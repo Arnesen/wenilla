@@ -648,3 +648,71 @@ fn fcf_select_dock_frame_selects_by_frame_and_raises_for_an_undocked_one() {
         "an undocked window raises — benilla has no dock model for it (0288 §2)"
     );
 }
+
+/// **The idle dock writes nothing** (decision 1396). `FCF_OnUpdate`'s apply block used to run
+/// unconditionally — ~24 `getglobal`s, two table builds and ~20 `SetAlpha` calls every frame of
+/// every session, writing the values that were already there, at 36 µs/frame (1395 measured it as
+/// the largest single handler in the client).
+///
+/// The probe is a sentinel the applier can never write: it only ever writes `{0, 0.5, 1.0} × reveal`,
+/// and `reveal` is pinned at 0 with the cursor away from the dock. If the gate is removed, the very
+/// next tick overwrites 0.42 with 0 and this goes red.
+#[test]
+fn an_idle_dock_stops_rewriting_the_tab_alpha_every_frame() {
+    let mut s = chat_frame();
+    s.mouse_move(1500.0, 850.0); // far from the dock: no hover, so `reveal` stays 0
+    for _ in 0..8 {
+        s.tick(0.016); // let the label measurements land and the applier reach its resting write
+        s.resolve();
+    }
+
+    s.run("ChatFrame1Tab:SetAlpha(0.42)").unwrap();
+    for _ in 0..10 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    let alpha: f64 = s.eval("return ChatFrame1Tab:GetAlpha()").unwrap();
+    assert!(
+        (alpha - 0.42).abs() < 1e-6,
+        "a settled dock must not rewrite its tab alpha — got {alpha}"
+    );
+}
+
+/// The control for the guard above: the gate must not cost the reveal it is gating. A stationary
+/// cursor over the dock for longer than `CHAT_TAB_SHOW_DELAY` fades the selected tab to full.
+#[test]
+fn hovering_the_dock_still_reveals_the_tabs() {
+    let mut s = chat_frame();
+    s.mouse_move(1500.0, 850.0);
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(
+        s.eval::<f64>("return ChatFrame1Tab:GetAlpha()").unwrap() < 1e-6,
+        "the dock starts concealed"
+    );
+
+    // The dock's own centre, asked of the layout rather than hardcoded.
+    let (x, y): (f32, f32) = s
+        .eval(
+            "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+             (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+        )
+        .unwrap();
+    s.mouse_move(x, y);
+    // 0.2 s stationary to arm the reveal, then the 0.15 s ramp — 25 frames covers both with room.
+    for _ in 0..25 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    let alpha: f64 = s.eval("return ChatFrame1Tab:GetAlpha()").unwrap();
+    assert!(
+        (alpha - 1.0).abs() < 1e-6,
+        "a stationary hover reveals the selected tab at full alpha — got {alpha}"
+    );
+}

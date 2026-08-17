@@ -70,6 +70,8 @@ pub(crate) mod font;
 mod font_block;
 mod gossip;
 mod guild;
+mod handler_prof;
+pub use handler_prof::HandlerRow;
 mod inspect;
 mod item_stats;
 mod item_text;
@@ -489,6 +491,9 @@ impl UiScript {
     pub fn new() -> mlua::Result<UiScript> {
         let lua = Lua::new();
         lua.set_app_data(Model::new());
+        // Before anything can fire a handler, and while nothing holds an app-data borrow — the two
+        // conditions the profiler's slot has to be installed under (decision 1395).
+        handler_prof::install(&lua);
 
         addon::install(&lua)?;
         addon_message::install(&lua)?;

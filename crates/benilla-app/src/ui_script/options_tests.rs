@@ -822,6 +822,56 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **Vertical Sync** (1394) — the Graphics page's third row, and the first option in this window
+/// that reaches the *window* rather than a gameplay or UI knob. It is 1.12's own Video Options
+/// checkbox 5 (`gxVSync`), which lived on the perf HUD as a dev checkbox until it turned out to be
+/// unreachable in a player build (the HUD is `#[cfg(feature = "dev")]`) and to be a setting rather
+/// than an instrument in the first place.
+///
+/// The row is deliberately **not** deferred, unlike the UI Scale slider above it: the reference's
+/// row carries `gxRestart = 1` because its device could not swap the presentation interval live,
+/// and wgpu can — so the click commits, like every other checkbox here.
+#[test]
+fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
+    let mut s = audio_harness();
+    s.set_cvar_host("gxVSync", "0");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+
+    // Read from the table, not from a restated default: the harness seeded it off.
+    assert!(!s
+        .eval::<bool>("return OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:GetChecked()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowVerticalSyncLabel:GetText()")
+            .unwrap(),
+        "Vertical Sync"
+    );
+    let _ = s.take_cvar_changes();
+
+    // A click commits immediately — nothing stages it behind Apply.
+    s.run("OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("gxVSync".to_string(), "1".to_string())],
+        "the checkbox writes the cvar on click, not on Apply"
+    );
+
+    // Defaults walks it back to the registered "1" — which `cvars::tests` welds to
+    // `VideoConfig::default()`, and `video::tests` welds in turn to the window's boot mode.
+    s.run("OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:Click()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodyGraphicsRowVerticalSyncCheck:GetChecked()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The dropdown row (0992, the first): the capsule reads the CVar on select (text from the
 /// row's own entries), the capsule button opens the shared list at the OWNER's effective scale
 /// (the kit's 0992 uiScale correction — the window rides SetScale) with the current value's
@@ -1647,10 +1697,11 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 19 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
-    // and Max Camera Distance 1140's) + the Combat page's 14 saved-variable rows (1134) + the Interface
-    // page's 4 (3 from 1136, Buff Durations 1139) and the Action Bars page's 1 (1136).
-    assert_eq!(checked, 38, "every row but one carries a live 1.12 key");
+    // 20 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
+    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's) + the Combat page's 14
+    // saved-variable rows (1134) + the Interface page's 4 (3 from 1136, Buff Durations 1139) and
+    // the Action Bars page's 1 (1136).
+    assert_eq!(checked, 39, "every row but one carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec!["ControlsRowAutoLoot".to_string()],
@@ -1739,10 +1790,10 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // 19 of the 20 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
-    // Max Camera Distance 1140's), plus the Combat page's 14 saved-variable rows (1134), the Interface page's 4
-    // (1136, + Buff Durations 1139) and Action Bars' 1 (1136).
-    assert_eq!(raised, 38, "every row but Auto Loot has a 1.12 description");
+    // 20 of the 21 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
+    // Max Camera Distance 1140's; Vertical Sync 1394's), plus the Combat page's 14 saved-variable
+    // rows (1134), the Interface page's 4 (1136, + Buff Durations 1139) and Action Bars' 1 (1136).
+    assert_eq!(raised, 39, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

@@ -615,7 +615,7 @@
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
                 "RowEnableMusic", "RowEnableAmbience",
             },
-            Graphics = { "RowUiScale", "RowWorldDetail" },
+            Graphics = { "RowUiScale", "RowWorldDetail", "RowVerticalSync" },
             Nameplates = { "RowPlayerNames", "RowNpcNames", "RowOwnName" },
             -- The stock globals that were already defined AND consumed when 1134 opened the store
             -- (1136; Buff Durations 1139), in the reference's own on-screen order — its Basic
@@ -2073,6 +2073,22 @@
                                                     { text = "Medium", value = "1" },
                                                     { text = "High", value = "2" },
                                                 })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowVerticalSync" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Vertical Sync: 1.12's own Video Options checkbox
+                                                -- 5 (gxVSync), over the window's present mode.
+                                                -- The reference row carries gxRestart = 1; ours
+                                                -- does not and must not be marked deferred --
+                                                -- wgpu swaps the presentation interval live, so
+                                                -- the box takes effect as you click it.
+                                                OptionsRow_OnLoad(self, "gxVSync", "Vertical Sync",
+                                                    "OPTION_TOOLTIP_VERTICAL_SYNC")
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

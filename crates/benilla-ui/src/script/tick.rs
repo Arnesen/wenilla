@@ -170,5 +170,8 @@ impl UiScript {
         // Advance fading tooltips (FadeOut's ramp + end-of-ramp hide) — engine behavior like the
         // message fade above, decision 0274.
         tooltip::tick_fades(&self.lua);
+        // `WOW_UI_HANDLERS=<secs>` — who spent the frame (decision 1395). Last, so a report covers
+        // everything this tick fired; a no-op unless the instrument is armed.
+        self.report_handler_profile(elapsed);
     }
 }

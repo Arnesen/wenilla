@@ -58,6 +58,20 @@ const SPIKE_FLOOR_MIN_MS: f32 = 2.0;
 /// has to outlive the event by long enough to glance at.
 const LATCH_HOLD_SECS: f32 = 10.0;
 
+/// Consecutive frames a [`SpikeKind::Worker`] burst must last before the badge will show it.
+///
+/// **Because `cpu` is a sum across threads, not a duration.** A frame in which six pool workers
+/// happen to overlap carries six threads' milliseconds and trips the ratio test while costing the
+/// frame nothing — the first live run of this HUD latched `▲31.3 work ×1` against `missed 0/300`,
+/// which is the instrument reporting the scheduler rather than a regression. A real worker
+/// regression is *sustained* (0610's burst is ~6 frames), so a few consecutive frames separates
+/// the two cleanly.
+///
+/// [`SpikeKind::Main`] and [`SpikeKind::Stalled`] are deliberately **not** gated: one long
+/// main-thread frame is itself the stutter, and `Stalled` already had to exceed the
+/// missed-interval threshold to classify at all.
+const WORKER_BURST_FRAMES: u32 = 3;
+
 /// Baselines are re-derived this often, not every frame. A median moves slowly by construction, so
 /// a one-second-stale baseline changes no verdict — and it keeps the collapsed pill's per-frame
 /// path free of sorts (1370: the HUD is itself inside every campaign anchor).
@@ -127,6 +141,17 @@ impl Series {
         v.sort_by(f32::total_cmp);
         let at = |q: f32| v[(((v.len() - 1) as f32) * q).round() as usize];
         (at(0.50), at(0.99), *v.last().unwrap())
+    }
+
+    /// The window's `q`-quantile. Sorts a copy, so like [`Self::percentiles`] it belongs off the
+    /// per-frame path — [`Baselines`] is where its caller reads the answer from.
+    fn quantile(&self, q: f32) -> f32 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let mut v: Vec<f32> = self.samples.iter().copied().collect();
+        v.sort_by(f32::total_cmp);
+        v[(((v.len() - 1) as f32) * q).round() as usize]
     }
 
     /// The window's median alone — the baseline every spike test is relative to.
@@ -210,12 +235,23 @@ pub(super) struct Spike {
     pub(super) at: f32,
 }
 
+/// Is this burst worth a badge? See [`WORKER_BURST_FRAMES`] — the one kind that needs to prove
+/// itself is the one measured by a cross-thread sum.
+fn reportable(s: &Spike) -> bool {
+    s.kind != SpikeKind::Worker || s.frames >= WORKER_BURST_FRAMES
+}
+
 /// Medians re-derived once a second, off the per-frame path.
 #[derive(Default)]
 struct Baselines {
     wall: f32,
     cpu: f32,
     main: f32,
+    /// The trend sparkline's y-scale: the trend window's p90, **not its max**. Derived here rather
+    /// than in the painter because it needs a sort and the pill draws every frame — and refreshed
+    /// on exactly the tick that appends the sample it summarises, so it can never lag by more
+    /// than one point.
+    trend_hi: f32,
     at: f32,
 }
 
@@ -278,6 +314,11 @@ impl FrameStats {
         self.rail_ms() * DROPPED_FACTOR
     }
 
+    /// The sparkline's y-scale — see [`Baselines::trend_hi`].
+    pub(super) fn trend_hi(&self) -> f32 {
+        self.baselines.trend_hi
+    }
+
     /// Windowed mean frames per second. A mean, and labelled as one — it is the number that cannot
     /// see a spike, which is why it is no longer the pill's headline.
     pub(super) fn fps(&self) -> f32 {
@@ -292,6 +333,7 @@ impl FrameStats {
         self.latched
             .filter(|s| now - s.at < LATCH_HOLD_SECS)
             .or(self.run)
+            .filter(reportable)
     }
 
     /// Bursts finished inside the hold window — "it happened three times" is a different report
@@ -362,10 +404,11 @@ impl FrameStats {
                 }
             }
             None => {
-                // The burst (if any) just ended: commit it. The latch keeps the WORST burst in the
-                // hold window rather than the most recent, so a small one cannot bury the big one
-                // you were meant to see.
-                if let Some(run) = self.run.take() {
+                // The burst (if any) just ended: commit it, unless it never earned a badge — a
+                // filtered burst is not a burst, or the tooltip would count three while the pill
+                // shows one. The latch keeps the WORST burst in the hold window rather than the
+                // most recent, so a small one cannot bury the big one you were meant to see.
+                if let Some(run) = self.run.take().filter(reportable) {
                     if now - self.recent_since >= LATCH_HOLD_SECS {
                         self.recent_bursts = 0;
                         self.recent_since = now;
@@ -392,6 +435,26 @@ impl FrameStats {
         })
     }
 
+    /// Drive the meters from a sibling module's test, on the same path [`sample_frame_time`] takes
+    /// minus the clocks. Each frame is `(wall_ms, cpu_ms, main_ms)`; returns the clock it left off
+    /// at. `hud`'s layout test needs a realistically-populated `FrameStats` — including a *latched
+    /// spike*, whose description is the longest string the panel can draw.
+    #[cfg(test)]
+    pub(super) fn feed_frames(&mut self, frames: &[(f32, f32, f32)], start_t: f32, dt: f32) -> f32 {
+        let mut t = start_t;
+        for &(wall, cpu, main) in frames {
+            self.wall.push(wall);
+            self.cpu.push(cpu);
+            self.main.push(main);
+            self.refresh_baselines(t);
+            if self.wall.len() > 1 && self.baselines.wall > 0.0 {
+                self.observe(t);
+            }
+            t += dt;
+        }
+        t
+    }
+
     fn refresh_baselines(&mut self, now: f32) {
         if now - self.baselines.at < BASELINE_REFRESH_SECS && self.baselines.at > 0.0 {
             return;
@@ -400,12 +463,14 @@ impl FrameStats {
             wall: self.wall.median(),
             cpu: self.cpu.median(),
             main: self.main.median(),
+            trend_hi: self.baselines.trend_hi,
             at: now,
         };
         // The trend samples the same median the baseline does, so the two lanes cannot disagree
         // about what "normal right now" is — the badge and the sparkline read one truth.
         if !self.cpu.is_empty() {
             self.trend.push(self.baselines.cpu);
+            self.baselines.trend_hi = self.trend.quantile(0.90);
         }
     }
 }
@@ -538,11 +603,45 @@ mod tests {
         let mut s = FrameStats::default();
         let calm: Vec<_> = (0..400).map(|_| (8.3, 15.0, 4.0)).collect();
         let mut t = feed(&mut s, &calm, 0.0, 1.0 / 120.0);
-        t = feed(&mut s, &[(8.3, 60.0, 4.0)], t, 1.0 / 120.0);
+        let burst: Vec<_> = (0..WORKER_BURST_FRAMES).map(|_| (8.3, 60.0, 4.0)).collect();
+        t = feed(&mut s, &burst, t, 1.0 / 120.0);
         t = feed(&mut s, &[(8.3, 15.0, 4.0)], t, 1.0 / 120.0);
 
         let spike = s.spike(t).expect("a worker burst must latch");
         assert_eq!(spike.kind, SpikeKind::Worker);
+    }
+
+    /// The noise floor the badge kept tripping on: `cpu` sums every thread, so one frame where
+    /// several pool workers overlap trips the ratio test while costing the frame nothing. It must
+    /// not reach the pill — nor the tooltip's burst count, or the two would disagree.
+    #[test]
+    fn a_one_frame_worker_blip_does_not_latch() {
+        let mut s = FrameStats::default();
+        let calm: Vec<_> = (0..400).map(|_| (8.3, 15.0, 4.0)).collect();
+        let mut t = feed(&mut s, &calm, 0.0, 1.0 / 120.0);
+        t = feed(&mut s, &[(8.3, 60.0, 4.0)], t, 1.0 / 120.0);
+        t = feed(&mut s, &[(8.3, 15.0, 4.0)], t, 1.0 / 120.0);
+
+        assert!(
+            s.spike(t).is_none(),
+            "a single-frame cross-thread CPU blip is the scheduler, not a regression"
+        );
+        assert_eq!(s.recent_bursts(t), 0, "and it is not counted as a burst");
+    }
+
+    /// The gate is on `Worker` alone: a one-frame main-thread spike *is* the stutter and must
+    /// still latch immediately.
+    #[test]
+    fn a_one_frame_main_spike_is_not_gated() {
+        let mut s = FrameStats::default();
+        let calm: Vec<_> = (0..400).map(|_| (8.3, 15.0, 4.0)).collect();
+        let mut t = feed(&mut s, &calm, 0.0, 1.0 / 120.0);
+        t = feed(&mut s, &[(8.3, 15.0, 30.0)], t, 1.0 / 120.0);
+        t = feed(&mut s, &[(8.3, 15.0, 4.0)], t, 1.0 / 120.0);
+
+        let spike = s.spike(t).expect("one long main-thread frame must latch");
+        assert_eq!(spike.kind, SpikeKind::Main);
+        assert_eq!(spike.frames, 1);
     }
 
     /// The 120 Hz calibration bug, pinned. A missed interval on a ProMotion panel is 16.7 ms; the
@@ -568,6 +667,36 @@ mod tests {
             .wall
             .frames_over(super::super::FRAME_BUDGET_MS * DROPPED_FACTOR);
         assert_eq!(old_n, 0, "the assumed-60 Hz threshold is blind to it");
+    }
+
+    /// The sparkline's y-scale must survive the launch spike. A loading second costs ~110 ms
+    /// against a settled ~8.5, and scaling to the window's MAX pressed a whole minute of real
+    /// signal into the bottom 7 % of the box — the lane read as a flat line on the director's
+    /// screen. p90 drops the outlier and keeps the shape.
+    #[test]
+    fn one_loading_second_does_not_flatten_the_trend_lane() {
+        let mut s = FrameStats::default();
+        let mut t = 0.0;
+        // A loading second, then a settled minute — one trend sample per second, so step the
+        // clock a full second between feeds.
+        t = feed(&mut s, &[(111.0, 111.0, 90.0)], t, 1.0);
+        for _ in 0..40 {
+            t = feed(&mut s, &[(16.6, 8.5, 1.7)], t, 1.0);
+        }
+        assert!(
+            s.trend.iter().any(|v| v > 100.0),
+            "the loading sample is still IN the window — this is about the scale, not a filter"
+        );
+        assert!(
+            s.trend_hi() < 20.0,
+            "p90 must ignore the launch outlier, got {}",
+            s.trend_hi()
+        );
+        // The settled level has to land in a readable part of the box, not squashed at the floor.
+        assert!(
+            8.5 / (s.trend_hi() * 1.15) > 0.5,
+            "the settled level must occupy the upper half of the lane"
+        );
     }
 
     /// The latch must keep the worst burst in the window, not the most recent — a small wobble

@@ -202,6 +202,12 @@ fn fire(
     };
 
     let wrapper = frame_wrapper(lua, id)?;
+    // The attribution seam (decision 1395). Tight around the call and *after* `frame_wrapper` —
+    // which documents that callers hold no model borrow here, so the profiler's own borrow cannot
+    // land in the middle of one. Off, it is a relaxed load and a not-taken branch; the guard closes
+    // the fire on the way out of this scope, including an unwind.
+    let _fire =
+        super::handler_prof::armed().then(|| super::handler_prof::Fire::open(lua, id, script));
     invoke_with_globals(lua, wrapper, &func, event_name, extra)
 }
 

@@ -36,6 +36,7 @@ use crate::sound::SoundConfig;
 use crate::target::ClickConfig;
 use crate::ui_loot::LootConfig;
 use crate::ui_script::UiScaleCvar;
+use crate::video::VideoConfig;
 use benilla_ui::script::UiScript;
 use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
 use benilla_world::clutter::ClutterConfig;
@@ -141,6 +142,19 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // skip-default rule). No host knob: its consumers are the load walk (via the persisted value,
     // [`CvarPersist::addon_version_check`]) and the gate's live per-query read in the VM.
     ("checkAddonVersion", "1"),
+    // Vertical Sync — 1.12's own `gxVSync`, the Video Options checkbox at index 5
+    // (`OptionsFrame.lua`'s `OptionsFrameCheckButtons["VERTICAL_SYNC"]`, in the install's
+    // FrameXML). The knob is [`crate::video::VideoConfig::vsync`], which the window's
+    // `present_mode` follows.
+    //
+    // Default "1" is BEHAVIOUR-derived, not byte-read: 1.12's registrar value for this var is not
+    // pinned in wow-re, and "1" is what benilla actually ships — the primary window is born at
+    // `PresentMode::default()` (Fifo), and a test in `video.rs` welds the two together.
+    //
+    // Two knowing departures from the reference row, both stated on [`crate::video`]: its
+    // `gxRestart = 1` does not apply (wgpu swaps the presentation interval live, so the box takes
+    // effect on click), and `$WOW_NOVSYNC=1` overrides it session-only, below.
+    ("gxVSync", "1"),
 ];
 
 /// `config.toml`'s shape: a `[cvars]` table of `Name = "value"` strings (CVars are strings in
@@ -213,6 +227,7 @@ struct Knobs<'a> {
     minimap: &'a mut MinimapZoom,
     bubbles: &'a mut BubbleConfig,
     zoom: &'a mut ZoomLimit,
+    video: &'a mut VideoConfig,
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -264,6 +279,9 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // and the gate reads the live table — but a KNOWN key, so a toggle dirties the config
         // and persists (the statusBarText posture).
         "checkaddonversion" => {}
+        // Vertical Sync — a flag like every other checkbox here. `video::apply_present_mode`
+        // watches the value and pushes it to the window; nothing else reads it.
+        "gxvsync" => knobs.video.vsync = v != 0.0,
         _ => return false,
     }
     true
@@ -293,6 +311,7 @@ fn load_config(
     mut minimap: ResMut<MinimapZoom>,
     mut bubbles: ResMut<BubbleConfig>,
     mut zoom: ResMut<ZoomLimit>,
+    mut video: ResMut<VideoConfig>,
 ) {
     let mut knobs = Knobs {
         sound: &mut sound,
@@ -306,6 +325,7 @@ fn load_config(
         minimap: &mut minimap,
         bubbles: &mut bubbles,
         zoom: &mut zoom,
+        video: &mut video,
     };
     if std::env::var_os("WOW_UI_SCALE").is_some() {
         persist.env_overridden.insert("uiscale".into());
@@ -316,6 +336,11 @@ fn load_config(
     // The clutter A/B env drives the same knob WorldDetail lands on — same session-only law.
     if std::env::var_os("WOW_CLUTTER_DENSITY").is_some() {
         persist.env_overridden.insert("worlddetail".into());
+    }
+    // `$WOW_NOVSYNC=1` is the measurement uncap: session-only, exactly like the taste-iteration
+    // overrides above. Pinning it into the config would make an instrument run sticky.
+    if crate::video::novsync_env() {
+        persist.env_overridden.insert("gxvsync".into());
     }
     let Some(path) = crate::local_state::config_path() else {
         return; // hermetic capture, or no install — session-only state
@@ -377,6 +402,7 @@ fn sync_cvars(
     mut minimap: ResMut<MinimapZoom>,
     mut bubbles: ResMut<BubbleConfig>,
     mut zoom: ResMut<ZoomLimit>,
+    mut video: ResMut<VideoConfig>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -396,7 +422,7 @@ fn sync_cvars(
         );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 23] = [
+        let session: [(&str, String); 24] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -423,6 +449,7 @@ fn sync_cvars(
             ("ChatBubblesParty", flag(bubbles.party)),
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
+            ("gxVSync", flag(video.vsync)),
         ];
         for (name, value) in session {
             script.set_cvar_host(name, &value);
@@ -447,6 +474,7 @@ fn sync_cvars(
         minimap: &mut minimap,
         bubbles: &mut bubbles,
         zoom: &mut zoom,
+        video: &mut video,
     };
     for (name, value) in changes {
         if apply_to_knobs(&name, &value, &mut knobs) {
@@ -489,6 +517,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         Option<ResMut<MinimapZoom>>,
         Option<ResMut<BubbleConfig>>,
         Option<ResMut<ZoomLimit>>,
+        Option<ResMut<VideoConfig>>,
     )> = bevy::ecs::system::SystemState::new(world);
     let (
         script,
@@ -504,6 +533,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         minimap,
         bubbles,
         zoom,
+        video,
     ) = state.get_mut(world);
     let (Some(mut script), Some(mut persist)) = (script, persist) else {
         return;
@@ -525,8 +555,9 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
             Some(mut minimap),
             Some(mut bubbles),
             Some(mut zoom),
+            Some(mut video),
         ) = (
-            sound, scale, view, look, click, loot, names, clutter, minimap, bubbles, zoom,
+            sound, scale, view, look, click, loot, names, clutter, minimap, bubbles, zoom, video,
         ) {
             let mut knobs = Knobs {
                 sound: &mut sound,
@@ -540,6 +571,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
                 minimap: &mut minimap,
                 bubbles: &mut bubbles,
                 zoom: &mut zoom,
+                video: &mut video,
             };
             for (name, value) in changes {
                 if apply_to_knobs(&name, &value, &mut knobs) {
@@ -704,6 +736,9 @@ mod tests {
         assert_eq!(d["minimapZoom"], f32::from(zoom.outdoor));
         assert_eq!(d["minimapInsideZoom"], f32::from(zoom.inside));
         assert_eq!(zoom.outdoor, benilla_ui::widget::MINIMAP_DEFAULT_ZOOM);
+        // VSync welds to the video knob, which in turn welds to the window literal's boot
+        // mode (`video::tests`) — so the registered "1" cannot drift from what we ship.
+        assert_eq!(d["gxVSync"] != 0.0, VideoConfig::default().vsync);
     }
 
     #[test]
@@ -725,6 +760,7 @@ mod tests {
         let mut minimap = MinimapZoom::default();
         let mut bubbles = BubbleConfig::default();
         let mut zoom = ZoomLimit::default();
+        let mut video = VideoConfig::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -737,6 +773,7 @@ mod tests {
             minimap: &mut minimap,
             bubbles: &mut bubbles,
             zoom: &mut zoom,
+            video: &mut video,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -854,6 +891,7 @@ mod tests {
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()
             .init_resource::<ZoomLimit>()
+            .init_resource::<VideoConfig>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
 
@@ -922,6 +960,7 @@ mod tests {
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()
             .init_resource::<ZoomLimit>()
+            .init_resource::<VideoConfig>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app.update();

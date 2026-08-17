@@ -58,6 +58,24 @@
 //! and frame scale. 12.80 px at 1024×768; 14.69 at 1280×720. 1386 froze the 4:3 case into a
 //! constant, which is why our 16:9 stars were 22 % small until 1390.
 //!
+//! **"Free of UI scale" is byte-law, not a loose phrase** (wow-re
+//! `system/ui/scratch/modelframe-uiscale-law.md`, a §5 cross-check dispatched *because* the
+//! phrasing looked too loose to rest on). `uiScale` is an ordinary `SetScale` on the frame named
+//! `UIParent` (`0x494550` → `0x76ac10(ecx = [0xb4b44c])`, and `0x494590` "GetUiScale" is literally
+//! `fld [[0xb4b44c]+0x7c]`), and it *does* reach both the widget's rect and the model root
+//! (`76d1dd fmul [esi+0x7c]`). It cancels anyway: `0x76d240` builds the ortho `m00 = 2/w` **and**
+//! the viewport from the SAME rect, so px per eye unit is `√(W² + H²)` whatever `w` is. So:
+//!
+//! > **the button scales with the dial and the star does not.** At 2560×1440 a newborn star is
+//! > **29.37 px at every setting**, against a 37-unit button of 69.4 / 62.4 / 44.4 px at `uiScale`
+//! > 1.0 / 0.9 / 0.64 — 42 % / 47 % / **66 %** of the button.
+//!
+//! And the consequence that actually reads on screen is not that ratio but this: the four emitters
+//! sit on a path that DOES shrink with the dial (`31.2 · uiScale` units), so at 0.64 four
+//! fixed-size 29 px stars pack into a 37 px square instead of a 59 px one and **overlap into one
+//! blob**. Every bit of that is the reference's own behaviour; there is nothing to fix here, and a
+//! low-`uiScale` complaint about this widget is a taste call, not a defect.
+//!
 //! **And the widget is its own scissor** ([`site_quads`], decision 1387): a `<Model>` installs its
 //! frame rect as the VIEWPORT for the duration of its draw and restores it after, so the model
 //! cannot paint one pixel outside the button. With the path running on the rim and the stars

@@ -241,6 +241,11 @@
             oldX = 0, oldY = 0,
             reveal = 0,             -- 0..1 master fade the tab/texture alphas scale by
             revealTarget = 0,
+            -- What the apply block below last WROTE, so an unchanged frame writes nothing
+            -- (decision 1396). -1 is unreachable for both, so the first pass always applies.
+            appliedReveal = -1,
+            appliedSelected = -1,
+            tabsSettled = false,    -- both tabs' host-measured label widths have landed
             flashTab = 0,           -- tab id whose whisper flash runs (0 = none), 0288 P4 wires it
             flashLeft = 0,          -- remaining flash seconds (ref: 60s, blink 0.25/0.25)
         }
@@ -331,14 +336,19 @@
         -- PanelTemplates_TabResize(5, tab), re-expressed: the ref sizes every docked tab to its
         -- label (FCF_DockUpdate) — middle slice = text width + 5, tab = middle + the two 16px
         -- caps; the flash/highlight bands follow the Left/Right pieces by anchor. The label
-        -- width is host-measured (GetStringWidth), so early frames may see 0 — the OnUpdate
-        -- below re-applies until it settles, then the change-guard makes this a no-op.
+        -- width is host-measured (GetStringWidth), so early frames may see 0. It RETURNS whether
+        -- the width is known yet — which is what lets FCF_OnUpdate's apply gate keep polling
+        -- until the measurement lands and then stop for good (decision 1396). Without that
+        -- answer the gate would have to choose between polling forever and shipping tabs stuck
+        -- at their authored width on whichever session measured late.
         function BenillaFCF_TabResize(tab)
             local w = getglobal(tab:GetName() .. "Text"):GetStringWidth()
-            if w == 0 or tab.benillaTabTextW == w then return end
+            if w == 0 then return false end
+            if tab.benillaTabTextW == w then return true end
             tab.benillaTabTextW = w
             getglobal(tab:GetName() .. "Middle"):SetWidth(w + 5)
             tab:SetWidth(w + 5 + 32)
+            return true
         end
 
         -- The hover rect: the dock's rect expanded by the ref's MouseIsOver pads
@@ -389,16 +399,43 @@
 
             -- Apply: tabs at 1.0 (selected) / 0.5 (unselected) × reveal; the selected window's
             -- background+borders at 0.25 × reveal (ref: fade oldAlpha↔DEFAULT_CHATFRAME_ALPHA).
-            for i = 1, 2 do
-                local tab = getglobal("ChatFrame" .. i .. "Tab")
-                if tab then
-                    local a = (i == BenillaFCF.selected) and 1.0 or 0.5
-                    tab:SetAlpha(a * s.reveal)
-                    BenillaFCF_TabResize(tab)
+            --
+            -- GATED on everything the writes below depend on — the reveal, the selected tab, and
+            -- whether the label measurements have landed (decision 1396). **The reference needs
+            -- no gate because it does not do this here at all**: ref FCF_OnUpdate hands the fade
+            -- to UIFrameFadeIn/Out, and UIFrameFade_OnUpdate walks only the frames still fading,
+            -- so a settled dock costs nothing. This transcription inlined the ramp and lost that
+            -- property with it, and ~24 getglobals, two table builds and ~20 SetAlpha calls then
+            -- ran every frame of every session to write the values that were already there —
+            -- 36 us/frame, the largest single handler in the client (1395 measured it). The
+            -- guard restores the reference's own behaviour rather than inventing one.
+            if s.reveal ~= s.appliedReveal or s.selected ~= s.appliedSelected then
+                for i = 1, 2 do
+                    local tab = getglobal("ChatFrame" .. i .. "Tab")
+                    if tab then
+                        tab:SetAlpha(((i == s.selected) and 1.0 or 0.5) * s.reveal)
+                    end
+                    for _, t in ipairs(BenillaFCF_Textures(i)) do
+                        t:SetAlpha(0.25 * s.reveal)
+                    end
                 end
-                for _, t in ipairs(BenillaFCF_Textures(i)) do
-                    t:SetAlpha(0.25 * s.reveal)
+                s.appliedReveal = s.reveal
+                s.appliedSelected = s.selected
+            end
+
+            -- The tab widths are a SEPARATE trigger and get their own latch, deliberately: they
+            -- depend on a host measurement rather than on the fade, and folding them into the
+            -- gate above would tie the alphas to a width that can legitimately never arrive (an
+            -- empty label measures 0 forever) — the apply block would then run every frame again
+            -- for a reason having nothing to do with what it writes. Polls until both land, then
+            -- stops for good.
+            if not s.tabsSettled then
+                local settled = true
+                for i = 1, 2 do
+                    local tab = getglobal("ChatFrame" .. i .. "Tab")
+                    if tab and not BenillaFCF_TabResize(tab) then settled = false end
                 end
+                s.tabsSettled = settled
             end
 
             -- The whisper flash blink (0.25 on / 0.25 off, 60s — ref UIFrameFlash args).

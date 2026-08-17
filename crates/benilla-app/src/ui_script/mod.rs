@@ -218,6 +218,17 @@ impl Default for UiScaleCvar {
 
 /// The shipped default (the reference's slider spans 0.64..1.0; 1.0 read oversized to the
 /// director's eye — the taste call this dial exists for).
+///
+/// **It also happens to be what the reference itself lands on above ~853 px tall**, which we did
+/// not know when it was chosen (wow-re `system/ui/scratch/modelframe-uiscale-law.md`, out of the
+/// autocast-shine thread): `0x492f70` computes `max((H > 768) ? 768/H : 1.0, 0.9)` and is called
+/// **both** on a mode set and from the `useUiScale`-OFF leg (`0x4908ad`) — and OFF is the shipped
+/// default (`0x8430c0` = `"0"`). So the reference is 1.0 at 768 and below, 0.96 at 1280×800, and
+/// **0.9 at 1080p and 1440p**. Our flat 0.9 therefore agrees with it on every modern window and
+/// diverges only *below* ~853 px tall, where the reference is nearer 1.0. Left alone deliberately:
+/// this constant is a director taste call, and the divergence is confined to window heights we
+/// do not ship against. The reference's own law is written here so the next session inherits it
+/// rather than re-deriving it.
 pub(crate) const DEFAULT_UI_SCALE: f32 = 0.9;
 
 /// The app's `uiScale`: `WOW_UI_SCALE=` if set (clamped to the plausible dial range), else

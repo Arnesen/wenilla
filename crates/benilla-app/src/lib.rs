@@ -144,6 +144,7 @@ mod ui_tradeskill;
 mod ui_trainer;
 mod ui_unit;
 mod ui_world_map;
+mod video;
 mod vplates;
 mod world_state;
 
@@ -393,15 +394,12 @@ pub fn run(build: BuildId) -> AppExit {
                 })
                 .into()
         },
-        // `$WOW_NOVSYNC=1`: uncap presentation so a headless FPS-journal run measures true frame
-        // cost, not the vsync ceiling — the same uncap the capture probe flips mid-run, available
-        // from boot for non-capture probes (perf triage at the glue screens, where no capture
-        // scenario runs).
-        present_mode: if std::env::var("WOW_NOVSYNC").as_deref() == Ok("1") {
-            bevy::window::PresentMode::AutoNoVsync
-        } else {
-            bevy::window::PresentMode::default()
-        },
+        // The boot present mode. `$WOW_NOVSYNC=1` uncaps presentation so a headless FPS-journal
+        // run measures true frame cost, not the vsync ceiling — the same uncap the capture probe
+        // flips mid-run, available from boot for non-capture probes (perf triage at the glue
+        // screens, where no capture scenario runs). Absent it, we boot synced and the player's
+        // `gxVSync` setting takes over from `Startup` on ([`crate::video`]).
+        present_mode: video::present_mode(!video::novsync_env()),
         // An instrumented run must never fight the director's screen (decision 0703).
         // Focused, it steals the keyboard — on 2026-07-19 a login-shot run swallowed
         // their keystrokes out of another app and typed them into the account box,
@@ -525,6 +523,9 @@ pub fn run(build: BuildId) -> AppExit {
     // `SetPortraitTexture`-bound region (the modern high-res 2D model bake).
     .add_plugins(PortraitPlugin)
     .add_plugins((TextInputPlugin, UiScriptPlugin))
+    // The video knobs the CVar host writes into (today: `gxVSync`). Before CvarPlugin so the
+    // resource exists when `load_config` applies the saved value at Startup.
+    .add_plugins(video::VideoPlugin)
     // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After
     // UiScriptPlugin only for reading order — its systems gate on the VM existing anyway.
     .add_plugins(cvars::CvarPlugin)
