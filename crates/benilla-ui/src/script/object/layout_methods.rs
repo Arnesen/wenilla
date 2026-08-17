@@ -137,7 +137,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = input.width.to_bits() != w.to_bits();
             input.width = w;
             if changed {
-                model.touch_layout();
+                // A size write moves no edge and no roster membership (decision 1388).
+                model.touch_layout_frame(h);
             }
             Ok(())
         })?,
@@ -151,7 +152,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = input.height.to_bits() != ht.to_bits();
             input.height = ht;
             if changed {
-                model.touch_layout();
+                model.touch_layout_frame(h);
             }
             Ok(())
         })?,
@@ -167,7 +168,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             input.width = w;
             input.height = ht;
             if changed {
-                model.touch_layout();
+                model.touch_layout_frame(h);
             }
             Ok(())
         })?,
@@ -423,11 +424,38 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
             .iter()
             .any(|a| a.point == point);
     if !same_at_tail {
+        // Value-only unless the target moved (decision 1388) — the per-frame `SetPoint` idiom
+        // (a dragged window, a moving spark) re-points the SAME anchor at the SAME target with new
+        // offsets, so it names its node and the cached graph survives the frame.
+        let structural = anchor_retarget_is_structural(&input.anchors, &new);
         input.anchors.retain(|a| a.point != point);
         input.anchors.push(new);
-        model.touch_layout();
+        if structural {
+            model.touch_layout();
+        } else {
+            model.touch_layout_frame(h);
+        }
     }
     Ok(())
+}
+
+/// Would this `SetPoint` change the node's set of anchor TARGETS — i.e. is it structural?
+///
+/// The layout scope's reverse edges are built from `Anchor::relative_to` (decision 1350): "this
+/// node reads that node's rect". An anchor whose OFFSETS moved is a value change — the node
+/// re-solves and nothing else does, which is exactly what a precise touch claims. An anchor whose
+/// TARGET moved is not: an edge has to disappear and another to appear, and no per-node hash can
+/// say so, so the cached graph must be thrown away instead (decision 1388).
+///
+/// Mirrors the `retain(point) + push` the setters do. It is value-only in exactly one shape — one
+/// existing anchor carries this point and keeps the same target. Zero (an edge appears) and two or
+/// more (edges disappear) are both structural, and so is any change of target.
+pub(crate) fn anchor_retarget_is_structural(anchors: &[Anchor], new: &Anchor) -> bool {
+    let mut same_point = anchors.iter().filter(|a| a.point == new.point);
+    match (same_point.next(), same_point.next()) {
+        (Some(old), None) => old.relative_to != new.relative_to,
+        _ => true,
+    }
 }
 
 /// Bit-exact anchor equality — the same lens the layout gate's fingerprint reads anchors through

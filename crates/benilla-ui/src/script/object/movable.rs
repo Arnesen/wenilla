@@ -451,7 +451,11 @@ pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
     // anchored regions to conclude nothing had moved — the castbar's bug class in miniature, for
     // every frame of such a drag (decision 1385).
     if moved {
-        model.touch_layout();
+        // Offsets only — a resize grip never repoints an anchor, so the frame names itself and the
+        // cached graph survives the drag (decision 1388). A drag is per-frame by nature: this is
+        // the difference between a smooth window resize and one that re-derives 13,656 nodes on
+        // every mouse-move.
+        model.touch_layout_frame(sz.frame);
     }
     model.sizing = Some(FrameSizing { sample: pos, ..sz });
 }
@@ -481,8 +485,9 @@ pub(crate) fn advance_move(model: &mut Model, pos: (f32, f32)) {
             }
             // The one mutation path every layout setter shares — the tier-1 epoch, never the
             // solver's arrays (see [`super::layout_methods`]'s mutate-only-on-change law; a zero
-            // delta returned above, so this write always moved something).
-            model.touch_layout();
+            // delta returned above, so this write always moved something). Translating every
+            // anchor moves no TARGET, so the frame names itself (decision 1388).
+            model.touch_layout_frame(mv.frame);
         }
     }
     model.moving = Some(FrameMove { sample: pos, ..mv });

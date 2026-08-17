@@ -6,7 +6,9 @@
 
 use mlua::{Lua, Table, Value};
 
-use super::object::{anchor_bits_eq, as_f32, decode_id, id_to_lud, point_from_str};
+use super::object::{
+    anchor_bits_eq, anchor_retarget_is_structural, as_f32, decode_id, id_to_lud, point_from_str,
+};
 use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
     REG_TEXTURE_META, REG_TEXTURE_METHODS, REG_TITLE_META, REG_TITLE_METHODS, REG_WRAPPERS, SCREEN,
@@ -698,9 +700,17 @@ pub(super) fn region_set_point(
             .iter()
             .any(|a| a.point == point);
     if !same_at_tail {
+        // The frame twin's law (decision 1388): re-pointing the same anchor at the same target is
+        // a VALUE change and names its node; anything that moves the target set is structural.
+        // This is the castbar spark's and every combat-text string's per-frame write.
+        let structural = anchor_retarget_is_structural(&data.anchors, &new);
         data.anchors.retain(|a| a.point != point);
         data.anchors.push(new);
-        model.touch_layout();
+        if structural {
+            model.touch_layout();
+        } else {
+            model.touch_layout_region(rh);
+        }
     }
     Ok(())
 }

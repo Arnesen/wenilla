@@ -720,6 +720,10 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         // `pad_w` = SetPadding's extra width (ref ItemRefTooltip: room for the close button).
         input.width = maxw + 2.0 * TOOLTIP_PAD + pad_w;
         input.height = totalh + 2.0 * TOOLTIP_PAD;
+        // This pre-pass runs INSIDE the resolve, so it must not open tier 1 (see the note method's
+        // own doc) — but the per-node ledger decision 1388's incremental pass seeds from still has
+        // to hear that these two inputs were written by something other than a Lua setter.
+        model.note_layout_frame_write(h);
         // Right-flush each double line: right edge = left.right + (maxw − left.width)
         // = frame.left + pad + maxw = the text inset's right.
         for (i, (l, r)) in rows.iter().enumerate() {
@@ -727,10 +731,15 @@ pub(super) fn layout_tooltips(model: &mut Model) {
                 continue;
             }
             let lw = l.map_or(0.0, |(w, _)| w);
+            let mut wrote = false;
             if let Some(d) = model.region_data.get_mut(&rights[i]) {
                 if let Some(a) = d.anchors.first_mut() {
                     a.x_off = maxw - lw;
+                    wrote = true;
                 }
+            }
+            if wrote {
+                model.note_layout_region_write(rights[i]);
             }
         }
     }

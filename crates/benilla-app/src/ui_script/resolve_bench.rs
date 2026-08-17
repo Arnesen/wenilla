@@ -152,6 +152,7 @@ fn a_tooltip_content_change_costs_exactly_one_layout_solve() {
         app_frame(&mut s);
     }
     let before = s.layout_solves();
+    let derives_before = s.layout_derivations();
     for _ in 0..10 {
         s.run("gate_change()").unwrap();
         app_frame(&mut s);
@@ -161,6 +162,19 @@ fn a_tooltip_content_change_costs_exactly_one_layout_solve() {
         solves, 10,
         "10 content changes must cost 10 solves — one each. Two per change means the measure \
          round-trip is running AFTER the resolve again (extract::drive_script's order)."
+    );
+    // …and none of those ten may DERIVE the graph (decision 1388). This is the second shape of
+    // the same law `a_region_moving_every_frame_costs_no_graph_derivation_on_the_shipped_ui`
+    // guards, and it is worth asserting separately because it arrives by a different road: a
+    // hover sweep churns tooltip CONTENT, so its per-frame writes are measure answers and
+    // re-anchors of pooled line regions rather than one moving texture. The bag-hover re-enter
+    // loop is the most common interactive path in the client; a derivation per frame here is
+    // 1.48 ms every frame the cursor sits over a bag.
+    assert_eq!(
+        s.layout_derivations() - derives_before,
+        0,
+        "a settled tooltip whose CONTENT changes must not re-derive the layout graph — the line \
+         pool is already built, so nothing structural is happening (decision 1388)"
     );
     // …and the measure answers must have landed in that one solve: a frame that resolved before
     // measuring leaves the fresh text unmeasured until the next frame, which is the visible half
@@ -296,6 +310,93 @@ fn a_region_moving_every_frame_costs_one_gate_walk_on_the_shipped_ui() {
     assert_eq!(
         solves, 10,
         "and each of those walks must be a real solve, not a wasted one"
+    );
+}
+
+/// **The castbar law, part two** (decision 1388): those ten gate walks must cost **zero**
+/// derivations of the layout graph.
+///
+/// 1385 got the moving spark from three whole-roster walks per frame down to one, and the test
+/// above is its guard. It did nothing about what the surviving walk *costs*: measured at the
+/// Stormwind pin (3,218 frames, 10,438 anchored regions) the preamble ran 1.48 ms, 79% of it in two
+/// phases — re-hashing every anchored region (919 µs) and re-filtering every seed rect for liveness
+/// (255 µs) — to rediscover a graph whose SHAPE had not changed. At 144 fps that is a fifth of the
+/// frame, on every frame of every cast, and it is paid by anything that animates: floating combat
+/// text moves up to twenty strings a frame, and a frame getter inside an OnUpdate (`GetWidth` calls
+/// `settle`) buys another one each.
+///
+/// So the counter this asserts on is not `layout_gate_walks` but `layout_derivations`. A moving
+/// region names its node, the ledger vouches for the cached roster and edges, and the resolve
+/// re-hashes one node instead of 13,656. Zero is the whole claim: **one** derivation per frame
+/// would mean a write site somewhere fell back to the conservative `touch_layout` and the ledger
+/// is being poisoned every frame, which reads as a perfectly healthy walk count and costs the
+/// entire 1.48 ms.
+///
+/// The positive control is not optional here. "Zero derivations" is exactly what a permanently
+/// broken counter also reports, so the test first proves the counter can move — a frame BIRTH is
+/// structural by construction and must derive.
+///
+/// It ticks the VM (`app_frame_ticked`) rather than driving the resolve alone, so the shipped UI's
+/// own `OnUpdate` handlers run on every one of these frames. That is the difference between "one
+/// synthetic write can use the ledger" and "the ledger survives the real UI": a single handler
+/// anywhere in `assets/ui/` falling back to a conservative touch every frame would poison it for
+/// everything else, and only a ticked frame can see that.
+#[test]
+fn a_region_moving_every_frame_costs_no_graph_derivation_on_the_shipped_ui() {
+    let mut s = settled_default_ui();
+    s.run(
+        r#"
+        BenchBar2 = CreateFrame("Frame", "BenchBar2", UIParent)
+        BenchBar2:SetPoint("CENTER", 0, 0); BenchBar2:SetWidth(195); BenchBar2:SetHeight(13)
+        BenchSpark2 = BenchBar2:CreateTexture(nil, "OVERLAY")
+        BenchSpark2:SetWidth(32); BenchSpark2:SetHeight(32)
+        BenchSpark2:SetPoint("CENTER", BenchBar2, "LEFT", 0, 2)
+        bench_spark2_n = 0
+        function bench_spark2_frame()
+            bench_spark2_n = bench_spark2_n + 1
+            BenchSpark2:SetPoint("CENTER", BenchBar2, "LEFT", bench_spark2_n * 1.7, 2)
+            local _ = UIParent:GetWidth()
+        end
+        "#,
+    )
+    .unwrap();
+
+    // The positive control, taken across the birth above: a new frame and a new region move the
+    // roster, so they MUST derive. If this reads zero the counter is dead and the real assertion
+    // below proves nothing.
+    let born_at = s.layout_derivations();
+    for _ in 0..6 {
+        s.run("bench_spark2_frame()").unwrap();
+        app_frame_ticked(&mut s, 1.0 / 144.0);
+    }
+    assert!(
+        s.layout_derivations() > born_at,
+        "creating a frame and a texture must derive the graph — a birth moves the roster, which \
+         is the one thing the per-node ledger cannot describe. Reading zero here means \
+         `layout_derivations` never moves and the assertion below is vacuous."
+    );
+
+    let derives_before = s.layout_derivations();
+    let walks_before = s.layout_gate_walks();
+    for _ in 0..10 {
+        s.run("bench_spark2_frame()").unwrap();
+        app_frame_ticked(&mut s, 1.0 / 144.0);
+    }
+    let derives = s.layout_derivations() - derives_before;
+    let walks = s.layout_gate_walks() - walks_before;
+    assert!(
+        walks >= 10,
+        "the frames must still be reaching the gate at all — {walks} walks over 10 frames means \
+         this test stopped exercising the path it is guarding"
+    );
+    assert_eq!(
+        derives, 0,
+        "10 frames of one moving region derived the layout graph {derives} times. Each derivation \
+         is a walk of the WHOLE roster — every live frame's scale re-synced, every seed rect \
+         re-filtered for liveness, all 10,438 anchored regions re-hashed and their edges rebuilt: \
+         ~1.48 ms of CPU at the Stormwind pin, on every frame anything moves. A write site is \
+         falling back to the conservative `Model::touch_layout` where it could name its node \
+         (decision 1388)."
     );
 }
 

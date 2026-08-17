@@ -85,6 +85,32 @@ pub(crate) struct Model {
     /// change-gated — `tooltip::append_line`, and the gate
     /// `layout_gate::the_hover_re_enter_loop_neither_re_measures_nor_re_solves`.
     pub(crate) layout_epoch: u64,
+    /// [`Self::layout_epoch`]'s **precise** form: the nodes a write actually NAMED since the last
+    /// converged resolve — tier 1 promoted from "something moved" to "*these* moved" (decision
+    /// 1388).
+    ///
+    /// `Some(nodes)` carries a second, stronger claim than its contents: **every** write since the
+    /// cached graph was built named its node *and* left the graph's SHAPE alone, so
+    /// [`super::layout::LayoutScope`]'s roster, edges and per-node hashes still describe the live
+    /// model and a resolve may seed the dirty closure straight from this list. `None` is the
+    /// conservative state — a write that could not name its node, or one that moved the roster or
+    /// an anchor's TARGET — and forces the next resolve to derive the graph from scratch, which is
+    /// exactly what every resolve did before 1388.
+    ///
+    /// That asymmetry is the safety argument. A site that keeps calling plain
+    /// [`Model::touch_layout`] is *correct by construction* (it lands in `None`, i.e. today's
+    /// behaviour); only a site that opts into [`Model::touch_layout_region`] /
+    /// [`Model::touch_layout_frame`] can be wrong, and `WOW_LAYOUT_VERIFY` re-resolves every
+    /// incremental pass in full scope and compares rects, so being wrong fails a test rather than
+    /// shipping a stale one.
+    /// The list holds **layout ids**, not handles: the touch sites below already have to prove the
+    /// node is in the cached roster before they may name it, and that proof is a `node_of[id]`
+    /// probe — which hands back the roster row, and with it the handle, for free at resolve time.
+    pub(crate) layout_touched: Option<Vec<u32>>,
+    /// `WOW_LAYOUT_VERIFY`'s flag that the resolve just taken was the incremental one and owes a
+    /// full-derive re-run to prove it (see `layout::UiScript::resolve_layout`). Always `false` in
+    /// production — nothing reads it unless the verify build set it.
+    pub(crate) layout_verify_recheck: bool,
     /// Per-node input hashes + the dirty-closure scratch — what makes a resolve cost the nodes
     /// that MOVED rather than the whole graph (decision 1350; see `script::layout::LayoutScope`).
     /// Tiers 1 and 2 above decide *whether* to solve; this decides *what*.
@@ -125,6 +151,20 @@ pub(crate) struct Model {
     /// consumes `benilla-ui` as a dependency, where `cfg!(test)` is false and the count is
     /// production's; inside this crate's own tests, assert on `layout_solves`.
     pub(crate) layout_gate_walks: u64,
+    /// How many times a resolve **derived the layout graph** — the whole-roster walk that rebuilds
+    /// the frame/region roster, the reverse edges and every per-node hash (decision 1388).
+    ///
+    /// This is the cost counter [`Self::layout_gate_walks`] used to be. 1385 got a moving castbar
+    /// spark down from three walks per frame to one; 1388 made that one walk *cheap* by seeding the
+    /// dirty closure from a ledger of named nodes instead of rediscovering it, so "walks" no longer
+    /// separates the 1.48 ms case from the 20 µs one and this does. A UI that animates anything
+    /// should hold this at **zero** frame after frame — a non-zero steady-state reading means some
+    /// write site is falling back to the conservative `touch_layout`, and that is the regression.
+    ///
+    /// Verify-independent in the direction that matters: the `WOW_LAYOUT_VERIFY` re-run's
+    /// derivation is counted, but `resolve_layout` restores the meter afterwards, so a test reads
+    /// the same number in both modes.
+    pub(crate) layout_derives: u64,
     /// The SCOPE of the last solve that ran: `(frames solved, regions swept)` — decision 1350's
     /// own meter, and the number its gate asserts on. `layout_solves` says how often the gate let
     /// a solve through and `layout_rounds` how deep each went; this says how WIDE, which is the
@@ -1120,6 +1160,9 @@ impl Model {
             solver: LayoutSolver::new(),
             layout_fingerprint: None,
             layout_epoch: 0,
+            layout_touched: None,
+            layout_verify_recheck: false,
+            layout_derives: 0,
             layout_scope: super::layout::LayoutScope::default(),
             layout_last_scope: (0, 0),
             layout_epoch_resolved: None,
@@ -1424,6 +1467,97 @@ impl Model {
     /// exactly the failure `WOW_LAYOUT_VERIFY` (on for every benilla-ui test) exists to catch
     /// loudly, by proving the fingerprint still matches whenever tier 1 claims quiet.
     pub(crate) fn touch_layout(&mut self) {
+        // The conservative half of the tier-1 ledger (decision 1388): this write did not name a
+        // node, so the cached graph can no longer be trusted to describe the live model and the
+        // next resolve must derive it in full. Every site that has NOT been migrated to a precise
+        // touch lands here, which is why migration can be incremental and a missed one is slow
+        // rather than wrong.
+        self.layout_touched = None;
+        self.bump_layout_epoch();
+    }
+
+    /// A write that moved **one region's** layout inputs and changed nothing else about the graph:
+    /// its anchor OFFSETS, its explicit size, its measured extent. Not its anchor targets, not its
+    /// membership, not its liveness — those move edges or the roster, and belong on
+    /// [`Self::touch_layout`].
+    ///
+    /// Falls back to the conservative touch whenever it cannot prove the region is a node of the
+    /// **cached** graph: no minted id, an id past the roster's arrays, or an id the last derive
+    /// left unmapped (an anchor-less region, a region born since). That fallback is what makes the
+    /// call safe to reach for — the worst a mistaken one can do is derive the graph again.
+    pub(crate) fn touch_layout_region(&mut self, rh: RegionHandle) {
+        match self.region_to_id.get(&rh) {
+            Some(&id) => self.touch_layout_node(id),
+            None => self.touch_layout(),
+        }
+    }
+
+    /// [`Self::touch_layout_region`]'s frame twin — an anchor offset, a width/height, and nothing
+    /// that moves an edge or the roster.
+    pub(crate) fn touch_layout_frame(&mut self, h: FrameHandle) {
+        match self.frame_to_id.get(&h) {
+            Some(&id) => self.touch_layout_node(id),
+            None => self.touch_layout(),
+        }
+    }
+
+    /// Name a node **without opening tier 1** — for the resolve's own pre-pass
+    /// (`tooltip::layout_tooltips`), which writes layout inputs derived from state that already
+    /// arrived through touched paths.
+    ///
+    /// It deliberately does not call [`Self::touch_layout`]: bumping the epoch from inside a
+    /// resolve would pin the gate open forever (the pre-pass runs on every let-through resolve, so
+    /// it would re-dirty the very resolve it is running in). But the ledger still has to hear about
+    /// it, or an incremental pass would inherit a node whose hash the pre-pass moved and no write
+    /// site named — the one shape that could ship a stale rect. Naming it is free: the hash it
+    /// recomputes is unchanged on the frames the pre-pass writes idempotently, which is nearly all
+    /// of them, so no dirty seed comes of it.
+    pub(crate) fn note_layout_frame_write(&mut self, h: FrameHandle) {
+        if self.layout_touched.is_some() {
+            match self.frame_to_id.get(&h) {
+                Some(&id) if self.layout_scope.has_node(id) => {
+                    self.layout_touched
+                        .as_mut()
+                        .expect("checked above")
+                        .push(id);
+                }
+                _ => self.layout_touched = None,
+            }
+        }
+    }
+
+    /// [`Self::note_layout_frame_write`]'s region twin.
+    pub(crate) fn note_layout_region_write(&mut self, rh: RegionHandle) {
+        if self.layout_touched.is_some() {
+            match self.region_to_id.get(&rh) {
+                Some(&id) if self.layout_scope.has_node(id) => {
+                    self.layout_touched
+                        .as_mut()
+                        .expect("checked above")
+                        .push(id);
+                }
+                _ => self.layout_touched = None,
+            }
+        }
+    }
+
+    /// Name `id` as the only thing this write moved — if the cached graph has a node for it and no
+    /// earlier write in this frame already gave up on naming.
+    fn touch_layout_node(&mut self, id: u32) {
+        let in_graph = self.layout_scope.has_node(id);
+        match &mut self.layout_touched {
+            // Already conservative: a precise touch cannot un-say an imprecise one.
+            None => {}
+            Some(_) if !in_graph => self.layout_touched = None,
+            Some(list) => list.push(id),
+        }
+        self.bump_layout_epoch();
+    }
+
+    /// Tier 1's counter, shared by every touch above. Bumping it is what re-opens the gate; which
+    /// of [`Self::layout_touched`]'s two states the caller leaves behind is what decides how much
+    /// the re-opened resolve has to derive.
+    fn bump_layout_epoch(&mut self) {
         self.layout_epoch = self.layout_epoch.wrapping_add(1);
         // `WOW_LAYOUT_TOUCH_TRACE=<n>` — name the epoch's per-frame toucher: print a backtrace
         // for the first n touches (a mechanism probe, meaningful in a debuginfo build). Built

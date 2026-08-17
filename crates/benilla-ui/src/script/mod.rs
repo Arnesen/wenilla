@@ -894,11 +894,11 @@ impl UiScript {
     /// number, which is why [`Self::set_measured_text_unwrapped`] exists for tests.
     pub fn set_measured_text(&mut self, measures: &[(u32, f32, f32, f32, u64)]) {
         let mut model = self.model_mut();
-        let mut changed = false;
         for &(id, w, h, natural_w, key) in measures {
             let Some(&rh) = model.id_to_region.get(&id) else {
                 continue;
             };
+            let mut moved = false;
             if let Some(d) = model.region_data.get_mut(&rh) {
                 let new = MeasuredText {
                     w,
@@ -908,13 +908,16 @@ impl UiScript {
                 };
                 // The KEY always lands (or the region re-requests its own measure forever); the
                 // EPOCH moves only if the laid-out extent did — see `MeasuredText::layout_moved`.
-                changed |= MeasuredText::layout_moved(d.measured, new);
+                moved = MeasuredText::layout_moved(d.measured, new);
                 d.measured = Some(new);
             }
-        }
-        if changed {
-            // Measured extents are the auto-size axes' inputs — the layout gate's read set.
-            model.touch_layout();
+            if moved {
+                // Measured extents are the auto-size axes' inputs — the layout gate's read set.
+                // Touched PER REGION rather than once for the batch (decision 1388): the batch
+                // touch could only say "some extent moved", which is exactly the whole-roster
+                // question the ledger exists to stop asking.
+                model.touch_layout_region(rh);
+            }
         }
     }
 
@@ -1090,6 +1093,13 @@ impl UiScript {
     /// preamble and never reaches the solve counter.
     pub fn layout_gate_walks(&self) -> u64 {
         self.model_ref().layout_gate_walks
+    }
+
+    /// How many times a resolve DERIVED the layout graph from scratch ([`Model::layout_derives`])
+    /// — the whole-roster walk, and since decision 1388 the only expensive thing a resolve can do.
+    /// A UI that merely animates should hold this flat.
+    pub fn layout_derivations(&self) -> u64 {
+        self.model_ref().layout_derives
     }
 
     /// Total fixpoint ROUNDS across every solve ([`Model::layout_rounds`]) — a solve costs

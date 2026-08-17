@@ -26,7 +26,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
             if changed {
-                model.touch_layout();
+                // A size write moves no edge and no roster membership (decision 1388).
+                model.touch_layout_region(rh);
             }
             Ok(())
         })?,
@@ -42,7 +43,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
             if changed {
-                model.touch_layout();
+                // A size write moves no edge and no roster membership (decision 1388).
+                model.touch_layout_region(rh);
             }
             Ok(())
         })?,
@@ -58,7 +60,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
             if changed {
-                model.touch_layout();
+                // A size write moves no edge and no roster membership (decision 1388).
+                model.touch_layout_region(rh);
             }
             Ok(())
         })?,
