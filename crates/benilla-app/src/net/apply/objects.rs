@@ -39,6 +39,24 @@ pub(super) fn gameobject_custom_anim(
     });
 }
 
+/// An object plays its one-shot **Despawn** animation (`SMSG_GAMEOBJECT_DESPAWN_ANIM`, decision
+/// 1404) — the other half of wow-re `gameobject-anim-arm.md` §2c's channel, AnimationData id 157.
+///
+/// This marks the entity **immediately**, with a component rather than a message, because vmangos
+/// sends `SMSG_DESTROY_OBJECT` for the same object in the same server tick: the mark has to be on
+/// the entity before [`object_destroyed`] runs, or the destroy frees it before anything can play.
+/// Commands apply in the order they were queued, so an insert queued here is visible to the
+/// closure the destroy queues below. The arm itself, and the model-ownership gate, are
+/// [`crate::go_anim`]'s.
+pub(super) fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index: &GuidIndex) {
+    debug!("net: gameobject {guid:#x} despawn anim");
+    if let Some(&e) = index.0.get(&guid) {
+        commands
+            .entity(e)
+            .insert(crate::go_anim::DespawnAnimAnnounced);
+    }
+}
+
 /// An object entered range / was created (`SMSG_UPDATE_OBJECT` create block): spawn or refresh the
 /// entity, warm the ask-once caches, and seed its descriptor store via the per-drain `pending` map.
 #[allow(clippy::too_many_arguments)]
@@ -381,8 +399,26 @@ pub(super) fn object_destroyed(
     // appear-fade on create). A respawn then streams in as a fresh entity. If it was the
     // target, the ring's gone-entity branch clears the selection next frame — the
     // reference's teardown does the same (and sends the same `CMSG_SET_SELECTION 0`).
+    //
+    // …*unless the object is pinned* — `0x464920` on a still-pinned object only sets the
+    // pending-destroy bit and returns, and the real free waits for the last pin to drop (wow-re
+    // `go-display-sound-events.md` §6d). The one pin benilla takes is the despawn animation
+    // announced a moment earlier by `SMSG_GAMEOBJECT_DESPAWN_ANIM`, which is the whole of how an
+    // object gets to play its own despawn after the server says it is gone (decision 1404).
+    // The guid leaves the index either way: to the server it no longer exists.
     if let Some(e) = index.0.remove(&guid) {
-        commands.entity(e).try_despawn();
+        commands.queue(move |world: &mut bevy::ecs::world::World| {
+            if world
+                .get::<crate::go_anim::DespawnAnimAnnounced>(e)
+                .is_some()
+            {
+                if let Ok(mut ent) = world.get_entity_mut(e) {
+                    ent.insert(crate::go_anim::PendingDestroy);
+                }
+            } else if let Ok(ent) = world.get_entity_mut(e) {
+                ent.despawn();
+            }
+        });
     }
     // An item destroy (consumed, sold) never had a scene entity — clear the item store.
     items.remove_object(guid);

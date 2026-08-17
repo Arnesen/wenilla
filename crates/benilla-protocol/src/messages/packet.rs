@@ -307,6 +307,14 @@ pub enum ServerPacket {
         guid: u64,
         anim_id: u32,
     },
+    /// `SMSG_GAMEOBJECT_DESPAWN_ANIM` — an object plays its one-shot **Despawn** animation and
+    /// then goes away. Payload VERIFIED vmangos `WorldObject::SendObjectDeSpawnAnim`: a bare
+    /// `u64` guid. The client arms substate 12 (AnimationData **157 Despawn**) and PINS the
+    /// object so the `SMSG_DESTROY_OBJECT` that follows in the same server tick waits for the
+    /// play to finish (decision 1404).
+    GameObjectDespawnAnim {
+        guid: u64,
+    },
     /// `SMSG_FISH_NOT_HOOKED` — the fishing channel ended (expiry, or clicked before the splash)
     /// with nothing hooked. Empty body (VERIFIED vmangos `GameObject::Update`/`Use`); the red
     /// `ERR_FISH_NOT_HOOKED` toast (decision 1086).
@@ -1196,6 +1204,7 @@ impl ServerPacket {
             ServerPacket::GameObjectQueryResponse { .. } => "SMSG_GAMEOBJECT_QUERY_RESPONSE".into(),
             ServerPacket::PageTextQueryResponse { .. } => "SMSG_PAGE_TEXT_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectCustomAnim { .. } => "SMSG_GAMEOBJECT_CUSTOM_ANIM".into(),
+            ServerPacket::GameObjectDespawnAnim { .. } => "SMSG_GAMEOBJECT_DESPAWN_ANIM".into(),
             ServerPacket::FishNotHooked => "SMSG_FISH_NOT_HOOKED".into(),
             ServerPacket::FishEscaped => "SMSG_FISH_ESCAPED".into(),
             ServerPacket::PlaySound { .. } => "SMSG_PLAY_SOUND".into(),

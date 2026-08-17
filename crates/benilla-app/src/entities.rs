@@ -131,6 +131,24 @@ pub(crate) const ATTACH_OVERHEAD_MOUNTED: u16 = 29;
 /// attachment anchors overhead content at `feet + scale × bbox_z × 1.25`.
 const OVERHEAD_FALLBACK_FACTOR: f32 = 1.25;
 
+/// The unit's **Stand-animation box height** (model-local, pre-scale) — the chat bubble's anchor,
+/// and *only* the chat bubble's (1406).
+///
+/// The reference's two overhead heights are two different mechanisms, and benilla had recorded them
+/// as one. The overhead NAME (and the floating combat text, and the V-plate) takes `0x608640`: the
+/// live posed PlayerName attachment, which tracks the pose. The chat bubble takes `0x711a20`, which
+/// wow-re's cross-check followed into the model layer and found reading the **MD20 header image** —
+/// file bytes, no bone matrix in the call tree — returning the Stand sequence CAaBox's Z extent,
+/// and the client caches it in the bubble at `+0x354` on a parity guard so it is queried **once per
+/// chat line**. The recorded claim that the two calls were equivalent ("both are the head-region
+/// attachment height, model-scaled", INFERRED) is refuted: they differ precisely on
+/// animated-vs-static.
+///
+/// So this is a constant per display, stamped at attach and never re-read — which is also why the
+/// bubble's height cannot acquire a pose-clock bug of the kind 1398 had to remove from the anchor.
+#[derive(Component)]
+pub(crate) struct StandBoxHeight(pub(crate) f32);
+
 /// The unit's model bbox z-extent (model-local, pre-scale) — stamped by the attach path for
 /// [`overhead_anchor`]'s fallback. `0.0` until the model loads (the fallback then anchors at
 /// feet — the same degenerate the client hits with no model).

@@ -338,6 +338,18 @@ pub const CMSG_GAMEOBJ_USE: u16 = 0x00B1; // 177
 /// `gameobject-anim-arm.md` §"one-shot channel" step 8. The load-bearing sender: the fishing
 /// bobber's bite (`animId 0` — the splash; decision 1086).
 pub const SMSG_GAMEOBJECT_CUSTOM_ANIM: u16 = 0x00B3; // 179
+/// The **other** one-shot GameObject arm channel (VERIFIED vmangos `Opcodes_1_12_1.h`: 533,
+/// `WorldObject::SendObjectDeSpawnAnim` → `WorldPackets::Misc::GameObjectDespawnAnim`). Body in
+/// [`super::gameobject`]: a bare `u64` guid. The client arms substate **12** — AnimationData id
+/// **157 Despawn** — and the object then survives its own `SMSG_DESTROY_OBJECT` for the length of
+/// that play (wow-re `gameobject-anim-arm.md` §2c's code table `0x80b0e0[6]` → the `0x8607e4` LUT,
+/// and `go-display-sound-events.md` §6d's arm-time pin). The load-bearing sender: a TRAP that has
+/// spent its charges — UBRS's Rookery Eggs hatch on this packet (decision 1404).
+///
+/// It is **not** GameObject-only: `SendObjectDeSpawnAnim` lives on `WorldObject`, so a totem's
+/// death and a DynamicObject's expiry send it too. The consumer treats a guid with nothing armable
+/// as an ordinary destroy.
+pub const SMSG_GAMEOBJECT_DESPAWN_ANIM: u16 = 0x0215; // 533
 /// VERIFIED vmangos `Opcodes_1_12_1.h:183`: 180 — and the reference writes this literal
 /// (`0x5e2110`, its area-trigger check, builds `0xb4` + the trigger id). Body in
 /// [`super::area_trigger`]: the `AreaTrigger.dbc` id the player just walked into.

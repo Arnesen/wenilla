@@ -27,7 +27,11 @@
 //!   PLAIN (`||`→`|`, color/hyperlink escapes stripped — [`sanitize`]).
 //! - **Anchor** (`0x4b0c30`): `worldZ = unit.z + attachmentHeight·modelScale + 0.7`, projected
 //!   by the plate/name projector, seated **BOTTOM at the point, growing upward** (the mirror
-//!   of the plate, which hangs down).
+//!   of the plate, which hangs down). `attachmentHeight` is `0x4b0e38 call 0x711a20` — a read of
+//!   the **MD20 header image**, i.e. the **Stand sequence CAaBox's Z extent**, a file constant
+//!   with no bone matrix anywhere in its call tree — and the scaled product is **latched** at
+//!   `bubble+0x354` behind a parity guard, so it is queried exactly **once per chat line**
+//!   ([`crate::entities::StandBoxHeight`], wow-re's anchor cross-check 2026-08-17; 1406).
 //!
 //! Named divergences (all deliberate, decisions 0598/0599):
 //! - **`ChatBubblesParty` defaults ON** (binary default "0") — the director asked for `/p`
@@ -37,10 +41,14 @@
 //!   bubbles too — but that category claim is INFERRED on an OPEN wire-type remap
 //!   (chat-bubble.md §1) and contradicts the remembered reference look, so the uncontested
 //!   set ships and a capture can widen it ([`bubble_cvar`]).
-//! - **The anchor height is the posed overhead attachment** ([`overhead_anchor`], the
-//!   `0x608640` chain) rather than the client's `0x711a20` model-attachment query — the
-//!   attachment behind `0x711a20` is not identified in the note (INFERRED equivalence; both
-//!   are "the head-region attachment height, model-scaled").
+//! - ~~**The anchor height is the posed overhead attachment**~~ — **REFUTED and removed (1406).**
+//!   This shipped as an INFERRED equivalence ("both are the head-region attachment height,
+//!   model-scaled") between the overhead-name chain `0x608640` and the bubble's `0x711a20`. They
+//!   are not equivalent, and they differ on exactly the axis that mattered: `0x608640` reads the
+//!   live posed palette and tracks the pose, `0x711a20` reads file bytes. The overhead *name*
+//!   keeps `0x608640`; the bubble now takes the Stand-box constant the bytes actually specify. It
+//!   sits **0.199 model units lower** on a human male (2.0128 vs the attachment's 2.2120) — a
+//!   deliberate, measured move toward the reference, not a regression.
 //! - **Sizes ride the plates' damped diagonal basis** ([`plate_basis`], decisions 0185/0186)
 //!   so bubble text and plate text stay the same em at every window — the same director-pinned
 //!   deviation from the unbounded byte law.
@@ -60,7 +68,7 @@ use benilla_ui::layout::Rect as GxRect;
 use benilla_ui::script::{inset_atlas_bleed, pieces, Backdrop, Insets};
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
-use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
+use crate::entities::StandBoxHeight;
 use crate::net::{Embodied, Guid, NetEntity, SelfGuid};
 use crate::ui_chat::{default_color, ChatEventKind};
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
@@ -282,6 +290,11 @@ struct Bubble {
     born: f32,
     /// The steady window past the fade-in ([`duration_secs`]).
     duration: f32,
+    /// The **latched** anchor height above the speaker's feet: the Stand box's Z extent
+    /// ([`crate::entities::StandBoxHeight`]) already multiplied by the unit's model scale, queried
+    /// ONCE here and never re-read — the reference caches exactly this product at `bubble+0x354`
+    /// behind a parity guard, so it is one query per chat line (1406).
+    lift: f32,
     /// Current fade alpha 0..1 — ramped 250 ms linear toward the eligibility verdict.
     alpha: f32,
 }
@@ -355,14 +368,8 @@ fn drive_bubbles(
     mut atlas: Option<ResMut<UiFontAtlas>>,
     mut quads: ResMut<UiQuads>,
     art: Option<Res<BubbleArt>>,
-    // The overhead-anchor inputs ([`overhead_anchor`]).
-    anchor_q: (
-        Query<&BoneAttach>,
-        Query<&benilla_world::rig_anim::RigPose>,
-        Query<&OverheadFallback>,
-        Query<&GlobalTransform>,
-        Query<(), With<crate::entities::mount::MountChild>>,
-    ),
+    // The latched anchor height, read once per bubble at spawn ([`StandBoxHeight`]).
+    heights: Query<&StandBoxHeight>,
     time: Res<Time>,
     // The device scale, for the seat's pixel snap ([`device_snap`]).
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -416,6 +423,10 @@ fn drive_bubbles(
         }
         let is_self = self_guid.0 == Some(guid);
         let c = default_color(kind);
+        // The one-time attachment query (`0x4b0e38 call 0x711a20`, scaled by `[unit+0x90]`): a file
+        // constant × this unit's model scale. A speaker with no bounds reads 0 and the bubble sits
+        // at the feet + 0.7, which is the reference's own degenerate for a bounds-less model.
+        let lift = heights.get(entity).map_or(0.0, |h| h.0) * tf.scale.y;
         // Replace, never queue: the insert tears the old bubble down (`0x608c00`) and the
         // fresh one fades in from 0.
         bubbles.0.insert(
@@ -429,6 +440,7 @@ fn drive_bubbles(
                 ],
                 born: now,
                 duration: duration_secs(words, is_self),
+                lift,
                 alpha: 0.0,
             },
         );
@@ -477,19 +489,12 @@ fn drive_bubbles(
         else {
             continue; // no camera/atlas/art — lifetimes still tick, nothing draws
         };
-        // World anchor: unit position, Z lifted by the posed attachment height + 0.7 yd —
-        // seated BOTTOM at the projected point, growing upward. A point behind the camera
-        // draws nothing (state kept — it fades back the moment it projects again).
-        let anchor = overhead_anchor(
-            entity,
-            tf,
-            &anchor_q.0,
-            &anchor_q.1,
-            &anchor_q.2,
-            &anchor_q.3,
-            &anchor_q.4,
-        );
-        let seat_world = Vec3::new(tf.translation.x, anchor.y + LIFT, tf.translation.z);
+        // World anchor (`0x4b0c30`): the unit's position, Z lifted by the LATCHED Stand-box height
+        // + 0.7 yd — seated BOTTOM at the projected point, growing upward. Every term is this
+        // frame's `Transform` or a constant, so there is no pose to read and no clock to get wrong.
+        // A point behind the camera draws nothing (state kept — it fades back the moment it
+        // projects again).
+        let seat_world = tf.translation + Vec3::Y * (b.lift + LIFT);
         let cam_tf = GlobalTransform::from(*cam_pose);
         // The SEVENTH silent cause, and the one that cost the most to find: a seat behind the
         // camera fails to project and the bubble draws nothing — alive, ticking, invisible, and
@@ -514,7 +519,7 @@ fn drive_bubbles(
             scale,
             trace,
             entity,
-            anchor,
+            seat_world,
             tf.translation,
             cam_pose,
         );
@@ -669,17 +674,16 @@ fn draw_bubble(
         );
     }
     // **The jitter decomposition** (`WOW_MOVE_TRACE` tag `bub`, one line per bubble per frame) —
-    // the plate's `vpl` line ([`crate::vplates`]) for the bubble: the world anchor the pose
-    // returned, the camera pose that projected it, the raw projected seat, and the snapped frame
-    // origin. "The bubble is jittery when running" is then attributed to one of three from
-    // numbers rather than from the eye — a bobbing anchor (the animated head attachment re-read
-    // every frame), a noisy camera, or the pixel snap — which is what settles whether the snap fix
-    // was the whole of it. `pos=` is the unit's OWN `Transform` this frame, beside the `anchor=`
-    // the pose returned: the two are read on **different clocks** (the anchor computes through a
-    // `GlobalTransform` that Bevy propagates in `PostUpdate`, so it is last frame's; `pos` is this
-    // frame's), and their horizontal difference is therefore a direct reading of that lag in yards
-    // — the term 1341 cleared for the plate by measuring a unit that was STANDING STILL, where it
-    // is identically zero. It rides the shared tag-filtered trace and NOT the `WOW_BUBBLE_TRACE`
+    // the plate's `vpl` line ([`crate::vplates`]) for the bubble: the seat's world point, the
+    // camera pose that projected it, the raw projected seat, and the snapped frame origin. "The
+    // bubble is jittery when running" is then attributed from numbers rather than from the eye —
+    // a moving anchor, a noisy camera, or the pixel snap. Since 1406 `anchor=` and `pos=` differ by
+    // a LATCHED constant on Y and by nothing at all on X/Z, so any wobble between them is a defect
+    // by construction. (Through 1398 they were read on different clocks — the anchor computed
+    // through a `GlobalTransform` Bevy propagates in `PostUpdate`, i.e. last frame's — and their
+    // difference measured exactly that lag: the term 1341 cleared for the plate by measuring a unit
+    // that was STANDING STILL, where it is identically zero. Dropping the pose read removes the
+    // seam rather than correcting it.) It rides the shared tag-filtered trace and NOT the `WOW_BUBBLE_TRACE`
     // eprintln beside it, whose unbuffered writes would distort the frame pacing the question is
     // about (the 0880 lesson, the same reason `vpl` lives there).
     if benilla_assets::trace::enabled_for("bub") {

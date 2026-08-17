@@ -39,6 +39,21 @@ pub struct M2Bounds {
     /// `follow-camera`: `feet + (attach17.z + 0.0972)·scale`). `None` for a model with no slot-17
     /// attachment; the camera then falls back to a fraction of the box. See [`M2Bounds::pivot_z`].
     pub pivot_z: Option<f32>,
+    /// The **Stand** animation box's vertical extent, `max.z − min.z` (model-local, pre-scale) — the
+    /// chat bubble's anchor height above the unit's feet (× model scale, + 0.7 yd).
+    ///
+    /// The same `0x711a20` query the selection ring above is sized from, taking the box's Z instead
+    /// of its XY: wow-re's chat-bubble anchor cross-check (2026-08-17) followed `0x4b0e38 call
+    /// 0x711a20` into the model layer and found it reading the **MD20 header image** — file bytes,
+    /// no bone matrix anywhere in the call tree — and returning `out+0x20 − out+0x14`, which is that
+    /// CAaBox's Z extent. Benilla anchored the bubble on the posed PlayerName attachment instead,
+    /// on a recorded INFERRED claim that `0x608640` and `0x711a20` were "both the head-region
+    /// attachment height"; that equivalence is **REFUTED** — they differ precisely on
+    /// animated-vs-static, `0x608640` reading the live posed palette (it bobs) and this reading a
+    /// file constant. The overhead *name* keeps `0x608640`; only the bubble takes this. See 1406.
+    ///
+    /// Falls back to the header render-box Z extent for a model with no sequences, like the ring.
+    pub stand_box_z: f32,
 }
 
 /// Read an M2's authored bounds + the vertex-derived radius (see [`M2Bounds`]). Uses the same path
@@ -56,10 +71,14 @@ pub fn load_m2_bounds(chain: &mut Chain, raw_path: &str) -> Result<M2Bounds> {
 /// The animation `M2Sequence` array is at MD20 `0x1c`(count)/`0x20`(offset), stride `0x44`, with the
 /// sequence's `CAaBox` at record `+0x24` (min C3 `+0x24`, max C3 `+0x30`). Stand is animation **id 0**,
 /// whose *sequence index* is `animationLookup[0]` (array at `0x24`/`0x28`, `u16` each) — NOT necessarily
-/// record 0 (a chicken's record 0 is a flap, its Stand sits at index 2). Returns `(dx, dy)`, or `None`
-/// when the model has no sequences / lookup or the indices are out of range (caller falls back to the
-/// header box). VERIFIED: reproduces the reference ring radii to ~1 mm.
-fn stand_box_xy(bytes: &[u8]) -> Option<(f32, f32)> {
+/// record 0 (a chicken's record 0 is a flap, its Stand sits at index 2). Returns `(dx, dy, dz)`, or
+/// `None` when the model has no sequences / lookup or the indices are out of range (caller falls back
+/// to the header box). VERIFIED: reproduces the reference ring radii to ~1 mm.
+///
+/// The Z extent joins the pair the ring needs because the chat bubble's anchor is the **same box**
+/// read on the other axis (1406) — one parse, one Stand-sequence resolution, two consumers, so the
+/// ring and the bubble can never drift onto different animations.
+fn stand_box(bytes: &[u8]) -> Option<(f32, f32, f32)> {
     let anim_count = bytes.u32_at(0x1c)? as usize;
     let anim_ofs = bytes.u32_at(0x20)? as usize;
     let lookup_count = bytes.u32_at(0x24)? as usize;
@@ -82,7 +101,8 @@ fn stand_box_xy(bytes: &[u8]) -> Option<(f32, f32)> {
     // formula so an unsorted box is harmless.
     let dx = bytes.f32_at(rec + 0x30)? - bytes.f32_at(rec + 0x24)?;
     let dy = bytes.f32_at(rec + 0x34)? - bytes.f32_at(rec + 0x28)?;
-    Some((dx, dy))
+    let dz = bytes.f32_at(rec + 0x38)? - bytes.f32_at(rec + 0x2c)?;
+    Some((dx, dy, dz))
 }
 
 /// Read an **in-memory** M2's authored bounds + vertex-derived radius (see [`M2Bounds`]). The bytes-in
@@ -103,9 +123,10 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
     // Selection-ring footprint: `sqrt(0.5 · sqrt(dx² + dy²))` of the Stand animation box's horizontal
     // extents (the real client's living-unit ring input), falling back to the header render-box XY for a
     // model with no animation sequences (the client's static-model path).
-    let (rx, ry) = stand_box_xy(bytes).unwrap_or((
+    let (rx, ry, rz) = stand_box(bytes).unwrap_or((
         h.bounding_box_max[0] - h.bounding_box_min[0],
         h.bounding_box_max[1] - h.bounding_box_min[1],
+        h.bounding_box_max[2] - h.bounding_box_min[2],
     ));
     let ring_footprint = (0.5 * (rx * rx + ry * ry).sqrt()).sqrt();
     Ok(M2Bounds {
@@ -115,5 +136,6 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
         vert_max_from_origin,
         ring_footprint,
         pivot_z: model.pivot_attach_z,
+        stand_box_z: rz.max(0.0),
     })
 }

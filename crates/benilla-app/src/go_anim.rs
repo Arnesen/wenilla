@@ -82,6 +82,11 @@ const GO_STATE_ACTIVE: u32 = 0;
 /// only in this state; `GO_STATE_ACTIVE` (0, open) and `GO_STATE_ACTIVE_ALTERNATIVE` (2) are passable.
 const GO_STATE_READY: u32 = 1;
 
+/// `AnimationData.dbc` **157 Despawn** — the id the one-shot channel's code 6 resolves to
+/// (wow-re `gameobject-anim-arm.md` §2c: `0x80b0e0[6]` = substate 12, `0x8607e4[12]` = 157). The
+/// object plays this once and *then* goes away; see [`DespawnAnimAnnounced`].
+const ANIM_DESPAWN: u16 = 157;
+
 /// Marker + client-side state for an animated GameObject (decisions 0242/0250). Instanced by
 /// [`crate::entities::attach`] on an animatable GO type whose model authors sequences; driven by
 /// [`drive_go_anim`]. Distinct from creatures' `AnimDriver` so the two drivers never touch one entity.
@@ -100,13 +105,22 @@ pub(crate) struct GoAnim {
     /// *genuine* wire change — a chest's wire state is constant (its lid is driven by loot events, not the
     /// wire), so an unrelated values-update (a dyn-flag, a position) must not re-close an open lid.
     last_wire: Option<u32>,
-    /// A pending one-shot **Custom** play (AnimationData id 153..156) from
-    /// `SMSG_GAMEOBJECT_CUSTOM_ANIM` — the second, disjoint arm channel of wow-re
-    /// `gameobject-anim-arm.md` §"one-shot channel" step 8 (substates 8..11, never the §243 lid
-    /// family). Armed by [`queue_custom_anim`], consumed by [`drive_go_anim`] AFTER the state arm,
-    /// so the bobber's same-frame pair (the forced `READY → ACTIVE` flip + the splash) resolves
-    /// with the splash on top (decision 1086).
-    custom: Option<u16>,
+    /// A pending **one-shot** play, as an `AnimationData.dbc` id — the second, disjoint arm
+    /// channel of wow-re `gameobject-anim-arm.md` §2c, never the §243 lid family. The reference
+    /// has ONE such slot fed by ONE entry point (`0x5f8c50(GO, code)` → slot 15), whose 7-entry
+    /// code table `0x80b0e0` is the whole channel:
+    ///
+    /// | code | substate | id | producer |
+    /// |------|----------|----|----------|
+    /// | 1    | 0        | 145 Spawn      | object CREATE on wire update-type 3 (**not built**) |
+    /// | 2..5 | 8..11    | 153..156 Custom0-3 | opcode `0xb3` (`anim_id >= 4` rejected) |
+    /// | 6    | 12       | 157 Despawn    | opcode `0x215` — [`DespawnAnimAnnounced`] |
+    ///
+    /// Written by [`queue_custom_anim`] / [`arm_despawn_anim`], consumed by [`drive_go_anim`]
+    /// AFTER the state arm, so the bobber's same-frame pair (the forced `READY → ACTIVE` flip +
+    /// the splash) resolves with the splash on top (decision 1086). Slot 15 pre-gates on the model
+    /// OWNING the resolved id, so this channel takes no §2c remap (decisions 1086/1404).
+    one_shot: Option<u16>,
     /// The clip armed for the current **TRANSIENT substate**, if any — the completion-retire's
     /// watch (decisions 1100/1151, wow-re `gameobject-anim-arm.md` §2d + `go-display-sound-events.md`
     /// §6-8). The reference keeps exactly one current substate in `[handler+0x10]`, and its
@@ -429,7 +443,7 @@ fn queue_custom_anim(
             continue;
         };
         if let Ok(mut anim) = gos.get_mut(e) {
-            anim.custom = Some(id);
+            anim.one_shot = Some(id);
         }
     }
 }
@@ -439,6 +453,82 @@ fn queue_custom_anim(
 /// "opcode `0xb3` byte `b` (reject `b >= 4`), substate `8+b`").
 fn custom_anim_id(anim_id: u32) -> Option<u16> {
     (anim_id < 4).then(|| 153 + anim_id as u16)
+}
+
+/// The server announced this object's **despawn animation** (`SMSG_GAMEOBJECT_DESPAWN_ANIM`,
+/// opcode `0x215`) — the one-shot channel's code 6, [`ANIM_DESPAWN`]. Inserted by the net apply
+/// layer at packet time so it is on the entity *before* the `SMSG_DESTROY_OBJECT` that vmangos
+/// sends in the same server tick is processed: that ordering is the whole mechanism, and it is
+/// why this is a component rather than a message (a message is not read until later in the frame,
+/// by which time the destroy has already freed the entity).
+///
+/// It is **not** GameObject-only — `WorldObject::SendObjectDeSpawnAnim` also fires for a totem's
+/// death and a DynamicObject's expiry, and two vmangos boss scripts send it for objects that keep
+/// living. So this marker asserts nothing on its own: it arms [`GoAnim::one_shot`] if there is a
+/// [`GoAnim`] to arm, and it only defers a destroy that actually arrives ([`PendingDestroy`]).
+#[derive(Component)]
+pub(crate) struct DespawnAnimAnnounced;
+
+/// The reference's **pending-destroy mark** — `[GO+0xe4]` bit `0x10`, set by the object-manager
+/// destroy `0x464920` when it finds the object still pinned (wow-re
+/// `go-display-sound-events.md` §6d, §5-VERIFIED). The arm takes the pin whenever the armed
+/// substate is not a resting one (`0x5f3b27 call 0x4683e0` → refcount `[obj+0xe8]`), slot 14's
+/// footer releases it at the window end (`0x468410`), and only then does the deferred destroy run
+/// (`0x46844a call 0x464920`) — which is how an object gets to finish its own despawn animation
+/// after the server has already told the client it is gone.
+///
+/// benilla takes the pin on the ONE substate that produces an observable — 12 / [`ANIM_DESPAWN`],
+/// where the whole play happens after the destroy — and [`release_despawn_pin`] is the release.
+/// A GO destroyed mid-transition (a door frozen half-open by a despawn) is the reference's other
+/// pinned case and still pops instantly here; named, not built (decision 1404).
+///
+/// One deliberate divergence: the reference's `0x464920` returns *before* removing the object from
+/// the manager, so a pinned object stays addressable by guid for the length of its play. benilla
+/// drops the guid from the index at destroy time and keeps only the entity, because a respawn that
+/// reused the guid would otherwise refresh an object already condemned to despawn. Nothing
+/// observable rides on it — the object still draws, and the server has stopped answering for that
+/// guid anyway.
+#[derive(Component)]
+pub(crate) struct PendingDestroy;
+
+/// Caller 5 (the despawn-anim opcode): arm the one-shot [`ANIM_DESPAWN`] play on an object the
+/// server has announced as despawning — one arm per announcement, exactly as the reference's
+/// single `0x5f8c50(GO, 6)` call is one arm per packet.
+///
+/// `Changed`, not `Added`, and the difference is not pedantry: re-inserting a component that is
+/// already present marks it changed but **not** added, so an object announced a second time
+/// without having died in between (`SendObjectDeSpawnAnim` is a `WorldObject` method — two vmangos
+/// boss scripts call it on objects that go on living) would silently never arm again.
+///
+/// A marked entity with no [`GoAnim`] (a totem, a DynamicObject, a GO type off the machine) simply
+/// isn't matched, and [`release_despawn_pin`] then pops it on its first pass — the ordinary instant
+/// destroy. Model ownership is judged at play time by [`drive_go_anim`], as on the Custom channel.
+fn arm_despawn_anim(mut gos: Query<&mut GoAnim, Changed<DespawnAnimAnnounced>>) {
+    for mut go in &mut gos {
+        go.one_shot = Some(ANIM_DESPAWN);
+    }
+}
+
+/// Release the pin: an object whose destroy was deferred ([`PendingDestroy`]) goes away as soon as
+/// it is no longer *playing* its despawn animation — the reference's `0x468410` decrement reaching
+/// zero with the pending-destroy bit set, which runs the deferred `0x464920`.
+///
+/// Runs AFTER [`drive_go_anim`], and that ordering is load-bearing in both directions. On the
+/// arming frame the drive has just set [`GoAnim::transient`], so the object is held; on the frame
+/// [`retire_transient_anim`] clears it (the window ended) nothing re-arms 157, so the object pops.
+/// An entity that never armed anything — no [`GoAnim`], a model that doesn't author 157 — fails the
+/// test on its very first pass and pops the same frame, which is today's behaviour for everything
+/// that isn't an egg.
+fn release_despawn_pin(
+    mut commands: Commands,
+    pinned: Query<(Entity, Option<&GoAnim>), With<PendingDestroy>>,
+) {
+    for (e, go) in &pinned {
+        if go.is_some_and(|g| g.transient == Some(ANIM_DESPAWN)) {
+            continue;
+        }
+        commands.entity(e).try_despawn();
+    }
 }
 
 /// Caller 3 (the loot-release): close a chest lid when its loot window closes. The client sends
@@ -604,8 +694,8 @@ fn drive_go_anim(
         // pass, one `$GC0` splash, then the state pose — never a churning loop.
         // (`is_some` pre-check: an unconditional `take()` mut-derefs the `Mut` and re-marks the
         // component Changed every frame, keeping this Changed-filtered query hot forever.)
-        if go.custom.is_some() {
-            let id = go.custom.take().expect("checked is_some");
+        if go.one_shot.is_some() {
+            let id = go.one_shot.take().expect("checked is_some");
             if anims.owns(id) {
                 if let Some(clip) = anims.find(id) {
                     let active = tr.play(
@@ -717,12 +807,15 @@ pub(crate) fn plugin(app: &mut App) {
                     open_go_lid,
                     close_go_lid,
                     queue_custom_anim,
+                    arm_despawn_anim,
                     // The completion retire reads last frame's finished flags and must clear
                     // `shown` BEFORE the drive, so its state re-arm lands this frame — the
                     // reference's own one-frame-after-window-end timing.
                     retire_transient_anim,
                 ),
                 (drive_go_anim, drive_go_collision),
+                // The pin release reads what the drive just armed — see its doc for why AFTER.
+                release_despawn_pin,
                 fire_go_anim_events,
             )
                 .chain()
@@ -831,7 +924,15 @@ mod tests {
         app.init_resource::<Time>();
         app.init_resource::<NextStep>();
         app.add_systems(bevy::app::First, step_clock);
-        app.add_systems(Update, (retire_transient_anim, drive_go_anim).chain());
+        app.add_systems(
+            Update,
+            (
+                (arm_despawn_anim, retire_transient_anim),
+                drive_go_anim,
+                release_despawn_pin,
+            )
+                .chain(),
+        );
 
         let authored: Vec<(u16, f32)> = CRATE_FAMILY.iter().chain(extra_ids).copied().collect();
         let handles: Vec<_> = authored
@@ -1004,7 +1105,7 @@ mod tests {
             .entity_mut(go)
             .get_mut::<GoAnim>()
             .unwrap()
-            .custom = Some(153);
+            .one_shot = Some(153);
         app.update();
         assert_eq!(armed(&app, go), Some((153, RepeatAnimation::Never)));
 
@@ -1014,6 +1115,85 @@ mod tests {
             armed(&app, go),
             Some((0x93, RepeatAnimation::Forever)),
             "one Custom window, then the state pose — never a churning loop"
+        );
+    }
+
+    /// **B140** (decision 1404): UBRS's Rookery Eggs. Walk into a `TRAP`'s radius, the server
+    /// spends its last charge and sends `SMSG_GAMEOBJECT_DESPAWN_ANIM` immediately followed by
+    /// `SMSG_DESTROY_OBJECT` in the same tick — and the egg must **hatch before it pops**: 157
+    /// Despawn, one window (2.667 s on `G_DragonEggFreeze`, whose bone 8 swells 4.76×), with the
+    /// object held alive for exactly that long by the pin.
+    ///
+    /// The failing shape this pins is the whole report: the destroy freed the entity on arrival,
+    /// so 271 eggs blinked out with no animation at all.
+    #[test]
+    fn an_announced_despawn_plays_its_window_before_the_object_pops() {
+        let (mut app, go) = crate_app(&[(157, 2.667)]);
+        app.update();
+        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Forever)));
+
+        // The wire pair, in the order vmangos sends it and Commands apply it.
+        app.world_mut()
+            .entity_mut(go)
+            .insert((DespawnAnimAnnounced, PendingDestroy));
+        app.update();
+        assert_eq!(
+            armed(&app, go),
+            Some((157, RepeatAnimation::Never)),
+            "the announcement arms 157 Despawn for ONE window"
+        );
+        assert!(
+            app.world().get_entity(go).is_ok(),
+            "the pin holds the object alive across its own destroy"
+        );
+
+        advance(&mut app, 2700);
+        app.update();
+        assert!(
+            app.world().get_entity(go).is_err(),
+            "the window ended — the pin drops and the deferred destroy runs"
+        );
+    }
+
+    /// The other half of the same rule: a model that doesn't author 157 (or an object with no
+    /// animation machine at all — a totem, a DynamicObject, both of which `SendObjectDeSpawnAnim`
+    /// also fires for) must keep today's **instant pop**. Nothing arms, so the pin never forms and
+    /// the release runs on its first pass.
+    #[test]
+    fn an_unownable_despawn_anim_still_pops_instantly() {
+        let (mut app, go) = crate_app(&[]); // the crate family only — no 157
+        app.update();
+
+        app.world_mut()
+            .entity_mut(go)
+            .insert((DespawnAnimAnnounced, PendingDestroy));
+        app.update();
+        assert!(
+            app.world().get_entity(go).is_err(),
+            "nothing to play ⇒ the ordinary instant destroy, same frame"
+        );
+    }
+
+    /// The announcement **alone** kills nothing. `SendObjectDeSpawnAnim` lives on `WorldObject`,
+    /// and two vmangos boss scripts send it for objects that go on living (Sapphiron sends it for
+    /// *himself*); only a destroy that actually arrives marks [`PendingDestroy`]. So an announced
+    /// object with no destroy plays its window and returns to its state pose, still there.
+    #[test]
+    fn an_announcement_without_a_destroy_never_despawns_anything() {
+        let (mut app, go) = crate_app(&[(157, 2.667)]);
+        app.update();
+
+        app.world_mut().entity_mut(go).insert(DespawnAnimAnnounced);
+        app.update();
+        assert_eq!(armed(&app, go), Some((157, RepeatAnimation::Never)));
+
+        advance(&mut app, 2700);
+        app.update();
+        assert!(app.world().get_entity(go).is_ok(), "no destroy, no despawn");
+        assert_eq!(
+            armed(&app, go),
+            Some((0x93, RepeatAnimation::Forever)),
+            "and the window hands back to the state pose, like any other one-shot"
         );
     }
 

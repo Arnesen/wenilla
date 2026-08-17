@@ -94,6 +94,15 @@ pub(super) fn read_gameobject_custom_anim(r: &mut &[u8]) -> io::Result<(u64, u32
     Ok((guid, anim_id))
 }
 
+/// Read `SMSG_GAMEOBJECT_DESPAWN_ANIM` → `guid`. VERIFIED vmangos
+/// `WorldObject::SendObjectDeSpawnAnim` (`Objects/Object.cpp:2307`) →
+/// `WorldPackets::Misc::GameObjectDespawnAnim`, whose whole body is the object guid. The
+/// client-side meaning (wow-re `gameobject-anim-arm.md` §2c): arm substate 12, AnimationData id
+/// **157 Despawn** — the arm channel, like the custom one, is disjoint from the §243 lid family.
+pub(super) fn read_gameobject_despawn_anim(r: &mut &[u8]) -> io::Result<u64> {
+    read_u64_le(r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +161,21 @@ mod tests {
                 assert_eq!(info.data[1], 0);
             }
             other => panic!("expected GameObjectQueryResponse, got {}", other.name()),
+        }
+    }
+
+    #[test]
+    fn gameobject_despawn_anim_decodes() {
+        // The whole body is the object guid (VERIFIED vmangos
+        // `WorldObject::SendObjectDeSpawnAnim` → `WorldPackets::Misc::GameObjectDespawnAnim`,
+        // whose `AppendBodyTo` writes only `gameObjectGuid`). A UBRS Rookery Egg spending its
+        // last trap charge is the load-bearing sender (decision 1404).
+        let body = hx("f0debc9a78563412");
+        match parse_server(opcode::SMSG_GAMEOBJECT_DESPAWN_ANIM, &body).unwrap() {
+            ServerPacket::GameObjectDespawnAnim { guid } => {
+                assert_eq!(guid, 0x1234_5678_9abc_def0);
+            }
+            other => panic!("expected GameObjectDespawnAnim, got {}", other.name()),
         }
     }
 

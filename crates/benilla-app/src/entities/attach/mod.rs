@@ -757,6 +757,11 @@ pub(super) fn attach_entity_visuals(
             commands.entity(entity).insert(super::OverheadFallback(
                 dm.map(|d| d.bbox_z_local).unwrap_or(0.0),
             ));
+            // The chat bubble's own anchor height — the Stand box's Z, a file constant, NOT the
+            // posed attachment the overhead name above rides (1406).
+            commands.entity(entity).insert(super::StandBoxHeight(
+                dm.map(|d| d.stand_box_z_local).unwrap_or(0.0),
+            ));
             // Selection-ring radius (model-local sphere radius, pre-scale) — the targeting ring reads it
             // × the unit's scale (harmless on non-unit models, which are never ringed).
             commands.entity(entity).insert(SelectionRadius(
@@ -891,8 +896,12 @@ pub(super) fn attach_entity_visuals(
             // nothing (decision 1403, bug B13). The reference's mesh gate is type-independent: it
             // draws any loaded model and the per-batch zero-alpha cull skips what is transparent
             // (decision 0024, verified wow-re `go-render-gate`), so a model with no surviving batch
-            // submits no geometry and the unit is invisible. That is the whole of how a **trigger
-            // creature** hides — `Creature\InvisibleStalker\InvisibleStalker.m2` ships with
+            // submits no geometry and the unit is invisible. Byte-exact, folded back at 1407: the
+            // batch loop's TRIP COUNT is the selected ModelView's texUnit count (`0x707a72`), so a
+            // view with none skips the whole loop — and the unit lane reaches that same loop, on
+            // the same singleton `CM2Scene`, through the same `0x613e10` as every other typeId.
+            // That is the whole of how a **trigger creature** hides —
+            // `Creature\InvisibleStalker\InvisibleStalker.m2` ships with
             // `nVertices == 0`, and its `NoName` sibling's one batch carries a constant-zero
             // transparency track — no unit flag is consumed anywhere. Cubing them put a black slab
             // over 154 vmangos templates on 8 displays (the Scarab Wall's Anachronos trigger,

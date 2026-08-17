@@ -48,6 +48,19 @@ type GoCollisionReadout = (
     Option<&'static crate::go_anim::GoAnim>,
 );
 
+/// The inspector's **motion** readout: the server-dictated path a creature is riding
+/// ([`crate::net::Spline`]) and the dead-reckoned state of a remote mover
+/// ([`crate::net::RemoteMotion`]) — the two producers of "this thing is moving" that the animation
+/// selector itself unifies. On the card because the identity lines alone cannot answer the one
+/// question a "that creature looks wrong" report always turns on: *is it actually moving, and how
+/// fast?* The AQ drakes are the case that earned it — a Brood of Nozdormu 190 yd overhead beating
+/// its wings at a flat 1× while its path crawls at walk pace reads as frozen, and nothing on the
+/// card said the path was the slow half.
+type MotionReadout = (
+    Option<&'static crate::net::Spline>,
+    Option<&'static crate::net::RemoteMotion>,
+);
+
 /// The inspector's entity LIGHT readout (decision 0776): the lane this object's parts render
 /// under, and which attach found the room — "two identical GameObjects a few yards apart, one lit
 /// like the room and one like the street" is the report that made this a card line rather than a
@@ -69,6 +82,7 @@ pub(super) struct InspectStores<'w, 's> {
     kinds: Query<'w, 's, &'static crate::net::NetEntity>,
     collision: Query<'w, 's, GoCollisionReadout>,
     lit: Query<'w, 's, EntityLightReadout>,
+    motion: Query<'w, 's, MotionReadout>,
     factions: Option<Res<'w, crate::target::ring::Factions>>,
     self_store: Query<'w, 's, &'static ObjectStore, With<crate::net::SelfPlayer>>,
     /// The ask-once GO template cache — the readable head a TEXT object's line reports
@@ -161,11 +175,12 @@ pub(super) fn inspect_ui(
         .map(|c| c.parent());
     let (factions, self_store) = (stores.factions.as_deref(), stores.self_store.single().ok());
     let go_templates = &*stores.go_templates;
-    let (stores, kinds, collision, lit, go_anims) = (
+    let (stores, kinds, collision, lit, motion, go_anims) = (
         &stores.stores,
         &stores.kinds,
         &stores.collision,
         &stores.lit,
+        &stores.motion,
         &stores.go_anims,
     );
     let store = net_entity.and_then(|p| stores.get(p).ok());
@@ -313,6 +328,28 @@ pub(super) fn inspect_ui(
             None => format!("casting {}", c.spell_id),
         }
     });
+    // **Is it moving, and how fast** ([`MotionReadout`]) — the input the `anim` line below is a
+    // consequence of. A creature riding a server path reports the path's constant speed (its whole
+    // length over its whole duration, the same number the gait selector reads) and how far through
+    // it is, so a unit that looks static is either `still` (no path at all — the server has not
+    // launched one, or the last one expired) or a path so slow it cannot be seen. A remote mover
+    // reports its dead-reckoning speed instead. Units and players only: a GameObject has no mover.
+    let motion_line = net_entity
+        .filter(|_| is_unit)
+        .and_then(|p| motion.get(p).ok())
+        .map(|(spline, remote)| match (spline, remote) {
+            (Some(sp), _) => format!(
+                "motion {:.2} yd/s · {} path {:.0}% of {:.0}s",
+                sp.speed(),
+                if sp.grounded { "ground" } else { "flying" },
+                100.0 * sp.elapsed_frac(),
+                sp.duration.as_secs_f32(),
+            ),
+            (None, Some(r)) if r.speed > 0.0 => {
+                format!("motion {:.2} yd/s · dead-reckoned", r.speed)
+            }
+            _ => "motion still".to_string(),
+        });
     // An `AnimationData` id as the card names it — shared by the creature and GameObject anim
     // lines below, which read the same id space.
     let fmt = |id: u16| match anim_data.as_ref().and_then(|a| a.0.name(id)) {
@@ -396,6 +433,9 @@ pub(super) fn inspect_ui(
         lines.push(line.clone());
     }
     if let Some(line) = &casting_line {
+        lines.push(line.clone());
+    }
+    if let Some(line) = &motion_line {
         lines.push(line.clone());
     }
     if let Some(line) = &anim_line {

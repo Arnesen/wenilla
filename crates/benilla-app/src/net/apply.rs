@@ -688,6 +688,9 @@ pub(super) fn apply_net_updates(
             SessionEvent::GameObjectCustomAnim { guid, anim_id } => {
                 objects::gameobject_custom_anim(guid, anim_id, &mut audio.15 .3)
             }
+            SessionEvent::GameObjectDespawnAnim { guid } => {
+                objects::gameobject_despawn_anim(guid, &mut commands, &index)
+            }
             SessionEvent::FishNotHooked => loot::fish_verdict(false, &mut ui_error_keys),
             SessionEvent::FishEscaped => loot::fish_verdict(true, &mut ui_error_keys),
             SessionEvent::PlaySound { sound_id } => world::play_sound(sound_id, &mut audio.0),

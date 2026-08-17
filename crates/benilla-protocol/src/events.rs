@@ -422,6 +422,13 @@ pub enum SessionEvent {
     /// The load-bearing sender is the fishing bobber's bite (`anim_id 0`, the splash;
     /// decision 1086).
     GameObjectCustomAnim { guid: u64, anim_id: u32 },
+    /// An object plays its one-shot **Despawn** animation, then goes away
+    /// (`SMSG_GAMEOBJECT_DESPAWN_ANIM`): the client arms substate 12 — AnimationData **157
+    /// Despawn** — and holds the object alive across the `SMSG_DESTROY_OBJECT` that follows in
+    /// the same server tick, for the length of that play (decision 1404). UBRS's Rookery Eggs
+    /// hatch on this packet; a totem's death and a DynamicObject's expiry send it too, and those
+    /// carry nothing armable, so the consumer falls back to the ordinary instant destroy.
+    GameObjectDespawnAnim { guid: u64 },
     /// The fishing channel ended with nothing hooked (`SMSG_FISH_NOT_HOOKED`, empty body):
     /// the red `ERR_FISH_NOT_HOOKED` toast (decision 1086).
     FishNotHooked,

@@ -714,6 +714,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::GameObjectCustomAnim { guid, anim_id } => {
             vec![SessionEvent::GameObjectCustomAnim { guid, anim_id }]
         }
+        ServerPacket::GameObjectDespawnAnim { guid } => {
+            vec![SessionEvent::GameObjectDespawnAnim { guid }]
+        }
         ServerPacket::FishNotHooked => vec![SessionEvent::FishNotHooked],
         ServerPacket::FishEscaped => vec![SessionEvent::FishEscaped],
         // The keepalive echo: the io layer matches the sequence against its ping clock to compute

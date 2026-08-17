@@ -856,6 +856,10 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             let (guid, anim_id) = gameobject::read_gameobject_custom_anim(&mut r)?;
             ServerPacket::GameObjectCustomAnim { guid, anim_id }
         }
+        opcode::SMSG_GAMEOBJECT_DESPAWN_ANIM => {
+            let guid = gameobject::read_gameobject_despawn_anim(&mut r)?;
+            ServerPacket::GameObjectDespawnAnim { guid }
+        }
         // Both fishing verdicts are empty-bodied (the opcode IS the message).
         opcode::SMSG_FISH_NOT_HOOKED => ServerPacket::FishNotHooked,
         opcode::SMSG_FISH_ESCAPED => ServerPacket::FishEscaped,

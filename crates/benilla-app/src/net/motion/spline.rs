@@ -63,6 +63,17 @@ impl Spline {
         length / self.duration.as_secs_f32().max(1e-3)
     }
 
+    /// How far through the ride this path is, `0..=1` — elapsed over duration, clamped. The
+    /// inspector's motion line reads it; [`sample`](Self::sample) computes the same fraction to
+    /// locate the unit, and a path at `1` is one frame from being dropped.
+    pub(crate) fn elapsed_frac(&self) -> f32 {
+        (Instant::now()
+            .saturating_duration_since(self.start)
+            .as_secs_f32()
+            / self.duration.as_secs_f32().max(1e-3))
+        .clamp(0.0, 1.0)
+    }
+
     /// Interpolated `(raw-WoW position, facing, travel pitch)` at `now`, constant speed along the
     /// path (clamped at the ends). `facing` is the WoW orientation of the travel direction in
     /// progress (`atan2` of its horizontal component), `None` for a degenerate/vertical direction so
@@ -355,13 +366,37 @@ fn create_spline_enabled() -> bool {
 /// Interpolate every path-walking entity along its [`Spline`] into its [`Transform`] each frame — so
 /// motion stays smooth between the sparse server `MSG_MOVE` packets. Writes translation + rotation
 /// only (scale, set by the renderer when it attaches the model, is preserved).
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(in crate::net) fn sample_splines(
     mut commands: Commands,
-    mut q: Query<(Entity, &Spline, &mut Transform, Has<CreatureSwimming>)>,
+    mut q: Query<(
+        Entity,
+        &Spline,
+        &mut Transform,
+        Has<CreatureSwimming>,
+        // The rider's server identity, for the `spl` trace alone — `Option` because the sampler
+        // must never gate on it (a spline entity with no guid still has to be flown).
+        Option<&super::super::Guid>,
+    )>,
+    mut trace_next: Local<f32>,
+    time: Res<Time>,
 ) {
     let now = Instant::now();
-    for (entity, spline, mut t, swimming) in &mut q {
+    // The `spl` sampler's own clock (see [`trace_ride`]): one tick per second for the WHOLE
+    // population, not per entity — a shared deadline keeps every rider's line on the same instant,
+    // which is what makes two units' progress directly comparable in the file.
+    let tracing = benilla_assets::trace::enabled_for("spl");
+    let tick = tracing && time.elapsed_secs() >= *trace_next;
+    if tick {
+        *trace_next = time.elapsed_secs() + SPL_TRACE_SECS;
+    }
+    for (entity, spline, mut t, swimming, guid) in &mut q {
         let (wow_pos, facing, pitch) = spline.sample(now);
+        // What the transform held *coming in* — i.e. whatever the previous frame left there after
+        // every other writer had its turn. Traced beside the fresh sample as `was=`: a rider whose
+        // `was` is not last frame's sample is being stomped by another system, which no amount of
+        // staring at the sampler would ever show.
+        let was = tick.then(|| bevy_to_wow(t.translation));
         t.translation = wow_to_bevy(wow_pos);
         if let Some(f) = facing {
             // The swim body pitch (TU-A's render law, applied to the spline movers): a swimming
@@ -386,14 +421,59 @@ pub(in crate::net) fn sample_splines(
                 Quat::from_rotation_y(f)
             };
         }
+        if let Some(was) = was {
+            trace_ride(guid.map_or(0, |g| g.0), spline, wow_pos, was, now);
+        }
         // Path finished: the final pose is written above (the sample clamps to the last point), so drop
         // the spline. It's what makes a `Spline` mean "actively moving" — otherwise a completed path
         // lingers until the next packet and a creature reads as walking forever after one move
         // (`creature_anim` keys Walk/Run on the spline's presence).
         if now.saturating_duration_since(spline.start) >= spline.duration {
+            if tracing {
+                benilla_assets::trace::line(
+                    "spl",
+                    &format!("{:#x} DONE — spline dropped", guid.map_or(0, |g| g.0)),
+                );
+            }
             commands.entity(entity).remove::<Spline>();
         }
     }
+}
+
+/// How often the `spl` tag samples a live ride. One second is the resolution a "does this thing
+/// actually move?" question needs, and it keeps a zone full of walkers off the shared trace mutex
+/// (see [`benilla_assets::trace`] on why a busy tag distorts the run it measures).
+const SPL_TRACE_SECS: f32 = 1.0;
+
+/// One `spl` line per live [`Spline`] per [`SPL_TRACE_SECS`] — the **ride** half of the movement
+/// instrument, beside `csp`'s supply and `mmv`'s realized snaps (decision 0708). Those two log at
+/// the wire; this one logs what the client is actually *drawing*, which is the only thing that
+/// answers "the server says it is flying and it looks frozen to me".
+///
+/// `t=` is the ride's own progress (elapsed/duration, seconds), `pos` the sampled raw-WoW point,
+/// `spd` the path's constant speed (its full length over its full duration), and `was=` the
+/// distance from what the transform held *coming into this frame* to the fresh sample. The three
+/// separate the three faults that all look identical on screen: a ride whose `pos` does not change
+/// while `t` advances is a **sampler** fault; a ride whose `spd` is wrong is a **wire** fault; and
+/// a `was=` far larger than one frame of travel is a **stomp** — some other system writing this
+/// transform after us.
+fn trace_ride(guid: u64, spline: &Spline, pos: [f32; 3], was: [f32; 3], now: Instant) {
+    let elapsed = now.saturating_duration_since(spline.start).as_secs_f32();
+    let (dx, dy, dz) = (pos[0] - was[0], pos[1] - was[1], pos[2] - was[2]);
+    let drift = (dx * dx + dy * dy + dz * dz).sqrt();
+    benilla_assets::trace::line(
+        "spl",
+        &format!(
+            "{guid:#x} t={elapsed:.1}/{:.1} pos=[{:.2},{:.2},{:.2}] was={drift:.3} spd={:.2} nodes={} {}",
+            spline.duration.as_secs_f32(),
+            pos[0],
+            pos[1],
+            pos[2],
+            spline.speed(),
+            spline.points.len(),
+            if spline.grounded { "ground" } else { "flying" },
+        ),
+    );
 }
 
 /// Distance (yd) above a creature's current feet that the terrain probe starts. Generous enough to

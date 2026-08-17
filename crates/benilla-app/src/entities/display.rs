@@ -227,6 +227,12 @@ pub(crate) struct DisplayModel {
     /// fallback's input (`0x608640`: a unit whose model has no PlayerName attachment anchors overhead
     /// text at `feet + scale × this × 1.25`). `0.0` for a bounds-less display.
     pub(super) bbox_z_local: f32,
+    /// The **Stand animation** box's z-extent (model-local yards, pre-scale) — the CHAT BUBBLE's
+    /// anchor height (`0x711a20`, wow-re 2026-08-17; 1406). Distinct from `bbox_z_local` above,
+    /// which is the all-animation vertex box, and from the posed PlayerName attachment the overhead
+    /// NAME uses: this one is a file constant, queried once and cached, so the bubble's height
+    /// cannot move with the pose. `0.0` for a bounds-less display.
+    pub(super) stand_box_z_local: f32,
     /// The M2 vertex-box CENTRE in Bevy model-local (pre-scale) — the interior fold's MOLR
     /// reference point for a GameObject's footprint bake (the byte-cited `[def+0x5c]` anchor
     /// family; `benilla_world::interior`). `Vec3::ZERO` for a bounds-less / WMO / model-less display.
@@ -341,6 +347,7 @@ pub(crate) fn empty_shell() -> DisplayModel {
         portrait_camera: None,
         pane_camera: None,
         bbox_z_local: 0.0,
+        stand_box_z_local: 0.0,
         bake_center_local: Vec3::ZERO,
         terrain_tilt: 0,
         is_character_body: false,
@@ -394,6 +401,7 @@ pub(super) fn build_parts(
     let mut portrait_camera = None;
     let mut pane_camera = None;
     let mut bbox_z_local = 0.0;
+    let mut stand_box_z_local = 0.0;
     let mut bake_center_local = Vec3::ZERO;
     let parts = match &dm.handle {
         ModelHandle::M2(h) => {
@@ -435,6 +443,9 @@ pub(super) fn build_parts(
             bbox_z_local = model
                 .bounds
                 .map_or(0.0, |b| (b.bbox_max[2] - b.bbox_min[2]).max(0.0));
+            // The chat bubble's anchor height — the STAND sequence box's Z, off the same parse the
+            // selection ring takes its XY from, so the two can never resolve different animations.
+            stand_box_z_local = model.bounds.map_or(0.0, |b| b.stand_box_z);
             // The vertex-box centre (Bevy local) — a GameObject's interior-fold reference point.
             bake_center_local = model.bounds.map_or(Vec3::ZERO, |b| {
                 benilla_assets::coords::wow_to_bevy([
@@ -584,6 +595,7 @@ pub(super) fn build_parts(
     dm.portrait_camera = portrait_camera;
     dm.pane_camera = pane_camera;
     dm.bbox_z_local = bbox_z_local;
+    dm.stand_box_z_local = stand_box_z_local;
     dm.bake_center_local = bake_center_local;
     dm.terrain_tilt = terrain_tilt;
 }
