@@ -123,6 +123,7 @@ fn bake_test(
                     material: mats.off_world(
                         s,
                         s.texture.clone().or_else(|| skin.clone()),
+                        u16::try_from(pi + 1).unwrap_or(u16::MAX),
                         light,
                         false,
                     ),

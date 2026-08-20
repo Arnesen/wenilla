@@ -449,6 +449,18 @@ struct Booth {
 /// command-applied spawn, the billboard re-face's one-frame lag, and GPU upload of fresh meshes.
 const BOOTH_SETTLE_FRAMES: u32 = 4;
 
+/// This rig stands on a booth stage, not in the world: its `AnimParked` marker is owned by
+/// [`gate_booth_cameras`] alone, and the world-view parker (`creature_anim::lod`) filters it out
+/// (decision 1447). One marker, one writer — the same split the doodad draw gate holds for
+/// placed doodads (decision 1365). The hazard is structural: a booth stage sits outside every
+/// world frustum by construction, so an unfiltered view parker freezes every pane moments after
+/// its bake — while this gate, tracking only its own park edges, cannot heal the foreign marker.
+/// [`booth::BoothRig::finish`] inserts it beside the `RigPose`; [`booth::clear_booth_rig`]
+/// strips it with the rest. Policy, not machinery — which is why it lives here and not in
+/// `benilla_world::rig_anim` beside the marker it fences (the 1160 line).
+#[derive(bevy::prelude::Component)]
+pub(crate) struct StageRig;
+
 /// How long a [`Booth::pending`] texture hold may keep the camera awake (wall secs) before it is
 /// declared never-landing and released ([`Booth::pending_since`]). Generous against a real load —
 /// an MPQ image lands in well under a second — because a premature release only costs a stale
@@ -1699,6 +1711,11 @@ fn gate_booth_cameras(
     mut cams: Query<(&BoothCam, &mut Camera)>,
     rate: Res<PaneRate>,
     frames: Res<bevy::diagnostic::FrameCount>,
+    // `WOW_BOOTH_LOG` only: the marker's REAL state beside this gate's `booth.parked`
+    // bookkeeping. The two can desync exactly one way — a foreign writer — and that desync is
+    // invisible in every capture (a woken rig snaps to the absolute clock), so it must be
+    // loggable (decision 1447: the world parker froze every pane and no dump could show it).
+    markers: Query<(), With<benilla_world::rig_anim::AnimParked>>,
     mut env_cache: Local<Option<bool>>,
 ) {
     let test = test_mode(&mut env_cache);
@@ -1764,13 +1781,14 @@ fn gate_booth_cameras(
             && (cam.is_active != render || active)
         {
             eprintln!(
-                "[booth] t={:7.2} {} active={} render={} wake={} pending={}",
+                "[booth] t={:7.2} {} active={} render={} wake={} pending={} marker={}",
                 time.elapsed_secs(),
                 token.as_str(),
                 active,
                 render,
                 booth.wake,
                 booth.pending.len(),
+                markers.contains(booth.root),
             );
         }
         if cam.is_active != render {

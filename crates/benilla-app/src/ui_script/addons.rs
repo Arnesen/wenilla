@@ -186,7 +186,16 @@ impl Addon {
             let path = benilla_ui::loader::join_ref(self.prefix(), file);
             let Some(bytes) = self.read(&path) else {
                 let e = format!("{}/{file}: not found", self.name);
-                error!("ui_script: {e}");
+                // Severity follows whose manifest lied. For the builtin that is us — a client
+                // bug, and the boot tests assert none. For a player's addon it is the package
+                // (the director's AtlasLoot copy lists `Bossnames\BossNames.xml`; no such folder
+                // ships in it), and the reference client silently skips a missing toc entry — so
+                // a broken addon must not read as a client ERROR, which is gate-fatal to
+                // `smoke.sh`'s zero-ERROR count (1450).
+                match self.source {
+                    Source::Builtin => error!("ui_script: {e}"),
+                    Source::Dir(_) => warn!("ui_script: {e}"),
+                }
                 failures.push(e);
                 continue;
             };

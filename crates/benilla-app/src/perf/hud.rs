@@ -1,18 +1,24 @@
 //! The standing dev HUD: a collapsed cost pill you can read while playing, and the full readout
 //! behind a click.
 //!
-//! **The collapsed pill covers three timescales, because a regression can arrive on any of them.**
-//! *Now* is the cost number. *The last few seconds* is the latched spike badge — a burst is ~250 ms
-//! (0610) and the director is looking at the game when it happens, so the evidence has to outlive
-//! the event. *The last minute* is the sparkline, which is the only lane that can see cost merely
-//! sitting higher than it used to.
+//! **The pill is two small numbers and a bare latch arrow** (1448 pared it back). fps dim — the
+//! familiar anchor, and by construction the number that cannot see cost (0717) — then process-CPU
+//! cost per frame, the meter vsync cannot rail; both under-size, because the pill sits over the
+//! game all session. The arrow is the spike latch: a burst is ~250 ms (0610) and the director is
+//! looking at the game when it happens, so the evidence has to outlive the event — and its
+//! appearance and colour are the *whole* signal (it once printed `▲261.9 main ×94`, a report
+//! where an alarm belongs; the numbers wait behind the click). What left the pill entirely: the
+//! minute-trend sparkline — a wiggle at 72 px; it is the expanded panel's full-width lane now,
+//! beside the line that names its step.
 //!
-//! **What is deliberately no longer the headline: fps.** 0717 established that while synced, wall
-//! frame time measures the display's present grant rather than our cost — but it only ever applied
-//! that to the expanded lines, and the pill went on reading framerate. On a 120 Hz-adaptive panel
-//! that hides a doubling: cost can go 3 → 6 ms with the grant unchanged and the number unmoved, and
-//! the old red threshold (fps < 58) sat ~5.7× above a healthy frame's cost. fps stays on the pill,
-//! dimmed, as the familiar anchor it is — not as the thing being watched.
+//! **Drawn from a 4 Hz snapshot, not the live meters.** A label whose string changes every frame
+//! re-shapes its galley every frame — cost that scales with every widget the surface carries,
+//! booked into the very number the pill reports. Between snapshots every string is byte-identical,
+//! so egui's galley cache absorbs the text; the meters keep sampling every frame — only the *view*
+//! is quantized, and 250 ms is inside a human read of a number. (1448 *bounds* the price: the
+//! drawing cost, before and after, sat below the ~0.4 ms noise floor of the interleaved legs —
+//! 1370's "0.4–1.2 ms est" reads at its floor, and the diet is cheap insurance plus legibility,
+//! not a measured megawin.)
 //!
 //! **Detail lives behind the click, and nowhere else.** The pill briefly carried a hover tooltip
 //! holding the whole readout, on the theory that hovering costs no screen — but the pill is
@@ -42,8 +48,17 @@ const GREEN: egui::Color32 = egui::Color32::from_rgb(140, 220, 140);
 /// A latched spike is drawn amber until its peak is this many times its own baseline, then red.
 const SPIKE_RED_RATIO: f32 = 3.0;
 
-/// The trend sparkline's footprint on the collapsed pill.
-const TREND_SIZE: egui::Vec2 = egui::vec2(72.0, 13.0);
+/// The trend lane's height in the expanded panel (its width is the panel's).
+const TREND_HEIGHT: f32 = 13.0;
+
+/// The pill's number size — under the 12 pt monospace default. The pill sits over the game all
+/// session; the director asked for the numbers at a glance-size, not a reading-size (1448).
+const PILL_NUM_SIZE: f32 = 10.0;
+
+/// How often the drawn snapshot advances. Fast enough that the numbers read as live and a latched
+/// badge appears within a perceptual beat; slow enough that between refreshes every galley is
+/// byte-identical and egui's shape cache absorbs the whole text layout (see the module doc).
+const HUD_REFRESH_SECS: f32 = 0.25;
 
 /// **The ruler.** The expanded panel is as wide as this string renders in the monospace face —
 /// or as wide as the pill above it, whichever is more — and every line inside either fits that or
@@ -61,8 +76,10 @@ const TREND_SIZE: egui::Vec2 = egui::vec2(72.0, 13.0);
 /// blows up:
 ///
 /// - [`crate::debug_panel::overlay_text`] sets `TextWrapMode::Extend`, so **every label allocates
-///   its full natural width and ignores `max_rect` entirely.** One long line (`SpikeKind::describe`
-///   is ~110 characters) therefore *defines* the window width, and `set_width` alone cannot stop it.
+///   its full natural width and ignores `max_rect` entirely.** One long line therefore *defines*
+///   the window width, and `set_width` alone cannot stop it. (The line that shipped broken was
+///   `SpikeKind::describe`, ~110 characters; 1448 moved it to hover, but the `Wrap` below stays —
+///   it is the fence that stops the *next* long label, not a patch for that one.)
 /// - `Area` runs its sizing pass only on the frame the area is *created*
 ///   (`sizing_pass = state.is_none()`, egui 0.33 `containers/area.rs`). This HUD is born collapsed,
 ///   so that pass measures the pill; every later expand has no sizing pass, and `Separator` falls
@@ -111,6 +128,14 @@ pub(crate) struct PerfHud {
     pub(crate) visible: bool,
     /// Full stats shown? Toggled by clicking the pill; the cost pill alone when `false`.
     expanded: bool,
+    /// The snapshot the HUD draws from — a copy of the meters taken every [`HUD_REFRESH_SECS`],
+    /// so the strings it formats hold still between refreshes (the module doc's cost argument).
+    /// The live [`FrameStats`] keeps sampling every frame; this is only the view.
+    snap: FrameStats,
+    /// The clock `snap` was taken at. Spike ages and hold windows are computed against this, not
+    /// the live clock, so they hold still with the rest of the view — and it doubles as the
+    /// refresh timer.
+    snap_at: f32,
 }
 
 impl Default for PerfHud {
@@ -118,6 +143,19 @@ impl Default for PerfHud {
         Self {
             visible: std::env::var("WOW_PERF_HUD").as_deref() != Ok("0"),
             expanded: false,
+            snap: FrameStats::default(),
+            // −∞, so the very first frame refreshes rather than drawing an empty snapshot.
+            snap_at: f32::NEG_INFINITY,
+        }
+    }
+}
+
+impl PerfHud {
+    /// Advance the snapshot if the current one is older than [`HUD_REFRESH_SECS`].
+    fn maybe_refresh(&mut self, stats: &FrameStats, now: f32) {
+        if now - self.snap_at >= HUD_REFRESH_SECS {
+            self.snap = stats.clone();
+            self.snap_at = now;
         }
     }
 }
@@ -143,15 +181,17 @@ pub(super) fn perf_hud_ui(
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
-    let now = time.elapsed_secs();
     let synced = windows
         .single()
         .map(|w| synced_mode(w.present_mode))
         .unwrap_or(true);
+    hud.maybe_refresh(&stats, time.elapsed_secs());
 
     // A title-less, anchored window — minimal chrome (no title bar, no resize) but the stable
     // auto-sizing of a `Window`, so expanding to the full readout doesn't flash a mislaid first
     // frame the way a raw `Area` does.
+    let hud = &mut *hud;
+    let mut clicked = false;
     egui::Window::new("perf_hud")
         .title_bar(false)
         .resizable(false)
@@ -165,10 +205,18 @@ pub(super) fn perf_hud_ui(
                 .fill(OVERLAY_FILL),
         )
         .show(ctx, |ui| {
-            if draw_hud(ui, &stats, &diagnostics, synced, now, hud.expanded) {
-                hud.expanded = !hud.expanded;
-            }
+            clicked = draw_hud(
+                ui,
+                &hud.snap,
+                &diagnostics,
+                synced,
+                hud.snap_at,
+                hud.expanded,
+            );
         });
+    if clicked {
+        hud.expanded = !hud.expanded;
+    }
     Ok(())
 }
 
@@ -210,8 +258,12 @@ pub(super) fn draw_hud(
         .clicked()
 }
 
-/// The collapsed pill: fps (dim), the cost headline, the minute-long trend, and the latched spike.
+/// The collapsed pill: fps (dim), the cost headline — both small — and the bare latch arrow.
 /// Returns the row's rect; the caller makes the strip that spans it the toggle.
+///
+/// The arrow carries no numbers: the badge once printed `▲261.9 main ×94` over the game, which
+/// is a report, not an alarm (director, 1448). Its appearance and its colour are the whole
+/// signal; the numbers wait behind the click.
 ///
 /// **No hover tooltip.** It used to carry the detail so the expanded panel would be unnecessary
 /// while playing — but the pill sits top-center, the mouse passes through constantly, and the
@@ -222,12 +274,13 @@ fn collapsed_pill(ui: &mut egui::Ui, stats: &FrameStats, now: f32) -> egui::Rect
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
 
-        // fps stays, dimmed: the familiar anchor, and by construction the number that cannot
-        // see any of this.
+        // fps, dimmed: the familiar anchor, and by construction the number that cannot see
+        // any of this (0717).
         ui.label(
             egui::RichText::new(format!("{:.0} fps", stats.fps()))
                 .color(OVERLAY_TEXT_DIM)
-                .monospace(),
+                .monospace()
+                .size(PILL_NUM_SIZE),
         );
 
         // The headline: process CPU per frame, the meter vsync cannot rail (0717).
@@ -236,16 +289,16 @@ fn collapsed_pill(ui: &mut egui::Ui, stats: &FrameStats, now: f32) -> egui::Rect
                 egui::RichText::new(format!("{cpu:.1} ms"))
                     .color(OVERLAY_TEXT)
                     .monospace()
-                    .strong(),
+                    .strong()
+                    .size(PILL_NUM_SIZE),
             ),
             None => ui.label(
                 egui::RichText::new("-- ms")
                     .color(OVERLAY_TEXT_DIM)
-                    .monospace(),
+                    .monospace()
+                    .size(PILL_NUM_SIZE),
             ),
         };
-
-        trend_sparkline(ui, &stats.trend, stats.trend_hi());
 
         // The latch. Present only when something actually happened, so its mere appearance is
         // the signal — no scanning a number for a change.
@@ -255,23 +308,22 @@ fn collapsed_pill(ui: &mut egui::Ui, stats: &FrameStats, now: f32) -> egui::Rect
             } else {
                 AMBER
             };
-            ui.label(
-                egui::RichText::new(format!("▲{:.1} {} ×{}", s.peak_ms, s.kind.tag(), s.frames))
-                    .color(col)
-                    .monospace()
-                    .strong(),
-            );
+            ui.label(egui::RichText::new("▲").color(col).strong());
         }
     })
     .response
     .rect
 }
 
-/// The minute-long trend of per-second median CPU cost. Flat means nothing changed; a step means
-/// the scene got more (or less) expensive and stayed there — the only lane that can see that, since
-/// a sustained cost is its own baseline in every other one.
+/// The minute-long trend of per-second median CPU cost, at the expanded panel's full width (1448
+/// moved it off the pill, where 72 px showed a wiggle, not a shape). Flat means nothing changed; a
+/// step means the scene got more (or less) expensive and stayed there — the only lane that can see
+/// that, since a sustained cost is its own baseline in every other one.
 fn trend_sparkline(ui: &mut egui::Ui, trend: &Series, hi: f32) {
-    let (rect, _) = ui.allocate_exact_size(TREND_SIZE, egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TREND_HEIGHT),
+        egui::Sense::hover(),
+    );
     if trend.len() < 2 {
         return;
     }
@@ -417,8 +469,10 @@ fn expanded_readout(
         .on_hover_text(why);
     }
 
-    // The creep lane, in words — the sparkline on the pill shows the shape, this names the step.
+    // The creep lane: the sparkline shows the shape, the line under it names the step.
     if let Some((first, last)) = stats.trend_ends() {
+        ui.add_space(2.0);
+        trend_sparkline(ui, &stats.trend, stats.trend_hi());
         let delta = last - first;
         ui.label(
             egui::RichText::new(format!("trend {first:.1} → {last:.1} ms ({delta:+.1}/min)"))
@@ -445,38 +499,30 @@ fn expanded_readout(
             .monospace(),
     );
 
-    // The badge in full: the pill can only afford peak/kind/count, and the interesting part of a
-    // spike is what it was measured against and what that kind of spike means.
-    ui.separator();
-    match stats.spike(now) {
-        Some(s) => {
-            ui.label(
-                egui::RichText::new(format!(
-                    "spike {:.2} ms over {:.2}, {}f, {:.0}s ago",
-                    s.peak_ms,
-                    s.baseline_ms,
-                    s.frames,
-                    (now - s.at).max(0.0)
-                ))
-                .color(AMBER)
-                .monospace(),
-            );
-            // The only prose in the panel, and the reason `Wrap` is set: ~110 characters that
-            // would otherwise measure the window (see [`PANEL_RULER`]).
-            ui.label(egui::RichText::new(s.kind.describe()).color(OVERLAY_TEXT_DIM));
-            let bursts = stats.recent_bursts(now);
-            if bursts > 1 {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{bursts} bursts in the last 10 s — the worst is shown"
-                    ))
-                    .color(OVERLAY_TEXT_DIM),
-                );
-            }
+    // The latch in full — only when one is latched; a quiet panel says nothing about it (1448
+    // dropped the "no spike" placeholder and the inline prose). The pill's arrow carries no
+    // numbers, so this line is where the spike is actually read: kind, peak against baseline,
+    // age. The frame count, the *meaning* of the kind, and the burst count wait on hover — the
+    // panel stays numbers; the ~110-character `describe()` used to be the widest and least-read
+    // thing on it.
+    if let Some(s) = stats.spike(now) {
+        let mut why = format!("{} frames — {}", s.frames, s.kind.describe());
+        let bursts = stats.recent_bursts(now);
+        if bursts > 1 {
+            why = format!("{why} — {bursts} bursts in the last 10 s; the worst is shown");
         }
-        None => {
-            ui.label(egui::RichText::new("no spike in the last 10 s").color(OVERLAY_TEXT_DIM));
-        }
+        ui.label(
+            egui::RichText::new(format!(
+                "spike {} {:.1} over {:.1}, {:.0}s ago",
+                s.kind.tag(),
+                s.peak_ms,
+                s.baseline_ms,
+                (now - s.at).max(0.0)
+            ))
+            .color(AMBER)
+            .monospace(),
+        )
+        .on_hover_text(why);
     }
 }
 
@@ -610,6 +656,40 @@ mod tests {
         assert!(
             (width - ruler).abs() <= 1.0,
             "the quiet panel is {width:.1} px, not the {ruler:.1} px ruler"
+        );
+    }
+
+    /// The view the HUD draws only advances on the refresh interval — between ticks it holds
+    /// still, which is the entire cost argument (identical strings are what the galley cache can
+    /// absorb) — and a refresh adopts the live meters wholesale.
+    #[test]
+    fn the_snapshot_advances_on_the_interval_not_per_frame() {
+        let mut live = FrameStats::default();
+        let frames: Vec<_> = (0..60).map(|_| (16.6, 20.0, 5.0)).collect();
+        let t = live.feed_frames(&frames, 0.0, 1.0 / 60.0);
+
+        let mut hud = PerfHud::default();
+        hud.maybe_refresh(&live, t);
+        assert_eq!(
+            hud.snap.wall.len(),
+            60,
+            "the first refresh adopts the meters"
+        );
+        assert_eq!(hud.snap_at, t);
+
+        let t2 = live.feed_frames(&[(40.0, 20.0, 5.0)], t, 1.0 / 60.0);
+        hud.maybe_refresh(&live, t2);
+        assert_eq!(
+            hud.snap.wall.len(),
+            60,
+            "one frame later — inside the interval — the view holds still"
+        );
+
+        hud.maybe_refresh(&live, t + HUD_REFRESH_SECS);
+        assert_eq!(
+            hud.snap.wall.len(),
+            61,
+            "past the interval the view catches up"
         );
     }
 }

@@ -595,7 +595,13 @@ pub(super) fn sync_glue_scene(
             .map(|(pi, s)| {
                 // The create scene is lit by its OWN authored M2 rig against its own buffer —
                 // never the world's sun (decisions 0429/0435) — and its clouds and water scroll.
-                let material = mats.off_world(s, s.texture.clone(), &light, true);
+                //
+                // The authored batch order (index + 1) rides with it (decision 1449): a scene's
+                // batches all hang off the scene root, so they share one transparent sort distance
+                // and only this bias tells them apart — without it `UI_Human`'s ground-shadow decal
+                // and its street tied, and the tie re-broke every frame.
+                let order = u16::try_from(pi + 1).unwrap_or(u16::MAX);
+                let material = mats.off_world(s, s.texture.clone(), order, &light, true);
                 BoothPart {
                     skinned: skin_forms.get(pi).cloned(),
                     static_mesh: stat_forms

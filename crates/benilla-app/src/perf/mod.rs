@@ -17,7 +17,8 @@
 //! present grant, not our cost.** Only the CPU series measure work. That is why the pill's headline
 //! is `cpu ms` and not fps — on a 120 Hz-adaptive panel, cost can double with the granted interval
 //! unchanged and framerate unmoved, and the pill's old red threshold (fps < 58) sat ~5.7× above a
-//! healthy frame. fps is still there, dimmed, as the familiar anchor.
+//! healthy frame. fps stays on the pill — dim and small, the familiar anchor, never the thing
+//! being watched (1448).
 //!
 //! The budget is a **60 fps floor = 16.7 ms; no frame should exceed it** — but note that the
 //! *missed-interval* threshold is derived from the interval we actually observe, not from this

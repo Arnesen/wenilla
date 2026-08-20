@@ -85,6 +85,7 @@ const BASELINE_REFRESH_SECS: f32 = 1.0;
 pub(super) const TREND_WINDOW_SECS: usize = 60;
 
 /// A rolling window of one cost series, in milliseconds, capped at its own length.
+#[derive(Clone)]
 pub(super) struct Series {
     samples: VecDeque<f32>,
     cap: usize,
@@ -194,7 +195,7 @@ pub(super) enum SpikeKind {
 }
 
 impl SpikeKind {
-    /// The short tag the pill's badge carries.
+    /// The short tag the expanded panel's spike line carries.
     pub(super) fn tag(self) -> &'static str {
         match self {
             SpikeKind::Main => "main",
@@ -242,15 +243,15 @@ fn reportable(s: &Spike) -> bool {
 }
 
 /// Medians re-derived once a second, off the per-frame path.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Baselines {
     wall: f32,
     cpu: f32,
     main: f32,
     /// The trend sparkline's y-scale: the trend window's p90, **not its max**. Derived here rather
-    /// than in the painter because it needs a sort and the pill draws every frame — and refreshed
-    /// on exactly the tick that appends the sample it summarises, so it can never lag by more
-    /// than one point.
+    /// than in the painter because it needs a sort and the painter runs every frame the panel is
+    /// open — and refreshed on exactly the tick that appends the sample it summarises, so it can
+    /// never lag by more than one point.
     trend_hi: f32,
     at: f32,
 }
@@ -260,7 +261,10 @@ struct Baselines {
 /// Three series, because they answer three different questions and 0717's law binds all of them:
 /// while synced, **wall frame time is the display's grant, not our cost**. Only the CPU series
 /// measure work.
-#[derive(Resource)]
+///
+/// `Clone` is for the HUD's 4 Hz snapshot (`PerfHud::maybe_refresh`) — a few hundred floats,
+/// four times a second.
+#[derive(Resource, Clone)]
 pub(super) struct FrameStats {
     /// Wall frame interval. The grant while synced; our real cost only when uncapped.
     pub(super) wall: Series,
@@ -319,8 +323,8 @@ impl FrameStats {
         self.baselines.trend_hi
     }
 
-    /// Windowed mean frames per second. A mean, and labelled as one — it is the number that cannot
-    /// see a spike, which is why it is no longer the pill's headline.
+    /// Windowed mean frames per second. A mean, and labelled as one — it is the number that
+    /// cannot see a spike, which is why the pill draws it dim and small, never as the headline.
     pub(super) fn fps(&self) -> f32 {
         match self.wall.mean() {
             Some(mean) if mean > 0.0 => 1000.0 / mean,
@@ -576,7 +580,7 @@ mod tests {
             "the badge reports the burst, not one frame"
         );
         assert!((spike.peak_ms - 12.0).abs() < 0.01);
-        // The control: the number the pill used to show is still, by construction, unmoved.
+        // The control: the pill's dim fps is still, by construction, unmoved.
         assert!(
             (s.fps() - fps_before).abs() < 1.0,
             "fps must be blind here — that is the whole reason the latch exists"

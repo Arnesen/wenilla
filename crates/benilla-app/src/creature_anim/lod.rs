@@ -60,6 +60,8 @@ use benilla_world::wmo_portal::{UnitWmoRoom, WmoPortalInstance, WmoRoom};
 
 use benilla_world::rig_anim::{AnimParked, RigPose};
 
+use crate::portrait::StageRig;
+
 /// Park only after the rig has been continuously out of frustum this long — a camera swing
 /// across the pack doesn't churn bone repoints. Waking is always instant.
 const PARK_AFTER_SECS: f32 = 0.5;
@@ -100,16 +102,22 @@ pub(super) fn gate_rig_animation(
         // — at the LBRS pin, ~350 of the ~620 per-frame refreshes. Parking preserves their whole
         // observable surface: the event scanner requires `AnimDriver` (GOs never fired anim
         // events), `go_anim`'s state machine arms the player regardless of the marker, and the
-        // wake samples the absolute clock. Booth/studio rigs are entity-joint-lane (no
-        // `RigPose`), so this query can never park the character pane.
+        // wake samples the absolute clock.
         //
         // `Without<DoodadAnimHost>` (decision 1365): placed doodads joined the collapsed lane,
         // and their draw gate (`doodad_anim::gate_doodad_anim`) owns their `AnimParked` marker —
         // it parks on the composed draw verdict + fade sphere, the doodad lane's own law, and
         // two writers to one marker would fight every frame the two policies disagree.
+        //
+        // `Without<StageRig>` (decision 1447): booth rigs joined the collapsed lane too (1443),
+        // and a booth stage sits outside every world frustum by construction — unfiltered, this
+        // gate froze every pane and glue scene `PARK_AFTER_SECS` after its bake, a marker the
+        // booth camera gate (tracking only its own park edges) could not heal. Same one-writer
+        // law as the doodads': the booth gate owns a staged rig's marker.
         (
             With<RigPose>,
             Without<benilla_world::doodad_anim::DoodadAnimHost>,
+            Without<StageRig>,
         ),
     >,
     self_hosts: Query<Has<Embodied>>,
@@ -478,6 +486,26 @@ mod tests {
             bone(&app, behind_joint),
             bone(&app, twin_joint),
             "the woken pose equals the never-parked twin's — the absolute-clock snap"
+        );
+    }
+
+    /// The 1447 regression: a staged rig (a booth doll — off every world frustum by
+    /// construction) is never this gate's to park. Its `AnimParked` belongs to the booth camera
+    /// gate alone; the night the 1443 collapse put `RigPose` on booth roots, this gate froze
+    /// every paper doll and glue scene half a second after its bake.
+    #[test]
+    fn a_stage_rig_is_never_world_parked() {
+        let mut app = app();
+        spawn_camera(&mut app);
+        let (stage, _) = spawn_rig(&mut app, Vec3::Z * 50.0); // behind the camera, like any stage
+        app.world_mut()
+            .entity_mut(stage)
+            .insert(crate::portrait::StageRig);
+        app.update();
+        advance(&mut app, PARK_AFTER_SECS + 0.2, 4);
+        assert!(
+            !app.world().entity(stage).contains::<AnimParked>(),
+            "an off-frustum stage rig stays live — its park is the booth gate's, not the world's"
         );
     }
 

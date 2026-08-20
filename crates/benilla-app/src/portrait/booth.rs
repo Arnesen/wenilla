@@ -134,10 +134,12 @@ impl BoothRig {
         self.rig.is_some()
     }
 
-    /// Commit the pose buffer onto the booth root — after every consumer is seated.
+    /// Commit the pose buffer onto the booth root — after every consumer is seated. `StageRig`
+    /// rides with it (decision 1447): the pair exists together or not at all, so the world-view
+    /// parker can never see a booth `RigPose` without the marker that exempts it.
     pub(super) fn finish(self, commands: &mut Commands) {
         if let Some(rig) = self.rig {
-            commands.entity(self.root).insert(rig);
+            commands.entity(self.root).insert((rig, super::StageRig));
         }
     }
 }
@@ -155,6 +157,7 @@ pub(super) fn clear_booth_rig(commands: &mut Commands, root: Entity) {
         benilla_world::rig_anim::GlobalSeqDrive,
         benilla_world::rig_anim::RigPose,
         benilla_world::rig_anim::AnimParked,
+        super::StageRig,
         benilla_world::rig_palette::RigSkin,
     )>();
 }
