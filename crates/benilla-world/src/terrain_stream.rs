@@ -582,7 +582,8 @@ fn stream_terrain(
     batchers: (
         ResMut<HullWelds>,
         ResMut<StaticMerge>,
-        // `None` unless `WOW_STATIC_GX=1` (the collector only exists armed — 1429).
+        // `None` only under `WOW_STATIC_GX=0` (the collector exists whenever the retained
+        // pass is armed — the default since 1434).
         Option<ResMut<crate::static_gx::StaticGx>>,
     ),
 ) {

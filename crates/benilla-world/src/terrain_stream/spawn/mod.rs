@@ -67,7 +67,8 @@ type SpawnTables<'w> = (
     ResMut<'w, HullWelds>,
     ResMut<'w, crate::mega_static::MegaStaticPending>,
     ResMut<'w, StaticMerge>,
-    // `None` unless `WOW_STATIC_GX=1` (the resource only exists armed — decision 1429).
+    // `None` only under `WOW_STATIC_GX=0` (the resource exists whenever the retained pass
+    // is armed — the default since 1434).
     Option<ResMut<'w, crate::static_gx::StaticGx>>,
 );
 
@@ -700,7 +701,25 @@ pub(super) fn spawn_loaded_placements(
                         slot: interior_slot,
                     },
                 )),
-                None, // static-gx is the ADT-doodad lane; WMO props never feed it
+                // The prop retained-pass site (B4, decision 1433): region keyed by the
+                // building's instance entity — the PVS identity AND the lifecycle. No
+                // instance ⇒ no region key ⇒ the merge/entity path, tallied per prop so
+                // the declined population is never silent.
+                match (portal_instance, staticgx.as_deref_mut()) {
+                    (Some(instance), Some(gx)) => Some((
+                        gx,
+                        crate::static_gx::GxSite::Prop {
+                            instance,
+                            groups: &d.groups,
+                            slot: interior_slot,
+                        },
+                    )),
+                    (None, Some(gx)) => {
+                        gx.tally_prop_declined(true);
+                        None
+                    }
+                    _ => None,
+                },
             );
             // The slot frees itself when the prop despawns (streaming out) — the component hook
             // returns it to the table whoever does the despawn. A prop whose every batch

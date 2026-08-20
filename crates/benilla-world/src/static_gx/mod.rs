@@ -1,18 +1,20 @@
-//! **`WOW_STATIC_GX=1` — the B1 retained-pass prototype** (decision 1429): the never-fade
-//! order-free ADT-doodad population leaves bevy_pbr entirely and draws from per-cell retained
-//! buffers in one custom render node, cross-material — per-vertex texture-array layers + flag
-//! bits where the entity path had one material handle per batch.
+//! **The retained static-world pass — ON by default** (decisions 1429–1434;
+//! `WOW_STATIC_GX=0` opts out): the static world leaves bevy_pbr entirely and draws from
+//! retained buffers in one custom render node, cross-material — per-vertex texture-array
+//! layers + flag bits where the entity path had one material handle per batch. Grown in
+//! four slices: B1 never-fade doodads + WMO group geometry, B2 faders via the exile
+//! protocol, B3 the churn payments (shared pool, re-bake cadence, draw order, kill-aware
+//! runs), B4 the WMO-prop absorption; flipped default-on at 1434 after the director's eye
+//! passed at the pins.
 //!
-//! **Prototype, dev-only, correctness-graded** (1429's B1: "correctness, not perf"; legs price
-//! B2+, never this). Armed, it replaces lane 1's doodad divert for eligible batches; off (the
-//! default), this module registers nothing and costs nothing. The bar is pixel-identity against
-//! the entity path (`WOW_STATIC_MERGE=0 WOW_STATIC_GX=0` vs `=1`) at a parked pin — the
-//! on-demand A/B harness, not the director's eye (§7: captures are a regression tool).
+//! The correctness bar is pixel-identity against the entity path
+//! (`WOW_STATIC_MERGE=0 WOW_STATIC_GX=0` vs the armed default) at the capture fixtures —
+//! the on-demand A/B harness, not the director's eye (§7: captures are a regression tool).
 //!
 //! What it deliberately does NOT build (1429 stages them): horizon occlusion, class-aware
 //! index baking (items are sorted by `(bucket, texture)` main-world and coalesced into runs
 //! render-side; dims and format are only knowable there — BLP images are
-//! `RENDER_WORLD`-only), front-to-back region order (B3), and any default flip.
+//! `RENDER_WORLD`-only), and any default flip.
 //!
 //! The visibility terms at this lane's granularity (1429's table): frustum + farclip + the
 //! exterior window gate are CPU per-CELL ([`cull_cells`] — the real client's own shape, a CPU
@@ -56,8 +58,14 @@
 //! **Known B1 gaps, deliberate** (B2+ owns them): no `presentable()` coupling — an unbaked
 //! cell can show a hole for a beat on a cold arrival where the merge publishes
 //! `merge_pending` into the reveal cover (1419); dev-instrument identity (inspector/WOW_PICK
-//! name nothing — the weld/merge trade, one side table if missed); per-cell texture arrays
-//! duplicate shared textures across cells (VRAM; class-aware sharing is a B2 refinement).
+//! name nothing — the weld/merge trade, one side table if missed).
+//!
+//! **B3 (decision 1432): the churn 1431 priced is paid.** Texture arrays are ONE SHARED POOL
+//! across every cell and region (dedup by asset id; `pool.rs` owns the design note), layer
+//! copies encode exactly once, re-bakes ride the long quiet window ([`REBAKE_FRAMES`] —
+//! 1424's consolidate-on-quiet at bake grain), admitted cells and regions draw NEAR-FIRST
+//! (the 1.12 band walk's effect at cell grain), and killed items are dropped from the draw
+//! runs entirely rather than collapsed in the vertex stage (the WGSL collapse stays as belt).
 //!
 //! **Slice 2 (1429's second half): WMO group geometry.** An order-free WMO group batch diverts
 //! into a region keyed by its placement's [`crate::wmo_portal::WmoPortalInstance`] ENTITY —
@@ -72,6 +80,23 @@
 //! geometry out from under it. The WMO lighting lanes (MOCV inside the clamp, INT/TRANS batch
 //! classes, SIDN night glow, WINDOW midpoint light, the interior fog triple, ZERO point
 //! lights, the authored batch-order clip-z nudge) mirror `wow_model.wgsl` in `static_gx.wgsl`.
+//!
+//! **B4 (decision 1433): the prop site joins the pass — A's blobs absorbed.** WMO doodad
+//! props (1418's lane 3, the population A merged) divert into PROP REGIONS keyed by the same
+//! instance entity as the WMO regions but held apart (props trickle in as their M2s load;
+//! a shared region would re-bake the building's geometry per arrival — B3's churn class).
+//! Admission is per REFERRER SET (the distinct room-sets naming this region's props): the
+//! PVS bit ORs over the set exactly like `WmoGroupVis::drawn_by`, ∧ frustum ∧ farclip ∧ the
+//! exterior gate with the own-building exemption — an empty set (an unnamed prop) admits
+//! bare and is never exterior-gated (0784's untagged rule). Interior props light from their
+//! folded SH probe: the slot rides the record table (w bits 1..14) and the shader reads the
+//! probe region of the SAME shared light buffer every material binds; live point lights are
+//! zero (folded at spawn), fog is the interior triple. Exterior props take the Matte
+//! fixed-1.0 sun family ([`WORD_MATTE`]). Declined and censused, not absorbed: exterior
+//! FADER props (the exile protocol has no prop shape — they keep the default path's own
+//! per-entity fade) and props of instance-less placements (no PVS identity). With B4, the
+//! armed lane leaves A's merge only the divert's declined families; the default flip is a
+//! later record's question. `WOW_STATIC_GX_PROP=0` is the lane-isolation lever.
 //!
 //! **Slice-2 verdict (2026-08-18):** floors exactly 0 on all 11 scenarios; the armed A/B
 //! reads MAE ≤ 0.003 with 99.9 % of differing pixels at exactly 1/255 and 2–35 px/frame
@@ -98,15 +123,27 @@ use benilla_formats::{ModelBlend, RenderSubmesh, WmoBatchClass};
 
 mod bake;
 mod cull;
+mod pool;
 mod render;
 
 /// The doodad spatial cell — ¼ ADT tile, the same 133⅓-yd locality key the merge lanes use
 /// (`terrain_stream::merge::CELL`; 1413 round 2 proved the locality load-bearing).
 const CELL: f32 = 533.333_3 / 4.0;
 
-/// Quiet frames before a dirty cell re-bakes (~¼ s at 60 Hz) — the merge's own close rationale:
-/// fast appearance, consolidation once the admission burst has moved on.
+/// Quiet frames before a dirty cell's FIRST bake (~¼ s at 60 Hz) — the merge's own close
+/// rationale: fast appearance, consolidation once the admission burst has moved on.
 const IDLE_FRAMES: u32 = 15;
+/// Quiet frames before an already-published cell RE-bakes (~2 s) — 1424's spawn-fast/
+/// consolidate-on-quiet shape at bake granularity (B3, decision 1432): the admission trickle
+/// arrives in bursts spaced wider than [`IDLE_FRAMES`], so the short window re-baked cells
+/// once per arrival for minutes (1431 measured the churn); the long window batches a whole
+/// trickle span per re-bake. The cost is arrival latency for content joining an ALREADY-baked
+/// cell (distance-trickle admissions, under fog at the cell's range) — the entity path's own
+/// arrival class, slower by construction.
+const REBAKE_FRAMES: u32 = 120;
+/// A dirty cell this old re-bakes even if never quiet (~10 s) — the trickle must not be able
+/// to starve a re-bake forever.
+const MAX_DIRTY_FRAMES: u32 = 600;
 
 /// Per-vertex packed word: texture-array layer in bits 0..16, flag bits above —
 /// see `static_gx.wgsl` (kept in sync by the flush's packing below).
@@ -141,11 +178,24 @@ const WORD_WINDOW: u32 = 1 << 26;
 // colourless INT batch takes the no-COLORS combine (plain tex × lit), so the override must
 // key on authored colours, not on the lane.
 const WORD_HAS_VC: u32 = 1 << 27;
+// The prop lane (B4, decision 1433) — an exterior WMO MODD prop's Matte sun family: intensity
+// FIXED 1.0 (`ShadeSel::Matte`, the mid-band selector — the ADT 2.5 site is one a MODD prop
+// never reaches, §8b). A distinct bit rather than an alias of SHADE_LIT: under the recorded
+// `min(I,1)` cap the two read identically today, but the cap is the lane's one unfaithful
+// term (0803 §3) and lifting it must not silently split this lane's parity.
+const WORD_MATTE: u32 = 1 << 28;
+// An INTERIOR M2 prop (B4) is WORD_INTERIOR with WORD_WMO clear — exactly the entity shader's
+// `interior_prop = flags.z && !flags.x`: the per-item SH-probe lane (record-table slot),
+// interior fog, zero live point lights (the group-MOLR lobes are folded into the probe).
 
-/// Armed? (`WOW_STATIC_GX=1`.) Read once; the plugin registers nothing when off.
+/// Armed? **ON by default** (decision 1434: the B chapter's population story is complete —
+/// B1–B4 — with pixel parity at the quantization floor, legs negative at all four pins, and
+/// the director's eye passed at the pins). `WOW_STATIC_GX=0` is the opt-out lever — the A/B
+/// arm for every comparison this chapter still owes; `=1` still reads as an explicit on for
+/// anything that predates the flip. Read once; the plugin registers nothing when off.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WOW_STATIC_GX").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("WOW_STATIC_GX").as_deref() != Ok("0"))
 }
 
 /// `WOW_WMO_BIAS=0` — B38's A/B diagnostic, honoured exactly where `model_material` honours
@@ -170,6 +220,14 @@ fn wmo_lane_disabled() -> bool {
 pub(crate) fn fade_lane_disabled() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| matches!(std::env::var("WOW_STATIC_GX_FADE").as_deref(), Ok("0")))
+}
+
+/// `WOW_STATIC_GX_PROP=0` — the B4 lane-isolation lever (the family's third): WMO-prop
+/// batches refuse wholesale and fall back to the merge/entity path, cells and WMO regions
+/// unaffected. The attribution instrument for any prop-lane A/B.
+fn prop_lane_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| matches!(std::env::var("WOW_STATIC_GX_PROP").as_deref(), Ok("0")))
 }
 
 /// `WOW_GX_PERF=1` — the lane's own cost meter (1431's regression hunt): each armed system
@@ -231,12 +289,26 @@ struct GxItem {
     shade_lit: bool,
     wrap_x: bool,
     wrap_y: bool,
+    /// The exterior-prop Matte sun family (B4): intensity fixed 1.0. False everywhere else.
+    matte: bool,
     /// `Some` on a WMO group-geometry item (slice 2) — the per-batch WMO facts the shader's
     /// WMO lanes read.
     wmo: Option<GxItemWmo>,
+    /// `Some` on a WMO-prop item (B4, decision 1433) — the referrer-set index + probe slot.
+    prop: Option<GxItemProp>,
     /// `Some(uid)` on a FADER item (B2, decision 1431): the placement this item exiles with.
     /// The flush maps post-sort item indices back to the cell's [`GxFader`] through it.
     fader: Option<u32>,
+}
+
+/// A WMO-prop item's baked facts (B4): which of its region's referrer SETS admits it (the
+/// index into [`GxCell::sets`] — the PVS admission ORs over the set's rooms, the entity
+/// path's `WmoGroupVis::drawn_by` at range-selection grain), and the interior prop's folded
+/// SH-probe slot (`None` = exterior light: an exterior MODD prop, or a probe-table overflow —
+/// the entity path's own fallback).
+struct GxItemProp {
+    set: u16,
+    slot: Option<u16>,
 }
 
 /// One fader placement's exile seed + live state (B2, decision 1431): everything needed to
@@ -316,6 +388,8 @@ struct GxCell {
     items: Vec<GxItem>,
     dirty: bool,
     last_change: u32,
+    /// The frame `dirty` last went false→true — [`MAX_DIRTY_FRAMES`]'s clock.
+    dirty_since: u32,
     /// The cell's fader placements (B2), keyed by placement uniqueId. Empty on WMO regions.
     faders: bevy::platform::collections::HashMap<u32, GxFader>,
     /// The published kill bitmap no longer matches the fader states (a re-bake reassigned
@@ -331,6 +405,10 @@ struct GxCell {
     /// The scan's last wholesale verdict for this cell (`None` = mixed/unknown → walk every
     /// frame). A repeated all-steady / all-gone verdict skips the per-placement walk.
     settled: Option<bool>,
+    /// The DISTINCT referrer sets of this region's prop items (B4; prop regions only —
+    /// empty on cells and WMO regions). An item's [`GxItemProp::set`] indexes here; content
+    /// dedup means props named by the same rooms share one selection bit and one run key.
+    sets: Vec<Arc<[u16]>>,
 }
 
 /// The main-world collector + the published draw set. One resource carries both halves so the
@@ -341,14 +419,19 @@ pub struct StaticGx {
     /// The WMO regions (slice 2), keyed by placement instance entity — the same identity the
     /// portal PVS is computed on, so range selection needs no translation table.
     wmos: bevy::platform::collections::HashMap<Entity, GxCell>,
+    /// The PROP regions (B4, decision 1433), keyed by the SAME instance entity but held
+    /// apart from [`Self::wmos`] deliberately: props trickle in over seconds as their M2s
+    /// load, and sharing the building's region would convert every arrival into a re-bake
+    /// of the whole building's geometry — the exact churn class B3 paid down.
+    props: bevy::platform::collections::HashMap<Entity, GxCell>,
     /// The published, extracted half — what the render node draws.
     pub(crate) world: render::GxWorld,
     frame: u32,
-    /// Declined-batch census (env-map / depth-flag / shade-family refusals), logged once per
-    /// count change so a silently-thinner population can't masquerade as covered (1429's
-    /// no-silent-caps note).
-    declined: [u32; 3],
-    declined_logged: [u32; 3],
+    /// Declined-batch census (env-map / depth-flag / shade-family / prop-fader /
+    /// prop-without-instance refusals), logged once per count change so a silently-thinner
+    /// population can't masquerade as covered (1429's no-silent-caps note).
+    declined: [u32; 5],
+    declined_logged: [u32; 5],
     /// Exiled entities whose seed died out from under them (owner release, map clear) —
     /// drained and despawned by the scan, which owns the exile lifecycle end to end.
     pending_despawn: Vec<Entity>,
@@ -377,9 +460,23 @@ pub struct GxBatch<'a> {
     pub shade: ShadeSel,
     /// `Some` = a WMO group-geometry batch (slice 2).
     pub wmo: Option<GxWmoBatch>,
+    /// `Some` = a WMO-prop batch (B4, decision 1433).
+    pub prop: Option<GxPropBatch>,
     /// `Some` = a FADER batch (B2, decision 1431): the exile seed. `None` on never-fade
-    /// batches and the whole WMO lane.
+    /// batches, the WMO lane, and the prop lane (an exterior fader prop never diverts —
+    /// see the assemble gate).
     pub fade: Option<GxFadeSeed<'a>>,
+}
+
+/// The prop half of [`GxBatch`] (B4): the building's instance entity (the region key, the
+/// PVS source, and the lifecycle — the instance dies with the placement, `refs` and all,
+/// so a prop region needs no owner-tile bookkeeping), the referrer set of rooms naming the
+/// prop (empty = unnamed: always admitted, never exterior-gated — 0784's untagged rule),
+/// and the interior prop's SH-probe slot.
+pub struct GxPropBatch {
+    pub instance: Entity,
+    pub groups: Arc<[u16]>,
+    pub slot: Option<u16>,
 }
 
 /// The fader half of [`GxBatch`] (B2): the placement identity + the respawn payload the
@@ -416,6 +513,15 @@ pub enum GxSite<'a> {
     /// A WMO placement's group geometry: the pre-spawned `WmoPortalInstance` entity + the
     /// model's per-batch group map (`WmoModel::submesh_group`, index-parallel with batches).
     Wmo { instance: Entity, groups: &'a [u16] },
+    /// A WMO doodad prop (B4, decision 1433 — 1418's lane 3, absorbed): the building's
+    /// instance entity, the referrer set of rooms that name the prop, and the interior
+    /// prop's folded SH-probe slot. Only a placement WITH an instance qualifies (no
+    /// instance ⇒ no PVS identity ⇒ the merge/entity path, tallied).
+    Prop {
+        instance: Entity,
+        groups: &'a Arc<[u16]>,
+        slot: Option<u16>,
+    },
 }
 
 /// The WMO half of [`GxBatch`], gathered at the spawn site (`spawn/mod.rs` owns the instance
@@ -453,12 +559,18 @@ impl StaticGx {
         if b.wmo.is_some() && wmo_lane_disabled() {
             return false; // the lane-isolation lever: WMO batches back to the entity path
         }
+        if b.prop.is_some() && prop_lane_disabled() {
+            return false; // the B4 lever: prop batches back to the merge/entity path
+        }
         // The shade family gates CELLS only: the WMO lane never reads the selector (the
-        // entity path passes `Matte` for every WMO batch and lights on the FFP N·L).
-        let shade_lit = match (&b.wmo, b.shade) {
-            (Some(_), _) => false,
-            (None, ShadeSel::Lit) => true,
-            (None, ShadeSel::Shaded) => false,
+        // entity path passes `Matte` for every WMO batch and lights on the FFP N·L), and
+        // the prop lane admits Matte as its own word bit (B4 — an exterior MODD prop's
+        // fixed-1.0 family; an interior prop also arrives Matte, selector unread).
+        let (shade_lit, matte) = match (&b.wmo, &b.prop, b.shade) {
+            (Some(_), _, _) => (false, false),
+            (None, Some(_), ShadeSel::Matte) => (false, true),
+            (None, _, ShadeSel::Lit) => (true, false),
+            (None, _, ShadeSel::Shaded) => (false, false),
             _ => {
                 self.declined[2] += 1;
                 return false;
@@ -481,9 +593,10 @@ impl StaticGx {
                 w.batch_order
             },
         });
-        let entry = match wmo_key {
-            Some(instance) => self.wmos.entry(instance).or_default(),
-            None => {
+        let entry = match (wmo_key, &b.prop) {
+            (Some(instance), _) => self.wmos.entry(instance).or_default(),
+            (None, Some(p)) => self.props.entry(p.instance).or_default(),
+            (None, None) => {
                 let cell = (
                     (b.transform.translation.x / CELL).floor() as i32,
                     (b.transform.translation.z / CELL).floor() as i32,
@@ -491,6 +604,25 @@ impl StaticGx {
                 self.cells.entry(cell).or_default()
             }
         };
+        // A prop item resolves its referrer set to the region's dedup list (B4): same rooms
+        // ⇒ same selection bit ⇒ same run key, and the cull tests each distinct set once.
+        let prop = b.prop.map(|p| {
+            let set = match entry
+                .sets
+                .iter()
+                .position(|s| s.as_ref() == p.groups.as_ref())
+            {
+                Some(i) => i,
+                None => {
+                    entry.sets.push(p.groups);
+                    entry.sets.len() - 1
+                }
+            };
+            GxItemProp {
+                set: u16::try_from(set).expect("gx region under u16 referrer sets"),
+                slot: p.slot,
+            }
+        });
         // A fader batch (B2) registers its exile seed on the cell's placement entry. Fresh
         // placements start Steady; the scan classifies them against the live camera the same
         // frame their cell bakes (states run before the bitmap rebuild), so a placement that
@@ -552,14 +684,27 @@ impl StaticGx {
             unlit: b.unlit,
             fog_off: matches!(b.fog_policy, benilla_formats::FogPolicy::Off),
             shade_lit,
+            matte,
             wrap_x: b.geometry.wrap_x,
             wrap_y: b.geometry.wrap_y,
             wmo,
+            prop,
             fader: fader_uid,
         });
+        if !entry.dirty {
+            entry.dirty_since = self.frame;
+        }
         entry.dirty = true;
         entry.last_change = self.frame;
         true
+    }
+
+    /// Tally a prop-site refusal the divert never sees (B4): an exterior FADER prop (the
+    /// exile protocol has no prop shape — it keeps today's per-entity fade, the default
+    /// path's own look), or a whole prop on a placement WITHOUT an instance entity (no PVS
+    /// identity to key a region on). Censused so the declined population is never silent.
+    pub fn tally_prop_declined(&mut self, no_instance: bool) {
+        self.declined[if no_instance { 4 } else { 3 }] += 1;
     }
 
     /// Drop a dead owner tile's items and mark their cells for re-bake — the unload hook
@@ -581,6 +726,9 @@ impl StaticGx {
             let before = cell.items.len();
             cell.items.retain(|i| i.owner != owner);
             if cell.items.len() != before {
+                if !cell.dirty {
+                    cell.dirty_since = frame;
+                }
                 cell.dirty = true;
                 cell.last_change = frame;
             }
@@ -634,8 +782,10 @@ impl StaticGx {
         }
         self.cells.clear();
         self.wmos.clear();
+        self.props.clear();
         self.world.cells.clear();
         self.world.wmos.clear();
+        self.world.props.clear();
         self.world.visible.clear();
         self.world.visible_wmos.clear();
     }
@@ -648,7 +798,7 @@ impl Plugin for StaticGxPlugin {
         if !enabled() {
             return;
         }
-        info!("static-gx: ARMED (WOW_STATIC_GX=1) — the B1 retained-pass prototype (1429)");
+        info!("static-gx: ARMED (default since 1434; WOW_STATIC_GX=0 opts out) — the retained static-world pass (1429–1434)");
         app.init_resource::<StaticGx>().add_systems(
             PostUpdate,
             // Chained: bake, then this frame's scene walk (after the camera settles), then
@@ -711,6 +861,7 @@ pub(crate) mod testkit {
             no_depth_test: false,
             shade: ShadeSel::Lit,
             wmo: None,
+            prop: None,
             fade: None,
         }
     }
@@ -746,7 +897,7 @@ mod tests {
         let mut b = batch(&g, Vec3::ZERO, None, ModelBlend::Opaque);
         b.shade = ShadeSel::Matte;
         assert!(!gx.divert(b));
-        assert_eq!(gx.declined, [1, 1, 1]);
+        assert_eq!(gx.declined, [1, 1, 1, 0, 0]);
         assert!(gx.divert(batch(&g, Vec3::ZERO, None, ModelBlend::Opaque)));
         assert_eq!(gx.cells.len(), 1);
     }
@@ -793,6 +944,51 @@ mod tests {
             2,
             "both fader items carry the uid; the never-fade item stays bare"
         );
+    }
+
+    /// A prop batch (B4) diverts into a region keyed by its INSTANCE entity; props naming
+    /// the same rooms share one referrer-set index and a distinct set opens a new one; the
+    /// interior slot and the Matte family ride the item (Matte admits on this lane — still
+    /// refused on cells).
+    #[test]
+    fn a_prop_divert_dedups_referrer_sets() {
+        let mut gx = StaticGx::default();
+        let g = tri([0.0; 3]);
+        let instance = Entity::PLACEHOLDER;
+        let rooms_a: Arc<[u16]> = Arc::from([3u16, 5].as_slice());
+        let rooms_b: Arc<[u16]> = Arc::from([9u16].as_slice());
+        let mk = |groups: &Arc<[u16]>, slot| GxPropBatch {
+            instance,
+            groups: Arc::clone(groups),
+            slot,
+        };
+        let mut b = batch(&g, Vec3::ZERO, None, ModelBlend::Opaque);
+        b.shade = ShadeSel::Matte;
+        b.prop = Some(mk(&rooms_a, Some(11)));
+        assert!(gx.divert(b));
+        let mut b = batch(&g, Vec3::ONE, None, ModelBlend::Opaque);
+        b.shade = ShadeSel::Matte;
+        b.prop = Some(mk(&rooms_a, Some(12)));
+        assert!(gx.divert(b));
+        let mut b = batch(&g, Vec3::ONE, None, ModelBlend::Opaque);
+        b.shade = ShadeSel::Shaded;
+        b.prop = Some(mk(&rooms_b, None));
+        assert!(gx.divert(b));
+        assert!(gx.cells.is_empty() && gx.wmos.is_empty());
+        let region = &gx.props[&instance];
+        assert_eq!(region.sets.len(), 2, "same rooms share a set");
+        assert_eq!(region.items.len(), 3);
+        let sets: Vec<u16> = region
+            .items
+            .iter()
+            .map(|i| i.prop.as_ref().unwrap().set)
+            .collect();
+        assert_eq!(sets, vec![0, 0, 1]);
+        assert_eq!(region.items[0].prop.as_ref().unwrap().slot, Some(11));
+        assert!(region.items[0].matte, "Matte is the prop lane's own bit");
+        assert!(!region.items[2].matte, "Shaded stays the 0.5 family");
+        gx.clear();
+        assert!(gx.props.is_empty() && gx.world.props.is_empty());
     }
 
     /// A dead owner drops its fader seeds with its items, and an exiled placement's entities

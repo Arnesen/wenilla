@@ -9,10 +9,13 @@ use bevy::camera::primitives::Aabb;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
-use super::{render, GxItem, StaticGx, ATTRIBUTE_GX_ANCHOR, ATTRIBUTE_GX_WORD, IDLE_FRAMES};
 use super::{
-    WORD_CLASS_INT, WORD_CLASS_TRANS, WORD_FOG_OFF, WORD_HAS_VC, WORD_INTERIOR, WORD_SHADE_LIT,
-    WORD_TEXTURED, WORD_UNLIT, WORD_WINDOW, WORD_WMO, WORD_WRAP_X, WORD_WRAP_Y,
+    render, GxItem, StaticGx, ATTRIBUTE_GX_ANCHOR, ATTRIBUTE_GX_WORD, IDLE_FRAMES,
+    MAX_DIRTY_FRAMES, REBAKE_FRAMES,
+};
+use super::{
+    WORD_CLASS_INT, WORD_CLASS_TRANS, WORD_FOG_OFF, WORD_HAS_VC, WORD_INTERIOR, WORD_MATTE,
+    WORD_SHADE_LIT, WORD_TEXTURED, WORD_UNLIT, WORD_WINDOW, WORD_WMO, WORD_WRAP_X, WORD_WRAP_Y,
 };
 
 /// Bake dirty-and-quiet cells into retained draw data; publish into [`render::GxWorld`].
@@ -20,21 +23,26 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
     let _t = super::gx_perf_guard(0);
     gx.frame = gx.frame.wrapping_add(1);
     let frame = gx.frame;
-    for i in 0..3 {
+    for i in 0..5 {
         if gx.declined[i] != gx.declined_logged[i] {
             let d = gx.declined;
             info!(
-                "static-gx: declined so far — env-map {}, depth-flag {}, shade-family {}",
-                d[0], d[1], d[2]
+                "static-gx: declined so far — env-map {}, depth-flag {}, shade-family {}, \
+                 prop-fader {} (batches), prop-no-instance {} (props)",
+                d[0], d[1], d[2], d[3], d[4]
             );
             gx.declined_logged = d;
         }
     }
     let StaticGx {
-        cells, wmos, world, ..
+        cells,
+        wmos,
+        props,
+        world,
+        ..
     } = &mut *gx;
     for (&cell, state) in cells.iter_mut() {
-        if !state.dirty || frame.wrapping_sub(state.last_change) < IDLE_FRAMES {
+        if !bake_due(state, world.cells.contains_key(&cell), frame) {
             continue;
         }
         state.dirty = false;
@@ -60,7 +68,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
         world.cells.insert(cell, baked);
     }
     for (&instance, state) in wmos.iter_mut() {
-        if !state.dirty || frame.wrapping_sub(state.last_change) < IDLE_FRAMES {
+        if !bake_due(state, world.wmos.contains_key(&instance), frame) {
             continue;
         }
         state.dirty = false;
@@ -87,6 +95,53 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
         );
         world.wmos.insert(instance, baked);
     }
+    // The prop regions (B4): the WMO loop's shape with the referrer SET as the selection
+    // grain — the sort keeps runs set-homogeneous, and the published draw carries the
+    // region's set list beside the per-set bounds `bake_cell` accumulated into `groups`.
+    for (&instance, state) in props.iter_mut() {
+        if !bake_due(state, world.props.contains_key(&instance), frame) {
+            continue;
+        }
+        state.dirty = false;
+        if state.items.is_empty() {
+            world.props.remove(&instance);
+            continue;
+        }
+        state.items.sort_by_key(|i| {
+            (
+                (u8::from(i.cutout) << 1) | u8::from(i.two_sided),
+                i.texture,
+                i.prop.as_ref().map_or(0, |p| p.set),
+            )
+        });
+        let mut baked = bake_cell(&state.items, &mut meshes);
+        baked.sets = state.sets.clone();
+        info!(
+            "static-gx: props {instance} baked — {} item(s), {} set(s), {} vert(s)",
+            state.items.len(),
+            baked.sets.len(),
+            baked.draws.last().map_or(0, |d| d.vertex_range.end),
+        );
+        world.props.insert(instance, baked);
+    }
+}
+
+/// Is this region's bake due? A FIRST bake waits only the short window (fast appearance); a
+/// re-bake of a published region waits for the LONG quiet window (B3, decision 1432 — the
+/// admission trickle arrives spaced wider than the short window, so B2 re-baked cells once
+/// per arrival for minutes; 1431's cost map priced it), with the age cap so a never-quiet
+/// region still consolidates.
+fn bake_due(state: &super::GxCell, published: bool, frame: u32) -> bool {
+    if !state.dirty {
+        return false;
+    }
+    let window = if published {
+        REBAKE_FRAMES
+    } else {
+        IDLE_FRAMES
+    };
+    frame.wrapping_sub(state.last_change) >= window
+        || frame.wrapping_sub(state.dirty_since) >= MAX_DIRTY_FRAMES
 }
 
 /// B2 (1431): the bake reassigns item indices — remap each fader placement's kill targets
@@ -149,8 +204,16 @@ fn bake_cell(items: &[GxItem], meshes: &mut Assets<Mesh>) -> render::GxCellDraw 
             | (u32::from(item.unlit) * WORD_UNLIT)
             | (u32::from(item.fog_off) * WORD_FOG_OFF)
             | (u32::from(item.shade_lit) * WORD_SHADE_LIT)
+            | (u32::from(item.matte) * WORD_MATTE)
             | (u32::from(item.texture.is_some()) * WORD_TEXTURED)
             | (u32::from(has_vc) * WORD_HAS_VC)
+            // An interior PROP is WORD_INTERIOR with WORD_WMO clear (B4) — the entity
+            // shader's own `interior_prop = flags.z && !flags.x` split. A slot-less prop
+            // (exterior, or probe-table overflow) keeps the exterior law, like the entity
+            // path's fallback.
+            | item.prop.as_ref().map_or(0, |p| {
+                u32::from(p.slot.is_some()) * WORD_INTERIOR
+            })
             | item.wmo.as_ref().map_or(0, |w| {
                 WORD_WMO
                     | (u32::from(w.interior) * WORD_INTERIOR)
@@ -194,13 +257,22 @@ fn bake_cell(items: &[GxItem], meshes: &mut Assets<Mesh>) -> render::GxCellDraw 
             words.push(word_flags); // layer bits 0..16 resolve render-side (dims live there)
             anchors.push(anchor.to_array());
         }
-        if let Some(w) = &item.wmo {
-            match group_bounds.iter_mut().find(|(g, _, _)| *g == w.group) {
+        // The selection grain: a WMO item's GROUP, a prop item's referrer SET (B4) — one
+        // field, because the node's range selection is the same mechanism for both (the
+        // per-frame bit vector just means "group visible" on one map and "set admitted" on
+        // the other).
+        let sel_group = item
+            .wmo
+            .as_ref()
+            .map(|w| w.group)
+            .or(item.prop.as_ref().map(|p| p.set));
+        if let Some(g) = sel_group {
+            match group_bounds.iter_mut().find(|(gb, _, _)| *gb == g) {
                 Some((_, bmn, bmx)) => {
                     *bmn = bmn.min(gmn);
                     *bmx = bmx.max(gmx);
                 }
-                None => group_bounds.push((w.group, gmn, gmx)),
+                None => group_bounds.push((g, gmn, gmx)),
             }
         }
         let start = u32::try_from(indices.len()).expect("gx cell under u32 indices");
@@ -211,9 +283,10 @@ fn bake_cell(items: &[GxItem], meshes: &mut Assets<Mesh>) -> render::GxCellDraw 
             cutout: item.cutout,
             two_sided: item.two_sided,
             vertex_range: base..u32::try_from(positions64.len()).unwrap(),
-            group: item.wmo.as_ref().map(|w| w.group),
+            group: sel_group,
             order: item.wmo.as_ref().map_or(0, |w| w.order),
             sidn: item.wmo.as_ref().map_or([0; 3], |w| w.sidn),
+            slot: item.prop.as_ref().and_then(|p| p.slot).unwrap_or(0),
         });
     }
     // Recentre for clip-space precision (0974): the shader reconstructs world = v + origin.
@@ -255,6 +328,7 @@ fn bake_cell(items: &[GxItem], meshes: &mut Assets<Mesh>) -> render::GxCellDraw 
                 )
             })
             .collect(),
+        sets: Vec::new(), // prop regions: the flush fills it from the collector's dedup list
         killed,
         killed_rev: 0,
     }
@@ -268,6 +342,35 @@ mod tests {
     use crate::model_render::ShadeSel;
     use benilla_formats::{ModelBlend, RenderSubmesh, WmoBatchClass};
     use std::sync::Arc;
+
+    /// The bake cadence (B3, decision 1432): first bakes wait only the short window, re-bakes
+    /// of a published region wait for the long one, and the age cap consolidates a
+    /// never-quiet region regardless.
+    #[test]
+    fn the_bake_waits_short_first_and_long_after() {
+        let mut state = super::super::GxCell::default();
+        assert!(!bake_due(&state, false, 100), "clean cells are never due");
+        state.dirty = true;
+        state.dirty_since = 0;
+        state.last_change = 0;
+        assert!(!bake_due(&state, false, IDLE_FRAMES - 1));
+        assert!(
+            bake_due(&state, false, IDLE_FRAMES),
+            "first bake: short window"
+        );
+        assert!(
+            !bake_due(&state, true, IDLE_FRAMES),
+            "published: short is not enough"
+        );
+        assert!(!bake_due(&state, true, REBAKE_FRAMES - 1));
+        assert!(
+            bake_due(&state, true, REBAKE_FRAMES),
+            "published: long window"
+        );
+        // A cell that keeps changing (never quiet) still consolidates at the age cap.
+        state.last_change = MAX_DIRTY_FRAMES;
+        assert!(bake_due(&state, true, MAX_DIRTY_FRAMES));
+    }
 
     /// A quiet cell bakes: one recentred mesh whose draws sort by (bucket, texture), each
     /// item's word carrying its index + flags, index ranges contiguous over one index buffer.
@@ -465,6 +568,75 @@ mod tests {
         // clear() empties the WMO side too.
         gx.clear();
         assert!(gx.wmos.is_empty());
+    }
+
+    /// A prop region bakes with the referrer SET as the selection grain (B4): draws sort
+    /// (bucket, texture, set) and carry the set index in `group`, per-set bounds land in
+    /// `groups`, the interior slot rides the draw, and the word carries
+    /// INTERIOR-without-WMO for slotted items and MATTE for the exterior family.
+    #[test]
+    fn a_prop_region_bakes_set_ranges_and_slots() {
+        let mut gx = StaticGx::default();
+        let g = tri([0.0; 3]);
+        let instance = Entity::PLACEHOLDER;
+        let rooms_a: Arc<[u16]> = Arc::from([3u16].as_slice());
+        let rooms_b: Arc<[u16]> = Arc::from([5u16, 8].as_slice());
+        let mk = |groups: &Arc<[u16]>, slot| super::super::GxPropBatch {
+            instance,
+            groups: Arc::clone(groups),
+            slot,
+        };
+        // Set B pushed FIRST — the sort must bring set A (index 1? no: dedup order is
+        // arrival order, so B=0, A=1) ranges together and set-homogeneous.
+        let mut b = batch(&g, Vec3::new(1.0, 0.0, 1.0), None, ModelBlend::Opaque);
+        b.shade = ShadeSel::Matte;
+        b.prop = Some(mk(&rooms_b, Some(42)));
+        assert!(gx.divert(b));
+        let mut b = batch(&g, Vec3::new(2.0, 0.0, 2.0), None, ModelBlend::Opaque);
+        b.shade = ShadeSel::Matte;
+        b.prop = Some(mk(&rooms_a, None));
+        assert!(gx.divert(b));
+        let mut b = batch(&g, Vec3::new(3.0, 0.0, 3.0), None, ModelBlend::Opaque);
+        b.shade = ShadeSel::Matte;
+        b.prop = Some(mk(&rooms_b, Some(43)));
+        assert!(gx.divert(b));
+        let state = gx.props.get_mut(&instance).expect("the instance's region");
+        state.items.sort_by_key(|i| {
+            (
+                (u8::from(i.cutout) << 1) | u8::from(i.two_sided),
+                i.texture,
+                i.prop.as_ref().map_or(0, |p| p.set),
+            )
+        });
+        let mut meshes = Assets::<Mesh>::default();
+        let baked = bake_cell(&state.items, &mut meshes);
+        // Set 0 (rooms_b)'s two items sit adjacent; set 1 (rooms_a) follows.
+        assert_eq!(
+            baked.draws.iter().map(|d| d.group).collect::<Vec<_>>(),
+            vec![Some(0), Some(0), Some(1)]
+        );
+        assert_eq!(
+            baked.draws.iter().map(|d| d.slot).collect::<Vec<_>>(),
+            vec![42, 43, 0]
+        );
+        // Per-set bounds for the admission walk.
+        let mut sets: Vec<u16> = baked.groups.iter().map(|(s, _)| *s).collect();
+        sets.sort_unstable();
+        assert_eq!(sets, vec![0, 1]);
+        // The word: a slotted item is INTERIOR without WMO; a slot-less Matte prop keeps
+        // the exterior law with the MATTE family bit.
+        let mesh = meshes.get(&baked.mesh).unwrap();
+        let Some(bevy::mesh::VertexAttributeValues::Uint32(words)) =
+            mesh.attribute(ATTRIBUTE_GX_WORD)
+        else {
+            panic!("gx word attribute missing")
+        };
+        let w_int = words[baked.draws[0].vertex_range.start as usize];
+        let w_ext = words[baked.draws[2].vertex_range.start as usize];
+        assert_ne!(w_int & WORD_INTERIOR, 0);
+        assert_eq!(w_int & WORD_WMO, 0, "a prop item never takes the WMO lane");
+        assert_eq!(w_ext & WORD_INTERIOR, 0);
+        assert_ne!(w_ext & WORD_MATTE, 0);
     }
 
     /// Authored vertex colours bake RAW into ATTRIBUTE_COLOR and set the HAS_VC bit — the

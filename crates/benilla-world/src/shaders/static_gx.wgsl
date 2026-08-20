@@ -12,15 +12,19 @@
 // (the Model2.bls order-2 lobe, 0803 — `min(I,1)` cap included, with its recorded caveat),
 // the WMO surface lanes (slice 2: MOCV inside the clamp under GL_COLOR_MATERIAL, the
 // INT/TRANS/EXT batch-class lanes, the WINDOW midpoint light, SIDN × night on lit lanes,
-// ZERO point lights, the authored batch-order clip-z nudge, the interior fog triple), and
-// the step-5 fog. Deliberately ABSENT (this lane never carries them): the interior-PROP
-// probe/clutter/rig/fade/env-map/highlight/mat-anim lanes and per-instance tint (identity
-// for statics).
+// ZERO point lights, the authored batch-order clip-z nudge, the interior fog triple), the
+// interior-PROP probe lane (B4, decision 1433: the per-item slot rides the record table and
+// the probe rows live in the TAIL of the same shared buffer — zero live point lights, the
+// group-MOLR lobes are folded into the probe at spawn), the exterior-prop Matte fixed-1.0
+// family (B4), and the step-5 fog. Deliberately ABSENT (this lane never carries them): the
+// clutter/rig/fade/env-map/highlight/mat-anim lanes and per-instance tint (identity for
+// statics).
 //
 // Population contract (enforced by the collector's divert — `static_gx::StaticGx::divert`):
-// never-fade order-free non-animated statics, Opaque/AlphaTest only, no env-map, no depth
-// flags; cells additionally `ShadeSel::Lit`/`Shaded` only (the WMO lane never reads the
-// selector). Output alpha is pinned 1.0 — every draw here is opaque-intent by admission
+// never-fade order-free non-animated statics (interior props are never-fade by law),
+// Opaque/AlphaTest only, no env-map, no depth flags; cells additionally
+// `ShadeSel::Lit`/`Shaded` only (the WMO lane never reads the selector; the prop lane adds
+// `Matte`). Output alpha is pinned 1.0 — every draw here is opaque-intent by admission
 // (wow_model.wgsl's bit-3 armor, as a constant).
 
 #import bevy_render::view::View
@@ -49,6 +53,11 @@ struct WowLight {
     wmo_fog_params: vec4<f32>,
     point_count: vec4<f32>,
     points: array<vec4<f32>, 512>,
+    // The interior-prop SH probe table (B4 — lighting::prop_probes, 7 rows per slot, 8192
+    // slots; wow_model.wgsl owns the layout note). Sits immediately after the point table in
+    // the shared buffer, so extending the mirrored prefix by one region is all it takes; the
+    // rig/tint/mat-anim regions beyond it stay unmirrored (statics never read them).
+    prop_probes: array<vec4<f32>, 57344>,
 }
 @group(0) @binding(1) var<storage, read> wow_light: WowLight;
 
@@ -82,6 +91,10 @@ const WORD_CLASS_TRANS: u32 = 33554432u; // 1 << 25 — tint.w == 2 (TRANS batch
 const WORD_WINDOW: u32 = 67108864u;    // 1 << 26 — sidn.w (WINDOW midpoint light)
 const WORD_HAS_VC: u32 = 134217728u;   // 1 << 27 — the batch AUTHORED vertex colours
                                        //           (the entity shader's VERTEX_COLORS def)
+// The prop lane (B4). INTERIOR without WMO = an interior M2 prop — the entity shader's own
+// `interior_prop = flags.z && !flags.x` split: probe lighting, interior fog, zero live
+// point lights.
+const WORD_MATTE: u32 = 268435456u;    // 1 << 28 — exterior MODD prop: intensity FIXED 1.0
 
 // Vanilla cutout ref (224/255) — wow_model.wgsl's VANILLA_ALPHA_KEY.
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
@@ -193,8 +206,10 @@ fn vertex(v: GxVertex) -> GxVsOut {
     // The ≤3-nearest FFP selection, anchored at the PLACEMENT origin exactly like the entity
     // path (the baked per-vertex anchor — 1429's parity note; the blob path coarsened this).
     // WMO surfaces take ZERO point lights — the entity path zeroes them in the vertex stage
-    // (wow-re trace-forensics-abbey-interior-d3d §2: zero on every observed WMO surface).
-    if ((v.word & WORD_WMO) != 0u) {
+    // (wow-re trace-forensics-abbey-interior-d3d §2: zero on every observed WMO surface) —
+    // and so do interior M2 props (B4): their group-MOLR point lobes are folded into the
+    // per-item SH probe at spawn, the entity path's own vertex-stage zeroing.
+    if ((v.word & (WORD_WMO | WORD_INTERIOR)) != 0u) {
         out.point_lit = vec3<f32>(0.0);
     } else {
         out.point_lit = point_light_sum(world, v.normal, v.anchor);
@@ -259,6 +274,10 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
+    // The order-2 SH basis products over the fragment normal — shared by the exterior
+    // doodad lobe and the interior-prop probe lane (wow_model.wgsl computes them once too).
+    let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
+    let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
     // ATTRIBUTE_COLOR, pre-folded into the sampled base exactly where bevy_pbr folds it
     // (`base_color *= in.color` before the texture multiply — commutative, so tex×vc is the
     // same bits). **A colour-less batch takes the CONSTANT 1.0, never the interpolated
@@ -339,15 +358,47 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
                 vec3<f32>(1.0),
             );
         }
+    } else if ((in.word & WORD_INTERIOR) != 0u) {
+        // ---- the interior M2-PROP lane (B4, decision 1433) — wow_model.wgsl's
+        // interior-prop branch verbatim: the folded per-instance SH probe (MODD ambient +
+        // the fixed-axis diffuse lobe + the owning group's MOLR lobes, folded ONCE at
+        // spawn), evaluated over the fragment normal. The slot rides the record table
+        // (w bits 1..14) where the entity path rode MeshTag bits 6..19. The soft SH wrap
+        // is the reference's authored response — deliberately NOT a hard max(N·L,0).
+        // point_lit is zero (vertex stage); inst_tint identity, no highlight, SIDN zero on
+        // every M2 batch — the combine collapses to folded × clamp(probe eval).
+        let probe = 7u * ((recs[in.word & 0xffffu].w >> 1u) & 0x1fffu);
+        let n1 = vec4<f32>(n_lit, 1.0);
+        let lit_prop = clamp(
+            vec3<f32>(
+                dot(wow_light.prop_probes[probe + 0u], n1)
+                    + dot(wow_light.prop_probes[probe + 3u], quad)
+                    + wow_light.prop_probes[probe + 6u].x * x2y2,
+                dot(wow_light.prop_probes[probe + 1u], n1)
+                    + dot(wow_light.prop_probes[probe + 4u], quad)
+                    + wow_light.prop_probes[probe + 6u].y * x2y2,
+                dot(wow_light.prop_probes[probe + 2u], n1)
+                    + dot(wow_light.prop_probes[probe + 5u], quad)
+                    + wow_light.prop_probes[probe + 6u].z * x2y2,
+            ),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+        let primary = clamp(lit_prop + in.point_lit, vec3<f32>(0.0), vec3<f32>(1.0));
+        rgb = folded * primary;
     } else {
-        // ---- the exterior ADT-doodad lane (slice 1) ----
+        // ---- the exterior ADT-doodad lane (slice 1) + the exterior MODD-prop family (B4) --
         // The intensity family: statics are `mat_shade` only (no per-instance ramp byte —
-        // that is an entity concern): lit ground ⇒ mix(2.5,0.5,0)=2.5, MCSH-shadowed ⇒ 0.5;
-        // then the recorded `min(I,1)` cap (unfaithful, kept in exact sync — 0803 §3).
+        // that is an entity concern): lit ground ⇒ mix(2.5,0.5,0)=2.5, MCSH-shadowed ⇒ 0.5,
+        // and the Matte mid-band (an exterior WMO MODD prop) FIXED 1.0 — the 2.5 site is one
+        // a MODD prop never reaches (§8b); then the recorded `min(I,1)` cap (unfaithful,
+        // kept in exact sync — 0803 §3; today it makes Matte and Lit read identically, and
+        // the distinct bit exists so lifting the cap cannot silently split this lane).
         let shade_t = select(1.0, 0.0, (in.word & WORD_SHADE_LIT) != 0u);
-        let intensity = min(mix(2.5, 0.5, shade_t), 1.0);
-        let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
-        let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
+        let intensity = min(
+            select(mix(2.5, 0.5, shade_t), 1.0, (in.word & WORD_MATTE) != 0u),
+            1.0,
+        );
         let sun_dc = wow_light.grade.yzw * intensity;
         let sun_lobe = vec3<f32>(
             wow_light.sh_c10_r.w + sun_dc.x

@@ -5,6 +5,7 @@
 
 use bevy::prelude::*;
 
+use super::render::GxDoodadVis;
 use super::{FaderState, GxFader, StaticGx};
 
 /// Exile hysteresis (yd). Entry into the feather has NO slack — a retained draw at
@@ -69,6 +70,18 @@ fn fade_step(radius: f32, d: f32, current: FadeClass) -> FadeClass {
             }
         }
     }
+}
+
+/// One referrer set's PVS verdict (B4): a prop is drawn from ANY of the rooms that name it,
+/// each bit read fail-open — `WmoGroupVis::drawn_by`'s exact rule at range-selection grain.
+/// An EMPTY set is always admitted (an unnamed prop carries no `WmoGroupVis` on the entity
+/// path and is never portal-culled; `drawn_by`'s `any()` on empty would read false, which is
+/// why the entity path never constructs the component for one).
+fn set_admitted(visible: &[bool], rooms: &[u16]) -> bool {
+    rooms.is_empty()
+        || rooms
+            .iter()
+            .any(|&g| visible.get(usize::from(g)).copied().unwrap_or(true))
 }
 
 /// `WOW_GX_FADE_TRACE=1` — one line per exile transition (the live-probe instrument for the
@@ -187,13 +200,19 @@ pub(super) fn cull_cells(
     let StaticGx {
         cells,
         wmos,
+        props,
         world,
         fade_events,
         ..
     } = &mut *gx;
     // Reap dead regions (instance despawned with its placement) — items and published draws.
+    // Prop regions share the instance lifecycle (B4): the instance dies exactly when the
+    // placement releases at refs 0, and a WMO placement never hands off (the straddler
+    // handoff is M2-only), so no owner-tile bookkeeping exists to go stale.
     wmos.retain(|e, _| instances.contains(*e));
     world.wmos.retain(|e, _| instances.contains(*e));
+    props.retain(|e, _| instances.contains(*e));
+    world.props.retain(|e, _| instances.contains(*e));
     world.visible.clear();
     world.visible_wmos.clear();
     let Some((cam_t, proj, frustum)) = cam_view else {
@@ -343,8 +362,17 @@ pub(super) fn cull_cells(
         }
     }
 
-    // The dev doodad toggle, cell-wholesale (see the module doc).
+    // The own-building exemption, shared by the WMO groups' gate term and the prop sets'
+    // (B4): the camera's containing placement is not exterior to itself (decision 0784's
+    // dynamic exemption — a static tag could not be right, the player walks in and out).
+    let own = claim.0.map(|c| c.room.instance);
+    // The dev doodad toggle, cell-wholesale (see the module doc). The doodad phase — cells
+    // AND prop regions (B4; a WMO's furniture is the M2 scene, not the WMO phase) — sorts
+    // NEAR-FIRST as one list (B3, decision 1432): the 1.12 client's front-to-back band walk
+    // (32 bands × 33⅓ yd, `terrain.md` 0xc7bd40) at this lane's grain: the node draws the
+    // list in order, so early-z rejects the far entries' fragments instead of shading them.
     if doodads_on {
+        let mut admitted: Vec<(u32, GxDoodadVis)> = Vec::new();
         for (&cell, draw) in &world.cells {
             let center = draw.origin + Vec3::from(draw.aabb.center);
             let radius = Vec3::from(draw.aabb.half_extents).length();
@@ -370,14 +398,69 @@ pub(super) fn cull_cells(
             ) {
                 continue;
             }
-            world.visible.push(cell);
+            // Distance² is non-negative, so its IEEE bits sort exactly like the value.
+            admitted.push((
+                cam_pos.distance_squared(center).to_bits(),
+                GxDoodadVis::Cell(cell),
+            ));
         }
+        // The prop regions (B4) join the same list: admission per referrer SET — the PVS
+        // bit ORs over the set's rooms ([`set_admitted`] — `WmoGroupVis::drawn_by`'s
+        // fail-open read, behind the same panel switch), ∧ frustum ∧ farclip ∧ the exterior
+        // gate for NAMED sets with the own-building exemption. An empty set (an unnamed
+        // prop) admits bare and is never gated: 0784's untagged rule — no key, no exemption
+        // possible, so it is deliberately not gated blind.
+        for (&entity, draw) in &world.props {
+            // A region whose instance can't answer this frame keeps last frame's absence —
+            // one frame of the entity path's own arrival class (the WMO regions' rule).
+            let Ok(inst) = instances.get(entity) else {
+                continue;
+            };
+            let mut sel = vec![false; draw.sets.len()];
+            let mut any = false;
+            for (set, aabb) in &draw.groups {
+                let Some(rooms) = draw.sets.get(usize::from(*set)) else {
+                    continue;
+                };
+                if m.portal_cull && !set_admitted(&inst.visible, rooms) {
+                    continue;
+                }
+                let center = draw.origin + Vec3::from(aabb.center);
+                let radius = Vec3::from(aabb.half_extents).length();
+                if !crate::view::within_farclip(view.farclip, cam_pos, cam_fwd, center, radius) {
+                    continue;
+                }
+                let sphere = bevy::camera::primitives::Sphere {
+                    center: center.into(),
+                    radius,
+                };
+                if !frustum.intersects_sphere(&sphere, false) {
+                    continue;
+                }
+                if !rooms.is_empty()
+                    && Some(entity) != own
+                    && !gate.admits(&GlobalTransform::from_translation(draw.origin), Some(aabb))
+                {
+                    continue;
+                }
+                sel[usize::from(*set)] = true;
+                any = true;
+            }
+            if any {
+                let center = draw.origin + Vec3::from(draw.aabb.center);
+                admitted.push((
+                    cam_pos.distance_squared(center).to_bits(),
+                    GxDoodadVis::Prop(entity, sel),
+                ));
+            }
+        }
+        admitted.sort_unstable_by_key(|(d, _)| *d);
+        world.visible.extend(admitted.into_iter().map(|(_, v)| v));
     }
-    // The WMO regions — the dev WMO toggle wholesale, then per-group admission.
+    // The WMO regions — the dev WMO toggle wholesale, then per-group admission; regions
+    // likewise ordered near-first (B3).
     if m.kind_visible[crate::model_render::kind_index(crate::model_render::ModelKind::Wmo)] {
-        // The own-building exemption: the camera's containing placement (decision 0784's
-        // dynamic exemption — a static tag could not be right, the player walks in and out).
-        let own = claim.0.map(|c| c.room.instance);
+        let mut admitted: Vec<(u32, (Entity, Vec<bool>))> = Vec::new();
         for (&entity, draw) in &world.wmos {
             // A region whose instance can't answer this frame (spawn-command latency) keeps
             // last frame's absence — one frame of the entity path's own arrival class.
@@ -421,9 +504,14 @@ pub(super) fn cull_cells(
                 any = true;
             }
             if any {
-                world.visible_wmos.push((entity, sel));
+                let center = draw.origin + Vec3::from(draw.aabb.center);
+                admitted.push((cam_pos.distance_squared(center).to_bits(), (entity, sel)));
             }
         }
+        admitted.sort_unstable_by_key(|(d, _)| *d);
+        world
+            .visible_wmos
+            .extend(admitted.into_iter().map(|(_, v)| v));
     }
     // `WOW_GX_CENSUS=1` — the slice-2 agreement instrument (1429: "LBRS-style drawn-count
     // agreement"): each selected item IS one would-be submesh entity, so this line reads
@@ -436,12 +524,29 @@ pub(super) fn cull_cells(
         && gx.frame.is_multiple_of(64)
     {
         let world = &gx.world;
-        let cell_items: usize = world
-            .visible
-            .iter()
-            .filter_map(|c| world.cells.get(c))
-            .map(|d| d.draws.len())
-            .sum();
+        let mut cell_items = 0usize;
+        let (mut prop_regions, mut prop_items) = (0usize, 0usize);
+        for vis in &world.visible {
+            match vis {
+                GxDoodadVis::Cell(c) => {
+                    cell_items += world.cells.get(c).map_or(0, |d| d.draws.len());
+                }
+                GxDoodadVis::Prop(e, sel) => {
+                    prop_regions += 1;
+                    if let Some(d) = world.props.get(e) {
+                        prop_items += d
+                            .draws
+                            .iter()
+                            .filter(|i| {
+                                i.group.is_some_and(|s| {
+                                    sel.get(usize::from(s)).copied().unwrap_or(false)
+                                })
+                            })
+                            .count();
+                    }
+                }
+            }
+        }
         let (mut wmo_items, mut wmo_groups) = (0usize, 0usize);
         for (e, sel) in &world.visible_wmos {
             if let Some(d) = world.wmos.get(e) {
@@ -469,12 +574,14 @@ pub(super) fn cull_cells(
         let ev = gx.fade_events;
         println!(
             "GX_CENSUS cells={}/{} cell_items={cell_items} wmo_regions={}/{} \
-             wmo_groups={wmo_groups} wmo_items={wmo_items} faders={fs}s/{fx}x/{fg}g \
-             fade_events={}x/{}s/{}g",
-            world.visible.len(),
+             wmo_groups={wmo_groups} wmo_items={wmo_items} \
+             prop_regions={prop_regions}/{} prop_items={prop_items} \
+             faders={fs}s/{fx}x/{fg}g fade_events={}x/{}s/{}g",
+            world.visible.len() - prop_regions,
             world.cells.len(),
             world.visible_wmos.len(),
             world.wmos.len(),
+            world.props.len(),
             ev[0],
             ev[1],
             ev[2],
@@ -502,6 +609,18 @@ pub(super) fn cull_cells(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The set admission mirrors `WmoGroupVis::drawn_by` exactly: any named room visible ⇒
+    /// drawn, missing bits fail-open, and the empty set (an unnamed prop) always admits.
+    #[test]
+    fn set_admission_is_any_of_named_rooms_fail_open() {
+        let vis = [false, true, false];
+        assert!(set_admitted(&vis, &[1]));
+        assert!(set_admitted(&vis, &[0, 1]));
+        assert!(!set_admitted(&vis, &[0, 2]));
+        assert!(set_admitted(&vis, &[7]), "a missing bit fails open");
+        assert!(set_admitted(&vis, &[]), "an unnamed prop is never culled");
+    }
 
     /// The state machine against the fade law it mirrors: entry edges exact (the retained
     /// draw must stop the frame the authority would feather), exit edges sticky by the

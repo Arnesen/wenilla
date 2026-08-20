@@ -256,9 +256,10 @@ impl Plugin for WorldFoundation {
         // the flag off nothing ever diverts, the buffer stays empty, and the flush early-outs.
         app.init_resource::<crate::mega_static::MegaStaticPending>();
         app.add_systems(bevy::app::Update, crate::mega_static::flush_mega_static);
-        // `WOW_STATIC_GX=1` — the B1 retained-pass prototype (decision 1429; dev-only, the
-        // module doc owns the caveats). Registers NOTHING when off — the divert sites see
-        // `None` for its resource and the render graph never gains the node.
+        // The retained static-world pass — ON by default (1429–1434; `WOW_STATIC_GX=0`
+        // opts out; the module doc owns the design). Registers NOTHING when opted out —
+        // the divert sites see `None` for its resource and the render graph never gains
+        // the node.
         app.add_plugins(crate::static_gx::StaticGxPlugin);
         // `WOW_MERGE_CENSUS=1` — the 1417 population census (module doc): tally rides the
         // assembler, this is just the quiet-timer printer.

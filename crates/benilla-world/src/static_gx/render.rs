@@ -5,11 +5,15 @@
 //!
 //! Assembly happens where each fact lives: the MAIN world bakes geometry (it owns the
 //! submeshes) but cannot know texture dims/format (BLP images are `RENDER_WORLD`-only), so
-//! classing into `texture_2d_array`s happens HERE, per cell, once its members' `GpuImage`s are
-//! all resident — the layer copies ride the node's own encoder, before its pass begins. A cell
-//! whose textures aren't all loaded yet simply isn't drawn that frame (the entity path streams
-//! batches in piecewise; cell-granular appearance is the same arrival class, mostly under the
-//! load cover).
+//! classing into `texture_2d_array`s happens HERE, once each member's `GpuImage` is resident.
+//! A cell whose textures aren't all loaded yet simply isn't drawn that frame (the entity path
+//! streams batches in piecewise; cell-granular appearance is the same arrival class, mostly
+//! under the load cover).
+//!
+//! **The arrays are ONE SHARED POOL, not per-cell (B3, decision 1432)** — `pool.rs` owns the
+//! design note (the two driver taxes 1431's `sample` caught, and how dedup + drain-once +
+//! sibling growth remove them structurally). Here, a re-bake costs a record table and a few
+//! bind groups, never a texture.
 
 use bevy::camera::primitives::Aabb;
 use bevy::ecs::query::QueryItem;
@@ -52,13 +56,17 @@ pub(crate) struct GxItemDraw {
     pub two_sided: bool,
     #[allow(dead_code)] // bake-side bookkeeping; the node draws by index range alone
     pub vertex_range: Range<u32>,
-    /// The WMO group this item belongs to (`None` on cell items) — the range-selection key:
-    /// a run never crosses a group boundary, so the flood's verdict selects whole runs.
+    /// The range-selection key (`None` on cell items — always drawn): a WMO item's GROUP,
+    /// or a prop item's referrer-SET index (B4). A run never crosses a selection boundary,
+    /// so the per-frame verdict selects whole runs.
     pub group: Option<u16>,
     /// The authored batch order (the coplanar-MOBA clip-z nudge; 0 on cell items).
     pub order: u16,
     /// The MOMT SIDN night-glow colour (gamma bytes; zero on cell items).
     pub sidn: [u8; 3],
+    /// The interior prop's SH-probe slot (B4; 0 elsewhere — read only under the word's
+    /// INTERIOR-without-WMO lane). Rides the record table's w column, bits 1..14.
+    pub slot: u16,
 }
 
 /// One baked cell (or WMO region), published by the main-world flush.
@@ -77,9 +85,14 @@ pub(crate) struct GxCellDraw {
     /// Bumped by the scan on every bitmap change — the render side syncs the record table's
     /// kill column when it sees a revision it hasn't applied.
     pub killed_rev: u32,
-    /// Per-GROUP mesh-local bounds (WMO regions only; empty for cells) — what the cull's
-    /// per-group admission tests.
+    /// Per-selection-grain mesh-local bounds (empty for cells): a WMO region's per-GROUP
+    /// bounds, or a prop region's per-referrer-SET bounds (B4) — what the cull's admission
+    /// walk tests.
     pub groups: Vec<(u16, Aabb)>,
+    /// A prop region's distinct referrer sets (B4), indexed by the same u16 as `groups` /
+    /// item selection: the rooms the PVS admission ORs over (empty set = unnamed — admitted
+    /// bare, never exterior-gated). Empty on cells and WMO regions.
+    pub sets: Vec<std::sync::Arc<[u16]>>,
 }
 
 /// Marks the ONE view the retained pass draws into — the world camera. Without this the node
@@ -98,34 +111,44 @@ fn mark_world_camera(
     }
 }
 
+/// One admitted entry of the doodad-phase draw list (B4): ADT-doodad cells and WMO-prop
+/// regions are the SAME drain phase in the 1.12 order (both are the M2 scene, after the WMO
+/// phase), so the cull sorts them near-first TOGETHER — a far cell must not shade before a
+/// near building's furniture.
+#[derive(Clone)]
+pub(crate) enum GxDoodadVis {
+    Cell((i32, i32)),
+    /// A prop region + this frame's per-referrer-SET admission bits.
+    Prop(Entity, Vec<bool>),
+}
+
 /// The published half the render world clones each frame (handles + ranges — cheap).
 #[derive(Clone, Default, Resource, ExtractResource)]
 pub(crate) struct GxWorld {
     pub cells: HashMap<(i32, i32), GxCellDraw>,
-    /// This frame's CPU scene-walk verdict (frustum + farclip + exterior gate, cell-granular).
-    pub visible: Vec<(i32, i32)>,
+    /// This frame's doodad-phase draw list, near-first across cells AND prop regions (B4):
+    /// frustum + farclip + exterior gate at cell/set granularity, PVS per set.
+    pub visible: Vec<GxDoodadVis>,
     /// The WMO regions (slice 2), keyed by placement instance entity.
     pub wmos: HashMap<Entity, GxCellDraw>,
+    /// The prop regions (B4), keyed by the same instance entity as `wmos` (their lifecycle),
+    /// held apart so prop arrivals never re-bake building geometry.
+    pub props: HashMap<Entity, GxCellDraw>,
     /// This frame's per-group admission per region (indexed by absolute group index): the
     /// portal flood's verdict collapsed to CPU range selection — the node draws exactly the
     /// runs whose group bit is set.
     pub visible_wmos: Vec<(Entity, Vec<bool>)>,
 }
 
-/// A texture-dimension class within one cell: one `texture_2d_array` + the members feeding it.
-struct GxClassGpu {
-    array: Texture,
-    bind_group: BindGroup,
-    /// Copies still to encode (source GpuImage's texture, destination layer). Drained by the
-    /// node's encoder on its next run; the cell draws only once every class is fully copied.
-    pending: Vec<(Texture, u32)>,
-    mip_count: u32,
-    size: Extent3d,
-}
+use super::pool::GxTexturePool;
 
-/// One coalesced draw run: adjacent bake items sharing (class, pipeline bucket, group).
+/// One coalesced draw run: adjacent live bake items sharing (bind-group slot, pipeline
+/// bucket, group). Killed items are SKIPPED at build time (B3): a run never carries an exiled
+/// or gone item, so a far cell of fully-faded faders submits no vertex work at all (the WGSL
+/// kill-bit collapse stays as the belt for the same frame's record table).
 struct GxRun {
-    class: usize,
+    /// Index into the cell's `bind_groups` (NOT a pool class index).
+    slot: usize,
     cutout: bool,
     two_sided: bool,
     index_range: Range<u32>,
@@ -136,13 +159,18 @@ struct GxRun {
 }
 
 /// A cell's assembled GPU state, cached across frames; rebuilt when the bake (mesh handle)
-/// changes.
+/// changes — which, with the shared pool, costs a record table and a few bind groups, never
+/// a texture.
 struct GxCellGpu {
     mesh: AssetId<Mesh>,
-    classes: Vec<GxClassGpu>,
+    /// One bind group per pool class this cell's items touch: (pool class index, group).
+    bind_groups: Vec<(u16, BindGroup)>,
     record_table: Buffer,
     #[allow(dead_code)] // held alive for the bind groups that reference it
     cell_uniform: Buffer,
+    /// Per item: its index into `bind_groups` — the run key, kept for kill-driven run
+    /// rebuilds.
+    item_slot: Vec<u16>,
     runs: Vec<GxRun>,
     /// CPU copy of the record table — the kill-bit sync rewrites column 3 and re-uploads.
     records: Vec<[u32; 4]>,
@@ -154,6 +182,7 @@ struct GxCellGpu {
 struct GxGpuCache {
     cells: HashMap<(i32, i32), GxCellGpu>,
     wmos: HashMap<Entity, GxCellGpu>,
+    props: HashMap<Entity, GxCellGpu>,
 }
 
 #[derive(Resource)]
@@ -281,6 +310,7 @@ fn vertex_layout() -> VertexBufferLayout {
 fn prepare_static_gx(
     gx: Res<GxWorld>,
     mut cache: ResMut<GxGpuCache>,
+    mut pool: ResMut<GxTexturePool>,
     mut pipes: ResMut<GxPipelines>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
@@ -354,6 +384,19 @@ fn prepare_static_gx(
         pipes.specialized_for = Some(key);
     }
 
+    // The map cleared (the main world published an empty set): the pool's assignments point
+    // at content the world no longer holds — reset it with the cache. Never fires on a mere
+    // area change; only `StaticGx::clear` empties ALL published maps.
+    if gx.cells.is_empty() && gx.wmos.is_empty() && gx.props.is_empty() {
+        if !pool.is_empty() {
+            *pool = GxTexturePool::default();
+        }
+        cache.cells.clear();
+        cache.wmos.clear();
+        cache.props.clear();
+        return;
+    }
+
     // Drop cache entries whose region vanished or re-baked.
     cache
         .cells
@@ -361,23 +404,50 @@ fn prepare_static_gx(
     cache
         .wmos
         .retain(|e, gpu| gx.wmos.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
+    cache
+        .props
+        .retain(|e, gpu| gx.props.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
 
-    for cell in &gx.visible {
-        if cache.cells.contains_key(cell) {
-            continue;
-        }
-        let Some(draw) = gx.cells.get(cell) else {
-            continue;
-        };
-        if let Some(gpu) = assemble_region(
-            draw,
-            &pipes,
-            &pipeline_cache,
-            &render_device,
-            &render_queue,
-            &images,
-        ) {
-            cache.cells.insert(*cell, gpu);
+    for vis in &gx.visible {
+        match vis {
+            GxDoodadVis::Cell(cell) => {
+                if cache.cells.contains_key(cell) {
+                    continue;
+                }
+                let Some(draw) = gx.cells.get(cell) else {
+                    continue;
+                };
+                if let Some(gpu) = assemble_region(
+                    draw,
+                    &mut pool,
+                    &pipes,
+                    &pipeline_cache,
+                    &render_device,
+                    &render_queue,
+                    &images,
+                ) {
+                    cache.cells.insert(*cell, gpu);
+                }
+            }
+            GxDoodadVis::Prop(entity, _) => {
+                if cache.props.contains_key(entity) {
+                    continue;
+                }
+                let Some(draw) = gx.props.get(entity) else {
+                    continue;
+                };
+                if let Some(gpu) = assemble_region(
+                    draw,
+                    &mut pool,
+                    &pipes,
+                    &pipeline_cache,
+                    &render_device,
+                    &render_queue,
+                    &images,
+                ) {
+                    cache.props.insert(*entity, gpu);
+                }
+            }
         }
     }
     for (entity, _) in &gx.visible_wmos {
@@ -389,6 +459,7 @@ fn prepare_static_gx(
         };
         if let Some(gpu) = assemble_region(
             draw,
+            &mut pool,
             &pipes,
             &pipeline_cache,
             &render_device,
@@ -398,11 +469,19 @@ fn prepare_static_gx(
             cache.wmos.insert(*entity, gpu);
         }
     }
+    // Encode this frame's queued layer copies, exactly once (B3 — see the module doc; B2's
+    // per-cell pending list was never drained and re-encoded every frame).
+    pool.drain_pending(&render_device, &render_queue);
+
     // The exile kill-bit sync (B2, 1431): when the scan's bitmap revision moved, rewrite the
-    // record table's kill column and re-upload. One whole-table write per changed cell per
+    // record table's kill column, re-upload, and REBUILD THE RUNS (B3) so killed items stop
+    // being submitted at all. One whole-table write + one CPU coalesce per changed cell per
     // change frame — band crossings are rare and a table is tens of KB; a cell that changed
     // while out of view syncs on re-entry (the revision mismatch persists until applied).
-    for cell in &gx.visible {
+    for vis in &gx.visible {
+        let GxDoodadVis::Cell(cell) = vis else {
+            continue; // prop regions carry no faders — their bitmap never revs
+        };
         let (Some(gpu), Some(draw)) = (cache.cells.get_mut(cell), gx.cells.get(cell)) else {
             continue;
         };
@@ -410,85 +489,62 @@ fn prepare_static_gx(
             continue;
         }
         for (i, rec) in gpu.records.iter_mut().enumerate() {
-            rec[3] = kill_bit(&draw.killed, i);
+            // Column w carries the probe slot in the high bits (B4) — rewrite only bit 0.
+            rec[3] = (rec[3] & !1) | kill_bit(&draw.killed, i);
         }
         render_queue.write_buffer(&gpu.record_table, 0, bytemuck::cast_slice(&gpu.records));
+        gpu.runs = build_runs(&draw.draws, &gpu.item_slot, &draw.killed);
         gpu.killed_applied = draw.killed_rev;
     }
 }
 
-/// Assemble one region's GPU state (texture classes + arrays, the per-item record table, bind
-/// groups, coalesced runs). `None` while any member texture is not yet resident — the region
-/// simply isn't drawn that frame (the entity path streams batches in piecewise; this is the
-/// same arrival class).
+/// Assemble one region's GPU state against the shared pool: pool slots for its textures, the
+/// per-item record table, one bind group per touched pool class, coalesced runs. `None` while
+/// any member texture is not yet resident — the region simply isn't drawn that frame (the
+/// entity path streams batches in piecewise; this is the same arrival class; slots already
+/// assigned stay assigned, so the retry finishes cheaper).
 fn assemble_region(
     draw: &GxCellDraw,
+    pool: &mut GxTexturePool,
     pipes: &GxPipelines,
     pipeline_cache: &PipelineCache,
     render_device: &RenderDevice,
     render_queue: &RenderQueue,
     images: &RenderAssets<GpuImage>,
 ) -> Option<GxCellGpu> {
-    // Class by (size, format, mips); assign layers DEDUPED by texture — many items share one
-    // texture (Stormwind's region carries 3,042 items over a few hundred distinct BLPs), and
-    // per-item layers blew past the D2-array layer limit the moment a city root baked. A
-    // layer's content depends only on its source texture, so sharing is exact. A class that
-    // still fills to the device limit overflows into a sibling class with the same key.
-    let max_layers = render_device.limits().max_texture_array_layers as usize;
-    type ClassAcc<'a> = (Extent3d, TextureFormat, u32, Vec<&'a GpuImage>);
-    let mut classes: Vec<ClassAcc<'_>> = Vec::new();
-    let mut item_class_layer: Vec<(u32, u32)> = vec![(0, 0); draw.draws.len()];
-    let mut assigned: HashMap<AssetId<Image>, (u32, u32)> = HashMap::default();
-    for (i, item) in draw.draws.iter().enumerate() {
-        let Some(tex) = item.texture else { continue };
-        if let Some(&cl) = assigned.get(&tex) {
-            item_class_layer[i] = cl;
-            continue;
-        }
-        // Every member texture must be resident to class the region at all.
-        let g = images.get(tex)?;
-        let sz = g.texture.size();
-        let key = (
-            Extent3d {
-                width: sz.width,
-                height: sz.height,
-                depth_or_array_layers: 1,
-            },
-            g.texture.format(),
-            g.texture.mip_level_count(),
-        );
-        let ci = classes
-            .iter()
-            .position(|(s, f, m, mem)| {
-                (*s, *f, *m) == (key.0, key.1, key.2) && mem.len() < max_layers
-            })
-            .unwrap_or_else(|| {
-                classes.push((key.0, key.1, key.2, Vec::new()));
-                classes.len() - 1
-            });
-        let layer = u32::try_from(classes[ci].3.len()).unwrap();
-        classes[ci].3.push(g);
-        let cl = (u32::try_from(ci).unwrap(), layer);
-        assigned.insert(tex, cl);
-        item_class_layer[i] = cl;
+    // Resolve every item to a pool (class, layer) — deduped globally by texture id (many
+    // items share one texture: Stormwind's region carries 3,042 items over a few hundred
+    // distinct BLPs, and neighbouring cells repeat most of them; per-item layers blew the
+    // D2-array limit the moment a city root baked, and per-CELL arrays paid the driver churn
+    // 1431 measured). Untextured items ride the white class (never sampled — TEXTURED clear).
+    let mut white: Option<u16> = None;
+    let mut item_class_layer: Vec<(u16, u16)> = Vec::with_capacity(draw.draws.len());
+    for item in &draw.draws {
+        item_class_layer.push(match item.texture {
+            Some(tex) => pool.assign(tex, images.get(tex)?, render_device),
+            None => {
+                let w = *white.get_or_insert_with(|| pool.white(render_device, render_queue));
+                (w, 0)
+            }
+        });
     }
-    // The per-item record table: [layer, batch-order nudge, packed SIDN, kill bit] per item —
-    // the vertex word's low bits index it. Untextured items ride class 0 (never sampled — the
-    // TEXTURED bit is clear); a region of ONLY untextured items still needs one dummy array.
-    // Column 3 is the exile kill bit (B2): folded from the published bitmap here, kept in
-    // sync per frame by `prepare_static_gx`'s revision check — hence COPY_DST.
+    // The per-item record table: [layer, batch-order nudge, packed SIDN, kill bit + probe
+    // slot] per item — the vertex word's low bits index it. Column 3's bit 0 is the exile
+    // kill bit (B2), folded from the published bitmap here and kept in sync by
+    // `prepare_static_gx`'s revision check (hence COPY_DST); bits 1..14 carry the interior
+    // prop's SH-probe slot (B4 — 13 bits fits `MAX_PROP_PROBES` exactly).
     let records: Vec<[u32; 4]> = draw
         .draws
         .iter()
         .enumerate()
         .map(|(i, item)| {
             [
-                item_class_layer[i].1,
+                u32::from(item_class_layer[i].1),
                 u32::from(item.order),
                 u32::from(item.sidn[0])
                     | (u32::from(item.sidn[1]) << 8)
                     | (u32::from(item.sidn[2]) << 16),
-                kill_bit(&draw.killed, i),
+                kill_bit(&draw.killed, i) | (u32::from(item.slot) << 1),
             ]
         })
         .collect();
@@ -502,132 +558,59 @@ fn assemble_region(
         contents: bytemuck::cast_slice(&[draw.origin.x, draw.origin.y, draw.origin.z, 0.0f32]),
         usage: BufferUsages::UNIFORM,
     });
+    // One bind group per DISTINCT pool class this region touches; items collapse to slots.
     let cell_layout = pipeline_cache.get_bind_group_layout(&pipes.cell_layout);
-    let mut gpu_classes: Vec<GxClassGpu> = Vec::new();
-    for (size, tex_format, mips, members) in &classes {
-        // The VRAM meter (1431's regression hunt): approximate bytes for the array about to
-        // be created — block-compressed at their block rate, else 4 B/texel — ×4/3 for mips.
-        if super::gx_perf_enabled() {
-            let per_layer = match tex_format {
-                TextureFormat::Bc1RgbaUnorm | TextureFormat::Bc1RgbaUnormSrgb => {
-                    u64::from(size.width) * u64::from(size.height) / 2
-                }
-                TextureFormat::Bc2RgbaUnorm
-                | TextureFormat::Bc2RgbaUnormSrgb
-                | TextureFormat::Bc3RgbaUnorm
-                | TextureFormat::Bc3RgbaUnormSrgb => u64::from(size.width) * u64::from(size.height),
-                _ => u64::from(size.width) * u64::from(size.height) * 4,
-            };
-            let bytes = per_layer * members.len().max(1) as u64 * if *mips > 1 { 4 } else { 3 } / 3;
-            super::GX_VRAM.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-        }
-        let array = render_device.create_texture(&TextureDescriptor {
-            label: Some("static_gx_array"),
-            size: Extent3d {
-                width: size.width,
-                height: size.height,
-                depth_or_array_layers: u32::try_from(members.len().max(1)).unwrap(),
-            },
-            mip_level_count: *mips,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: *tex_format,
-            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = array.create_view(&TextureViewDescriptor {
-            dimension: Some(TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let bind_group = render_device.create_bind_group(
-            "static_gx_cell",
-            &cell_layout,
-            &BindGroupEntries::sequential((
-                cell_uniform.as_entire_binding(),
-                record_table.as_entire_binding(),
-                &view,
-                &pipes.sampler,
-                &pipes.sampler_clamp,
-            )),
-        );
-        gpu_classes.push(GxClassGpu {
-            array,
-            bind_group,
-            pending: members
-                .iter()
-                .enumerate()
-                .map(|(layer, g)| (g.texture.clone(), u32::try_from(layer).unwrap()))
-                .collect(),
-            mip_count: *mips,
-            size: *size,
-        });
+    let mut bind_groups: Vec<(u16, BindGroup)> = Vec::new();
+    let mut item_slot: Vec<u16> = Vec::with_capacity(draw.draws.len());
+    for &(class, _) in &item_class_layer {
+        let slot = match bind_groups.iter().position(|(c, _)| *c == class) {
+            Some(s) => s,
+            None => {
+                let bg = render_device.create_bind_group(
+                    "static_gx_cell",
+                    &cell_layout,
+                    &BindGroupEntries::sequential((
+                        cell_uniform.as_entire_binding(),
+                        record_table.as_entire_binding(),
+                        pool.view(class),
+                        &pipes.sampler,
+                        &pipes.sampler_clamp,
+                    )),
+                );
+                bind_groups.push((class, bg));
+                bind_groups.len() - 1
+            }
+        };
+        item_slot.push(u16::try_from(slot).expect("gx region under u16 slots"));
     }
-    if gpu_classes.is_empty() {
-        // All-untextured region: a 1×1 white dummy array so the bind group exists.
-        let white = render_device.create_texture(&TextureDescriptor {
-            label: Some("static_gx_white"),
-            size: Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
-            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        render_queue.write_texture(
-            white.as_image_copy(),
-            &[255, 255, 255, 255],
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: None,
-            },
-            Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        let view = white.create_view(&TextureViewDescriptor {
-            dimension: Some(TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let bind_group = render_device.create_bind_group(
-            "static_gx_cell",
-            &cell_layout,
-            &BindGroupEntries::sequential((
-                cell_uniform.as_entire_binding(),
-                record_table.as_entire_binding(),
-                &view,
-                &pipes.sampler,
-                &pipes.sampler_clamp,
-            )),
-        );
-        gpu_classes.push(GxClassGpu {
-            array: white,
-            bind_group,
-            pending: Vec::new(),
-            mip_count: 1,
-            size: Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        });
-    }
-    // Coalesce adjacent items sharing (class, bucket, group) into draw runs (the bake sorted
-    // by (bucket, texture[, group]), so repeated textures and same-bucket spans fuse; a WMO
-    // run never crosses a group boundary — the selection grain).
+    let runs = build_runs(&draw.draws, &item_slot, &draw.killed);
+    Some(GxCellGpu {
+        mesh: draw.mesh.id(),
+        bind_groups,
+        record_table,
+        cell_uniform,
+        item_slot,
+        runs,
+        records,
+        killed_applied: draw.killed_rev,
+    })
+}
+
+/// Coalesce adjacent LIVE items sharing (slot, bucket, group) into draw runs (the bake sorted
+/// by (bucket, texture[, group]), so repeated textures and same-bucket spans fuse; a WMO run
+/// never crosses a group boundary — the selection grain). Killed items are skipped whole
+/// (B3): their vertices are never submitted, and the kill-bit sync rebuilds the runs on every
+/// bitmap revision — a fully-gone cell coalesces to NOTHING.
+fn build_runs(draws: &[GxItemDraw], item_slot: &[u16], killed: &[u64]) -> Vec<GxRun> {
     let mut runs: Vec<GxRun> = Vec::new();
-    for (i, item) in draw.draws.iter().enumerate() {
-        let class = item_class_layer[i].0 as usize;
+    for (i, item) in draws.iter().enumerate() {
+        if kill_bit(killed, i) != 0 {
+            continue;
+        }
+        let slot = usize::from(item_slot[i]);
         match runs.last_mut() {
             Some(r)
-                if r.class == class
+                if r.slot == slot
                     && r.cutout == item.cutout
                     && r.two_sided == item.two_sided
                     && r.group == item.group
@@ -636,7 +619,7 @@ fn assemble_region(
                 r.index_range.end = item.index_range.end;
             }
             _ => runs.push(GxRun {
-                class,
+                slot,
                 cutout: item.cutout,
                 two_sided: item.two_sided,
                 index_range: item.index_range.clone(),
@@ -644,15 +627,7 @@ fn assemble_region(
             }),
         }
     }
-    Some(GxCellGpu {
-        mesh: draw.mesh.id(),
-        classes: gpu_classes,
-        record_table,
-        cell_uniform,
-        runs,
-        records,
-        killed_applied: draw.killed_rev,
-    })
+    runs
 }
 
 /// Record-table column 3: item `i`'s exile kill bit from the published bitmap.
@@ -725,51 +700,38 @@ impl ViewNode for StaticGxNode {
         let meshes = world.resource::<RenderAssets<RenderMesh>>();
         let allocator = world.resource::<MeshAllocator>();
         // Cells draw whole; a WMO region draws only the runs whose group the flood admitted
-        // this frame (the selection rides beside the gpu state — `None` = draw everything).
+        // this frame, a prop region only the runs whose referrer SET the walk admitted (the
+        // selection rides beside the gpu state — `None` = draw everything). WMO regions
+        // FIRST, then the doodad phase — cells and prop regions in one near-first order
+        // (B3/B4): the real client's own drain order (1429's byte-true anchor: terrain →
+        // WMO → … → doodad), and the buildings are the frame's best early-z occluders for
+        // the doodads behind them.
         let mut resolved: Vec<(&GxCellGpu, &GxCellDraw, Option<&Vec<bool>>)> = Vec::new();
-        for cell in &gx.visible {
-            if let (Some(gpu), Some(draw)) = (cache.cells.get(cell), gx.cells.get(cell)) {
-                resolved.push((gpu, draw, None));
-            }
-        }
         for (entity, sel) in &gx.visible_wmos {
             if let (Some(gpu), Some(draw)) = (cache.wmos.get(entity), gx.wmos.get(entity)) {
                 resolved.push((gpu, draw, Some(sel)));
             }
         }
-        if resolved.is_empty() {
-            return Ok(());
-        }
-        // Encode any outstanding layer copies OUTSIDE the pass. `pending` drains through
-        // interior mutability-free re-borrow: the cache is not mutable here, so copies are
-        // (re-)encoded from a snapshot; encoding the same copy twice is idempotent (same src →
-        // same dst), and PrepareResources rebuilds cells only on bake changes, so the window
-        // is one frame. Simplicity over a drain flag — B2 revisits if it ever shows.
-        {
-            let encoder = render_context.command_encoder();
-            for (gpu, _, _) in &resolved {
-                for class in &gpu.classes {
-                    for (src, layer) in &class.pending {
-                        for mip in 0..class.mip_count.min(src.mip_level_count()) {
-                            let mut dst = class.array.as_image_copy();
-                            dst.mip_level = mip;
-                            dst.origin.z = *layer;
-                            let mut s = src.as_image_copy();
-                            s.mip_level = mip;
-                            encoder.copy_texture_to_texture(
-                                s,
-                                dst,
-                                Extent3d {
-                                    width: (class.size.width >> mip).max(1),
-                                    height: (class.size.height >> mip).max(1),
-                                    depth_or_array_layers: 1,
-                                },
-                            );
-                        }
+        for vis in &gx.visible {
+            match vis {
+                GxDoodadVis::Cell(cell) => {
+                    if let (Some(gpu), Some(draw)) = (cache.cells.get(cell), gx.cells.get(cell)) {
+                        resolved.push((gpu, draw, None));
+                    }
+                }
+                GxDoodadVis::Prop(entity, sel) => {
+                    if let (Some(gpu), Some(draw)) = (cache.props.get(entity), gx.props.get(entity))
+                    {
+                        resolved.push((gpu, draw, Some(sel)));
                     }
                 }
             }
         }
+        if resolved.is_empty() {
+            return Ok(());
+        }
+        // (Layer copies are encoded + submitted by `prepare_static_gx`'s pool drain, exactly
+        // once per texture — B3; the node encodes nothing outside its pass anymore.)
         // The four bucket pipelines must all be compiled before the first draw (all-or-none:
         // a cell drawing only its opaque half would flash cutout content off for a frame).
         let mut ready: HashMap<(bool, bool), &RenderPipeline> = HashMap::default();
@@ -818,7 +780,7 @@ impl ViewNode for StaticGxNode {
                     }
                 }
                 pass.set_render_pipeline(ready[&(run.cutout, run.two_sided)]);
-                pass.set_bind_group(1, &gpu.classes[run.class].bind_group, &[]);
+                pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
                 pass.draw_indexed(
                     (islice.range.start + run.index_range.start)
                         ..(islice.range.start + run.index_range.end),
@@ -849,6 +811,7 @@ pub(super) fn build(app: &mut App) {
     };
     render_app
         .init_resource::<GxGpuCache>()
+        .init_resource::<GxTexturePool>()
         .add_systems(bevy::render::RenderStartup, init_pipelines)
         .add_systems(
             Render,
@@ -874,5 +837,53 @@ pub(super) fn publish_gx_world(gx: Res<super::StaticGx>, mut out: ResMut<GxWorld
     out.cells.clone_from(&gx.world.cells);
     out.visible.clone_from(&gx.world.visible);
     out.wmos.clone_from(&gx.world.wmos);
+    out.props.clone_from(&gx.world.props);
     out.visible_wmos.clone_from(&gx.world.visible_wmos);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(index_range: Range<u32>, cutout: bool) -> GxItemDraw {
+        GxItemDraw {
+            index_range,
+            texture: None,
+            cutout,
+            two_sided: false,
+            vertex_range: 0..0,
+            group: None,
+            order: 0,
+            sidn: [0; 3],
+            slot: 0,
+        }
+    }
+
+    /// Runs fuse adjacent live items of one (slot, bucket, group); a killed item is dropped
+    /// whole and SPLITS the run around it (B3: no vertex work is submitted for killed rows);
+    /// a slot or bucket change breaks the run; an all-killed region coalesces to nothing.
+    #[test]
+    fn runs_fuse_live_items_and_split_at_kills() {
+        let draws = vec![
+            item(0..3, false),
+            item(3..6, false),
+            item(6..9, false),
+            item(9..12, true), // bucket change
+            item(12..15, true),
+        ];
+        let slots = vec![0, 0, 0, 0, 1]; // the last item binds another pool class
+        let runs = build_runs(&draws, &slots, &[]);
+        assert_eq!(runs.len(), 3, "opaque span fused; cutout split by slot");
+        assert_eq!(runs[0].index_range, 0..9);
+        assert_eq!(runs[1].index_range, 9..12);
+        assert!(runs[1].cutout);
+        assert_eq!(runs[2].slot, 1);
+        // Kill the middle opaque item: the fused run splits around it.
+        let runs = build_runs(&draws, &slots, &[0b010u64]);
+        assert_eq!(runs.len(), 4);
+        assert_eq!(runs[0].index_range, 0..3);
+        assert_eq!(runs[1].index_range, 6..9);
+        // Kill everything: nothing is submitted at all.
+        assert!(build_runs(&draws, &slots, &[0b11111u64]).is_empty());
+    }
 }

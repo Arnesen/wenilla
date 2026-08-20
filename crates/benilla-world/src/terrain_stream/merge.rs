@@ -2,6 +2,13 @@
 //! `WOW_STATIC_MERGE=0` opts out. Design 1417, lane order re-ranked by 1418's density
 //! verdict; the measured premise is 1413/1416's 44 ns/row tax).
 //!
+//! **Since 1434 this is the SECOND consolidator in line**: the retained pass
+//! (`crate::static_gx`, also default-on) takes the static populations first at the same
+//! assemble gate, and what reaches these accumulators under the defaults is its declined
+//! families (env-mapped, depth-flagged batches) plus everything under `WOW_STATIC_GX=0`,
+//! where this module is again the whole consolidation. The default flip deliberately
+//! removed no code here — this lane IS the A/B arm every gx comparison diffs against.
+//!
 //! The assembler diverts every ADT-doodad batch that is fully static (the bracket's anim
 //! exclusions), **order-free** (`Opaque`/`AlphaTest`, not additive: 0858's law that authored
 //! draw order exists only on transparent-pass batches) and not an interior-slot prop, into
