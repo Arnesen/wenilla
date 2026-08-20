@@ -457,6 +457,14 @@ mod macos {
         // Inserted unconditionally (ahead of the native-cursor early-return below) — `drive` reads
         // it every frame regardless of whether any MODE cursor decoded.
         world.insert_non_send_resource(PayloadCursors(HashMap::new()));
+        // No client data at all → say it ONCE. The per-stem warning below means *this cursor is
+        // missing from an install that exists*, which is worth a line each; with no install it is
+        // 31 lines of the same fact, and they were the loudest thing in the log of the frame-one
+        // crash that decision 1451 is about.
+        if world.get_resource::<WorldAssets>().is_none() {
+            warn!("no client data — the OS cursor stands in for every mode cursor");
+            return;
+        }
         let mut cursors = HashMap::new();
         for stem in CURSOR_STEMS {
             let Some((w, h, rgba)) = world.get_resource_mut::<WorldAssets>().and_then(|wa| {

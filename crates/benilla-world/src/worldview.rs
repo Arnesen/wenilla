@@ -212,6 +212,15 @@ fn report_check(exit: AppExit) -> AppExit {
          fact is parked on the game side. Decision 1160.",
         faults.len()
     );
+    // The no-install run (`WOW_DATA=`, decision 1451) fails for a different reason than 1160's,
+    // and the run that trips it is a gate line nobody is watching — so it says which reason.
+    if benilla_formats::wow_data().is_none() {
+        println!(
+            "WORLDVIEW_CHECK ran with NO INSTALL: a fault here is a system taking a resource that \
+             only exists when there is client data as a hard `Res`/`ResMut`. Take it as `Option` \
+             and return, or insert it ahead of the no-data bail. Decision 1451."
+        );
+    }
     AppExit::error()
 }
 /// **What the engine still needs told, and nothing more.**

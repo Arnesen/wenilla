@@ -20,7 +20,9 @@
 //!
 //! 1. **`$WOW_DATA`** — the explicit override, for a second install or a non-standard layout. Kept
 //!    because the director's rule is about what the client *assumes*, not about removing the
-//!    escape hatch; the sprawl was 11 reads of it, not the variable itself.
+//!    escape hatch; the sprawl was 11 reads of it, not the variable itself. **Set and empty**
+//!    (`WOW_DATA=`) means *there is no install*: the ladder stops there and returns nothing, which
+//!    is how a machine that has an install can still run the no-install path (decision 1451).
 //! 2. **`<project folder>/WoW/Data`** — `#[cfg(feature = "dev")]` only. Computed from **this
 //!    crate's** `CARGO_MANIFEST_DIR`, which lands on the same workspace root whichever crate is
 //!    asking, and is what the repo-root `WoW` symlink points at. Gated because a shipped binary
@@ -78,8 +80,17 @@ pub fn candidates() -> Vec<PathBuf> {
 fn candidates_from(override_dir: Option<PathBuf>, exe_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(4);
 
-    // 1 · the explicit override.
+    // 1 · the explicit override — and its EMPTY spelling. `WOW_DATA=` (set, no value) is the
+    // answer *there is no install*: it returns no candidates at all, so [`wow_data`] is `None`
+    // even in a dev build with the project folder sitting right there. It exists because the
+    // no-install boot path — which every player who unzips benilla into the wrong folder takes —
+    // was unreachable in any build we run on this machine, and rotted until it panicked on frame
+    // one (decision 1451). `scripts/gates.sh` runs the enforcer under it on every commit; a
+    // session can see what a player without data sees with `WOW_DATA= cargo play`.
     if let Some(over) = override_dir {
+        if over.as_os_str().is_empty() {
+            return Vec::new();
+        }
         out.push(over);
     }
 
@@ -191,6 +202,18 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// `WOW_DATA=` — set and empty — is *there is no install*, and it outranks every other rung
+    /// including the dev build's project folder. Without it the no-install path is unreachable on
+    /// any machine that has an install, which is every machine this is developed on (1451).
+    #[test]
+    fn an_empty_override_means_there_is_no_install() {
+        assert_eq!(
+            probe(Some(""), Some("/games/benilla")),
+            Vec::<PathBuf>::new(),
+            "`WOW_DATA=` must leave the ladder with no rungs at all"
+        );
     }
 
     /// **The falsifier for the whole record, as a unit test.** A player build — `dev` off — must

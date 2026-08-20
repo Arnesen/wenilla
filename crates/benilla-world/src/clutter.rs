@@ -435,12 +435,19 @@ pub(crate) fn stream_chunk_clutter(
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     mut chunks: Query<(Entity, &mut ClutterChunk)>,
     cfg: Res<ClutterConfig>,
-    mut geometry: ResMut<ClutterGeometry>,
-    mut assets: ResMut<WorldAssets>,
+    geometry: Option<ResMut<ClutterGeometry>>,
+    assets: Option<ResMut<WorldAssets>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
 ) {
+    // Both come from `setup_clutter`, which inserts neither when there is no client data — and a
+    // hard `ResMut` here is a *validation* failure, not a `None` the body can handle: the system
+    // never runs, Bevy's default error handler panics, and a client that found no install died on
+    // its first frame instead of sitting at the login screen (decision 1451).
+    let (Some(mut geometry), Some(mut assets)) = (geometry, assets) else {
+        return;
+    };
     let Some(cam_pos) = cam.iter().next().map(|t| t.translation()) else {
         return;
     };

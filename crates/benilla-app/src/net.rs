@@ -41,8 +41,15 @@ use motion::{
     mark_swimming_creatures, sample_splines,
 };
 pub(crate) use motion::{
-    jump_seed, CreatureSwimming, FacingStep, GroundClamped, RemoteMotion, Spline, SplineStopped,
+    jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
 };
+// `GroundClamped`'s only consumer outside `net::motion::spline` is the ground-census probe, and a
+// probe is an instrument — a build with the instruments compiled out contains nothing that names
+// this re-export, and warned about it every time (decision 1451). The `allow` is "unused in *that*
+// build", not dead code; a `cfg` here is not the alternative, because seam knowledge has exactly
+// three addresses and this file is not one of them (1179, and its test says so out loud).
+#[allow(unused_imports)]
+pub(crate) use motion::GroundClamped;
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
 pub(crate) struct NetPlugin {

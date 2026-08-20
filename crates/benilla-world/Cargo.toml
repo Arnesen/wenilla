@@ -11,7 +11,14 @@ description = "The world renderer: terrain, water, sky, weather, models, lightin
 # without this a `--no-default-features` player build gets the feature back through unification and
 # the binary carries the build machine's source-tree path after all.
 default = ["dev"]
-dev = ["benilla-formats/dev", "benilla-assets/dev"]
+#
+# `bevy/debug` rides with it (decision 1451): without it every ECS diagnostic — a panicking system,
+# a parameter that will not validate, the enforcer's whole fault list — reads `<Enable the debug
+# feature to see the name>`, which is what the frame-one crash it fixes was reported as. It stores
+# `&'static str` names on systems and params; it is diagnostics, not an instrument, so nothing
+# depends on it and the player build simply says less. Enabled here rather than in `benilla-app`
+# so `benilla-worldview` — the enforcer, whose entire output is these names — carries it too.
+dev = ["benilla-formats/dev", "benilla-assets/dev", "bevy/debug"]
 
 [dependencies]
 avian3d = "0.6"

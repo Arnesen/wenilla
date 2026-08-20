@@ -133,14 +133,21 @@ fn setup_wdl(
 fn stream_wdl(
     mut commands: Commands,
     streamer: Option<ResMut<WdlStreamer>>,
-    assets: ResMut<WorldAssets>,
+    assets: Option<ResMut<WorldAssets>>,
     focus: Res<crate::terrain_stream::ViewFocus>,
     camera: Query<&Transform, With<WorldCamera>>,
-    current_map: Res<CurrentMap>,
-    map_catalog: Res<MapCatalogRes>,
+    current_map: Option<Res<CurrentMap>>,
+    map_catalog: Option<Res<MapCatalogRes>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let Some(mut streamer) = streamer else {
+    // All four are absent together — there is no client data, so `setup_wdl` and `load_world_map`
+    // both bailed. `Option` rather than a hard `Res` because a missing resource is a *validation*
+    // failure, not a `None`: the system would never run, and Bevy's default handler panics the
+    // client (decision 1451). This one is gated on `world_is_live`, so it takes a world with no
+    // install to reach — which a player build in the wrong folder can still do.
+    let (Some(mut streamer), Some(assets), Some(current_map), Some(map_catalog)) =
+        (streamer, assets, current_map, map_catalog)
+    else {
         return;
     };
     // The map the *focus* is on — `CurrentMap` once the snap has landed, the picked character's

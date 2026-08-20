@@ -32,8 +32,9 @@ use bevy::camera::CameraOutputMode;
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
 use bevy_egui::{
-    egui, EguiContextSettings, EguiContexts, EguiGlobalSettings, EguiInput, EguiPlugin,
-    EguiPreUpdateSet, EguiPrimaryContextPass, PrimaryEguiContext,
+    egui, EguiContext, EguiContextSettings, EguiContexts, EguiFullOutput, EguiGlobalSettings,
+    EguiInput, EguiPlugin, EguiPostUpdateSet, EguiPreUpdateSet, EguiPrimaryContextPass,
+    PrimaryEguiContext,
 };
 
 use benilla_world::lighting::{ClockSource, GameClock, WowLighting};
@@ -217,7 +218,44 @@ impl Plugin for DebugPanelPlugin {
             // No ordering against the UI keyboard feed: the toggle is a dev chord (1043), which no
             // focused EditBox can consume and which needs no capture gate — the same reason `perf`'s
             // and `sound`'s toggles never needed one.
-            .add_systems(Update, (toggle_panel, gate_egui_lane).chain());
+            .add_systems(Update, (toggle_panel, gate_egui_lane).chain())
+            // The gate's other half: a gated frame still owes bevy_egui a prepared (empty) pass —
+            // between the end-pass it skipped and the output consumer that doesn't (1452).
+            .add_systems(
+                PostUpdate,
+                feed_gated_egui_output
+                    .after(EguiPostUpdateSet::EndPass)
+                    .before(EguiPostUpdateSet::ProcessOutput),
+            );
+    }
+}
+
+/// The 1445 gate's missing half (decision 1452). Upstream, `run_manually` means "the app will run
+/// the egui pass itself this frame" — never "off": `process_output_system` still `take()`s an
+/// output from every context every frame and logs at ERROR when none was prepared (bevy_egui
+/// 0.39 and 0.41 alike, `output.rs`). With the lane gated that was one ERROR per frame — a red
+/// herring beside any real failure, and gate-fatal severity for a by-design idle state (ERROR
+/// means "the client is broken": 1450).
+///
+/// So a gated frame *runs the empty pass itself* — `Context::run` with default input and no UI,
+/// exactly what the error message prescribes for manual mode. Zero widgets means zero shapes:
+/// the consumer tessellates nothing, uploads nothing, and the sleeping camera draws nothing —
+/// the lane keeps costing what 1445 bought, and bevy_egui's output contract holds. A context
+/// that genuinely ran (gate open, or a true manual runner) has `Some` output by now and is left
+/// alone.
+///
+/// Not hand-built `FullOutput::default()`: `process_output_system` tessellates whatever it is
+/// given, and tessellating a context that never began a pass panics `No fonts loaded` (measured
+/// here — fonts only initialize inside a real begin-pass). `run` is the initialization path.
+fn feed_gated_egui_output(
+    mut contexts: Query<(&mut EguiContext, &mut EguiFullOutput, &EguiContextSettings)>,
+) {
+    for (mut ctx, mut full_output, settings) in &mut contexts {
+        if settings.run_manually && full_output.0.is_none() {
+            // `get_mut`, not `get`: the immutable getter sits behind bevy_egui's
+            // `immutable_ctx` feature, off in our build.
+            full_output.0 = Some(ctx.get_mut().run(egui::RawInput::default(), |_| {}));
+        }
     }
 }
 

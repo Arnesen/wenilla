@@ -61,6 +61,17 @@ fn scope_world_art(mut scope: ArtScope, assets: Option<ResMut<WorldAssets>>) {
 /// can't be found or opened, `WorldAssets` is simply absent and downstream startup falls back to
 /// an empty free-fly scene.
 fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
+    // The one shared global-light buffer, created here (RenderDevice is live by Startup) so it exists
+    // before any material is built. Inserted FIRST — ahead of the install lookup, so no early return
+    // below can skip it: it is cloned into `WorldAssets` (for model materials) and read as the
+    // `SharedLightBuffer` resource by the terrain streamer, the model/particle lanes and the
+    // render-world upload. Always present — even with no client data — so the render upload has a
+    // target; harmless if unused. It used to be created *after* the lookup, so a client that found no
+    // install had no buffer at all and `particles::model::update_model_particles` — a hard
+    // `Res<SharedLightBuffer>` — could not validate (decision 1451).
+    let shared_light = crate::lighting::new_shared_light_buffer(&device);
+    let light_buf = shared_light.0.clone();
+    commands.insert_resource(shared_light);
     let Some(data) = benilla_formats::wow_data() else {
         warn!(
             "no WoW install found — looked in {:?}; starting with no world",
@@ -93,14 +104,8 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
         unload_budget,
     });
 
-    // The one shared global-light buffer, created here (RenderDevice is live by Startup) so it exists
-    // before any material is built. Cloned into `WorldAssets` (for model materials) and inserted as the
-    // `SharedLightBuffer` resource (the terrain streamer + the render-world upload read it). Always
-    // inserted — even with no client data — so the render upload has a target; harmless if unused.
-    let shared_light = crate::lighting::new_shared_light_buffer(&device);
     match open_chain(&data) {
-        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, shared_light.0.clone())),
+        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf)),
         Err(e) => error!("failed to open client data: {e:#}"),
     }
-    commands.insert_resource(shared_light);
 }
