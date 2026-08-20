@@ -95,13 +95,30 @@ impl UiScript {
         }
         let ids: Vec<u32> = {
             let mut model = self.model_mut();
+            // The OnUpdate population is its own list (decision 1446) — maintained by
+            // `SetScript`, `scripts`' one writer — so this reads a few hundred handles instead
+            // of re-filtering the whole scripts map. A destroyed frame's handle stays until its
+            // liveness check fails once, then compacts here.
             let frames: Vec<FrameHandle> = model
-                .scripts
+                .on_update_frames
                 .iter()
-                .filter(|(_, kinds)| kinds.contains("OnUpdate"))
-                .map(|(&h, _)| h)
+                .copied()
                 .filter(|&h| model.arena.frame(h).is_some_and(|f| f.effective_visible))
                 .collect();
+            if model
+                .on_update_frames
+                .iter()
+                .any(|&h| model.arena.frame(h).is_none())
+            {
+                let arena = &model.arena;
+                let live: Vec<FrameHandle> = model
+                    .on_update_frames
+                    .iter()
+                    .copied()
+                    .filter(|&h| arena.frame(h).is_some())
+                    .collect();
+                model.on_update_frames = live;
+            }
             let mut ids: Vec<u32> = frames.into_iter().map(|h| model.frame_id(h)).collect();
             // **Deterministic order, by frame id — i.e. creation order.**
             //
@@ -132,13 +149,18 @@ impl UiScript {
         // plus the capacity law that is this class's stand-in for `maxLines` — the cap is what fits
         // vertically, so it needs the frame's resolved rect and is collected first (the arena walk
         // below holds a mutable borrow that cannot also read `model.resolved`).
-        let message_frames: Vec<(FrameHandle, usize)> = model
-            .arena
-            .iter_frames()
-            .filter(|(_, f)| matches!(f.kind_state, crate::widget::KindState::Message(_)))
-            .map(|(h, _)| h)
-            .collect::<Vec<_>>()
-            .into_iter()
+        // Both per-kind walks below ride the arena's ticked-kind registry (decision 1446):
+        // dozens of handles instead of two full-arena sweeps per tick.
+        let ticked: Vec<FrameHandle> = model.arena.ticked_kinds().to_vec();
+        let message_frames: Vec<(FrameHandle, usize)> = ticked
+            .iter()
+            .copied()
+            .filter(|&h| {
+                model
+                    .arena
+                    .frame(h)
+                    .is_some_and(|f| matches!(f.kind_state, crate::widget::KindState::Message(_)))
+            })
             .map(|h| (h, Self::message_viewport_rows(&model, h)))
             .collect();
         for (h, viewport_rows) in message_frames {
@@ -150,7 +172,10 @@ impl UiScript {
             }
         }
         let mut finished_cooldowns: Vec<FrameHandle> = Vec::new();
-        for (h, frame) in model.arena.iter_frames_mut() {
+        for &h in &ticked {
+            let Some(frame) = model.arena.frame_mut(h) else {
+                continue;
+            };
             if let crate::widget::KindState::ScrollingMessage(smf) = &mut frame.kind_state {
                 smf.tick(elapsed);
             }

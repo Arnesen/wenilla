@@ -807,11 +807,14 @@ pub(crate) fn build_global_bones(
         .collect()
 }
 
-/// Build ONE mesh from many placed static submeshes — the transforms baked into the vertices.
-/// The `WOW_MEGA_STATIC` consolidation bracket's builder (2026-08-18 drastic-options census):
-/// same attribute recipe as [`submesh_to_static_mesh`], concatenated, with each part's placement
-/// transform applied to positions and its rotation to normals (placements scale uniformly, so
-/// directions survive). Parts lacking vertex colours pad white when any part has them — one
+/// Build ONE mesh from many placed static submeshes — the transforms baked into the vertices
+/// (the production blob build, 1418; the retired `WOW_MEGA_STATIC` bracket's unfaded twin died
+/// with it): same attribute recipe as [`submesh_to_static_mesh`], concatenated, with each part's
+/// placement transform applied to positions and its rotation to normals (placements scale
+/// uniformly, so directions survive), plus the per-vertex [`ATTRIBUTE_WOW_FADE_SPHERE`] (one
+/// sphere per PART, replicated onto each of its vertices). `slots` (index-parallel with `parts`
+/// when `Some`) additionally bakes each part's SH-probe slot as [`ATTRIBUTE_WOW_MERGED_SLOT`] —
+/// the interior-prop lane. Parts lacking vertex colours pad white when any part has them — one
 /// attribute set must cover the whole concatenation.
 ///
 /// **The mesh is recentred on its union-AABB centre** and that world centre is returned last:
@@ -822,19 +825,9 @@ pub(crate) fn build_global_bones(
 /// pixels depth-killed every transparent entity drawn after it (a per-entity fader behind a
 /// 20 %-alpha merged fence vanished outright, popping in only when the sightline cleared the
 /// segment — decision 1422). Centre-sort restores the same location-sort semantics every
-/// per-entity draw has (whose sort key is its placement origin).
-pub fn merged_static_mesh(
-    parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
-) -> (Mesh, Vec3, Vec3, Vec3) {
-    merged_static_mesh_impl(parts, None)
-}
-
-/// [`merged_static_mesh`] plus the per-vertex [`ATTRIBUTE_WOW_FADE_SPHERE`] (one sphere per
-/// PART, replicated onto each of its vertices) — the production blob build (1418). `slots`
-/// (index-parallel with `parts` when `Some`) additionally bakes each part's SH-probe slot as
-/// [`ATTRIBUTE_WOW_MERGED_SLOT`] — the interior-prop lane. The spheres stay WORLD-space —
-/// the shader compares them against the camera, never against mesh-local positions — so the
-/// recentring (see [`merged_static_mesh`]) does not touch them.
+/// per-entity draw has (whose sort key is its placement origin). The fade spheres stay
+/// WORLD-space — the shader compares them against the camera, never against mesh-local
+/// positions — so the recentring does not touch them.
 pub fn merged_static_mesh_faded(
     parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
     spheres: &[Vec4],

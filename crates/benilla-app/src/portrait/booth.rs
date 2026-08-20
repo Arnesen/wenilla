@@ -2,6 +2,13 @@
 //! camera shoots (the ref mechanism, wow-re portrait-render §4 D2). [`spawn_booth_model`] is the
 //! whole surface; the sync systems in [`super`] build [`BoothPart`]/[`BoothRider`] lists from the
 //! unit's mirrored children and hand them here.
+//!
+//! Since decision 1443 the bake rides the **collapsed rig lane** (0724/1365): the skeleton is a
+//! [`RigPose`](benilla_world::rig_anim::RigPose) buffer on the booth root — no joint entities,
+//! no per-bone `AnimatedBy` seats in bevy's `animate_targets` sweep (the booth doll was the last
+//! consumer of that lane; ~0.35 ms/frame of the open char window, decision 1441). Consumers
+//! (riders, cards, effect hosts) seat on demand-spawned anchors ([`BoothRig::anchor`]), and the
+//! park is one [`AnimParked`](benilla_world::rig_anim::AnimParked) marker on the root.
 
 use benilla_formats::BillboardKind;
 use bevy::camera::visibility::RenderLayers;
@@ -102,8 +109,58 @@ pub(super) struct BoothEffects {
     pub(super) emitters: Vec<benilla_assets::ModelEmitter>,
 }
 
-/// Spawn `effects` into a booth bake: one host per effect model, seated under its bone's `joints`
-/// entry at the model's offset, with that model's emitters owned by the host. Returns
+/// The in-flight bake's rig: the booth root plus its pending [`RigPose`] buffer (`None` = the
+/// boneless bake). Consumers seat on demand-spawned bone anchors via [`Self::anchor`]; the caller
+/// MUST [`Self::finish`] once every consumer is seated — the pose buffer only reaches the ECS
+/// then, anchors included (they are registered *in* the component).
+#[must_use = "call finish(): the pose buffer reaches the booth root only then"]
+pub(super) struct BoothRig {
+    root: Entity,
+    rig: Option<benilla_world::rig_anim::RigPose>,
+}
+
+impl BoothRig {
+    /// The anchor entity standing in for `bone` (decision 1355's shape, shared with every world
+    /// rig): spawned on first demand, seated at the current composed pose, re-seated by the
+    /// compose pass every animated frame. `None` = boneless bake or a bone outside the skeleton —
+    /// the consumer misses, exactly as a bad joint index always did.
+    pub(super) fn anchor(&mut self, commands: &mut Commands, bone: u16) -> Option<Entity> {
+        let root = self.root;
+        self.rig.as_mut()?.anchor_for(commands, root, bone)
+    }
+
+    /// Whether a rig stands at all — the park gate's "is there anything to park".
+    pub(super) fn rigged(&self) -> bool {
+        self.rig.is_some()
+    }
+
+    /// Commit the pose buffer onto the booth root — after every consumer is seated.
+    pub(super) fn finish(self, commands: &mut Commands) {
+        if let Some(rig) = self.rig {
+            commands.entity(self.root).insert(rig);
+        }
+    }
+}
+
+/// Strip a booth root's whole rig state — the bake teardown twin of the child despawn. Every
+/// empty/re-bake arm must run this: `despawn_related::<Children>` reaps the meshes and anchors,
+/// but the pose buffer, the player, the palette slot and the park marker all live ON the root,
+/// and a leftover `RigPose`+`AnimationPlayer` pair keeps evaluating (and re-writing palette rows
+/// through a leaked `RigSkin` slot) for as long as the booth stands empty.
+pub(super) fn clear_booth_rig(commands: &mut Commands, root: Entity) {
+    commands.entity(root).remove::<(
+        AnimationPlayer,
+        AnimationGraphHandle,
+        benilla_assets::ModelAnimations,
+        benilla_world::rig_anim::GlobalSeqDrive,
+        benilla_world::rig_anim::RigPose,
+        benilla_world::rig_anim::AnimParked,
+        benilla_world::rig_palette::RigSkin,
+    )>();
+}
+
+/// Spawn `effects` into a booth bake: one host per effect model, seated on its bone's anchor
+/// at the model's offset, with that model's emitters owned by the host. Returns
 /// `(emitters, frames)` — how many emitters went up, and how many of them ride a billboard frame.
 ///
 /// `light` is the booth's own light-storage buffer, bound onto every emitter
@@ -122,7 +179,7 @@ pub(super) struct BoothEffects {
 /// never need to do.
 pub(super) fn spawn_booth_effects(
     commands: &mut Commands,
-    joints: &[Entity],
+    rig: &mut BoothRig,
     layer: &RenderLayers,
     light: Option<&bevy::render::render_resource::Buffer>,
     effects: &[BoothEffects],
@@ -130,7 +187,7 @@ pub(super) fn spawn_booth_effects(
     let mut spawned = 0usize;
     let mut frames = 0usize;
     for fx in effects {
-        let Some(&joint) = joints.get(usize::from(fx.bone)) else {
+        let Some(joint) = rig.anchor(commands, fx.bone) else {
             continue; // bad bone index — bake the body without this model's effects
         };
         let host = commands
@@ -211,17 +268,19 @@ pub(super) enum BoothMotion {
 /// Spawn a booth bake under `root` on the booth's layer — the ref mechanism (wow-re §4 D2): a
 /// **fresh throwaway instance posed at Stand**, never the unit's live world pose.
 ///
-/// With a rig (skeleton + inverse bindposes; every M2 display), the booth builds a joint hierarchy,
-/// draws each part's **skinned** twin bound to it, seats riders under their bone's joint, and arms
-/// the model's own Stand (anim id 0 through its baked resolution — the ref's loader-idle seed):
-/// `motion` decides whether that Stand is **frozen at t = 0** (a portrait still) or **looping** (the
-/// live glue scenes/preview — decisions 0423 + 0539). (The ref's own sampling clock is the one
-/// unsettled INFERRED point of the verdict — t≈0 vs live phase; a frozen t=0 is inside its
-/// envelope either way.) Without a rig (boneless / WMO-display / rig not built), the static
-/// bind-pose bake: parts at identity, riders dropped (no bones to seat them on).
+/// With a rig (skeleton + inverse bindposes; every M2 display), the booth builds a collapsed
+/// [`RigPose`](benilla_world::rig_anim::RigPose) buffer (decision 1443 — no joint entities),
+/// draws each part's **skinned** twin against its palette slot, seats riders on their bone's
+/// anchor, and arms the model's own Stand (anim id 0 through its baked resolution — the ref's
+/// loader-idle seed): `motion` decides whether that Stand is **frozen at t = 0** (a portrait
+/// still) or **looping** (the live glue scenes/preview — decisions 0423 + 0539). (The ref's own
+/// sampling clock is the one unsettled INFERRED point of the verdict — t≈0 vs live phase; a
+/// frozen t=0 is inside its envelope either way.) Without a rig (boneless / WMO-display / rig
+/// not built), the static bind-pose bake: parts at identity, riders dropped (no bones to seat
+/// them on).
 ///
-/// Returns the joint entities (empty for the boneless bake) — the glue scene seats its particle
-/// emitters on them (decision 0539 §5).
+/// Returns the [`BoothRig`] handle — seat any remaining consumers on it (the effect hosts, the
+/// glue scene's emitters), then `finish()` it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_booth_model(
     commands: &mut Commands,
@@ -246,16 +305,11 @@ pub(super) fn spawn_booth_model(
     // joint and re-faced to the booth camera by [`face_booth_billboards`]. Needs the rig (no bones =
     // no eye bone); the boneless bake below drops them. `&[]` for booths that dress none.
     billboards: &[BoothBillboardSpec],
-) -> Vec<Entity> {
+) -> BoothRig {
     // A re-bake must not inherit the previous model's animation state on the shared root — nor a
-    // stale global-sequence drive holding the despawned joints, nor the previous rig's palette
+    // stale pose buffer (its anchors died with the child despawn), nor the previous rig's palette
     // slot (`RigSkin`'s on_replace hook frees it; the boneless bake below has no new one).
-    commands.entity(root).remove::<(
-        AnimationPlayer,
-        AnimationGraphHandle,
-        benilla_world::rig_anim::GlobalSeqDrive,
-        benilla_world::rig_palette::RigSkin,
-    )>();
+    clear_booth_rig(commands, root);
     let Some((skeleton, ibp, anims)) = rig.filter(|(s, _, _)| !s.joints.is_empty()) else {
         for p in parts {
             let mut child = commands.spawn((
@@ -277,22 +331,30 @@ pub(super) fn spawn_booth_model(
                 ));
             }
         }
-        return Vec::new();
+        return BoothRig { root, rig: None };
     };
-    let joints = benilla_world::rig_palette::spawn_joints(commands, root, root, skeleton);
-    // The owned palette rig (decision 0720): the booth's skinned parts tag this slot; the palette
-    // compute reads these joints like any world rig, and the booth's studio light buffer mirrors
+    // The collapsed pose buffer (decision 1443, replaying 0724/1365 for the last entity-joint
+    // rig lane): bind-pose composed, evaluated in place by the 0712 evaluator off the player
+    // below. `without_camera_billboards` because a booth is not the world camera — see its doc;
+    // the booth's cards counter-rotate to their own camera instead.
+    let mut pose =
+        benilla_world::rig_anim::RigPose::new(root, skeleton).without_camera_billboards();
+    // The owned palette rig (decision 0720): the booth's skinned parts tag this slot; the world
+    // pass writes its rows from the composed pose, and the booth's studio light buffer mirrors
     // the palette region (`rig_palette::RigPaletteMirrors`), so the booth camera sees the pose.
-    let rig_slot =
-        benilla_world::rig_palette::RigSkin::allocate(palettes, joints.clone(), ibp.clone())
-            .map_or(0, |rig| {
-                let slot = rig.slot;
-                commands.entity(root).insert(rig);
-                // Booth materials bind a STUDIO light buffer, not the shared one — route this
-                // rig's rows to the registered mirrors too.
-                palettes.mark_mirrored(slot);
-                slot
-            });
+    let rig_slot = benilla_world::rig_palette::RigSkin::allocate_bones(
+        palettes,
+        skeleton.joints.len() as u32,
+        ibp.clone(),
+    )
+    .map_or(0, |rig| {
+        let slot = rig.slot;
+        commands.entity(root).insert(rig);
+        // Booth materials bind a STUDIO light buffer, not the shared one — route this
+        // rig's rows to the registered mirrors too.
+        palettes.mark_mirrored(slot);
+        slot
+    });
     // The model's global-sequence bone channels, by motion (decision 0539 §5):
     // - **Loop** (the glue scenes + the create/select character): LIVE, on the world's own
     //   clock-driven sampler — the login gate's fires flicker, the Tauren windmill turns, the
@@ -304,22 +366,20 @@ pub(super) fn spawn_booth_model(
     if let Some(anims) = anims {
         match motion {
             BoothMotion::Loop => {
-                if let Some(drive) =
-                    benilla_world::rig_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
-                {
+                if let Some(drive) = benilla_world::rig_anim::GlobalSeqDrive::new_rig(
+                    &anims.global_bones,
+                    pose.locals.len(),
+                ) {
                     commands.entity(root).insert(drive);
                 }
             }
             BoothMotion::Frozen => {
                 for gb in &anims.global_bones {
-                    let Some(&j) = joints.get(gb.bone as usize) else {
+                    // `locals` are seeded at bind pose, so the untouched properties keep the
+                    // rest transform — the same base the joint-entity form built from.
+                    let Some(tf) = pose.locals.get_mut(gb.bone as usize) else {
                         continue;
                     };
-                    let rest = skeleton
-                        .joints
-                        .get(gb.bone as usize)
-                        .map_or(Vec3::ZERO, |jt| jt.local_translation);
-                    let mut tf = Transform::from_translation(rest);
                     if let Some(c) = &gb.translation {
                         tf.translation = c.sample(0.0);
                     }
@@ -329,7 +389,6 @@ pub(super) fn spawn_booth_model(
                     if let Some(c) = &gb.scale {
                         tf.scale = c.sample(0.0);
                     }
-                    commands.entity(j).insert(tf);
                 }
             }
         }
@@ -374,8 +433,12 @@ pub(super) fn spawn_booth_model(
             child.insert(benilla_world::rig_palette::RigPart(root));
         }
     }
+    let mut booth_rig = BoothRig {
+        root,
+        rig: Some(pose),
+    };
     for r in riders {
-        let Some(&joint) = joints.get(usize::from(r.bone)) else {
+        let Some(anchor) = booth_rig.anchor(commands, r.bone) else {
             continue; // bad bone index — bake the body without this rider
         };
         commands.spawn((
@@ -383,17 +446,17 @@ pub(super) fn spawn_booth_model(
             MeshMaterial3d(r.material.clone()),
             Transform::from_translation(r.offset),
             layer.clone(),
-            ChildOf(joint),
+            ChildOf(anchor),
         ));
     }
     // The camera-facing batches (the eye-glow, an item's gem, a glow model's quad): seat the centred
-    // quad under its bone's joint at the spec's offset — zero for the body's own batches, whose joint
-    // frame already bakes the bone pivot, so the quad lands at the eye — and tag it for
-    // [`face_booth_billboards`], which rewrites its rotation to the booth camera each frame. The
-    // rotation the joint carries here (its Stand pose) is countered there. A bone the rig lacks
-    // drops the card, like a rider.
+    // quad under its bone's anchor at the spec's offset — zero for the body's own batches, whose
+    // anchor frame already bakes the bone pivot (the 0130 rig identity), so the quad lands at the
+    // eye — and tag it for [`face_booth_billboards`], which rewrites its rotation to the booth
+    // camera each frame. The rotation the anchor carries here (its Stand pose) is countered there.
+    // A bone the rig lacks drops the card, like a rider.
     for bb in billboards {
-        let Some(&joint) = joints.get(usize::from(bb.bone)) else {
+        let Some(anchor) = booth_rig.anchor(commands, bb.bone) else {
             continue;
         };
         commands.spawn((
@@ -401,12 +464,15 @@ pub(super) fn spawn_booth_model(
             MeshMaterial3d(bb.material.clone()),
             Transform::from_translation(bb.offset),
             layer.clone(),
-            ChildOf(joint),
+            ChildOf(anchor),
             BoothBillboard { kind: bb.kind },
         ));
     }
     // Arm Stand and freeze: the player is configured *before* insertion (plain component data),
     // so the pose lands with the first animation pass — no play-after-spawn ordering dance.
+    // `ModelAnimations` goes up beside it: the 0712 evaluator reads the player THROUGH the baked
+    // pose source (`(&AnimationPlayer, &ModelAnimations, &mut RigPose)`) — no `AnimatedBy`
+    // targets exist to route bevy's own sweep here, which is the point (decision 1443).
     if let Some(anims) = anims {
         let stand = catalog.map_or(0, |c| anims.resolve(0, c).id);
         if let Some(clip) = anims.find(stand) {
@@ -432,18 +498,14 @@ pub(super) fn spawn_booth_model(
                     active.set_weight(crate::creature_anim::HAND_GRIP_WEIGHT);
                 }
             }
-            commands
-                .entity(root)
-                .insert((player, AnimationGraphHandle(anims.graph.clone())));
-            for (i, &j) in joints.iter().enumerate() {
-                commands.entity(j).insert((
-                    benilla_assets::bone_target_id(i as u16),
-                    bevy::animation::AnimatedBy(root),
-                ));
-            }
+            commands.entity(root).insert((
+                player,
+                AnimationGraphHandle(anims.graph.clone()),
+                anims.clone(),
+            ));
         }
     }
-    joints
+    booth_rig
 }
 
 /// Re-face each booth billboard card ([`BoothBillboard`]) to its booth's camera — the booth twin of

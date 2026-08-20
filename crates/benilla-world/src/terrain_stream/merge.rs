@@ -95,8 +95,13 @@ const RECONSOLIDATE_IDLE_FRAMES: u32 = 180;
 /// would flicker the cell off, the exact defect class the 1421–1423 hunt closed.
 const RETIRE_FRAMES: u32 = 10;
 
-/// The doodad spatial cell, ¼ of an ADT tile — the bracket's measured 133⅓-yd locality key
-/// (`mega_static`'s comment records the round-1 failure without it).
+/// The doodad spatial cell, ¼ of an ADT tile — the retired `WOW_MEGA_STATIC` bracket's measured
+/// 133⅓-yd locality key. Its round 1 grouped by material alone and LOST (+1.38 cpu_ms at SW,
+/// drawn 400 → ~830): one blob per material spans the whole streamed scene, so its Aabb defeats
+/// the frustum cull and every blob's full vertex load encodes every frame. The cell restores
+/// locality; the distinct-material count (~5.6k at SW) remains the blob-count floor either way —
+/// the census finding that per-material merging alone cannot reach the few-hundred-row regime
+/// (decision 1413).
 const CELL: f32 = 533.333_3 / 4.0;
 
 /// One accumulating blob: shared geometry + placement transforms + per-placement fade

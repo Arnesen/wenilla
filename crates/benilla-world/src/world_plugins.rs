@@ -72,6 +72,42 @@ impl PluginGroup for WorldPlugins {
             // thread inside `update_narrow_phase` for 12–41% of their samples; the run that
             // prompted this stalled >600 ms three times in five minutes. Decision 1232.
             .disable::<BvhBroadPhasePlugin>()
+            // …and NOT the dynamics pipeline either (decision 1445 — stage 2 of the same diet,
+            // on the same recorded premise as `SubstepCount(1)` below: the world has ZERO
+            // `RigidBody::Dynamic` bodies, zero joints, zero velocity/force consumers — verified
+            // by grep across the workspace, only Static colliders and Kinematic transports that
+            // write their `Position` directly). With no contacts (broad phase off) and no
+            // dynamic bodies, the solver bodies, the integrators, the xpbd joint solver, CCD,
+            // islands/sleeping, the joint graphs, mass-property upkeep, the narrow phase's
+            // empty-graph iteration and the render-side interpolation (zero
+            // `TransformInterpolation` users; transports tick in `Update` at render rate) were
+            // pure fixed-tick schedule overhead — ~60% of a parked frame's physics share on the
+            // 1445 trace. What stays is exactly what benilla consumes: the collider storage +
+            // backend, the collider BVH (`ColliderTreePlugin`) and spatial queries the
+            // controller/pick shape-casts ride, collider transform propagation, and the
+            // Transform↔Position sync. Revisit the moment a dynamic body enters the world —
+            // the `SubstepCount` note below is the standing tripwire.
+            .disable::<ForcePlugin>()
+            .disable::<MassPropertyPlugin>()
+            .disable::<NarrowPhasePlugin<Collider>>()
+            .disable::<JointPlugin>()
+            .disable::<PhysicsInterpolationPlugin>()
+            // `SolverSchedulePlugin` deliberately STAYS: it owns the `PhysicsSchedule`'s
+            // step-set scaffolding (the chain every kept system's `in_set` ordering hangs off —
+            // removing it left the collider-tree systems floating and tripped the ambiguity
+            // gate), plus the substep runner, which now runs a near-empty schedule.
+            .disable::<SolverBodyPlugin>()
+            .disable::<IntegratorPlugin>()
+            .disable::<SolverPlugin>()
+            .disable::<XpbdSolverPlugin>()
+            .disable::<CcdPlugin>()
+            .disable::<IslandPlugin>()
+            .disable::<IslandSleepingPlugin>()
+            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<FixedJoint>>()
+            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<RevoluteJoint>>()
+            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<PrismaticJoint>>()
+            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<DistanceJoint>>()
+            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<SphericalJoint>>()
             .add(WorldFoundation)
             // The per-frame world-transition ordering (Input → Stream → Present) the loading
             // screen relies on to cover a teleport the same frame it happens. See `schedule.rs`.
@@ -251,11 +287,6 @@ impl Plugin for WorldFoundation {
         // two scans are its entire price. Pinned, not a knob: no scene benilla renders can be
         // on the other side of the threshold.
         app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::enabled());
-        // `WOW_MEGA_STATIC=1` — the consolidation bracket (EXPERIMENT lever; the module doc owns
-        // the caveats — never a default). The resource + flush register unconditionally: with
-        // the flag off nothing ever diverts, the buffer stays empty, and the flush early-outs.
-        app.init_resource::<crate::mega_static::MegaStaticPending>();
-        app.add_systems(bevy::app::Update, crate::mega_static::flush_mega_static);
         // The retained static-world pass — ON by default (1429–1434; `WOW_STATIC_GX=0`
         // opts out; the module doc owns the design). Registers NOTHING when opted out —
         // the divert sites see `None` for its resource and the render graph never gains

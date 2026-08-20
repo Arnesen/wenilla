@@ -257,6 +257,12 @@ pub(crate) struct Model {
     /// Which handler kinds each frame has a script for (presence mirror; the closures live Lua-side
     /// in the `REG_SCRIPTS` table). Lets `tick` find OnUpdate frames without scanning Lua.
     pub(crate) scripts: HashMap<FrameHandle, HashSet<&'static str>>,
+    /// The frames carrying an `OnUpdate` script, maintained by `SetScript` — `scripts`' one
+    /// writer — so the tick iterates exactly the OnUpdate population instead of re-filtering
+    /// (and re-allocating from) the whole scripts map every frame (decision 1446). Order is
+    /// irrelevant here: the tick sorts its visible subset by frame id every pass (the
+    /// deterministic-dispatch law stays where it was).
+    pub(crate) on_update_frames: Vec<FrameHandle>,
     /// `event name → frames registered for it` (RegisterEvent), in **registration order** — an
     /// ordered Vec, never a set: the client's `SignalEvent 0x703e50` walks a per-event listener
     /// LIST, so cross-frame dispatch order is a law, not an accident (the abbey territory-line
@@ -1225,6 +1231,7 @@ impl Model {
             region_to_id: HashMap::new(),
             region_names: HashMap::new(),
             scripts: HashMap::new(),
+            on_update_frames: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
             focused_editbox: None,

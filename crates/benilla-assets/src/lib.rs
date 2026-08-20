@@ -32,11 +32,11 @@ pub use world_assets::*;
 
 mod model;
 pub use model::{
-    bone_target_id, merged_static_mesh, merged_static_mesh_faded, submesh_to_skinned_mesh,
-    submesh_to_static_mesh, AnimClip, BillboardInfo, GlobalBone, GlobalSeqChannel, ModelAnimations,
-    ModelAttachment, ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip,
-    PoseNode, PoseSource, PoseTrack, ATTRIBUTE_WOW_FADE_SPHERE, ATTRIBUTE_WOW_JOINT_INDEX,
-    ATTRIBUTE_WOW_JOINT_WEIGHT, ATTRIBUTE_WOW_MERGED_SLOT,
+    bone_target_id, merged_static_mesh_faded, submesh_to_skinned_mesh, submesh_to_static_mesh,
+    AnimClip, BillboardInfo, GlobalBone, GlobalSeqChannel, ModelAnimations, ModelAttachment,
+    ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip, PoseNode, PoseSource,
+    PoseTrack, ATTRIBUTE_WOW_FADE_SPHERE, ATTRIBUTE_WOW_JOINT_INDEX, ATTRIBUTE_WOW_JOINT_WEIGHT,
+    ATTRIBUTE_WOW_MERGED_SLOT,
 };
 mod adt;
 mod terrain;

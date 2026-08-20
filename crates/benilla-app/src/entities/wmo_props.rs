@@ -285,10 +285,9 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &mut tint_reg,
                 &mut anim_table,
                 card_owner,
-                // Never diverted into the WOW_MEGA_STATIC bracket (nor 1417's production
-                // merge, nor 1429's static-gx): these props parent under a MOVING gameobject,
-                // and every divert lane bakes world transforms.
-                None,
+                // Never diverted into 1417's production merge nor 1429's static-gx: these
+                // props parent under a MOVING gameobject, and every divert lane bakes world
+                // transforms.
                 None,
                 None,
             );

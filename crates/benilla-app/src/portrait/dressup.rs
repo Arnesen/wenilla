@@ -160,7 +160,7 @@ pub(super) fn spawn_dressup_booth(
             pending: Vec::new(),
             pending_since: None,
             aspect: 1.0,
-            joints: Vec::new(),
+            rigged: false,
             parked: false,
         },
     );
@@ -222,8 +222,10 @@ pub(super) fn sync_dressup_booth(
                 booth.wake = BOOTH_SETTLE_FRAMES;
                 booth.live = false;
                 booth.pending.clear();
-                // The despawn above took the park set with it.
-                booth.joints.clear();
+                // The despawn reaped meshes and anchors; the rig state on the ROOT needs its
+                // own strip ([`super::clear_booth_rig`]).
+                super::clear_booth_rig(&mut commands, booth.root);
+                booth.rigged = false;
                 booth.parked = false;
                 *staged = false;
             }
@@ -282,7 +284,7 @@ pub(super) fn sync_dressup_booth(
             return;
         }
         commands.entity(booth.root).despawn_related::<Children>();
-        let joints = spawn_booth_model(
+        let mut booth_rig = spawn_booth_model(
             &mut commands,
             &mut palettes,
             booth.root,
@@ -301,7 +303,7 @@ pub(super) fn sync_dressup_booth(
         );
         let (fx_emitters, _) = spawn_booth_effects(
             &mut commands,
-            &joints,
+            &mut booth_rig,
             &booth.layer,
             booth_light.pane.buffer.as_ref(),
             &bake
@@ -317,8 +319,9 @@ pub(super) fn sync_dressup_booth(
         // The bake animates, so its camera can't sleep — `gate_booth_cameras` runs it every frame
         // the window is drawing this pane, and none once it closes.
         booth.live = true;
-        // A fresh bake is animated by construction; the park set is the new skeleton's.
-        booth.joints = joints;
+        // A fresh bake is animated by construction; the park state is the new rig's.
+        booth.rigged = booth_rig.rigged();
+        booth_rig.finish(&mut commands);
         booth.parked = false;
         *staged = true;
         aim(&mut cams, DRESSUP_SLOT, &body_frame(&anchors, aspect));

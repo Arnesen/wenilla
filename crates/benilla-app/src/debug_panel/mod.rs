@@ -32,8 +32,8 @@ use bevy::camera::CameraOutputMode;
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
 use bevy_egui::{
-    egui, EguiContexts, EguiGlobalSettings, EguiInput, EguiPlugin, EguiPreUpdateSet,
-    EguiPrimaryContextPass, PrimaryEguiContext,
+    egui, EguiContextSettings, EguiContexts, EguiGlobalSettings, EguiInput, EguiPlugin,
+    EguiPreUpdateSet, EguiPrimaryContextPass, PrimaryEguiContext,
 };
 
 use benilla_world::lighting::{ClockSource, GameClock, WowLighting};
@@ -217,7 +217,7 @@ impl Plugin for DebugPanelPlugin {
             // No ordering against the UI keyboard feed: the toggle is a dev chord (1043), which no
             // focused EditBox can consume and which needs no capture gate — the same reason `perf`'s
             // and `sound`'s toggles never needed one.
-            .add_systems(Update, toggle_panel);
+            .add_systems(Update, (toggle_panel, gate_egui_lane).chain());
     }
 }
 
@@ -241,6 +241,37 @@ fn spawn_egui_camera(mut commands: Commands) {
             ..default()
         },
     ));
+}
+
+/// Demand-gate the whole egui lane (decision 1445): when no dev overlay is open — panel closed,
+/// perf HUD hidden (chord+`P`), inspect off — the primary context goes `run_manually` (which
+/// `bevy_egui`'s context-pass loop honors by skipping it outright: no begin/end pass, no
+/// tessellate, no `EguiPrimaryContextPass` run) and the overlay camera sleeps (no Core2d graph
+/// run, no composite, no render-side prep). A hidden dev surface then costs what a player build
+/// pays — nothing; before the gate the lane drew an EMPTY overlay for ~0.33 traced ms/frame
+/// (the 1445 trace). One-frame lag behind the toggles, invisible on a chord press.
+///
+/// `EguiPointerOver` clears on the way down: its writer ([`track_pointer_over_ui`]) lives inside
+/// the gated pass and would hold the last hover forever.
+fn gate_egui_lane(
+    debug: Res<DebugState>,
+    hud: Res<crate::perf::PerfHud>,
+    inspect: Res<crate::ui_script::InspectMode>,
+    mut cams: Query<(&mut Camera, &mut EguiContextSettings), With<PrimaryEguiContext>>,
+    mut over: ResMut<EguiPointerOver>,
+) {
+    let open = debug.open || hud.visible || inspect.enabled;
+    for (mut cam, mut settings) in &mut cams {
+        if cam.is_active != open {
+            cam.is_active = open;
+            if !open && over.0 {
+                over.0 = false;
+            }
+        }
+        if settings.run_manually == open {
+            settings.run_manually = !open;
+        }
+    }
 }
 
 fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugState>) {

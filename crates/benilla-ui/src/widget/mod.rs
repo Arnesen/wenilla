@@ -377,6 +377,13 @@ pub struct WidgetArena {
     /// exists" signal, so the per-frame state feed (`set_minimap_inside`'s caller) re-pushes
     /// exactly when one appears instead of walking every frame to find out.
     minimap_created: u64,
+    /// Frames whose kind carries **engine-side per-tick behavior** — ScrollingMessageFrame /
+    /// MessageFrame (the line fades) and Cooldown (the flash-finished hide). The tick's registry
+    /// (decision 1446, the `minimap_created` disposition at list size): the per-frame advance
+    /// walks these few dozen instead of the whole arena, which it used to do TWICE per tick — a
+    /// corpus UI is thousands of frames. Appended at creation (kinds never change after);
+    /// `destroy` removes its own handle, so the list never carries dead entries.
+    ticked_kinds: Vec<FrameHandle>,
 }
 
 impl Default for WidgetArena {
@@ -394,12 +401,18 @@ impl WidgetArena {
             names: HashMap::new(),
             next_insertion: 0,
             minimap_created: 0,
+            ticked_kinds: Vec::new(),
         }
     }
 
     /// Monotonic count of Minimap widgets ever created (see the field note).
     pub fn minimap_created(&self) -> u64 {
         self.minimap_created
+    }
+
+    /// The frames whose kind the host must advance each tick (see the field note).
+    pub fn ticked_kinds(&self) -> &[FrameHandle] {
+        &self.ticked_kinds
     }
 
     // ── Read access ────────────────────────────────────────────────────────────────────────────
@@ -598,8 +611,15 @@ impl WidgetArena {
         if matches!(kind, FrameKind::Minimap) {
             self.minimap_created += 1;
         }
+        let ticked = matches!(
+            kind,
+            FrameKind::ScrollingMessageFrame | FrameKind::MessageFrame | FrameKind::Cooldown
+        );
         let (index, generation) = self.frames.insert(frame);
         let handle = FrameHandle { index, generation };
+        if ticked {
+            self.ticked_kinds.push(handle);
+        }
 
         if let Some(p) = parent {
             self.frame_mut(p)
@@ -624,6 +644,8 @@ impl WidgetArena {
         let regions = frame.regions.clone();
         let parent = frame.parent;
         let name = frame.name.clone();
+        // Each (recursive) destroy removes its own handle — the tick registry stays dead-free.
+        self.ticked_kinds.retain(|&t| t != h);
 
         for c in children {
             self.destroy(c);

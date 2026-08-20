@@ -422,7 +422,7 @@ pub(super) fn spawn_glue_booth(
             pending: Vec::new(),
             pending_since: None,
             aspect: 1.0,
-            joints: Vec::new(),
+            rigged: false,
             parked: false,
         },
     );
@@ -483,11 +483,9 @@ pub(super) fn sync_glue_scene(
         // Off the glue screens: tear the scene down, free the model, square target back.
         if scene.token.is_some() {
             commands.entity(scene.root).despawn_related::<Children>();
-            commands.entity(scene.root).remove::<(
-                AnimationPlayer,
-                AnimationGraphHandle,
-                benilla_world::rig_anim::GlobalSeqDrive,
-            )>();
+            // The whole rig-state strip (pose buffer, player, palette slot — `clear_booth_rig`):
+            // the scene root outlives its bakes.
+            super::clear_booth_rig(&mut commands, scene.root);
             scene.token = None;
             scene.handle = None;
             scene.spawned = false;
@@ -529,6 +527,9 @@ pub(super) fn sync_glue_scene(
         scene.cam = None;
         scene.char_spot = Vec3::ZERO;
         commands.entity(scene.root).despawn_related::<Children>();
+        // The model may still be loading — strip the old rig state off the outliving root now,
+        // not only at the next spawn (which may be many frames away).
+        super::clear_booth_rig(&mut commands, scene.root);
     } else if scene.spawned && scene.fog != fog {
         // Same scene, other screen: rebuild in place (the handle is cached — same-frame respawn).
         scene.spawned = false;
@@ -610,7 +611,7 @@ pub(super) fn sync_glue_scene(
                 }
             })
             .collect();
-        let joints = spawn_booth_model(
+        let mut scene_rig = spawn_booth_model(
             &mut commands,
             &mut palettes,
             scene.root,
@@ -631,14 +632,14 @@ pub(super) fn sync_glue_scene(
         // UI_* scene carries (MainMenu 28, Orc 11, NightElf 12…), dead until now. The world spawn
         // path, on the booth's layer, lit/fogged by the SCENE's own light buffer (the ModelFFX fog
         // covers the whole model, emitters included — carried by `EffectLightOverride` into the
-        // shared lane's per-draw bind group); owner = the emitter bone's joint, so fire flicker
+        // shared lane's per-draw bind group); owner = the emitter bone's anchor, so fire flicker
         // rides the animated bones; anchored at the static scene root. No `EmitterFade`: a glue
         // scene always ticks. Parented under the scene root so teardown cascades.
         let mut emitters = 0usize;
         for em in &model.emitters {
-            let owner = joints
-                .get(em.def.bone as usize)
-                .map_or((scene.root, [0.0; 3]), |&j| (j, em.bone_pivot));
+            let owner = scene_rig
+                .anchor(&mut commands, em.def.bone)
+                .map_or((scene.root, [0.0; 3]), |j| (j, em.bone_pivot));
             if let Some(e) = benilla_world::particles::spawn_emitter(
                 &mut commands,
                 em,
@@ -670,6 +671,7 @@ pub(super) fn sync_glue_scene(
         if emitters > 0 {
             info!("create scene: UI_{token} — {emitters} particle emitter(s) up");
         }
+        scene_rig.finish(&mut commands);
         scene.spawned = true;
         scene.cam = model.camera0;
         scene.char_spot = stage;
@@ -780,8 +782,10 @@ pub(super) fn sync_glue_booth(
         // Empty parts (nothing selected, or the model failed) → clear the booth.
         if bake.parts.is_empty() {
             commands.entity(booth.root).despawn_related::<Children>();
-            // The despawn above took the park set with it.
-            booth.joints.clear();
+            // The despawn reaped meshes and anchors; the rig state on the ROOT needs its own
+            // strip ([`super::clear_booth_rig`]).
+            super::clear_booth_rig(&mut commands, booth.root);
+            booth.rigged = false;
             booth.parked = false;
             *last = Some((bake.revision, preview.yaw, scene_rev));
             apply_yaw(&mut commands, booth.root, spot, preview.yaw);
@@ -856,7 +860,7 @@ pub(super) fn sync_glue_booth(
             })
             .collect();
         commands.entity(booth.root).despawn_related::<Children>();
-        let joints = spawn_booth_model(
+        let mut booth_rig = spawn_booth_model(
             &mut commands,
             &mut palettes,
             booth.root,
@@ -881,7 +885,7 @@ pub(super) fn sync_glue_booth(
         // no enchant, so what shows here is each item's intrinsic effects only.
         let (fx_emitters, fx_frames) = spawn_booth_effects(
             &mut commands,
-            &joints,
+            &mut booth_rig,
             &booth.layer,
             scene_buf.as_ref(),
             &bake
@@ -901,8 +905,9 @@ pub(super) fn sync_glue_booth(
                 bake.effects.len()
             );
         }
-        // A fresh bake is animated by construction; the park set is the new skeleton's.
-        booth.joints = joints;
+        // A fresh bake is animated by construction; the park state is the new rig's.
+        booth.rigged = booth_rig.rigged();
+        booth_rig.finish(&mut commands);
         booth.parked = false;
         // The character-only fallback framing (no scene up — art missing / still loading): the
         // body-frame transform with an aspect-aware projection, because the booth target is

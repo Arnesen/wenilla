@@ -62,7 +62,8 @@ pub struct SpawnedModel {
     /// parts, world-root cards; owner-following cards manage their own lifecycle and stay out).
     pub entities: Vec<Entity>,
     /// Index-parallel with the `submeshes` slice: the entity each batch spawned, `None` where
-    /// no entity exists (a missing render form, or the `WOW_MEGA_STATIC` divert). This exists
+    /// no entity exists (a missing render form; historically also the retired `WOW_MEGA_STATIC`
+    /// bracket's divert). This exists
     /// because POSITION IS A CONTRACT: the WMO path zips per-batch group indices against what
     /// was spawned, and a skipped batch must hold its slot rather than shift every later batch
     /// onto the wrong group — which is exactly what the bracket's bare `continue` did to the
@@ -133,11 +134,6 @@ pub fn spawn_model_entities(
     // parents that list, and a card is a world root the billboard pass writes absolutely).
     // `None` for world-static placements (terrain), whose pivots never move.
     card_owner: Option<Entity>,
-    // `Some` on the world-static streamer path when the `WOW_MEGA_STATIC` bracket may divert
-    // fully static batches into the merge buffer instead of spawning them
-    // ([`crate::mega_static`] — an EXPERIMENT lever; its module doc owns the caveats). `None`
-    // on the moving-prop path (a merged blob cannot ride a gameobject).
-    mut mega: Option<&mut crate::mega_static::MegaStaticPending>,
     // `Some` on the world-static streamer paths lane 1 covers (ADT doodads + WMO group
     // geometry): the production merge buffer and this placement's merge site (decision 1417,
     // `WOW_STATIC_MERGE`). `None` on the WMO-prop and moving-gameobject paths.
@@ -491,34 +487,6 @@ pub fn spawn_model_entities(
                     kind,
                 )
             {
-                continue;
-            }
-        }
-        // The `WOW_MEGA_STATIC` divert (the consolidation bracket): a fully static batch — no
-        // anim host, not a billboard card, no per-entity material animation — skips its entity
-        // entirely; the merge flush draws it inside one blob per MATERIAL, which preserves every
-        // material semantic by construction (the handle is already deduped over blend, shade,
-        // batch order, fog policy...). Shared-table UV/tint loops would merge fine too (the
-        // table drives the material, not the entity), excluded anyway to keep the bracket's
-        // divert predicate trivially auditable.
-        if let Some(mega) = mega.as_mut() {
-            if crate::mega_static::enabled()
-                && !animated
-                && sub.billboard.is_none()
-                && sub.alpha_anim.is_none()
-                && seq_owner.is_none()
-                && sub.uv_anim.is_none()
-                && sub.rgb_anim.is_none()
-            {
-                mega.parts.push((
-                    cutout.clone(),
-                    crate::mega_static::PendingPart {
-                        geometry: sub.geometry.clone(),
-                        transform,
-                        blend: sub.blend,
-                        kind,
-                    },
-                ));
                 continue;
             }
         }

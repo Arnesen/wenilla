@@ -32,6 +32,7 @@ use crate::chat_bubble::BubbleConfig;
 use crate::minimap::MinimapZoom;
 use crate::nameplates::NameConfig;
 use crate::player::camera::{LookConfig, ZoomLimit, MOUSE_SPEED_RANGE};
+use crate::portrait::PaneRate;
 use crate::sound::SoundConfig;
 use crate::target::ClickConfig;
 use crate::ui_loot::LootConfig;
@@ -155,6 +156,12 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // `gxRestart = 1` does not apply (wgpu swaps the presentation interval live, so the box takes
     // effect on click), and `$WOW_NOVSYNC=1` overrides it session-only, below.
     ("gxVSync", "1"),
+    // The body panes' half-rate render (decision 1444) — **benilla's own CVar**, no 1.12
+    // counterpart: the reference draws its doll inside the main pass (no second view exists to
+    // rate-limit), while our RTT booths (1069) re-run the render graph per pane per frame. "1" =
+    // the doll renders at half the frame rate while its pane is open; the knob is
+    // [`crate::portrait::PaneRate`], and the default mirrors it (welded below).
+    ("boothHalfRate", "1"),
 ];
 
 /// `config.toml`'s shape: a `[cvars]` table of `Name = "value"` strings (CVars are strings in
@@ -228,6 +235,7 @@ struct Knobs<'a> {
     bubbles: &'a mut BubbleConfig,
     zoom: &'a mut ZoomLimit,
     video: &'a mut VideoConfig,
+    pane_rate: &'a mut PaneRate,
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -282,6 +290,8 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // Vertical Sync — a flag like every other checkbox here. `video::apply_present_mode`
         // watches the value and pushes it to the window; nothing else reads it.
         "gxvsync" => knobs.video.vsync = v != 0.0,
+        // The body panes' half-rate render (1444) — a flag like every other checkbox here.
+        "boothhalfrate" => knobs.pane_rate.half = v != 0.0,
         _ => return false,
     }
     true
@@ -312,6 +322,7 @@ fn load_config(
     mut bubbles: ResMut<BubbleConfig>,
     mut zoom: ResMut<ZoomLimit>,
     mut video: ResMut<VideoConfig>,
+    mut pane_rate: ResMut<PaneRate>,
 ) {
     let mut knobs = Knobs {
         sound: &mut sound,
@@ -326,6 +337,7 @@ fn load_config(
         bubbles: &mut bubbles,
         zoom: &mut zoom,
         video: &mut video,
+        pane_rate: &mut pane_rate,
     };
     if std::env::var_os("WOW_UI_SCALE").is_some() {
         persist.env_overridden.insert("uiscale".into());
@@ -403,6 +415,7 @@ fn sync_cvars(
     mut bubbles: ResMut<BubbleConfig>,
     mut zoom: ResMut<ZoomLimit>,
     mut video: ResMut<VideoConfig>,
+    mut pane_rate: ResMut<PaneRate>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -422,7 +435,7 @@ fn sync_cvars(
         );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 24] = [
+        let session: [(&str, String); 25] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -450,6 +463,7 @@ fn sync_cvars(
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
             ("gxVSync", flag(video.vsync)),
+            ("boothHalfRate", flag(pane_rate.half)),
         ];
         for (name, value) in session {
             script.set_cvar_host(name, &value);
@@ -475,6 +489,7 @@ fn sync_cvars(
         bubbles: &mut bubbles,
         zoom: &mut zoom,
         video: &mut video,
+        pane_rate: &mut pane_rate,
     };
     for (name, value) in changes {
         if apply_to_knobs(&name, &value, &mut knobs) {
@@ -518,6 +533,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         Option<ResMut<BubbleConfig>>,
         Option<ResMut<ZoomLimit>>,
         Option<ResMut<VideoConfig>>,
+        Option<ResMut<PaneRate>>,
     )> = bevy::ecs::system::SystemState::new(world);
     let (
         script,
@@ -534,6 +550,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         bubbles,
         zoom,
         video,
+        pane_rate,
     ) = state.get_mut(world);
     let (Some(mut script), Some(mut persist)) = (script, persist) else {
         return;
@@ -556,8 +573,10 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
             Some(mut bubbles),
             Some(mut zoom),
             Some(mut video),
+            Some(mut pane_rate),
         ) = (
             sound, scale, view, look, click, loot, names, clutter, minimap, bubbles, zoom, video,
+            pane_rate,
         ) {
             let mut knobs = Knobs {
                 sound: &mut sound,
@@ -572,6 +591,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
                 bubbles: &mut bubbles,
                 zoom: &mut zoom,
                 video: &mut video,
+                pane_rate: &mut pane_rate,
             };
             for (name, value) in changes {
                 if apply_to_knobs(&name, &value, &mut knobs) {
@@ -739,6 +759,8 @@ mod tests {
         // VSync welds to the video knob, which in turn welds to the window literal's boot
         // mode (`video::tests`) — so the registered "1" cannot drift from what we ship.
         assert_eq!(d["gxVSync"] != 0.0, VideoConfig::default().vsync);
+        // The pane half-rate (1444) welds to the portrait knob's shipped default.
+        assert_eq!(d["boothHalfRate"] != 0.0, PaneRate::default().half);
     }
 
     #[test]
@@ -761,6 +783,7 @@ mod tests {
         let mut bubbles = BubbleConfig::default();
         let mut zoom = ZoomLimit::default();
         let mut video = VideoConfig::default();
+        let mut pane_rate = PaneRate::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -774,6 +797,7 @@ mod tests {
             bubbles: &mut bubbles,
             zoom: &mut zoom,
             video: &mut video,
+            pane_rate: &mut pane_rate,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -892,6 +916,7 @@ mod tests {
             .init_resource::<BubbleConfig>()
             .init_resource::<ZoomLimit>()
             .init_resource::<VideoConfig>()
+            .init_resource::<PaneRate>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
 
@@ -961,6 +986,7 @@ mod tests {
             .init_resource::<BubbleConfig>()
             .init_resource::<ZoomLimit>()
             .init_resource::<VideoConfig>()
+            .init_resource::<PaneRate>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app.update();

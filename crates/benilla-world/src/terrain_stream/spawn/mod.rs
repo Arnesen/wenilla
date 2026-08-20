@@ -65,7 +65,6 @@ type SpawnTables<'w> = (
     Res<'w, crate::terrain_stream::ViewFocus>,
     ResMut<'w, ModelForms>,
     ResMut<'w, HullWelds>,
-    ResMut<'w, crate::mega_static::MegaStaticPending>,
     ResMut<'w, StaticMerge>,
     // `None` only under `WOW_STATIC_GX=0` (the resource exists whenever the retained pass
     // is armed — the default since 1434).
@@ -98,8 +97,7 @@ pub(super) fn spawn_loaded_placements(
     // model-forms cache (decision 0834).
     tables: SpawnTables,
 ) {
-    let (mut probes, mut activity, focus, mut forms, mut welds, mut mega, mut merge, mut staticgx) =
-        tables;
+    let (mut probes, mut activity, focus, mut forms, mut welds, mut merge, mut staticgx) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -205,7 +203,6 @@ pub(super) fn spawn_loaded_placements(
                         &mut tint_reg,
                         &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
-                        Some(&mut *mega),
                         Some((&mut *merge, MergeSite::Doodad { owner: p.owner })),
                         // The retained-pass collector (1429/1431) — ADT doodads are its
                         // lane; uid + label seed the fader exile identity (B2).
@@ -390,7 +387,6 @@ pub(super) fn spawn_loaded_placements(
                         &mut tint_reg,
                         &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
-                        Some(&mut *mega),
                         Some((
                             &mut *merge,
                             MergeSite::Wmo {
@@ -701,7 +697,6 @@ pub(super) fn spawn_loaded_placements(
                 &mut tint_reg,
                 &mut anim_table,
                 None, // world-static placement: cards bake their world pivot
-                Some(&mut *mega),
                 // The prop merge site (1418 lane 3): keyed by the rooms that name the prop,
                 // slot baked per vertex for the interior lane.
                 Some((

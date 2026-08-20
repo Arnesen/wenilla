@@ -925,7 +925,9 @@ pub fn plugin(app: &mut App) {
 /// Engine work that lived in `entities::attach` because the unit spawner was the first lane to
 /// want it — and the doodad animator, the portrait booth, the equipment spawner and the spell-fx
 /// spawner all reached across for it since. Its only cross-module reference was `RigJoint`, which
-/// is here, so this is where it goes.
+/// is here, so this is where it goes. The lanes have been leaving one by one for the collapsed
+/// `RigPose` buffer (units 0724, doodads 1365, booths 1443); what remains is the **attached
+/// model** lanes — equipment and spell-fx, whose joints hang under someone else's bone.
 ///
 /// `holder` is the rig root the palette belongs to; `root` is what an unparented joint attaches
 /// to. They differ for an attached model whose joints hang under someone else's bone.

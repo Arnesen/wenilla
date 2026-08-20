@@ -141,6 +141,20 @@ impl RigPose {
         }
     }
 
+    /// This rig is rendered by an **off-world camera** (a portrait booth), so the world pass must
+    /// not camera-face its billboard bones: [`finalize_rig_worlds`](super::finalize_rig_worlds)
+    /// takes its basis from the `WorldCamera`, which is not the camera drawing this rig. Dropping
+    /// the kinds leaves those bones at their composed pose — exactly what the entity-joint booth
+    /// lane produced (its joints never carried a `BillboardJointRig`), while the booth's own card
+    /// facer counter-rotates each card's anchor to the booth camera. The `flags & 0x7` parent
+    /// arms stay: that law is camera-free and runs in [`Self::compose`] regardless.
+    pub fn without_camera_billboards(mut self) -> Self {
+        self.kinds.iter_mut().for_each(|k| *k = None);
+        self.has_billboard = false;
+        self.has_special = self.arms.iter().any(Option::is_some);
+        self
+    }
+
     /// The anchor entity standing in for `bone`, spawned on first demand (decision 1355): a
     /// consumer that needs an *entity* on a bone — a held item's parent, an emitter's owner
     /// frame, a quest marker's seat — resolves it here, and only bones something actually

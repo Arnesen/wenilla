@@ -675,13 +675,30 @@ fn clamp_seat_disabled() -> bool {
 /// What [`mark_swimming_creatures`] reads per unit: identity, kind, pose, its own collision height
 /// (`None` only on a unit's first frame, before the stamp), its own WMO-room claim (whose liquid may
 /// answer for it — decision 0696), and whether it is already marked.
+/// The gate: a stamped unit re-enters the query only when its `Transform` moved (spline ticks,
+/// teleports, clamp writes); an unstamped one is retried every frame until it evaluates.
+type SwimMarkGate = Or<(Changed<Transform>, Without<SwimEvaluated>)>;
+
 type SwimMarkQuery = (
     Entity,
     &'static NetEntity,
     &'static Transform,
     Option<&'static CollisionHeight>,
     Has<CreatureSwimming>,
+    Has<SwimEvaluated>,
 );
+
+/// This unit has been through [`mark_swimming_creatures`] with its room claim settled — the
+/// change-gate's stamp (decision 1445). A stationary unit's swim state cannot change while the
+/// world stands still (1.12 water is static; the boundary depends only on the unit's own
+/// position and height), so a stamped unit re-evaluates only on `Changed<Transform>` — which
+/// every spline tick, teleport and clamp correction raises. The world NOT standing still is the
+/// [`ColliderEpoch`] (1384's law, liquid-flavoured): liquid arrives with the same streamed
+/// tiles/WMOs that attach colliders, so an epoch bump drops every stamp and the population
+/// re-evaluates once. Before the gate, `water_surface_at` ran for every streamed unit every
+/// frame — ~0.13 traced ms/frame at the Goldshire pin, almost all of it standing idlers.
+#[derive(Component)]
+pub(in crate::net) struct SwimEvaluated;
 
 /// The exit band (yd) below the swim boundary where a marked swimmer stays marked — the player
 /// boundary's **VERIFIED** 1/36-yd hysteresis (`0x7ff9d0`), an absolute distance independent of
@@ -732,10 +749,22 @@ pub(crate) struct GroundClamped {
 /// clamp the same frame (Bevy inserts the deferred-command sync point for the chain).
 pub(in crate::net) fn mark_swimming_creatures(
     mut commands: Commands,
-    units: Query<SwimMarkQuery>,
+    units: Query<SwimMarkQuery, SwimMarkGate>,
+    stamped: Query<Entity, With<SwimEvaluated>>,
     world: benilla_world::world_point::WorldPoint,
+    epoch: Res<benilla_world::collision::ColliderEpoch>,
+    mut last_epoch: Local<Option<u64>>,
 ) {
-    for (e, net, t, collision, marked) in &units {
+    // A world edge (a streamed tile/WMO attached or dropped colliders — and, with them, their
+    // liquid) invalidates every standing answer: drop the stamps, the whole population
+    // re-evaluates next frame ([`SwimEvaluated`]'s doc). Rare, so the steady state stays gated.
+    let now = epoch.get();
+    if last_epoch.replace(now) != Some(now) {
+        for e in &stamped {
+            commands.entity(e).remove::<SwimEvaluated>();
+        }
+    }
+    for (e, net, t, collision, marked, evaluated) in &units {
         if net.kind != EntityKind::Unit {
             continue; // players carry the real flag on the wire; GameObjects don't swim
         }
@@ -749,7 +778,10 @@ pub(in crate::net) fn mark_swimming_creatures(
         // It can still LEAVE: a stale mark must always be able to clear.
         let who = benilla_world::world_point::Subject::Unit(e);
         if !marked && !world.room_settled(who) {
-            continue;
+            continue; // …and stays unstamped, so it is retried until the claim lands
+        }
+        if !evaluated {
+            commands.entity(e).insert(SwimEvaluated);
         }
         let wow = bevy_to_wow(t.translation);
         let depth = world
