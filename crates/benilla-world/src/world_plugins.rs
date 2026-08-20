@@ -256,6 +256,11 @@ impl Plugin for WorldFoundation {
         // the flag off nothing ever diverts, the buffer stays empty, and the flush early-outs.
         app.init_resource::<crate::mega_static::MegaStaticPending>();
         app.add_systems(bevy::app::Update, crate::mega_static::flush_mega_static);
+        // `WOW_MERGE_CENSUS=1` — the 1417 population census (module doc): tally rides the
+        // assembler, this is just the quiet-timer printer.
+        if crate::static_merge::census_enabled() {
+            app.add_systems(bevy::app::Update, crate::static_merge::log_merge_census);
+        }
         // `WOW_UPLOAD_BUDGET=<MB>` — cap the render app's per-frame GPU asset upload (bevy's
         // `RenderAssetBytesPerFrame`, unlimited by default; only assets implementing `byte_len`
         // participate, which covers meshes and images — exactly the streaming payload). An

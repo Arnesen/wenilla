@@ -226,6 +226,15 @@ struct WowVsOut {
     // the VERTEX, like the reference FFP — the tessellation-scale smoothing IS the authored look
     // (wide floor pools, dim hoods). The fragment folds in the live gain and the saturating clamp.
     @location(8) point_lit: vec3<f32>,
+#ifdef WOW_MERGED_FADE
+    // The merged fader blob's per-placement fade alpha (decision 1418), computed in the vertex
+    // stage from the baked fade sphere. Constant across a placement's vertices, so plain
+    // interpolation reproduces it exactly.
+    @location(9) merged_fade: f32,
+#endif
+#ifdef WOW_MERGED_SLOT
+    @location(10) @interpolate(flat) merged_slot: u32,
+#endif
 }
 
 // The dynamic point-light term at a world-space point (decisions 0016/0273/0278, selection 0285) —
@@ -323,6 +332,29 @@ fn mcnk_cell_anchor(P: vec3<f32>) -> vec3<f32> {
 // attributes to the buffer layout when the mesh carries `ATTRIBUTE_WOW_JOINT_INDEX` — decision
 // 0720; Bevy's `forward_io::Vertex` only declares joints under its own SKINNED path, which no
 // benilla mesh triggers anymore).
+#ifdef WOW_MERGED_FADE
+// The faithful per-object doodad fade curve (`model_fade::doodad_fade_alpha`, exact
+// `FUN_00683f80` constants): horizontal-plane distance, `d = dist − radius`, size-bucketed
+// band, `1 − (d − start)/range` clamped. `radius > 7` never fades (never-fade members of a
+// merged blob bake their true radius and land here).
+fn merged_fade_alpha(radius: f32, horiz_dist: f32) -> f32 {
+    if (radius > 7.0) {
+        return 1.0;
+    }
+    var start = 150.0;
+    var range = 50.0;
+    if (radius <= 0.5) {
+        start = 40.0;
+        range = 10.0;
+    } else if (radius <= 2.5) {
+        start = 100.0;
+        range = 25.0;
+    }
+    let d = horiz_dist - radius;
+    return clamp(1.0 - (d - start) / range, 0.0, 1.0);
+}
+#endif
+
 struct WowVertex {
     @builtin(instance_index) instance_index: u32,
 #ifdef VERTEX_POSITIONS
@@ -343,6 +375,15 @@ struct WowVertex {
 #ifdef WOW_RIG_SKIN
     @location(10) joint_indices: vec4<u32>,
     @location(11) joint_weights: vec4<f32>,
+#endif
+#ifdef WOW_MERGED_FADE
+    // The baked placement fade sphere (decision 1418): `xyz` world center, `w` fade radius.
+    @location(12) fade_sphere: vec4<f32>,
+#endif
+#ifdef WOW_MERGED_SLOT
+    // The baked interior-prop SH-probe slot (1418 lane 3) — replaces the MeshTag payload the
+    // per-entity lane carries.
+    @location(13) merged_slot: u32,
 #endif
 }
 
@@ -473,6 +514,20 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     // but as uniform DATA: as pipeline state it made every batch index its own pipeline, and a
     // first city sight synchronously compiled ~3000 of them on the render thread (decision 0837).
     out.position.z *= 1.0 + m.sun_scale.y * 1.1920929e-7;
+#ifdef WOW_MERGED_FADE
+    // The merged fader lane (decision 1418). Alpha channel: the faithful curve, per vertex.
+    // Hidden channel: a fully-faded placement collapses its clip position past the far plane —
+    // its triangles never rasterize, the shader-side equivalent of `Visibility::Hidden` at
+    // fade 0 (the CPU authority never sees inside a blob).
+    let fade_d = distance(view.world_position.xz, vertex.fade_sphere.xz);
+    out.merged_fade = merged_fade_alpha(vertex.fade_sphere.w, fade_d);
+    if (out.merged_fade <= 0.0) {
+        out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+    }
+#ifdef WOW_MERGED_SLOT
+    out.merged_slot = vertex.merged_slot;
+#endif
+#endif
 #endif
 
 #ifdef VERTEX_UVS_A
@@ -629,6 +684,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let f = clamp((m.clutter_fade.y - d) / max(m.clutter_fade.y - m.clutter_fade.x, 0.001), 0.0, 1.0);
         base_color.a = base_color.a * f;
     }
+
     // Faithful per-object WORLD-DOODAD distance fade (`FUN_00683f80`/`model_fade.rs`): the fade alpha
     // (1.0 = opaque) rides in the per-instance `MeshTag`; tag 0 (clutter/WMO) ⇒ 1.0 no-op.
     // VERIFIED reference behaviour (`RECONCILE-fade-render-state.md`): a fading doodad is the SAME draw
@@ -664,7 +720,15 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // probe AND its alpha ramp — and a skinned part keeps its rig slot through either.
     let fade_tag = raw_tag & 0x3fffffffu;
     let alpha6 = f32(fade_tag & 0x3fu) / 63.0;
-    let obj_fade = select(alpha6, 1.0, fade_tag == 0u);
+    var obj_fade = select(alpha6, 1.0, fade_tag == 0u);
+#ifdef WOW_MERGED_FADE
+    // The merged per-vertex fade composes exactly where the per-entity tag fade did (1420):
+    // every downstream consumer — `faded_alpha`, the multiply-lerp, the additive scale, and
+    // the bit-10 re-discard on UNFADED texel alpha — sees the same algebra an individual
+    // fading doodad produced, so a fader blob on its blend twin feathers exactly like the
+    // reference (and a steady member at fade 1.0 is pixel-identical to the cutout it left).
+    obj_fade = obj_fade * in.merged_fade;
+#endif
     // The per-instance body TINT (instance_tint.rs, decision 0812) — the aura state kit's CharProc 1:
     // an aura painting the whole model one colour (ghost pale blue, poison green, Frostbolt blue).
     // Indexed by the SAME rig slot the vertex stage skins from (bits 19-29), so it needs no tag bits
@@ -872,7 +936,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // slot. Evaluated here per fragment over the same basis — note the SH lobe's soft wrap (side-on
     // ≈ 0.088·C) is the reference's authored response, deliberately NOT a hard max(N·L,0).
     // Units/GameObjects never reach this lane (base CGLight — plain day/night ×1.0, §8/§9).
+#ifdef WOW_MERGED_SLOT
+    // A merged interior-prop blob (1418 lane 3): the slot is baked per vertex — the tag's
+    // payload bits belong to the whole blob and carry only fog/alpha.
+    let probe = 7u * in.merged_slot;
+#else
     let probe = 7u * ((fade_tag >> 6u) & 0x1fffu);
+#endif
     let lit_m2_interior = clamp(
         vec3<f32>(
             dot(wow_light.prop_probes[probe + 0u], n1)

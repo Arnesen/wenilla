@@ -240,6 +240,7 @@ mod tests {
             wall: None,
             clutter: Vec::new(),
             welds: Vec::new(),
+            merged: Vec::new(),
         }
     }
 

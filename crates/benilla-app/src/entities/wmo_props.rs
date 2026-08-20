@@ -61,7 +61,7 @@ use benilla_world::model_render::ShadeSel;
 use benilla_world::particles;
 use benilla_world::terrain_stream::{
     build_collider_task, fold_interior_probe, m2_anim_bound, m2_fade, placement_collider_data,
-    point_light, spawn_model_entities, PendingCollider, PropLobeLight,
+    point_light, spawn_model_entities, PendingCollider, PropLobeLight, SpawnedModel,
 };
 
 use super::{GameObjects, ModelHandle, VisualAttached};
@@ -260,7 +260,11 @@ pub(super) fn spawn_wmo_gameobject_props(
                 }
                 slot
             });
-            let (ents, host) = spawn_model_entities(
+            let SpawnedModel {
+                entities: ents,
+                host,
+                ..
+            } = spawn_model_entities(
                 &mut commands,
                 mat_cache,
                 materials,
@@ -281,8 +285,10 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &mut tint_reg,
                 &mut anim_table,
                 card_owner,
-                // Never diverted into the WOW_MEGA_STATIC bracket: these props parent under a
-                // MOVING gameobject, and a merged blob bakes world transforms.
+                // Never diverted into the WOW_MEGA_STATIC bracket (nor 1417's production
+                // merge): these props parent under a MOVING gameobject, and a merged blob
+                // bakes world transforms.
+                None,
                 None,
             );
             commands.entity(entity).add_children(&ents);

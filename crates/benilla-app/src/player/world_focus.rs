@@ -105,7 +105,7 @@ pub(super) fn release_post_snap_hold(
     mut player: ResMut<Player>,
     progress: Option<Res<WorldLoadProgress>>,
     time: Res<Time>,
-    mut last_counters: Local<Option<[usize; 4]>>,
+    mut last_counters: Local<Option<[usize; 5]>>,
     net_cmds: Option<Res<crate::net::NetCommands>>,
 ) {
     let Some(p) = progress else { return };
@@ -129,7 +129,13 @@ pub(super) fn release_post_snap_hold(
     // Did the stream move since last frame? Any counter changing — a tile spawned, a placement
     // up, a collider queued or attached — is the destination still arriving. Tracked every frame
     // (not just while settling) so the first settling frame compares against a real baseline.
-    let counters = [p.ready, p.total, p.colliders_pending, p.placements_pending];
+    let counters = [
+        p.ready,
+        p.total,
+        p.colliders_pending,
+        p.merge_pending,
+        p.placements_pending,
+    ];
     let progressed = last_counters.replace(counters) != Some(counters);
     if !player.settling {
         return;
@@ -145,7 +151,7 @@ pub(super) fn release_post_snap_hold(
     // still up. Only a stream that has made NO progress for the whole budget — missing data, dead
     // IO — can time out now, which is the case the backstop was always for.
     let now = time.elapsed_secs();
-    if p.scene_ready && p.colliders_pending == 0 && !player.world_stale && focus_matches {
+    if p.presentable() && !player.world_stale && focus_matches {
         player.end_settle(true, now);
     } else if player.world_stale || progressed {
         player.settle_deadline = now + SETTLE_TIMEOUT;

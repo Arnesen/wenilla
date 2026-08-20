@@ -56,6 +56,22 @@ impl PlacementHost {
     }
 }
 
+/// What [`spawn_model_entities`] spawned.
+pub struct SpawnedModel {
+    /// The caller's despawn list — everything this placement owns as world roots (anim host,
+    /// parts, world-root cards; owner-following cards manage their own lifecycle and stay out).
+    pub entities: Vec<Entity>,
+    /// Index-parallel with the `submeshes` slice: the entity each batch spawned, `None` where
+    /// no entity exists (a missing render form, or the `WOW_MEGA_STATIC` divert). This exists
+    /// because POSITION IS A CONTRACT: the WMO path zips per-batch group indices against what
+    /// was spawned, and a skipped batch must hold its slot rather than shift every later batch
+    /// onto the wrong group — which is exactly what the bracket's bare `continue` did to the
+    /// surviving entities of a diverted building (found by 1417's constraint map).
+    pub by_batch: Vec<Option<Entity>>,
+    /// The anim host, when the model animates (see [`PlacementHost`]).
+    pub host: Option<PlacementHost>,
+}
+
 /// Spawn a model's submeshes at `transform` with the full doodad/WMO component set. Returns the spawned
 /// entities (for refcounted despawn).
 ///
@@ -122,11 +138,18 @@ pub fn spawn_model_entities(
     // ([`crate::mega_static`] — an EXPERIMENT lever; its module doc owns the caveats). `None`
     // on the moving-prop path (a merged blob cannot ride a gameobject).
     mut mega: Option<&mut crate::mega_static::MegaStaticPending>,
-    // Returns the spawned entities + what the anim host armed for this placement, when the model
-    // animates: the joint set (bone-indexed) the emitter spawn rides its host bone off (0130 phase
-    // 4), and the FILE sequence slot its variation roll landed on, which the emitters' rate/gate
-    // tracks must be sampled against (decision 0760).
-) -> (Vec<Entity>, Option<PlacementHost>) {
+    // `Some` on the world-static streamer paths lane 1 covers (ADT doodads + WMO group
+    // geometry): the production merge buffer and this placement's merge site (decision 1417,
+    // `WOW_STATIC_MERGE`). `None` on the WMO-prop and moving-gameobject paths.
+    mut merge: Option<(
+        &mut super::super::merge::StaticMerge,
+        super::super::merge::MergeSite<'_>,
+    )>,
+    // Returns the spawned entities + the per-batch map + what the anim host armed for this
+    // placement, when the model animates: the joint set (bone-indexed) the emitter spawn rides
+    // its host bone off (0130 phase 4), and the FILE sequence slot its variation roll landed
+    // on, which the emitters' rate/gate tracks must be sampled against (decision 0760).
+) -> SpawnedModel {
     let kind = if is_wmo {
         ModelKind::Wmo
     } else {
@@ -161,6 +184,9 @@ pub fn spawn_model_entities(
     // The parts the lazy-rig wake will promote static → skinned (decision 0863) — the ones that
     // got a [`crate::doodad_anim::SkinnedTwin`] below.
     let mut lazy_parts: Vec<Entity> = Vec::new();
+    // The per-batch slot map (see [`SpawnedModel::by_batch`]) — every `continue` in the loop
+    // below leaves a `None` in place instead of shifting later batches.
+    let mut by_batch: Vec<Option<Entity>> = vec![None; submeshes.len()];
     for (batch_idx, sub) in submeshes.iter().enumerate() {
         // The batch's app-built render form (decision 0834). Callers gate spawning on the forms
         // being complete, so a miss here is a broken contract — skip the batch rather than panic.
@@ -240,34 +266,6 @@ pub fn spawn_model_entities(
             light,
             seq_owner,
         );
-        // The `WOW_MEGA_STATIC` divert (the consolidation bracket): a fully static batch — no
-        // anim host, not a billboard card, no per-entity material animation — skips its entity
-        // entirely; the merge flush draws it inside one blob per MATERIAL, which preserves every
-        // material semantic by construction (the handle is already deduped over blend, shade,
-        // batch order, fog policy...). Shared-table UV/tint loops would merge fine too (the
-        // table drives the material, not the entity), excluded anyway to keep the bracket's
-        // divert predicate trivially auditable.
-        if let Some(mega) = mega.as_mut() {
-            if crate::mega_static::enabled()
-                && !animated
-                && sub.billboard.is_none()
-                && sub.alpha_anim.is_none()
-                && seq_owner.is_none()
-                && sub.uv_anim.is_none()
-                && sub.rgb_anim.is_none()
-            {
-                mega.parts.push((
-                    cutout.clone(),
-                    crate::mega_static::PendingPart {
-                        geometry: sub.geometry.clone(),
-                        transform,
-                        blend: sub.blend,
-                        kind,
-                    },
-                ));
-                continue;
-            }
-        }
         // The blend twin for the distance-fade feather pass (reuse the cutout when already blend, or when
         // this is a non-fading interior prop). A MULTIPLY batch (Mod/Mod2x — the weapon-rack
         // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so no
@@ -312,6 +310,96 @@ pub fn spawn_model_entities(
                 seq_owner,
             )
         };
+        // The 1417 batch classification — ONE source for both the census tally and the
+        // production divert below, so the population the census prints and the population the
+        // merge takes can never drift apart.
+        let class = crate::static_merge::BatchClass {
+            excluded: animated
+                || sub.billboard.is_some()
+                || sub.alpha_anim.is_some()
+                || seq_owner.is_some()
+                || sub.uv_anim.is_some()
+                || sub.rgb_anim.is_some(),
+            interior_prop: interior_probe,
+            order_free: matches!(sub.blend, ModelBlend::Opaque | ModelBlend::AlphaTest)
+                && !sub.additive,
+            never_fade: radius > crate::model_fade::NEVER_FADE_RADIUS,
+        };
+        // A merged FADER blob lives permanently in the reference's own fading render state —
+        // the blend twin (blend on, cutout ref on unfaded alpha, depth-write forced on) — with
+        // per-vertex alpha; at fade 1.0 that state is pixel-identical to the steady cutout, so
+        // nothing changes while it is steady and the feather is the reference's smooth
+        // translucent ramp (1420, superseding 1419's ordered-dither erode, which quantized the
+        // ramp to 16 visible steps — the director's report). Never-faders keep the cutout and
+        // the opaque bins; a steady interior prop never fades at all, so it keeps the cutout
+        // AND bakes an infinite sphere (its members carry no `DoodadFade` — the merged path
+        // must not invent one).
+        let merge_mat = if class.never_fade || steady_interior_prop {
+            &cutout
+        } else {
+            &blend
+        };
+        let merge_sphere = if steady_interior_prop {
+            Vec4::new(0.0, 0.0, 0.0, f32::INFINITY)
+        } else {
+            Vec4::from((transform.transform_point(local_center), radius))
+        };
+        if crate::static_merge::census_enabled() {
+            let key = merge
+                .as_ref()
+                .and_then(|(_, site)| site.census_key(batch_idx, merge_mat, &transform));
+            crate::static_merge::tally(&class, is_wmo, sub.geometry.positions.len(), key);
+        }
+        // The production consolidation divert (`WOW_STATIC_MERGE=1`, 1417/1418): an order-free
+        // static doodad batch — faders included, their fade rides the baked sphere through the
+        // shader's WOW_MERGED_FADE lane — merges into its site's blob instead of spawning. Its
+        // `by_batch` slot stays `None`; a refused divert (a WMO/prop site — 1418's verdict)
+        // falls through and spawns individually.
+        if let Some((merge, site)) = merge.as_mut() {
+            if crate::terrain_stream::merge::merge_enabled()
+                && class.merges()
+                && merge.divert(
+                    site,
+                    batch_idx,
+                    merge_mat,
+                    &sub.geometry,
+                    transform,
+                    merge_sphere,
+                    sub.blend,
+                    kind,
+                )
+            {
+                continue;
+            }
+        }
+        // The `WOW_MEGA_STATIC` divert (the consolidation bracket): a fully static batch — no
+        // anim host, not a billboard card, no per-entity material animation — skips its entity
+        // entirely; the merge flush draws it inside one blob per MATERIAL, which preserves every
+        // material semantic by construction (the handle is already deduped over blend, shade,
+        // batch order, fog policy...). Shared-table UV/tint loops would merge fine too (the
+        // table drives the material, not the entity), excluded anyway to keep the bracket's
+        // divert predicate trivially auditable.
+        if let Some(mega) = mega.as_mut() {
+            if crate::mega_static::enabled()
+                && !animated
+                && sub.billboard.is_none()
+                && sub.alpha_anim.is_none()
+                && seq_owner.is_none()
+                && sub.uv_anim.is_none()
+                && sub.rgb_anim.is_none()
+            {
+                mega.parts.push((
+                    cutout.clone(),
+                    crate::mega_static::PendingPart {
+                        geometry: sub.geometry.clone(),
+                        transform,
+                        blend: sub.blend,
+                        kind,
+                    },
+                ));
+                continue;
+            }
+        }
         // Register both variants' materials for the per-frame UV scroll (idempotent per material —
         // every instance of the batch lands on the same deduped handle).
         // A period-0 loop is a constant the material seed already wrote (`sample(0.0)` IS its
@@ -484,6 +572,7 @@ pub fn spawn_model_entities(
             }
             (entity, local_center)
         };
+        by_batch[batch_idx] = Some(entity);
         // Animated material alpha (decision 0130 phase 2): the rare batch whose colour-alpha/weight
         // tracks animate (fire flicker) or constantly dim gets its per-instance sampler; the
         // visibility authority composes the value into the render-alpha tag + the A ≤ 0 cull.
@@ -577,7 +666,11 @@ pub fn spawn_model_entities(
         let anchors = h.finish(commands);
         PlacementHost { anchors, root, arm }
     });
-    (out, placement_host)
+    SpawnedModel {
+        entities: out,
+        by_batch,
+        host: placement_host,
+    }
 }
 
 /// The `Aabb` a placed submesh is culled with: its build-time bind-pose bound, widened by the

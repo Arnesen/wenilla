@@ -224,6 +224,29 @@ pub const ATTRIBUTE_WOW_JOINT_WEIGHT: bevy::mesh::MeshVertexAttribute =
         bevy::render::render_resource::VertexFormat::Float32x4,
     );
 
+/// A merged fader blob's per-vertex fade sphere (`center.xyz` world-space, `w` = fade radius —
+/// decision 1418): every vertex of one baked placement carries the placement's sphere, and
+/// `wow_model.wgsl` computes the faithful `doodad_fade_alpha` from it per vertex (the erode
+/// lane), replacing the per-entity MeshTag/twin/Hidden fade channels a merged draw cannot
+/// express. Own attribute id for the same reason as the joints above; shader location 12.
+pub const ATTRIBUTE_WOW_FADE_SPHERE: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Wow_FadeSphere",
+        988_540_919,
+        bevy::render::render_resource::VertexFormat::Float32x4,
+    );
+
+/// A merged interior-prop blob's per-vertex SH-probe slot (decision 1418 lane 3): the slot
+/// index every vertex of one baked placement carries, replacing the per-entity `MeshTag`
+/// payload (`wow_model.wgsl`'s `WOW_MERGED_SLOT` reads it instead of the tag bits). Shader
+/// location 13.
+pub const ATTRIBUTE_WOW_MERGED_SLOT: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Wow_MergedSlot",
+        988_540_920,
+        bevy::render::render_resource::VertexFormat::Uint32,
+    );
+
 /// The app-facing **static** mesh build (decision 0834): geometry only, `RENDER_WORLD`-only
 /// usages — the render world takes the vertex buffers at extract and the main world keeps no
 /// copy. Consumers must pair it with an explicit `Aabb` computed at build time (the exterior
@@ -794,6 +817,25 @@ pub(crate) fn build_global_bones(
 pub fn merged_static_mesh(
     parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
 ) -> (Mesh, Vec3, Vec3) {
+    merged_static_mesh_impl(parts, None)
+}
+
+/// [`merged_static_mesh`] plus the per-vertex [`ATTRIBUTE_WOW_FADE_SPHERE`] (one sphere per
+/// PART, replicated onto each of its vertices) — the production blob build (1418). `slots`
+/// (index-parallel with `parts` when `Some`) additionally bakes each part's SH-probe slot as
+/// [`ATTRIBUTE_WOW_MERGED_SLOT`] — the interior-prop lane.
+pub fn merged_static_mesh_faded(
+    parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
+    spheres: &[Vec4],
+    slots: Option<&[u32]>,
+) -> (Mesh, Vec3, Vec3) {
+    merged_static_mesh_impl(parts, Some((spheres, slots)))
+}
+
+fn merged_static_mesh_impl(
+    parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
+    extras: Option<(&[Vec4], Option<&[u32]>)>,
+) -> (Mesh, Vec3, Vec3) {
     let any_colors = parts
         .iter()
         .any(|(s, _)| s.vertex_colors.len() == s.positions.len());
@@ -802,8 +844,10 @@ pub fn merged_static_mesh(
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    let mut fade: Vec<[f32; 4]> = Vec::new();
+    let mut slot_verts: Vec<u32> = Vec::new();
     let (mut mn, mut mx) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    for (sub, transform) in parts {
+    for (i, (sub, transform)) in parts.iter().enumerate() {
         let base = u32::try_from(positions.len()).expect("merged mesh under u32 vertices");
         for p in &sub.positions {
             let w = transform.transform_point(wow_to_bevy(*p));
@@ -834,6 +878,15 @@ pub fn merged_static_mesh(
                 ));
             }
         }
+        if let Some((spheres, slots)) = extras {
+            fade.extend(std::iter::repeat_n(
+                spheres[i].to_array(),
+                sub.positions.len(),
+            ));
+            if let Some(slots) = slots {
+                slot_verts.extend(std::iter::repeat_n(slots[i], sub.positions.len()));
+            }
+        }
         indices.extend(sub.indices.iter().map(|i| base + i));
     }
     let mut mesh = Mesh::new(
@@ -845,6 +898,15 @@ pub fn merged_static_mesh(
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     if any_colors {
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    }
+    if let Some((_, slots)) = extras {
+        mesh.insert_attribute(ATTRIBUTE_WOW_FADE_SPHERE, fade);
+        if slots.is_some() {
+            mesh.insert_attribute(
+                ATTRIBUTE_WOW_MERGED_SLOT,
+                bevy::mesh::VertexAttributeValues::Uint32(slot_verts),
+            );
+        }
     }
     mesh.insert_indices(Indices::U32(indices));
     (mesh, mn, mx)

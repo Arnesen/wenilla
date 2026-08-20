@@ -40,12 +40,14 @@ use benilla_assets::{m2_url, wmo_url};
 
 mod collider;
 mod furnish;
+pub mod merge;
 mod queries;
 mod spawn;
 mod weld;
 
 use collider::{finish_colliders, impassable_wall_data, terrain_collider_data};
 use furnish::furnish_tile_cells;
+use merge::{flush_static_merge, StaticMerge};
 use spawn::prop_light::WmoDoodadInst;
 use spawn::spawn_loaded_placements;
 use weld::{flush_hull_welds, HullWelds};
@@ -57,7 +59,7 @@ pub use spawn::prop_light::{fold_interior_probe, PropLobeLight};
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
 pub use collider::{build_collider_task, placement_collider_data, PendingCollider};
-pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities};
+pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities, SpawnedModel};
 // The position queries + area authority (their home is `queries`; paths stay `terrain_stream::X`).
 use queries::update_current_area;
 pub use queries::{
@@ -144,6 +146,10 @@ struct TileState {
     /// The welded map-doodad hull colliders this tile owns (decision 1369): batches of the hulls
     /// whose placements registered here first, despawned with the tile like [`Self::wall`].
     welds: Vec<Entity>,
+    /// The merged static-render blobs this tile owns (decision 1417, `WOW_STATIC_MERGE`):
+    /// per-(cell × material) bakes of the doodads whose placements registered here first,
+    /// despawned with the tile exactly like [`Self::welds`].
+    merged: Vec<Entity>,
 }
 
 /// Doodad/WMO placements spawned **once** and shared across the tiles that reference them — the client's
@@ -214,6 +220,11 @@ pub struct WorldLoadProgress {
     pub scene_ready: bool,
     /// Outstanding collider attaches (decision 0610's queue) — published by `finish_colliders`.
     pub colliders_pending: usize,
+    /// Unflushed static-merge accumulators (1418, `WOW_STATIC_MERGE`) — published by
+    /// `flush_static_merge`. Merged world geometry that has not yet baked is a hole the reveal
+    /// must not show; same conservative semantics as the weld backlog inside
+    /// [`Self::colliders_pending`]. Always `0` with the lever off.
+    pub merge_pending: usize,
     /// Focus-neighbourhood placements not yet spawned (the wait instrument's term).
     pub placements_pending: usize,
     /// **Which tile these facts are about** — the focus tile the streamer computed this frame.
@@ -246,7 +257,7 @@ impl WorldLoadProgress {
     /// The world at the focus is presentable — the scene term plus a quiet collider queue. What
     /// both consumers (the screen clear here, the settle release in the streamer) key on.
     pub fn presentable(&self) -> bool {
-        self.scene_ready && self.colliders_pending == 0
+        self.scene_ready && self.colliders_pending == 0 && self.merge_pending == 0
     }
 }
 
@@ -448,6 +459,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<StreamActivity>()
             .init_resource::<Placements>()
             .init_resource::<HullWelds>()
+            .init_resource::<StaticMerge>()
             .init_resource::<crate::model_forms::ModelForms>()
             .init_resource::<CurrentArea>()
             // **The streaming chain lives in `WorldStage::Stream`** — the load-bearing half of the
@@ -467,6 +479,7 @@ impl Plugin for TerrainPlugin {
                     furnish_tile_cells,
                     spawn_loaded_placements,
                     flush_hull_welds,
+                    flush_static_merge,
                     sync_interior_volumes,
                 )
                     .chain()
@@ -556,8 +569,11 @@ fn stream_terrain(
     // reason as `asset_stores`.
     location: (Option<Res<CurrentMap>>, Option<Res<MapCatalogRes>>),
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
-    mut welds: ResMut<HullWelds>,
+    // Bundled for the same 16-param reason as `asset_stores`: the two stream-batch accumulators
+    // the map-change drop must clear.
+    batchers: (ResMut<HullWelds>, ResMut<StaticMerge>),
 ) {
+    let (mut welds, mut static_merge) = batchers;
     let (mut materials, mut meshes, wdts, _time, mut activity) = asset_stores;
     let (current_map, map_catalog) = location;
     // The shared light buffer + map catalog are set up by other plugins' startup; until they exist
@@ -589,6 +605,7 @@ fn stream_terrain(
             &mut state,
             placements,
             &mut welds,
+            &mut static_merge,
             &mut activity,
         );
         state.map_dir = Some(dir.clone());
@@ -752,6 +769,7 @@ fn stream_terrain(
                     wall: None,
                     clutter: Vec::new(),
                     welds: Vec::new(),
+                    merged: Vec::new(),
                 },
             );
         }
@@ -1038,6 +1056,7 @@ fn drop_streamed_world(
     state: &mut TerrainStreamer,
     placements: &mut Placements,
     welds: &mut HullWelds,
+    merge: &mut StaticMerge,
     activity: &mut StreamActivity,
 ) {
     for ((_tx, _ty), t) in state.tiles.drain() {
@@ -1056,6 +1075,10 @@ fn drop_streamed_world(
     // map's tiles are requested (and their `TileState`s inserted) on this very frame, so a stale
     // accumulator could weld the previous map's geometry into a same-numbered fresh tile.
     welds.clear();
+    // Same staleness argument for the merge accumulators (1417) and the census tallies: both
+    // describe the world just dropped, and tile keys repeat across maps.
+    merge.clear();
+    crate::static_merge::reset();
 }
 
 /// Expire the placement material dedup by **distance** (decision 0793) — the within-map half of
@@ -1082,8 +1105,11 @@ fn release_world(
     mut forms: ResMut<crate::model_forms::ModelForms>,
     mut progress: Option<ResMut<WorldLoadProgress>>,
     mut activity: ResMut<StreamActivity>,
-    mut welds: ResMut<HullWelds>,
+    // Bundled for the same reason as `stream_terrain`'s pair: the two stream-batch
+    // accumulators the world drop must clear (and clippy's argument-count line).
+    batchers: (ResMut<HullWelds>, ResMut<StaticMerge>),
 ) {
+    let (mut welds, mut static_merge) = batchers;
     if state.tiles.is_empty() && state.map_dir.is_none() {
         return;
     }
@@ -1100,6 +1126,7 @@ fn release_world(
         &mut state,
         &mut placements,
         &mut welds,
+        &mut static_merge,
         &mut activity,
     );
     state.map_dir = None;
@@ -1116,7 +1143,13 @@ fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
     for e in t.entity.into_iter().chain(t.wall) {
         commands.entity(e).try_despawn();
     }
-    for &e in t.liquid.iter().chain(&t.clutter).chain(&t.welds) {
+    for &e in t
+        .liquid
+        .iter()
+        .chain(&t.clutter)
+        .chain(&t.welds)
+        .chain(&t.merged)
+    {
         commands.entity(e).try_despawn();
     }
 }

@@ -467,12 +467,14 @@ fn drive_loading_screen(
                 screen.last_wait_log = now;
                 info!(
                     "loading screen: waiting {:.1}s — {}/{} resident, {} placements pending, \
-                     {} colliders pending, awaiting_snap={}, settling={}, warm={}, ui_pending={}",
+                     {} colliders pending, {} merges pending, awaiting_snap={}, settling={}, \
+                     warm={}, ui_pending={}",
                     now - screen.active_since,
                     progress.ready,
                     progress.total,
                     progress.placements_pending,
                     progress.colliders_pending,
+                    progress.merge_pending,
                     screen.awaiting_snap,
                     player_settling,
                     warm.satisfied(),

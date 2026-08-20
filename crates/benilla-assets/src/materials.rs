@@ -270,6 +270,42 @@ impl MaterialExtension for WowModelExt {
             attrs.push(crate::ATTRIBUTE_WOW_JOINT_WEIGHT.at_shader_location(11));
             descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
         }
+        // The merged fader blob (decisions 1418/1420): a mesh carrying the per-vertex fade
+        // sphere compiles the WOW_MERGED_FADE path — the faithful doodad fade curve computed
+        // per vertex (folded into the tag fade the fragment already consumes) and a clip-space
+        // collapse at zero (the Hidden channel). The blob's material is its blend TWIN, so the
+        // feather is the reference's own translucent ramp. Same rebuild pattern as the joints
+        // above; the two attribute sets never co-occur (merged blobs never skin).
+        if layout.0.contains(crate::ATTRIBUTE_WOW_FADE_SPHERE) {
+            descriptor.vertex.shader_defs.push("WOW_MERGED_FADE".into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_MERGED_FADE".into());
+            }
+            let mut attrs = Vec::with_capacity(6);
+            for (attr, loc) in [
+                (Mesh::ATTRIBUTE_POSITION, 0),
+                (Mesh::ATTRIBUTE_NORMAL, 1),
+                (Mesh::ATTRIBUTE_UV_0, 2),
+                (Mesh::ATTRIBUTE_UV_1, 3),
+                (Mesh::ATTRIBUTE_TANGENT, 4),
+                (Mesh::ATTRIBUTE_COLOR, 5),
+            ] {
+                if layout.0.contains(attr) {
+                    attrs.push(attr.at_shader_location(loc));
+                }
+            }
+            attrs.push(crate::ATTRIBUTE_WOW_FADE_SPHERE.at_shader_location(12));
+            // The interior-prop half (1418 lane 3): the baked SH-probe slot replaces the
+            // per-entity MeshTag payload.
+            if layout.0.contains(crate::ATTRIBUTE_WOW_MERGED_SLOT) {
+                descriptor.vertex.shader_defs.push("WOW_MERGED_SLOT".into());
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    fragment.shader_defs.push("WOW_MERGED_SLOT".into());
+                }
+                attrs.push(crate::ATTRIBUTE_WOW_MERGED_SLOT.at_shader_location(13));
+            }
+            descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
+        }
         // M2 render flags 0x10 (no depth-write) / 0x08 (no depth-test), per batch. Default: write depth
         // (LEQUAL) like the real client — including transparent batches, which fixes the bleed-through.
         if let Some(ds) = descriptor.depth_stencil.as_mut() {

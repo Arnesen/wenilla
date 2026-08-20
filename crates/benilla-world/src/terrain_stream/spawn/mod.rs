@@ -7,7 +7,7 @@ mod assemble;
 mod fx;
 pub(crate) mod prop_light;
 
-pub use assemble::spawn_model_entities;
+pub use assemble::{spawn_model_entities, SpawnedModel};
 pub use fx::point_light;
 use fx::{
     emitter_fade, spawn_emitters_for, spawn_lights_for, spawn_ribbons_for, spawn_wmo_lights_for,
@@ -39,6 +39,7 @@ use super::collider::{
     build_collider_task, doodad_bodies_disabled, doodad_hulls_bare, placement_collider_data,
     PendingCollider,
 };
+use super::merge::{MergeSite, StaticMerge};
 use super::weld::{hull_weld_disabled, HullWelds};
 use super::{
     doodad_ground_shade, ModelHandle, Placements, ShadeResolve, TerrainStreamer, SPAWN_BUDGET,
@@ -65,6 +66,7 @@ type SpawnTables<'w> = (
     ResMut<'w, ModelForms>,
     ResMut<'w, HullWelds>,
     ResMut<'w, crate::mega_static::MegaStaticPending>,
+    ResMut<'w, StaticMerge>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -93,7 +95,7 @@ pub(super) fn spawn_loaded_placements(
     // model-forms cache (decision 0834).
     tables: SpawnTables,
 ) {
-    let (mut probes, mut activity, focus, mut forms, mut welds, mut mega) = tables;
+    let (mut probes, mut activity, focus, mut forms, mut welds, mut mega, mut merge) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -163,7 +165,11 @@ pub(super) fn spawn_loaded_placements(
                         };
                     let (radius, center) = m2_fade(&m.bounds, p.transform.scale.x);
                     let anim_bound = m2_anim_bound(&m.bounds);
-                    let (mut ents, host) = spawn_model_entities(
+                    let SpawnedModel {
+                        entities: mut ents,
+                        host,
+                        ..
+                    } = spawn_model_entities(
                         &mut commands,
                         mat_cache,
                         materials,
@@ -186,6 +192,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
                         Some(&mut *mega),
+                        Some((&mut *merge, MergeSite::Doodad { owner: p.owner })),
                     );
                     // ADT doodads are exterior scene: from inside a WMO they draw only through a
                     // portal window (`0x683700`, fed solely by the per-window walk `0x682fa0` — see
@@ -279,7 +286,14 @@ pub(super) fn spawn_loaded_placements(
                     }
                     // WMOs carry no authored bounds → never size-fade (∞ radius), rely on the far-clip.
                     // (`m2: None` ⇒ no anim host, so the joint half of the return is always empty.)
-                    let (mut ents, _) = spawn_model_entities(
+                    // Hoisted above the spawn: the merge site needs it (a portal-gated building's
+                    // blobs take `WmoGroupVis`), and the instance logic below reuses it.
+                    let has_portals = !m.portal_refs.is_empty() && !m.portal_infos.is_empty();
+                    let SpawnedModel {
+                        entities: mut ents,
+                        by_batch,
+                        ..
+                    } = spawn_model_entities(
                         &mut commands,
                         mat_cache,
                         materials,
@@ -302,6 +316,14 @@ pub(super) fn spawn_loaded_placements(
                         &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
                         Some(&mut *mega),
+                        Some((
+                            &mut *merge,
+                            MergeSite::Wmo {
+                                uid: unique_id,
+                                groups: &m.submesh_group,
+                                portal_gated: has_portals,
+                            },
+                        )),
                     );
                     // A world WMO placement is exterior scene too (`0x6856c0`, fed by the same
                     // per-window populate `0x682fa0`): from inside one building, another building
@@ -319,14 +341,14 @@ pub(super) fn spawn_loaded_placements(
                             .entity(*e)
                             .insert(crate::exterior_cull::ExteriorScene);
                     }
-                    // Portal visibility + interior tracking: tie every group submesh entity (the `ents`
-                    // here are exactly the submeshes, in order, before colliders/lights are appended
-                    // below) back to one per-placement instance that holds the placement transform + the
-                    // per-frame visible set. The cull is per-group, so a building with a portal graph
+                    // Portal visibility + interior tracking: tie every group submesh entity (the
+                    // `by_batch` map is index-parallel with the submeshes — the structural form of
+                    // what used to be a positional promise on `ents`, which the mega divert's
+                    // `continue` silently broke) back to one per-placement instance that holds the
+                    // placement transform + the per-frame visible set. The cull is per-group, so a building with a portal graph
                     // gets tagged; a portal-less prop keeps all groups visible but still spawns the
                     // instance when it carries a WMOAreaTable identity — the interior down-ray
                     // (`wmo_portal::track_current_interior`) needs it. See `crate::wmo_portal`.
-                    let has_portals = !m.portal_refs.is_empty() && !m.portal_infos.is_empty();
                     if has_portals || m.wmo_id != 0 {
                         let instance = commands
                             .spawn(WmoPortalInstance {
@@ -362,7 +384,8 @@ pub(super) fn spawn_loaded_placements(
                             let group_key: Vec<Arc<[u16]>> = (0..m.group_nav.len() as u16)
                                 .map(|g| Arc::from([g].as_slice()))
                                 .collect();
-                            for (&entity, &group) in ents.iter().zip(&m.submesh_group) {
+                            for (&entity, &group) in by_batch.iter().zip(&m.submesh_group) {
+                                let Some(entity) = entity else { continue };
                                 let Some(groups) = group_key.get(group as usize).cloned() else {
                                     continue;
                                 };
@@ -381,9 +404,8 @@ pub(super) fn spawn_loaded_placements(
                     }
                     // The building's embedded MLIQ liquid (Stormwind's canals + fountains, the
                     // Ironforge lava, dungeon pools): one flat animated surface per group with water,
-                    // spawned at the placement transform on the shared per-kind material. Appended
-                    // AFTER the portal-instance zip above, which requires `ents` to still be exactly the
-                    // submeshes in order.
+                    // spawned at the placement transform on the shared per-kind material. (The group
+                    // zip above reads `by_batch`, so appends to `ents` no longer threaten it.)
                     // Spawned a group at a time so each surface can take that group's cull key: a
                     // pool belongs to the room it sits in, and a culled room's lava must go with it
                     // (decision 0689 — the same defect as the props, on the same building).
@@ -572,7 +594,11 @@ pub(super) fn spawn_loaded_placements(
                     slot
                 }
             };
-            let (mut ents, host) = spawn_model_entities(
+            let SpawnedModel {
+                entities: mut ents,
+                host,
+                ..
+            } = spawn_model_entities(
                 &mut commands,
                 mat_cache,
                 materials,
@@ -595,11 +621,31 @@ pub(super) fn spawn_loaded_placements(
                 &mut anim_table,
                 None, // world-static placement: cards bake their world pivot
                 Some(&mut *mega),
+                // The prop merge site (1418 lane 3): keyed by the rooms that name the prop,
+                // slot baked per vertex for the interior lane.
+                Some((
+                    &mut *merge,
+                    MergeSite::Prop {
+                        uid: unique_id,
+                        groups: &d.groups,
+                        slot: interior_slot,
+                    },
+                )),
             );
             // The slot frees itself when the prop despawns (streaming out) — the component hook
-            // returns it to the table whoever does the despawn.
-            if let (Some(slot), Some(&first)) = (interior_slot, ents.first()) {
-                commands.entity(first).insert(PropProbeSlot(slot));
+            // returns it to the table whoever does the despawn. A prop whose every batch
+            // diverted into a merge blob (1418 lane 3) spawns a bare carrier row for the hook:
+            // the blob aggregates many props and cannot own any single slot's lifetime.
+            if let Some(slot) = interior_slot {
+                let owner = match ents.first() {
+                    Some(&first) => first,
+                    None => {
+                        let carrier = commands.spawn_empty().id();
+                        ents.push(carrier);
+                        carrier
+                    }
+                };
+                commands.entity(owner).insert(PropProbeSlot(slot));
             }
             // Portal-cull the prop with the rooms that name it — the reference commits a WMO's
             // doodads per VISIBLE group (`0x695aa0` over the group's MODR refs, from the
