@@ -117,6 +117,11 @@ pub fn spawn_model_entities(
     // parents that list, and a card is a world root the billboard pass writes absolutely).
     // `None` for world-static placements (terrain), whose pivots never move.
     card_owner: Option<Entity>,
+    // `Some` on the world-static streamer path when the `WOW_MEGA_STATIC` bracket may divert
+    // fully static batches into the merge buffer instead of spawning them
+    // ([`crate::mega_static`] — an EXPERIMENT lever; its module doc owns the caveats). `None`
+    // on the moving-prop path (a merged blob cannot ride a gameobject).
+    mut mega: Option<&mut crate::mega_static::MegaStaticPending>,
     // Returns the spawned entities + what the anim host armed for this placement, when the model
     // animates: the joint set (bone-indexed) the emitter spawn rides its host bone off (0130 phase
     // 4), and the FILE sequence slot its variation roll landed on, which the emitters' rate/gate
@@ -235,6 +240,34 @@ pub fn spawn_model_entities(
             light,
             seq_owner,
         );
+        // The `WOW_MEGA_STATIC` divert (the consolidation bracket): a fully static batch — no
+        // anim host, not a billboard card, no per-entity material animation — skips its entity
+        // entirely; the merge flush draws it inside one blob per MATERIAL, which preserves every
+        // material semantic by construction (the handle is already deduped over blend, shade,
+        // batch order, fog policy...). Shared-table UV/tint loops would merge fine too (the
+        // table drives the material, not the entity), excluded anyway to keep the bracket's
+        // divert predicate trivially auditable.
+        if let Some(mega) = mega.as_mut() {
+            if crate::mega_static::enabled()
+                && !animated
+                && sub.billboard.is_none()
+                && sub.alpha_anim.is_none()
+                && seq_owner.is_none()
+                && sub.uv_anim.is_none()
+                && sub.rgb_anim.is_none()
+            {
+                mega.parts.push((
+                    cutout.clone(),
+                    crate::mega_static::PendingPart {
+                        geometry: sub.geometry.clone(),
+                        transform,
+                        blend: sub.blend,
+                        kind,
+                    },
+                ));
+                continue;
+            }
+        }
         // The blend twin for the distance-fade feather pass (reuse the cutout when already blend, or when
         // this is a non-fading interior prop). A MULTIPLY batch (Mod/Mod2x — the weapon-rack
         // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so no

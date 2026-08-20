@@ -1,13 +1,20 @@
 //! **The Bevy render glue** — the animated liquid surfaces themselves.
 //!
 //! One shared material per (kind, fog block) over a `texture_2d_array` of the kind's frames, the two
-//! spawn paths (an ADT chunk's MCLQ and a WMO group's MLIQ), the flat mesh build, and the 24 fps
-//! frame cycler. The faithful shading model is `super`'s header and `liquid.wgsl`'s; the *position*
-//! side — the grid each spawned surface publishes and the queries against it — is [`super::query`].
+//! spawn paths (an ADT chunk's MCLQ and a WMO group's MLIQ), and the flat mesh build. The faithful
+//! shading model is `super`'s header and `liquid.wgsl`'s; the *position* side — the grid each
+//! spawned surface publishes and the queries against it — is [`super::query`].
 //!
-//! The frame-flip is the client's first render animation — a deliberate **one-off** (a frame-index
-//! uniform off Bevy real `Time`), NOT a general animation system. Two clocks: animation =
-//! wall-clock; day/night = server game-time.
+//! **The 24 fps frame-flip and the lava scroll are computed IN the shader off `globals.time`**
+//! (liquid.wgsl `anim_time`): both are pure functions of the wall clock and two per-material
+//! constants baked at build, so no CPU ever mutates a liquid material again. The 24 Hz
+//! `Assets::get_mut` cycler this replaced cost a measured 0.28 cpu_ms/frame at the SW pin (the
+//! WOW_NO_LIQUID_ANIM bracket, 2026-08-18, negative in all three rounds): its per-tick Modified
+//! chain re-uploaded ~14 material uniforms, rebuilt their Metal bind groups, and armed the
+//! whole-population `AssetChanged` walks 24 times a second. A deterministic run bakes the freeze
+//! at BUILD time (`anim.w = 0` → the shader clock reads 0 forever), so captures keep frame 0 /
+//! scroll 0 bit-exactly — the same pin the old tick enforced (0600). Two clocks, unchanged in
+//! spirit: animation = wall clock; day/night = server game-time.
 
 use std::collections::HashMap;
 
@@ -24,11 +31,7 @@ use benilla_assets::LockRecover;
 use benilla_assets::{liquid_frame_array, RenderConfig, WorldAssets};
 use benilla_formats::{read_texture_mip_chain, BlpMipChain, LiquidKind, LiquidMesh};
 
-/// Frame-flip rate — 30 frames over 1.25 s (VERIFIED `FUN_0068aac0`), i.e. 24 fps, real wall-clock.
-const ANIM_FPS: f32 = 24.0;
-
-/// The shared liquid materials, keyed by [`LiquidKey`], plus each one's animated frame count (for
-/// the modulo in `animate_liquid`). Read by the terrain streamer (via [`spawn_liquids`] /
+/// The shared liquid materials, keyed by [`LiquidKey`]. Read by the terrain streamer (via [`spawn_liquids`] /
 /// [`spawn_wmo_liquids`]) to material the per-chunk water meshes. Absent when the client has no data
 /// (no `WorldAssets`).
 #[derive(Resource, Default)]
@@ -61,15 +64,6 @@ struct LiquidKey {
     scroll: bool,
 }
 
-/// **Texture repeats per second** the reference slides a scrolling liquid sheet along **v** —
-/// `[0x801620]` = 0.1 (VERIFIED wow-re `liquid-uv-scroll-law.md`, six-agent §5).
-const SCROLL_REPEATS_PER_SEC: f32 = 0.1;
-
-/// The scroll's wrap period in seconds — the `fmod` divisor `[0x80e5a0]` = 10.0. With
-/// [`SCROLL_REPEATS_PER_SEC`] that makes the offset a **sawtooth over exactly one repeat**, so the
-/// wrap is invisible on a `REPEAT`-sampled texture and the phase never grows without bound.
-const SCROLL_PERIOD_SECS: f32 = 10.0;
-
 /// Does this surface take the reference's animated stage-0 texture matrix — the lava/slime scroll?
 ///
 /// **Only WMO MLIQ surfaces whose type nibble is 6 or 7** (VERIFIED wow-re `liquid-uv-scroll-law.md`:
@@ -94,10 +88,6 @@ fn scrolls(nibble: u8) -> bool {
 
 struct LiquidEntry {
     material: Handle<LiquidMaterial>,
-    frame_count: u32,
-    /// Mirrors [`LiquidKey::scroll`], so the cycler can drive the v-offset without re-deriving the
-    /// key it is already iterating the values of.
-    scroll: bool,
 }
 
 impl LiquidAssets {
@@ -440,10 +430,21 @@ pub(super) fn setup_liquid(
                         if interior { 1.0 } else { 0.0 },
                         WATER_SHININESS,
                     ),
-                    // x = frame 0 (index driven by `animate_liquid`); y = frame count; z = the
-                    // v-scroll offset in texture repeats (also `animate_liquid`'s, and left at 0
-                    // forever on a non-scrolling material); w unused.
-                    anim: Vec4::new(0.0, frame_count as f32, 0.0, 0.0),
+                    // x = reserved (frame 0; the shader derives the live index from its own
+                    // clock); y = frame count; z = the SCROLL FLAG (1 = this lane takes the
+                    // stage-0 v-scroll — [`scrolls`]' nibble-6/7 WMO lane); w = the clock
+                    // enable (0 on a deterministic run bakes the 0600 capture freeze — frame 0,
+                    // scroll 0 — with no tick left to skip).
+                    anim: Vec4::new(
+                        0.0,
+                        frame_count as f32,
+                        if scroll { 1.0 } else { 0.0 },
+                        if crate::dev_state::deterministic_run() {
+                            0.0
+                        } else {
+                            1.0
+                        },
+                    ),
                     light_buf: world_assets.shared_light.clone(),
                 },
             });
@@ -453,11 +454,7 @@ pub(super) fn setup_liquid(
                     interior,
                     scroll,
                 },
-                LiquidEntry {
-                    material,
-                    frame_count,
-                    scroll,
-                },
+                LiquidEntry { material },
             );
         }
     }
@@ -507,74 +504,6 @@ fn load_frame_array(
     }
     let loaded = frames.len() as u32;
     Some((images.add(liquid_frame_array(frames)), loaded))
-}
-
-/// Advance every liquid material's frame index at [`ANIM_FPS`] off Bevy **real** `Time` (wall-clock,
-/// mirroring the reference's `GetTickCount`-driven cycler — NOT the day/night game clock), and the
-/// **v-scroll offset** on the materials that take one ([`scrolls`]). Writes only on the
-/// [`ANIM_FPS`] tick edge: `Assets::get_mut` alone marks the asset Modified and feeds the
-/// respecialization pipeline (the mark-changed scan + `Changed<Mesh3d>` sweeps) every frame — the
-/// 0353 demand-price law; between ticks the frame index cannot have changed.
-///
-/// The scroll rides the same 24 Hz edge rather than getting its own per-frame write. It is a
-/// continuous quantity, so that quantises it — but to 1/24 s, i.e. **1/240th of a repeat** per step
-/// on a 10 s sawtooth, which is far below what a 256² sheet can show, and it keeps the material
-/// upload budget exactly where 0353 put it. (The reference is quantised too, just differently: it
-/// rebuilds the matrix per draw off a millisecond clock.)
-pub(super) fn animate_liquid(
-    time: Res<Time>,
-    liquid: Option<Res<LiquidAssets>>,
-    mut materials: ResMut<Assets<LiquidMaterial>>,
-    mut last_ticks: Local<Option<u32>>,
-    surfaces: Query<(), With<MeshMaterial3d<LiquidMaterial>>>,
-) {
-    let Some(liquid) = liquid else {
-        return;
-    };
-    // No liquid mesh in the world → nothing samples these materials; skip the whole cycle (the
-    // startup-built kind set otherwise re-uploads ~10 materials at every 24 Hz edge on maps with
-    // no water at all). The cycler is wall-clock ([`ANIM_FPS`] × elapsed), so when the first
-    // surface streams in the index resumes at the current wall frame — exactly the reference's
-    // `GetTickCount`-driven phase.
-    if surfaces.is_empty() {
-        return;
-    }
-    // Captures pin the cycler to frame 0: the wall-clock at screenshot time varies with load
-    // times, so any framing with open water diffs differently run to run — the flake substrate's
-    // baseline redesign caught (MAE 3.97 → 0.009 pinned; decision 0600). One clause, one frame.
-    let ticks = if crate::dev_state::deterministic_run() {
-        0
-    } else {
-        (time.elapsed_secs() * ANIM_FPS) as u32
-    };
-    if *last_ticks == Some(ticks) {
-        return;
-    }
-    *last_ticks = Some(ticks);
-    // The scroll's sawtooth, off the SAME quantised clock as the frame index so the two can never
-    // disagree about what time it is: `fmod(t, 10) · 0.1` ∈ [0, 1) repeats. Pinned to 0 in a
-    // deterministic run for exactly the reason the frame index is (0600).
-    let scroll = if crate::dev_state::deterministic_run() {
-        0.0
-    } else {
-        (ticks as f32 / ANIM_FPS) % SCROLL_PERIOD_SECS * SCROLL_REPEATS_PER_SEC
-    };
-    for entry in liquid.materials.values() {
-        // Gated per entry: a single-frame liquid (`frame_count` 1) never changes index, and the
-        // shared cache holds every kind ever built — re-marking them all Modified on each tick
-        // edge re-uploaded ~10 materials/frame on maps with no water at all.
-        let frame = (ticks % entry.frame_count.max(1)) as f32;
-        let offset = if entry.scroll { scroll } else { 0.0 };
-        benilla_assets::write_gated(
-            &mut materials,
-            &entry.material,
-            |m| m.extension.anim.x != frame || m.extension.anim.z != offset,
-            |m| {
-                m.extension.anim.x = frame;
-                m.extension.anim.z = offset;
-            },
-        );
-    }
 }
 
 #[cfg(test)]

@@ -104,7 +104,6 @@ impl Plugin for LiquidPlugin {
             .add_systems(
                 Update,
                 (
-                    surface::animate_liquid,
                     // AFTER the portal pass, which publishes the camera eye's room this frame
                     // (`CameraInteriorClaim`): the submersion verdict is the eye's room applied to
                     // the eye's position, and a frame-old room would flash the wrong atmosphere for

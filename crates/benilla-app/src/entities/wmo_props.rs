@@ -281,6 +281,9 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &mut tint_reg,
                 &mut anim_table,
                 card_owner,
+                // Never diverted into the WOW_MEGA_STATIC bracket: these props parent under a
+                // MOVING gameobject, and a merged blob bakes world transforms.
+                None,
             );
             commands.entity(entity).add_children(&ents);
             // The slot frees itself when the prop despawns — the component hook returns it to

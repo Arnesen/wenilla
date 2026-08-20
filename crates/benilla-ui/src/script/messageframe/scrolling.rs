@@ -695,4 +695,57 @@ mod tests {
         s.run("CF:Clear()").unwrap();
         assert_eq!(s.eval::<i64>("return CF:GetNumMessages()").unwrap(), 0);
     }
+
+    /// The W4 skip token: a settled message frame's sweep hashes ZERO lines (the counter is the
+    /// claim — 0735's counts rule), and each side of the token catches its own change class:
+    /// text through the generation, the resolved width through the environment hash. The token
+    /// is only stored by a zero-request sweep, so an UNANSWERED request keeps re-requesting —
+    /// the region ledger's own rule (1410), inherited.
+    #[test]
+    fn a_settled_message_frame_hashes_no_lines_until_something_moves() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        s.run(
+            "local f = CreateFrame('ScrollingMessageFrame', 'CF')\n\
+             f:SetPoint('BOTTOMLEFT', 32, 90)\n\
+             f:SetWidth(430)\n\
+             f:SetHeight(34)",
+        )
+        .unwrap();
+        s.run("CF:AddMessage('one', 1, 1, 1)").unwrap();
+        s.run("CF:AddMessage('two', 1, 1, 1)").unwrap();
+        s.resolve();
+        // Unanswered requests re-request: no token may be stored while keys mismatch.
+        let first = s.message_lines_needing_measure();
+        assert_eq!(first.len(), 2);
+        let again = s.message_lines_needing_measure();
+        assert_eq!(again.len(), 2, "unanswered lines must keep re-requesting");
+        let answers: Vec<(u32, u32, u16, u64)> =
+            again.iter().map(|r| (r.frame, r.index, 1, r.key)).collect();
+        s.set_message_line_rows(&answers);
+        assert!(s.message_lines_needing_measure().is_empty());
+        // Settled: the NEXT sweep must skip the frame whole — zero lines hashed.
+        let hashed_before = s.model_mut().msg_lines_hashed;
+        assert!(s.message_lines_needing_measure().is_empty());
+        assert_eq!(
+            s.model_mut().msg_lines_hashed,
+            hashed_before,
+            "a settled frame's sweep must hash no lines"
+        );
+        // Text change reopens through the GENERATION…
+        s.run("CF:AddMessage('three', 1, 1, 1)").unwrap();
+        let reqs = s.message_lines_needing_measure();
+        assert_eq!(reqs.len(), 1, "the new line re-surfaces");
+        assert_eq!(reqs[0].text, "three");
+        let answers: Vec<(u32, u32, u16, u64)> =
+            reqs.iter().map(|r| (r.frame, r.index, 1, r.key)).collect();
+        s.set_message_line_rows(&answers);
+        assert!(s.message_lines_needing_measure().is_empty());
+        // …and a resolved-width change reopens through the ENVIRONMENT: every line re-keys.
+        s.run("CF:SetWidth(300)").unwrap();
+        s.resolve();
+        let reqs = s.message_lines_needing_measure();
+        assert_eq!(reqs.len(), 3, "a new wrap width re-measures every line");
+        assert!(reqs.iter().all(|r| (r.wrap_width - 300.0).abs() < 0.5));
+    }
 }

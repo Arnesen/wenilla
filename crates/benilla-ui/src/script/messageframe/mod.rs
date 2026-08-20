@@ -163,6 +163,9 @@ impl UiScript {
     pub fn message_lines_needing_measure(&mut self) -> Vec<LineMeasureRequest> {
         use std::hash::{Hash, Hasher};
         let mut model = self.model_mut();
+        // A plain reborrow so the arena borrow inside the loop and the sweep-token field writes
+        // split by FIELD instead of fighting over the RefMut.
+        let model = &mut *model;
         let mut out = Vec::new();
         let frames: Vec<(FrameHandle, Rect)> = model
             .resolved
@@ -185,7 +188,7 @@ impl UiScript {
                 .frame(fh)
                 .map(|f| f.effective_scale)
                 .unwrap_or(1.0);
-            let font = Self::message_frame_font(&model, fh);
+            let font = Self::message_frame_font(model, fh);
             let frame_id = model.frame_id(fh);
             let Some(frame) = model.arena.frame(fh) else {
                 continue;
@@ -193,7 +196,30 @@ impl UiScript {
             let Some(lines) = frame.kind_state.message_lines() else {
                 continue;
             };
+            // The skip token (the W4 fix, 1410's lane one door over): a frame whose line set
+            // (lines_gen) and measure environment (font/wrap/scale/outline) both match its last
+            // CLEAN sweep can produce nothing — every line's rows_key was minted under exactly
+            // these inputs and matched then. Environment changes (a resize, a font swap, a
+            // SetScale) miss the env hash; text changes miss the generation. The token is only
+            // stored by a zero-request sweep (below), so an unanswered request keeps
+            // re-requesting — the same rule the region ledger runs under.
+            let lines_gen = frame.kind_state.lines_gen().unwrap_or(0);
+            let env = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                font.path.hash(&mut h);
+                font.height.map(f32::to_bits).hash(&mut h);
+                wrap_width.to_bits().hash(&mut h);
+                (font.outline as u8).hash(&mut h);
+                scale.to_bits().hash(&mut h);
+                h.finish()
+            };
+            if model.msg_swept.get(&fh) == Some(&(lines_gen, env)) {
+                continue;
+            }
+            let requests_before = out.len();
             for (index, line) in lines.iter().enumerate() {
+                model.msg_lines_hashed += 1;
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 line.text.hash(&mut hasher);
                 font.path.hash(&mut hasher);
@@ -216,6 +242,11 @@ impl UiScript {
                     text: line.text.clone(),
                     key,
                 });
+            }
+            if out.len() == requests_before {
+                model.msg_swept.insert(fh, (lines_gen, env));
+            } else {
+                model.msg_swept.remove(&fh);
             }
         }
         out

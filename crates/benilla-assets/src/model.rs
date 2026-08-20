@@ -784,6 +784,72 @@ pub(crate) fn build_global_bones(
         .collect()
 }
 
+/// Build ONE mesh from many placed static submeshes — the transforms baked into the vertices.
+/// The `WOW_MEGA_STATIC` consolidation bracket's builder (2026-08-18 drastic-options census):
+/// same attribute recipe as [`submesh_to_static_mesh`], concatenated, with each part's placement
+/// transform applied to positions and its rotation to normals (placements scale uniformly, so
+/// directions survive). Parts lacking vertex colours pad white when any part has them — one
+/// attribute set must cover the whole concatenation. Returns the mesh and its baked min/max for
+/// the caller's Aabb.
+pub fn merged_static_mesh(
+    parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
+) -> (Mesh, Vec3, Vec3) {
+    let any_colors = parts
+        .iter()
+        .any(|(s, _)| s.vertex_colors.len() == s.positions.len());
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let (mut mn, mut mx) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for (sub, transform) in parts {
+        let base = u32::try_from(positions.len()).expect("merged mesh under u32 vertices");
+        for p in &sub.positions {
+            let w = transform.transform_point(wow_to_bevy(*p));
+            mn = mn.min(w);
+            mx = mx.max(w);
+            positions.push(w.to_array());
+        }
+        if sub.normals.len() == sub.positions.len() {
+            let flip = sub.billboard_card_faces_away();
+            for n in &sub.normals {
+                let b = transform.rotation * wow_to_bevy(*n);
+                normals.push(if flip { -b } else { b }.normalize_or_zero().to_array());
+            }
+        } else {
+            // The lone compute_normals fallback path never merges (its models are rare and the
+            // bracket tolerates flat shading there): pad up, face normals are close enough for a
+            // measurement build.
+            normals.extend(std::iter::repeat_n([0.0, 1.0, 0.0], sub.positions.len()));
+        }
+        uvs.extend(sub.uvs.iter().copied());
+        if any_colors {
+            if sub.vertex_colors.len() == sub.positions.len() {
+                colors.extend(sub.vertex_colors.iter().copied());
+            } else {
+                colors.extend(std::iter::repeat_n(
+                    [1.0, 1.0, 1.0, 1.0],
+                    sub.positions.len(),
+                ));
+            }
+        }
+        indices.extend(sub.indices.iter().map(|i| base + i));
+    }
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    if any_colors {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    }
+    mesh.insert_indices(Indices::U32(indices));
+    (mesh, mn, mx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

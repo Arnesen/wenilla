@@ -40,6 +40,7 @@
 
 mod census;
 mod clock;
+mod gpu;
 mod hud;
 mod journal;
 #[cfg(target_os = "macos")]
@@ -52,6 +53,7 @@ use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 
 pub(crate) use clock::{process_cpu_secs, system_cpu_ticks};
+pub(crate) use gpu::GpuMsShared;
 pub(crate) use hud::PerfHud;
 pub(crate) use journal::FpsJournalPlugin;
 
@@ -114,7 +116,20 @@ impl Plugin for PerfPlugin {
             app.insert_resource(census::ArchCensusAt(at));
             app.add_systems(Last, census::arch_census);
         }
+        // `WOW_ROW_BLOAT=<n>` — spawn n inert clones of a live static row (see the system doc):
+        // the d(cpu_ms)/d(rows) instrument the consolidation option divides by.
+        if std::env::var("WOW_ROW_BLOAT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .is_some_and(|n| n > 0)
+        {
+            app.add_systems(Update, census::row_bloat);
+        }
         #[cfg(target_os = "macos")]
         stall::plugin(app);
+        // `WOW_GPU_MS=1` — the whole-frame GPU meter (its module doc owns the design and the
+        // 1389 resolve-on-a-later-submission trap). Registers nothing when off, so campaign
+        // anchors never carry its ~0.03 ms sentinel cost uninvited.
+        gpu::plugin(app);
     }
 }

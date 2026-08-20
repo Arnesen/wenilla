@@ -40,7 +40,7 @@
     mesh_functions,
     forward_io::Vertex,
     view_transformations::position_world_to_clip,
-    mesh_view_bindings::view,
+    mesh_view_bindings::{view, globals},
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var frames: texture_2d_array<f32>;
@@ -49,9 +49,11 @@
 struct LiquidParams {
     // x = fullbright (magma/slime); y = ocean swatch; z = interior fog; w = sun-sheen shininess.
     kind: vec4<f32>,
-    // x = current frame index; y = frame count; z = the v-scroll offset in texture repeats
-    // (nibble-6/7 WMO magma/slime only — the reference's animated stage-0 texture matrix; see
-    // `liquid/surface.rs`'s `scrolls`, and `apply_scroll` below); w unused.
+    // x = reserved (frame 0); y = frame count; z = the SCROLL FLAG (1 only on the nibble-6/7
+    // WMO magma/slime lane — the reference's animated stage-0 texture matrix; see
+    // `liquid/surface.rs`'s `scrolls`, and `apply_scroll` below); w = the clock enable (0 on a
+    // deterministic run — the whole animation freezes at frame 0 / scroll 0, the 0600 capture
+    // pin, baked at material build).
     anim: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
@@ -114,8 +116,28 @@ fn sun_sheen(world_normal: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
 // A full repeat every 10 s, so `REPEAT` wrapping makes the sawtooth's reset invisible. Only the
 // rate and the period are reproducible — the reference's phase comes off `GetTickCount`, i.e. the
 // machine's uptime, so its absolute value is not a thing to match.
+// The liquid clock: `globals.time` (the same wall-elapsed seconds the CPU cycler used to read)
+// under the build-time enable. Both animations below are pure functions of it — the CPU-side
+// 24 Hz `Assets::get_mut` tick this replaces mutated ~14 materials a tick and its Modified
+// fallout (uniform re-uploads, bind-group rebuilds, whole-population `AssetChanged` arming)
+// measured 0.28 cpu_ms/frame at the SW pin (2026-08-18 bracket).
+fn anim_time() -> f32 {
+    return w.anim.w * globals.time;
+}
+
+// The 24 fps frame flip — 30 frames over 1.25 s (VERIFIED `FUN_0068aac0`), floor-quantized to
+// the tick exactly as the reference's integer frame index is.
+fn frame_layer() -> i32 {
+    return i32(floor(anim_time() * 24.0) % max(w.anim.y, 1.0));
+}
+
 fn apply_scroll(uv: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(uv.x, uv.y + w.anim.z);
+    // v += (t mod 10) · 0.1 — repeats/s `[0x801620]` = 0.1, period `[0x80e5a0]` = 10.0 (VERIFIED
+    // wow-re `liquid-uv-scroll-law.md` §5): a sawtooth over exactly one repeat, invisible under
+    // REPEAT wrapping. CONTINUOUS now, where the CPU tick quantized it to 1/24 s — the reference
+    // itself rebuilds the matrix per draw off a millisecond clock, so this is the more faithful
+    // reading, not a new liberty. anim.z is the flag: hard 0 on every non-scrolling lane.
+    return vec2<f32>(uv.x, uv.y + w.anim.z * fract(anim_time() / 10.0));
 }
 
 // Distance fog — planar eye-Z, GL_LINEAR, gamma space (mirrors terrain.wgsl). Applied to EVERY liquid
@@ -183,7 +205,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
 
     // Animated frame. For water/ocean this is the DETAIL ripple (RGB ≈ near-black, ALPHA = ripple);
     // for magma/slime it is the OPAQUE BODY texture.
-    let detail = textureSample(frames, frames_samp, apply_scroll(in.uv), i32(round(w.anim.x)));
+    let detail = textureSample(frames, frames_samp, apply_scroll(in.uv), frame_layer());
 
     // Magma / slime (kind.x > 0.5): the animated texture IS the opaque body colour — no depth swatch
     // (the ADT liquid vertex format carries no colour element at all, and the WMO one is a hard

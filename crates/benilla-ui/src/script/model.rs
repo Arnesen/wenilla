@@ -126,6 +126,16 @@ pub(crate) struct Model {
     /// missed. A candidate the ledger names that the roster walk doesn't is fine (a same-value
     /// write — the staleness check absorbs it); the reverse is a stale label waiting to ship.
     pub(crate) measure_dirty: Option<Vec<crate::widget::RegionHandle>>,
+    /// The message-line sweep's clean tokens: frame → (lines_gen, env hash) at its last
+    /// ZERO-REQUEST sweep. A frame matching both is skipped whole (`message_lines_needing_measure`
+    /// hashes none of its lines); a sweep that produced requests stores nothing, so an unanswered
+    /// request re-requests forever exactly like the region lane's ledger (1410's rule). Stale
+    /// entries for destroyed frames are inert (generational handles never re-match) and the map
+    /// holds a handful of message frames, so no destroy hook.
+    pub(crate) msg_swept: std::collections::HashMap<crate::widget::FrameHandle, (u64, u64)>,
+    /// Lines actually hashed by the sweep — the skip's honest meter (tests assert 0 on a settled
+    /// second sweep; 0735's counts-never-milliseconds rule).
+    pub(crate) msg_lines_hashed: u64,
     /// `WOW_LAYOUT_VERIFY`'s flag that the resolve just taken was the incremental one and owes a
     /// full-derive re-run to prove it (see `layout::UiScript::resolve_layout`). Always `false` in
     /// production — nothing reads it unless the verify build set it.
@@ -1181,6 +1191,8 @@ impl Model {
             layout_epoch: 0,
             layout_touched: None,
             measure_dirty: None,
+            msg_swept: std::collections::HashMap::new(),
+            msg_lines_hashed: 0,
             layout_verify_recheck: false,
             layout_derives: 0,
             layout_scope: super::layout::LayoutScope::default(),

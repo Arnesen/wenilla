@@ -108,6 +108,14 @@ struct LiveFps {
 /// `drawn=` reading taken indoors cannot be read at all: a big number means either "we claimed a
 /// room and the cull let everything through" or "we never claimed a room, so nothing was gated" —
 /// opposite bugs with identical numbers, and the difference cost a measurement (0780).
+/// The display stamp's monitor roster + the `WOW_GPU_MS=1` meter + its sample sink, bundled
+/// (the 16-SystemParam ceiling, the house's SpawnTables shape).
+type ScreenParams<'w, 's> = (
+    Query<'w, 's, &'static bevy::window::Monitor>,
+    Option<Res<'w, crate::perf::GpuMsShared>>,
+    Local<'s, Vec<f32>>,
+);
+
 #[derive(SystemParam)]
 struct SamplePin<'w> {
     map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
@@ -139,8 +147,12 @@ fn drive_live_fps(
     mut key_events: MessageWriter<bevy::input::keyboard::KeyboardInput>,
     mut exit: MessageWriter<AppExit>,
     mut occlusions: MessageReader<bevy::window::WindowOccluded>,
-    monitors: Query<&bevy::window::Monitor>,
+    // Bundled (the 16-SystemParam ceiling): the monitor roster for the display stamp, and the
+    // `WOW_GPU_MS=1` meter — the render app's whole-frame GPU clock, sampled per probe frame so
+    // the leg line carries gpu percentiles beside the cpu ones (absent when the meter is off).
+    mut screen: ScreenParams,
 ) {
+    let (monitors, gpu, gpu_samples) = (&screen.0, &screen.1, &mut screen.2);
     // Drain every frame so the state is current whichever phase we're in — the window can be
     // occluded before sampling ever starts (a detached launch spawns behind whatever is open).
     for o in occlusions.read() {
@@ -214,6 +226,12 @@ fn drive_live_fps(
             }
             let ms = time.delta_secs() * 1000.0;
             probe.samples.push(ms);
+            if let Some(gpu) = gpu {
+                let ns = gpu.0.load(std::sync::atomic::Ordering::Relaxed);
+                if ns > 0 {
+                    gpu_samples.push(ns as f32 / 1.0e6);
+                }
+            }
             if probe.samples.len() < probe.frames {
                 return;
             }
@@ -270,6 +288,20 @@ fn drive_live_fps(
                         .unwrap_or_else(|| " display=none-contains-center".to_string()),
                     None => " display=unpositioned".to_string(),
                 }
+            };
+            // The GPU meter's percentiles over the same window (WOW_GPU_MS=1; empty otherwise).
+            let gpu_line = if gpu_samples.is_empty() {
+                String::new()
+            } else {
+                let mut g = std::mem::take(&mut **gpu_samples);
+                g.sort_by(f32::total_cmp);
+                let gat = |q: f32| g[(((g.len() - 1) as f32) * q).round() as usize];
+                format!(
+                    " gpu_p50={:.2} gpu_p99={:.2} gpu_max={:.2}",
+                    gat(0.50),
+                    gat(0.99),
+                    g[g.len() - 1]
+                )
             };
             // CPU cost per frame across every thread — the load-robust half of the measurement
             // (`perf::process_cpu_secs`), and directly comparable with a reporter's CPU %.
@@ -347,7 +379,7 @@ fn drive_live_fps(
                 seen.mats, seen.meshes, seen.images, seen.uv_anims, seen.tint_anims,
             );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display} occluded_frames={}{at_pin}{gate}{sky}{ribbons}{culled}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{gate}{sky}{ribbons}{culled}",
                 v.len(),
                 at(0.50),
                 at(0.95),

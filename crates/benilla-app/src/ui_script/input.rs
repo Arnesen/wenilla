@@ -126,7 +126,37 @@ pub(super) fn feed_ui_input(
         // the VM's space (the inverse of the extract seam's ×s).
         let s = super::seam_scale(window.height(), ui_scale.0);
         let (x, y) = (cursor.x / s, (window.height() - cursor.y) / s);
+        // `WOW_HIT_COST=1` — the hit-test lane's own meter (the resolve-lap report's W9): this
+        // call rebuilds `order::traversal` + sort + the scroll-clip map EVERY frame the cursor
+        // is inside the window, moving or not — a real-play cost every parked probe leg is
+        // structurally blind to (probes park the cursor outside). One aggregate line per
+        // second, census-meter posture; the number decides whether the epoch-gated skip is
+        // worth building, before it is built.
+        static HIT_COST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let metering =
+            *HIT_COST.get_or_init(|| std::env::var("WOW_HIT_COST").as_deref() == Ok("1"));
+        let t0 = metering.then(std::time::Instant::now);
         hover.0 = script.mouse_move(x, y);
+        if let Some(t0) = t0 {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static ACC_US: AtomicU64 = AtomicU64::new(0);
+            static CALLS: AtomicU64 = AtomicU64::new(0);
+            static LAST: AtomicU64 = AtomicU64::new(0);
+            ACC_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+            let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+            let now_s = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if LAST.swap(now_s, Ordering::Relaxed) != now_s && calls > 1 {
+                let us = ACC_US.swap(0, Ordering::Relaxed);
+                let n = CALLS.swap(0, Ordering::Relaxed);
+                eprintln!(
+                    "[hit-cost] mouse_move_us/frame={:.1} frames={n}",
+                    us as f64 / n.max(1) as f64
+                );
+            }
+        }
         for (btn, name) in [
             (MouseButton::Left, "LeftButton"),
             (MouseButton::Right, "RightButton"),

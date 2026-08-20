@@ -478,7 +478,9 @@ pub struct LiquidExt {
     ///   `secondary` Blinn term — water's own exponent, not the shared row-3 terrain shininess.
     #[uniform(102)]
     pub kind: Vec4,
-    /// `x` = current frame index (set each frame by `animate_liquid`), `y` = frame count; `zw` unused.
+    /// `x` = reserved (frame 0), `y` = frame count, `z` = scroll flag, `w` = clock enable —
+    /// the shader derives frame index and scroll from `globals.time` (liquid.wgsl `anim_time`);
+    /// nothing mutates this uniform after build.
     #[uniform(102)]
     pub anim: Vec4,
     /// **The shared global light** (`lighting::global_light`): the one storage buffer terrain and the

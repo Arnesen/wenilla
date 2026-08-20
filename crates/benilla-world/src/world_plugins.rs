@@ -243,6 +243,19 @@ impl Plugin for WorldFoundation {
         {
             app.insert_resource(bevy::time::Time::<bevy::time::Fixed>::from_hz(hz));
         }
+        // Static transform tracking is ALWAYS on — the adaptive default pays two serial
+        // full-population scans per frame (`mark_dirty_trees`'s `count()` calls; a `Changed`
+        // filter count degrades to full iteration) to decide whether >30% of the world moved
+        // this frame. Ours never has: movers are the streamed units, 1–3% of a world that is
+        // overwhelmingly static placements — the check can only ever conclude "track", so the
+        // two scans are its entire price. Pinned, not a knob: no scene benilla renders can be
+        // on the other side of the threshold.
+        app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::enabled());
+        // `WOW_MEGA_STATIC=1` — the consolidation bracket (EXPERIMENT lever; the module doc owns
+        // the caveats — never a default). The resource + flush register unconditionally: with
+        // the flag off nothing ever diverts, the buffer stays empty, and the flush early-outs.
+        app.init_resource::<crate::mega_static::MegaStaticPending>();
+        app.add_systems(bevy::app::Update, crate::mega_static::flush_mega_static);
         // `WOW_UPLOAD_BUDGET=<MB>` — cap the render app's per-frame GPU asset upload (bevy's
         // `RenderAssetBytesPerFrame`, unlimited by default; only assets implementing `byte_len`
         // participate, which covers meshes and images — exactly the streaming payload). An

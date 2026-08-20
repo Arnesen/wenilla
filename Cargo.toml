@@ -15,6 +15,9 @@ authors = ["sam <samuv.eth@gmail.com>"]
 [workspace.dependencies]
 anyhow = "1.0.102"
 bevy = "0.18.1"
+# The render app's raw GPU handles (the WOW_GPU_MS meter's query set): bevy 0.18 does not wrap
+# wgpu's QuerySet family, so the meter reaches for the same wgpu the workspace already builds.
+wgpu = "27"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 

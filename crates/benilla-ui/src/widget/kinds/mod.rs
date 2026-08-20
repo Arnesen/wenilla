@@ -151,11 +151,29 @@ impl KindState {
         }
     }
 
+    /// The message kinds' sweep-skip generation ([`ScrollingMessageState::lines_gen`]);
+    /// `None` for every other kind.
+    pub fn lines_gen(&self) -> Option<u64> {
+        match self {
+            KindState::ScrollingMessage(smf) => Some(smf.lines_gen),
+            KindState::Message(mf) => Some(mf.lines_gen),
+            _ => None,
+        }
+    }
+
     /// [`Self::message_lines`], mutably — the measure round-trip's write-back half.
     pub fn message_lines_mut(&mut self) -> Option<&mut VecDeque<MessageLine>> {
         match self {
-            KindState::ScrollingMessage(smf) => Some(&mut smf.lines),
-            KindState::Message(mf) => Some(&mut mf.lines),
+            // Any mut borrow through this door counts as a text change for the measure sweep's
+            // skip token — conservative, and the door every write-back path uses.
+            KindState::ScrollingMessage(smf) => {
+                smf.lines_gen = smf.lines_gen.wrapping_add(1);
+                Some(&mut smf.lines)
+            }
+            KindState::Message(mf) => {
+                mf.lines_gen = mf.lines_gen.wrapping_add(1);
+                Some(&mut mf.lines)
+            }
             _ => None,
         }
     }

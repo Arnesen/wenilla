@@ -54,6 +54,13 @@ pub struct ScrollingMessageState {
     /// `fadeDuration` — phase-2 fade ramp length (ctor 3.0s). `0` ⇒ the line vanishes instantly at
     /// phase-1 expiry (no ramp).
     pub fade_duration: f32,
+    /// Bumped by every path that can change a line's TEXT set (add, clear, SetMaxLines, and the
+    /// generic mut door `KindState::message_lines_mut`) — the measure sweep's skip token
+    /// (`message_lines_needing_measure`): a frame whose generation and measure environment both
+    /// match its last clean sweep hashes no lines. Fade ticking deliberately does NOT bump (it
+    /// moves alpha/time, never text), or a fading chat line would keep the sweep hot for its
+    /// whole 2-minute ride.
+    pub lines_gen: u64,
     /// `fadingEnabled` (ctor 1). While false, lines never fade.
     pub fading_enabled: bool,
     /// The scrollback offset, counted up from the newest line: `0` = pinned to the bottom (AtBottom,
@@ -71,6 +78,7 @@ impl Default for ScrollingMessageState {
             time_visible: 10.0,
             fade_duration: 3.0,
             fading_enabled: true,
+            lines_gen: 0,
             scroll_offset: 0,
         }
     }
@@ -88,6 +96,7 @@ impl ScrollingMessageState {
     /// dropping the oldest when over `max_lines`. A view scrolled up stays anchored on the same
     /// content (the ring cursor is a slot, not an offset — msgframe-runtime.md).
     pub fn add(&mut self, text: String, r: f32, g: f32, b: f32) {
+        self.lines_gen = self.lines_gen.wrapping_add(1);
         let line = MessageLine {
             text,
             color: [quantize_u8(r), quantize_u8(g), quantize_u8(b)],
@@ -113,6 +122,7 @@ impl ScrollingMessageState {
     /// `SetMaxLines(n)` — **destructive** (`0x787dd0`): frees every line + resets the cursor, then
     /// sets the new capacity. Not a preserving resize.
     pub fn set_max_lines(&mut self, n: usize) {
+        self.lines_gen = self.lines_gen.wrapping_add(1);
         self.lines.clear();
         self.scroll_offset = 0;
         self.max_lines = n.max(1);
@@ -120,6 +130,7 @@ impl ScrollingMessageState {
 
     /// `Clear` (`0x7882b0`): retire every line immediately (no fade), reset to the bottom.
     pub fn clear(&mut self) {
+        self.lines_gen = self.lines_gen.wrapping_add(1);
         self.lines.clear();
         self.scroll_offset = 0;
     }
@@ -275,6 +286,8 @@ pub enum InsertMode {
 /// that a message added to a zero-height frame vanishes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MessageFrameState {
+    /// See [`ScrollingMessageState::lines_gen`] — the same sweep-skip token.
+    pub lines_gen: u64,
     /// The display lines, **newest at the back always** — [`InsertMode`] is a *display direction*
     /// resolved at emit, not a storage order, so "evict the oldest" is one `pop_front` in both
     /// modes.
@@ -304,6 +317,7 @@ impl Default for MessageFrameState {
             time_visible: 10.0,
             fade_duration: 3.0,
             fading_enabled: true,
+            lines_gen: 0,
         }
     }
 }
@@ -314,6 +328,7 @@ impl MessageFrameState {
     /// starting alpha (this class's fourth numeric really is alpha — the scrolling one's is an id
     /// and forces `0xFF`), snapshot the frame's fade config, and append.
     pub fn add(&mut self, text: String, r: f32, g: f32, b: f32, a: f32) {
+        self.lines_gen = self.lines_gen.wrapping_add(1);
         self.lines.push_back(MessageLine {
             text,
             color: [quantize_u8(r), quantize_u8(g), quantize_u8(b)],
@@ -330,6 +345,7 @@ impl MessageFrameState {
     /// `Clear` — retire every line immediately, no fade. (`_LazyPig` calls `UIErrorsFrame:Clear()`
     /// eleven times; it is the one non-`AddMessage` verb the corpus actually uses on this class.)
     pub fn clear(&mut self) {
+        self.lines_gen = self.lines_gen.wrapping_add(1);
         self.lines.clear();
     }
 

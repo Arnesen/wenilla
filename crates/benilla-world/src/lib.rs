@@ -147,6 +147,7 @@ pub mod lighting;
 pub mod liquid;
 pub mod map_proj;
 pub mod mat_anim_table;
+pub mod mega_static;
 pub mod mesh_tag;
 pub mod model_fade;
 pub mod model_forms;

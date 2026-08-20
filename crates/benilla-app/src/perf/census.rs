@@ -106,3 +106,56 @@ pub(super) fn count_camera_changes(
         *last = time.elapsed_secs();
     }
 }
+
+/// `WOW_ROW_BLOAT=<n>` — the consolidation question's premise counter (the drastic-options
+/// census, 2026-08-17): once the world holds a real static model row, spawn `n` inert CLONES of
+/// it — same mesh handle, same material handle, same component shape — parked 10,000 yd
+/// underground so the frustum culls every one. The per-frame walks that scale with TOTAL rows
+/// (the visibility reset/sweep pair, the `AssetChanged` tick scans, `PreviousGlobalTransform`,
+/// `mark_dirty_trees`) pay for these rows exactly as for real ones, while the O(visible) half
+/// (specialize/queue/encode) never sees them — so an interleaved leg A/B (bloat off vs on) reads
+/// **d(cpu_ms)/d(rows)** directly. That derivative × the rows a mega-merge would delete is the
+/// honest ceiling of the consolidation option, measured before anyone builds it.
+/// (Measured the same night it was built: +30k rows = +1.33 cpu_ms at LBRS, ~44 ns/row/frame.)
+///
+/// `BloatSource` is one live static row's clonable component set, named for the lint.
+type BloatSource<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Mesh3d,
+        &'static MeshMaterial3d<benilla_assets::materials::WowModelMaterial>,
+        &'static benilla_world::model_render::ModelPart,
+        &'static bevy::mesh::MeshTag,
+        &'static bevy::camera::primitives::Aabb,
+    ),
+    Without<benilla_world::rig_palette::RigPart>,
+>;
+
+pub(super) fn row_bloat(mut commands: Commands, mut done: Local<bool>, source: BloatSource) {
+    if *done {
+        return;
+    }
+    let Some((mesh, mat, part, tag, aabb)) = source.iter().next() else {
+        return; // no static row streamed yet — try again next frame
+    };
+    let n: usize = std::env::var("WOW_ROW_BLOAT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    for _ in 0..n {
+        commands.spawn((
+            Mesh3d(mesh.0.clone()),
+            MeshMaterial3d(mat.0.clone()),
+            Transform::from_xyz(0.0, -10_000.0, 0.0),
+            *part,
+            tag.clone(),
+            *aabb,
+            bevy::camera::visibility::NoAutoAabb,
+        ));
+    }
+    eprintln!(
+        "[row-bloat] spawned {n} inert static rows (cloned a live world row, parked at y=-10000)"
+    );
+    *done = true;
+}

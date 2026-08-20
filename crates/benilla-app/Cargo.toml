@@ -42,6 +42,7 @@ anyhow.workspace = true
 arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
+wgpu.workspace = true
 # Optional: the dev overlays are its only consumers (the panel, the perf pill, the inspector
 # card), so a player build does not link it at all (`dev` feature, decision 1173).
 bevy_egui = { version = "0.39", optional = true }

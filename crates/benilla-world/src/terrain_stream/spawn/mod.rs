@@ -64,6 +64,7 @@ type SpawnTables<'w> = (
     Res<'w, crate::terrain_stream::ViewFocus>,
     ResMut<'w, ModelForms>,
     ResMut<'w, HullWelds>,
+    ResMut<'w, crate::mega_static::MegaStaticPending>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -92,7 +93,7 @@ pub(super) fn spawn_loaded_placements(
     // model-forms cache (decision 0834).
     tables: SpawnTables,
 ) {
-    let (mut probes, mut activity, focus, mut forms, mut welds) = tables;
+    let (mut probes, mut activity, focus, mut forms, mut welds, mut mega) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -184,6 +185,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut tint_reg,
                         &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
+                        Some(&mut *mega),
                     );
                     // ADT doodads are exterior scene: from inside a WMO they draw only through a
                     // portal window (`0x683700`, fed solely by the per-window walk `0x682fa0` — see
@@ -299,6 +301,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut tint_reg,
                         &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
+                        Some(&mut *mega),
                     );
                     // A world WMO placement is exterior scene too (`0x6856c0`, fed by the same
                     // per-window populate `0x682fa0`): from inside one building, another building
@@ -591,6 +594,7 @@ pub(super) fn spawn_loaded_placements(
                 &mut tint_reg,
                 &mut anim_table,
                 None, // world-static placement: cards bake their world pivot
+                Some(&mut *mega),
             );
             // The slot frees itself when the prop despawns (streaming out) — the component hook
             // returns it to the table whoever does the despawn.
