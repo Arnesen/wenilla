@@ -45,6 +45,11 @@ pub(crate) use visual_census::UnitVisualsPlugin;
 mod world_census;
 pub(crate) use world_census::{EntityCensusPlugin, NodeProbePlugin};
 
+/// The schedule census — per schedule, every system with its executor-relevant flags, both
+/// worlds: the structural inventory under the 1435 orchestration rows (decision 1437).
+mod sched_census;
+pub(crate) use sched_census::SchedCensusPlugin;
+
 /// The clock **every probe schedule reads** — real time, never the virtual clock (decision 0789).
 ///
 /// A probe knob is a wall-clock instruction: "send this at 20 s", "sample 300 frames from 25 s",

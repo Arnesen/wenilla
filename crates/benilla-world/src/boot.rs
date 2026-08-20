@@ -91,4 +91,26 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
         // still compiles in via bevy's default feature — trimming the feature set is a separate,
         // wider call.
         .disable::<bevy::audio::AudioPlugin>()
+        // The dead registrations (decision 1438): DefaultPlugins members whose only runtime
+        // trace here was per-frame machinery for types nothing instantiates — every registered
+        // asset/material type costs an `Assets<T>` event system in PostUpdate plus
+        // extract/prepare/sweep families in the render app, priced by the 1437 census against
+        // the 1435 band map. Each cut was usage-grepped NEGATIVE and then proven by a clean
+        // boot, and the boot vetoed two of the five candidates the greps had passed (its
+        // missing-resource panic names the dependent): gizmos are the bowstring/fishing-line
+        // renderer (0938, warmed through a bare-`Gizmos` param no `Gizmos<` pattern sees), and
+        // the sprite pair carries our OWN FrameXML quad pass — `UiQuadMaterial` is a
+        // `Material2d` riding `Mesh2dPipeline`. What else stays, stays for a reason:
+        // bevy_picking drives the world-interact lane, TextPlugin draws the glue-screen text,
+        // PostProcessPlugin is the EffectGlow bloom, and two members are pinned by upstream
+        // exactly like 1437's Render-MT — ScenePlugin (avian's collider backend reads
+        // `SceneSpawner` even in a meshless world; our own harness tests document it) and
+        // PbrPlugin's ForwardDecal family (registered inside PbrPlugin::build).
+        //
+        // We load M2/WMO/ADT through our own mpq:// loaders — no glTF anywhere.
+        .disable::<bevy::gltf::GltfPlugin>()
+        // No bevy AA: no Fxaa/TAA/SMAA/CAS component anywhere (MSAA is core render, unaffected).
+        .disable::<bevy::anti_alias::AntiAliasPlugin>()
+        // No gamepad input; 1.12's bindings are keyboard/mouse (0997).
+        .disable::<bevy::gilrs::GilrsPlugin>()
 }

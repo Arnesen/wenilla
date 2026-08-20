@@ -43,10 +43,17 @@ const SPLASH_DEPTH_FRAC: f32 = 0.4;
 /// by entity and `WorldPoint` looks its room up.
 type SplashQuery = (Entity, &'static Transform, Option<&'static CollisionHeight>);
 
+/// Only units whose depth can have changed since last frame (decision 1436): depth is a pure
+/// function of pose + collision height (the room claim follows the pose, liquid surfaces are
+/// static), so an unmoved unit cannot cross the line — and the per-unit `water_surface_at`
+/// lookup for EVERY unit priced 0.19 ms/f parked in the 1435 band map. A unit's first frame is
+/// `Added ⊆ Changed`, so the silent first-seen arming below still happens.
+type SplashGate = Or<(Changed<Transform>, Changed<CollisionHeight>)>;
+
 /// Play the water splash on a unit's `0.4·h` depth-line crossing, either direction (module docs).
 #[allow(clippy::too_many_arguments)] // the sound-play plumbing, one param per concern
 fn water_splashes(
-    units: Query<SplashQuery, With<NetEntity>>,
+    units: Query<SplashQuery, (With<NetEntity>, SplashGate)>,
     world: benilla_world::world_point::WorldPoint,
     mut wet: Local<EntityHashMap<bool>>,
     kits: Option<ResMut<SoundKits>>,

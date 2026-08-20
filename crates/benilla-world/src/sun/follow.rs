@@ -150,9 +150,20 @@ fn flare_ray_clear(height_under: impl Fn(Vec3) -> Option<f32>, cam_pos: Vec3, di
     true
 }
 
-/// Ray-grid side count for [`flare_visible_fraction`] — 4×4 = 16 rays; the envelope slew smooths
-/// the 1/16 quantization between frames.
+/// Ray-grid side count for the occ3 fraction — 4×4 = 16 rays; the envelope slew smooths the 1/16
+/// quantization between frames.
 const FLARE_FRACTION_GRID: u32 = 4;
+
+/// The grid's cell count — the fraction's denominator and the cached mask's width.
+const FLARE_CELLS: u32 = FLARE_FRACTION_GRID * FLARE_FRACTION_GRID;
+
+/// How many grid cells the probe re-marches per frame (decision 1436): the full 16×48-sample march
+/// every frame priced 0.45 ms/f — the biggest single system in the 1435 parked band map — for a
+/// value the slew rate-limits anyway. Two cells/frame refreshes the whole grid in 8 frames
+/// (0.13 s at 60 Hz), inside BOTH slew time constants (rise 0.25 s, fall 0.66 s), so the drip is
+/// invisible under the smoothing that already covers the grid's own quantization. The faithful
+/// end-state stays the reference's GPU occlusion query (`0x7e5220`, recorded below).
+const FLARE_RAYS_PER_FRAME: u32 = 2;
 
 /// The **visible fraction** of the body's quad footprint against resident terrain ∈ [0, 1] — our
 /// CPU stand-in for the reference's fractional occlusion probe (`0x7e5220`, Addendum #8): the real
@@ -162,30 +173,61 @@ const FLARE_FRACTION_GRID: u32 = 4;
 /// half-size), each ray the same quadratic terrain march — fraction = clear rays / total rays.
 /// Terrain-only, like the march it generalizes; the reference's z-buffer probe also catches
 /// WMOs/doodads — the GPU-occlusion-query instrument remains the faithful end-state (recorded).
+/// Since decision 1436 the live path drips cells through [`flare_mask_update`] instead; the full
+/// one-call march stays as the convergence oracle for the tests.
+#[cfg(test)]
 fn flare_visible_fraction(
     height_under: impl Fn(Vec3) -> Option<f32>,
     cam_pos: Vec3,
     dir: Vec3,
     half: f32,
 ) -> f32 {
+    let clear = (0..FLARE_CELLS)
+        .filter(|&c| flare_cell_clear(&height_under, cam_pos, dir, half, c))
+        .count();
+    clear as f32 / FLARE_CELLS as f32
+}
+
+/// March ONE grid cell of the quad's [−half, +half]² angular footprint — the unit the round-robin
+/// re-prices per frame (decision 1436). Cell `c` = row `c / 4`, column `c % 4`, centre-sampled.
+fn flare_cell_clear(
+    height_under: impl Fn(Vec3) -> Option<f32>,
+    cam_pos: Vec3,
+    dir: Vec3,
+    half: f32,
+    cell: u32,
+) -> bool {
     // Any orthonormal frame across the camera-facing quad works — the probe is symmetric.
     let right = dir.cross(Vec3::Y).normalize_or_zero();
     let right = if right == Vec3::ZERO { Vec3::X } else { right };
     let up = right.cross(dir);
     let n = FLARE_FRACTION_GRID;
-    let mut clear = 0u32;
-    for i in 0..n {
-        for j in 0..n {
-            // Cell centres over the quad's [−half, +half]² angular footprint.
-            let u = ((i as f32 + 0.5) / n as f32 - 0.5) * 2.0 * half;
-            let v = ((j as f32 + 0.5) / n as f32 - 0.5) * 2.0 * half;
-            let d = (dir + right * u + up * v).normalize();
-            if flare_ray_clear(&height_under, cam_pos, d) {
-                clear += 1;
-            }
+    let u = ((cell / n) as f32 + 0.5) / n as f32 - 0.5;
+    let v = ((cell % n) as f32 + 0.5) / n as f32 - 0.5;
+    let d = (dir + right * (u * 2.0 * half) + up * (v * 2.0 * half)).normalize();
+    flare_ray_clear(&height_under, cam_pos, d)
+}
+
+/// One frame's round-robin step over the cached cell mask (bit set = that cell's ray is clear):
+/// re-march `cells` cells from `cursor`, then read the WHOLE mask as the fraction. Pure, for the
+/// convergence test; [`FlareGate::envelope`] owns the state.
+fn flare_mask_update(
+    mask: &mut u16,
+    cursor: &mut u32,
+    cells: u32,
+    clear_of: impl Fn(u32) -> bool,
+) -> f32 {
+    for _ in 0..cells {
+        let c = *cursor % FLARE_CELLS;
+        let bit = 1u16 << c;
+        if clear_of(c) {
+            *mask |= bit;
+        } else {
+            *mask &= !bit;
         }
+        *cursor = (c + 1) % FLARE_CELLS;
     }
-    clear as f32 / (n * n) as f32
+    f32::from(mask.count_ones() as u16) / FLARE_CELLS as f32
 }
 
 /// The flare **envelope** — our build of the reference's `[glare+0x30]` smoothed intensity
@@ -217,6 +259,13 @@ pub(super) struct FlareGate<'w, 's> {
     /// the visible layer, like the reference).
     clouds: Res<'w, CloudCoverage>,
     env: Local<'s, f32>,
+    /// The occ3 grid's cached per-cell verdicts (bit = clear) and the round-robin cursor
+    /// (decision 1436): [`FLARE_RAYS_PER_FRAME`] cells re-march per active frame. `primed`
+    /// falls when the probe is skipped (night, interior, below horizon) so the first active
+    /// frame after a gap marches the whole grid instead of trusting a stale mask.
+    mask: Local<'s, u16>,
+    cursor: Local<'s, u32>,
+    primed: Local<'s, bool>,
 }
 
 /// The weather **celestial-alpha seed** (Addendum #6): under active weather the recompute writes
@@ -244,18 +293,28 @@ impl FlareGate<'_, '_> {
     ) -> f32 {
         let base = dn * horizon_gate(dir) * occ1;
         let target = if base > 0.0 && self.camera_interior.0.is_none() {
-            base * flare_visible_fraction(
-                // Resident detailed terrain first; the coarse WDL surface everywhere else (it
-                // covers the whole map, so it also plugs the ADT-ring-to-farclip gap).
-                |p| {
-                    terrain_height_under(&self.streamer, &self.adt_tiles, p)
-                        .or_else(|| self.wdl.as_ref().and_then(|w| w.height_under(p)))
-                },
-                cam_pos,
-                dir,
-                half,
-            )
+            // Resident detailed terrain first; the coarse WDL surface everywhere else (it
+            // covers the whole map, so it also plugs the ADT-ring-to-farclip gap).
+            let (streamer, adt_tiles, wdl) = (&self.streamer, &self.adt_tiles, &self.wdl);
+            let oracle = |p| {
+                terrain_height_under(streamer, adt_tiles, p)
+                    .or_else(|| wdl.as_ref().and_then(|w| w.height_under(p)))
+            };
+            // The round-robin drip (decision 1436): an unprimed mask marches every cell once,
+            // a primed one re-prices FLARE_RAYS_PER_FRAME — the slew smooths the ≤8-frame
+            // staleness exactly as it smooths the grid's own 1/16 quantization.
+            let cells = if *self.primed {
+                FLARE_RAYS_PER_FRAME
+            } else {
+                FLARE_CELLS
+            };
+            *self.primed = true;
+            let fraction = flare_mask_update(&mut self.mask, &mut self.cursor, cells, |c| {
+                flare_cell_clear(oracle, cam_pos, dir, half, c)
+            });
+            base * fraction
         } else {
+            *self.primed = false;
             0.0
         };
         *self.env = flare_slew(*self.env, target, rise, FLARE_FALL, self.time.delta_secs());
@@ -736,6 +795,29 @@ mod tests {
             (0.25..=0.75).contains(&frac),
             "straddling the crest: expected a partial fraction, got {frac}"
         );
+    }
+
+    /// The 1436 round-robin drip is the full march, just spread over frames: priming reads the
+    /// exact full-march fraction, and a whole 2-cells-per-step cycle over an unchanged scene
+    /// lands back on it (the mask never reads a partial window — every step reads all 16 bits).
+    #[test]
+    fn flare_mask_drip_converges_to_the_full_march() {
+        let cam = Vec3::new(0.0, 2.0, 0.0);
+        let e = 5.4_f32.to_radians();
+        let dir = Vec3::new(e.cos(), e.sin(), 0.0); // straddles the ridge crest — a partial mask
+        let half = 2.0_f32.to_radians();
+        let full = flare_visible_fraction(ridge, cam, dir, half);
+        assert!((0.0..1.0).contains(&full), "oracle must be partial: {full}");
+        let (mut mask, mut cursor) = (0u16, 0u32);
+        let march = |c| flare_cell_clear(ridge, cam, dir, half, c);
+        let primed = flare_mask_update(&mut mask, &mut cursor, FLARE_CELLS, march);
+        assert_eq!(primed, full, "priming = the full march in one call");
+        let mut last = primed;
+        for _ in 0..(FLARE_CELLS / FLARE_RAYS_PER_FRAME) {
+            last = flare_mask_update(&mut mask, &mut cursor, FLARE_RAYS_PER_FRAME, march);
+        }
+        assert_eq!(last, full, "a full drip cycle re-derives the same fraction");
+        assert_eq!(cursor, 0, "the cursor wrapped exactly once");
     }
 
     #[test]

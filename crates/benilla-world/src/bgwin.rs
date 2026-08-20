@@ -66,6 +66,7 @@ const BG_ENV_PREFIXES: &[&str] = &[
     "WOW_PORTRAIT_TEST",
     "WOW_PROBE",
     "WOW_RIG",
+    "WOW_SCHED_CENSUS",
     "WOW_WORLDVIEW_",
 ];
 
@@ -99,6 +100,7 @@ const NO_PIXEL_ENV_PREFIXES: &[&str] = &[
     "WOW_PARTICLE_CENSUS",
     "WOW_PROBE",
     "WOW_RIG",
+    "WOW_SCHED_CENSUS",
     // The engine boot check reads no pixels — it reads the ERROR LOG. Its sibling
     // `WOW_WORLDVIEW_SHOT` is deliberately absent: that one photographs the frame, and the
     // all-of rule below keeps a CHECK+SHOT pairing at full size.

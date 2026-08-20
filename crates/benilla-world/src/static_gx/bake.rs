@@ -65,7 +65,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             state.items.len(),
             baked.draws.last().map_or(0, |d| d.vertex_range.end),
         );
-        world.cells.insert(cell, baked);
+        world.cells.insert(cell, std::sync::Arc::new(baked));
     }
     for (&instance, state) in wmos.iter_mut() {
         if !bake_due(state, world.wmos.contains_key(&instance), frame) {
@@ -93,7 +93,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             baked.groups.len(),
             baked.draws.last().map_or(0, |d| d.vertex_range.end),
         );
-        world.wmos.insert(instance, baked);
+        world.wmos.insert(instance, std::sync::Arc::new(baked));
     }
     // The prop regions (B4): the WMO loop's shape with the referrer SET as the selection
     // grain — the sort keeps runs set-homogeneous, and the published draw carries the
@@ -122,7 +122,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             baked.sets.len(),
             baked.draws.last().map_or(0, |d| d.vertex_range.end),
         );
-        world.props.insert(instance, baked);
+        world.props.insert(instance, std::sync::Arc::new(baked));
     }
 }
 

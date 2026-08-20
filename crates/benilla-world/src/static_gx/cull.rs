@@ -338,6 +338,10 @@ pub(super) fn cull_cells(
         cell.settled = if unarmed_left { None } else { verdict };
         if bits_changed {
             if let Some(draw) = world.cells.get_mut(&key) {
+                // Copy-on-write (1436): the region is Arc-shared with the render world's
+                // extracted clone; a real bitmap change — the only writer — pays one region
+                // copy here so the per-frame publish/extract clones stay refcount bumps.
+                let draw = std::sync::Arc::make_mut(draw);
                 // Rebuild whole from the states — cheap, and immune to index drift across
                 // re-bakes (the flush refreshed `items` and set `bits_stale` this frame).
                 draw.killed.iter_mut().for_each(|w| *w = 0);

@@ -122,18 +122,22 @@ pub(crate) enum GxDoodadVis {
     Prop(Entity, Vec<bool>),
 }
 
-/// The published half the render world clones each frame (handles + ranges — cheap).
+/// The published half the render world clones each frame. The baked regions sit behind `Arc`
+/// (decision 1436): the 1435 band map priced the publish + extract clone pair at 0.39 ms/f —
+/// tens of thousands of `GxItemDraw`s memcpy'd twice a frame — so the per-frame clones are
+/// refcount bumps now, and the ONE writer that mutates a published region (the kill scan's
+/// bitmap rebuild) pays a copy-on-write of that region alone, only on a real fade transition.
 #[derive(Clone, Default, Resource, ExtractResource)]
 pub(crate) struct GxWorld {
-    pub cells: HashMap<(i32, i32), GxCellDraw>,
+    pub cells: HashMap<(i32, i32), std::sync::Arc<GxCellDraw>>,
     /// This frame's doodad-phase draw list, near-first across cells AND prop regions (B4):
     /// frustum + farclip + exterior gate at cell/set granularity, PVS per set.
     pub visible: Vec<GxDoodadVis>,
     /// The WMO regions (slice 2), keyed by placement instance entity.
-    pub wmos: HashMap<Entity, GxCellDraw>,
+    pub wmos: HashMap<Entity, std::sync::Arc<GxCellDraw>>,
     /// The prop regions (B4), keyed by the same instance entity as `wmos` (their lifecycle),
     /// held apart so prop arrivals never re-bake building geometry.
-    pub props: HashMap<Entity, GxCellDraw>,
+    pub props: HashMap<Entity, std::sync::Arc<GxCellDraw>>,
     /// This frame's per-group admission per region (indexed by absolute group index): the
     /// portal flood's verdict collapsed to CPU range selection — the node draws exactly the
     /// runs whose group bit is set.

@@ -199,6 +199,12 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_ENTITY_CENSUS").is_ok() {
                 app.add_plugins(crate::capture::EntityCensusPlugin);
             }
+            // The schedule census: `WOW_SCHED_CENSUS=1` prints every schedule's systems with their
+            // executor-relevant flags, both worlds, then exits — the structural inventory under
+            // the orchestration bands (see `capture::SchedCensusPlugin`, decision 1437).
+            if std::env::var("WOW_SCHED_CENSUS").is_ok() {
+                app.add_plugins(crate::capture::SchedCensusPlugin);
+            }
             // The melee live probe: `WOW_PROBE=melee` auto-fights the nearest enemy so the dbg-trace
             // sink can record the combat-text timeline (see `capture::ProbeMeleePlugin`).
             if std::env::var("WOW_PROBE").as_deref() == Ok("melee") {
