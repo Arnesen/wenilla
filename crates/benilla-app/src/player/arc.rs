@@ -9,15 +9,13 @@ use super::{Player, FALL_FAR_DROP, FALL_FAR_TIME};
 
 /// The airborne-arc lifecycle edges [`Player::advance_airborne_arc`] reports for the frame — what the
 /// live flags (`new_arc` re-seeds the frozen airborne direction bits) and the wire stream
-/// (`landed`/`started_falling` select the `MSG_MOVE_*` opcode) read.
+/// (`landed` selects the `MSG_MOVE_*` opcode) read.
 pub(super) struct ArcEdges {
     /// This frame began a new airborne arc (a first airborne frame or a fresh jump, incl. a
     /// same-frame land+relaunch) — the airborne direction flags re-seed from the current keys.
     pub(super) new_arc: bool,
     /// The arc ended this frame (airborne last frame, grounded now) — emit `MSG_MOVE_FALL_LAND`.
     pub(super) landed: bool,
-    /// A bracket-less step-off began this frame — push an immediate heartbeat so observers start it.
-    pub(super) started_falling: bool,
 }
 
 impl Player {
@@ -94,16 +92,13 @@ impl Player {
             // wound grunt and dust puff of a landing that never happened. On release the fall
             // restarts as a fresh arc from a zero clock, which is `ClearRoot`'s `StartFalling(0)`.
             landed: !airborne && was_airborne && !self.modes.rooted,
-            // A step-off with no jump opcode needs its first airborne report pushed promptly so
-            // observers start the arc (→ an immediate heartbeat); a jump has its own JUMP opcode.
-            started_falling: airborne && !was_airborne && !jumped,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::JUMP_SPEED;
+    use super::super::{GRAVITY, JUMP_SPEED};
     use super::*;
     use bevy::prelude::Vec3;
 
@@ -116,6 +111,13 @@ mod tests {
     /// the pre-step ground) would latch FALLINGFAR on the descent back to ground at 60 fps — the
     /// Fall(40) flash. The fix seats the launch height at the ground, defeating this.
     const _: () = assert!(TAKEOFF_RISE > FALL_FAR_DROP);
+
+    /// What a **real** step-off's first frame descends at 60 fps: the walk election launches at
+    /// vz 0, gravity gives it `g·dt`, and the step moves it `g·dt²`. Small — ~5 mm — and that is
+    /// the point: 1458's report edge asks only whether the body went down *at all*, so the margin
+    /// between a genuine walk-off and a body that went nowhere is this, not a threshold anyone
+    /// picked.
+    const FIRST_TICK_DROP: f32 = GRAVITY / (60.0 * 60.0);
 
     /// A grounded player about to jump from ground height `ground`. `launch_y` passed to
     /// `advance_airborne_arc` is this pre-step feet Y; the takeoff frame's post-step `pos.y` is
@@ -146,10 +148,6 @@ mod tests {
         p.pos.y = 100.0 + TAKEOFF_RISE;
         let edges = p.advance_airborne_arc(true, true, 0.0, 100.0);
         assert!(edges.new_arc);
-        assert!(
-            !edges.started_falling,
-            "a jump is not a bracket-less step-off"
-        );
         assert_eq!(p.jump_zspeed, JUMP_SPEED, "the launch vz is the jump speed");
         assert_eq!(
             p.fall_start_y, 100.0,
@@ -254,16 +252,15 @@ mod tests {
     fn a_step_off_fall_latches_falling_far_by_time_not_distance() {
         // A step-off (airborne, not jumped) launches at vz 0 — the walk election's StartFalling(0)
         // — so it latches by TIME, not descent, even before dropping a full 1/9 yd.
+        // `pos.y` is the POST-step pose, so a real step-off's first frame is already one tick of
+        // gravity below its launch ground ([`FIRST_TICK_DROP`]).
         let mut p = Player {
-            pos: Vec3::new(0.0, 100.0, 0.0),
+            pos: Vec3::new(0.0, 100.0 - FIRST_TICK_DROP, 0.0),
             vel_y: -0.5,
             ..Default::default()
         };
         let edges = p.advance_airborne_arc(true, false, 0.0, 100.0);
-        assert!(
-            edges.started_falling,
-            "a bracket-less step-off pushes a heartbeat"
-        );
+        assert!(edges.new_arc, "the step-off opens an arc");
         assert_eq!(p.jump_zspeed, 0.0, "a step-off launches at exactly 0");
         // Barely descended, but not yet FALL_FAR_TIME airborne.
         p.pos.y = 99.95;
@@ -317,12 +314,9 @@ mod tests {
         p.advance_airborne_arc(false, false, 1.2, 100.0);
 
         p.modes.rooted = false; // the aura expired; still nothing under us
+        p.pos.y = 70.0 - FIRST_TICK_DROP; // and the released body has already fallen one tick
         let edges = p.advance_airborne_arc(true, false, 11.2, 70.0);
         assert!(edges.new_arc, "the release begins a new arc");
-        assert!(
-            edges.started_falling,
-            "a bracket-less step-off — StartFalling(0), no JUMP opcode"
-        );
         assert_eq!(p.jump_zspeed, 0.0, "launched at exactly 0, like a walk-off");
         assert_eq!(
             p.airborne_since,

@@ -283,8 +283,23 @@ pub(super) fn inspect_ui(
             } else {
                 String::new()
             };
+            // The **placement tilt** (decision 1459) — shown only when there is one. A GameObject
+            // is placed by its `GAMEOBJECT_ROTATION` quaternion, and 96.7% of live spawns encode a
+            // plain yaw in it; the rest carry a tilt that swings the model's off-origin geometry
+            // yards from the spawn point. So `tilt 70°` on a prop that looks misplaced says "this
+            // one's pose is quaternion-only" — the question B89 cost a DB round-trip to answer —
+            // and its absence says the placement is a bare facing and the fault is elsewhere.
+            let tilt = s
+                .0
+                .gameobject_rotation()
+                // The angle the quaternion leans the model's own up-axis off world up:
+                // `acos(m22)`, i.e. `2·asin(|x, y|)` — zero for every pure-yaw spawn.
+                .map(|q| (2.0 * q[0].hypot(q[1]).min(1.0).asin()).to_degrees())
+                .filter(|deg| *deg >= 0.5)
+                .map(|deg| format!(" · tilt {deg:.0}°"))
+                .unwrap_or_default();
             format!(
-                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text} · {interact}{page_text}",
+                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text} · {interact}{page_text}{tilt}",
                 s.0.gameobject_type_id()
             )
         });

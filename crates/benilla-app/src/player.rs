@@ -1433,10 +1433,9 @@ fn control(
         // clears it under us. Root rides too — moving bits are what must not accompany it, and
         // rooted input can't produce any (`dir` is zeroed above, jumps refused).
         let mut move_flags_now = player.modes.wire_flags();
-        // `landed`/`started_falling` gate the wire's jump/fall lifecycle; the swim branch never sets
+        // `landed` gates the wire's jump/fall lifecycle; the swim branch never sets
         // them (leaving the water resumes the ground mover from rest, no airborne report).
         let landed;
-        let started_falling;
         if swimming {
             // Swimming: `MOVEFLAG_SWIMMING` (the swim-pitch tail rides with it) plus the travel-direction
             // bits the swim gait selector cascades on (TU-E: turn→41, strafe→43/44, back→45, fwd→42,
@@ -1459,7 +1458,6 @@ fn control(
             player.airborne_since = None;
             player.fall_far = false;
             landed = false;
-            started_falling = false;
         } else {
             // Straight off the net axis, so a netted-to-zero press pair streams NO direction bit
             // (the emitter's genuine STOP) rather than a phantom FORWARD we aren't actually moving
@@ -1491,7 +1489,6 @@ fn control(
             // also rides the wire (decision 0053), so observers replay it.
             let arc = player.advance_airborne_arc(airborne, jumped, now, launch_y);
             landed = arc.landed;
-            started_falling = arc.started_falling;
             if airborne {
                 move_flags_now |= move_flags::FALLING;
                 // Mid-air the direction flags stay LIVE — the real client's `CMovement+0x40` keeps
@@ -1745,7 +1742,6 @@ fn control(
                 jumped,
                 air_nudged,
                 landed,
-                started_falling,
                 fall_time: wire_fall_time,
             },
             now,

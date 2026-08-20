@@ -36,8 +36,9 @@ and no bundled game assets.
   wire coverage from movement and chat through spells, party, quests, mail, trade, vendors, bank
   and loot.
 - **UI:** a from-scratch FrameXML + Lua engine driving the built-in interface, from the login and
-  character screens through the full HUD, the classic windows, chat, nameplates, floating combat
-  text and tooltips.
+  character screens through the full HUD, the classic windows (guild, macros and key bindings
+  included), chat, nameplates, floating combat text and tooltips; third-party addons load from
+  your own `Interface/AddOns`.
 - **Combat:** melee on the faithful swing law, ranged and Auto Shot, casting with GCD and
   cooldowns, combo points, crowd control that really holds you, and the spell visual pipeline.
 - **Audio:** music, ambience and SFX under the client's own selection and crossfade rules, with
@@ -45,9 +46,7 @@ and no bundled game assets.
 
 ## Not built yet
 
-Guilds past the name over a head, the auction house, the hunter and warlock pet bar, battlegrounds
-and honor, the fishing minigame, the dressing room, macros and key bindings, and third-party
-addons; the Lua engine runs only the built-in UI so far.
+The auction house, and battlegrounds and honor.
 
 ## Running it
 

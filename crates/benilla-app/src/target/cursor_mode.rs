@@ -259,11 +259,31 @@ pub(crate) const GO_TYPE_FISHINGNODE: i32 = 17;
 /// `[0x80b0b0]`) — the bobber is effectively un-range-gated for any real cast, never the ~5.56 yd
 /// reach. Other types stay on the 0236 interim (the base default is 5.0 and several per-type ctors
 /// override it — 5.5556/10.0/…; their population is a later byte-pin).
+/// `GAMEOBJECT_TYPE_CHAIR` (7) — the byte-pinned second member of the per-type table (decision
+/// 1464, wow-re's chair §5). Its `+0x18` predicate is its own `0x5f5670`, which reports **3.0 yd**
+/// and accepts on `dist² < 9.0` against `[0xc4d808]` — whose only writer image-wide is the static
+/// initializer `0x5f98b0` squaring that same 3.0. Chair-exclusive, and it independently reproduces
+/// vmangos's `MAX_SITCHAIRUSE_DISTANCE`, which is why it is safe to hold as *client* law rather
+/// than a transcribed server number (the B158 trap).
+pub(crate) const GO_TYPE_CHAIR: i32 = 7;
 fn go_interact_range_sq(type_id: i32) -> f32 {
-    if type_id == GO_TYPE_FISHINGNODE {
-        100.0 * 100.0
-    } else {
-        GO_INTERACT_RANGE_SQ
+    match type_id {
+        GO_TYPE_FISHINGNODE => 100.0 * 100.0,
+        // The chair is the one type whose reach is *shorter* than the 0236 interim, so it is the one
+        // where the interim was visibly wrong: from 3 to ~5.56 yd we showed a live interact cursor
+        // and sent a `CMSG_GAMEOBJ_USE` the server drops on the floor (its own chair arm refuses
+        // past 3.0 to the nearest seat), so the click did nothing and said nothing. Now the cursor
+        // greys where the reference greys it.
+        //
+        // **Measured to the GameObject, not to the seat.** The reference runs its compare per seat,
+        // over the 5 slots `0x5f5760` builds at template bind; vmangos likewise measures to
+        // `GetClosestChairSlotPosition`. Seats spread along `orientation + PI/2` at
+        // `size·i − size·(slots−1)/2`, so for a 1-slot chair — the common case, and the B79 chair —
+        // the seat *is* the object and the two agree exactly; a long bench differs by at most half
+        // its span. Closing that gap needs the seat table, which needs `data0`/`data1` off the GO
+        // template; it is a refinement of this number, not a correction to it.
+        GO_TYPE_CHAIR => 9.0,
+        _ => GO_INTERACT_RANGE_SQ,
     }
 }
 /// `GameObjectFlags` bits consulted by the highlightable gate (decision 0243, wow-re cursor-system §4a):
@@ -1324,6 +1344,13 @@ mod tests {
         // effectively un-range-gated — while everything else stays on the interim reach.
         assert_eq!(go_interact_range_sq(GO_TYPE_FISHINGNODE), 100.0 * 100.0);
         assert_eq!(go_interact_range_sq(0), GO_INTERACT_RANGE_SQ);
+        // The chair's own 3.0 yd (1464) — the one type that reaches *less* far than the interim, so
+        // the interim was the visible bug: a live cursor and a dropped packet from 3 to 5.56 yd.
+        assert_eq!(go_interact_range_sq(GO_TYPE_CHAIR), 9.0);
+        assert!(
+            go_interact_range_sq(GO_TYPE_CHAIR) < GO_INTERACT_RANGE_SQ,
+            "the chair reaches SHORTER than the interim — a longer one would restore the bug"
+        );
         // The channel compare itself: owned iff self's channel object is exactly this guid.
         assert!(!fishing_channel_owned(None, Some(7)));
         assert!(!fishing_channel_owned(None, None));

@@ -16,8 +16,8 @@ use benilla_world::model_fade::DespawnFade;
 use benilla_world::vis_chain::VisChainOnly;
 
 use super::super::motion::{
-    create_spline, monster_move_spline, pose_transform, resolve_facing, trace_create_spline,
-    trace_move_snap, write_pose, SplineStopped,
+    create_spline, gameobject_rotation, monster_move_spline, pose_transform, resolve_facing,
+    trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped,
 };
 use super::super::{
     Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, RemoteMotion, SelfGuid,
@@ -101,6 +101,11 @@ pub(super) fn object_create(
             progress_ms,
             at: std::time::Instant::now(),
         });
+    // The spawn's `GAMEOBJECT_ROTATION` quaternion — read once, wanted twice: it is this object's
+    // placement (below) and, on a type-11 lift, the basis its keyframe offsets rotate through.
+    let go_quat = (kind == EntityKind::GameObject)
+        .then(|| fields.gameobject_rotation())
+        .flatten();
     // A type-11 lift's arm seed (decision 0438 phase 3's second consumer): the keyframe path is
     // keyed by the template **entry**, the offsets rotate through the spawn's `GAMEOBJECT_ROTATION`
     // quat, and the base is the stationary spot the movement block carried — all already in this
@@ -113,8 +118,15 @@ pub(super) fn object_create(
             entry,
             base_pos: position,
             yaw: orientation,
-            quat: fields.gameobject_rotation(),
+            quat: go_quat,
         });
+    // Where this object is *pointed*. A mover carries one yaw; a GameObject is placed by its
+    // `GAMEOBJECT_ROTATION` quaternion, which is the reference's own placement input and is a
+    // strictly wider answer than the facing (decision 1459, `motion::gameobject_rotation`).
+    let placement = match kind {
+        EntityKind::GameObject => gameobject_rotation(go_quat, orientation),
+        _ => wire_yaw(orientation),
+    };
     // A unit/player created already ON a transport (deck NPCs stream in this way): its LIVING
     // block's rider tail is its local pose — `compose_riders` re-anchors it through the boat's
     // live matrix each frame (decision 0438 phase 2). The block's world `position` is the
@@ -192,7 +204,7 @@ pub(super) fn object_create(
                 commands.entity(e).remove::<Spline>();
             }
         }
-        write_pose(transforms, e, position, orientation);
+        write_pose(transforms, e, position, placement);
         // Overlay the fresh snapshot's descriptor fields onto the existing store.
         merge_fields(stores, pending, e, guid, fields);
     } else {
@@ -207,7 +219,7 @@ pub(super) fn object_create(
         let mut entity = commands.spawn((
             Guid(guid),
             net,
-            pose_transform(position, orientation),
+            pose_transform(position, placement),
             visibility,
         ));
         // Chain-only visibility (benilla_world::vis_chain): the net root renders nothing —
@@ -254,7 +266,9 @@ pub(super) fn object_move(
 ) {
     if let Some(&e) = index.0.get(&guid) {
         commands.entity(e).remove::<Spline>();
-        write_pose(transforms, e, position, orientation);
+        // A movement block carries a yaw and nothing else — the only GameObjects that get one are
+        // transports, whose pose the transport tick owns from the next frame (decision 0438).
+        write_pose(transforms, e, position, wire_yaw(orientation));
     }
 }
 
@@ -368,7 +382,7 @@ pub(super) fn unit_move(
             debug_assert_eq!(fire_ms, now_ms, "a seeding packet fires at arrival");
             trace_relay(guid, &mv, &rm.relay, now_ms, 0, RelayOutcome::Seed);
             apply_move(e, &mv, &mut rm, now_ms, commands, landings);
-            write_pose(transforms, e, mv.position, mv.orientation);
+            write_pose(transforms, e, mv.position, wire_yaw(mv.orientation));
             commands.entity(e).insert(rm);
         }
     }

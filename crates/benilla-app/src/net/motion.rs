@@ -17,9 +17,9 @@
 //! move replays — the per-unit fire-time chain), [`facing`] (wire facing
 //! resolution + the client-local idle re-face and its [`FacingStep`] shuffle latch). This face keeps
 //! the shared pose glue. Poses live canonically in raw WoW space on the components; the `Transform`
-//! is derived (translation + facing only — scale, baked by the renderer, is preserved).
+//! is derived (translation + placement rotation only — scale, baked by the renderer, is preserved).
 
-use benilla_assets::coords::wow_to_bevy;
+use benilla_assets::coords::{wow_rotation_to_bevy, wow_to_bevy};
 use bevy::prelude::*;
 
 mod facing;
@@ -42,13 +42,51 @@ pub(super) use spline::{
 };
 pub(crate) use spline::{CreatureSwimming, GroundClamped, Spline, SplineStopped};
 
-/// A full [`Transform`] for a freshly-spawned entity from a raw-WoW pose. WoW orientation (yaw about
-/// +Z) maps straight to a Bevy +Y yaw under `wow_to_bevy` — no 180° offset (unlike doodad/WMO
-/// *placement* rotation).
-pub(super) fn pose_transform(position: [f32; 3], orientation: f32) -> Transform {
+/// The Bevy rotation of a wire **yaw** — a mover's orientation, in radians about WoW +Z. It maps
+/// straight to a Bevy +Y yaw under `wow_to_bevy` (`coords`' `yaw_conjugates_through_the_basis_map`)
+/// — no 180° offset, unlike doodad/WMO *placement* rotation.
+pub(super) fn wire_yaw(orientation: f32) -> Quat {
+    Quat::from_rotation_y(orientation)
+}
+
+/// The Bevy rotation of a **GameObject** placement: its `GAMEOBJECT_ROTATION` quaternion, not its
+/// `GAMEOBJECT_FACING` yaw.
+///
+/// The reference builds a GO's render matrix from that quaternion — `0x5f7910` (the every-frame
+/// slot-13 Animate) composes `GetPosition` → gx-rotate by the 4 floats at GO-fields `+0x10` →
+/// gx-scale, and the same 4×4 (`obj+0x218`) is what its collision reads (wow-re
+/// `object-layer/scratch/w2c1.md` §Q2/§Q3). `GAMEOBJECT_FACING` is a *separate* accessor
+/// (`0x5f9fb0`) that the placement never consults.
+///
+/// A yaw is the special case here, not a simplification of it: vmangos copies `rotation0/1` from the
+/// spawn row verbatim and fills `rotation2/3` from the facing when the row leaves them zero
+/// (`GameObject::UpdateRotationFields`), so a row that authors no `rotation0/1` sends
+/// `(0, 0, sin(o/2), cos(o/2))` — and that quaternion **is** `rot_z(o)` exactly. 54 747 of its
+/// 56 632 live spawn rows are that case and place bit-identically either way. The 1 885 that do not (1 410
+/// authoring a real tilt in `rotation0/1`, 475 a yaw that disagrees with their own `orientation`
+/// column; 1 411 of them on a visible display) are exactly what a yaw-only placement gets wrong —
+/// and it misreads as a *position* bug, because an M2's geometry sits off its own origin: a signpost
+/// pointer's plank is 3.3 yd above the origin and 0.3–2.1 yd out, so dropping a 70° tilt swings that
+/// plank 4.3 yd from a spawn point that never moved (decision 1459, bug B89).
+///
+/// Falls back to the facing when the wire carried no quaternion at all, and when what it carried has
+/// no length to normalize — a create block folds absent fields to zero, and an all-zero quat would
+/// normalize to `NaN` and blank the object. Length is otherwise *not* assumed: one shipped row
+/// authors a tilt with `rotation2/3` zero, so the server fills the yaw pair on top of it and sends a
+/// non-unit quat; `wow_rotation_to_bevy` normalizes.
+pub(super) fn gameobject_rotation(quat: Option<[f32; 4]>, orientation: f32) -> Quat {
+    match quat {
+        Some(q) if q.iter().map(|c| c * c).sum::<f32>() > 0.5 => wow_rotation_to_bevy(q),
+        _ => wire_yaw(orientation),
+    }
+}
+
+/// A full [`Transform`] for a freshly-spawned entity from a raw-WoW position + an already-resolved
+/// placement rotation ([`wire_yaw`] for a mover, [`gameobject_rotation`] for a GameObject).
+pub(super) fn pose_transform(position: [f32; 3], rotation: Quat) -> Transform {
     Transform {
         translation: wow_to_bevy(position),
-        rotation: Quat::from_rotation_y(orientation),
+        rotation,
         ..default()
     }
 }
@@ -61,11 +99,11 @@ pub(super) fn write_pose(
     transforms: &mut Query<&mut Transform>,
     e: Entity,
     position: [f32; 3],
-    orientation: f32,
+    rotation: Quat,
 ) {
     if let Ok(mut t) = transforms.get_mut(e) {
         t.translation = wow_to_bevy(position);
-        t.rotation = Quat::from_rotation_y(orientation);
+        t.rotation = rotation;
     }
 }
 

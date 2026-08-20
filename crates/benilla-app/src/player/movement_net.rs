@@ -1,7 +1,8 @@
 //! Outbound self-movement → the wire — the mirror of [`crate::net::motion`] (which integrates *remote*
 //! movers). [`stream_self_movement`] diffs this frame's CMovement move-flags against last frame's and
 //! emits a `MSG_MOVE_*` per movement-*axis* transition (start/stop forward-back, strafe, turn), the
-//! jump/fall lifecycle (JUMP launch, FALL_LAND, step-off heartbeat), a periodic heartbeat while moving,
+//! jump/fall lifecycle (JUMP launch, FALL_LAND — a jumpless fall opens with nothing, decision 1464),
+//! a periodic heartbeat while moving,
 //! and a SET_FACING every frame the facing changes off the turn axis — each carrying the live
 //! `MovementInfo` (decisions 0052 + 0053 + 0617). Split out of the controller: the wire stream is its
 //! own concern.
@@ -99,9 +100,6 @@ pub(super) struct ArcEdges {
     pub(super) air_nudged: bool,
     /// The arc ended this frame → `MSG_MOVE_FALL_LAND`.
     pub(super) landed: bool,
-    /// An arc began with no jump opcode (a walk-off) → an immediate heartbeat, so observers start
-    /// the arc promptly instead of waiting for the periodic one.
-    pub(super) started_falling: bool,
     /// ms since take-off — the caller's snapshot, because the landing frame's arc bookkeeping has
     /// already cleared `airborne_since` and the FALL_LAND must still report the accumulated time.
     pub(super) fall_time: u32,
@@ -116,13 +114,15 @@ pub(super) struct ArcEdges {
 /// the *facing* report its own independent emitter alongside it (decision 0617: in the 1.12.1 sniff
 /// SET_FACING outnumbers every other client-sent movement opcode combined, moving or standing).
 /// vmangos relays it all to nearby players, who extrapolate from the flags — how they see us walk/turn/
-/// strafe. (We claimed the mover with CMSG_SET_ACTIVE_MOVER at login.) **Airborne is its own send law** (VERIFIED, vanilla-sniffs `dwarf_rogue_dun_morogh`): the
-/// fwd/back/strafe transitions and the periodic heartbeat go silent while FALLING — the live flag state
-/// rides the packets that do go out (turn transitions, SET_FACING, the FALL_LAND) — so a normal jump is
-/// exactly JUMP → \[turn/facing\] → FALL_LAND, with the landing flags telling observers what the keys
-/// say *now*. The one press that breaks that silence is the standstill air nudge (`air_nudged`,
-/// decision 0627): it is the case the reference's own deferral excludes, and the only mid-air input
-/// that actually moves us. Sends are fire-and-forget; a down thread no-ops. Mutates `player`'s last-sent flags/facing/
+/// strafe. (We claimed the mover with CMSG_SET_ACTIVE_MOVER at login.) **Airborne is its own send law**
+/// (VERIFIED, vanilla-sniffs `dwarf_rogue_dun_morogh`): the fwd/back/strafe **transitions** go silent
+/// while FALLING — the live flag state rides the packets that do go out — so a jump is JUMP →
+/// \[heartbeats/turn/facing\] → FALL_LAND, with the landing flags telling observers what the keys say
+/// *now*. The one press that breaks the transition silence is the standstill air nudge (`air_nudged`,
+/// decision 0627): the case the reference's own deferral excludes, and the only mid-air input that
+/// actually moves us. **The periodic heartbeat is NOT part of that silence** and a jumpless fall opens
+/// with no packet at all — both corrected against the bytes and the same capture by decision 1464,
+/// which retired this module's two remaining 0053-era inventions. Sends are fire-and-forget; a down thread no-ops. Mutates `player`'s last-sent flags/facing/
 /// heartbeat so next frame can diff against them.
 // Eight, down from twelve: the arc edges are one struct now (`ArcEdges`). The rest are distinct
 // types the compiler can tell apart, so the remaining count is noise rather than a miscount risk.
@@ -141,7 +141,6 @@ pub(super) fn stream_self_movement(
         jumped,
         air_nudged,
         landed,
-        started_falling,
         fall_time,
     } = arc;
     let wow_pos = bevy_to_wow(player.pos);
@@ -260,17 +259,35 @@ pub(super) fn stream_self_movement(
     // — integrating our arc from a JUMP that said `xy_speed = 0` — can ever learn we started moving
     // before the FALL_LAND lands.
     let falling = wire_flags & move_flags::FALLING != 0;
-    // The airborne lifecycle: a JUMP launch (carries the ballistic tail), a FALL_LAND that closes the
-    // arc, or — for a step-off with no jump opcode — an immediate heartbeat so observers start the arc
-    // promptly instead of waiting for the periodic one. A mid-air key release updated the flag state
-    // silently (above), so the landing frame's diff has no direction edge left and the FALL_LAND goes
-    // out alone — the real client sends no trailing Stop after it (sniff-verified).
+    // The airborne lifecycle, and it is exactly two opcodes: a JUMP launch (carrying the ballistic
+    // tail) and a FALL_LAND that closes the arc. A mid-air key release updated the flag state
+    // silently (above), so the landing frame's diff has no direction edge left and the FALL_LAND
+    // goes out alone — the real client sends no trailing Stop after it (sniff-verified).
+    //
+    // **A fall that had no jump opens with NOTHING** — decision 1464, and the third of 0053's
+    // inventions to be retired by the bytes. We used to push an immediate heartbeat here "so
+    // observers start the arc promptly"; wow-re's §5 refuted it three ways: the move-state
+    // broadcaster `0x61a820` gates every send on the *locomotion nibble* (`61a99d test al,0xf`)
+    // and FALLING/`0x2000` lives in `ah`, so a flags change that is only the fall bit never
+    // broadcasts at all; every non-jump `StartFalling 0x7c61f0` site seeds `+0xa0 = 0.0f` while
+    // only `CMovement::Jump 0x7c6230` seeds the launch speed; and `MSG_MOVE_JUMP` has exactly one
+    // emission site image-wide, the move-command drain's jump arm. The 1.12.1 sniff agrees — three
+    // separate non-jump falls (a login settle, a forced unroot, and a post-near-teleport arrival)
+    // each show only the terminal `FALL_LAND`. The law is: **echo → heartbeats every 500 ms while
+    // the fall lasts → FALL_LAND**, and the parenthesis is empty for any fall shorter than the
+    // deadline.
+    //
+    // It was not a harmless invention. It is the only packet in the client that could put
+    // `MOVEFLAG_JUMPING` on the wire for a jumpless arc, and vmangos reads any reported moving flag
+    // as movement — `Unit::HandleInterruptsOnMovement` answers it with `SetStandState(STAND)`,
+    // with a source comment saying the test is there *because* sitting on a chair teleports you.
+    // A chair seats you inside the collider we bake for it, where the mover's down-shapecast can
+    // report nothing and the body reads airborne while moving `dy=+0.000` for six frames; this
+    // packet then told the server we were falling, and stood us up (B79, decision 1458).
     if jumped {
         send_move!(MoveKind::Jump);
     } else if landed {
         send_move!(MoveKind::FallLand);
-    } else if started_falling {
-        send_move!(MoveKind::Heartbeat);
     }
     // Swim transition: the real client announces entering/leaving the water with a dedicated
     // MSG_MOVE_START_SWIM (0xca) / STOP_SWIM (0xcb) the frame the `SWIMMING` bit flips (VERIFIED, wow-re
@@ -344,13 +361,24 @@ pub(super) fn stream_self_movement(
     // Heartbeat keeps a moving/turning mover's position + facing flowing between transitions. While
     // riding, ON_TRANSPORT alone keeps this stream alive — the deck carries us, so our world pose
     // really is changing (decision 0056: the wire mirrors actual motion) and observers on reference
-    // clients keep a fresh compose anchor. **Not while FALLING** — the JUMP packet seeded the whole
-    // arc and observers integrate it locally, so the real client sends a normal-length jump with no
-    // mid-air packet at all (sniff-verified; each extra heartbeat is a smoothing-free snap-apply on
-    // a reference observer). The very long fall's sparse ~3–4 s mid-air sends the sniff shows ride
-    // an untraced trigger — a wow-re question on the board; until it lands, a long fall streams
-    // nothing between JUMP/step-off and FALL_LAND.
-    if !sent && wire_flags != 0 && !falling && now - player.last_heartbeat >= HEARTBEAT_INTERVAL {
+    // clients keep a fresh compose anchor.
+    //
+    // **And it runs while FALLING too** (decision 1464). This arm used to carry `&& !falling`,
+    // defended as "the real client sends a normal-length jump with no mid-air packet at all
+    // (sniff-verified)" — which wow-re's §5 refuted on both halves against the same 1.12.1 capture.
+    // `MSG_MOVE_JUMP` is the **44-byte** form (the jump quad is present, `vz = -7.955547`, matching
+    // the `.text` constant `0xc0fe93d8` bit for bit), and mid-air packets are routine: heartbeats
+    // and a mid-air SET_FACING, all 44 B. The "untraced trigger" behind the sniff's sparse mid-air
+    // sends is traced now, and it is *this deadline*: `[mgr+0x130]` is re-armed to `now + 500 ms`
+    // after **every** outbound packet (`0x600a30` → `0x615b80`), which is why one 892 ms jump shows
+    // no heartbeat at all — the player's own SET_FACING at `fallTime 460` pushed the deadline out
+    // to 960. Our `last_heartbeat` is already stamped on every send below, so dropping the gate
+    // reproduces the reference's cadence exactly rather than approximating it.
+    //
+    // This does not re-open B79: a chair arrival's stall is ~100 ms and the arrival's own reconcile
+    // packet re-arms the deadline, so nothing fires inside it. What FALLING must never do is open
+    // an arc with a packet of its own — that is the arm above, and it is gone.
+    if !sent && wire_flags != 0 && now - player.last_heartbeat >= HEARTBEAT_INTERVAL {
         send_move!(MoveKind::Heartbeat);
     }
     // ── The position reconcile (decision 0907) ── **the server's copy of where we are may never go
@@ -446,7 +474,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 0,
             },
             0.0,
@@ -485,8 +512,12 @@ mod tests {
             0,
             // grounded again: no FALLING/FALLINGFAR on the land packet itself
             0.0,
-            ArcEdges { jumped: false, air_nudged: false, landed: true, started_falling: // landed
-            false, fall_time: 1700 },
+            ArcEdges {
+                jumped: false,
+                air_nudged: false,
+                landed: true,
+                fall_time: 1700,
+            },
             // the snapshot: ~1.7 s of fall (> the 1229 ms damage gate)
             0.0,
             &[],
@@ -527,7 +558,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 300,
             },
             0.2,
@@ -550,7 +580,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: true,
-                started_falling: false,
                 fall_time: 800,
             },
             0.8,
@@ -566,6 +595,70 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "no trailing Stop after the FALL_LAND"
+        );
+    }
+
+    /// **A fall that had no jump opens with nothing, and then heartbeats on the ordinary deadline**
+    /// — decision 1464, replacing two 0053-era inventions with the law wow-re's §5 read off the
+    /// broadcaster and reproduced in the 1.12.1 capture: `echo → heartbeats every 500 ms while the
+    /// fall lasts → FALL_LAND`, the parenthesis empty for any fall shorter than the deadline.
+    ///
+    /// The opener is the load-bearing half. It is the only packet that could put `MOVEFLAG_JUMPING`
+    /// on the wire for a jumpless arc, and vmangos answers a reported moving flag with
+    /// `SetStandState(STAND)` — which is what un-seated a chair-sitter for six frames of
+    /// `dy=+0.000` inside the chair's own collider (B79, decision 1458).
+    #[test]
+    fn a_jumpless_fall_opens_with_nothing_and_heartbeats_on_the_deadline() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        // Grounded last frame (flags 0), airborne now with no jump: the walk-off / arrival case.
+        let mut player = Player::default();
+        let step_off = |now: f32, player: &mut Player| {
+            stream_self_movement(
+                &tx,
+                player,
+                move_flags::FALLING,
+                0.0,
+                ArcEdges {
+                    jumped: false,
+                    air_nudged: false,
+                    landed: false,
+                    fall_time: (now * 1000.0) as u32,
+                },
+                now,
+                &[],
+                None,
+            );
+        };
+
+        step_off(0.1, &mut player);
+        assert!(
+            rx.try_recv().is_err(),
+            "the arc's first frame puts NOTHING on the wire — this packet is B79's un-seat"
+        );
+        assert_eq!(
+            player.move_flags,
+            move_flags::FALLING,
+            "the flag state still updated silently, to ride the next packet that does go out"
+        );
+
+        // Still inside the 500 ms deadline: silent. A chair arrival's whole stall lives here.
+        step_off(0.4, &mut player);
+        assert!(rx.try_recv().is_err(), "inside the deadline, still silent");
+
+        // Past it: the ordinary heartbeat runs, carrying the live FALLING bit. This is the half the
+        // old `&& !falling` gate suppressed, and the sniff shows mid-air heartbeats plainly.
+        step_off(0.7, &mut player);
+        let ClientCommand::Move { kind, flags, .. } = rx
+            .try_recv()
+            .expect("past the deadline the fall heartbeats")
+        else {
+            panic!("expected a Move command");
+        };
+        assert_eq!(kind, MoveKind::Heartbeat);
+        assert_ne!(
+            flags & move_flags::FALLING,
+            0,
+            "and it carries the arc, so observers learn of a long fall in progress"
         );
     }
 
@@ -592,7 +685,6 @@ mod tests {
                 jumped: false,
                 air_nudged: true,
                 landed: false,
-                started_falling: false,
                 fall_time: 300,
             },
             0.3,
@@ -631,7 +723,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 300,
             },
             0.3,
@@ -664,7 +755,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 200,
             },
             0.2,
@@ -679,8 +769,9 @@ mod tests {
         assert_eq!(kind, MoveKind::StartTurnLeft);
         assert_ne!(flags & move_flags::FALLING, 0, "the packet rides the arc");
         assert!(rx.try_recv().is_err(), "the turn axis carries the facing");
-        // Mid-air mouse-turn with the turn key released: the periodic heartbeat stays suppressed
-        // while FALLING, and the facing streams via SET_FACING once the turn flag is gone.
+        // Mid-air mouse-turn with the turn key released: the StopTurn transition is this frame's
+        // send, so the periodic arm does not add a second packet (it is `!sent`-gated, not
+        // FALLING-gated — 1464), and the facing streams via SET_FACING once the turn flag is gone.
         player.face_yaw = 1.0;
         stream_self_movement(
             &tx,
@@ -691,7 +782,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 900,
             },
             1.5,
@@ -708,7 +798,7 @@ mod tests {
         assert_eq!(
             kinds,
             vec![MoveKind::StopTurn, MoveKind::SetFacing],
-            "the turn closes, then the facing reports — no heartbeat while FALLING"
+            "the turn closes, then the facing reports — the frame already sent, so no heartbeat"
         );
     }
 
@@ -734,7 +824,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 0,
             },
             0.05,
@@ -768,7 +857,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 0,
             },
             0.06,
@@ -800,7 +888,6 @@ mod tests {
                     jumped: false,
                     air_nudged: false,
                     landed: false,
-                    started_falling: false,
                     fall_time: 0,
                 },
                 0.05 * (i as f32 + 1.0),
@@ -823,7 +910,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 0,
             },
             0.2,
@@ -860,7 +946,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 0,
             },
             0.05,
@@ -889,7 +974,6 @@ mod tests {
                 jumped: false,
                 air_nudged: false,
                 landed: false,
-                started_falling: false,
                 fall_time: 0,
             },
             0.0,

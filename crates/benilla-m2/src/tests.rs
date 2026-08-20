@@ -69,6 +69,53 @@ fn m2track(interp: u16, gseq: u16, ts: (u32, u32), vals: (u32, u32)) -> Vec<u8> 
     t
 }
 
+/// **A fix16 key is SIGNED.** Real art authors "hide me" as `0x8001` — `−32767`, i.e. `−1.0` —
+/// which read unsigned decodes to `+1.00006` and sails through the reference's `A ≤ 0` batch cull.
+/// `TanarisTrollGate.m2` switches between its intact gate and its burnt twin with exactly these
+/// ±1 keys, so reading them unsigned drew both copies at once (B138, decision 1460). Both records
+/// that carry a fix16 track — the M2Color **alpha** (header `0x54`, stride `0x38`, track @ `+0x1c`)
+/// and the M2TextureWeight (header `0x64`, stride `0x1c`) — share the decode, so both are checked.
+#[test]
+fn a_negative_fix16_key_decodes_signed() {
+    let mut b = header();
+    let ts_ofs = b.len() as u32;
+    b.extend(0u32.to_le_bytes());
+    b.extend(333u32.to_le_bytes());
+    let val_ofs = b.len() as u32;
+    b.extend(0x7fffu16.to_le_bytes()); // +1.0 — "draw me"
+    b.extend(0x8001u16.to_le_bytes()); // −1.0 — "hide me"
+                                       // One M2Color: a keyless RGB track @ +0x00, then the 2-key alpha track @ +0x1c.
+    let color_ofs = b.len() as u32;
+    b.extend(m2track(0, 0xffff, (0, 0), (0, 0)));
+    b.extend(m2track(1, 0xffff, (2, ts_ofs), (2, val_ofs)));
+    set_arr(&mut b, 0x54, 1, color_ofs);
+    // One M2TextureWeight: the same keys again, so the weight side is covered too.
+    let weight_ofs = b.len() as u32;
+    b.extend(m2track(1, 0xffff, (2, ts_ofs), (2, val_ofs)));
+    set_arr(&mut b, 0x64, 1, weight_ofs);
+
+    let fmt = parse(&b).expect("a colour + weight fixture parses");
+    let m = fmt.model();
+    let keys = |t: &M2ScalarTrack| t.keys.iter().map(|&(_, v)| v).collect::<Vec<_>>();
+    let alpha = keys(&m.color_alpha_tracks[0]);
+    assert!(
+        (alpha[0] - 1.0).abs() < 1e-4,
+        "0x7fff is +1.0 (got {})",
+        alpha[0]
+    );
+    assert!(
+        (alpha[1] + 1.0).abs() < 1e-4,
+        "0x8001 is −1.0 — read unsigned it would be +1.0 and the batch would draw (got {})",
+        alpha[1]
+    );
+    let weight = keys(&m.transparency_tracks[0]);
+    assert!(
+        (weight[1] + 1.0).abs() < 1e-4,
+        "the transparency weight decodes signed too (got {})",
+        weight[1]
+    );
+}
+
 #[test]
 fn texture_transform_translation_track_decodes() {
     let mut b = header();

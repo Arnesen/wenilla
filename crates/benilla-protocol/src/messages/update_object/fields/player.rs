@@ -582,8 +582,10 @@ impl ObjectFields {
     /// the wire carried no component at all (vmangos omits zero fields from the create mask, and
     /// an identity-ish quat still sends its nonzero `w`/`z`); absent components within a
     /// partially-sent quat read as the create-block zero default, so a pure-yaw spawn
-    /// (`x = y = 0`, the live-data norm) round-trips exactly. Consumed by the type-11 transport
-    /// evaluator (elevators/lifts rotate their keyframe offsets through this).
+    /// (`x = y = 0`, the live-data norm) round-trips exactly. This is the field a GameObject is
+    /// *placed* by — the reference builds its render matrix from this quaternion and never from
+    /// `GAMEOBJECT_FACING` (decision 1459) — and the basis a type-11 lift rotates its keyframe
+    /// offsets through.
     pub fn gameobject_rotation(&self) -> Option<[f32; 4]> {
         let any_sent = (0..4u16).any(|i| self.contains(FIELD_GAMEOBJECT_ROTATION + i));
         any_sent.then(|| {

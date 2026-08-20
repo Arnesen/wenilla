@@ -115,8 +115,8 @@ pub struct RibbonEmitterDef {
     pub blend_mode: Option<u16>,
     /// Trail tint (colorTrack, RGB 0..1, keyed on the clip clock; constant white when unkeyed).
     pub color: ValueTrack<[f32; 3]>,
-    /// Trail opacity (alphaTrack, fixed16/32767, keyed — the slash's fade-out; constant 1.0 when
-    /// unkeyed).
+    /// Trail opacity (alphaTrack, **int16** fix16/32767, keyed — the slash's fade-out; constant
+    /// 1.0 when unkeyed).
     pub alpha: ValueTrack,
     /// Cross-section half-widths (yards) above/below the bone path, keyed — the slash's
     /// flare-and-collapse. Sampled at edge-commit time (each edge keeps the width it was born
@@ -321,8 +321,11 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
             color: track_keys_with(bytes, e + 0x24, [1.0; 3], band, 12, |b, o| {
                 [le_f32(b, o), le_f32(b, o + 4), le_f32(b, o + 8)]
             }),
+            // fix16 keys are SIGNED (`movsx`, wow-re `tracks.md` flavour (c) — the same decode as
+            // `benilla_m2::track_fix16`; the ribbon spec calls the stride-2 values int16 outright,
+            // `ribbon-emitter-spec.md` +0x40). The strip's own draw clamps a negative to 0 below.
             alpha: track_keys_with(bytes, e + 0x40, 1.0, band, 2, |b, o| {
-                f32::from(le_u16(b, o)) / 32767.0
+                f32::from(le_u16(b, o) as i16) / 32767.0
             }),
             height_above: track_keys_with(bytes, e + 0x5c, 0.0, band, 4, le_f32),
             height_below: track_keys_with(bytes, e + 0x78, 0.0, band, 4, le_f32),

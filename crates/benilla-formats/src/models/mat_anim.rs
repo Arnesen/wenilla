@@ -5,7 +5,9 @@
 //! Byte ground (wow-re `m2-alpha-combine-cull.md`, VERIFIED): the per-batch alpha is
 //! `A = instanceAlpha × colors[colorIndex].alpha × transparency[transLookup[idx]].weight`, both
 //! tracks animation-evaluated each frame; `A ≤ 0` skips the batch before the blend mode is read, and
-//! an Opaque batch with `0 < A < 1` still draws opaque (no blend promotion). Clocks (wow-re
+//! an Opaque batch with `0 < A < 1` is **promoted to a blended draw** (that note's original "stays
+//! opaque" was refuted at the bytes on 2026-07-31 — wow-re `m2-blend-promotion-zfill.md` §1;
+//! benilla implements the promotion, decisions 0831/0842). Clocks (wow-re
 //! `eval.md`/`doodad-anim-host.md`): a `gseq`-tagged track wraps `global_sequences[gseq]`; an
 //! ordinary track keys inside the **playing** sequence's absolute time band — for a placed doodad
 //! that is the file-order-first sequence looping forever, but a creature changes sequence constantly
@@ -217,6 +219,86 @@ mod tests {
             w.keys.iter().all(|&(_, v)| (0.0..=1.0).contains(&v)),
             "fix16 weights decode into [0, 1]"
         );
+    }
+
+    /// **B138 — Zul'Farrak's troll gate drew its own ruin on top of itself** (decision 1460).
+    /// `TanarisTrollGate.m2` is ONE file holding TWO gates: the intact one
+    /// (`TANARISTROLLGATE.BLP`) and its burnt twin (`TANARISTROLLGATEBURNT.BLP`), plus a tiki-mask
+    /// batch for each. Which pair draws is authored entirely in the M2Color alpha keys — `+1.0`
+    /// (`0x7fff`) for the copy this sequence shows, `−1.0` (`0x8001`) for the copy it hides — and a
+    /// negative alpha is what trips the reference's `A ≤ 0` batch cull. Decoded UNSIGNED, `0x8001`
+    /// reads `+1.00006`: both gates drew, interpenetrating everywhere, and the pair z-fought until
+    /// the door swung open and pulled them apart. So the carve is per sequence slot: **Closed (0)**
+    /// shows the intact gate and hides the burnt one, **Destroy (3)** does the reverse — and the two
+    /// tiki-mask batches, which share a texture, are never both visible. Skips without client data.
+    #[test]
+    fn troll_gate_never_draws_its_burnt_twin_at_the_same_time() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("World\\Kalimdor\\Tanaris\\ActiveDoodads\\TrollGate\\TanarisTrollGate.m2")
+            .expect("read TanarisTrollGate.m2");
+        let subs = super::super::parse_m2_render_submeshes(&bytes, "", &[]).expect("parse");
+        // Sequence slots are FILE order (what the track ranges index): 0 Closed, 1 Open, 2 Opened,
+        // 3 Destroy, 4 Close.
+        let (closed, destroy) = (Some(0), Some(3));
+        let alpha_of = |tex: &str, seq| -> Vec<f32> {
+            subs.iter()
+                .filter(|s| {
+                    s.texture
+                        .as_deref()
+                        .is_some_and(|t| t.to_ascii_uppercase().contains(tex))
+                })
+                .map(|s| {
+                    s.alpha_anim
+                        .as_ref()
+                        .map_or(1.0, |a| a.sample(seq, 0.0, 0.0))
+                })
+                .collect()
+        };
+        let intact_closed = alpha_of("TANARISTROLLGATE.BLP", closed);
+        let burnt_closed = alpha_of("TANARISTROLLGATEBURNT.BLP", closed);
+        assert!(
+            !intact_closed.is_empty() && !burnt_closed.is_empty(),
+            "both gate copies are batches of this model (intact {}, burnt {})",
+            intact_closed.len(),
+            burnt_closed.len()
+        );
+        assert!(
+            intact_closed.iter().all(|&a| a > 0.0),
+            "a shut gate draws its INTACT self (Closed alphas {intact_closed:?})"
+        );
+        assert!(
+            burnt_closed.iter().all(|&a| a <= 0.0),
+            "a shut gate hides its BURNT twin — ±1 keys read signed ({burnt_closed:?})"
+        );
+        assert!(
+            alpha_of("TANARISTROLLGATE.BLP", destroy)
+                .iter()
+                .all(|&a| a <= 0.0),
+            "…and Destroy swaps them: the intact copy hides"
+        );
+        assert!(
+            alpha_of("TANARISTROLLGATEBURNT.BLP", destroy)
+                .iter()
+                .all(|&a| a > 0.0),
+            "…and the burnt copy shows"
+        );
+        // The mask twin is the same duplication one texture further in: two batches, one texture,
+        // and exactly one of them visible in any sequence.
+        for seq in [closed, destroy] {
+            let masks = alpha_of("BM_TROLL_TIKI03.BLP", seq);
+            assert_eq!(
+                masks.len(),
+                2,
+                "the model authors the mask twice ({masks:?})"
+            );
+            assert_eq!(
+                masks.iter().filter(|&&a| a > 0.0).count(),
+                1,
+                "exactly one mask copy draws per sequence ({masks:?})"
+            );
+        }
     }
 
     /// Battle Shout's ground model, straight off the real client data: six additive crescent

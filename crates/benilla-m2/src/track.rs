@@ -110,11 +110,21 @@ fn rd_vec3(b: &[u8], o: usize) -> Option<[f32; 3]> {
     Some([b.f32_at(o)?, b.f32_at(o + 4)?, b.f32_at(o + 8)?])
 }
 
-/// Read a scalar `fix16` track (`uint16/32767` values). Used for the colour-**alpha** and
+/// Read a scalar `fix16` track (**`int16`**/32767 values). Used for the colour-**alpha** and
 /// transparency-**weight** tracks that gate batch visibility and drive the animated material combine.
+///
+/// **The key is SIGNED** — `movsx`, not `movzx` (VERIFIED, wow-re `system/animation/scratch/tracks.md`
+/// flavour (c): `dest = (f32)(int16 P[k0]) * (1/0x7fff)`, bytes `movsx edx,word[P+k0*2]; fild;
+/// fmul [0x811610]; fstp dest` at `0x715b2f`–`0x715b46`, dispatched at the M2Color-alpha site
+/// `0x715b21` (`colors[]` stride 0x38, track @ +0x1c) and the transparency-weight site `0x715ce2`).
+/// Read unsigned, the authored "hide me" key `0x8001` decodes as `+1.00006` instead of `−1.0`, so a
+/// batch the reference culls (`A ≤ 0`, wow-re `m2-alpha-combine-cull`) draws at full alpha instead:
+/// that is how Zul'Farrak's troll gate drew its BURNT twin on top of its intact self and z-fought
+/// (B138, decision 1460). Values outside `[0, 1]` are the artist's own encoding, not a data quirk —
+/// the combine consumes them as signed floats and the cull tests `≤ 0`.
 pub(crate) fn track_fix16(b: &[u8], track_ofs: usize) -> M2ScalarTrack {
     track_read(b, track_ofs, 2, |b, o| {
-        b.u16_at(o).map(|v| v as f32 / 32767.0)
+        b.u16_at(o).map(|v| f32::from(v as i16) / 32767.0)
     })
 }
 
