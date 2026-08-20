@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::io::{self, Read};
 
 use crate::wire::{read_u32_le, read_u8, Vector3d};
@@ -503,11 +502,15 @@ pub struct PlayerSkillSlot {
     pub perm_bonus: i16,
 }
 
-/// A sparse update-field set: a bitmask of `u32` blocks followed by one `u32` per set bit. We keep the
-/// values in an index→value map and expose **named** accessors for the descriptor fields consumers read
-/// — the raw `get_*(index)` reads stay module-private, so field-index knowledge (a wire fact) never
-/// leaves this crate (decision 0061). The ECS mirrors one of these per object and [`Self::merge`]s each
-/// `Values` delta into it; the codec itself stays stateless (decision 0006).
+/// A sparse update-field set: a bitmask of `u32` blocks followed by one `u32` per set bit. We keep
+/// the wire's own mask plus a dense value array — not a map — because the ECS-side pollers
+/// (animation, equipment, plates) probe thousands of fields **per frame**, so a read must be two
+/// array indexings, never a tree walk (decision 1457); the wire's `u8` block count bounds the
+/// arrays at 8160 dwords, and a Unit's real footprint is ~800 B. We expose **named** accessors for
+/// the descriptor fields consumers read — the raw `get_*(index)` reads stay module-private, so
+/// field-index knowledge (a wire fact) never leaves this crate (decision 0061). The ECS mirrors
+/// one of these per object and [`Self::merge`]s each `Values` delta into it; the codec itself
+/// stays stateless (decision 0006).
 ///
 /// **Absent-field semantics** hinge on [`Self::descriptor_end`]: a CREATE block is a *complete*
 /// snapshot — the server masks in only non-zero fields (vmangos `Object::_SetCreateBits`: bit set
@@ -527,7 +530,13 @@ pub struct PlayerSkillSlot {
 /// unstreamed default `1.0` and the tooltip read `inf - inf` / `nan` (director, 2026-08-07).
 #[derive(Debug, Clone, Default)]
 pub struct ObjectFields {
-    fields: BTreeMap<u16, u32>,
+    /// Presence bitmask, one bit per field index (`index = word * 32 + bit`) — the wire's block
+    /// mask, kept verbatim.
+    present: Vec<u32>,
+    /// Dense value array, invariant `values.len() == present.len() * 32`; a slot is meaningful
+    /// iff its `present` bit is set (unset slots hold `0` but must be read through the mask —
+    /// absent-vs-zero is exactly the distinction the struct doc is about).
+    values: Vec<u32>,
     /// How long this object's descriptor is, in dwords — [`descriptor_len`] of the CREATE block's
     /// own `ObjectType` (set by the parser via [`Self::into_created`]). Every index **below** it is
     /// known: absent = `0`. `0` marks a bare `Values` delta (or a hand-built fixture), where no
@@ -558,20 +567,21 @@ fn descriptor_len(object_type: ObjectType) -> u16 {
 impl ObjectFields {
     pub(super) fn read(r: &mut impl Read) -> io::Result<Self> {
         let amount_of_blocks = read_u8(r)?;
-        let mut blocks = Vec::with_capacity(amount_of_blocks as usize);
+        let mut present = Vec::with_capacity(amount_of_blocks as usize);
         for _ in 0..amount_of_blocks {
-            blocks.push(read_u32_le(r)?);
+            present.push(read_u32_le(r)?);
         }
-        let mut fields = BTreeMap::new();
-        for (index, block) in blocks.iter().enumerate() {
-            for bit in 0..32u16 {
-                if block & (1 << bit) != 0 {
-                    fields.insert(index as u16 * 32 + bit, read_u32_le(r)?);
+        let mut values = vec![0u32; present.len() * 32];
+        for (word, block) in present.iter().enumerate() {
+            for bit in 0..32 {
+                if block & (1u32 << bit) != 0 {
+                    values[word * 32 + bit] = read_u32_le(r)?;
                 }
             }
         }
         Ok(Self {
-            fields,
+            present,
+            values,
             descriptor_end: 0,
         })
     }
@@ -590,10 +600,11 @@ impl ObjectFields {
     /// [`Self::read`]; live code never builds fields by hand. Chain [`Self::into_created`] when
     /// the fixture stands in for a create snapshot.
     pub fn from_pairs(pairs: &[(u16, u32)]) -> Self {
-        Self {
-            fields: pairs.iter().copied().collect(),
-            descriptor_end: 0,
+        let mut this = Self::default();
+        for &(index, value) in pairs {
+            this.insert(index, value);
         }
+        this
     }
 
     /// A 2-field guid: `lo | hi << 32`, present iff the low half is (the wire always sends guid
@@ -639,19 +650,41 @@ impl ObjectFields {
         ))
     }
 
+    /// Whether the wire genuinely carried this field (mask bit set) — the raw presence probe
+    /// under every accessor, bypassing the created-store absent-is-zero fold.
+    fn contains(&self, index: u16) -> bool {
+        self.present
+            .get(usize::from(index / 32))
+            .is_some_and(|w| w & (1u32 << (index % 32)) != 0)
+    }
+
+    /// The carried value, `None` when the mask bit is unset — [`Self::contains`]'s value twin.
+    fn get_raw(&self, index: u16) -> Option<u32> {
+        self.contains(index)
+            .then(|| self.values[usize::from(index)])
+    }
+
+    fn insert(&mut self, index: u16, value: u32) {
+        let word = usize::from(index / 32);
+        if word >= self.present.len() {
+            self.present.resize(word + 1, 0);
+            self.values.resize(self.present.len() * 32, 0);
+        }
+        self.present[word] |= 1u32 << (index % 32);
+        self.values[usize::from(index)] = value;
+    }
+
     fn get_guid(&self, index: u16) -> Option<u64> {
-        // Raw map read on purpose: a guid slot stays "present iff the low half is" even on a
+        // Raw read on purpose: a guid slot stays "present iff the low half is" even on a
         // created store — every consumer already treats a sent-empty `Some(0)` as no-guid, so the
         // absent-is-zero fallback would only blur the two identical cases.
-        let lo = self.fields.get(&index).copied()?;
+        let lo = self.get_raw(index)?;
         let hi = self.get_u32(index + 1).unwrap_or(0);
         Some(u64::from(lo) | (u64::from(hi) << 32))
     }
 
     fn get_u32(&self, index: u16) -> Option<u32> {
-        self.fields
-            .get(&index)
-            .copied()
+        self.get_raw(index)
             .or((index < self.descriptor_end).then_some(0))
     }
     fn get_f32(&self, index: u16) -> Option<f32> {
@@ -693,18 +726,27 @@ impl ObjectFields {
         if delta.descriptor_end != 0 {
             *self = delta;
         } else {
-            self.fields.extend(delta.fields);
+            for (index, value) in delta.raw_fields() {
+                self.insert(index, value);
+            }
         }
     }
 
     /// Whether this carried no fields — the codec skips emitting an empty `Values` delta.
     pub fn is_empty(&self) -> bool {
-        self.fields.is_empty()
+        self.present.iter().all(|&w| w == 0)
     }
-    /// Every present `(index, value)` pair — the debug/probe affordance for descriptor
-    /// archaeology (named accessors stay the consumer surface; decision 0061).
+    /// Every present `(index, value)` pair in ascending index order — the debug/probe affordance
+    /// for descriptor archaeology (named accessors stay the consumer surface; decision 0061).
     pub fn raw_fields(&self) -> impl Iterator<Item = (u16, u32)> + '_ {
-        self.fields.iter().map(|(&i, &v)| (i, v))
+        self.present.iter().enumerate().flat_map(move |(word, &w)| {
+            (0..32u16)
+                .filter(move |bit| w & (1u32 << bit) != 0)
+                .map(move |bit| {
+                    let index = word as u16 * 32 + bit;
+                    (index, self.values[usize::from(index)])
+                })
+        })
     }
 }
 

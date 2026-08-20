@@ -585,8 +585,7 @@ impl ObjectFields {
     /// (`x = y = 0`, the live-data norm) round-trips exactly. Consumed by the type-11 transport
     /// evaluator (elevators/lifts rotate their keyframe offsets through this).
     pub fn gameobject_rotation(&self) -> Option<[f32; 4]> {
-        let any_sent =
-            (0..4u16).any(|i| self.fields.contains_key(&(FIELD_GAMEOBJECT_ROTATION + i)));
+        let any_sent = (0..4u16).any(|i| self.contains(FIELD_GAMEOBJECT_ROTATION + i));
         any_sent.then(|| {
             [
                 self.get_f32(FIELD_GAMEOBJECT_ROTATION).unwrap_or(0.0),
@@ -612,15 +611,15 @@ impl ObjectFields {
             self.get_f32(FIELD_GAMEOBJECT_FACING).unwrap_or(0.0),
         ))
     }
-    /// Whether the wire genuinely carried **any** `GAMEOBJECT_POS_*` field — a raw map read on purpose
+    /// Whether the wire genuinely carried **any** `GAMEOBJECT_POS_*` field — a raw presence probe on purpose
     /// (like `get_guid`'s, bypassing the create block's absent-is-zero fold) so a consumer can tell
     /// "this GO's create never carried a position" from "it did, and it's `0.0` on some axis". A normal
     /// GameObject sends at least one non-zero axis virtually always; a boat/zeppelin/elevator sends
     /// **none** (vmangos never sets `GAMEOBJECT_POS_*` on a transport).
     pub fn gameobject_pos_sent(&self) -> bool {
-        self.fields.contains_key(&FIELD_GAMEOBJECT_POS_X)
-            || self.fields.contains_key(&FIELD_GAMEOBJECT_POS_Y)
-            || self.fields.contains_key(&FIELD_GAMEOBJECT_POS_Z)
+        self.contains(FIELD_GAMEOBJECT_POS_X)
+            || self.contains(FIELD_GAMEOBJECT_POS_Y)
+            || self.contains(FIELD_GAMEOBJECT_POS_Z)
     }
     /// `GAMEOBJECT_TYPE_ID` — the GameObject sub-type (DOOR/CHEST/SPELL_FOCUS/…). **Absent ⇒ `0` =
     /// DOOR**, not "unknown": vmangos omits a zero-valued field from the create mask (the same reason an

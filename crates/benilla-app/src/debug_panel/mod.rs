@@ -282,7 +282,8 @@ fn spawn_egui_camera(mut commands: Commands) {
 }
 
 /// Demand-gate the whole egui lane (decision 1445): when no dev overlay is open — panel closed,
-/// perf HUD hidden (chord+`P`), inspect off — the primary context goes `run_manually` (which
+/// inspect off (the perf HUD's pill is quads on the player-UI pass and never needs this lane;
+/// 1453/1454) — the primary context goes `run_manually` (which
 /// `bevy_egui`'s context-pass loop honors by skipping it outright: no begin/end pass, no
 /// tessellate, no `EguiPrimaryContextPass` run) and the overlay camera sleeps (no Core2d graph
 /// run, no composite, no render-side prep). A hidden dev surface then costs what a player build
@@ -293,12 +294,11 @@ fn spawn_egui_camera(mut commands: Commands) {
 /// the gated pass and would hold the last hover forever.
 fn gate_egui_lane(
     debug: Res<DebugState>,
-    hud: Res<crate::perf::PerfHud>,
     inspect: Res<crate::ui_script::InspectMode>,
     mut cams: Query<(&mut Camera, &mut EguiContextSettings), With<PrimaryEguiContext>>,
     mut over: ResMut<EguiPointerOver>,
 ) {
-    let open = debug.open || hud.visible || inspect.enabled;
+    let open = debug.open || inspect.enabled;
     for (mut cam, mut settings) in &mut cams {
         if cam.is_active != open {
             cam.is_active = open;

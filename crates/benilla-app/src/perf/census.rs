@@ -3,6 +3,264 @@
 
 use bevy::prelude::*;
 
+/// `WOW_CPU_CENSUS=<at>:<secs>` — the per-thread CPU census (macOS): where does the pill's
+/// cpu-ms actually go, thread by thread, summing **exactly** to the process total?
+///
+/// Two snapshots bracket a window: at each, `getrusage(RUSAGE_SELF)` (the pill's own clock,
+/// [`super::clock::process_cpu_secs`]) and then every live thread's cumulative CPU via
+/// `proc_pidinfo(PROC_PIDLISTTHREADS / PROC_PIDTHREADINFO)`. The report prints each thread's
+/// delta over the window in ms/frame, then the **residual** = process delta − Σ live-thread
+/// deltas, which is exactly the CPU of threads that exited inside the window (plus the
+/// inter-read skew of the sweep itself). Nothing is modeled: every row is a measured delta and
+/// the rows plus the residual reproduce the process total by construction.
+///
+/// Facts this rests on, pinned empirically on this machine (2026-08-20, threadcpu.c probe)
+/// before this was written:
+/// - `pth_user_time`/`pth_system_time` are **nanoseconds** (a 200 ms calibrated burn read
+///   196.6 ms; the mach-timebase interpretation read 31.8× over) — *not* mach ticks, unlike
+///   `rusage_info`'s `ri_user_time`.
+/// - live-thread sums + exited-thread time = `getrusage` total to 0.05 ms over a ~1 s burn
+///   (a thread that burned 250 ms and exited was absent from the list and present in the
+///   residual at exactly 250.0 ms).
+/// - `PROC_PIDLISTTHREADS = 6` (verified in the SDK's `sys/proc_info.h`; libc lacks the const).
+#[cfg(target_os = "macos")]
+pub(super) mod cpu_census {
+    use std::collections::HashMap;
+
+    use bevy::prelude::*;
+    use bevy::time::Real;
+
+    use crate::perf::clock::process_cpu_secs;
+
+    /// `sys/proc_info.h`; not in the libc crate (its sibling `PROC_PIDTHREADINFO = 5` is).
+    const PROC_PIDLISTTHREADS: libc::c_int = 6;
+
+    /// One cumulative reading per live thread: `tid → (name, user_ns, system_ns)`. User and
+    /// system are kept apart on purpose: real work is user time, while a thread whose CPU is
+    /// mostly *system* time is burning it in the kernel — park/wake churn, semaphores, mach
+    /// calls — which points at the scheduler/driver seam rather than at any system's body.
+    fn thread_snapshot() -> HashMap<u64, (String, u64, u64)> {
+        let pid = std::process::id() as libc::c_int;
+        let mut tids = [0u64; 512];
+        // SAFETY: proc_pidinfo writes at most `buffersize` bytes into the buffer and returns
+        // how many it wrote; the buffer is a plain u64 array.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                PROC_PIDLISTTHREADS,
+                0,
+                tids.as_mut_ptr().cast(),
+                std::mem::size_of_val(&tids) as libc::c_int,
+            )
+        };
+        if n <= 0 {
+            return HashMap::new();
+        }
+        let count = n as usize / std::mem::size_of::<u64>();
+        let mut out = HashMap::with_capacity(count);
+        for &tid in &tids[..count] {
+            // SAFETY: zeroed is a valid proc_threadinfo (plain integers + a char array);
+            // proc_pidinfo fills it and returns the size written.
+            let mut ti: libc::proc_threadinfo = unsafe { std::mem::zeroed() };
+            let r = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTHREADINFO,
+                    tid,
+                    (&raw mut ti).cast(),
+                    std::mem::size_of::<libc::proc_threadinfo>() as libc::c_int,
+                )
+            };
+            if r as usize != std::mem::size_of::<libc::proc_threadinfo>() {
+                continue; // the thread died mid-sweep: its time lands in the residual
+            }
+            let name_bytes: Vec<u8> = ti
+                .pth_name
+                .iter()
+                .take_while(|&&c| c != 0)
+                .map(|&c| c as u8)
+                .collect();
+            let name = String::from_utf8_lossy(&name_bytes).into_owned();
+            out.insert(tid, (name, ti.pth_user_time, ti.pth_system_time));
+        }
+        out
+    }
+
+    struct Snap {
+        t: f32,
+        frames: u64,
+        process_secs: f64,
+        threads: HashMap<u64, (String, u64, u64)>,
+    }
+
+    /// Armed from the env at plugin build (on the main thread — which is how `main_tid` is
+    /// known without pinning the census system itself).
+    #[derive(Resource)]
+    pub(in crate::perf) struct CpuCensus {
+        at: f32,
+        window: f32,
+        main_tid: u64,
+        frames: u64,
+        start: Option<Snap>,
+        /// Every thread seen by the once-a-second sweeps inside the window, with its **latest**
+        /// cumulative reading — so a thread that dies mid-window can still be *named* in the
+        /// residual report (its last reading is a lower bound on what it contributed).
+        seen: HashMap<u64, (String, u64, u64)>,
+        next_sweep: f32,
+        done: bool,
+    }
+
+    impl CpuCensus {
+        /// Parse `WOW_CPU_CENSUS=<at>:<secs>`. Must be called on the main thread.
+        pub(in crate::perf) fn from_env() -> Option<Self> {
+            let v = std::env::var("WOW_CPU_CENSUS").ok()?;
+            let (at, window) = v.split_once(':')?;
+            let mut main_tid = 0u64;
+            // SAFETY: null pthread = the calling thread; writes one u64.
+            unsafe { libc::pthread_threadid_np(0, &mut main_tid) };
+            Some(Self {
+                at: at.parse().ok()?,
+                window: window.parse().ok()?,
+                main_tid,
+                frames: 0,
+                start: None,
+                seen: HashMap::new(),
+                next_sweep: 0.0,
+                done: false,
+            })
+        }
+    }
+
+    pub(in crate::perf) fn cpu_census(mut census: ResMut<CpuCensus>, time: Res<Time<Real>>) {
+        if census.done {
+            return;
+        }
+        census.frames += 1;
+        let now = time.elapsed_secs();
+        if census.start.is_none() {
+            if now >= census.at {
+                census.start = Some(Snap {
+                    t: now,
+                    frames: census.frames,
+                    process_secs: process_cpu_secs().unwrap_or(0.0),
+                    threads: thread_snapshot(),
+                });
+            }
+            return;
+        }
+        if now >= census.next_sweep {
+            census.next_sweep = now + 1.0;
+            for (tid, entry) in thread_snapshot() {
+                census.seen.insert(tid, entry);
+            }
+        }
+        let start = census.start.as_ref().unwrap();
+        if now - start.t < census.window {
+            return;
+        }
+        let end_process = process_cpu_secs().unwrap_or(0.0);
+        let end_threads = thread_snapshot();
+        let frames = (census.frames - start.frames).max(1);
+        let dt = now - start.t;
+        let process_ms = (end_process - start.process_secs) * 1000.0;
+        let per_frame = |ms: f64| ms / frames as f64;
+
+        // Per-thread deltas over the window. A thread born inside the window has no start
+        // reading — its full cumulative time is its delta (it was zero at birth).
+        let mut rows: Vec<(f64, f64, String)> = Vec::new(); // (user_ms, sys_ms, label)
+        let mut live_sum_ms = 0.0f64;
+        for (tid, (name, end_u, end_s)) in &end_threads {
+            let (start_u, start_s) = start.threads.get(tid).map_or((0, 0), |(_, u, s)| (*u, *s));
+            let user_ms = end_u.saturating_sub(start_u) as f64 / 1e6;
+            let sys_ms = end_s.saturating_sub(start_s) as f64 / 1e6;
+            live_sum_ms += user_ms + sys_ms;
+            // Hex tids so a row can be matched against `/usr/bin/sample`'s "Thread 0x…" headers.
+            let label = if *tid == census.main_tid {
+                format!("main (tid 0x{tid:x})")
+            } else if name.is_empty() {
+                format!("(unnamed tid 0x{tid:x})")
+            } else {
+                format!("{name} (tid 0x{tid:x})")
+            };
+            rows.push((user_ms, sys_ms, label));
+        }
+        rows.sort_by(|a, b| (b.0 + b.1).total_cmp(&(a.0 + a.1)));
+        let residual_ms = process_ms - live_sum_ms;
+
+        eprintln!(
+            "[cpu-census] window {dt:.2} s, {frames} frames ({:.1} fps), process {process_ms:.1} ms \
+             = {:.4} ms/frame  (the pill's number over this window)",
+            frames as f32 / dt,
+            per_frame(process_ms),
+        );
+        eprintln!(
+            "[cpu-census] {:>9}  {:>8}  {:>8}  {:>6}  thread",
+            "ms/frame", "user", "sys", "share"
+        );
+        for (u, s, label) in &rows {
+            let ms = u + s;
+            if per_frame(ms) < 0.0005 {
+                continue; // folded into the "under" line below — still in the printed sum
+            }
+            eprintln!(
+                "[cpu-census] {:>9.4}  {:>8.4}  {:>8.4}  {:>5.1}%  {label}",
+                per_frame(ms),
+                per_frame(*u),
+                per_frame(*s),
+                ms / process_ms * 100.0
+            );
+        }
+        let tiny: f64 = rows
+            .iter()
+            .filter(|(u, s, _)| per_frame(u + s) < 0.0005)
+            .map(|(u, s, _)| u + s)
+            .sum();
+        let tiny_n = rows
+            .iter()
+            .filter(|(u, s, _)| per_frame(u + s) < 0.0005)
+            .count();
+        if tiny_n > 0 {
+            eprintln!(
+                "[cpu-census] {:>9.4}  {:>5.1}%  ({tiny_n} threads under 0.5 µs/frame each)",
+                per_frame(tiny),
+                tiny / process_ms * 100.0
+            );
+        }
+        eprintln!(
+            "[cpu-census] {:>9.4}  {:>5.1}%  (residual: threads exited in-window + sweep skew)",
+            per_frame(residual_ms),
+            residual_ms / process_ms * 100.0
+        );
+        // Name the churn: threads the per-second sweeps saw that are gone by the end snapshot.
+        // Their last cumulative reading minus their start reading (0 if born in-window) is a
+        // LOWER bound on what they contributed to the residual — they kept burning after the
+        // sweep that last saw them.
+        let mut churned: HashMap<String, (usize, f64)> = HashMap::new();
+        for (tid, (name, last_u, last_s)) in &census.seen {
+            if end_threads.contains_key(tid) {
+                continue;
+            }
+            let (start_u, start_s) = start.threads.get(tid).map_or((0, 0), |(_, u, s)| (*u, *s));
+            let e = churned.entry(name.clone()).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 += (last_u.saturating_sub(start_u) + last_s.saturating_sub(start_s)) as f64 / 1e6;
+        }
+        for (name, (n, ms)) in &churned {
+            eprintln!(
+                "[cpu-census]   churn: {n} thread(s) '{}' died in-window, ≥{:.4} ms/frame of the residual",
+                if name.is_empty() { "(unnamed)" } else { name },
+                per_frame(*ms)
+            );
+        }
+        eprintln!(
+            "[cpu-census] sum check: Σ live {live_sum_ms:.1} + residual {residual_ms:.1} \
+             = {:.1} vs process {process_ms:.1} ms (identity, by construction)",
+            live_sum_ms + residual_ms
+        );
+        census.done = true;
+    }
+}
+
 /// `WOW_MESH_EVENTS=1`: per-second Mesh asset-event counts (see the plugin registration). The
 /// `sample` list names a few mutated asset ids so the writer can be found by grepping who holds
 /// that handle.

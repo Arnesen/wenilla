@@ -1,14 +1,14 @@
 //! `perf` — performance instrumentation + the standing dev HUD ([`PerfPlugin`]).
 //!
 //! Owns the **frame-cost measurement layer** that every future subsystem is measured against (the
-//! standard), and draws the always-on pill (top-center) that you **click to expand** into the full
-//! readout; the **dev chord + `P`** toggles the whole HUD (`Ctrl+Shift+P` — decisions
-//! 0585/0867/0870).
+//! standard), and draws the always-on cost pill (top-center) — the whole HUD since 1454; anything
+//! deeper is an instrument's job (the journal, the probes, Tracy). The **dev chord + `P`** toggles
+//! it (`Ctrl+Shift+P` — decisions 0585/0867/0870).
 //!
 //! The concerns, one file each:
 //! - [`clock`] — the three CPU clocks (process, main thread, machine) every number is denominated in,
-//! - [`stats`] — the rolling windows, their tails, and the spike latch,
-//! - [`hud`] — the collapsed cost pill and the expanded readout,
+//! - [`stats`] — the rolling windows the pill reads,
+//! - [`hud`] — the standing cost pill,
 //! - [`trace`] / [`journal`] — the two CSV instruments (`WOW_STREAM_TRACE`, `WOW_FPS_JOURNAL`),
 //! - [`stall`] — the stuck-main-thread self-sampler (macOS),
 //! - [`census`] — the env-gated premise counters.
@@ -36,8 +36,8 @@
 //! 0.015/0.019/0.049 ms across 256²/1920×1080/4096² clears, 12/12 reproducible. It needs two
 //! sentinel render-graph nodes at ~0.03 ms/frame, and the query set must be resolved in a
 //! *different* command buffer than the timed pass or Metal returns zeros. Until that is built, a
-//! GPU-bound frame is identified rather than timed: it is the one that runs long while both CPU
-//! meters stay flat ([`stats::SpikeKind::Stalled`]).
+//! GPU-bound frame is identified rather than timed: it is the one that runs long while the CPU
+//! meters stay flat (read them side by side in the journal or a probe line).
 
 mod census;
 mod clock;
@@ -49,7 +49,6 @@ mod stall;
 mod stats;
 mod trace;
 
-use bevy::diagnostic::{EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 
@@ -65,32 +64,34 @@ pub struct PerfPlugin;
 
 impl Plugin for PerfPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((
-            FrameTimeDiagnosticsPlugin::default(),
-            EntityCountDiagnosticsPlugin::default(),
-            // Render-pass timing (CPU-only on Apple Silicon — see the module header). Harmless if
-            // the backend can't record it; also the hook Tracy GPU uses on Vulkan/DX12.
-            RenderDiagnosticsPlugin,
-        ))
-        .init_resource::<stats::FrameStats>()
-        .init_resource::<PerfHud>()
-        .insert_resource(trace::StreamTrace {
-            path: std::env::var("WOW_STREAM_TRACE").unwrap_or_default(),
-            frame: 0,
-            log_until: 0,
-            prev_cpu_secs: None,
-            prev_pipes_created: 0,
-        })
-        .add_systems(
-            Update,
-            // `toggle_hud` needs no ordering against the UI keyboard feed any more: its dev
-            // chord can't be typed text, so there's no `UiKeyboardCapture` to read (decision 0585).
-            (hud::toggle_hud, stats::sample_frame_time),
-        )
-        // `Last`, so a row carries everything this frame's Stream chain did — and the reset runs
-        // whether or not anything is tracing, or the counters would accumulate forever.
-        .add_systems(Last, trace::trace_stream)
-        .add_systems(bevy_egui::EguiPrimaryContextPass, hud::perf_hud_ui);
+        // Render-pass timing (CPU-only on Apple Silicon — see the module header). Harmless if
+        // the backend can't record it; also the hook Tracy GPU uses on Vulkan/DX12.
+        app.add_plugins(RenderDiagnosticsPlugin)
+            .init_resource::<stats::FrameStats>()
+            .init_resource::<PerfHud>()
+            .insert_resource(trace::StreamTrace {
+                path: std::env::var("WOW_STREAM_TRACE").unwrap_or_default(),
+                frame: 0,
+                log_until: 0,
+                prev_cpu_secs: None,
+                prev_pipes_created: 0,
+            })
+            .add_systems(
+                Update,
+                // `toggle_hud` needs no ordering against the UI keyboard feed any more: its dev
+                // chord can't be typed text, so there's no `UiKeyboardCapture` to read (decision 0585).
+                (
+                    hud::toggle_hud,
+                    hud::refresh_hud_snapshot,
+                    stats::sample_frame_time,
+                ),
+            )
+            // The pill rides the player-UI quad pass (1453): appended with the other overlay
+            // producers, so the HUD costs a Vec clone and never touches the egui lane (1454).
+            .add_systems(Update, hud::pill_quads.in_set(crate::ui_pass::UiQuadAppend))
+            // `Last`, so a row carries everything this frame's Stream chain did — and the reset runs
+            // whether or not anything is tracing, or the counters would accumulate forever.
+            .add_systems(Last, trace::trace_stream);
         // `WOW_MESH_EVENTS=1` — who churns Mesh assets per frame? The premise counter behind
         // the Stormwind trace's `allocate_and_free_meshes` row (0.86 ms/frame at a PARKED pin):
         // the allocator answers every Modified with a free+realloc, so a steady scene should
@@ -125,6 +126,13 @@ impl Plugin for PerfPlugin {
             .is_some_and(|n| n > 0)
         {
             app.add_systems(Update, census::row_bloat);
+        }
+        // `WOW_CPU_CENSUS=<at>:<secs>` — the per-thread CPU census (see its module doc): where
+        // the pill's cpu-ms goes, thread by thread, summing exactly to the process total.
+        #[cfg(target_os = "macos")]
+        if let Some(c) = census::cpu_census::CpuCensus::from_env() {
+            app.insert_resource(c);
+            app.add_systems(Update, census::cpu_census::cpu_census);
         }
         #[cfg(target_os = "macos")]
         stall::plugin(app);
