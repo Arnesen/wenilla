@@ -38,7 +38,7 @@ and no bundled game assets.
 - **UI:** a from-scratch FrameXML + Lua engine driving the built-in interface, from the login and
   character screens through the full HUD, the classic windows (guild, macros and key bindings
   included), chat, nameplates, floating combat text and tooltips; third-party addons load from
-  your own `Interface/AddOns`.
+  your own `Interface/AddOns` (partial — see below).
 - **Combat:** melee on the faithful swing law, ranged and Auto Shot, casting with GCD and
   cooldowns, combo points, crowd control that really holds you, and the spell visual pipeline.
 - **Audio:** music, ambience and SFX under the client's own selection and crossfade rules, with
@@ -46,7 +46,8 @@ and no bundled game assets.
 
 ## Not built yet
 
-The auction house, and battlegrounds and honor.
+Battlegrounds and honor, and the auction house. Third-party addons are partial: AtlasLoot and
+Bagnon run, and the addon API fills in as other addons are tried.
 
 ## Running it
 
