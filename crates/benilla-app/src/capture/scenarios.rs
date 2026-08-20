@@ -640,6 +640,19 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
+    // The same farmhouse at MIDNIGHT — the one WMO fixture where the SIDN night fraction
+    // (`grade.x`) is 1.0, so the MOMT 0x10 window glow is live pixels instead of a ×0 term.
+    // Added for the static-gx slice-2 parity sweep (1429): every other WMO scenario sits at
+    // noon or 19:30, both before the 20:30 ramp, and a wrong SIDN mirror would have passed
+    // every diff unseen.
+    Scenario {
+        name: "house-north-midnight",
+        map: MAP_AZEROTH,
+        eye: HOUSE_EYE,
+        look: [-9389.1, 71.2, 58.0],
+        minute: 0,
+        ui: None,
+    },
     // Inside the Lion's Pride Inn KITCHEN (its hearth carries the building's strongest MOCV-alpha
     // bake, α≈100 at the firebox — group-local (-32.9, 1.5, 2), world ≈ (-9461.7, -8.4, 58) per
     // the real MODF: uid 71414 on tile 31,49, origin (-9464.25, 24.39, 56.53), rot -97°). The

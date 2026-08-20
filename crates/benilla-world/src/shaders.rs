@@ -36,6 +36,7 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/celestial.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/ffx_glow.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wow_effect.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/static_gx.wgsl");
 }
 
 #[cfg(test)]
@@ -76,9 +77,9 @@ mod tests {
                  `shaders::plugin`, or was registered from a file that is not directly under src/"
             );
         }
-        // 6 since decision 1264 retired `wmo_skybox.wgsl`: a WMO skybox draws on the shared model
-        // lane, whose forced-far-depth branch lives in `benilla_assets`' `wow_model.wgsl` and is
-        // pinned by that crate's own `the_sky_lane_forces_the_far_depth`.
-        assert_eq!(found, 6, "the engine's shader set changed size");
+        // 6 since decision 1264 retired `wmo_skybox.wgsl` (a WMO skybox draws on the shared
+        // model lane, whose forced-far-depth branch lives in `benilla_assets`'
+        // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass).
+        assert_eq!(found, 7, "the engine's shader set changed size");
     }
 }

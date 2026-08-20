@@ -161,6 +161,7 @@ pub mod schedule;
 mod shaders;
 pub mod sky;
 pub mod sky_order;
+pub mod static_gx;
 pub mod static_merge;
 pub mod sun;
 pub mod surface;

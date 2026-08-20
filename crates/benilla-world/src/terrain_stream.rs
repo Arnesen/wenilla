@@ -579,9 +579,14 @@ fn stream_terrain(
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
     // Bundled for the same 16-param reason as `asset_stores`: the two stream-batch accumulators
     // the map-change drop must clear.
-    batchers: (ResMut<HullWelds>, ResMut<StaticMerge>),
+    batchers: (
+        ResMut<HullWelds>,
+        ResMut<StaticMerge>,
+        // `None` unless `WOW_STATIC_GX=1` (the collector only exists armed — 1429).
+        Option<ResMut<crate::static_gx::StaticGx>>,
+    ),
 ) {
-    let (mut welds, mut static_merge) = batchers;
+    let (mut welds, mut static_merge, mut staticgx) = batchers;
     let (mut materials, mut meshes, wdts, _time, mut activity) = asset_stores;
     let (current_map, map_catalog) = location;
     // The shared light buffer + map catalog are set up by other plugins' startup; until they exist
@@ -614,6 +619,7 @@ fn stream_terrain(
             placements,
             &mut welds,
             &mut static_merge,
+            staticgx.as_deref_mut(),
             &mut activity,
         );
         state.map_dir = Some(dir.clone());
@@ -744,6 +750,11 @@ fn stream_terrain(
                 &t.placements,
                 merge::merge_enabled(),
             );
+            // The B1 retained cells (1429): a diverted batch has no entity and no blob, so the
+            // dead owner's items leave here or never — the cells re-bake without them.
+            if let Some(gx) = staticgx.as_deref_mut() {
+                gx.release_owner(c);
+            }
         }
     }
 
@@ -1073,6 +1084,7 @@ fn drop_streamed_world(
     placements: &mut Placements,
     welds: &mut HullWelds,
     merge: &mut StaticMerge,
+    staticgx: Option<&mut crate::static_gx::StaticGx>,
     activity: &mut StreamActivity,
 ) {
     for ((_tx, _ty), t) in state.tiles.drain() {
@@ -1094,6 +1106,10 @@ fn drop_streamed_world(
     // Same staleness argument for the merge accumulators (1417) and the census tallies: both
     // describe the world just dropped, and tile keys repeat across maps.
     merge.clear();
+    // …and for the B1 retained cells (1429): cell keys repeat across maps too.
+    if let Some(gx) = staticgx {
+        gx.clear();
+    }
     crate::static_merge::reset();
 }
 
@@ -1121,11 +1137,15 @@ fn release_world(
     mut forms: ResMut<crate::model_forms::ModelForms>,
     mut progress: Option<ResMut<WorldLoadProgress>>,
     mut activity: ResMut<StreamActivity>,
-    // Bundled for the same reason as `stream_terrain`'s pair: the two stream-batch
+    // Bundled for the same reason as `stream_terrain`'s pair: the stream-batch
     // accumulators the world drop must clear (and clippy's argument-count line).
-    batchers: (ResMut<HullWelds>, ResMut<StaticMerge>),
+    batchers: (
+        ResMut<HullWelds>,
+        ResMut<StaticMerge>,
+        Option<ResMut<crate::static_gx::StaticGx>>,
+    ),
 ) {
-    let (mut welds, mut static_merge) = batchers;
+    let (mut welds, mut static_merge, mut staticgx) = batchers;
     if state.tiles.is_empty() && state.map_dir.is_none() {
         return;
     }
@@ -1143,6 +1163,7 @@ fn release_world(
         &mut placements,
         &mut welds,
         &mut static_merge,
+        staticgx.as_deref_mut(),
         &mut activity,
     );
     state.map_dir = None;

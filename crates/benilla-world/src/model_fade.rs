@@ -90,6 +90,23 @@ pub fn doodad_fade_alpha(radius: f32, horiz_dist: f32) -> f32 {
     (1.0 - (d - start) / range).clamp(0.0, 1.0)
 }
 
+/// The fade-band edges for a fader of bounding-sphere `radius`: `(near, far)` horizontal
+/// CENTRE distances — [`doodad_fade_alpha`] is `1.0` at `d ≤ near`, `0.0` at `d ≥ far`, and
+/// feathers between. `None` for a never-fader. The static-gx exile scan (B2, decision 1431)
+/// classifies placements on these edges, derived from the SAME bucket table the per-frame
+/// alpha evaluates — one source, so the two verdicts can never disagree.
+pub fn fade_band(radius: f32) -> Option<(f32, f32)> {
+    if radius > NEVER_FADE_RADIUS {
+        return None;
+    }
+    let (_, start, range) = BUCKETS
+        .iter()
+        .copied()
+        .find(|(max_r, _, _)| radius <= *max_r)
+        .unwrap_or((NEVER_FADE_RADIUS, 150.0, 50.0));
+    Some((start + radius, start + radius + range))
+}
+
 /// The faithful per-object **appear / spawn fade** (`wow-5875-re` object-layer/`appear-fade`): a CGObject
 /// — every streamed unit, GameObject, and player — ramps its render alpha `α = t³` over **2 s wall-clock**
 /// when it first becomes visible, then latches opaque. This is the *temporal* sibling of [`DoodadFade`]'s
@@ -1006,6 +1023,23 @@ mod tests {
         assert_eq!(doodad_fade_alpha(7.01, 0.0), 1.0);
         assert_eq!(doodad_fade_alpha(20.0, 500.0), 1.0);
         assert_eq!(doodad_fade_alpha(7.0001, 195.0), 1.0);
+    }
+
+    /// The property the gx exile scan (B2, 1431) rests on: outside the band edges — with the
+    /// scan's own 1-yd hysteresis of margin — the alpha is EXACTLY the constant the retained
+    /// pass assumes (1.0 steady / 0.0 gone), and strictly between them inside. A band table
+    /// duplicated into the scan is the drift this test forbids: `fade_band` derives from the
+    /// same `BUCKETS` row `doodad_fade_alpha` evaluates.
+    #[test]
+    fn fade_band_edges_agree_with_the_alpha_they_summarize() {
+        for radius in [0.0, 0.3, 0.5, 1.7, 2.5, 4.0, 7.0] {
+            let (near, far) = fade_band(radius).expect("faders carry a band");
+            assert_eq!(doodad_fade_alpha(radius, near - 1.0), 1.0, "r={radius}");
+            assert_eq!(doodad_fade_alpha(radius, far + 1.0), 0.0, "r={radius}");
+            let mid = doodad_fade_alpha(radius, (near + far) / 2.0);
+            assert!(mid > 0.0 && mid < 1.0, "r={radius} mid={mid}");
+        }
+        assert_eq!(fade_band(7.01), None, "never-faders have no band");
     }
 
     #[test]

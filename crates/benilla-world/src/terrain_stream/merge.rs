@@ -564,10 +564,12 @@ pub(super) fn flush_static_merge(
 /// sort centre lands beyond a per-entity fader, the blob draws first and its translucent
 /// pixels depth-kill the entity behind them (the director's popping lamppost; 1422's
 /// centre-sort only shrank the class, it cannot eliminate it). Under the default merge
-/// faders spawn per-entity — the configuration the director's eye
-/// passed. The engineered path to win lane 2 back (sort-near bias on a blob-only twin
-/// variant, the depth test resolving order against depth-writing content) is 1423's
-/// follow-up.
+/// faders spawn per-entity — the configuration the director's eye passed. 1423's recorded
+/// re-entry (sort-near on a blob twin) was REFUTED before build (1428): the blob's
+/// opaque-intent pixels ride the same near-sorted transparent draw and erase any
+/// non-depth-writing card in front of them, O(1) and permanent. Lane 2 stays parked; the
+/// question folds into option B's retained draw, which bins opaque-intent content properly
+/// by construction.
 pub(crate) fn merge_faders_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_MERGE_FADERS").is_some())

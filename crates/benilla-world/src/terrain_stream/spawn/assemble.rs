@@ -145,6 +145,14 @@ pub fn spawn_model_entities(
         &mut super::super::merge::StaticMerge,
         super::super::merge::MergeSite<'_>,
     )>,
+    // `Some((collector, site))` on the world-static streamer paths the B1 retained pass may
+    // take batches from (`WOW_STATIC_GX=1`, decision 1429; [`crate::static_gx`]): ADT
+    // doodads (slice 1, cell items by owner tile) and WMO group geometry (slice 2, region
+    // items by portal-instance entity). `None` on the prop and moving paths.
+    mut staticgx: Option<(
+        &mut crate::static_gx::StaticGx,
+        crate::static_gx::GxSite<'_>,
+    )>,
     // Returns the spawned entities + the per-batch map + what the anim host armed for this
     // placement, when the model animates: the joint set (bone-indexed) the emitter spawn rides
     // its host bone off (0130 phase 4), and the FILE sequence slot its variation roll landed
@@ -349,6 +357,80 @@ pub fn spawn_model_entities(
                 .as_ref()
                 .and_then(|(_, site)| site.census_key(batch_idx, merge_mat, &transform));
             crate::static_merge::tally(&class, is_wmo, sub.geometry.positions.len(), key);
+        }
+        // The retained-pass divert (`WOW_STATIC_GX=1`, decisions 1429/1431): an eligible
+        // order-free static batch leaves bevy_pbr entirely — no entity, no blob; `static_gx`
+        // draws it from retained buffers (per-cell for ADT doodads, per-instance
+        // group-bucketed for WMO group geometry — slice 2). B2 admits DOODAD FADERS too:
+        // the batch rides in with its exile seed (the placement identity + handle clones of
+        // this exact bundle), and the scan respawns it through the entity path for the
+        // feather band. Checked BEFORE the merge divert (armed, this lane owns the
+        // population lane 1 would have taken); a refused batch — the collector's own
+        // exclusions or a site/kind mismatch — falls through to the ordinary paths below,
+        // slot held like every other divert.
+        if let Some((gx, site)) = staticgx.as_mut() {
+            let facts =
+                match site {
+                    crate::static_gx::GxSite::Doodad { owner, uid, label } if !is_wmo => {
+                        let fade = (!class.never_fade && !crate::static_gx::fade_lane_disabled())
+                            .then(|| crate::static_gx::GxFadeSeed {
+                                uid: *uid,
+                                label,
+                                radius,
+                                local_center,
+                                stat_mesh: stat_mesh.clone(),
+                                aabb: *stat_aabb,
+                                cutout: cutout.clone(),
+                                blend: blend.clone(),
+                            });
+                        Some((*owner, None, fade))
+                    }
+                    crate::static_gx::GxSite::Wmo { instance, groups } if is_wmo => {
+                        groups.get(batch_idx).map(|&g| {
+                            (
+                                (0, 0), // WMO items release by instance death, never by tile
+                                Some(crate::static_gx::GxWmoBatch {
+                                    instance: *instance,
+                                    group: g,
+                                    interior,
+                                    class: sub.wmo_batch,
+                                    sidn: sub.sidn,
+                                    window: sub.window,
+                                    batch_order,
+                                }),
+                                None,
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+            if let Some((owner, wmo, fade)) = facts {
+                if crate::static_gx::enabled()
+                    && class.merges()
+                    && !class.interior_prop
+                    // Never-fade admits bare; a fader admits only WITH its seed (the fade
+                    // lane lever empties the seed, sending faders back to the entity path).
+                    && (class.never_fade || fade.is_some())
+                    && gx.divert(crate::static_gx::GxBatch {
+                        geometry: &sub.geometry,
+                        transform,
+                        owner,
+                        texture: sub.texture.clone(),
+                        blend: sub.blend,
+                        two_sided,
+                        unlit: sub.emissive,
+                        fog_policy: sub.fog_policy,
+                        env_map: sub.env_map,
+                        no_depth_write: sub.no_depth_write,
+                        no_depth_test: sub.no_depth_test,
+                        shade,
+                        wmo,
+                        fade,
+                    })
+                {
+                    continue;
+                }
+            }
         }
         // The production consolidation divert (`WOW_STATIC_MERGE=1`, 1417/1418): an order-free
         // static doodad batch — faders included, their fade rides the baked sphere through the

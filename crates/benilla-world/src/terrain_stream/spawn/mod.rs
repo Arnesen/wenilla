@@ -67,6 +67,8 @@ type SpawnTables<'w> = (
     ResMut<'w, HullWelds>,
     ResMut<'w, crate::mega_static::MegaStaticPending>,
     ResMut<'w, StaticMerge>,
+    // `None` unless `WOW_STATIC_GX=1` (the resource only exists armed — decision 1429).
+    Option<ResMut<'w, crate::static_gx::StaticGx>>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -95,7 +97,8 @@ pub(super) fn spawn_loaded_placements(
     // model-forms cache (decision 0834).
     tables: SpawnTables,
 ) {
-    let (mut probes, mut activity, focus, mut forms, mut welds, mut mega, mut merge) = tables;
+    let (mut probes, mut activity, focus, mut forms, mut welds, mut mega, mut merge, mut staticgx) =
+        tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -165,6 +168,9 @@ pub(super) fn spawn_loaded_placements(
                         };
                     let (radius, center) = m2_fade(&m.bounds, p.transform.scale.x);
                     let anim_bound = m2_anim_bound(&m.bounds);
+                    // Built here (not at the tag site below) so the gx fader seed can carry
+                    // the placement identity (B2, 1431); moved into `tag_world_object` after.
+                    let label = handle_label(h);
                     let SpawnedModel {
                         entities: mut ents,
                         by_batch,
@@ -193,6 +199,18 @@ pub(super) fn spawn_loaded_placements(
                         None, // world-static placement: cards bake their world pivot
                         Some(&mut *mega),
                         Some((&mut *merge, MergeSite::Doodad { owner: p.owner })),
+                        // The retained-pass collector (1429/1431) — ADT doodads are its
+                        // lane; uid + label seed the fader exile identity (B2).
+                        staticgx.as_deref_mut().map(|gx| {
+                            (
+                                gx,
+                                crate::static_gx::GxSite::Doodad {
+                                    owner: p.owner,
+                                    uid: unique_id,
+                                    label: &label,
+                                },
+                            )
+                        }),
                     );
                     // ADT doodads are exterior scene: from inside a WMO they draw only through a
                     // portal window (`0x683700`, fed solely by the per-window walk `0x682fa0` — see
@@ -266,7 +284,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         &ents,
                         ModelKind::Doodad,
-                        handle_label(h),
+                        label,
                         unique_id,
                         format!("emitters: {}", m.emitters.len()),
                     );
@@ -304,6 +322,40 @@ pub(super) fn spawn_loaded_placements(
                     // Hoisted above the spawn: the merge site needs it (a portal-gated building's
                     // blobs take `WmoGroupVis`), and the instance logic below reuses it.
                     let has_portals = !m.portal_refs.is_empty() && !m.portal_infos.is_empty();
+                    // The per-placement portal-cull instance, spawned BEFORE the batches so the
+                    // static-gx divert can key its retained region on it (slice 2 of 1429 — the
+                    // region's lifecycle IS this entity's). The group-vis tagging still runs
+                    // after the spawn, off `by_batch`; see the instance block below for why a
+                    // portal-less-but-named building spawns one too.
+                    let instance = (has_portals || m.wmo_id != 0).then(|| {
+                        commands
+                            .spawn(WmoPortalInstance {
+                                handle: h.clone(),
+                                world_from_local: p.transform.compute_affine(),
+                                name_set: p.name_set,
+                                visible: vec![true; m.group_nav.len()],
+                                liquid_visited: vec![false; m.group_nav.len()],
+                                // The MOGP `groupLiquid` override, resolved once at spawn: 13
+                                // groups in the whole archive declare "this room is wholly
+                                // submerged" in place of carrying a liquid grid, and 5 of them are
+                                // placed — the Deeprun Tram's two flooded sections, the Prison
+                                // Oubliette, the MD crypt and the mountain cave (decision 1000).
+                                flooded: m
+                                    .group_nav
+                                    .iter()
+                                    .map(|g| {
+                                        (g.group_liquid != benilla_formats::NO_GROUP_LIQUID)
+                                            .then(|| {
+                                                benilla_formats::LiquidKind::from_nibble(
+                                                    (g.group_liquid & 0xf) as u8,
+                                                )
+                                            })
+                                            .flatten()
+                                    })
+                                    .collect(),
+                            })
+                            .id()
+                    });
                     let SpawnedModel {
                         entities: mut ents,
                         by_batch,
@@ -339,6 +391,20 @@ pub(super) fn spawn_loaded_placements(
                                 portal_gated: has_portals,
                             },
                         )),
+                        // Slice 2 (1429): WMO group geometry diverts into a retained region
+                        // keyed by the instance entity — only a placement WITH an instance
+                        // qualifies (no instance ⇒ no PVS identity ⇒ entity path).
+                        instance.and_then(|i| {
+                            staticgx.as_deref_mut().map(|gx| {
+                                (
+                                    gx,
+                                    crate::static_gx::GxSite::Wmo {
+                                        instance: i,
+                                        groups: &m.submesh_group,
+                                    },
+                                )
+                            })
+                        }),
                     );
                     if let Some((target, r)) = fade_near_target() {
                         let pos = p.transform.translation;
@@ -379,34 +445,7 @@ pub(super) fn spawn_loaded_placements(
                     // gets tagged; a portal-less prop keeps all groups visible but still spawns the
                     // instance when it carries a WMOAreaTable identity — the interior down-ray
                     // (`wmo_portal::track_current_interior`) needs it. See `crate::wmo_portal`.
-                    if has_portals || m.wmo_id != 0 {
-                        let instance = commands
-                            .spawn(WmoPortalInstance {
-                                handle: h.clone(),
-                                world_from_local: p.transform.compute_affine(),
-                                name_set: p.name_set,
-                                visible: vec![true; m.group_nav.len()],
-                                liquid_visited: vec![false; m.group_nav.len()],
-                                // The MOGP `groupLiquid` override, resolved once at spawn: 13
-                                // groups in the whole archive declare "this room is wholly
-                                // submerged" in place of carrying a liquid grid, and 5 of them are
-                                // placed — the Deeprun Tram's two flooded sections, the Prison
-                                // Oubliette, the MD crypt and the mountain cave (decision 1000).
-                                flooded: m
-                                    .group_nav
-                                    .iter()
-                                    .map(|g| {
-                                        (g.group_liquid != benilla_formats::NO_GROUP_LIQUID)
-                                            .then(|| {
-                                                benilla_formats::LiquidKind::from_nibble(
-                                                    (g.group_liquid & 0xf) as u8,
-                                                )
-                                            })
-                                            .flatten()
-                                    })
-                                    .collect(),
-                            })
-                            .id();
+                    if let Some(instance) = instance {
                         if has_portals {
                             // One shared single-group key per group — geometry belongs to exactly
                             // one room, and sharing keeps the tag one allocation per group rather
@@ -661,6 +700,7 @@ pub(super) fn spawn_loaded_placements(
                         slot: interior_slot,
                     },
                 )),
+                None, // static-gx is the ADT-doodad lane; WMO props never feed it
             );
             // The slot frees itself when the prop despawns (streaming out) — the component hook
             // returns it to the table whoever does the despawn. A prop whose every batch
