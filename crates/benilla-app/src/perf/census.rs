@@ -295,6 +295,101 @@ pub(super) fn count_mesh_events(
     }
 }
 
+/// `WOW_PART_CHURN=1`: per-second M2-part churn. `rm_frames` is the count of frames with ≥1
+/// `MeshMaterial3d<WowModelMaterial>` removal — exactly the predicate that promotes
+/// `classify_water_side` to its full walk (0930's twin-GC mark), so a regime reading ~60 here
+/// full-walks every frame. `mat_mod` counts `WowModelMaterial` asset Modified events — the
+/// global asset-changed tick that wakes every `AssetChanged` scan.
+pub(super) fn count_part_churn(
+    added: Query<(), Added<MeshMaterial3d<benilla_assets::materials::WowModelMaterial>>>,
+    mut removed: RemovedComponents<MeshMaterial3d<benilla_assets::materials::WowModelMaterial>>,
+    mut mat_events: MessageReader<
+        bevy::asset::AssetEvent<benilla_assets::materials::WowModelMaterial>,
+    >,
+    time: Res<Time>,
+    mut acc: Local<(f32, u32, u32, u32, u32)>,
+) {
+    let (last, add_n, rm_n, rm_frames, mat_mod) = &mut *acc;
+    *add_n += added.iter().count() as u32;
+    let rm = removed.read().count() as u32;
+    *rm_n += rm;
+    if rm > 0 {
+        *rm_frames += 1;
+    }
+    *mat_mod += mat_events
+        .read()
+        .filter(|e| matches!(e, bevy::asset::AssetEvent::Modified { .. }))
+        .count() as u32;
+    if time.elapsed_secs() - *last >= 1.0 {
+        eprintln!(
+            "[part-churn] parts +{add_n} -{rm_n} rm_frames={rm_frames}/s mat_modified={mat_mod}/s"
+        );
+        (*add_n, *rm_n, *rm_frames, *mat_mod) = (0, 0, 0, 0);
+        *last = time.elapsed_secs();
+    }
+}
+
+/// `WOW_MESH_HOLDERS=1`: once a second, the set of mesh asset ids Modified in the last second
+/// and the component signature of every entity holding one — [`count_mesh_events`] counts and
+/// samples the ids, this names the writer by its holder's archetype (an id alone says nothing).
+/// Exclusive, like [`arch_census`], for the same reason: the signature needs the live archetype.
+pub(super) fn mesh_holders(
+    world: &mut World,
+    mut cursor: Local<Option<bevy::ecs::message::MessageCursor<bevy::asset::AssetEvent<Mesh>>>>,
+    mut acc: Local<(f32, std::collections::HashSet<bevy::asset::AssetId<Mesh>>)>,
+) {
+    let messages = world.resource::<bevy::ecs::message::Messages<bevy::asset::AssetEvent<Mesh>>>();
+    let cursor = cursor.get_or_insert_with(|| messages.get_cursor());
+    let (last, ids) = &mut *acc;
+    ids.extend(cursor.read(messages).filter_map(|e| match e {
+        bevy::asset::AssetEvent::Modified { id } => Some(*id),
+        _ => None,
+    }));
+    let now = world.resource::<Time>().elapsed_secs();
+    if now - *last < 1.0 {
+        return;
+    }
+    *last = now;
+    if ids.is_empty() {
+        return;
+    }
+    let short = |full: &str| -> String {
+        let base = full.split('<').next().unwrap_or(full);
+        let segs: Vec<&str> = base.split("::").collect();
+        segs[segs.len().saturating_sub(2)..].join("::")
+    };
+    let mut found = 0usize;
+    let mut holders = world.query::<(Entity, &Mesh3d)>();
+    let matches: Vec<Entity> = holders
+        .iter(world)
+        .filter(|(_, m)| ids.contains(&m.0.id()))
+        .map(|(e, _)| e)
+        .take(6)
+        .collect();
+    for e in matches {
+        found += 1;
+        let sig: Vec<String> = world
+            .entity(e)
+            .archetype()
+            .components()
+            .iter()
+            .filter_map(|&c| world.components().get_info(c))
+            .map(|i| short(&i.name().to_string()))
+            .collect();
+        eprintln!(
+            "[mesh-holders] {e} holds a modified mesh: {}",
+            sig.join("+")
+        );
+    }
+    if found == 0 {
+        eprintln!(
+            "[mesh-holders] {} modified id(s), no Mesh3d holder (2d or unowned)",
+            ids.len()
+        );
+    }
+    ids.clear();
+}
+
 /// When the one-shot archetype census fires (seconds of `Time` elapsed; `f32::MAX` = spent).
 #[derive(Resource)]
 pub(super) struct ArchCensusAt(pub(super) f32);

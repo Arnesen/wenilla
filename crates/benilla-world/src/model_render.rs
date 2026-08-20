@@ -787,12 +787,22 @@ pub struct FarSideOfWater;
 /// surfaces, and the eye's side — so a *clean* batch is skipped, and only the changed set
 /// re-classifies (~2.6k of ~40k parts on a measured Stormwind frame; the full sweep cost 2.2 ms).
 /// The frame promotes to the full walk — byte-identical to the old per-frame behaviour — whenever
-/// a global term moves: the eye crosses the surface (every verdict inverts), surfaces stream
-/// in/out, or any part despawned (the twin GC below needs its full mark; between full frames a
-/// pair orphaned by a handle overwrite — a fade settling to its cutout — lingers harmlessly, kept
-/// fresh by the mirror above, until the next edge sweeps it). The room-claim trigger fans DOWN:
-/// the claim lives on the unit root, the batches are its descendants, and a claim can change with
-/// the unit standing still (a building streaming in under it re-claims at the same spot).
+/// a global term that changes VERDICTS moves: the eye crosses the surface (every verdict
+/// inverts) or surfaces stream in/out. A part *despawn* changes no live verdict — it only
+/// obligates the twin GC's exact mark eventually — so it schedules a full walk behind
+/// [`GC_DEADLINE_SECS`] instead of promoting the same frame (decision 1462: walking streams
+/// parts out on 12–22 frames/s, and each promotion was a full re-classify of every part —
+/// lane B of 1461's walking tax; between full frames a pair orphaned by a handle overwrite —
+/// a fade settling to its cutout — lingers harmlessly, kept fresh by the mirror above, until
+/// the next edge sweeps it, and a GC-due twin lingers the same way). The room-claim trigger
+/// fans DOWN: the claim lives on the unit root, the batches are its descendants, and a claim
+/// can change with the unit standing still (a building streaming in under it re-claims at the
+/// same spot).
+/// How long a despawn-obligated twin GC may wait for its full walk (1462). Bounds how long an
+/// orphaned twin pair can outlive its last user — a handful of small material clones — while a
+/// walking regime's continuous despawn stream costs ~0.5 full walks/s instead of 12–22.
+const GC_DEADLINE_SECS: f32 = 2.0;
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn classify_water_side(
     interleave: crate::particles::WaterInterleave,
@@ -834,7 +844,9 @@ pub(crate) fn classify_water_side(
     reclaimed: Query<Entity, Changed<crate::wmo_portal::UnitWmoRoom>>,
     children: Query<&Children>,
     mut removed: RemovedComponents<MeshMaterial3d<WowModelMaterial>>,
+    time: Res<bevy::time::Time>,
     mut eye_was_submerged: Local<Option<bool>>,
+    mut gc_due: Local<Option<f32>>,
 ) {
     // Mirror any near-asset edit into the live twin. Since decision 1381 the texanim/tint lane
     // animates through the shared table (the twin's clone carries the same slot and seed, so it
@@ -858,12 +870,22 @@ pub(crate) fn classify_water_side(
         }
     }
     let eye = interleave.eye_submerged();
-    // `last()` drains the reader — `next()` would leave the tail readable and promote NEXT frame
-    // to a spurious second full walk.
+    let now = time.elapsed_secs();
+    // `last()` drains the reader — `next()` would leave the tail readable and re-arm NEXT frame
+    // as a spurious second deadline. The earliest despawn holds the deadline (`get_or_insert`):
+    // a steady despawn stream must not push the GC out forever.
+    if removed.read().last().is_some() {
+        gc_due.get_or_insert(now + GC_DEADLINE_SECS);
+    }
     let full = *eye_was_submerged != Some(eye)
         || interleave.surfaces_changed()
-        || removed.read().last().is_some();
+        || gc_due.is_some_and(|due| now >= due);
     *eye_was_submerged = Some(eye);
+    if full {
+        // Any full walk runs the GC's exact mark, whatever triggered it — a pending deadline
+        // is satisfied, not merely postponed.
+        *gc_due = None;
+    }
 
     if full {
         // The full walk — every part, plus the twin GC's exact mark-and-sweep.

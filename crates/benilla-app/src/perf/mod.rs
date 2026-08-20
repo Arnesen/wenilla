@@ -99,6 +99,17 @@ impl Plugin for PerfPlugin {
         if std::env::var_os("WOW_MESH_EVENTS").is_some() {
             app.add_systems(Update, census::count_mesh_events);
         }
+        // `WOW_PART_CHURN=1` — the moving-regime premise counters (1461): how many frames per
+        // second despawn an M2 part (= `classify_water_side` full-walk promotions), and how
+        // often model materials fire Modified (= the `AssetChanged` scan wake-ups).
+        if std::env::var_os("WOW_PART_CHURN").is_some() {
+            app.add_systems(Update, census::count_part_churn);
+        }
+        // `WOW_MESH_HOLDERS=1` — who OWNS the meshes `WOW_MESH_EVENTS` counts? Prints each
+        // holder's archetype signature once a second (1461's writer hunt).
+        if std::env::var_os("WOW_MESH_HOLDERS").is_some() {
+            app.add_systems(Last, census::mesh_holders);
+        }
         // `WOW_CAM_CHANGED=1` — is the world camera's transform bit-stable at a parked pin?
         // The premise counter for gating the per-submesh visibility sweep on frame-stable
         // camera inputs: if the controller rewrites an equal transform every frame, change

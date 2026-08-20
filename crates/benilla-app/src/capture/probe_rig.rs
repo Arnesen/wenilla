@@ -54,7 +54,7 @@
 //! | `gear:<t>` | `.character premade gear <t>` | SEC_BASIC_ADMIN 4 | name or entry; levels up + equips |
 //! | `spec:<t>` | `.character premade spec <t>` | SEC_BASIC_ADMIN 4 | resets talents, learns the tree |
 //! | `at:<name>` | `.tele <name>` | SEC_TICKETMASTER 2 | 997 named rows in `game_tele` |
-//! | `at:m,x,y,z` | `.go xyz x y z m` | SEC_TICKETMASTER 2 | |
+//! | `at:m,x,y,z[,o]` | `.go xyz x y z m` (`.go xyzo` with `o`) | SEC_TICKETMASTER 2 | pin the facing when a motion probe walks |
 //! | `gm:on\|off` | `.gm on\|off` | SEC_GAMEMASTER 3 | see 0649 on why `off` matters |
 //!
 //! Probe accounts are gmlevel **6**, so every one of these lands. Pass `gear:?` (or `spec:?`) to
@@ -506,15 +506,21 @@ fn build_steps(spec: &RigSpec, dead: bool) -> Vec<String> {
     }
     if let Some(at) = &spec.at {
         steps.push(match parse_point(at) {
-            Some((map, x, y, z)) => format!(".go xyz {x} {y} {z} {map}"),
+            Some((map, x, y, z, Some(o))) => format!(".go xyzo {x} {y} {z} {o} {map}"),
+            Some((map, x, y, z, None)) => format!(".go xyz {x} {y} {z} {map}"),
             None => format!(".tele {at}"),
         });
     }
     steps
 }
 
-/// `map,x,y,z` → the `.go xyz` argument order (`x y z map`). Anything else is a `game_tele` name.
-fn parse_point(at: &str) -> Option<(i32, f32, f32, f32)> {
+/// `map,x,y,z[,o]` → `.go xyz x y z map`, or `.go xyzo x y z o map` when a facing is given
+/// (VERIFIED vmangos `Chat.cpp:408`: `xyzo`, SEC_TICKETMASTER like `xyz`). Anything else is a
+/// `game_tele` name. The facing is load-bearing exactly when a motion probe walks from the
+/// pin: `W` follows the BODY's facing, and each probe character keeps whatever facing it last
+/// had — an unpinned facing sent probe0 and probe4 down different routes from the same point,
+/// which invalidated a cross-slot A/B before 1462's sitting caught it.
+fn parse_point(at: &str) -> Option<(i32, f32, f32, f32, Option<f32>)> {
     let mut parts = at.split(',').map(str::trim);
     let map = parts.next()?.parse().ok()?;
     let (x, y, z) = (
@@ -522,7 +528,11 @@ fn parse_point(at: &str) -> Option<(i32, f32, f32, f32)> {
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
     );
-    parts.next().is_none().then_some((map, x, y, z))
+    let o = match parts.next() {
+        Some(o) => Some(o.parse().ok()?),
+        None => None,
+    };
+    parts.next().is_none().then_some((map, x, y, z, o))
 }
 
 fn rig_char_name(spec: &RigSpec) -> Option<String> {
@@ -743,9 +753,14 @@ mod tests {
             build_steps(&point, false),
             vec![".go xyz -1277.5 124 131.2 1"]
         );
+        let faced = RigSpec::parse("at:0,-9399.03,10.41,59.83,0.0").unwrap();
+        assert_eq!(
+            build_steps(&faced, false),
+            vec![".go xyzo -9399.03 10.41 59.83 0 0"]
+        );
         assert_eq!(parse_point("ThunderBluff"), None);
         assert_eq!(parse_point("1,2,3"), None); // three numbers is not a map + point
-        assert_eq!(parse_point("1,2,3,4,5"), None);
+        assert_eq!(parse_point("1,2,3,4,5,6"), None); // and six is past even a faced point
     }
 
     #[test]

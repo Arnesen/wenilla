@@ -517,7 +517,11 @@ fn emit_minimap(
                     z_key: slot.z,
                     texture: Some(handle.clone()),
                     color: [tint[0], tint[1], tint[2], slot.alpha],
-                    clip: Some(slot.rect),
+                    // No CPU clip (1463): the mask shader already zeroes everything outside
+                    // `mask_rect` (`ui_quad.wgsl`'s `inside` test), and clipping a PANNING tile
+                    // re-cut its quad every frame — constant positions, churning UVs — which is
+                    // exactly the shape the batcher's pan gate cannot ride on a `Transform`.
+                    // Unclipped, the tile is a pure translation and never rewrites its mesh.
                     mask: mask.clone(),
                     ..default()
                 });
@@ -552,6 +556,14 @@ fn emit_minimap(
         }
         let win = window.iter().next();
         let cursor = win.and_then(|w| w.cursor_position());
+        // The player's pan term, quantized to a half-logical-pixel grid (one device px at 2×):
+        // every blip offset — and the rim arrows' bearing — derives from `wx`/`wy`, so the whole
+        // blip layer steps together a few times a second instead of re-emitting sub-pixel-shifted
+        // quads every frame while walking (1463; a 0.07 px/frame slide on a 16 px icon is not a
+        // visible motion, but each slide rewrote the batch mesh and armed the world's
+        // `AssetChanged` scans). The blips' world positions stay exact — only the shared pan
+        // origin snaps.
+        let q = 0.5 / blip_px_per_yd;
         blips::BlipCtx {
             center,
             side,
@@ -559,8 +571,8 @@ fn emit_minimap(
             radius_yd: (side * 0.5) / blip_px_per_yd,
             z: slot.z,
             alpha: slot.alpha,
-            wx,
-            wy,
+            wx: (wx / q).round() * q,
+            wy: (wy / q).round() * q,
             wz: wow[2],
             cursor,
             // The same point in UI space (y-up, ÷s through the 0582/0584 seam — the tooltip's

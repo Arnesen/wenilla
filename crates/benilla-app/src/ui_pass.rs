@@ -656,10 +656,18 @@ impl Run {
 struct BatchPools {
     entities: Vec<Entity>,
     meshes: Vec<Handle<Mesh>>,
-    /// Each slot's last-written content — the per-run skip gate (decision 1361): a slot whose
-    /// run is bit-identical to what its pooled mesh already holds is not rewritten, so one
-    /// animating quad no longer drags every batch through the GPU mesh allocator.
+    /// Each slot's last-written MESH content (base positions, before [`Self::offsets`]) — the
+    /// per-run skip gate (decision 1361): a slot whose run is bit-identical to what its pooled
+    /// mesh already holds is not rewritten, so one animating quad no longer drags every batch
+    /// through the GPU mesh allocator.
     stored: Vec<StoredRun>,
+    /// Each slot's current XY translation from its stored base, carried by the batch entity's
+    /// `Transform` instead of the mesh (decision 1463): a run that only *panned* — the minimap
+    /// tile was ~74% of all moving-regime rebuild triggers — moves without an `Assets<Mesh>`
+    /// write, because ONE Modified event per frame arms `AssetChanged` probes over every
+    /// `Mesh3d` row in the scene (1370's all-or-nothing fast path, ~0.8 ms/frame at 1461's
+    /// Goldshire pin).
+    offsets: Vec<Vec2>,
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
 }
 
@@ -674,6 +682,55 @@ struct StoredRun {
     indices: Vec<u32>,
     z_bits: u32,
     key: MatKey,
+}
+
+impl StoredRun {
+    /// The candidate's uniform XY offset from this base: `Some(d)` when every vertex is this
+    /// run's vertex plus one constant delta and everything else is bit-equal — `Some(ZERO)` is
+    /// exactly the old bit-identical skip case, so this subsumes 1361's gate. `None` means the
+    /// run genuinely changed shape and must be rebaked. The comparison is exact float
+    /// arithmetic on purpose: a miss only falls back to the rewrite path, so a widget whose
+    /// pan doesn't survive `b + d == n` bit-exactly loses the optimization, never correctness.
+    /// Why [`Self::translation_from`] missed — the pan-gate diagnostic (`WOW_UI_DIFF=1`).
+    fn translation_miss_reason(&self, new: &StoredRun) -> &'static str {
+        if self.key != new.key {
+            "key"
+        } else if self.z_bits != new.z_bits {
+            "z"
+        } else if self.positions.len() != new.positions.len() {
+            "len"
+        } else if self.indices != new.indices {
+            "indices"
+        } else if self.uvs != new.uvs {
+            "uvs"
+        } else if self.colors != new.colors {
+            "colors"
+        } else {
+            "delta-nonuniform"
+        }
+    }
+
+    fn translation_from(&self, new: &StoredRun) -> Option<Vec2> {
+        if self.key != new.key
+            || self.z_bits != new.z_bits
+            || self.positions.len() != new.positions.len()
+            || self.positions.is_empty()
+            || self.indices != new.indices
+            || self.uvs != new.uvs
+            || self.colors != new.colors
+        {
+            return None;
+        }
+        let d = Vec2::new(
+            new.positions[0][0] - self.positions[0][0],
+            new.positions[0][1] - self.positions[0][1],
+        );
+        self.positions
+            .iter()
+            .zip(&new.positions)
+            .all(|(b, n)| n[0] == b[0] + d.x && n[1] == b[1] + d.y && n[2] == b[2])
+            .then_some(d)
+    }
 }
 
 /// A material's full identity: texture, blend/shape flags, mask texture + mask rect (as bits, so
@@ -696,8 +753,10 @@ fn retire_batches(pools: &mut BatchPools, commands: &mut Commands) {
         commands.entity(entity).despawn();
     }
     // The skip gate must forget with them (decision 1361): a retired slot's entity is gone, so
-    // "content unchanged" must not skip the respawn when the UI returns.
+    // "content unchanged" must not skip the respawn when the UI returns. The pan gate's
+    // offsets ride the same lifecycle (they index the same slots).
     pools.stored.clear();
+    pools.offsets.clear();
 }
 
 /// Per frame: when the BASE lane flagged a change ([`UiQuads::dirty`]) or the APPEND lane's
@@ -962,9 +1021,53 @@ fn rebuild_ui_mesh(
             z_bits: z.to_bits(),
             key,
         };
-        if pools.stored.get(used) == Some(&stored) {
+        // The pan gate (1463): a run that matches its slot's base up to one constant XY delta
+        // moves on the batch entity's `Transform` — no mesh write, no `AssetChanged` arming.
+        // `Some(ZERO)` is the bit-identical case (1361's old skip gate), where even the
+        // `Transform` write is skipped unless a previous pan is being undone.
+        let pan = pools
+            .stored
+            .get(used)
+            .and_then(|prev| prev.translation_from(&stored).map(|d| (d, prev.z_bits)));
+        if let Some((d, z_bits)) = pan {
+            if pools.offsets[used] != d {
+                pools.offsets[used] = d;
+                if let Some(&entity) = pools.entities.get(used) {
+                    commands.entity(entity).insert(Transform::from_xyz(
+                        d.x,
+                        d.y,
+                        f32::from_bits(z_bits),
+                    ));
+                }
+            }
             used += 1;
             continue;
+        }
+        // Pan-gate miss diagnostic (`WOW_UI_DIFF=1`, ≤3 lines/s so a startup burst can't
+        // exhaust it): names the check that sent this slot to the rewrite path.
+        if *UI_DIFF {
+            use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+            static SHOWN: AtomicU32 = AtomicU32::new(0);
+            static LAST_SEC: AtomicU64 = AtomicU64::new(0);
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let sec = START
+                .get_or_init(std::time::Instant::now)
+                .elapsed()
+                .as_secs();
+            if LAST_SEC.swap(sec, Ordering::Relaxed) != sec {
+                SHOWN.store(0, Ordering::Relaxed);
+            }
+            if SHOWN.fetch_add(1, Ordering::Relaxed) < 3 {
+                let why = pools
+                    .stored
+                    .get(used)
+                    .map_or("no-prev", |p| p.translation_miss_reason(&stored));
+                eprintln!(
+                    "[ui-pan] slot {used} rewrite: {why} (quads={}, key.tex={:?})",
+                    stored.positions.len() / 4,
+                    stored.key.0
+                );
+            }
         }
         // MAIN_WORLD too (not RENDER_WORLD-only): the pool rewrites this asset in place next
         // rebuild, so the main-world copy must survive extraction.
@@ -980,6 +1083,13 @@ fn rebuild_ui_mesh(
             pools.stored[used] = stored;
         } else {
             pools.stored.push(stored);
+        }
+        // A rebaked slot's mesh holds absolute positions again — its pan resets with it (the
+        // rewrite arm below writes `Transform::from_xyz(0, 0, z)`).
+        if pools.offsets.len() > used {
+            pools.offsets[used] = Vec2::ZERO;
+        } else {
+            pools.offsets.push(Vec2::ZERO);
         }
         let mesh_handle = match pools.meshes.get(used) {
             Some(handle) => {
@@ -1048,6 +1158,7 @@ fn rebuild_ui_mesh(
     }
     pools.meshes.truncate(used);
     pools.stored.truncate(used);
+    pools.offsets.truncate(used);
 }
 
 /// Deliberately-overlapping synthetic content proving the sort: 5 z strata × 40 quads each, offset both
