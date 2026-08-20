@@ -221,11 +221,16 @@ impl UiScript {
                     if region.map(|r| r.kind) == Some(crate::widget::RegionKind::Title) {
                         continue;
                     }
-                    let mut data = model.region_data.get(&rh).cloned().unwrap_or_default();
-                    // Region-level Hide (the VisibleRegion bit): no quad at all.
-                    if data.hidden {
+                    // Region-level Hide (the VisibleRegion bit): no quad at all — checked on the
+                    // borrow, BEFORE the clone below. `RegionData` is a fat row (text `String`,
+                    // paths, the anchors `Vec`), and paying its clone for a row whose next line
+                    // discards it was a per-hidden-region-per-frame allocation tax the extract
+                    // walk never noticed it was paying.
+                    let data_ref = model.region_data.get(&rh);
+                    if data_ref.is_some_and(|d| d.hidden) {
                         continue;
                     }
+                    let mut data = data_ref.cloned().unwrap_or_default();
                     // The single-hop draw multiply (`propagation.md`): the region's own alpha times
                     // its immediate owner's — never a product up the tree, because the owner's own
                     // `effective_alpha` was already overwritten by any ancestor's SetAlpha.

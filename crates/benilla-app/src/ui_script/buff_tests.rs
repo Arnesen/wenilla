@@ -750,6 +750,186 @@ fn the_temporary_enchant_row_shows_a_weapon_enchant_and_moves_the_top_row_aside(
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **The idle enchant row writes nothing** (decision 1396's class, the audit's item on
+/// `TemporaryEnchantFrame:OnUpdate` — 1396 measured it at ~14 µs/frame as the post-fix lead). With
+/// neither hand enchanted, `BuffFrame_Enchant_OnUpdate` used to clear both slots and re-park the
+/// bar every frame of every session; now the no-enchant branch latches on `benillaCleared` after
+/// its first pass.
+///
+/// The probes are sentinels the branch would overwrite if it still ran: the bar re-anchored 41px
+/// left of its park, and slot 1 shown. Ten ticks later both survive. Then the row is DRIVEN — both
+/// hands at once — proving the latch releases, the straight-line hand packer keeps the reference's
+/// off-hand-first order, and the `filled`-gated width/anchor writes fire on the 0→2 edge; the drop
+/// back to empty re-parks the bar (the first pass after a transition always writes).
+#[test]
+fn an_idle_enchant_row_stops_rewriting_the_bar() {
+    let mut s = harness();
+    push(&mut s, mixed_bar());
+    frame(&mut s, 0.1); // first pass: the clear + park write once and latch
+    frame(&mut s, 0.1);
+    s.resolve();
+    let resting = s.eval::<f64>("return BuffFrame:GetRight()").unwrap();
+
+    // Sentinels the no-enchant branch can never leave standing if it still writes.
+    s.run(
+        r#"BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPRIGHT", -41, 0)
+           TempEnchant1:Show()"#,
+    )
+    .unwrap();
+    for _ in 0..10 {
+        frame(&mut s, 0.1);
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    assert!(
+        shown(&s, "TempEnchant1"),
+        "a latched idle row must not re-hide the slot every frame"
+    );
+    let displaced = s.eval::<f64>("return BuffFrame:GetRight()").unwrap();
+    assert!(
+        (displaced - (resting - 41.0)).abs() < 1e-3,
+        "a latched idle row must not re-park the bar every frame — got {displaced}, resting {resting}"
+    );
+
+    // The control: both hands enchant. Off hand packs slot 1 (the reference's order — main hand
+    // sits to its LEFT in slot 2), the row is 64 wide, the bar starts one 5px gutter left of it.
+    s.set_weapon_enchants(
+        Some(benilla_ui::script::WeaponEnchant {
+            remaining_ms: Some(480_000),
+            charges: 0,
+        }),
+        Some(benilla_ui::script::WeaponEnchant {
+            remaining_ms: Some(120_000),
+            charges: 0,
+        }),
+    );
+    frame(&mut s, 0.1);
+    assert!(shown(&s, "TempEnchant1") && shown(&s, "TempEnchant2"));
+    assert_eq!(
+        s.eval::<i64>("return TempEnchant1:GetID()").unwrap(),
+        17,
+        "off hand first: slot 1 is the OffHandSlot id"
+    );
+    assert_eq!(s.eval::<i64>("return TempEnchant2:GetID()").unwrap(), 16);
+    assert_eq!(text(&s, "TempEnchant1Duration"), "2 m");
+    assert_eq!(text(&s, "TempEnchant2Duration"), "8 m");
+    s.resolve();
+    assert_eq!(
+        s.eval::<f64>("return TemporaryEnchantFrame:GetWidth()")
+            .unwrap(),
+        64.0,
+        "two 32px columns"
+    );
+    let both = s.eval::<f64>("return BuffFrame:GetRight()").unwrap();
+    assert!(
+        (resting - both - 69.0).abs() < 1e-3,
+        "the bar clears both columns + the gutter: {resting} -> {both}"
+    );
+
+    // And back to empty: the transition still writes (the latch re-arms, not re-fires).
+    s.set_weapon_enchants(None, None);
+    frame(&mut s, 0.1);
+    assert!(!shown(&s, "TempEnchant1") && !shown(&s, "TempEnchant2"));
+    s.resolve();
+    let parked = s.eval::<f64>("return BuffFrame:GetRight()").unwrap();
+    assert!(
+        (parked - resting).abs() < 1e-3,
+        "the drop-to-empty pass re-parks the bar: {parked} vs {resting}"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **A settled buff button writes nothing per frame** (the same 1396 class, one row down): the
+/// poll (`GetPlayerBuffTimeLeft` every frame — load-bearing, decision 0846) stays, but the alpha
+/// and the duration-region writes are gated on what was last written. The probes are sentinels the
+/// handler can never produce: alpha 0.42 (it writes only 1.0 or the warning ramp, and at 5 min out
+/// the ramp is not running) and the text "X" (it writes only `SecondsToTimeAbbrev` strings — and
+/// the compare is against the computed STRING, never a measured extent, which is 1396's fixture
+/// trap). The controls: the minute rollover still rewrites the text, the warning band still turns
+/// the number white, and inside the last 31s the pulse still writes a fresh alpha per tick.
+#[test]
+fn a_settled_buff_button_stops_rewriting_alpha_and_duration() {
+    let mut s = harness();
+    push(
+        &mut s,
+        vec![aura(
+            1126,
+            "Mark of the Wild",
+            "Interface\\Icons\\Spell_Nature_Regeneration",
+            true,
+            1,
+            None,
+            300.0,
+            true,
+        )],
+    );
+    frame(&mut s, 0.1); // the event repaint + the poll's first write ("5 m", alpha 1.0)
+    frame(&mut s, 0.1);
+    assert_eq!(text(&s, "BuffButton0Duration"), "5 m");
+
+    s.run(r#"BuffButton0:SetAlpha(0.42); BuffButton0Duration:SetText("X")"#)
+        .unwrap();
+    for _ in 0..10 {
+        frame(&mut s, 0.016);
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    assert!(
+        (alpha(&s, "BuffButton0") - 0.42).abs() < 1e-6,
+        "a settled button must not rewrite its alpha every frame — got {}",
+        alpha(&s, "BuffButton0")
+    );
+    assert_eq!(
+        text(&s, "BuffButton0Duration"),
+        "X",
+        "a settled button must not rewrite its unchanged duration text every frame"
+    );
+
+    // Control 1: a REAL text change flows — the abbreviation drops to "4 m" past the boundary.
+    s.tick(60.0);
+    assert_eq!(
+        text(&s, "BuffButton0Duration"),
+        "4 m",
+        "the minute rollover overwrites the sentinel: the gate passes real changes"
+    );
+
+    // Control 2: inside the last 31s the pulse writes a fresh ramp value every tick, and the
+    // number wears the sub-minute HIGHLIGHT white (the band is part of the write tuple).
+    s.tick(210.0); // ~29.5s left
+    s.resolve();
+    let a1 = alpha(&s, "BuffButton0");
+    s.tick(0.2);
+    let a2 = alpha(&s, "BuffButton0");
+    s.tick(0.3);
+    let a3 = alpha(&s, "BuffButton0");
+    assert!(
+        a1 != a2 && a2 != a3,
+        "the warning pulse flows through the gate per tick: {a1} {a2} {a3}"
+    );
+    s.resolve();
+    let seconds_text = text(&s, "BuffButton0Duration");
+    assert!(
+        seconds_text.ends_with(" s"),
+        "inside the last minute the timer counts seconds: {seconds_text}"
+    );
+    let white = s.extract().iter().any(|q| match &q.content {
+        QuadContent::Text {
+            text: Some(t),
+            color: Some(c),
+            ..
+        } => {
+            *t == seconds_text
+                && (c[0] - 1.0).abs() < 1e-3
+                && (c[1] - 1.0).abs() < 1e-3
+                && (c[2] - 1.0).abs() < 1e-3
+        }
+        _ => false,
+    });
+    assert!(
+        white,
+        "the sub-minute band rewrote the vertex color to HIGHLIGHT white"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The duration line against the **real shipped strings**, end to end — the leg the engine's own
 /// synthetic-template tests cannot reach.
 ///

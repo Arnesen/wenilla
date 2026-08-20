@@ -34,6 +34,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             data.text = text;
             // Fresh text draws whole — an armed write-on gradient belongs to the old string.
             data.alpha_gradient = None;
+            // SetText is the measure lane's canonical SILENT write (it must not touch the
+            // layout — the extent hasn't moved yet), so it names itself on the measure ledger.
+            model.touch_measure(rh);
             Ok(())
         })?,
     )?;
@@ -53,6 +56,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let data = model.region_data.entry(rh).or_default();
             data.text = Some(text);
             data.alpha_gradient = None;
+            model.touch_measure(rh);
             Ok(())
         })?,
     )?;
@@ -247,12 +251,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetTextHeight",
         lua.create_function(|lua, (this, height): (Table, f32)| {
             let rh = region_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .region_data
-                .entry(rh)
-                .or_default()
-                .text_height = Some(height);
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            model.region_data.entry(rh).or_default().text_height = Some(height);
+            model.touch_measure(rh);
             Ok(())
         })?,
     )?;

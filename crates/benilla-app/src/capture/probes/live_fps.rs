@@ -139,6 +139,7 @@ fn drive_live_fps(
     mut key_events: MessageWriter<bevy::input::keyboard::KeyboardInput>,
     mut exit: MessageWriter<AppExit>,
     mut occlusions: MessageReader<bevy::window::WindowOccluded>,
+    monitors: Query<&bevy::window::Monitor>,
 ) {
     // Drain every frame so the state is current whichever phase we're in — the window can be
     // occluded before sampling ever starts (a detached launch spawns behind whatever is open).
@@ -231,6 +232,45 @@ fn drive_live_fps(
                 .single()
                 .map(|w| format!(" present={:?}", w.present_mode))
                 .unwrap_or_default();
+            // Which display the window sits on, and that display's refresh rate — the regime a
+            // railed leg is railed AT. Two legs of one sitting have read 126.5 vs exactly 60.0 fps
+            // under the same uncapped present mode (1388 round 3, 1395's pin), and nothing on the
+            // line said why: this machine drives a 60 Hz external beside a 120 Hz built-in, and
+            // present=AutoNoVsync resolves to Metal displaySync=false either way — the rail, when
+            // one appears, is the WindowServer's, keyed to the display. Stamp it so a regime split
+            // reads off the line instead of costing a discarded round.
+            let display = {
+                let center = windows.single().ok().and_then(|w| match w.position {
+                    bevy::window::WindowPosition::At(p) => {
+                        Some(p + bevy::math::IVec2::new(px.0 as i32, px.1 as i32) / 2)
+                    }
+                    _ => None,
+                });
+                match center {
+                    Some(c) => monitors
+                        .iter()
+                        .find(|m| {
+                            let min = m.physical_position;
+                            let max = min
+                                + bevy::math::IVec2::new(
+                                    m.physical_width as i32,
+                                    m.physical_height as i32,
+                                );
+                            c.x >= min.x && c.x < max.x && c.y >= min.y && c.y < max.y
+                        })
+                        .map(|m| {
+                            format!(
+                                " display={}@{}",
+                                m.name.as_deref().unwrap_or("?").replace(' ', "-"),
+                                m.refresh_rate_millihertz
+                                    .map(|mhz| format!("{:.0}", mhz as f64 / 1000.0))
+                                    .unwrap_or_else(|| "?".into())
+                            )
+                        })
+                        .unwrap_or_else(|| " display=none-contains-center".to_string()),
+                    None => " display=unpositioned".to_string(),
+                }
+            };
             // CPU cost per frame across every thread — the load-robust half of the measurement
             // (`perf::process_cpu_secs`), and directly comparable with a reporter's CPU %.
             let cpu = match (probe.cpu_at_start, crate::perf::process_cpu_secs()) {
@@ -307,7 +347,7 @@ fn drive_live_fps(
                 seen.mats, seen.meshes, seen.images, seen.uv_anims, seen.tint_anims,
             );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present} occluded_frames={}{at_pin}{gate}{sky}{ribbons}{culled}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display} occluded_frames={}{at_pin}{gate}{sky}{ribbons}{culled}",
                 v.len(),
                 at(0.50),
                 at(0.95),

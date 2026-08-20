@@ -286,8 +286,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let shown = model.arena.reparent_finish(h, new_parent, was_visible);
                 // A real reparent moves the subtree's effective scale and anchors — a
-                // layout-gate input.
+                // layout-gate input, and the scale is a measure-key input the subtree's
+                // FontStrings cannot name one by one (human-rate; the sweep walks once).
                 model.touch_layout();
+                model.touch_measure_all();
                 shown
             };
             event::fire_visibility_changes(lua, shown);
@@ -350,6 +352,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             model.arena.set_scale(h, scale);
             if changed {
                 model.touch_layout();
+                // The owner's effective scale is in every descendant FontString's measure key.
+                model.touch_measure_all();
             }
             Ok(())
         })?,

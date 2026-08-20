@@ -459,8 +459,14 @@
             local flash = getglobal(frame:GetName() .. "BottomButtonFlash")
             if not flash then return end
             if frame:AtBottom() then
-                flash:Hide()
-                frame.flashTimer = 0
+                -- The reference's own gate (ChatFrame.lua): a settled view writes nothing. Our
+                -- flashTimer reset rides inside it — so a return-to-bottom during a hidden blink
+                -- phase keeps the residual phase (a divergence that restarts the blink mid-phase
+                -- next scroll-up, invisible at rest and costing zero writes there).
+                if flash:IsVisible() then
+                    flash:Hide()
+                    frame.flashTimer = 0
+                end
                 return
             end
             frame.flashTimer = (frame.flashTimer or 0) + elapsed

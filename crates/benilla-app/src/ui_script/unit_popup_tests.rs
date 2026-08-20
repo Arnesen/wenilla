@@ -727,6 +727,146 @@ fn the_pet_details_row_opens_the_pet_paper_doll() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+// ── The enable-pass driver (BenillaUnitPopupDriver) ─────────────────────────────────────────────
+
+/// **The idle popup driver parks itself** (decision 1396's class, the audit's driver-hide item):
+/// with no unit menu of ours open, `UnitPopup_OnUpdate`'s early-out hides the driver's own frame —
+/// and the engine dispatches OnUpdate only to visible frames (`tick.rs`), so the per-frame scan
+/// stops entirely. `UnitPopup_ShowMenu` — the one opener every unit menu goes through (grep:
+/// UnitFrames/PartyFrame/FriendsFrame/ItemRef all call it) — wakes it again.
+///
+/// The probe wraps `UnitPopup_OnUpdate` in a counter: after the first tick parks the shipped-shown
+/// driver, ten idle ticks never run the pass. The control: an open target menu still runs the
+/// per-frame enable pass — a disconnected target's Whisper row greys, and greys back live when the
+/// unit reconnects mid-open — and closing the menu re-parks the driver.
+#[test]
+fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    bake_strings(&s);
+    load_popup_frames(&s);
+
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Me".into()),
+            is_player: true,
+            ..UnitState::default()
+        }),
+    );
+    // A friendly player target, DISCONNECTED (is_connected defaults to false): the Whisper row's
+    // grey predicate is live from the first enable pass.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            name: Some("Ally".into()),
+            health: 40,
+            max_health: 40,
+            is_player: true,
+            reaction: 5,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    s.resolve();
+    assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
+
+    s.run(
+        "BENILLA_TEST_POPUP_TICKS = 0\n\
+         local real = UnitPopup_OnUpdate\n\
+         function UnitPopup_OnUpdate(elapsed)\n\
+             BENILLA_TEST_POPUP_TICKS = BENILLA_TEST_POPUP_TICKS + 1\n\
+             real(elapsed)\n\
+         end",
+    )
+    .unwrap();
+
+    // The driver ships shown; the first tick's early-out parks it, and then nothing runs.
+    s.tick(0.016);
+    s.resolve();
+    assert!(
+        !s.eval::<bool>("return BenillaUnitPopupDriver:IsShown()")
+            .unwrap(),
+        "no menu open: the first tick parks the driver"
+    );
+    s.run("BENILLA_TEST_POPUP_TICKS = 0").unwrap();
+    for _ in 0..10 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert_eq!(
+        s.eval::<i64>("return BENILLA_TEST_POPUP_TICKS").unwrap(),
+        0,
+        "a parked driver never runs the enable pass"
+    );
+
+    // Open the PLAYER menu through the real hit path: the driver wakes...
+    let (cx, cy) = s
+        .eval::<(f64, f64)>("return TargetFrame:GetCenter()")
+        .unwrap();
+    s.mouse_button(cx as f32, cy as f32, "RightButton", true);
+    s.mouse_button(cx as f32, cy as f32, "RightButton", false);
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
+        "the menu opened"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaUnitPopupDriver:IsShown()")
+            .unwrap(),
+        "UnitPopup_ShowMenu wakes the driver"
+    );
+
+    // ...and the pass runs per frame: the disconnected target's Whisper row greys...
+    s.tick(0.016);
+    s.resolve();
+    assert!(
+        s.eval::<i64>("return BENILLA_TEST_POPUP_TICKS").unwrap() > 0,
+        "an open menu ticks the enable pass"
+    );
+    assert!(
+        !s.eval::<bool>("return DropDownList1Button2:IsEnabled()")
+            .unwrap(),
+        "Whisper greys against a disconnected target"
+    );
+
+    // ...and un-greys LIVE when the unit reconnects while the menu is up — the whole reason the
+    // pass is per-frame rather than baked at open.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            name: Some("Ally".into()),
+            health: 40,
+            max_health: 40,
+            is_player: true,
+            reaction: 5,
+            is_connected: true,
+            ..UnitState::default()
+        }),
+    );
+    s.tick(0.016);
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return DropDownList1Button2:IsEnabled()")
+            .unwrap(),
+        "Whisper enables the frame the target reconnects"
+    );
+
+    // Closing the menu re-parks the driver on its next tick.
+    s.run("CloseDropDownMenus()").unwrap();
+    s.tick(0.016);
+    s.resolve();
+    assert!(
+        !s.eval::<bool>("return BenillaUnitPopupDriver:IsShown()")
+            .unwrap(),
+        "a closed menu parks the driver again"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Click an open dropdown row through the real hit path.
 fn click_row(s: &mut UiScript, row: u32) {
     click_frame(s, &format!("DropDownList1Button{row}"));

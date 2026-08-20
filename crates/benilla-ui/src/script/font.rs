@@ -237,6 +237,10 @@ pub(crate) fn propagate(model: &mut Model, name: &str) {
             repaint(d, &fo);
         }
     }
+    // A fan-out cannot name its regions one by one without a second pass; a font-object edit is
+    // a human-rate action, so the measure ledger goes conservative and the next sweep walks the
+    // roster once, exactly as every sweep did before the ledger existed.
+    model.touch_measure_all();
 }
 
 /// Run `f` over the named font object's record, then propagate the change to its dependants.

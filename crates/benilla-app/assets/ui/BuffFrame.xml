@@ -243,6 +243,18 @@
             end
         end
 
+        -- Void a button's memory of what its duration region last had WRITTEN to it (the
+        -- benillaDur* fields BuffFrame_UpdateDuration gates on). Called by everything ELSE that
+        -- touches the region — the aura event's repaint here, the enchant row's clear — so the
+        -- per-frame gate can never skip a write against a region somebody moved under it; a
+        -- forgotten state just means the next poll writes once.
+        local function buffDurationForget(button)
+            button.benillaDurShown = nil
+            button.benillaDurText = nil
+            button.benillaDurWarn = nil
+            button.benillaDurSetting = nil
+        end
+
         -- The button's aura, resolved on the discrete-change edge and CACHED AS A POSITION
         -- (ref BuffButton_Update, l.58-107). `this:GetID()` is the 0-based ordinal within
         -- this.buffFilter; buffIndex is the cache position every read below uses.
@@ -250,21 +262,25 @@
             local buffIndex, untilCancelled = GetPlayerBuff(this:GetID(), this.buffFilter)
             this.buffIndex = buffIndex
             this.untilCancelled = untilCancelled
-            local buffDuration = getglobal(this:GetName() .. "Duration")
+            local buffDuration = this.durationFS or getglobal(this:GetName() .. "Duration")
+            this.durationFS = buffDuration
 
             -- -1, not nil: the miss sentinel the whole family agrees on.
             if buffIndex < 0 then
                 this:Hide()
                 buffDuration:Hide()
+                buffDurationForget(this)
                 return
             end
             this:SetAlpha(1.0)
+            this.benillaLastAlpha = 1.0
             this:Show()
             if SHOW_BUFF_DURATIONS == "1" then
                 buffDuration:Show()
             else
                 buffDuration:Hide()
             end
+            buffDurationForget(this)
 
             getglobal(this:GetName() .. "Icon"):SetTexture(GetPlayerBuffTexture(buffIndex) or BENILLA_FALLBACK_ICON)
 
@@ -343,10 +359,20 @@
             -- The flash is NOT gated on the timer setting: the reference pulses a button in its last
             -- 31s whether or not a number is drawn under it, and with the timers off it is the only
             -- thing left saying "about to drop".
+            --
+            -- Written only when it moves (decision 1396's class — a settled bar must not rewrite
+            -- per frame what changes only on an edge). Inside the warning window BUFF_ALPHA_VALUE
+            -- is a fresh ramp value every frame, so the pulse flows through the compare untouched;
+            -- outside it the value is the 1.0 that is already there, forever.
+            local alpha
             if timeLeft < BUFF_WARNING_TIME then
-                button:SetAlpha(BUFF_ALPHA_VALUE)
+                alpha = BUFF_ALPHA_VALUE
             else
-                button:SetAlpha(1.0)
+                alpha = 1.0
+            end
+            if alpha ~= button.benillaLastAlpha then
+                button.benillaLastAlpha = alpha
+                button:SetAlpha(alpha)
             end
 
             BuffFrame_UpdateDuration(button, timeLeft)
@@ -363,66 +389,91 @@
             CancelPlayerBuff(this.buffIndex)
         end
 
-        -- Clear enchant slots `first`..2 — the tail of the row nothing is using this frame.
+        -- Clear enchant slots `first`..2 — the tail of the row nothing is using this frame. The
+        -- Hide moves the Duration region under the poll's write gate, so the gate's memory is
+        -- voided with it.
         local function buffEnchantClear(first)
             for slot = first, 2 do
-                getglobal("TempEnchant" .. slot):Hide()
+                local button = getglobal("TempEnchant" .. slot)
+                button:Hide()
                 getglobal("TempEnchant" .. slot .. "Duration"):Hide()
+                buffDurationForget(button)
             end
+        end
+
+        -- One hand's six steps (the same block the reference spells out twice, ref l.180-207):
+        -- an enchanted hand packs into the next slot rightwards and keeps its countdown and
+        -- warning pulse live; a bare hand packs nothing. Returns the new fill count. A plain
+        -- function of its arguments so the per-frame path allocates nothing — this used to be a
+        -- two-row table built fresh every frame.
+        --
+        -- `slot` is the live API's inventory id, which is also what the button's hover reads
+        -- back off itself to ask for the ITEM's tooltip.
+        local function buffEnchantHand(filled, enchanted, expiration, slot)
+            if not enchanted then
+                return filled
+            end
+            filled = filled + 1
+            local button = getglobal("TempEnchant" .. filled)
+            button:SetID(slot)
+            getglobal(button:GetName() .. "Icon"):SetTexture(
+                GetInventoryItemTexture("player", slot) or BENILLA_FALLBACK_ICON)
+            button:Show()
+
+            -- The wire counts an enchant down in MILLISECONDS; everything the row draws is
+            -- in seconds. A nil expiration is "no countdown known", which the timer and the
+            -- warning flash both read as "nothing to warn about".
+            local timeLeft = expiration and (expiration / 1000)
+            BuffFrame_UpdateDuration(button, timeLeft)
+            if timeLeft and timeLeft < BUFF_WARNING_TIME then
+                button:SetAlpha(BUFF_ALPHA_VALUE)
+            else
+                button:SetAlpha(1.0)
+            end
+            return filled
         end
 
         -- The temporary-weapon-enchant row (ref l.162-233). GetWeaponEnchantInfo is the whole data
         -- path: two flags, two remaining-MILLISECOND counts, two charge counts (the charges are
         -- read by nobody here, and are named only to spell the API's shape out).
         --
-        -- The two hands are the same six steps on different numbers, so they are one loop over a
-        -- two-row table rather than the reference's two copies of the block. OFF HAND FIRST is the
-        -- part that matters: the row packs from slot 1 rightwards, so with both weapons enchanted
-        -- the main hand lands in slot 2 and therefore sits to the LEFT of the off hand.
+        -- OFF HAND FIRST is the part that matters: the row packs from slot 1 rightwards, so with
+        -- both weapons enchanted the main hand lands in slot 2 and therefore sits to the LEFT of
+        -- the off hand.
         function BuffFrame_Enchant_OnUpdate(elapsed)
             local hasMainHandEnchant, mainHandExpiration, mainHandCharges,
                   hasOffHandEnchant, offHandExpiration, offHandCharges = GetWeaponEnchantInfo()
 
-            -- Nothing enchanted: clear the whole row and park BuffFrame back on its resting point.
+            -- Nothing enchanted: clear the whole row and park BuffFrame back on its resting
+            -- point — ONCE per transition, latched on benillaCleared (decision 1396's class:
+            -- re-deriving per frame what changes only on an edge). The latch starts unset, so
+            -- the FIRST pass still writes — the load-time hide the header's TempEnchant note
+            -- leans on — and any enchant appearing clears it below.
             if not hasMainHandEnchant and not hasOffHandEnchant then
-                buffEnchantClear(1)
-                BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPRIGHT", 0, 0)
+                if not TemporaryEnchantFrame.benillaCleared then
+                    TemporaryEnchantFrame.benillaCleared = true
+                    -- Forget the last row width too: after a park, the next enchanted pass must
+                    -- re-write the width AND the bar's TOPLEFT anchor whatever its fill count is.
+                    TemporaryEnchantFrame.benillaFilled = nil
+                    buffEnchantClear(1)
+                    BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPRIGHT", 0, 0)
+                end
                 return
             end
+            TemporaryEnchantFrame.benillaCleared = nil
 
-            local filled = 0
-            for _, hand in ipairs({
-                -- `slot` is the live API's inventory id, which is also what the button's hover
-                -- reads back off itself to ask for the ITEM's tooltip.
-                { enchanted = hasOffHandEnchant,  expiration = offHandExpiration,  slot = 17 },
-                { enchanted = hasMainHandEnchant, expiration = mainHandExpiration, slot = 16 },
-            }) do
-                if hand.enchanted then
-                    filled = filled + 1
-                    local button = getglobal("TempEnchant" .. filled)
-                    button:SetID(hand.slot)
-                    getglobal(button:GetName() .. "Icon"):SetTexture(
-                        GetInventoryItemTexture("player", hand.slot) or BENILLA_FALLBACK_ICON)
-                    button:Show()
-
-                    -- The wire counts an enchant down in MILLISECONDS; everything the row draws is
-                    -- in seconds. A nil expiration is "no countdown known", which the timer and the
-                    -- warning flash both read as "nothing to warn about".
-                    local timeLeft = hand.expiration and (hand.expiration / 1000)
-                    BuffFrame_UpdateDuration(button, timeLeft)
-                    if timeLeft and timeLeft < BUFF_WARNING_TIME then
-                        button:SetAlpha(BUFF_ALPHA_VALUE)
-                    else
-                        button:SetAlpha(1.0)
-                    end
-                end
-            end
+            local filled = buffEnchantHand(0, hasOffHandEnchant, offHandExpiration, 17)
+            filled = buffEnchantHand(filled, hasMainHandEnchant, mainHandExpiration, 16)
             buffEnchantClear(filled + 1)
 
             -- Position buff frame: the row is `filled` icons wide, and the bar starts one 5px
-            -- gutter to its left.
-            TemporaryEnchantFrame:SetWidth(filled * 32)
-            BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPLEFT", -5, 0)
+            -- gutter to its left. The geometry depends on nothing but `filled`, so it is written
+            -- only when that changes.
+            if TemporaryEnchantFrame.benillaFilled ~= filled then
+                TemporaryEnchantFrame.benillaFilled = filled
+                TemporaryEnchantFrame:SetWidth(filled * 32)
+                BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPLEFT", -5, 0)
+            end
         end
 
         function BuffFrame_EnchantButton_OnUpdate()
@@ -442,19 +493,47 @@
         -- BuffFrame_UpdateDuration (ref l.247-260), gate and all: the timer draws only when the
         -- setting is on AND there is a live one. `timeLeft` nil is the enchant row's "no countdown
         -- known" case. Hidden, not blanked — see the header's deviation note.
+        --
+        -- The POLL stays per-frame (the re-read is load-bearing — decision 0846); only the WRITES
+        -- are gated, on what was last written: shown, the abbreviated text, the warning band, and
+        -- the SHOW_BUFF_DURATIONS value itself (so the settings toggle stays live). Deliberately
+        -- never on a measured extent (1396's trap: a fixture with no font engine measures 0
+        -- forever); the compare is against the STRING this function computed, nothing the host
+        -- had to shape. The benillaDur* memory is voided by whoever else touches the region
+        -- (buffDurationForget), so a stale skip is unrepresentable.
         function BuffFrame_UpdateDuration(buffButton, timeLeft)
-            local duration = getglobal(buffButton:GetName() .. "Duration")
+            local duration = buffButton.durationFS or getglobal(buffButton:GetName() .. "Duration")
+            buffButton.durationFS = duration
+            local setting = SHOW_BUFF_DURATIONS
             -- Two ways to have no number to draw: the setting is off, or nothing has told us how
             -- long is left (the enchant row's "no countdown known").
-            if SHOW_BUFF_DURATIONS ~= "1" or not timeLeft then
+            if setting ~= "1" or not timeLeft then
+                -- == false, not falsey: nil is "no memory", and the first pass must write.
+                if buffButton.benillaDurShown == false and buffButton.benillaDurSetting == setting then
+                    return
+                end
+                buffButton.benillaDurShown = false
+                buffButton.benillaDurText = nil
+                buffButton.benillaDurWarn = nil
+                buffButton.benillaDurSetting = setting
                 duration:Hide()
                 return
             end
-            duration:SetText(SecondsToTimeAbbrev(timeLeft))
+            local text = SecondsToTimeAbbrev(timeLeft)
             -- Gold most of the way, white inside the last minute — the number's own warning, a
             -- half-minute ahead of the icon starting to pulse.
+            local warning = timeLeft < BUFF_DURATION_WARNING_TIME
+            if buffButton.benillaDurShown == true and buffButton.benillaDurText == text
+                and buffButton.benillaDurWarn == warning and buffButton.benillaDurSetting == setting then
+                return
+            end
+            buffButton.benillaDurShown = true
+            buffButton.benillaDurText = text
+            buffButton.benillaDurWarn = warning
+            buffButton.benillaDurSetting = setting
+            duration:SetText(text)
             local color = NORMAL_FONT_COLOR
-            if timeLeft < BUFF_DURATION_WARNING_TIME then
+            if warning then
                 color = HIGHLIGHT_FONT_COLOR
             end
             duration:SetVertexColor(color.r, color.g, color.b)

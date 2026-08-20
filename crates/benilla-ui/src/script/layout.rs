@@ -1476,18 +1476,68 @@ impl UiScript {
         // declared needs no measure for its *layout*, but `GetStringWidth` still has to answer
         // with the string's natural width, and only a measure can supply it (decision 0997: a
         // kit that reads that number and then SETS a width on the string would otherwise stop
-        // receiving measures the instant it did so, and start reading its own box back). The
-        // key cache is what keeps this from costing a re-measure per frame — and the staleness
-        // check runs allocation-free ([`stale_measure_key`]) so the whole-roster sweep stays
-        // cheap: the request build (text/font clones, the id mint) is paid only by rows that
-        // actually need a measure, which on a quiet frame is none.
-        let needy: Vec<RegionHandle> = model
-            .region_data
-            .iter()
-            .filter(|(_, d)| d.text.as_deref().is_some_and(|t| !t.is_empty()))
-            .map(|(&rh, _)| rh)
-            .filter(|&rh| stale_measure_key(&model, rh).is_some())
-            .collect();
+        // receiving measures the instant it did so, and start reading its own box back).
+        //
+        // Asked off the MEASURE LEDGER, not the roster (the 1388 shape one lane over): the
+        // sweep existed to *discover* silent writes — `SetText` touches no layout until the
+        // extent moves — and discovery cost two whole-roster walks per frame at a city pin
+        // (~300 µs of the `resolve` lap, decision 1370) to conclude, almost always, that
+        // nothing was written. The write sites announce themselves now
+        // ([`Model::touch_measure`]); draining the ledger re-arms it, so the second ask of the
+        // same frame (`fill_measures`, inside `resolve`) sees only what was written *between*
+        // the asks — same-frame semantics unchanged. `None` (a fan-out that could not name its
+        // regions, or the initial state) is the old whole-roster walk, verbatim.
+        let ledger = model.measure_dirty.take();
+        model.measure_dirty = Some(Vec::new());
+        let needy: Vec<RegionHandle> = match ledger {
+            Some(mut dirty) => {
+                dirty.sort_unstable_by_key(|rh| rh.fingerprint_bits());
+                dirty.dedup();
+                dirty.retain(|&rh| stale_measure_key(&model, rh).is_some());
+                // The completeness falsifier (on for every benilla-ui test): the ledger's whole
+                // correctness claim is that its enrolled sites cover every measure-key writer,
+                // and that claim is checked, not argued — the old discovery walk runs beside
+                // the drain and any row it finds that the ledger missed is a stale label
+                // waiting to ship, so it panics with the region named. The other direction is
+                // legal by construction (an enrolled same-value write drops out at the
+                // staleness check above).
+                if layout_verify_enabled() {
+                    let roster: Vec<RegionHandle> = model
+                        .region_data
+                        .iter()
+                        .filter(|(_, d)| d.text.as_deref().is_some_and(|t| !t.is_empty()))
+                        .map(|(&rh, _)| rh)
+                        .filter(|&rh| stale_measure_key(&model, rh).is_some())
+                        .collect();
+                    for rh in &roster {
+                        assert!(
+                            dirty.contains(rh),
+                            "measure ledger missed a write: region {rh:?} (id {:?}) needs a \
+                             measure the drained ledger never named — a measure-key write site \
+                             is not enrolled in Model::touch_measure",
+                            model.region_to_id.get(rh),
+                        );
+                    }
+                }
+                dirty
+            }
+            None => model
+                .region_data
+                .iter()
+                .filter(|(_, d)| d.text.as_deref().is_some_and(|t| !t.is_empty()))
+                .map(|(&rh, _)| rh)
+                .filter(|&rh| stale_measure_key(&model, rh).is_some())
+                .collect(),
+        };
+        // Re-enroll everything still stale: a request handed out is not an answer. The old
+        // discovery walk re-found an unanswered region every frame until `set_measured_text`
+        // landed (the no-measurer engine-test path answers a frame later; a dropped request
+        // would otherwise go stale FOREVER now that nothing walks the roster), so the ledger
+        // keeps asking too. With a synchronous measurer the answer lands before the next drain
+        // and the staleness check drops the re-enrolled handle for free.
+        if let Some(list) = &mut model.measure_dirty {
+            list.extend(needy.iter().copied());
+        }
         let mut out = Vec::with_capacity(needy.len());
         for rh in needy {
             if let Some(req) = measure_request_for(&mut model, rh) {

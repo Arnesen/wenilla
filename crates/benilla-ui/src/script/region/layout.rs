@@ -26,8 +26,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
             if changed {
-                // A size write moves no edge and no roster membership (decision 1388).
+                // A size write moves no edge and no roster membership (decision 1388) — and on
+                // a FontString the width is the WRAP width, a measure-key input, so it names
+                // itself on the measure ledger too.
                 model.touch_layout_region(rh);
+                model.touch_measure(rh);
             }
             Ok(())
         })?,
@@ -43,8 +46,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
             if changed {
-                // A size write moves no edge and no roster membership (decision 1388).
+                // A size write moves no edge and no roster membership (decision 1388) — and on
+                // a FontString the width is the WRAP width, a measure-key input, so it names
+                // itself on the measure ledger too.
                 model.touch_layout_region(rh);
+                model.touch_measure(rh);
             }
             Ok(())
         })?,
@@ -60,8 +66,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = !size_bits_eq(d.size, new);
             d.size = new;
             if changed {
-                // A size write moves no edge and no roster membership (decision 1388).
+                // A size write moves no edge and no roster membership (decision 1388) — and on
+                // a FontString the width is the WRAP width, a measure-key input, so it names
+                // itself on the measure ledger too.
                 model.touch_layout_region(rh);
+                model.touch_measure(rh);
             }
             Ok(())
         })?,

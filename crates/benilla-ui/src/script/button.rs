@@ -121,6 +121,7 @@ fn link_label_to_font_object(lua: &Lua, text: Option<RegionHandle>, name: Option
     let d = model.region_data.entry(rh).or_default();
     d.font_object = Some(name.to_string());
     super::font::repaint(d, &fo);
+    model.touch_measure(rh);
 }
 
 /// Run `f` over a frame's Button state under one short write borrow.
@@ -271,6 +272,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let rh = *model.id_to_region.get(&id).expect("text region id");
             model.region_data.entry(rh).or_default().text = text;
+            model.touch_measure(rh);
             Ok(())
         })?,
     )?;

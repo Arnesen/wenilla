@@ -107,6 +107,25 @@ pub(crate) struct Model {
     /// node is in the cached roster before they may name it, and that proof is a `node_of[id]`
     /// probe — which hands back the roster row, and with it the handle, for free at resolve time.
     pub(crate) layout_touched: Option<Vec<u32>>,
+    /// The MEASURE lane's ledger — [`Self::layout_touched`]'s twin for the text-measure sweep
+    /// (`UiScript::fontstrings_needing_measure`), which used to walk every `region_data` row
+    /// twice a frame to *discover* silent writes (`SetText` touches no layout until the extent
+    /// moves — that silence is the lane's defining property, decision 1370's ~300 µs standing
+    /// `resolve` lap at a city pin). `Some(handles)` = every write since the last sweep that
+    /// could move a region's measure key ([`crate::script::types::RegionData::measure_key`]:
+    /// text, font path/height, text height, outline, wrap width, owner scale) named its region
+    /// here, so the sweep asks exactly these. `None` = some write could not name one (a
+    /// font-object fan-out, a scale propagation, `invalidate_text_measures`) and the next sweep
+    /// walks the whole roster exactly as it always did — which is also the initial state.
+    ///
+    /// UNLIKE the layout ledger, `None` is not re-entered by unmigrated sites automatically:
+    /// nothing at a `region_data` field write *had* to announce itself before this existed, so
+    /// completeness of the enrolled sites is the correctness claim — and it is machine-checked,
+    /// not argued: with `WOW_LAYOUT_VERIFY` on (forced for every benilla-ui test) the sweep
+    /// re-runs the whole-roster walk beside the drained ledger and panics on any row the ledger
+    /// missed. A candidate the ledger names that the roster walk doesn't is fine (a same-value
+    /// write — the staleness check absorbs it); the reverse is a stale label waiting to ship.
+    pub(crate) measure_dirty: Option<Vec<crate::widget::RegionHandle>>,
     /// `WOW_LAYOUT_VERIFY`'s flag that the resolve just taken was the incremental one and owes a
     /// full-derive re-run to prove it (see `layout::UiScript::resolve_layout`). Always `false` in
     /// production — nothing reads it unless the verify build set it.
@@ -1161,6 +1180,7 @@ impl Model {
             layout_fingerprint: None,
             layout_epoch: 0,
             layout_touched: None,
+            measure_dirty: None,
             layout_verify_recheck: false,
             layout_derives: 0,
             layout_scope: super::layout::LayoutScope::default(),
@@ -1499,6 +1519,25 @@ impl Model {
             Some(&id) => self.touch_layout_node(id),
             None => self.touch_layout(),
         }
+    }
+
+    /// A write that could move region `rh`'s measure key — its text, its font face/height/
+    /// outline, its text height, its explicit size (the wrap width) — names the region on the
+    /// measure ledger ([`Self::measure_dirty`]). Push-only and unfiltered: non-FontStrings and
+    /// same-value writes cost one `Vec` push here and one staleness probe at the next sweep,
+    /// which is the price of keeping every enrolled site a one-liner.
+    pub(crate) fn touch_measure(&mut self, rh: RegionHandle) {
+        if let Some(list) = &mut self.measure_dirty {
+            list.push(rh);
+        }
+    }
+
+    /// A write that moves measure keys WITHOUT being able to name the regions — a font-object
+    /// edit fanning out to every inheriting region, a scale change propagating down a subtree,
+    /// [`super::UiScript::invalidate_text_measures`]. The next sweep walks the whole roster,
+    /// exactly as every sweep did before the ledger existed. All human-rate paths.
+    pub(crate) fn touch_measure_all(&mut self) {
+        self.measure_dirty = None;
     }
 
     /// Name a node **without opening tier 1** — for the resolve's own pre-pass

@@ -992,6 +992,8 @@ impl UiScript {
         // Measured extents are auto-size inputs — the layout gate's read set, same as
         // [`Self::set_measured_text`]'s.
         model.touch_layout();
+        // Every stored measure was just wiped; only the whole-roster sweep can re-request them.
+        model.touch_measure_all();
     }
 
     // ── Input: pointer-leaves-window cleanup (decision 0216 §3; the hit-test/mouse dispatch that

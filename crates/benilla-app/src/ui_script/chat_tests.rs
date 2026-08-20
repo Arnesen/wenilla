@@ -716,3 +716,69 @@ fn hovering_the_dock_still_reveals_the_tabs() {
         "a stationary hover reveals the selected tab at full alpha — got {alpha}"
     );
 }
+
+/// **A view at the bottom writes nothing** — `ChatFrame_OnUpdate`'s at-bottom branch used to call
+/// `flash:Hide()` and zero `flashTimer` every frame; the 1.12 reference gates both behind
+/// `flash:IsVisible()` (1396's residual item 3, now restored — our `flashTimer = 0` rides inside
+/// the reference's gate, so a return-to-bottom during a hidden blink phase keeps the residual
+/// phase, a divergence that costs nothing at rest).
+///
+/// The probe is a sentinel the gated branch can only zero: `flashTimer = 0.42` with the flash
+/// hidden survives ten ticks. The controls: scrolled up, the bottom-button blink still runs its
+/// 0.5s toggle; and scrolling back while the flash is LIT still hides it and zeroes the timer.
+#[test]
+fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
+    let mut s = chat_frame();
+    for t in ["L0", "L1", "L2"] {
+        s.add_chat_message("ChatFrame1", t, 1.0, 1.0, 1.0);
+    }
+    for _ in 0..3 {
+        s.tick(0.016);
+        s.resolve();
+    }
+
+    // At the bottom, flash hidden: the sentinel must survive.
+    s.run("ChatFrame1.flashTimer = 0.42").unwrap();
+    for _ in 0..10 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    let timer: f64 = s.eval("return ChatFrame1.flashTimer").unwrap();
+    assert!(
+        (timer - 0.42).abs() < 1e-6,
+        "a settled view must not rewrite flashTimer every frame — got {timer}"
+    );
+    assert!(
+        !s.eval::<bool>("return ChatFrame1BottomButtonFlash:IsVisible()")
+            .unwrap(),
+        "the flash stays hidden at rest"
+    );
+
+    // Control 1: scrolled up, the blink still runs — the timer accumulates past 0.5 and shows
+    // the flash (a point inside the docked frame, as the wheel test uses).
+    s.mouse_wheel(100.0, 150.0, 1.0);
+    s.tick(0.3); // 0.42 + 0.3 = 0.72 >= 0.5 -> toggle on
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return ChatFrame1BottomButtonFlash:IsVisible()")
+            .unwrap(),
+        "scrolled up, the bottom-button blink still lights"
+    );
+
+    // Control 2: back to the bottom while the flash is LIT — the transition still writes.
+    s.mouse_wheel(100.0, 150.0, -1.0);
+    s.tick(0.016);
+    s.resolve();
+    assert!(
+        !s.eval::<bool>("return ChatFrame1BottomButtonFlash:IsVisible()")
+            .unwrap(),
+        "returning to the bottom hides a lit flash"
+    );
+    assert_eq!(
+        s.eval::<f64>("return ChatFrame1.flashTimer").unwrap(),
+        0.0,
+        "and zeroes the timer with it (our reset rides inside the reference's gate)"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

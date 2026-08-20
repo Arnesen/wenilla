@@ -203,6 +203,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                     }
                 }];
                 model.region_data.insert(left, d);
+                model.touch_measure(left); // an adopted cell can arrive text-in-hand
                 model.touch_layout(); // a line row entered the layout graph (decision 0740)
             }
             let left_id = model.region_id(left);
@@ -230,6 +231,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 d.justify.set_h(super::JustifyH::Right);
                 d.anchors = vec![Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)];
                 model.region_data.insert(right, d);
+                model.touch_measure(right); // an adopted cell can arrive text-in-hand
                 model.touch_layout(); // a line row entered the layout graph (decision 0740)
             }
             let right_id = model.region_id(right);
@@ -274,6 +276,7 @@ fn write_cell(model: &mut Model, rh: crate::widget::RegionHandle, text: &str, co
     // `GameTooltipText:SetTextColor(…)` would repaint every red/green line in the tooltip.
     d.font_explicit.color = true;
     d.hidden = false;
+    model.touch_measure(rh);
 }
 
 /// Hide + blank every line cell and zero the counters. The caller fires `OnTooltipCleared`
@@ -599,6 +602,8 @@ pub(super) fn append_line(
         if d.size != pin {
             d.size = pin;
             model.touch_layout();
+            // The wrap pin is the measure key's wrap-width input.
+            model.touch_measure(lh);
         }
     }
     if let Some((text, color)) = right {

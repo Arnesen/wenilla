@@ -327,6 +327,7 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                 d.font_explicit.justify_h = true;
                 d.font_explicit.justify_v = true;
                 model.region_data.insert(rh, d);
+                model.touch_measure(rh); // a text block arrives text-in-hand
                 prev_block = Some(id);
                 next_y = -paint.spacing;
                 made.push(rh);

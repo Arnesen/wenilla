@@ -1283,6 +1283,10 @@
             end
             frame:Show()
             table.insert(FADEFRAMES, frame)
+            -- Wake the driver: it hides itself the moment the list empties (its OnUpdate gate),
+            -- so the ONE insertion point is where it is shown again. Every other verb only
+            -- removes or rewrites entries.
+            BenillaFadeDriver:Show()
         end
 
         -- The two directions are one call with the mode flipped; whatever endpoints the caller
@@ -1559,11 +1563,14 @@
     ]]></Script>
 
     <!-- The fade kit's tick source — the ref hangs UIFrameFadeUpdate on UIParent's OnUpdate
-         (UIParent.xml l.16-22); benilla has no UIParent frame, so a dedicated 1x1 driver ticks it. -->
+         (UIParent.xml l.16-22); benilla has no UIParent frame, so a dedicated 1x1 driver ticks it.
+         It runs only while FADEFRAMES has entries: the engine dispatches OnUpdate to visible
+         frames only (tick.rs), so hiding itself on an empty list stops the per-frame walk cold,
+         and UIFrameFade — the single inserter — shows it again (decision 1396's class). -->
     <Frame name="BenillaFadeDriver">
         <Size><AbsDimension x="1" y="1"/></Size>
         <Anchors><Anchor point="TOPLEFT"/></Anchors>
-        <Scripts><OnUpdate>UIFrameFadeUpdate(arg1)</OnUpdate></Scripts>
+        <Scripts><OnUpdate>if not FADEFRAMES[1] then this:Hide() return end UIFrameFadeUpdate(arg1)</OnUpdate></Scripts>
     </Frame>
 
     <!--

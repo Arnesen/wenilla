@@ -200,6 +200,7 @@ pub(super) fn install(
             // cleared by each local setter and never restored — so a property the widget set for
             // itself stays severed across a later `SetFontObject`.
             super::font::repaint(d, &fo);
+            model.touch_measure(rh);
             Ok(())
         })?,
     )?;
@@ -258,6 +259,7 @@ pub(super) fn install(
                     d.outline = Outline::flags(&f);
                     d.font_explicit.outline = true;
                 }
+                model.touch_measure(rh);
                 Ok(if ok { Value::Number(1.0) } else { Value::Nil })
             },
         )?,

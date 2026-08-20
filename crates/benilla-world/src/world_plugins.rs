@@ -243,6 +243,21 @@ impl Plugin for WorldFoundation {
         {
             app.insert_resource(bevy::time::Time::<bevy::time::Fixed>::from_hz(hz));
         }
+        // `WOW_UPLOAD_BUDGET=<MB>` — cap the render app's per-frame GPU asset upload (bevy's
+        // `RenderAssetBytesPerFrame`, unlimited by default; only assets implementing `byte_len`
+        // participate, which covers meshes and images — exactly the streaming payload). An
+        // EXPERIMENT lever for the arrival burst: the LBRS arrival trace (2026-08-17) put the
+        // fat frames in drawable/render-schedule WAITS while streamed uploads land — every
+        // suspect system's own CPU was flat, avian's whole stack included — so pacing the
+        // uploads is the candidate fix, and this knob prices it before anything is redesigned.
+        if let Some(mb) = std::env::var("WOW_UPLOAD_BUDGET")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
+                mb * 1024 * 1024,
+            ));
+        }
         // Direct draws on EVERY camera — the default, not a knob (1374/1376). Bevy's indirect
         // lane is a per-draw indirect encode loop on Metal (no MULTI_DRAW_INDIRECT) plus the GPU
         // preprocessing dispatches, and the 1374 bracket priced it ~4.3 cpu_ms at LBRS on 0.18 —

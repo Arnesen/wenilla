@@ -64,6 +64,7 @@ pub(crate) fn apply_font_parts(
         d.outline = super::Outline::flags(&f);
         d.font_explicit.outline = true;
     }
+    model.touch_measure(rh);
     Ok(())
 }
 

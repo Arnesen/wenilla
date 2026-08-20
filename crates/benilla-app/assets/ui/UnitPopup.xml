@@ -442,6 +442,10 @@
         end
 
         function UnitPopup_ShowMenu(dropdownMenu, which, unit, name, userData)
+            -- Wake the enable-pass driver: it hides itself the moment no unit menu of ours is
+            -- open (UnitPopup_OnUpdate's early-out), and this function is the one opener of
+            -- every unit menu — the six dropdowns' initialize functions all land here.
+            BenillaUnitPopupDriver:Show();
             dropdownMenu.which = which;
             dropdownMenu.unit = unit;
             if ( unit and not name ) then
@@ -624,6 +628,10 @@
         -- BenillaUnitPopupDriver below — the ref hooks it off UIParent's OnUpdate).
         function UnitPopup_OnUpdate(elapsed)
             if ( not DropDownList1:IsVisible() or not ownsOpenMenu() ) then
+                -- Nothing of ours to scan: put the driver back to sleep until the next
+                -- UnitPopup_ShowMenu (visible frames are the only ones ticked — tick.rs — so
+                -- this stops the per-frame pass entirely; decision 1396's class).
+                BenillaUnitPopupDriver:Hide();
                 return;
             end
 
@@ -803,7 +811,10 @@
     ]]></Script>
 
     <!-- The OnUpdate driver (ref UIParent.xml l.21 runs UnitPopup_OnUpdate from UIParent's own
-         OnUpdate; ours has none — the DeathFrame hidden-driver pattern instead). -->
+         OnUpdate; ours has none — the DeathFrame hidden-driver pattern instead). Awake only while
+         a unit menu of ours is open: UnitPopup_ShowMenu shows it, its own early-out hides it, and
+         a hidden frame is never ticked (tick.rs). It ships shown so the first tick runs the
+         early-out once and parks it. -->
     <Frame name="BenillaUnitPopupDriver" parent="UIParent" hidden="false">
         <Size><AbsDimension x="1" y="1"/></Size>
         <Anchors><Anchor point="TOPLEFT"/></Anchors>

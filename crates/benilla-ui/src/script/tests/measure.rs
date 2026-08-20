@@ -490,3 +490,83 @@ fn a_synchronous_measure_satisfies_the_batch_request_too() {
         "a stale measure is not this string's metric"
     );
 }
+
+/// The measure LEDGER's completeness guard: `fontstrings_needing_measure` no longer walks the
+/// roster on the armed path — a measure-input write the ledger never hears about is a label
+/// whose box silently never updates again. The exposing sequence is SETTLE (drain the ledger
+/// dry), then one silent write, then sweep: enrolled, the sweep names exactly that region;
+/// missed, it returns empty and this test is the red light. (Watched red with the `SetText`
+/// enrollment removed — the earlier tests in this file stay green through that removal, because
+/// their regions ride the ledger's own re-enrollment of still-unanswered requests.)
+#[test]
+fn a_settled_region_is_refound_after_each_measure_input_write() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Host")
+        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        local fs = f:CreateFontString("Label", "ARTWORK")
+        fs:SetPoint("TOPLEFT")
+        fs:SetText("one")
+    "#,
+    )
+    .unwrap();
+    let writes: &[(&str, &str)] = &[
+        ("SetText", "Label:SetText('two')"),
+        ("SetFormattedText", "Label:SetFormattedText('n=%d', 3)"),
+        (
+            "SetFont",
+            r#"Label:SetFont("Fonts\\FRIZQT__.TTF", 14, "OUTLINE")"#,
+        ),
+        ("SetTextHeight", "Label:SetTextHeight(20)"),
+        ("SetWidth (the wrap width)", "Label:SetWidth(123)"),
+        // The conservative lane: a scale write cannot name descendants one by one, so it must
+        // put the ledger back on the whole-roster walk — which refinds Label (scale is in the
+        // measure key).
+        ("SetScale (conservative)", "Host:SetScale(2.0)"),
+    ];
+    for (label, lua) in writes {
+        // Settle: answer whatever is pending, then prove the sweep is dry.
+        loop {
+            let reqs = s.fontstrings_needing_measure();
+            if reqs.is_empty() {
+                break;
+            }
+            let answers: Vec<_> = reqs.iter().map(|r| (r.id, 10.0, 16.0, r.key)).collect();
+            s.set_measured_text_unwrapped(&answers);
+        }
+        assert!(s.fontstrings_needing_measure().is_empty(), "settled");
+        s.run(lua).unwrap();
+        let reqs = s.fontstrings_needing_measure();
+        assert_eq!(
+            reqs.len(),
+            1,
+            "{label}: a silent measure-input write must re-surface its region to the sweep"
+        );
+    }
+    // The button label lane writes through its own binding (`Button:SetText` routes to the
+    // ButtonText region) — same guard, second write path.
+    s.run(
+        r#"
+        local b = CreateFrame("Button", "Btn")
+        b:SetPoint("TOPLEFT", 0, -50); b:SetSize(80, 22)
+    "#,
+    )
+    .unwrap();
+    while !{
+        let reqs = s.fontstrings_needing_measure();
+        let answers: Vec<_> = reqs.iter().map(|r| (r.id, 10.0, 16.0, r.key)).collect();
+        s.set_measured_text_unwrapped(&answers);
+        reqs.is_empty()
+    } {}
+    s.run("Btn:SetText('Go')").unwrap();
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "Button:SetText: the label region must be re-surfaced to the sweep"
+    );
+    assert_eq!(reqs[0].text, "Go");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
