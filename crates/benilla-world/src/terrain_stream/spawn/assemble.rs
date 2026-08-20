@@ -358,6 +358,13 @@ pub fn spawn_model_entities(
         if let Some((merge, site)) = merge.as_mut() {
             if crate::terrain_stream::merge::merge_enabled()
                 && class.merges()
+                // The fader lane is OPT-IN (`WOW_MERGE_FADERS=1`, decision 1423): a fader —
+                // neither never-fade nor a steady interior prop — spawns per-entity by
+                // default; a cell-granular transparent draw with depth-write depth-kills
+                // per-entity faders behind its translucent pixels (the popping lamppost).
+                && (class.never_fade
+                    || steady_interior_prop
+                    || crate::terrain_stream::merge::merge_faders_enabled())
                 && merge.divert(
                     site,
                     batch_idx,

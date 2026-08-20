@@ -812,30 +812,41 @@ pub(crate) fn build_global_bones(
 /// same attribute recipe as [`submesh_to_static_mesh`], concatenated, with each part's placement
 /// transform applied to positions and its rotation to normals (placements scale uniformly, so
 /// directions survive). Parts lacking vertex colours pad white when any part has them — one
-/// attribute set must cover the whole concatenation. Returns the mesh and its baked min/max for
-/// the caller's Aabb.
+/// attribute set must cover the whole concatenation.
+///
+/// **The mesh is recentred on its union-AABB centre** and that world centre is returned last:
+/// the caller places the entity AT the centre (`Transform::from_translation`), and the returned
+/// min/max are mesh-LOCAL for its `Aabb`. A world-baked mesh on `Transform::IDENTITY` sorts the
+/// entity at the WORLD ORIGIN in Bevy's transparent phase — ~9 400 yd out, drawn first among
+/// ALL transparent content with the twin's depth-write ON, so a feathering blob's translucent
+/// pixels depth-killed every transparent entity drawn after it (a per-entity fader behind a
+/// 20 %-alpha merged fence vanished outright, popping in only when the sightline cleared the
+/// segment — decision 1422). Centre-sort restores the same location-sort semantics every
+/// per-entity draw has (whose sort key is its placement origin).
 pub fn merged_static_mesh(
     parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
-) -> (Mesh, Vec3, Vec3) {
+) -> (Mesh, Vec3, Vec3, Vec3) {
     merged_static_mesh_impl(parts, None)
 }
 
 /// [`merged_static_mesh`] plus the per-vertex [`ATTRIBUTE_WOW_FADE_SPHERE`] (one sphere per
 /// PART, replicated onto each of its vertices) — the production blob build (1418). `slots`
 /// (index-parallel with `parts` when `Some`) additionally bakes each part's SH-probe slot as
-/// [`ATTRIBUTE_WOW_MERGED_SLOT`] — the interior-prop lane.
+/// [`ATTRIBUTE_WOW_MERGED_SLOT`] — the interior-prop lane. The spheres stay WORLD-space —
+/// the shader compares them against the camera, never against mesh-local positions — so the
+/// recentring (see [`merged_static_mesh`]) does not touch them.
 pub fn merged_static_mesh_faded(
     parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
     spheres: &[Vec4],
     slots: Option<&[u32]>,
-) -> (Mesh, Vec3, Vec3) {
+) -> (Mesh, Vec3, Vec3, Vec3) {
     merged_static_mesh_impl(parts, Some((spheres, slots)))
 }
 
 fn merged_static_mesh_impl(
     parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
     extras: Option<(&[Vec4], Option<&[u32]>)>,
-) -> (Mesh, Vec3, Vec3) {
+) -> (Mesh, Vec3, Vec3, Vec3) {
     let any_colors = parts
         .iter()
         .any(|(s, _)| s.vertex_colors.len() == s.positions.len());
@@ -909,7 +920,28 @@ fn merged_static_mesh_impl(
         }
     }
     mesh.insert_indices(Indices::U32(indices));
-    (mesh, mn, mx)
+    // Recentre on the union-AABB centre (see `merged_static_mesh`'s doc): positions become
+    // mesh-local, min/max follow, the centre goes back to the caller for the entity Transform.
+    // Guard the empty accumulation (no parts) — a MAX/MIN sentinel centre would explode.
+    // (`mn > mx` iff the vertex loop never ran; `positions` has been moved into the mesh.)
+    let center = if mn.x > mx.x {
+        Vec3::ZERO
+    } else {
+        (mn + mx) * 0.5
+    };
+    if center != Vec3::ZERO {
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
+            mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        else {
+            unreachable!("positions were just inserted as Float32x3");
+        };
+        for p in pos.iter_mut() {
+            p[0] -= center.x;
+            p[1] -= center.y;
+            p[2] -= center.z;
+        }
+    }
+    (mesh, mn - center, mx - center, center)
 }
 
 #[cfg(test)]

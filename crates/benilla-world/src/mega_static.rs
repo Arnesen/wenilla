@@ -105,11 +105,11 @@ pub fn flush_mega_static(
             .into_iter()
             .map(|p| (p.geometry, p.transform))
             .collect();
-        let (mesh, mn, mx) = merged_static_mesh(&geo);
+        let (mesh, mn, mx, center) = merged_static_mesh(&geo);
         commands.spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(mat),
-            Transform::IDENTITY,
+            Transform::from_translation(center),
             ModelPart { kind, blend },
             MeshTag(alpha_bits(1.0)),
             Aabb::from_min_max(mn, mx),

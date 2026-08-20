@@ -490,6 +490,14 @@ impl Plugin for TerrainPlugin {
                     // would leave three systems walking empty queries to prove it every frame.
                     .run_if(crate::schedule::world_is_live),
             )
+            // The blob-visibility dump (`WOW_BLOB_VIS=1`) — a dev instrument, registered only
+            // when asked for; see `merge::log_blob_vis`.
+            .add_systems(
+                Update,
+                merge::log_blob_vis
+                    .run_if(merge::blob_vis_enabled)
+                    .run_if(crate::schedule::world_is_live),
+            )
             // The model-forms furnisher (decision 0834) runs UNGATED, unlike the chain above: the
             // glue screens' character preview requests forms pre-world (`update_display_models`
             // serves the glue stage too), and a world-live gate would starve it forever. Ordered
@@ -725,9 +733,17 @@ fn stream_terrain(
         if let Some(t) = state.tiles.remove(&c) {
             despawn_tile_owned(&mut commands, &t);
             activity.tiles_dropped += 1;
-            for uid in t.placements {
+            for &uid in &t.placements {
                 release_placement(&mut commands, placements, uid, &mut activity);
             }
+            handoff_straddlers(
+                &mut commands,
+                &state.tiles,
+                placements,
+                c,
+                &t.placements,
+                merge::merge_enabled(),
+            );
         }
     }
 
@@ -1222,6 +1238,69 @@ fn sync_interior_volumes(placements: Res<Placements>, mut vols: ResMut<WmoReside
     );
 }
 
+/// **1417's owner-handoff re-emit.** A straddler's merged batches and welded hulls live with
+/// its OWNER tile (`Placement::owner`), so an owner unloading out from under a placement that
+/// a loaded neighbour still references left a permanent hole: the blob and hull died with the
+/// owner's tile, and a later re-cross of the owner only bumps refs (`register_doodad`) — the
+/// re-cross defect. Hand the placement to a still-loaded referrer instead and queue a respawn:
+/// the spawner re-runs the whole assembler under the new owner — the merge divert and the hull
+/// weld both read `p.owner` at spawn — so 1369's matching weld gap heals in the same stroke.
+/// The per-entity churn is invisible (the unload line sits past every fade band), and the
+/// respawned batches open as cell singletons that fold in on the next quiet window (1424's
+/// recon). M2 map doodads only: a WMO's prop blobs ride the placement's own entity list, and
+/// without the merge a surviving placement never lost anything (its entities are its own).
+fn handoff_straddlers(
+    commands: &mut Commands,
+    tiles: &HashMap<(i32, i32), TileState>,
+    placements: &mut Placements,
+    dead: (i32, i32),
+    uids: &[u32],
+    merge_on: bool,
+) {
+    if !merge_on {
+        return;
+    }
+    let mut handed = 0u32;
+    for &uid in uids {
+        let Some(p) = placements.by_id.get_mut(&uid) else {
+            continue; // refs hit zero — released outright, nothing survives to hand off
+        };
+        if p.owner != dead || !matches!(p.model, ModelHandle::M2(_)) {
+            continue;
+        }
+        // A straddler's other referrer shares its MDDF row across a tile seam, so it is an
+        // 8-neighbour of the dead owner; the full scan is a fallback for data that defies that.
+        let new_owner = [-1i32, 0, 1]
+            .iter()
+            .flat_map(|dx| [-1i32, 0, 1].map(|dy| (dead.0 + dx, dead.1 + dy)))
+            .find(|c| *c != dead && tiles.get(c).is_some_and(|t| t.placements.contains(&uid)))
+            .or_else(|| {
+                tiles
+                    .iter()
+                    .find(|(_, t)| t.placements.contains(&uid))
+                    .map(|(c, _)| *c)
+            });
+        let Some(new_owner) = new_owner else {
+            warn!("straddler handoff: uid {uid} holds refs but no loaded tile references it");
+            continue;
+        };
+        p.owner = new_owner;
+        if p.spawned {
+            for e in p.entities.drain(..) {
+                commands.entity(e).try_despawn();
+            }
+            p.spawned = false;
+        }
+        handed += 1;
+    }
+    if handed > 0 {
+        info!(
+            "straddler handoff: {handed} placement(s) re-owned off dead tile ({},{})",
+            dead.0, dead.1
+        );
+    }
+}
+
 /// A tile referencing this placement unloaded: drop one ref, despawning its entities (render submeshes
 /// + the avian collider entity) at zero — the collider rides the placement's entity lifecycle.
 fn release_placement(
@@ -1327,5 +1406,129 @@ mod focus_tests {
             ViewFocus::camera().resolve(None),
             [SPAWN_XY.0, SPAWN_XY.1, 0.0]
         );
+    }
+}
+
+#[cfg(test)]
+mod straddler_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn tile_listing(uids: &[u32]) -> TileState {
+        TileState {
+            handle: Default::default(),
+            entity: None,
+            material: None,
+            next_cell: 0,
+            furnished: false,
+            placements: uids.to_vec(),
+            liquid: Vec::new(),
+            wall: None,
+            clutter: Vec::new(),
+            welds: Vec::new(),
+            merged: Vec::new(),
+        }
+    }
+
+    fn straddler(owner: (i32, i32), entities: Vec<Entity>) -> Placement {
+        Placement {
+            model: ModelHandle::M2(Default::default()),
+            transform: Transform::IDENTITY,
+            entities,
+            spawned: true,
+            doodad_set: 0,
+            name_set: 0,
+            doodads: Vec::new(),
+            portal_instance: None,
+            refs: 1,
+            owner,
+        }
+    }
+
+    fn run_handoff(world: &mut World, dead: (i32, i32), uids: Vec<u32>, merge_on: bool) {
+        world
+            .run_system_once(
+                move |mut commands: Commands,
+                      streamer: Res<TerrainStreamer>,
+                      mut placements: ResMut<Placements>| {
+                    handoff_straddlers(
+                        &mut commands,
+                        &streamer.tiles,
+                        &mut placements,
+                        dead,
+                        &uids,
+                        merge_on,
+                    );
+                },
+            )
+            .unwrap();
+    }
+
+    /// The owner dies while a neighbour still lists the placement: ownership moves to the
+    /// neighbour and the placement is queued for respawn (entities down, `spawned` cleared) so
+    /// the assembler re-emits its merged batches and hulls under the new owner.
+    #[test]
+    fn a_dead_owner_hands_its_straddler_to_a_loaded_referrer() {
+        let mut world = World::new();
+        let doodad_ent = world.spawn_empty().id();
+        let mut streamer = TerrainStreamer::default();
+        streamer.tiles.insert((3, 5), tile_listing(&[7]));
+        let mut placements = Placements::default();
+        placements
+            .by_id
+            .insert(7, straddler((3, 4), vec![doodad_ent]));
+        world.insert_resource(streamer);
+        world.insert_resource(placements);
+        run_handoff(&mut world, (3, 4), vec![7], true);
+        let placements = world.resource::<Placements>();
+        let p = placements.by_id.get(&7).unwrap();
+        assert_eq!(
+            p.owner,
+            (3, 5),
+            "ownership must move to the loaded referrer"
+        );
+        assert!(!p.spawned, "the placement must queue for respawn");
+        assert!(p.entities.is_empty());
+        assert!(
+            world.get_entity(doodad_ent).is_err(),
+            "the stale entities must despawn ahead of the respawn"
+        );
+    }
+
+    /// A placement the dead tile merely referenced (owner elsewhere) is untouched, and the
+    /// whole pass is a no-op without the merge — a surviving placement never lost anything.
+    #[test]
+    fn non_owned_and_merge_off_placements_stay_untouched() {
+        let mut world = World::new();
+        let e1 = world.spawn_empty().id();
+        let e2 = world.spawn_empty().id();
+        let mut streamer = TerrainStreamer::default();
+        streamer.tiles.insert((3, 5), tile_listing(&[7, 8]));
+        let mut placements = Placements::default();
+        placements.by_id.insert(7, straddler((3, 5), vec![e1])); // owned by the SURVIVOR
+        placements.by_id.insert(8, straddler((3, 4), vec![e2])); // owned by the dead tile
+        world.insert_resource(streamer);
+        world.insert_resource(placements);
+        // Merge off: nothing moves, even for the dead tile's own straddler.
+        run_handoff(&mut world, (3, 4), vec![7, 8], false);
+        {
+            let placements = world.resource::<Placements>();
+            assert_eq!(placements.by_id.get(&8).unwrap().owner, (3, 4));
+            assert!(placements.by_id.get(&8).unwrap().spawned);
+        }
+        // Merge on: uid 8 hands off, uid 7 (not owned by the dead tile) is untouched.
+        run_handoff(&mut world, (3, 4), vec![7, 8], true);
+        let placements = world.resource::<Placements>();
+        let p7 = placements.by_id.get(&7).unwrap();
+        assert_eq!(p7.owner, (3, 5));
+        assert!(
+            p7.spawned,
+            "a placement the dead tile did not own keeps its entities"
+        );
+        let p8 = placements.by_id.get(&8).unwrap();
+        assert_eq!(p8.owner, (3, 5));
+        assert!(!p8.spawned);
+        assert!(world.get_entity(e1).is_ok());
+        assert!(world.get_entity(e2).is_err());
     }
 }

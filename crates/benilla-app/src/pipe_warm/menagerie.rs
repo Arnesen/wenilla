@@ -414,6 +414,31 @@ pub(super) fn spawn_menagerie(
         }
     }
 
+    // The MERGED-BLOB layouts (`WOW_STATIC_MERGE`, 1417–1420): the static layouts plus the baked
+    // per-vertex fade sphere, and plus the interior-prop probe slot — four more strides
+    // (48/52, and their vertex-coloured 64/68), each a distinct pipeline family via the
+    // `WOW_MERGED_FADE`/`WOW_MERGED_SLOT` shader defs `specialize` keys on the layout. Built
+    // through the REAL blob mesh builder (`merged_static_mesh_faded`) so the warm layout can't
+    // drift from production. World camera only: a blob never reaches a portrait booth and never
+    // far-twins (no `DoodadFade`, so `classify_water_side` never swaps it). Missing these was a
+    // live compile — a director-felt stall — on the first blob of each family to enter view.
+    for colors in [false, true] {
+        for slot in [false, true] {
+            let part = std::sync::Arc::new(warm_quad(colors, false));
+            let (mesh, mn, mx, _center) = benilla_assets::merged_static_mesh_faded(
+                &[(part, Transform::IDENTITY)],
+                &[Vec4::new(0.0, 0.0, 0.0, 1.0)],
+                slot.then_some(&[0u32][..]),
+            );
+            let aabb = Some(bevy::camera::primitives::Aabb::from_min_max(mn, mx));
+            let mesh = meshes.add(mesh);
+            for mat in &mats {
+                spawn_model_rig(commands, cam, None, &mesh, &aabb, false, mat);
+                count += 1;
+            }
+        }
+    }
+
     // The WMO-skybox rows (decision 1264): the STATIC PLAIN layout only, and only on the world
     // camera. `wmo_sky::build_skybox` inserts POSITION + NORMAL + UV_0 — `layouts[0]` exactly — a
     // skybox is never skinned (the asteroid belts' bones are a deferral, not a shipped lane), never

@@ -167,8 +167,8 @@ pub(super) fn spawn_loaded_placements(
                     let anim_bound = m2_anim_bound(&m.bounds);
                     let SpawnedModel {
                         entities: mut ents,
+                        by_batch,
                         host,
-                        ..
                     } = spawn_model_entities(
                         &mut commands,
                         mat_cache,
@@ -270,6 +270,21 @@ pub(super) fn spawn_loaded_placements(
                         unique_id,
                         format!("emitters: {}", m.emitters.len()),
                     );
+                    if let Some((target, r)) = fade_near_target() {
+                        let pos = p.transform.translation;
+                        let d = bevy::math::Vec2::new(pos.x, pos.z).distance(target);
+                        if d <= r {
+                            log_fade_near(
+                                "doodad",
+                                &handle_label(h),
+                                unique_id,
+                                pos,
+                                d,
+                                (radius, p.transform.scale.x),
+                                &by_batch,
+                            );
+                        }
+                    }
                     ents
                 }
                 ModelHandle::Wmo(h) => {
@@ -325,6 +340,21 @@ pub(super) fn spawn_loaded_placements(
                             },
                         )),
                     );
+                    if let Some((target, r)) = fade_near_target() {
+                        let pos = p.transform.translation;
+                        let d = bevy::math::Vec2::new(pos.x, pos.z).distance(target);
+                        if d <= r {
+                            log_fade_near(
+                                "wmo",
+                                &handle_label(h),
+                                unique_id,
+                                pos,
+                                d,
+                                (f32::INFINITY, p.transform.scale.x),
+                                &by_batch,
+                            );
+                        }
+                    }
                     // A world WMO placement is exterior scene too (`0x6856c0`, fed by the same
                     // per-window populate `0x682fa0`): from inside one building, another building
                     // draws only through a portal window. 0774 left this ungated because these
@@ -832,6 +862,46 @@ fn resolve_wmo_doodads(
         }
     }
     out
+}
+
+/// `WOW_FADE_NEAR="x,y,r"` — the "name that popping doodad" instrument: a WoW server-coordinate
+/// point (the same numbers `.go xyz` takes, director-verbatim) plus a horizontal radius in yards.
+/// Every placement spawning within `r` yd of the point logs its model path, fade radius (which
+/// selects the `model_fade` band), scale, and how many of its batches the static merge diverted —
+/// so a "this doodad pops in at .go X Y Z" report converts into the placement's actual fade
+/// inputs and its lane (merged fader / per-entity / WMO) in one parked probe run, no camera work.
+fn fade_near_target() -> Option<(bevy::math::Vec2, f32)> {
+    static T: std::sync::OnceLock<Option<(bevy::math::Vec2, f32)>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        let s = std::env::var("WOW_FADE_NEAR").ok()?;
+        let mut it = s.split(',').map(|v| v.trim().parse::<f32>().ok());
+        let (x, y, r) = (it.next()??, it.next()??, it.next()??);
+        let b = wow_to_bevy([x, y, 0.0]);
+        Some((bevy::math::Vec2::new(b.x, b.z), r))
+    })
+}
+
+/// One `[fade-near]` line for a placement inside the [`fade_near_target`] circle — shared by the
+/// doodad and WMO arms so the two print comparably. `radius` is the fade input (∞ for a WMO);
+/// `diverted` of `batches` went to the static merge (the lane readout).
+fn log_fade_near(
+    kind: &str,
+    label: &str,
+    unique_id: u32,
+    pos: Vec3,
+    d: f32,
+    (radius, scale): (f32, f32),
+    by_batch: &[Option<Entity>],
+) {
+    let diverted = by_batch.iter().filter(|e| e.is_none()).count();
+    eprintln!(
+        "[fade-near] {kind} {label} uid={unique_id} d={d:.1} radius={radius:.2} scale={scale:.2} \
+         batches={} diverted={diverted} pos=({:.1},{:.1},{:.1})",
+        by_batch.len(),
+        pos.x,
+        pos.y,
+        pos.z,
+    );
 }
 
 /// A model handle's source path as a readable label for the object inspector (the asset path without
