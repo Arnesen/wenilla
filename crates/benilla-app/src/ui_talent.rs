@@ -38,7 +38,7 @@ use benilla_ui::script::{TalentPrereqView, TalentTabView, TalentUiState, TalentV
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_script::UiInput;
+use crate::ui_script::{gate, UiInput};
 use crate::ui_unit::UnitFeed;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
@@ -90,19 +90,44 @@ struct FeedMemory {
     points: Option<(u32, u32)>,
 }
 
+#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 fn feed_talents(
     script: Option<NonSendMut<UiScript>>,
     talents: Option<Res<Talents>>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
     mut chat: ResMut<ChatLog>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    let memory = memory.get(&script);
+    let (memory, vm_reset) = memory.get_reset(&script);
+    // The gate (1439): every input the build below reads — the known-spell set, the two
+    // catalogs (`Added ⊆ Changed` covers their one-time landing), and the self descriptor
+    // (points, race/class; its ABSENCE needs no reopen — the body returns pushless without it).
+    let self_changed = !changed_self.is_empty();
+    let actions_changed = actions.is_changed();
+    let talents_changed = talents.as_ref().is_some_and(|r| r.is_changed());
+    let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
+    gate::trace(
+        "feed_talents",
+        &[
+            ("vm_reset", vm_reset),
+            ("self", self_changed),
+            ("actions", actions_changed),
+            ("talents", talents_changed),
+            ("spells", spells_changed),
+        ],
+    );
+    let gate = gate::Gate::new(
+        vm_reset || self_changed || actions_changed || talents_changed || spells_changed,
+    );
+    if gate.skip() {
+        return;
+    }
     let (Some(talents), Some(spells)) = (talents.as_deref(), spells.as_deref()) else {
         return;
     };
@@ -124,6 +149,7 @@ fn feed_talents(
         points,
     );
     if fresh != memory.pushed {
+        gate.audit("feed_talents", "the talent pages");
         debug!(
             "ui_talent: fed {} tab(s), {} points",
             fresh.tabs.len(),
@@ -146,6 +172,7 @@ fn feed_talents(
         }
     }
     if memory.points != Some(points) {
+        gate.audit("feed_talents", "the points memo");
         memory.points = Some(points);
     }
 }

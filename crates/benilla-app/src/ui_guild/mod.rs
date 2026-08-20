@@ -141,6 +141,10 @@ pub(crate) struct GuildState {
     rank_index: u32,
     /// Guild id → identity, from `SMSG_GUILD_QUERY_RESPONSE`. Holds negatives (module doc).
     identities: HashMap<u32, Identity>,
+    /// Bumped by every landed identity ([`Self::apply_query_response`]) — never by an ask. The
+    /// gated unit feeds' watch counter (decision 1439): `unit_guild`'s miss resolves later, and
+    /// `is_changed` cannot flag the landing because the miss itself takes `&mut self` per frame.
+    identity_generation: u64,
     /// Guild ids with a `CMSG_GUILD_QUERY` in flight — the ask-once gate.
     queried: HashSet<u32>,
     /// The message of the day. Kept beside the roster rather than inside it because `GE_MOTD`
@@ -250,6 +254,11 @@ impl GuildState {
         self.identity(guild_id)
     }
 
+    /// The landed-identity counter — see the [`Self::identity_generation`] field.
+    pub(crate) fn identity_generation(&self) -> u64 {
+        self.identity_generation
+    }
+
     /// `SMSG_GUILD_QUERY_RESPONSE` — fill (or negatively fill) the identity cache.
     fn apply_query_response(&mut self, response: GuildQueryResponse) {
         self.queried.remove(&response.guild_id);
@@ -261,6 +270,7 @@ impl GuildState {
                 rank_names: response.rank_names,
             },
         );
+        self.identity_generation = self.identity_generation.wrapping_add(1);
         self.dirty = true;
         if ours {
             // Our own rank names just landed under the roster rows that display them, so the pane

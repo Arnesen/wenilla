@@ -131,11 +131,38 @@ pub(crate) struct Cooldowns {
     records: Vec<Record>,
     /// Bumped on every mutation — the UI feed's `ACTIONBAR_UPDATE_COOLDOWN` edge.
     pub(crate) generation: u64,
+    /// Bumped when [`Self::prune`] actually removes records — the **natural-expiry** edge, kept
+    /// apart from [`Self::generation`] on purpose (decision 1439): a pruned record flips a
+    /// pushed `ui_triple` to `None`, so a feed gated on this store must reopen at that instant —
+    /// but the action feed's `ACTIONBAR_UPDATE_COOLDOWN` must NOT fire there, because the
+    /// reference sweeps elapsed records on events and never announces a natural expiry.
+    expiry_epoch: u64,
 }
 
 impl Cooldowns {
     fn bump(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// The single counter a gated feed watches (decision 1439): moves exactly when a snapshot
+    /// built over this store could differ — on any mutation, or on a natural expiry the prune
+    /// noticed. (Both terms only ever increment, so the sum moves whenever either does.)
+    pub(crate) fn feed_epoch(&self) -> u64 {
+        self.generation.wrapping_add(self.expiry_epoch)
+    }
+
+    /// True while an elapsed record still awaits its prune — the one window where a snapshot
+    /// built over this store changes with NO counter having moved yet: the feeds run before
+    /// `feed_action_state`'s per-frame prune, so on the exact frame a timer crosses zero the
+    /// pushed triple flips to `None` a frame ahead of [`Self::feed_epoch`] (decision 1439).
+    /// The predicate is prune's own removal test; cold and parked it costs an empty iteration.
+    pub(crate) fn sweep_pending(&self, now: Instant) -> bool {
+        self.records.iter().any(|r| {
+            !r.on_hold
+                && r.recovery.remaining(now).is_zero()
+                && r.category_recovery.remaining(now).is_zero()
+                && r.gcd.remaining(now).is_zero()
+        })
     }
 
     /// The insert primitive (`AddCooldown 0x6e12c0`): nothing to track → no-op; else **append a
@@ -186,14 +213,19 @@ impl Cooldowns {
 
     /// Prune records with nothing left to say: every timer elapsed and not on hold. Behaviorally
     /// invisible (an elapsed record contributes zero remaining) — bounds the list without the
-    /// client's event-driven sweep sites.
+    /// client's event-driven sweep sites. A removal bumps [`Self::expiry_epoch`], not
+    /// [`Self::generation`]: gated feeds must see the expiry, the event edge must not.
     pub(crate) fn prune(&mut self, now: Instant) {
+        let before = self.records.len();
         self.records.retain(|r| {
             r.on_hold
                 || !r.recovery.remaining(now).is_zero()
                 || !r.category_recovery.remaining(now).is_zero()
                 || !r.gcd.remaining(now).is_zero()
         });
+        if self.records.len() != before {
+            self.expiry_epoch = self.expiry_epoch.wrapping_add(1);
+        }
     }
 
     /// Start a spell's own cooldown (`StartCooldown 0x6e2c60`, spell-only path): recovery /
@@ -836,6 +868,45 @@ mod tests {
 
         cds.prune(t0 + Duration::from_secs(20));
         assert!(cds.records.is_empty());
+    }
+
+    /// The gated feeds' counter (1439): `feed_epoch` moves on a mutation AND on a natural
+    /// expiry the prune noticed — but a prune that removes nothing moves nothing, or the
+    /// per-frame prune call would hold every cooldown-watching gate open forever.
+    #[test]
+    fn the_feed_epoch_moves_on_expiry_but_an_empty_prune_is_silent() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        let e0 = cds.feed_epoch();
+        cds.start_gcd(133, &fireball(), t0);
+        let armed = cds.feed_epoch();
+        assert_ne!(e0, armed, "a mutation moves the epoch (generation)");
+
+        cds.prune(t0 + Duration::from_millis(100));
+        assert_eq!(
+            cds.feed_epoch(),
+            armed,
+            "nothing elapsed — the prune is silent"
+        );
+
+        cds.prune(t0 + Duration::from_secs(5));
+        let expired = cds.feed_epoch();
+        assert_ne!(
+            armed, expired,
+            "the expiry IS a feed edge (the triple flips to None)"
+        );
+        assert_eq!(
+            cds.generation,
+            {
+                let mut probe = Cooldowns::default();
+                probe.start_gcd(133, &fireball(), t0);
+                probe.generation
+            },
+            "…but the event-edge generation never saw it (the reference is silent on expiry)"
+        );
+
+        cds.prune(t0 + Duration::from_secs(6));
+        assert_eq!(cds.feed_epoch(), expired, "an empty prune stays silent");
     }
 
     /// The vanished-GCD-pie regression (spam-press: fail-clear + re-arm inside one inter-feed

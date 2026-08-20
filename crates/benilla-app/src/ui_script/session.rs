@@ -66,12 +66,26 @@ impl<T: Default> VmMemo<T> {
     /// way into it and once on the way out, and holds in between. Reaching for a scratch default
     /// each frame instead would quietly turn the memo off for the whole glue phase.
     pub(crate) fn get_for(&mut self, script: Option<&UiScript>) -> &mut T {
+        self.get_reset_for(script).0
+    }
+
+    /// [`VmMemo::get`], also reporting whether the memory RESET on this read — i.e. this is the
+    /// first read against a new VM. A gated feed (decision 1439) keys its "must run" on exactly
+    /// this: with every input unchanged, a fresh VM still needs the full re-push, and the reset is
+    /// the only signal that says so. The flag is true at most once per session per memo, so a gate
+    /// that ORs it in costs nothing on the steady frames it exists to skip.
+    pub(crate) fn get_reset(&mut self, script: &UiScript) -> (&mut T, bool) {
+        self.get_reset_for(Some(script))
+    }
+
+    fn get_reset_for(&mut self, script: Option<&UiScript>) -> (&mut T, bool) {
         let now = script.map_or(0, UiScript::session);
-        if self.session != now {
+        let reset = self.session != now;
+        if reset {
             self.session = now;
             self.inner = T::default();
         }
-        &mut self.inner
+        (&mut self.inner, reset)
     }
 }
 
@@ -116,6 +130,25 @@ mod tests {
             memo.get(&first).is_empty(),
             "and moving back does not resurrect it — the memory is gone, not shelved"
         );
+    }
+
+    /// The gate half (1439): `get_reset` reports the reset exactly once per session flip — the
+    /// one frame a gated feed must run with every other input unchanged.
+    #[test]
+    fn get_reset_reports_each_session_flip_once() {
+        let first = UiScript::new().expect("VM");
+        let second = UiScript::new().expect("VM");
+        let mut memo: VmMemo<u32> = VmMemo::default();
+
+        let (m, reset) = memo.get_reset(&first);
+        assert!(reset, "the first read of a session is the reset");
+        *m = 7;
+        let (m, reset) = memo.get_reset(&first);
+        assert!(!reset, "steady frames read quietly");
+        assert_eq!(*m, 7);
+        let (m, reset) = memo.get_reset(&second);
+        assert!(reset, "a new VM resets again");
+        assert_eq!(*m, 0, "…and the memory is gone with the old one");
     }
 
     #[test]

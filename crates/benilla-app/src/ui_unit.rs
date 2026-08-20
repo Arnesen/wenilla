@@ -30,7 +30,7 @@ use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::{ring_reaction, Factions, Selection};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_script::UiInput;
+use crate::ui_script::{gate, UiInput};
 
 /// The feed pass — runs **after [`benilla_world::schedule::WorldStage::Net`]** (the feeds snapshot state
 /// the net apply writes; unordered, `apply_net_updates` could land BETWEEN two feeds, and a
@@ -108,6 +108,10 @@ struct UnitFeedState {
 /// The per-VM half of [`UnitFeedState`] — the event-trigger diffs.
 #[derive(Default)]
 struct UnitFeedMemo {
+    /// The gate's counter memories (1439) — the two lazy caches this feed resolves through
+    /// (their per-frame `&mut` misses poison `is_changed`, the counters carry the landings).
+    names_generation: gate::Watch,
+    guild_generation: gate::Watch,
     /// Whether `PLAYER_ENTERING_WORLD` has been fired (once per world entry, once per VM).
     entered_world: bool,
     /// Per token, the last snapshot we pushed — the per-field event triggers diff against it.
@@ -775,6 +779,8 @@ fn feed_units(
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     selection: Res<Selection>,
     stores: Query<&ObjectStore>,
+    changed_stores: Query<(), Changed<ObjectStore>>,
+    mut removed_stores: RemovedComponents<ObjectStore>,
     mut feed: ResMut<UnitFeedState>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
@@ -790,6 +796,51 @@ fn feed_units(
     let Some(mut script) = script else {
         return;
     };
+    // One reborrow so the memo (`feed.vm`) and `feed.warned_sideless` can be borrowed as the
+    // disjoint fields they are — through the `ResMut` deref they would alias.
+    let feed = &mut *feed;
+    let (memo, vm_reset) = feed.vm.get_reset(&script);
+
+    // The gate (1439): every input the two snapshots and the edge diffs below read — any
+    // descriptor change or DESPAWN (a removed store is invisible to `Changed`), the selection,
+    // the group/reputation/faction state, and the two lazy caches by their landed counters.
+    let names_moved = memo.names_generation.moved(names.generation());
+    let guild_moved = memo.guild_generation.moved(guild.identity_generation());
+    let selection_changed = selection.is_changed();
+    let stores_changed = !changed_stores.is_empty();
+    let stores_removed = !removed_stores.is_empty();
+    let group_changed = group.is_changed();
+    let reps_changed = reputations.is_changed();
+    let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
+    gate::trace(
+        "feed_units",
+        &[
+            ("vm_reset", vm_reset),
+            ("names", names_moved),
+            ("guild", guild_moved),
+            ("selection", selection_changed),
+            ("stores", stores_changed),
+            ("removed", stores_removed),
+            ("group", group_changed),
+            ("reputations", reps_changed),
+            ("factions", factions_changed),
+        ],
+    );
+    let gate = gate::Gate::new(
+        vm_reset
+            || names_moved
+            || guild_moved
+            || selection_changed
+            || stores_changed
+            || stores_removed
+            || group_changed
+            || reps_changed
+            || factions_changed,
+    );
+    removed_stores.clear();
+    if gate.skip() {
+        return;
+    }
 
     // "player" = our own avatar's descriptor; "target" = the selected entity's. Absent → None, which
     // set_unit clears (UnitExists false), exactly as the real client reports a missing unit. Names
@@ -828,10 +879,8 @@ fn feed_units(
         }
         feed.warned_sideless = sideless;
     }
-    // The VM half — resolved against THIS VM, so a `/reload`'s fresh state reads a fresh memo and
-    // every event below re-fires for it (1291). Taken after the `warned_sideless` writes above:
-    // that field is server memory and must NOT expire with the VM.
-    let memo = feed.vm.get(&script);
+    // (The VM-half memo was taken at the top — the gate needs its reset flag. `warned_sideless`
+    // stays server memory outside it, which the disjoint field borrows above preserve.)
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         let store = stores.get(e).ok()?;
         let name = names.resolve(guid, &commands).map(str::to_string);
@@ -880,10 +929,23 @@ fn feed_units(
     // valid through its shutdown; a fresh VM starts with no `"player"` anyway, so nothing needs
     // the clear). `"target"` keeps the unconditional push: a selection's absence IS data — the
     // deselect/despawn transition the real client also reports.
-    if player.is_some() {
-        script.set_unit("player", player.clone());
+    // Both pushes diff against the SAME memo the event loop below uses (1439): an identical
+    // snapshot re-pushed is invisible to the VM, so only a real change pays the clone.
+    if let Some(cur) = &player {
+        if memo.last.get("player") != Some(cur) {
+            gate.audit("feed_units", "the player snapshot");
+            script.set_unit("player", player.clone());
+        }
     }
-    script.set_unit("target", target.clone());
+    let target_dirty = match (&target, memo.last.get("target")) {
+        (Some(cur), Some(prev)) => cur != prev,
+        (None, None) => false,
+        _ => true,
+    };
+    if target_dirty {
+        gate.audit("feed_units", "the target snapshot");
+        script.set_unit("target", target.clone());
+    }
 
     // The XP bar's feed: push our own avatar's PLAYER_XP / PLAYER_NEXT_LEVEL_XP (both PRIVATE, only
     // ever streamed for self) and fire PLAYER_XP_UPDATE when either changes — the coinage feed's
@@ -894,6 +956,7 @@ fn feed_units(
         let xp = store.0.player_xp().unwrap_or(0);
         let next = store.0.player_next_level_xp().unwrap_or(0);
         if memo.last_xp != Some((xp, next)) {
+            gate.audit("feed_units", "the XP pair");
             memo.last_xp = Some((xp, next));
             script.set_player_xp(xp, next);
             script.fire_event("PLAYER_XP_UPDATE", vec![]);
@@ -917,6 +980,7 @@ fn feed_units(
             store.0.player_flags(),
         );
         if memo.last_rest != Some(rest) {
+            gate.audit("feed_units", "the rest snapshot");
             let prev = memo.last_rest;
             memo.last_rest = Some(rest);
             script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
@@ -957,6 +1021,7 @@ fn feed_units(
         if let Some(level) = store.0.unit_level() {
             let prev = memo.last_level.replace(level);
             if prev.is_some_and(|p| level != p) {
+                gate.audit("feed_units", "the level edge");
                 script.fire_event("PLAYER_LEVEL_UP", vec![ScriptValue::Int(i64::from(level))]);
             }
         }
@@ -981,10 +1046,12 @@ fn feed_units(
     // repro), and a normal→rested char switch would misfire "You feel rested." at login.
     if self_pair.is_some() {
         if !memo.entered_world {
+            gate.audit("feed_units", "the PLAYER_ENTERING_WORLD arm");
             script.fire_event("PLAYER_ENTERING_WORLD", vec![]);
             memo.entered_world = true;
         }
     } else if memo.entered_world {
+        gate.audit("feed_units", "the world-exit disarm");
         memo.entered_world = false;
         memo.last_xp = None;
         memo.last_rest = None;
@@ -999,6 +1066,7 @@ fn feed_units(
             Some(cur) => {
                 let prev = memo.last.get(token);
                 if prev != Some(cur) {
+                    gate.audit("feed_units", "a unit-token transition");
                     fire_transitions(&mut script, token, prev, cur);
                     memo.last.insert(token.to_string(), cur.clone());
                 }
@@ -1006,13 +1074,16 @@ fn feed_units(
             None => {
                 // Clearing a token isn't a UNIT_* event; the target frame reacts to
                 // PLAYER_TARGET_CHANGED below.
-                memo.last.remove(token);
+                if memo.last.remove(token).is_some() {
+                    gate.audit("feed_units", "a unit-token clear");
+                }
             }
         }
     }
 
     // PLAYER_TARGET_CHANGED (no args, real WoW's shape) when the selection changes.
     if selection.guid != memo.target_guid {
+        gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
         memo.target_guid = selection.guid;
         script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     }
@@ -1024,6 +1095,7 @@ fn feed_units(
     if let Some((store, _)) = self_pair {
         let in_combat = store.0.unit_flags() & 0x0008_0000 != 0;
         if memo.in_combat != Some(in_combat) {
+            gate.audit("feed_units", "the combat-flag edge");
             let first_sight = memo.in_combat.is_none();
             memo.in_combat = Some(in_combat);
             if !first_sight || in_combat {
@@ -1049,6 +1121,7 @@ fn feed_units(
     if let Some((store, _)) = self_pair {
         let desired = store.0.player_flags() & PLAYER_FLAGS_PVP_DESIRED != 0;
         if let Some((toast, verbose)) = pvp_announcement(memo.pvp_desired, desired) {
+            gate.audit("feed_units", "the PvP-desired edge");
             script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(toast.to_string())]);
             chat.push_event(ChatEvent::text_only(
                 ChatEventKind::System,
@@ -1078,6 +1151,7 @@ fn feed_units(
             store.0.player_combo_target(),
         );
         if let Some(fire) = combo_edge(memo.last_combo, banked) {
+            gate.audit("feed_units", "the combo-point edge");
             memo.last_combo = Some(banked);
             script.set_combo_points(banked.0, banked.1);
             if fire {

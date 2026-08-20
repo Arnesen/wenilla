@@ -34,6 +34,7 @@ use bevy::prelude::*;
 use benilla_assets::{AnimClip, M2Model, ModelAnimations, ModelSkeleton};
 
 use crate::rig_anim::{AnimParked, GlobalSeqDrive, RigPose};
+use crate::vis_chain::VisChainOnly;
 
 mod lazy;
 mod mat_anim;
@@ -214,7 +215,12 @@ pub fn spawn_anim_host(
         return None;
     }
     let anims = m.animations.as_ref().expect("animated tier ⇒ animations");
-    let root = commands.spawn((transform, Visibility::default())).id();
+    // Chain-only visibility (`crate::vis_chain`): the host root renders nothing — its parts
+    // draw as world roots — and ~1.4k hosts sat in the per-camera sweep at the Goldshire pin.
+    let root = commands
+        .spawn((transform, Visibility::default()))
+        .vis_chain_only()
+        .id();
     // The collapsed pose buffer (decision 1365 — 0724 replayed for this lane): no joint
     // entities, no `AnimatedBy` targets, no `BillboardJointRig`. The 0712 evaluator poses
     // `locals` off the player, the model pass folds + seats the anchors, and the world pass

@@ -166,7 +166,7 @@ fn fire_entity_census(world: &mut World) {
         );
     }
     let components = world.components();
-    let mut rows: Vec<(usize, String)> = world
+    let mut rows: Vec<(usize, bool, String)> = world
         .archetypes()
         .iter()
         .filter(|a| !a.is_empty())
@@ -177,6 +177,10 @@ fn fire_entity_census(world: &mut World) {
                 .filter_map(|id| components.get_info(*id))
                 .map(|c| c.name().shortname().to_string())
                 .collect();
+            // Whether this archetype sits in the render-visibility population: bevy's
+            // `check_visibility` sweeps every `ViewVisibility` row once PER ACTIVE CAMERA,
+            // so `vis=y` rows are the ones a second camera (booth) re-bills the frame for.
+            let in_vis_population = full.iter().any(|n| n == "ViewVisibility");
             let signal: Vec<String> = full
                 .iter()
                 .filter(|n| {
@@ -204,21 +208,25 @@ fn fire_entity_census(world: &mut World) {
             if more > 0 {
                 comps.push_str(&format!(" +{more}"));
             }
-            (a.len() as usize, comps)
+            (a.len() as usize, in_vis_population, comps)
         })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     let (total_arch, total_n) = (rows.len(), rows.iter().map(|r| r.0).sum::<usize>());
+    let vis_n = rows.iter().filter(|r| r.1).map(|r| r.0).sum::<usize>();
     let other_n = rows
         .iter()
         .skip(ENTITY_CENSUS_ROWS)
         .map(|r| r.0)
         .sum::<usize>();
-    for (n, comps) in rows.iter().take(ENTITY_CENSUS_ROWS) {
-        println!("ENTITY_CENSUS_ARCH n={n} comps=[{comps}]");
+    for (n, vis, comps) in rows.iter().take(ENTITY_CENSUS_ROWS) {
+        println!(
+            "ENTITY_CENSUS_ARCH n={n} vis={} comps=[{comps}]",
+            if *vis { "y" } else { "n" }
+        );
     }
     println!(
-        "ENTITY_CENSUS total={total_n} archetypes={total_arch} \
+        "ENTITY_CENSUS total={total_n} vis_n={vis_n} archetypes={total_arch} \
          rows={} other_n={other_n}",
         rows.len().min(ENTITY_CENSUS_ROWS),
     );

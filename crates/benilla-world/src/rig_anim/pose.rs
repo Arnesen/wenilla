@@ -26,6 +26,7 @@ use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
 use super::AnimParked;
+use crate::vis_chain::VisChainOnly;
 
 /// The collapsed rig's pose buffer (decision 0724), on the entity carrying the `AnimationPlayer`:
 /// one local `Transform` per bone in skeleton order — no joint entities at all (decision 0712's
@@ -164,6 +165,10 @@ impl RigPose {
         }
         let m = self.model.get(bone as usize)?;
         let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        // Visibility so an attached subtree (a held item under a hand anchor) inherits the
+        // owner's hide — chain only: an anchor renders nothing, and at the Goldshire pin the
+        // anchor population was the single largest never-rendering block in the per-camera
+        // visibility sweep (4.8k rows, decision 1441).
         let anchor = commands
             .spawn((
                 Transform {
@@ -174,6 +179,7 @@ impl RigPose {
                 Visibility::default(),
                 RigAnchor { rig, bone },
             ))
+            .vis_chain_only()
             .id();
         commands.entity(self.joints_root).add_child(anchor);
         self.anchors.push((bone, anchor));

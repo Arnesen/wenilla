@@ -168,6 +168,7 @@ pub mod surface;
 pub mod terrain_stream;
 pub mod thread_qos;
 pub mod view;
+pub mod vis_chain;
 pub mod water_fx;
 pub mod wdl;
 pub mod weather;

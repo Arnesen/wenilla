@@ -524,7 +524,7 @@ pub(super) fn flush_static_merge(
         });
     }
     if recon.0 > 0 {
-        info!(
+        debug!(
             "static-merge: reconsolidated {} cell(s): {} fragments → {} blob(s)",
             recon.0, recon.1, recon.2
         );
@@ -554,7 +554,7 @@ pub(super) fn flush_static_merge(
     // and what the transform-baking duplication actually costs against the shared assets.
     if !merge.reported && merge.doodads.is_empty() && merge.props.is_empty() {
         merge.reported = true;
-        info!(
+        debug!(
             "static-merge: {} blobs from {} batches; baked {}kv vs {}kv shared ({:.2}x duplication)",
             merge.blobs,
             merge.batches,

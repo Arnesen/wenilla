@@ -46,6 +46,12 @@ pub(crate) struct NameCache {
     pending_players: HashSet<u64>,
     pending_creatures: HashSet<u32>,
     pending_pets: HashSet<u32>,
+    /// Bumped by every **landed** answer (and the pet-rename eviction) — never by an ask. The
+    /// gated feeds' watch counter (decision 1439): a feed that resolved a miss re-runs when the
+    /// answer lands, and only then. `is_changed` cannot say this — the resolves themselves take
+    /// `&mut self` every frame (the ask-once marker), so the resource reads as changed whenever
+    /// anything is still pending.
+    generation: u64,
 }
 
 /// One cached creature template head (see [`NameCache::creatures`]).
@@ -204,6 +210,12 @@ impl NameCache {
         }
         self.players
             .insert(guid, (!name.is_empty()).then_some(name));
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// The landed-answer counter — see the [`Self::generation`] field.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// `(race, class, gender)` for a player guid the name query has answered for — the macro
@@ -216,6 +228,7 @@ impl NameCache {
     pub(crate) fn insert_pet(&mut self, pet_number: u32, name: String) {
         self.pending_pets.remove(&pet_number);
         self.pets.insert(pet_number, name);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Forget a pet's cached name so the next [`Self::resolve`] asks for it again (decision 1066).
@@ -230,12 +243,14 @@ impl NameCache {
     pub(crate) fn forget_pet(&mut self, pet_number: u32) {
         self.pending_pets.remove(&pet_number);
         self.pets.remove(&pet_number);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Record a creature-name answer (`SMSG_CREATURE_QUERY_RESPONSE`); `None` = unknown entry.
     pub(crate) fn insert_creature(&mut self, entry: u32, record: Option<CreatureRecord>) {
         self.pending_creatures.remove(&entry);
         self.creatures.insert(entry, record);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// The cached subname (the overhead/tooltip title line) for a creature entry — read-only: the
@@ -289,6 +304,41 @@ mod tests {
     fn commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         (NetCommands(tx), rx)
+    }
+
+    /// The gated feeds' counter (1439): a landed answer (and the rename eviction) moves it; an
+    /// ask-once miss — the read gated feeds run every frame — never does, or the outstanding
+    /// query would hold every name-watching gate open until it answered.
+    #[test]
+    fn the_generation_counts_landings_never_asks() {
+        let (cmds, _rx) = commands();
+        let mut cache = NameCache::default();
+        let g0 = cache.generation();
+
+        let player = compose(0, 0, 7);
+        assert_eq!(cache.resolve(player, &cmds), None);
+        assert_eq!(
+            cache.generation(),
+            g0,
+            "the miss asked, and asking is not a landing"
+        );
+
+        cache.insert_player(player, "Benilla".into(), None);
+        let landed = cache.generation();
+        assert_ne!(g0, landed, "the answer landing is the edge");
+
+        assert_eq!(cache.resolve(player, &cmds), Some("Benilla"));
+        assert_eq!(cache.generation(), landed, "a cache hit moves nothing");
+
+        cache.insert_pet(137, "Voidwalker".into());
+        let pet = cache.generation();
+        assert_ne!(landed, pet);
+        cache.forget_pet(137);
+        assert_ne!(
+            pet,
+            cache.generation(),
+            "the rename eviction is a landing-shaped edge"
+        );
     }
 
     /// A summoned pet resolves through `CMSG_PET_NAME_QUERY`, keyed by the pet number in its guid —

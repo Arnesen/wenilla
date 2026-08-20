@@ -103,6 +103,12 @@ pub(super) fn spawn_loaded_placements(
     let Some(shared_light) = shared_light else {
         return;
     };
+    // Steady state is everything spawned, and the walk below still visits every placement and
+    // every WMO prop to find that out — the pending count (kept by the register/handoff/release
+    // sites) makes that frame free.
+    if placements.pending_spawns == 0 {
+        return;
+    }
     let t0 = Instant::now();
     // The landing COUNT cap (B181), on top of the time budget below. The clock gates main-thread
     // cost — but ~1000 one-submesh doodads pass a 4 ms budget in 2.5 ms and hand the render world
@@ -124,6 +130,7 @@ pub(super) fn spawn_loaded_placements(
     let Placements {
         by_id,
         materials: mat_cache,
+        pending_spawns,
     } = placements.into_inner();
 
     // Per-frame spawn budget. On cold start every tile's doodads/WMOs finish decoding near-together;
@@ -588,6 +595,10 @@ pub(super) fn spawn_loaded_placements(
             };
             p.spawned = true;
             p.entities = entities;
+            // The placement's own model landed; a WMO's just-resolved props (all unspawned)
+            // are new work the count takes on in the same stroke.
+            *pending_spawns += p.doodads.iter().filter(|d| !d.spawned).count();
+            *pending_spawns -= 1;
             activity.placements_spawned += 1;
             spawned_n += 1;
             // Spent the frame's spawn budget on this model (a WMO with two collider meshes is the
@@ -840,6 +851,7 @@ pub(super) fn spawn_loaded_placements(
             );
             p.entities.extend(ents);
             d.spawned = true;
+            *pending_spawns -= 1;
             activity.placements_spawned += 1;
             spawned_n += 1;
             if Instant::now() >= deadline || spawned_n >= count_cap {

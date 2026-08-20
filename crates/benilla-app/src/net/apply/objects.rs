@@ -13,6 +13,7 @@ use crate::go_templates::GameObjectTemplates;
 use crate::items::Items;
 use crate::names::NameCache;
 use benilla_world::model_fade::DespawnFade;
+use benilla_world::vis_chain::VisChainOnly;
 
 use super::super::motion::{
     create_spline, monster_move_spline, pose_transform, resolve_facing, trace_create_spline,
@@ -209,6 +210,10 @@ pub(super) fn object_create(
             pose_transform(position, orientation),
             visibility,
         ));
+        // Chain-only visibility (benilla_world::vis_chain): the net root renders nothing —
+        // its model parts and joints are the children, and the cull authorities flip this
+        // root's `Visibility` through `Mut` writes, which don't re-add the sweep row.
+        entity.vis_chain_only();
         if let Some(s) = speeds {
             entity.insert(UnitSpeeds(s));
         }

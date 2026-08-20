@@ -307,10 +307,12 @@ pub(super) fn spawn_wmo_gameobject_props(
             // `Static` body — same mechanism, no motion.
             if let Some((verts, tris)) = placement_collider_data(m.collision.as_ref(), &prop.local)
             {
+                // No visibility components at all: a hull renders nothing and hosts nothing,
+                // and B0004 only checks the child→parent direction — a bare child under a
+                // visible parent is fine (benilla_world::vis_chain has the sweep-tax law).
                 let hull = commands
                     .spawn((
                         Transform::IDENTITY,
-                        Visibility::default(),
                         PendingCollider::new(build_collider_task(verts, tris), None, false),
                     ))
                     .id();

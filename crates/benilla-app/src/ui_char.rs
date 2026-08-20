@@ -52,7 +52,7 @@ use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::pending_item_ops::PendingItemOps;
 use crate::portrait::PaperDollBooth;
 use crate::ui_items::{find_equip_slot, item_link};
-use crate::ui_script::UiInput;
+use crate::ui_script::{gate, UiInput};
 
 /// Equipment slots, 0-based (`EQUIPMENT_SLOT_*`): the inv-slot array index of the main hand,
 /// off hand, and ranged slots the weapon-skill / offhand / wand resolutions read.
@@ -87,6 +87,14 @@ struct CharFeedState {
 struct CharFeedMemo {
     last_stats: Option<UnitCombatStats>,
     last_inv: Option<InventorySlots>,
+    /// The gate's counter memories (1439) — the stores whose lazy resolves poison `is_changed`
+    /// for this feed (the equipment templates' ask-once, the enchant-name creator lookups).
+    items_objects: gate::Watch,
+    items_templates: gate::Watch,
+    names_generation: gate::Watch,
+    /// `Items::enchant_display_epoch` — one step per displayable countdown change (the slot
+    /// views read second-floored countdowns), including the last elapse's collapsing push.
+    enchant_deadlines: gate::Watch,
 }
 
 /// Adds the per-frame character-window feed. The bindings live in `benilla-ui`'s `char_stats`;
@@ -548,7 +556,7 @@ fn slot_view(
     // The temp-enchant countdowns, read before the object borrow (both live on `Items`) — the bag
     // feed's twin.
     let enchant_ms: [Option<u64>; 7] =
-        std::array::from_fn(|s| items.enchant_remaining_ms(guid, s as u32));
+        std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
     let obj = items.object(guid)?;
     let entry = obj.object_entry()?;
     let count = obj.item_stack_count().unwrap_or(1).max(1);
@@ -851,6 +859,7 @@ pub(crate) fn fire_stat_transitions(
 fn feed_char(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment`'s name column — the equipped tooltip's enchant lines (decision 0915).
@@ -865,11 +874,15 @@ fn feed_char(
         return;
     };
     // The pane's Model:SetRotation transcription owns the yaw; the booth mirrors it (0208 §5).
-    booth.yaw = script.paperdoll_yaw();
+    // Write-if-different: an unconditional write would mark the booth changed every frame.
+    let yaw = script.paperdoll_yaw();
+    if booth.yaw != yaw {
+        booth.yaw = yaw;
+    }
 
     // Resolved against THIS VM (1290/1291): a `/reload`'s replacement reads a fresh memo, so both
     // snapshots below re-push and their events re-fire for it.
-    let memo = feed.vm.get(&script);
+    let (memo, vm_reset) = feed.vm.get_reset(&script);
 
     let Some(store) = self_q.iter().next() else {
         // The self store's absence is NO DATA, never "the player has nothing equipped". The one
@@ -886,8 +899,68 @@ fn feed_char(
         return;
     };
 
+    // `GetWeaponEnchantInfo`'s whole data path (the buff bar's TemporaryEnchantFrame row, plus 8
+    // corpus addons). Pushed EVERY frame and change-gated by nothing — including the 1439 gate
+    // below: the remaining time is a live countdown, so riding a snapshot diff would fire
+    // `UNIT_INVENTORY_CHANGED` on every tick. The reference recomputes it per call for exactly
+    // the same reason (`0x5d9d00`). Hoisted above the gate (it used to sit last): the push is
+    // order-free of the two snapshots, and a handler they fire reads the fresher value this way.
+    script.set_weapon_enchants(
+        weapon_enchant(store, &items, EQUIPMENT_SLOT_MAINHAND),
+        weapon_enchant(store, &items, EQUIPMENT_SLOT_OFFHAND),
+    );
+
+    // The gate (1439), around the two snapshot builds only: the self descriptor (equipment
+    // slots, every stat field), the item stores behind the equipped templates and enchant
+    // names, the two catalogs, and the pending-op locks (held open while in flight; the
+    // resolving frame's own field update moves the object epoch).
+    let objects_moved = memo.items_objects.moved(items.object_epoch());
+    let templates_moved = memo.items_templates.moved(items.template_epoch());
+    let names_moved = memo.names_generation.moved(names.generation());
+    // The DISPLAY epoch, not a per-frame hold-open: the snapshot reads second-floored countdowns
+    // (`enchant_remaining_display_ms`), so it can only differ when this counter steps — once a
+    // second per ticking enchant, plus one final step at the elapse. Holding the gate open on
+    // `live_enchant_deadlines() > 0` (the first 1439 shape) rebuilt both snapshots and fired
+    // `UNIT_INVENTORY_CHANGED` at frame rate for the whole life of a poison.
+    let deadlines_moved = memo.enchant_deadlines.moved(items.enchant_display_epoch());
+    let self_changed = !changed_self.is_empty();
+    // `is_added` for the icon catalog: the feeds read only its load-once icon column;
+    // its model-cache half churns every frame (the containers gate's own note).
+    let icons_added = icons.as_ref().is_some_and(|r| r.is_added());
+    let enchants_changed = enchants.as_ref().is_some_and(|r| r.is_changed());
+    let pending_held = !pending.is_empty();
+    gate::trace(
+        "feed_char",
+        &[
+            ("vm_reset", vm_reset),
+            ("objects", objects_moved),
+            ("templates", templates_moved),
+            ("names", names_moved),
+            ("deadlines", deadlines_moved),
+            ("self", self_changed),
+            ("icons", icons_added),
+            ("enchants", enchants_changed),
+            ("pending", pending_held),
+        ],
+    );
+    let gate = gate::Gate::new(
+        vm_reset
+            || objects_moved
+            || templates_moved
+            || names_moved
+            || deadlines_moved
+            || self_changed
+            || icons_added
+            || enchants_changed
+            || pending_held,
+    );
+    if gate.skip() {
+        return;
+    }
+
     let stats = combat_stats(store, &mut items, &commands);
     if memo.last_stats.as_ref() != Some(&stats) {
+        gate.audit("feed_char", "the combat-stats snapshot");
         // PUSH before firing: event dispatch runs the Lua handlers synchronously, so the snapshot
         // must already be in the VM when they repaint (the ui_unit rule — a fire-first ordering
         // paints the OLD values and, being transition-gated, never corrects itself).
@@ -907,6 +980,7 @@ fn feed_char(
         &mut names,
     );
     if memo.last_inv.as_ref() != Some(&inv) {
+        gate.audit("feed_char", "the inventory snapshot");
         script.set_inventory_slots(inv.clone());
         script.fire_event(
             "UNIT_INVENTORY_CHANGED",
@@ -914,15 +988,6 @@ fn feed_char(
         );
         memo.last_inv = Some(inv);
     }
-
-    // `GetWeaponEnchantInfo`'s whole data path (the buff bar's TemporaryEnchantFrame row, plus 8
-    // corpus addons). Pushed EVERY frame and change-gated by nothing: the remaining time is a live
-    // countdown, so riding the snapshot above would fire `UNIT_INVENTORY_CHANGED` on every tick.
-    // The reference recomputes it per call for exactly the same reason (`0x5d9d00`).
-    script.set_weapon_enchants(
-        weapon_enchant(store, &items, EQUIPMENT_SLOT_MAINHAND),
-        weapon_enchant(store, &items, EQUIPMENT_SLOT_OFFHAND),
-    );
 }
 
 /// The client's own 0-based `EQUIPMENT_SLOT_*` ids for the two weapon slots — the numbers

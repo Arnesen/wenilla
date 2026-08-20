@@ -452,7 +452,7 @@ pub(super) fn simulate_particles(
     // rule. `Without<ParticleEmitter>`/`Without<ChildDraw>` keep the read provably disjoint from
     // the `&mut GlobalTransform` writes above.
     booth_cams: Query<
-        (Entity, &GlobalTransform, &RenderLayers),
+        (Entity, &GlobalTransform, &RenderLayers, &Camera),
         (
             With<Camera3d>,
             Without<WorldCamera>,
@@ -504,10 +504,30 @@ pub(super) fn simulate_particles(
         // camera.
         let booth = layers
             .filter(|l| !l.intersects(&RenderLayers::default()))
-            .and_then(|l| booth_cams.iter().find(|(_, _, cl)| cl.intersects(l)));
+            .and_then(|l| booth_cams.iter().find(|(_, _, cl, _)| cl.intersects(l)));
         let is_booth = booth.is_some();
+        // A sleeping booth camera (`gate_booth_cameras` — the pane's window closed) draws none
+        // of this lane, so its emitters freeze with it: pool + age held, the draw-set law's own
+        // shape (the reference ticks an emitter only inside a draw the frame performs). Draining
+        // pools still run out — freezing one strands it (the world arm's rule below).
+        if let Some((_, _, _, booth_cam)) = booth {
+            if !booth_cam.is_active && !emitter.draining {
+                if !emitter.gated {
+                    emitter.gated = true;
+                    for slot in &emitter.model_instances {
+                        for (e, _) in &slot.meshes {
+                            if let Ok((_, _, mut cv)) = child_draws.get_mut(*e) {
+                                *cv = Visibility::Hidden;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            emitter.gated = false;
+        }
         let (draw_cam, e_cam_pos, e_right, e_up) = match booth {
-            Some((cam_entity, tf, _)) => {
+            Some((cam_entity, tf, _, _)) => {
                 let (_, rot, _) = tf.to_scale_rotation_translation();
                 (cam_entity, tf.translation(), rot * Vec3::X, rot * Vec3::Y)
             }

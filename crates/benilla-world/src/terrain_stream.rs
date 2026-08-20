@@ -32,6 +32,7 @@ use crate::liquid::{spawn_liquids, LiquidAssets};
 use crate::model_render::MaterialCache;
 use crate::schedule::WorldStage;
 use crate::view::WorldCamera;
+use crate::vis_chain::VisChainOnly;
 use crate::world_map::CurrentMap;
 use benilla_assets::materials::{TerrainExtension, TerrainMaterial};
 use benilla_assets::MapCatalogRes;
@@ -162,6 +163,12 @@ struct Placements {
     /// Material dedup, so submeshes sharing a (texture, blend, sidedness, kind, fade-variant) share one
     /// `WowModelMaterial` handle — what lets Bevy batch them (mirrors the old `model_material` cache).
     materials: MaterialCache,
+    /// Registered-but-unspawned work — placements awaiting their model plus WMO props awaiting
+    /// their own M2s. Zero means the spawner's full [`Self::by_id`] walk has nothing to find, so
+    /// it returns without paying it (a resident city is thousands of placements, all spawned, in
+    /// steady state). Kept by the register/handoff/release sites here; the spawner itself settles
+    /// it as models land (and adds a WMO's props the moment they resolve).
+    pending_spawns: usize,
 }
 
 /// A shared placement: its resident model handle, world transform, and spawned submesh entities. Doodad
@@ -234,6 +241,13 @@ pub struct WorldLoadProgress {
     /// standing on another — the fail-closed guard that makes any future focus/snap ordering
     /// regression cost a logged 6 s timeout instead of a silent fall through the world.
     pub focus_tile: Option<(i32, i32)>,
+    /// Latched by the publisher once its own terms first read fully ready ([`Self::scene_ready`]
+    /// and [`Self::is_ready`]): the focus neighbourhood's per-placement walk is skipped from
+    /// then on — the counts stay at their converged values — until the focus lands on
+    /// unfurnished ground again (a worldport's map swap, a far teleport), which re-arms the full
+    /// accounting. [`Self::focus_tile`] and [`Self::focus_resident`] stay live every frame
+    /// regardless: the loading screen's backstop and the settle release key on them.
+    pub complete: bool,
 }
 
 impl WorldLoadProgress {
@@ -722,7 +736,7 @@ fn stream_terrain(
     // lane when measuring a streaming cost. Residency grows for the life of the run; dev-only.
     let unload_budget = cfg.as_ref().map(|c| c.unload_budget).unwrap_or(1);
     let keep = radius + 1;
-    let mut stale: Vec<(i32, i32)> = if std::env::var("WOW_NO_TILE_DROP").is_ok() {
+    let mut stale: Vec<(i32, i32)> = if tile_drop_disabled() {
         Vec::new()
     } else {
         state
@@ -848,7 +862,10 @@ fn stream_terrain(
         // render world their entire extract/prepare/upload as one 80–105 ms (process-CPU) frame —
         // the B181 first-contact spike. `furnish_tile_cells` (chained right after this system)
         // builds them from `AdtTile::chunks` + `shading` a few per frame while live.
+        // Chain-only visibility (`crate::vis_chain`): the tile root renders nothing itself —
+        // its cell meshes are the drawn children, and they need the inheritance chain intact.
         let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
+        tile_ent.vis_chain_only();
         if let Some((verts, tris)) = collider_data {
             // `GroundDecalSurface`: terrain receives the selection ring (see `crate::collision`).
             // `PickOccluder`: terrain clamps the mouse pick (the reference's world trace).
@@ -928,13 +945,6 @@ fn stream_terrain(
     // focus tile that doesn't exist (map edge) counts as resident so we never get stuck waiting
     // for ground that isn't there.
     if let Some(p) = load_progress.as_mut() {
-        // "Spawned" means FURNISHED (root + every cell): the furnisher is uncapped while the
-        // cover is up, so this costs entry nothing — but it keeps a reveal from ever showing a
-        // root whose ground is still landing (`furnished` lags root spawn by one frame here,
-        // since the furnisher runs after this system in the same chain).
-        let spawned = |c: &(i32, i32)| state.tiles.get(c).is_some_and(|t| t.furnished);
-        p.total = desired.len();
-        p.ready = desired.iter().filter(|c| spawned(c)).count();
         p.focus_tile = Some((cx, cy));
         // Resident = the focus tile is furnished — judged from the DESIRED set, not from the
         // presence of a `state.tiles` entry: a desired tile whose request hasn't landed yet is
@@ -946,35 +956,6 @@ fn stream_terrain(
         } else {
             true
         };
-        // The focus neighbourhood's placements join the accounting (bar + scene term). A placement
-        // is *up* once its own model spawned AND its WMO props (each an M2 arriving on its own
-        // schedule) have — the furniture the reveal would otherwise pop in. Placements of tiles not
-        // yet spawned aren't known yet; the missing tile itself holds `scene_ready` down.
-        let mut near_pending = 0usize;
-        let mut near_tile_missing = false;
-        for dx in -1..=1i32 {
-            for dy in -1..=1i32 {
-                let c = (cx + dx, cy + dy);
-                if !desired.contains(&c) {
-                    continue; // off-grid or WDT says no tile — nothing to wait for
-                }
-                match state.tiles.get(&c) {
-                    Some(t) if t.furnished => {
-                        for uid in &t.placements {
-                            if let Some(pl) = placements.by_id.get(uid) {
-                                let up = pl.spawned && pl.doodads.iter().all(|d| d.spawned);
-                                p.total += 1;
-                                p.ready += usize::from(up);
-                                near_pending += usize::from(!up);
-                            }
-                        }
-                    }
-                    _ => near_tile_missing = true,
-                }
-            }
-        }
-        p.placements_pending = near_pending;
-        p.scene_ready = p.focus_resident && !near_tile_missing && near_pending == 0;
         // Until the WDT answers we don't yet know what this map is made of, so nothing under the
         // focus can be called resident. Without this the post-worldport frames before the index
         // lands read as "ground is up" — harmless on an ADT map (the tile entries below close the
@@ -982,21 +963,79 @@ fn stream_terrain(
         // difference between a loading screen and a glimpse of the void.
         if wdt_index.is_none() && !state.wdt_ungated {
             p.focus_resident = false;
-            p.scene_ready = false;
         }
-        // A WMO-only map's residency IS its one building (0688) — there are no tiles to count, so
-        // the bar and the clear-condition ride the placement instead. Counting it keeps
-        // `total > 0`, which is what `is_ready` requires before it will clear the screen at all.
-        // The backstop/`world_stale` term takes the building's spawn; the scene term also waits
-        // for its props (the Stockade's 740 candles are the reveal).
+        // A WMO-only map's focus residency IS its one building's spawn (0688) — there is no
+        // tile to gate on. The bar/scene accounting for it lives in the gated block below.
         if state.global_wmo {
-            let pl = placements.by_id.get(&GLOBAL_WMO_UID);
-            let up = pl.is_some_and(|p| p.spawned);
-            let full = pl.is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned));
-            p.total += 1;
-            p.ready += usize::from(full);
-            p.focus_resident &= up;
-            p.scene_ready &= full;
+            p.focus_resident &= placements
+                .by_id
+                .get(&GLOBAL_WMO_UID)
+                .is_some_and(|p| p.spawned);
+        }
+        // `focus_tile`/`focus_resident` above stay live every frame — the loading screen's
+        // backstop and the settle release key on them. The counting below is only consumed
+        // while a load is underway, so once it has reported fully ready it latches off
+        // (`complete`) instead of walking the focus neighbourhood's every placement per frame
+        // forever. A focus on unfurnished ground IS a new load beginning (a worldport's map
+        // swap, a far teleport), so it re-arms the latch; `release_world`'s reset covers the
+        // logout → re-entry path.
+        if !p.focus_resident {
+            p.complete = false;
+        }
+        if !p.complete {
+            // "Spawned" means FURNISHED (root + every cell): the furnisher is uncapped while the
+            // cover is up, so this costs entry nothing — but it keeps a reveal from ever showing a
+            // root whose ground is still landing (`furnished` lags root spawn by one frame here,
+            // since the furnisher runs after this system in the same chain).
+            let spawned = |c: &(i32, i32)| state.tiles.get(c).is_some_and(|t| t.furnished);
+            p.total = desired.len();
+            p.ready = desired.iter().filter(|c| spawned(c)).count();
+            // The focus neighbourhood's placements join the accounting (bar + scene term). A
+            // placement is *up* once its own model spawned AND its WMO props (each an M2 arriving
+            // on its own schedule) have — the furniture the reveal would otherwise pop in.
+            // Placements of tiles not yet spawned aren't known yet; the missing tile itself holds
+            // `scene_ready` down.
+            let mut near_pending = 0usize;
+            let mut near_tile_missing = false;
+            for dx in -1..=1i32 {
+                for dy in -1..=1i32 {
+                    let c = (cx + dx, cy + dy);
+                    if !desired.contains(&c) {
+                        continue; // off-grid or WDT says no tile — nothing to wait for
+                    }
+                    match state.tiles.get(&c) {
+                        Some(t) if t.furnished => {
+                            for uid in &t.placements {
+                                if let Some(pl) = placements.by_id.get(uid) {
+                                    let up = pl.spawned && pl.doodads.iter().all(|d| d.spawned);
+                                    p.total += 1;
+                                    p.ready += usize::from(up);
+                                    near_pending += usize::from(!up);
+                                }
+                            }
+                        }
+                        _ => near_tile_missing = true,
+                    }
+                }
+            }
+            p.placements_pending = near_pending;
+            // `focus_resident` already folds the WDT gate and the global WMO's spawn, so both
+            // ride into the scene term through it.
+            p.scene_ready = p.focus_resident && !near_tile_missing && near_pending == 0;
+            // A WMO-only map's bar and clear-condition ride the placement (0688). Counting it
+            // keeps `total > 0`, which is what `is_ready` requires before it will clear the
+            // screen at all; the scene term also waits for its props (the Stockade's 740
+            // candles are the reveal).
+            if state.global_wmo {
+                let full = placements
+                    .by_id
+                    .get(&GLOBAL_WMO_UID)
+                    .is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned));
+                p.total += 1;
+                p.ready += usize::from(full);
+                p.scene_ready &= full;
+            }
+            p.complete = p.scene_ready && p.is_ready();
         }
         // Residency is *published* here and read by the mover's post-snap hold one stage later
         // (`player::release_post_snap_hold`). The streamer is still the only authority on which
@@ -1004,6 +1043,13 @@ fn stream_terrain(
         // reaching across 1160's line to act on it (decision 0737's release, inverted).
     }
     activity.stream_ms += t0.elapsed().as_secs_f32() * 1000.0;
+}
+
+/// `WOW_NO_TILE_DROP=1` — never release stale tiles (the ablation switch described at its use
+/// site in [`stream_terrain`]): a crossing becomes a pure asset-ADD event. Dev-only.
+fn tile_drop_disabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_DROP").is_some())
 }
 
 /// Register one M2 doodad placement: bump the refcount if it's already known, else load its model and
@@ -1038,6 +1084,7 @@ fn register_doodad(
             owner: tile,
         },
     );
+    placements.pending_spawns += 1;
 }
 
 /// Register one WMO building placement (vanilla scale is 1, so no per-placement scale).
@@ -1066,6 +1113,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             owner: (0, 0), // unread for WMOs — their prop hulls weld per placement (1369)
         },
     );
+    placements.pending_spawns += 1;
 }
 
 /// Despawn a tile's exclusively-owned entities — the terrain mesh, water surfaces, and per-chunk
@@ -1312,11 +1360,12 @@ fn handoff_straddlers(
                 commands.entity(e).try_despawn();
             }
             p.spawned = false;
+            placements.pending_spawns += 1;
         }
         handed += 1;
     }
     if handed > 0 {
-        info!(
+        debug!(
             "straddler handoff: {handed} placement(s) re-owned off dead tile ({},{})",
             dead.0, dead.1
         );
@@ -1340,6 +1389,10 @@ fn release_placement(
     };
     if drop_it {
         if let Some(p) = placements.by_id.remove(&uid) {
+            // The removed record may still owe spawns (a model that never landed, a building's
+            // props still arriving) — its share leaves the pending count with it.
+            placements.pending_spawns -=
+                usize::from(!p.spawned) + p.doodads.iter().filter(|d| !d.spawned).count();
             activity.placements_dropped += 1;
             activity.placement_entities_dropped += p.entities.len() as u32;
             for e in p.entities {

@@ -58,7 +58,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             .sort_by_key(|i| ((u8::from(i.cutout) << 1) | u8::from(i.two_sided), i.texture));
         remap_fader_items(state);
         let baked = bake_cell(&state.items, &mut meshes);
-        info!(
+        debug!(
             "static-gx: cell ({},{}) baked — {} item(s), {} vert(s)",
             cell.0,
             cell.1,
@@ -87,7 +87,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             )
         });
         let baked = bake_cell(&state.items, &mut meshes);
-        info!(
+        debug!(
             "static-gx: wmo {instance} baked — {} item(s), {} group(s), {} vert(s)",
             state.items.len(),
             baked.groups.len(),
@@ -116,7 +116,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
         });
         let mut baked = bake_cell(&state.items, &mut meshes);
         baked.sets = state.sets.clone();
-        info!(
+        debug!(
             "static-gx: props {instance} baked — {} item(s), {} set(s), {} vert(s)",
             state.items.len(),
             baked.sets.len(),

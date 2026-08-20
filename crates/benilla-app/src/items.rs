@@ -136,6 +136,12 @@ pub(crate) struct Items {
     /// itself is what ISSUES the ask-once query, so the first resolve of a cold entry ALWAYS
     /// misses (decision 0660).
     template_epoch: u64,
+    /// [`Self::template_epoch`]'s twin for the INSTANCE side (decision 1439): bumped by every
+    /// object create/merge/destroy and every enchant-deadline write — everything wire-driven
+    /// that can change what a bag/equipment view reads. The pair exists because `is_changed` on
+    /// this resource says nothing: the feeds' own lazy `template()` resolves take `&mut self`
+    /// every frame, so the resource reads as changed even when nothing landed.
+    object_epoch: u64,
     /// The **temporary-enchant deadlines**, keyed `(item guid, enchant slot)` — the reference's
     /// per-item `[obj + slot*4 + 0x324]` array (wow-re `tooltip-content-law.md` §E3), whose only
     /// feed is `SMSG_ITEM_ENCHANT_TIME_UPDATE`. NOT derived from `ITEM_FIELD_ENCHANTMENT`'s
@@ -154,6 +160,7 @@ impl Items {
                 e.insert(fields);
             }
         }
+        self.object_epoch = self.object_epoch.wrapping_add(1);
     }
 
     /// Merge a `Values` delta into a tracked item; `false` when the guid isn't ours to track (a
@@ -161,6 +168,7 @@ impl Items {
     pub(crate) fn merge_object(&mut self, guid: u64, fields: ObjectFields) -> bool {
         if let Some(store) = self.objects.get_mut(&guid) {
             store.merge(fields);
+            self.object_epoch = self.object_epoch.wrapping_add(1);
             true
         } else {
             false
@@ -169,8 +177,15 @@ impl Items {
 
     /// The item ceased to exist (`SMSG_DESTROY_OBJECT` — consumed, sold, destroyed).
     pub(crate) fn remove_object(&mut self, guid: u64) {
-        self.objects.remove(&guid);
+        if self.objects.remove(&guid).is_some() {
+            self.object_epoch = self.object_epoch.wrapping_add(1);
+        }
         self.enchant_deadlines.retain(|&(g, _), _| g != guid);
+    }
+
+    /// The instance-side broadcast counter — see the [`Self::object_epoch`] field.
+    pub(crate) fn object_epoch(&self) -> u64 {
+        self.object_epoch
     }
 
     /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` landed: park the absolute deadline for that item's enchant
@@ -179,11 +194,14 @@ impl Items {
     pub(crate) fn set_enchant_deadline(&mut self, guid: u64, slot: u32, seconds: u32) {
         match seconds {
             0 => {
-                self.enchant_deadlines.remove(&(guid, slot));
+                if self.enchant_deadlines.remove(&(guid, slot)).is_some() {
+                    self.object_epoch = self.object_epoch.wrapping_add(1);
+                }
             }
             n => {
                 let at = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(n));
                 self.enchant_deadlines.insert((guid, slot), at);
+                self.object_epoch = self.object_epoch.wrapping_add(1);
                 debug!("enchant timer: item {guid:#x} slot {slot} → {n}s");
             }
         }
@@ -196,6 +214,42 @@ impl Items {
         let at = self.enchant_deadlines.get(&(guid, slot))?;
         let left = at.saturating_duration_since(std::time::Instant::now());
         (!left.is_zero()).then_some(left.as_millis() as u64)
+    }
+
+    /// [`Self::enchant_remaining_ms`] at **display granularity**: floored to the whole second.
+    ///
+    /// The snapshot feeds read this one. The tooltip's bucket ladder is ceil at day/hour/min and
+    /// truncate at seconds, so every value inside one second renders the same line — but a raw
+    /// per-ms read makes the *snapshot* differ every frame, which held the 1439 gates open and
+    /// fired `UNIT_INVENTORY_CHANGED` at frame rate for as long as a poison ticked (director
+    /// report, 2026-08-19: the char window's cost, and its refusal to settle after closing).
+    /// Floored, the snapshot moves once a second — exactly as often as its rendering can.
+    /// The live per-ms reader stays for `GetWeaponEnchantInfo` ([`Self::enchant_deadline_ms`]),
+    /// whose per-frame push is the reference's own recompute-per-call (`0x5d9d00`).
+    pub(crate) fn enchant_remaining_display_ms(&self, guid: u64, slot: u32) -> Option<u64> {
+        self.enchant_remaining_ms(guid, slot)
+            .map(|ms| ms - ms % 1000)
+    }
+
+    /// The counter a gated feed watches instead of holding its gate open per-frame: moves exactly
+    /// when some [`Self::enchant_remaining_display_ms`] can move. Each live deadline contributes
+    /// `floor(seconds left) + 1` — the `+1` makes the final `Some(0) → None` collapse (the tooltip
+    /// reverting to the plain enchant name) its own step, one frame after the deadline elapses.
+    /// Landings and removals move [`Self::object_epoch`] on their own. Empty — the overwhelmingly
+    /// common case — costs an empty iteration.
+    pub(crate) fn enchant_display_epoch(&self) -> u64 {
+        let now = std::time::Instant::now();
+        self.enchant_deadlines
+            .values()
+            .map(|&at| {
+                let left = at.saturating_duration_since(now);
+                if left.is_zero() {
+                    0
+                } else {
+                    left.as_secs() + 1
+                }
+            })
+            .sum()
     }
 
     /// The same deadline read **without** the tooltip's expired-is-absent collapse: `Some(0)` for a
@@ -304,6 +358,7 @@ impl Items {
         self.objects.clear();
         self.enchant_deadlines.clear();
         self.pending.clear();
+        self.object_epoch = self.object_epoch.wrapping_add(1);
     }
 }
 
@@ -444,6 +499,77 @@ mod tests {
             items.template(117, 0x43, &cmds).map(|i| i.name.as_str()),
             Some("Tough Jerky")
         );
+    }
+
+    /// The gated feeds' instance-side counter (1439): every object mutation moves it, a
+    /// template landing moves ONLY the template epoch, and a lazy `template()` miss — the
+    /// per-frame read that poisons `is_changed` — moves neither.
+    #[test]
+    fn the_object_epoch_counts_instances_and_asks_count_nothing() {
+        let (cmds, _rx) = commands();
+        let mut items = Items::default();
+        let e0 = items.object_epoch();
+
+        assert!(items.template(117, 0x42, &cmds).is_none());
+        assert_eq!(items.object_epoch(), e0, "an ask-once miss is not a change");
+        let t0 = items.template_epoch();
+        items.insert_template(117, Some(info("Tough Jerky")));
+        assert_eq!(
+            items.object_epoch(),
+            e0,
+            "a landed template is the OTHER epoch's edge"
+        );
+        assert_ne!(items.template_epoch(), t0);
+
+        items.insert_object(0x42, ObjectFields::from_pairs(&[(3, 117)]));
+        let created = items.object_epoch();
+        assert_ne!(e0, created, "a create moves it");
+        items.merge_object(0x42, ObjectFields::from_pairs(&[(14, 5)]));
+        let merged = items.object_epoch();
+        assert_ne!(created, merged, "a delta moves it");
+        items.merge_object(0x99, ObjectFields::from_pairs(&[(14, 5)]));
+        assert_eq!(
+            items.object_epoch(),
+            merged,
+            "an untracked guid's delta is dropped, not counted"
+        );
+        items.remove_object(0x42);
+        assert_ne!(items.object_epoch(), merged, "a destroy moves it");
+        let removed = items.object_epoch();
+        items.remove_object(0x42);
+        assert_eq!(
+            items.object_epoch(),
+            removed,
+            "removing the already-removed is silent"
+        );
+    }
+
+    /// The display epoch/quantize pair: a parked deadline contributes `floor(secs)+1` (bounded
+    /// here, not exact — the test can't pin the sub-second phase), the display read is floored
+    /// to the whole second, and clearing the deadline zeroes the epoch (the `Some(0) → None`
+    /// collapse is the term's own last step).
+    #[test]
+    fn the_enchant_display_epoch_steps_by_displayable_seconds() {
+        let mut items = Items::default();
+        assert_eq!(items.enchant_display_epoch(), 0, "no deadlines, no epoch");
+
+        items.set_enchant_deadline(0x42, 1, 90);
+        let epoch = items.enchant_display_epoch();
+        assert!(
+            (90..=91).contains(&epoch),
+            "a 90 s deadline contributes floor(secs)+1, got {epoch}"
+        );
+        let shown = items.enchant_remaining_display_ms(0x42, 1).unwrap();
+        assert_eq!(shown % 1000, 0, "the display read is second-floored");
+        assert!(shown <= 90_000);
+
+        items.set_enchant_deadline(0x42, 1, 0);
+        assert_eq!(
+            items.enchant_display_epoch(),
+            0,
+            "cleared deadline, term gone"
+        );
+        assert_eq!(items.enchant_remaining_display_ms(0x42, 1), None);
     }
 
     /// The push half of the tooltip store: a landed template is marked fresh exactly once (the

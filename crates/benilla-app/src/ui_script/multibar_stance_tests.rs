@@ -23,10 +23,19 @@ fn load_xml(s: &UiScript, file: &str) {
 
 /// Load the shipped `UIParent.xml` (UIParent_ManageFramePositions — the stance bar's
 /// OnShow/OnHide calls it, decision 0272; the runtime loads it before every bar) +
+/// `Fonts.xml`/`GameTooltip.xml` (the buttons' OnEnter/OnLeave reach GameTooltip, and since the
+/// hover-hide law a bar hiding under the cursor fires the hovered button's OnLeave — a harness
+/// without the tooltip turns that faithful fire into a nil-index error) +
 /// `Cooldown.xml` (CooldownFrame_SetTimer — same before-every-consumer posture) +
 /// `ActionBar.xml` (the anchor target + shared globals both new bars need).
 fn load_action_bar(s: &UiScript) {
-    for file in ["UIParent.xml", "Cooldown.xml", "ActionBar.xml"] {
+    for file in [
+        "Fonts.xml",
+        "UIParent.xml",
+        "GameTooltip.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+    ] {
         load_xml(s, file);
     }
 }

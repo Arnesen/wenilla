@@ -11,6 +11,7 @@ use benilla_ui::script::{ScriptValue, UiScript, UnitState};
 
 use crate::names::NameCache;
 use crate::net::{NetCommands, ObjectStore};
+use crate::ui_script::gate;
 use crate::ui_unit::{fire_transitions, snapshot};
 
 use super::{PetBar, PetUnit};
@@ -31,6 +32,9 @@ pub(super) struct PetUnitMemory {
     /// (decision 1066). The guid rides along because the timestamp alone would read a *different*
     /// pet's stamp as a rename of this one.
     name_stamp: Option<(u64, Option<u32>)>,
+    /// The gate's counter memory (1439): the name cache by its landed counter — the token's own
+    /// `resolve` miss lands frames later, and `is_changed` cannot flag it.
+    names_generation: gate::Watch,
 }
 
 /// `UNIT_FIELD_FLAGS` bit `0x800` — the **pet-in-combat** flag, and the whole trigger for
@@ -55,10 +59,13 @@ pub(super) const UNIT_FLAG_PET_IN_COMBAT: u32 = 0x0000_0800;
 /// The reaction argument is `0`: the pet frame reads no reaction (only `"target"` resolves one —
 /// [`crate::ui_unit::feed_units`]' own note), and the party feed passes the same for the same
 /// reason.
+#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_pet_unit(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
     pet: PetUnit,
+    changed_stores: Query<(), Changed<ObjectStore>>,
+    mut removed_stores: RemovedComponents<ObjectStore>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<PetUnitMemory>>,
@@ -66,7 +73,30 @@ pub(super) fn feed_pet_unit(
     let Some(mut script) = script else {
         return;
     };
-    let memory = memory.get(&script);
+    let (memory, vm_reset) = memory.get_reset(&script);
+    // The gate (1439): the bar (the token's identity), any descriptor change or DESPAWN (the
+    // snapshot, the combat flag, and the rename timestamp all live on the pet's store), and the
+    // name cache by its landed counter.
+    let names_moved = memory.names_generation.moved(names.generation());
+    let bar_changed = bar.is_changed();
+    let stores_changed = !changed_stores.is_empty();
+    let stores_removed = !removed_stores.is_empty();
+    gate::trace(
+        "feed_pet_unit",
+        &[
+            ("vm_reset", vm_reset),
+            ("names", names_moved),
+            ("bar", bar_changed),
+            ("stores", stores_changed),
+            ("removed", stores_removed),
+        ],
+    );
+    let gate =
+        gate::Gate::new(vm_reset || names_moved || bar_changed || stores_changed || stores_removed);
+    removed_stores.clear();
+    if gate.skip() {
+        return;
+    }
     let pet_guid = bar.spells.pet_guid;
     watch_name_timestamp(pet_guid, &mut script, &pet, &mut names, memory);
     // A bar whose unit has not streamed yet (or has left) pushes nothing: `UnitExists("pet")` then
@@ -82,7 +112,16 @@ pub(super) fn feed_pet_unit(
             s
         });
 
-    script.set_unit("pet", fresh.clone());
+    // Pushed on diff (1439): an identical snapshot re-pushed is invisible to the VM.
+    let dirty = match (&fresh, &memory.pushed) {
+        (Some(cur), Some(prev)) => cur != prev,
+        (None, None) => false,
+        _ => true,
+    };
+    if dirty {
+        gate.audit("feed_pet_unit", "the pet snapshot");
+        script.set_unit("pet", fresh.clone());
+    }
     match &fresh {
         Some(cur) => {
             if memory.pushed.as_ref() != Some(cur) {
@@ -113,6 +152,7 @@ pub(super) fn feed_pet_unit(
     // the same pet (a learned spell, a mode change) is not one, which is why this diffs the guid
     // rather than riding `feed_pet_bar`'s whole-state diff.
     if memory.guid != Some(pet_guid) {
+        gate.audit("feed_pet_unit", "the UNIT_PET edge");
         memory.guid = Some(pet_guid);
         debug!("ui_pet: UNIT_PET — pet is now {pet_guid:#x}");
         script.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
@@ -143,6 +183,7 @@ pub(super) fn feed_pet_unit(
         .and_then(|_| pet_combat_flag(pet.store(pet_guid)?, pet.self_guid.0));
     if let Some(now) = in_combat {
         if memory.in_combat != Some(now) {
+            gate.audit("feed_pet_unit", "the pet combat-flag edge");
             memory.in_combat = Some(now);
             debug!("ui_pet: pet in-combat flag → {now}");
             script.fire_event(

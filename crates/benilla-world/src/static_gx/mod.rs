@@ -679,7 +679,7 @@ impl StaticGx {
             owner: b.owner,
             texture: b.texture.as_ref().map(Handle::id),
             _texture_handle: b.texture,
-            cutout: b.blend == ModelBlend::AlphaTest && std::env::var("WOW_NO_ALPHATEST").is_err(),
+            cutout: b.blend == ModelBlend::AlphaTest && !crate::model_render::alphatest_disabled(),
             two_sided: b.two_sided,
             unlit: b.unlit,
             fog_off: matches!(b.fog_policy, benilla_formats::FogPolicy::Off),

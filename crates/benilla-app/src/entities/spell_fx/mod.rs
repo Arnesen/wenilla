@@ -58,6 +58,7 @@ use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 use benilla_world::model_render::{ModelKind, ModelPart};
 use benilla_world::particles;
+use benilla_world::vis_chain::VisChainOnly;
 
 use super::{BoneAttach, DisplayModel, EntityPart, ModelHandle};
 pub(super) use lifecycle::advance_fx_anim;
@@ -877,6 +878,9 @@ pub(super) fn attach_spell_fx(
                             follow,
                         },
                     ))
+                    // Chain-only visibility (benilla_world::vis_chain) — the wrapper
+                    // renders nothing; the effect's parts are the children.
+                    .vis_chain_only()
                     .id();
                 (root, true)
             } else {
@@ -896,6 +900,8 @@ pub(super) fn attach_spell_fx(
                 let (parent, offset) = point.map_or((unit, Vec3::ZERO), |(_, j, o)| (j, o));
                 let root = commands
                     .spawn((Transform::from_translation(offset), Visibility::default()))
+                    // Chain-only, as above.
+                    .vis_chain_only()
                     .id();
                 commands.entity(parent).add_child(root);
                 (root, ground_anchor)

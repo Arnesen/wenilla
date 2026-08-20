@@ -41,6 +41,11 @@ mod reference_ui;
 /// or a change-memo outliving the VM it was written against (decision 1290).
 mod session;
 
+/// The feed gate (decision 1439): the input-side early-out for a per-frame UI feed, its
+/// [`gate::Watch`] counter memory, and the `WOW_FEED_GATE_CHECK=1` audit that catches a gate
+/// missing an input.
+pub(crate) mod gate;
+
 pub(crate) use session::VmMemo;
 
 // The manifest's loaders read as `ui_script::…` at every call site, including the tests' `super::`.

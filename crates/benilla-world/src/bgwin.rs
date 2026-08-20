@@ -51,6 +51,8 @@ const BG_ENV_PREFIXES: &[&str] = &[
     "WOW_CHARSELECT_SHOT",
     "WOW_CREATE_TEST",
     "WOW_DEPTH",
+    "WOW_FEED_GATE_CHECK",
+    "WOW_FEED_GATE_TRACE",
     "WOW_FPS_",
     "WOW_GLUE_ROUNDTRIP",
     "WOW_LIVE_",
@@ -95,6 +97,8 @@ pub fn background_run() -> bool {
 /// `WOW_PROBE…`-named env that captures pixels has to be excluded by name here, since the bare
 /// `WOW_PROBE` prefix would otherwise sweep it in.
 const NO_PIXEL_ENV_PREFIXES: &[&str] = &[
+    "WOW_FEED_GATE_CHECK",
+    "WOW_FEED_GATE_TRACE",
     "WOW_FPS_",
     "WOW_LIVE_FPS",
     "WOW_PARTICLE_CENSUS",

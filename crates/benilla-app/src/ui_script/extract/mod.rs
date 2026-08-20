@@ -213,10 +213,18 @@ pub(super) fn drive_script(
 ) {
     let (capture, ui_cost_wanted) = run;
     let Some(mut script) = script else {
+        // No VM ⇒ no UI is sampling any booth pane. The panes map must not outlive its writer:
+        // every OTHER return in this system provably keeps pane presence unchanged (the settled
+        // gate compares the whole extracted list; the splice refuses `portrait_unit` entries),
+        // but a VM dying mid-world with the character window up would strand its pane here and
+        // the paper-doll camera would render behind a dead UI until the next full conversion.
+        booths.panes.0.clear();
         return;
     };
     let prev = prev.get(&script);
     let Ok(window) = window.single() else {
+        // Same law as the no-VM arm: no window, no sampling — a pane map with no writer lies.
+        booths.panes.0.clear();
         return;
     };
     let (w, h) = (window.width(), window.height());

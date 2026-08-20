@@ -57,6 +57,7 @@ use bevy::render::renderer::RenderQueue;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::mesh_tag::MAX_RIG_SLOTS;
+use crate::vis_chain::VisChainOnly;
 
 /// Bone capacity of the palette region — concurrently-resident skinned bones across every live
 /// rig (units, animated doodads, spell effects, booths). The LBRS census (0718) holds ~59 k unit
@@ -942,12 +943,14 @@ pub fn spawn_joints(
                 // Visibility too, not just Transform: held items and spell effects hang their
                 // visible roots under joints, and a gap in the chain both trips Bevy's B0004 and
                 // orphans those subtrees from the unit root's visibility (a hidden unit would
-                // keep its weapon on screen).
+                // keep its weapon on screen). Chain only — a joint renders nothing
+                // (`crate::vis_chain`).
                 .spawn((
                     Transform::from_translation(j.local_translation),
                     Visibility::default(),
                     RigJoint(holder),
                 ))
+                .vis_chain_only()
                 .id()
         })
         .collect();

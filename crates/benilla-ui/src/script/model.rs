@@ -275,6 +275,15 @@ pub(crate) struct Model {
     /// The frame currently under the cursor (the last [`UiScript::mouse_move`] capture), so the next
     /// move knows whether to fire `OnLeave`/`OnEnter`. `None` = cursor over no mouse-enabled frame.
     pub(crate) mouseover: Option<FrameHandle>,
+    /// The hover **re-pick** is due: the world under a stationary cursor changed — the hovered
+    /// frame hid (its `OnLeave` already fired at hide time), or a frame was shown that may now
+    /// be the topmost under the cursor. The reference keeps exactly this flag on the frame
+    /// manager (`[root+0x1100]`) and its per-tick pump re-runs the hover walk at the **saved**
+    /// cursor position, explicitly bypassing the didn't-move coalesce — so the newly exposed
+    /// frame gets `OnEnter` with no physical mouse move (wow-re
+    /// `ui/scratch/hover-hide-and-tooltip-owner-law.md`: writers `0x764cbb`/`0x764b8d`, pump
+    /// tail `0x7657a1` → `0x7660d0` self-alias). [`UiScript::tick`] drains it the same way.
+    pub(crate) hover_repick: bool,
     /// Per-button, the frame a mouse-down last captured (`button name → frame`), for the `OnClick`
     /// same-frame press+release test in [`UiScript::mouse_button`]. Keyed by button so a `LeftButton`
     /// press is not cleared by a `RightButton` release.
@@ -1220,6 +1229,7 @@ impl Model {
             frame_events: HashMap::new(),
             focused_editbox: None,
             mouseover: None,
+            hover_repick: false,
             mouse_down_on: HashMap::new(),
             last_click: HashMap::new(),
             pending_size_changed: Vec::new(),

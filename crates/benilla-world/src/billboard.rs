@@ -614,13 +614,24 @@ pub(crate) fn face_billboards(
                 * (Vec3::from_array(a.sample(elapsed_ms.wrapping_add(card.arm_neg_ms)))
                     * card.scale)
         });
-        *tf = Transform {
+        let placed = Transform {
             translation: card.world_pivot + bob,
             rotation,
             scale: Vec3::splat(card.scale) * pulse,
         };
+        // A parked camera over a still, track-less card recomputes bit-identical values, so the
+        // write only lands on real movement: unconditional, it marked every card
+        // `Changed<Transform>`+`Changed<GlobalTransform>` every frame and the downstream
+        // change-detection consumers (`classify_water_side`'s moved sweep, the shade dirty walk)
+        // never went quiet.
+        if *tf != placed {
+            *tf = placed;
+        }
         // Propagation already ran this frame — the direct global write is what renders.
-        *global = GlobalTransform::from(*tf);
+        let placed_global = GlobalTransform::from(placed);
+        if *global != placed_global {
+            *global = placed_global;
+        }
     }
 }
 

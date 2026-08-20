@@ -12,6 +12,7 @@ use benilla_world::model_fade::{
     join_unit_appear_fade, FadeSet, JoinedFade, PartFade, UnitAppearFade,
 };
 use benilla_world::model_render::{ModelKind, ModelPart};
+use benilla_world::vis_chain::VisChainOnly;
 
 use super::super::{item_glow::ItemGlow, spawn_carried_lights};
 use super::{
@@ -293,6 +294,9 @@ fn spawn_slot(
             // instances included (decision 0833).
             benilla_world::model_fade::ParentModel(entity),
         ))
+        // Chain-only visibility (benilla_world::vis_chain): the wrapper renders nothing —
+        // the item's parts and glows are the children.
+        .vis_chain_only()
         .id();
     commands.entity(joint).add_child(root);
     // The item/enchant glow (decision 0805): its instances hang off the ITEM's own

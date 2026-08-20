@@ -47,7 +47,7 @@ pub(super) fn furnish_tile_cells(
     // on it (a crossing's spike survived zero cells, exonerating the entity lane); the
     // `WOW_NO_LIQUID`/`WOW_NO_PARTICLES` family's pattern. Tiles still MARK furnished, so the
     // loading-screen residency (which now waits on furnishing) converges.
-    let ablated = std::env::var("WOW_NO_TILE_CELLS").is_ok();
+    let ablated = tile_cells_disabled();
 
     let focus = state.focus;
     let mut pending: Vec<(i32, (i32, i32))> = state
@@ -114,6 +114,13 @@ pub(super) fn furnish_tile_cells(
     }
     activity.cells_spawned += built as u32;
     activity.furnish_ms += t0.elapsed().as_secs_f32() * 1000.0;
+}
+
+/// `WOW_NO_TILE_CELLS=1` — furnish no per-chunk cell entities (the ablation switch described at
+/// its use site in [`furnish_tile_cells`]). Dev-only.
+fn tile_cells_disabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_CELLS").is_some())
 }
 
 /// The one thing the furnisher promises the rest of the streamer: a tile is `furnished` only

@@ -42,6 +42,13 @@ pub(crate) const BATCH_ORDER_SORT_EPS: f32 = 1e-3;
 /// 899 tie here — see the cap rationale at the one application site.
 pub(crate) const BATCH_ORDER_SORT_CAP: f32 = 0.9;
 
+/// `WOW_NO_ALPHATEST=1` — every cutout batch draws opaque (the A/B lever described at the
+/// [`model_material`] use site; the static-gx bake keys its cutout runs on the same read).
+pub(crate) fn alphatest_disabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_NO_ALPHATEST").is_some())
+}
+
 /// Material-dedup key: same texture + blend + sidedness + kind + fade-variant → one shared material.
 #[derive(PartialEq, Eq, Hash)]
 pub struct MatKey {
@@ -274,8 +281,7 @@ pub fn model_material(
     // from the surface losing a depth test or never being submitted. (B38: the flip
     // survives it unchanged, so the cutout is not what removes the awning.) It suppresses the
     // fade twin's cutout marker too, so the A/B answers the same question mid-fade.
-    let source_cutout =
-        blend == ModelBlend::AlphaTest && std::env::var("WOW_NO_ALPHATEST").is_err();
+    let source_cutout = blend == ModelBlend::AlphaTest && !alphatest_disabled();
     let alpha_mode = if is_additive || fade_variant {
         // A fade twin blends whatever its source blend is — the reference's promotion is
         // transparent-pass membership (`m2-blend-promotion-zfill.md` §1); the source blend the

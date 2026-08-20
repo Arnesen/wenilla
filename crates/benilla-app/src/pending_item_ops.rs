@@ -47,6 +47,13 @@ impl PendingItemOps {
         );
     }
 
+    /// No outstanding ops at all — the container feed's gate reads this (decision 1439): while
+    /// anything is in flight the resolving walk must run every frame, and once nothing is, the
+    /// last resolve's own change tick already covered the final unlock.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Whether `(bag, slot)` is covered by any outstanding op — the container feed reads this
     /// building each pushed `ContainerSlot::locked`.
     pub(crate) fn contains(&self, bag: i64, slot: u32) -> bool {

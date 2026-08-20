@@ -45,7 +45,7 @@ use crate::ui_action::{
     cast_target, melee_auto_attack_icon, ranged_weapon_icon, CastCommit, CastLadder, PlayerActions,
     Spells,
 };
-use crate::ui_script::UiInput;
+use crate::ui_script::{gate, UiInput};
 use crate::ui_unit::UnitFeed;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
@@ -117,6 +117,13 @@ fn load_skill_lines(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 #[derive(Default)]
 struct FeedMemory {
     pushed: SpellBookState,
+    /// The gate's counter memories (1439) — the stores whose lazy resolves poison `is_changed`
+    /// (the weapon-icon template asks, the cooldown store's per-frame prune), plus the self
+    /// store's PRESENCE: the book's weapon icons flip on a despawn no `Changed` filter sees.
+    items_objects: gate::Watch,
+    items_templates: gate::Watch,
+    cooldown_epoch: gate::Watch,
+    self_present: gate::Watch,
 }
 
 #[allow(clippy::too_many_arguments)] // a Bevy system's full input set
@@ -126,6 +133,7 @@ fn feed_spellbook(
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
@@ -136,7 +144,58 @@ fn feed_spellbook(
     let Some(mut script) = script else {
         return;
     };
-    let memory = memory.get(&script);
+    let (memory, vm_reset) = memory.get_reset(&script);
+    // The gate (1439): the book is a function of the known-spell set, the two catalogs, the
+    // self descriptor (race/class, form byte, the two weapon slots — presence watched too,
+    // see the memory struct), the item stores behind the weapon icons, and the cooldown
+    // store. `UiClock` is deliberately NOT an input: `ui_triple` is frame-stable per arm and
+    // natural expiry rides the store's `feed_epoch`.
+    let objects_moved = memory.items_objects.moved(items.object_epoch());
+    let templates_moved = memory.items_templates.moved(items.template_epoch());
+    let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
+    let presence_moved = memory.self_present.moved(u64::from(!self_q.is_empty()));
+    // The frame a timer crosses zero, BEFORE the per-frame prune has moved the epoch
+    // (`sweep_pending`'s own doc) — the triple flips to None right then.
+    let sweep = cooldowns.sweep_pending(clock.anchor);
+    let self_changed = !changed_self.is_empty();
+    let actions_changed = actions.is_changed();
+    let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
+    let lines_changed = skill_lines.as_ref().is_some_and(|r| r.is_changed());
+    // `is_added` for the icon catalog: the feeds read only its load-once icon column;
+    // its model-cache half churns every frame (the containers gate's own note).
+    let icons_added = icons.as_ref().is_some_and(|r| r.is_added());
+    gate::trace(
+        "feed_spellbook",
+        &[
+            ("vm_reset", vm_reset),
+            ("objects", objects_moved),
+            ("templates", templates_moved),
+            ("cooldowns", cooldowns_moved),
+            ("sweep", sweep),
+            ("presence", presence_moved),
+            ("self", self_changed),
+            ("actions", actions_changed),
+            ("spells", spells_changed),
+            ("skill_lines", lines_changed),
+            ("icons", icons_added),
+        ],
+    );
+    let gate = gate::Gate::new(
+        vm_reset
+            || objects_moved
+            || templates_moved
+            || cooldowns_moved
+            || sweep
+            || presence_moved
+            || self_changed
+            || actions_changed
+            || spells_changed
+            || lines_changed
+            || icons_added,
+    );
+    if gate.skip() {
+        return;
+    }
     // Nothing to resolve a name/icon/passive from yet — try again once Spell.dbc lands.
     let Some(spells) = spells.as_deref() else {
         return;
@@ -198,6 +257,7 @@ fn feed_spellbook(
             .ui_triple(anchor, ui_now);
     }
     if fresh != memory.pushed {
+        gate.audit("feed_spellbook", "the spellbook snapshot");
         // Two event edges off one diff: the ref fires CURRENT_SPELL_CAST_CHANGED for a checked-
         // ring move and SPELLS_CHANGED for the book itself; a same-frame both fires both.
         let ring_moved = fresh.slots.len() != memory.pushed.slots.len()

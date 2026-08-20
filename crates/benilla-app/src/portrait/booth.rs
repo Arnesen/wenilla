@@ -454,13 +454,18 @@ pub(super) fn spawn_booth_model(
 /// joint pose is read a frame stale (its global is last propagate's), invisible on the near-static
 /// Stand loop the booth runs — the same latency budget the paper-doll/portrait stills already accept.
 pub(super) fn face_booth_billboards(
-    cams: Query<(&GlobalTransform, &RenderLayers), With<super::BoothCam>>,
+    cams: Query<(&GlobalTransform, &RenderLayers, &Camera), With<super::BoothCam>>,
     joints: Query<&GlobalTransform>,
     mut cards: Query<(&BoothBillboard, &ChildOf, &RenderLayers, &mut Transform)>,
 ) {
     for (card, child_of, layers, mut tf) in &mut cards {
-        let Some((cam, _)) = cams.iter().find(|(_, l)| l.intersects(layers)) else {
-            continue; // the card's booth camera isn't up (booth torn down) — leave it be
+        let Some((cam, _, _)) = cams
+            .iter()
+            // A sleeping camera renders nothing — leave its cards be (the booth park); they
+            // re-face on the wake window's first frame, before anything samples the target.
+            .find(|(_, l, c)| c.is_active && l.intersects(layers))
+        else {
+            continue; // …or the card's booth camera isn't up at all (booth torn down)
         };
         let Ok(joint) = joints.get(child_of.parent()) else {
             continue;
@@ -595,6 +600,9 @@ mod tests {
             .world_mut()
             .spawn((
                 crate::portrait::BoothCam("glue".to_string()),
+                // `Camera` because the facer skips a sleeping camera (the booth park);
+                // the default is active — the state a rendering booth is in.
+                Camera::default(),
                 GlobalTransform::from(cam_tf),
                 layer.clone(),
             ))

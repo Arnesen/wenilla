@@ -623,3 +623,98 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
         );
     }
 }
+
+/// The hover-hide law (wow-re `ui/scratch/hover-hide-and-tooltip-owner-law.md`, §5-arbitrated):
+/// hiding the hovered frame fires its `OnLeave` synchronously, BEFORE its own `OnHide`
+/// (`0x764ba0`'s kind-2 tail runs mid-hide, the leave at `0x764cce`; OnHide fires at the hide
+/// body's tail) — and an ancestor's `Hide()` reaches the hovered descendant through the cascade.
+#[test]
+fn hiding_the_hovered_frame_fires_its_onleave_before_onhide() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        log = {}
+        local win = CreateFrame("Frame", "Win")
+        win:SetPoint("BOTTOMLEFT", 0, 0); win:SetSize(800, 600)
+        local slot = CreateFrame("Button", "Slot", win)
+        slot:SetPoint("BOTTOMLEFT", 100, 100); slot:SetSize(100, 100); slot:EnableMouse(true)
+        slot:SetScript("OnLeave", function() table.insert(log, "leave") end)
+        slot:SetScript("OnHide", function() table.insert(log, "hide") end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(150.0, 150.0); // hover the slot
+    s.run("Win:Hide()").unwrap(); // the ANCESTOR hides — the cascade reaches the slot
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "leave,hide",
+        "OnLeave fires synchronously inside the hide, before the frame's own OnHide"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The negative: hiding a frame the cursor is NOT over fires no OnLeave (the reference's removal
+/// tail acts only when the removed frame IS the cached hover).
+#[test]
+fn hiding_an_unhovered_frame_fires_no_onleave() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        leaves = 0
+        local a = CreateFrame("Button", "Away")
+        a:SetPoint("BOTTOMLEFT", 500, 500); a:SetSize(50, 50); a:EnableMouse(true)
+        a:SetScript("OnLeave", function() leaves = leaves + 1 end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(10.0, 10.0); // nowhere near it
+    s.run("Away:Hide()").unwrap();
+    assert_eq!(s.eval::<f64>("return leaves").unwrap(), 0.0);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The re-pick (`[root+0x1100]` + the pump tail `0x7660d0` on the SAVED event): after the hovered
+/// frame hides, the next tick re-hovers whatever is now topmost at the unchanged cursor — OnEnter
+/// with no physical mouse move. And the symmetric insert law: a frame SHOWN under a stationary
+/// cursor gets hovered on the next tick too (`0x764b8d`).
+#[test]
+fn the_repick_re_hovers_without_a_mouse_move() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        entered = {}
+        local under = CreateFrame("Button", "Under")
+        under:SetPoint("BOTTOMLEFT", 100, 100); under:SetSize(100, 100); under:EnableMouse(true)
+        under:SetScript("OnEnter", function() table.insert(entered, "under") end)
+        local over = CreateFrame("Button", "Over")
+        over:SetPoint("BOTTOMLEFT", 100, 100); over:SetSize(100, 100); over:EnableMouse(true)
+        over:SetScript("OnEnter", function() table.insert(entered, "over") end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(150.0, 150.0); // hovers Over (topmost)
+    s.run("Over:Hide()").unwrap();
+    s.tick(0.016); // the pump's re-pick — cursor has not moved
+    assert_eq!(
+        s.eval::<String>("return table.concat(entered, ',')")
+            .unwrap(),
+        "over,under",
+        "the frame beneath is entered on the next tick with no mouse move"
+    );
+    // The insert half: re-showing the top frame under the stationary cursor re-hovers it.
+    s.run("Over:Show()").unwrap();
+    s.tick(0.016);
+    assert_eq!(
+        s.eval::<String>("return table.concat(entered, ',')")
+            .unwrap(),
+        "over,under,over",
+        "a frame shown under the cursor is entered on the next tick"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

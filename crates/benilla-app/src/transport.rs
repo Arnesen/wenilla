@@ -36,6 +36,7 @@ use bevy::prelude::*;
 use crate::go_templates::GameObjectTemplates;
 use crate::net::Guid;
 use benilla_assets::{LockRecover, WorldAssets};
+use benilla_world::vis_chain::VisChainOnly;
 use benilla_world::world_map::CurrentMap;
 
 pub(crate) struct TransportPlugin;
@@ -257,7 +258,11 @@ fn arm_transports(
                 commands
                     .entity(entity)
                     .remove::<(ElevatorSeed, TransportAnchor)>()
-                    .insert(Visibility::default());
+                    .insert(Visibility::default())
+                    // The one insert-based visibility flip: `Visibility`'s require chain just
+                    // re-added the sweep row a net root sheds at spawn — strip it again
+                    // (benilla_world::vis_chain).
+                    .vis_chain_only();
                 continue;
             };
             let Some(current_map) = current_map.as_ref() else {

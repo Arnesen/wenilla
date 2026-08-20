@@ -371,7 +371,9 @@ type TracedModels<'w, 's> = Query<
         &'static GlobalTransform,
         &'static Visibility,
         &'static InheritedVisibility,
-        &'static ViewVisibility,
+        // `Option`: a chain-only node (anim host root — `crate::vis_chain`) has no sweep row;
+        // it must still appear in the trace rather than silently vanish from the instrument.
+        Option<&'static ViewVisibility>,
         Option<&'static Aabb>,
         // Which lane the row is: a world-root billboard CARD inherits nothing, so `inh=true` on it
         // means only "no parent", never "my model is drawn" — the one row where the second field
@@ -421,7 +423,8 @@ pub(super) fn trace_model_visibility(
              cam=[{px:.1},{py:.1},{pz:.1}]",
             label = object.label,
             inh = inherited.get(),
-            view = view.get(),
+            // "-" = chain-only node, no sweep row (never drawn, so no per-view verdict exists).
+            view = view.map_or("-".into(), |v| v.get().to_string()),
             ox = xf.translation().x,
             oy = xf.translation().y,
             oz = xf.translation().z,

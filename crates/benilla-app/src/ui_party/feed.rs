@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::target::Selection;
+use crate::ui_script::gate;
 
 use super::GroupState;
 
@@ -27,6 +28,14 @@ pub(super) struct FedParty {
     loot: Option<GroupLootInfo>,
     invite: Option<String>,
     units: [Option<UnitState>; 4],
+    /// The whole roster-level snapshot last pushed — `set_party`'s own diff (1439; it used to
+    /// re-push, allocations and all, every frame).
+    pushed_party: Option<PartyState>,
+    /// The gate's counter memories (1439): the name cache by its landed counter (the resolves
+    /// other feeds run per frame poison `is_changed` on it), and the leaf area under us (our
+    /// own raid row's zone — a plain value watched as a counter).
+    names_generation: gate::Watch,
+    area: gate::Watch,
 }
 
 const PARTY_TOKENS: [&str; 4] = ["party1", "party2", "party3", "party4"];
@@ -49,6 +58,8 @@ pub(super) fn feed_party(
     group: Res<GroupState>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
+    changed_stores: Query<(), Changed<ObjectStore>>,
+    mut removed_stores: RemovedComponents<ObjectStore>,
     self_q: Query<(&Guid, &ObjectStore), With<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     names: Res<NameCache>,
@@ -63,7 +74,48 @@ pub(super) fn feed_party(
     let Some(mut script) = script else {
         return;
     };
-    let fed = fed.get(&script);
+    let (fed, vm_reset) = fed.get_reset(&script);
+    // The gate (1439): the group state, any member/self descriptor change or DESPAWN (a removed
+    // store is invisible to `Changed`), the streamed-guid index the merged view resolves
+    // through, the two catalogs, the name cache by its landed counter, and our own leaf area
+    // (the raid row's zone). The gate closing needs the party quiet — solo, it almost always is.
+    let names_moved = fed.names_generation.moved(names.generation());
+    let area_moved = fed.area.moved(here.area().map_or(u64::MAX, u64::from));
+    let group_changed = group.is_changed();
+    let index_changed = index.is_changed();
+    let stores_changed = !changed_stores.is_empty();
+    let stores_removed = !removed_stores.is_empty();
+    let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
+    let areas_changed = areas.as_ref().is_some_and(|r| r.is_changed());
+    gate::trace(
+        "feed_party",
+        &[
+            ("vm_reset", vm_reset),
+            ("names", names_moved),
+            ("area", area_moved),
+            ("group", group_changed),
+            ("index", index_changed),
+            ("stores", stores_changed),
+            ("removed", stores_removed),
+            ("factions", factions_changed),
+            ("areas", areas_changed),
+        ],
+    );
+    let gate = gate::Gate::new(
+        vm_reset
+            || names_moved
+            || area_moved
+            || group_changed
+            || index_changed
+            || stores_changed
+            || stores_removed
+            || factions_changed
+            || areas_changed,
+    );
+    removed_stores.clear();
+    if gate.skip() {
+        return;
+    }
     let self_pair = self_q.iter().next();
     let self_guid = self_pair.map(|(g, _)| g.0);
     // The party's PvP faction group (decision 0646 §1): our own. A 1.12 party is always one
@@ -139,16 +191,22 @@ pub(super) fn feed_party(
     };
     let raid = raid_roster(&group, me.as_ref(), &names, &zone_name);
 
-    script.set_party(PartyState {
+    let fresh = PartyState {
         members,
         leader_index,
         raid,
         loot_method,
         master_looter,
         loot_threshold,
-    });
+    };
+    if fed.pushed_party.as_ref() != Some(&fresh) {
+        gate.audit("feed_party", "the roster snapshot");
+        script.set_party(fresh.clone());
+        fed.pushed_party = Some(fresh);
+    }
 
-    // party1..party4 unit snapshots + their per-field UNIT_* transitions.
+    // party1..party4 unit snapshots + their per-field UNIT_* transitions — pushed on diff (1439;
+    // an identical snapshot re-pushed is invisible to the VM, so only a change pays the clone).
     for (i, token) in PARTY_TOKENS.iter().enumerate() {
         let snap = slots.get(i).map(|m| {
             member_unit_state(
@@ -160,28 +218,35 @@ pub(super) fn feed_party(
                 own_group.clone(),
             )
         });
-        script.set_unit(token, snap.clone());
-        if let Some(cur) = &snap {
-            crate::ui_unit::fire_transitions(&mut script, token, fed.units[i].as_ref(), cur);
+        if fed.units[i] != snap {
+            gate.audit("feed_party", "a party-token snapshot");
+            script.set_unit(token, snap.clone());
+            if let Some(cur) = &snap {
+                crate::ui_unit::fire_transitions(&mut script, token, fed.units[i].as_ref(), cur);
+            }
+            fed.units[i] = snap;
         }
-        fed.units[i] = snap;
     }
 
     // The party events, on edges.
     let roster: Vec<u64> = group.members.iter().map(|m| m.guid).collect();
     if roster != fed.roster {
+        gate.audit("feed_party", "the roster edge");
         script.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
         fed.roster = roster;
     }
     if group.leader != fed.leader {
+        gate.audit("feed_party", "the leader edge");
         script.fire_event("PARTY_LEADER_CHANGED", vec![]);
         fed.leader = group.leader;
     }
     if group.loot != fed.loot {
+        gate.audit("feed_party", "the loot-method edge");
         script.fire_event("PARTY_LOOT_METHOD_CHANGED", vec![]);
         fed.loot = group.loot;
     }
     if group.pending_invite != fed.invite {
+        gate.audit("feed_party", "the invite edge");
         match &group.pending_invite {
             Some(inviter) => script.fire_event(
                 "PARTY_INVITE_REQUEST",

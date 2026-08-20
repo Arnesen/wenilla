@@ -86,9 +86,10 @@ impl GlobalSeqDrive {
         })
     }
 
-    /// Pause/resume the joint writes (the doodad draw gate). While paused the joints hold their
-    /// last pose; resume lands on the anchored cursor with nothing to catch up.
-    pub(crate) fn set_paused(&mut self, paused: bool) {
+    /// Pause/resume the joint writes (the doodad draw gate, and the booth park — a sleeping
+    /// booth camera renders nothing, so its scene's channels hold). While paused the joints
+    /// hold their last pose; resume lands on the anchored cursor with nothing to catch up.
+    pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
     }
 }

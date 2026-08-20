@@ -170,6 +170,22 @@ impl UiScript {
         // Advance fading tooltips (FadeOut's ramp + end-of-ramp hide) — engine behavior like the
         // message fade above, decision 0274.
         tooltip::tick_fades(&self.lua);
+        // The hover RE-PICK ([`Model::hover_repick`]): the world under a stationary cursor
+        // changed this tick (the hovered frame hid, or a frame was shown over the cursor), so
+        // re-run the hover walk at the SAVED cursor position — the reference's own pump tail
+        // (`0x765650` → `0x7660d0` with the saved event, didn't-move coalesce bypassed).
+        // `mouse_move` at the unchanged point is exactly that walk: the hidden frame's OnLeave
+        // already fired at hide time and `mouseover` is clear, so only the new winner's
+        // boundary fires — no second OnLeave, `OnEnter` with no physical mouse move.
+        let repick = {
+            let mut model = self.model_mut();
+            let due = model.hover_repick;
+            model.hover_repick = false;
+            due.then_some(model.cursor_pos)
+        };
+        if let Some((x, y)) = repick {
+            self.mouse_move(x, y);
+        }
         // `WOW_UI_HANDLERS=<secs>` — who spent the frame (decision 1395). Last, so a report covers
         // everything this tick fired; a no-op unless the instrument is armed.
         self.report_handler_profile(elapsed);

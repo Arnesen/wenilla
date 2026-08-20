@@ -420,7 +420,10 @@ pub(super) fn spawn_glue_booth(
             // flag: the glue booth is live from the moment a screen shows, before any bake.
             live: false,
             pending: Vec::new(),
+            pending_since: None,
             aspect: 1.0,
+            joints: Vec::new(),
+            parked: false,
         },
     );
     // The background scene's own root (the character root above yaws; the scene never does).
@@ -744,7 +747,7 @@ pub(super) fn sync_glue_booth(
     mut commands: Commands,
     preview: Res<GluePreview>,
     bake: Res<GluePreviewBake>,
-    booths: Res<Booths>,
+    mut booths: ResMut<Booths>,
     mut scene: Option<ResMut<CreateScene>>,
     mut booth_light: ResMut<BoothLight>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
@@ -754,7 +757,7 @@ pub(super) fn sync_glue_booth(
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut last: Local<Option<(u64, f32, u64)>>,
 ) {
-    let Some(booth) = booths.0.get(GLUE_SLOT) else {
+    let Some(booth) = booths.0.get_mut(GLUE_SLOT) else {
         return;
     };
     // Where the character stands (the scene's stage spot while a scene is up, else the origin) —
@@ -777,6 +780,9 @@ pub(super) fn sync_glue_booth(
         // Empty parts (nothing selected, or the model failed) → clear the booth.
         if bake.parts.is_empty() {
             commands.entity(booth.root).despawn_related::<Children>();
+            // The despawn above took the park set with it.
+            booth.joints.clear();
+            booth.parked = false;
             *last = Some((bake.revision, preview.yaw, scene_rev));
             apply_yaw(&mut commands, booth.root, spot, preview.yaw);
             return;
@@ -895,6 +901,9 @@ pub(super) fn sync_glue_booth(
                 bake.effects.len()
             );
         }
+        // A fresh bake is animated by construction; the park set is the new skeleton's.
+        booth.joints = joints;
+        booth.parked = false;
         // The character-only fallback framing (no scene up — art missing / still loading): the
         // body-frame transform with an aspect-aware projection, because the booth target is
         // window-sized now (the square-true `WowPortraitProjection` would stretch on it). While a

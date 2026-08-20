@@ -13,6 +13,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
+use crate::ui_script::gate;
 
 use super::equip_error::equip_error_key;
 use super::{
@@ -30,6 +31,15 @@ pub(crate) struct FeedMemory {
     /// every frame. It is the gate the entire keyring UI hangs off, and "the keyring never
     /// appeared" is otherwise indistinguishable from "the button is mis-anchored".
     had_key: bool,
+    /// The gate's counter memories (1439) — the four stores whose lazy `&mut` resolves poison
+    /// `is_changed` for this feed, watched by their explicit counters instead.
+    items_objects: gate::Watch,
+    items_templates: gate::Watch,
+    cooldown_epoch: gate::Watch,
+    names_generation: gate::Watch,
+    /// `Items::enchant_display_epoch` — one step per displayable countdown change (the slot
+    /// views read second-floored countdowns), including the last elapse's collapsing push.
+    enchant_deadlines: gate::Watch,
 }
 
 /// A spell's tooltip text: the $-substituted description (the real "Use: Restores 392 to 653
@@ -375,6 +385,7 @@ pub(super) fn feed_item_stats(
 pub(super) fn feed_player_req(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
     proficiencies: Res<crate::net::Proficiencies>,
     reputations: Res<crate::net::Reputations>,
     factions: Option<Res<crate::target::Factions>>,
@@ -385,7 +396,40 @@ pub(super) fn feed_player_req(
     let Some(mut script) = script else {
         return;
     };
-    let last = last.get(&script);
+    let (last, vm_reset) = last.get_reset(&script);
+    // The gate (1439): the state below is a pure function of these six — the self descriptor
+    // (skills/level/race/class/honor; its absence returns pushless), the proficiency and
+    // reputation mirrors, the faction catalog, and the known-spell set with its catalog.
+    let self_changed = !changed_self.is_empty();
+    let prof_changed = proficiencies.is_changed();
+    let reps_changed = reputations.is_changed();
+    let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
+    let actions_changed = actions.is_changed();
+    let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
+    gate::trace(
+        "feed_player_req",
+        &[
+            ("vm_reset", vm_reset),
+            ("self", self_changed),
+            ("proficiencies", prof_changed),
+            ("reputations", reps_changed),
+            ("factions", factions_changed),
+            ("actions", actions_changed),
+            ("spells", spells_changed),
+        ],
+    );
+    let gate = gate::Gate::new(
+        vm_reset
+            || self_changed
+            || prof_changed
+            || reps_changed
+            || factions_changed
+            || actions_changed
+            || spells_changed,
+    );
+    if gate.skip() {
+        return;
+    }
     let Some(store) = self_q.iter().next() else {
         return;
     };
@@ -440,6 +484,7 @@ pub(super) fn feed_player_req(
         honor_rank: store.0.player_honor_rank().unwrap_or(0),
     };
     if last.as_ref() != Some(&state) {
+        gate.audit("feed_player_req", "the player-requirement state");
         *last = Some(state.clone());
         script.set_player_req_state(state);
     }
@@ -469,7 +514,7 @@ fn resolve_slot(
     // The temporary-enchant countdowns, read off the deadline store BEFORE the object borrow below
     // (both live on `Items`): one `Option<ms>` per enchant slot.
     let enchant_ms: [Option<u64>; 7] =
-        std::array::from_fn(|s| items.enchant_remaining_ms(guid, s as u32));
+        std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
     let (entry, count, durability, readable, creator, flags, enchant_lines) =
         match items.object(guid) {
             Some(fields) => (
@@ -601,14 +646,19 @@ fn bag_family_name(
     families.name(family).map(str::to_string)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // the param list IS the input set
 pub(crate) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment`'s name column — the tooltip's enchant lines (decision 0915).
     enchants: Option<Res<crate::items::Enchants>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    // The two self-descriptor legs in one param (the 16-SystemParam ceiling): the store the
+    // slot arrays read, and its change tick — the gate's cheapest input (1439).
+    self_q: (
+        Query<&ObjectStore, With<SelfPlayer>>,
+        Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
+    ),
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
     spells: Option<Res<crate::ui_action::Spells>>,
@@ -625,10 +675,82 @@ pub(crate) fn feed_containers(
     let Some(mut script) = script else {
         return;
     };
-    let memory = memory.get(&script);
-    // `WOW_FEED_COST=1` — the premise counter for gating this feed (the 2026-08-15 ledger's #8):
-    // the whole snapshot+diff below runs per frame; before an epoch gate is built, this says what
-    // that actually costs on a real bag population. Printed once a second.
+    let (memory, vm_reset) = memory.get_reset(&script);
+    // The gate (1439): the snapshot below is a function of the self descriptor's slot arrays,
+    // the item stores (both epochs — `is_changed` on `Items`/`NameCache`/`Cooldowns` is
+    // poisoned by per-frame lazy resolves, so the counters carry the truth), the four
+    // catalogs, and the drained side-channels (each held open while non-empty; their
+    // *arrival* frames are covered because a drain writer marks them non-empty). `UiClock`
+    // is deliberately NOT an input: the pushed cooldown triple carries the ABSOLUTE start
+    // (frame-stable, the memory struct's own doc), and natural expiry moves the store's
+    // `feed_epoch` through the prune.
+    let objects_moved = memory.items_objects.moved(items.object_epoch());
+    let templates_moved = memory.items_templates.moved(items.template_epoch());
+    let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
+    let names_moved = memory.names_generation.moved(names.generation());
+    // The DISPLAY epoch (see `feed_char`'s twin comment): the snapshot's countdowns are
+    // second-floored, so one watch step per displayable change replaces the per-frame hold-open
+    // that rebuilt every bag snapshot for the whole life of a ticking enchant.
+    let deadlines_moved = memory
+        .enchant_deadlines
+        .moved(items.enchant_display_epoch());
+    // Bound as `let`s (not a bare OR-chain) so the gate trace below can name each input.
+    let sweep = cooldowns.sweep_pending(clock.anchor);
+    let self_changed = !self_q.1.is_empty();
+    // `is_added`, NOT `is_changed`: the feeds read only the load-once icon CATALOG off this
+    // resource (its struct doc says so verbatim); the world's held-model cache half is
+    // get-or-insert every frame, so `is_changed` reads true forever — 1439's gate-trace found
+    // the containers gate held open by exactly this.
+    let icons_changed = icons.as_ref().is_some_and(|r| r.is_added());
+    let enchants_changed = enchants.as_ref().is_some_and(|r| r.is_changed());
+    let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
+    let families_changed = bag_families.as_ref().is_some_and(|r| r.is_changed());
+    let errors_held = !equip_errors.0.is_empty() || !error_lines.0.is_empty();
+    let locks_held = !lock_cleared.0.is_empty() || !pending.is_empty();
+    gate::trace(
+        "feed_containers",
+        &[
+            ("vm_reset", vm_reset),
+            ("objects", objects_moved),
+            ("templates", templates_moved),
+            ("cooldowns", cooldowns_moved),
+            ("sweep", sweep),
+            ("names", names_moved),
+            ("deadlines", deadlines_moved),
+            ("self", self_changed),
+            ("icons", icons_changed),
+            ("enchants", enchants_changed),
+            ("spells", spells_changed),
+            ("families", families_changed),
+            ("errors", errors_held),
+            ("locks", locks_held),
+        ],
+    );
+    let gate = gate::Gate::new(
+        vm_reset
+            || objects_moved
+            || templates_moved
+            || cooldowns_moved
+            // The frame a timer crosses zero, BEFORE the per-frame prune has moved the epoch
+            // (`sweep_pending`'s own doc) — the slot triple flips to None right then.
+            || sweep
+            || names_moved
+            || deadlines_moved
+            || self_changed
+            || icons_changed
+            || enchants_changed
+            || spells_changed
+            || families_changed
+            || errors_held
+            || locks_held,
+    );
+    if gate.skip() {
+        return;
+    }
+    // `WOW_FEED_COST=1` — the counter that PRICED gating this feed (the 2026-08-15 ledger's #8,
+    // built when the snapshot+diff below still ran every frame; the gate above is 1439's
+    // answer). Kept as the gate's wiring instrument: it accumulates only when the body runs, so
+    // a parked gated run prints (almost) nothing where the ungated binary printed once a second.
     let cost_t0 = std::env::var_os("WOW_FEED_COST")
         .is_some()
         .then(std::time::Instant::now);
@@ -650,7 +772,7 @@ pub(crate) fn feed_containers(
     // `ui_action::cast_fail` already runs. No hex debug line on the player's screen: a code we
     // failed to map can't reach here (the table is total), and a key we typo'd is caught by
     // `equip_error`'s resolution test against the real `GlobalStrings.lua`, not at runtime.
-    let player = self_q.iter().next();
+    let player = self_q.0.iter().next();
     for e in equip_errors.0.drain(..) {
         // Reason 16's substitution — the ONE reason whose text is chosen by the app rather than
         // by the table, because the choice needs the named bag (decision 0916). The reference's
@@ -919,6 +1041,7 @@ pub(crate) fn feed_containers(
         // same slot arrays, and it must be fresh on exactly the frames a BAG_UPDATE fires.
         let key = has_key(&store.0, &mut items, &commands);
         if key != memory.had_key {
+            gate.audit("feed_containers", "the HasKey() flip");
             debug!(
                 "ui_items: HasKey() -> {key} (keyring {})",
                 if key { "shown" } else { "hidden" }
@@ -943,12 +1066,14 @@ pub(crate) fn feed_containers(
             );
         }
     }
-    apply_container_source(
+    if apply_container_source(
         &mut script,
         memory,
         player.is_some().then_some(fresh),
         transitioned,
-    );
+    ) {
+        gate.audit("feed_containers", "a bag diff or a lock event");
+    }
 }
 
 /// The feed's outward half: diff `source` against what was last pushed, push each changed bag into
@@ -974,22 +1099,26 @@ pub(crate) fn apply_container_source(
     memory: &mut FeedMemory,
     source: Option<HashMap<i64, ContainerState>>,
     transitioned: Vec<(i64, u32)>,
-) {
+) -> bool {
     // Diff whole bags; push + fire BAG_UPDATE per transition, one BAG_UPDATE_DELAYED per batch. A
     // pending-lock transition always flips a slot's `.locked` (part of `ContainerSlot`'s equality),
     // so it always shows up here too — but `transitioned`'s ITEM_LOCK_CHANGED fires unconditionally
     // below rather than leaning on that invariant.
+    let mut pushed = false;
     if let Some(fresh) = source {
-        diff_and_push(script, memory, fresh);
+        pushed |= diff_and_push(script, memory, fresh);
     }
     // The lock-transition event (decision 0218: the bag windows' own repaint trigger) — after the
     // container push above, so a listener's repaint reads the corrected `.locked` state.
+    pushed |= !transitioned.is_empty();
     for (bag, slot) in transitioned {
         script.fire_event(
             "ITEM_LOCK_CHANGED",
             vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
         );
     }
+    // Whether anything went into the VM — the caller's gate audit reads it (1439).
+    pushed
 }
 
 /// The present-source half of [`apply_container_source`]: push every changed bag, announce each.
@@ -997,7 +1126,7 @@ fn diff_and_push(
     script: &mut UiScript,
     memory: &mut FeedMemory,
     fresh: HashMap<i64, ContainerState>,
-) {
+) -> bool {
     let changed: Vec<i64> = fresh
         .keys()
         .chain(memory.pushed.keys())
@@ -1044,7 +1173,9 @@ fn diff_and_push(
         }
         memory.pushed = fresh;
         script.fire_event("BAG_UPDATE_DELAYED", vec![]);
+        return true;
     }
+    false
 }
 
 #[cfg(test)]

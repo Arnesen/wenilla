@@ -150,6 +150,39 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
             })
             .collect()
     };
+    // **The hover-hide law** (wow-re `ui/scratch/hover-hide-and-tooltip-owner-law.md`, §5-
+    // arbitrated): hiding the hovered frame — directly or through an ancestor's cascade — fires
+    // its `OnLeave` SYNCHRONOUSLY, inside the hide and **before that frame's `OnHide`**
+    // (`0x764ba0`'s kind-2 tail runs mid-`effective_visible_hide`, the leave at `0x764cce`; the
+    // only silent case is destruction). It clears the hover cache and the drag-arm on that frame
+    // (`+0x100/+0x104`, the arg-1 flavor), and schedules the re-pick — the pump re-hovers
+    // whatever is now topmost at the unchanged cursor next tick ([`Model::hover_repick`]).
+    // A SHOW arms the re-pick too (`0x764b8d`: any mouse-bucket insert): a window opening under
+    // a stationary cursor gets hovered without a mouse move. This is what makes a slot button's
+    // FrameXML `OnLeave → GameTooltip:Hide()` actually run when its window closes under the
+    // cursor — the reference has NO engine-side owner-visibility fallback for the tooltip
+    // (byte-censused negative), so the leave firing here is the whole mechanism.
+    let left: Option<(FrameHandle, u32)> = {
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let hidden_hover = model
+            .mouseover
+            .filter(|&m| items.iter().any(|&(h, _, vis)| h == m && !vis));
+        if let Some(m) = hidden_hover {
+            model.mouseover = None;
+            if model.drag.as_ref().is_some_and(|d| d.source == m) {
+                model.drag = None;
+            }
+        }
+        model.hover_repick |= hidden_hover.is_some() || items.iter().any(|&(_, _, vis)| vis);
+        hidden_hover.map(|m| (m, model.frame_id(m)))
+    };
+    if let Some((_, oid)) = left {
+        if let Err(e) = fire_widget_handler(lua, oid, "OnLeave", vec![Value::Boolean(true)]) {
+            lua.app_data_mut::<Model>()
+                .expect("model")
+                .record_script_error(e.to_string());
+        }
+    }
     for (h, id, visible) in items {
         if visible {
             let mut model = lua.app_data_mut::<Model>().expect("model");
