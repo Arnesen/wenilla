@@ -62,6 +62,7 @@ fn motion(flags: u32, orientation: f32) -> RemoteMotion {
         relay: Default::default(),
         last_apply_ms: 0.0,
         last_apply_pos: [0.0, 0.0, 0.0],
+        settled_at: None,
     }
 }
 
@@ -881,4 +882,95 @@ fn a_gameobject_without_a_usable_quaternion_falls_back_to_its_facing() {
             "{quat:?} → {r:?}"
         );
     }
+}
+
+/// **The settled memo** ([`RemoteMotion::settled_at`], 1490 item 2): an idle grounded remote
+/// arms it once its resolve reaches the fixed point, holds bitwise still while armed, keeps
+/// resolving where no ground exists, and disarms the moment a direction flag moves it — so the
+/// per-frame depenetration + down-cast run only for movers that can actually change.
+#[test]
+fn an_idle_remote_settles_and_stops_sweeping() {
+    use avian3d::prelude::{Collider, RigidBody};
+    use bevy::prelude::*;
+    use bevy::transform::TransformPlugin;
+
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        TransformPlugin,
+        bevy::asset::AssetPlugin::default(),
+        bevy::scene::ScenePlugin,
+        avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
+    ));
+    app.init_asset::<Mesh>()
+        .init_resource::<benilla_world::collision::ColliderEpoch>();
+    app.finish();
+    app.cleanup();
+    app.insert_resource(crate::player::PlayerCapsule(Collider::capsule(
+        crate::player::CAPSULE_RADIUS,
+        crate::player::CAPSULE_HEIGHT - 2.0 * crate::player::CAPSULE_RADIUS,
+    )));
+    app.add_systems(Update, super::remote::extrapolate_remote_units);
+    // A 10×10 up-wound floor at bevy y = 0 (wow z = 0).
+    let verts = vec![
+        Vec3::new(-5.0, 0.0, -5.0),
+        Vec3::new(5.0, 0.0, -5.0),
+        Vec3::new(5.0, 0.0, 5.0),
+        Vec3::new(-5.0, 0.0, 5.0),
+    ];
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::trimesh(verts, vec![[0u32, 2, 1], [0, 3, 2]]),
+        Transform::default(),
+    ));
+    let idle = app
+        .world_mut()
+        .spawn((
+            Transform::default(),
+            motion(0, 0.0),
+            // Real speeds, so the FORWARD leg below actually translates — a flag with no speed
+            // moves nothing and would (correctly) stay settled.
+            crate::net::UnitSpeeds(speeds()),
+        ))
+        .id();
+    let mut over_nothing = motion(0, 0.0);
+    over_nothing.wow_pos = [50.0, 50.0, 10.0];
+    let stranded = app
+        .world_mut()
+        .spawn((Transform::default(), over_nothing))
+        .id();
+    // Seed the idle mover a hair above the floor — inside the standing snap reach (at zero
+    // speed the whole reach IS `STEP_SNAP_SLACK` ≈ 0.028), like a wire Z, which always arrives
+    // on the ground. The first resolve snaps it on, the second arms the memo.
+    app.world_mut()
+        .entity_mut(idle)
+        .get_mut::<RemoteMotion>()
+        .unwrap()
+        .wow_pos = [0.0, 0.0, 0.01];
+
+    for _ in 0..4 {
+        app.update();
+    }
+    let rm = app.world().entity(idle).get::<RemoteMotion>().unwrap();
+    let armed_at = rm.settled_at.expect("an idle grounded mover arms the memo");
+    assert_eq!(armed_at, rm.wow_pos, "the memo is the pose it stands at");
+    let parked = rm.wow_pos;
+    for _ in 0..3 {
+        app.update();
+    }
+    let rm = app.world().entity(idle).get::<RemoteMotion>().unwrap();
+    assert_eq!(rm.wow_pos, parked, "armed ⇒ bitwise still");
+    assert_eq!(rm.settled_at, Some(parked), "…and still armed");
+    // No ground in reach ⇒ never arms; it keeps asking until the world exists under it.
+    let rm = app.world().entity(stranded).get::<RemoteMotion>().unwrap();
+    assert_eq!(rm.settled_at, None, "no support ⇒ no memo");
+    // A direction flag moves the mover and the memo falls with it.
+    app.world_mut()
+        .entity_mut(idle)
+        .get_mut::<RemoteMotion>()
+        .unwrap()
+        .flags = move_flags::FORWARD;
+    app.update();
+    let rm = app.world().entity(idle).get::<RemoteMotion>().unwrap();
+    assert_eq!(rm.settled_at, None, "a moving mover resolves every frame");
 }

@@ -219,6 +219,23 @@ pub(crate) fn shots_path() -> Option<PathBuf> {
     home().map(|h| h.join("shots.txt"))
 }
 
+/// `benilla-config/Screenshots/` — where the print-screen key writes (decisions 1486, 1487).
+///
+/// **The reference writes `Screenshots\\` inside the install and we deliberately do not.** benilla
+/// reads a WoW install; it never writes to one (decision 1486, the director's rule) — the folder is
+/// somebody else's, it is shared with the sibling RE repo on this machine, and a client that
+/// scatters its output through it makes "what here is benilla's?" unanswerable. So the reference's
+/// own folder NAME is kept, capital S and all, and only its parent moves: a player who knows where
+/// WoW put screenshots finds the same folder one level over.
+///
+/// Unlike every other resident here this is a DIRECTORY, not a file, and it is not written through
+/// [`write_atomic`] — an image is bytes, not a settings diff, and it is written once and never
+/// rewritten, so the tmp-then-rename dance buys nothing. It resolves through [`home`] like
+/// everything else, which is what makes a capture run hermetic ([`home`] answers `None`).
+pub(crate) fn screenshots_dir() -> Option<PathBuf> {
+    home().map(|h| h.join("Screenshots"))
+}
+
 /// Make an arbitrary realm/character name safe as one path component: anything outside
 /// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
 /// escape the folder or collide with the path separator.
@@ -335,6 +352,12 @@ mod tests {
             Some(tmp.join("benilla-config/account"))
         );
         assert_eq!(shots_path(), Some(tmp.join("benilla-config/shots.txt")));
+        // The print-screen folder (decisions 1486/1487) — the one resident that is a DIRECTORY,
+        // and the one whose reference lives inside the install we refuse to write to.
+        assert_eq!(
+            screenshots_dir(),
+            Some(tmp.join("benilla-config/Screenshots"))
+        );
 
         // 0 · hermetic: a capture run resolves nothing, even with an override set. The account
         // name is the reason this line now matters more than it did: `config_base` had no such
@@ -348,6 +371,11 @@ mod tests {
             "a capture reads no saved account"
         );
         assert_eq!(shots_path(), None);
+        assert_eq!(
+            screenshots_dir(),
+            None,
+            "a capture writes no player screenshots"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 

@@ -49,12 +49,33 @@ impl WaterIndex {
             .get(&Self::cell_of(x, y))
             .map_or(&[], Vec::as_slice)
     }
+
+    /// Every surface registered in any cell the WoW-space box `[lo, hi]` touches, deduplicated —
+    /// the candidate set for a small box query (the foam patch builder), with [`Self::over`]'s
+    /// same superset guarantee: a surface overlapping the box overlaps one of its cells, and a
+    /// surface is registered in every cell its footprint overlaps. Boxes here are a few yards
+    /// (1–4 cells), buckets are short — the linear dedup is the cheap shape.
+    pub(crate) fn over_box(&self, lo: [f32; 2], hi: [f32; 2]) -> Vec<Entity> {
+        let [x0, y0] = Self::cell_of(lo[0], lo[1]);
+        let [x1, y1] = Self::cell_of(hi[0], hi[1]);
+        let mut out = Vec::new();
+        for cx in x0..=x1 {
+            for cy in y0..=y1 {
+                for &e in self.cells.get(&[cx, cy]).map_or(&[][..], Vec::as_slice) {
+                    if !out.contains(&e) {
+                        out.push(e);
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Rebuild [`WaterIndex`] when the surface population changed — tile stream edges only. A full
 /// rebuild over ~2k surfaces is microseconds, so incremental bookkeeping would be complexity
 /// with nothing to buy.
-pub(super) fn maintain_water_index(
+pub(crate) fn maintain_water_index(
     mut index: ResMut<WaterIndex>,
     added: Query<(), Added<WaterChunkInfo>>,
     mut removed: RemovedComponents<WaterChunkInfo>,

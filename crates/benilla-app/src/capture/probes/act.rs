@@ -204,6 +204,13 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         // membership had to be found by the director, twice. `WOW_CHAR` is a deliberate one-shot
         // (`run_mode`), so synthesizing the keypress is the only way back into the world in-process.
         "Enter" => KeyCode::Enter,
+        // Print screen (decision 1487). The whole player path — key → SCREENSHOT binding →
+        // `TakeScreenshot()` → `Screenshot()` → the writer → SCREENSHOT_SUCCEEDED — is reachable
+        // no other way: a Lua chunk can call the verb but skips the binding, and B261's contract
+        // ("the message is not in the file") is a property of the KEY press, since the whole
+        // reason `TakeScreenshot` hides the status line is a second press landing on a live one.
+        // On macOS this arrives as F13 (`bindings::chord`'s fold) and the token is the same.
+        "PrintScreen" => KeyCode::PrintScreen,
         _ => return None,
     })
 }

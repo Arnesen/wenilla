@@ -4,7 +4,7 @@
 //!
 //! **Honest tree**: a command appears here only over a real engine action — the same law as the
 //! options rows (0954). The 1.12 commands with no benilla mechanism yet (pitch keys, walk toggle,
-//! action pages, the right multibars' MULTIACTIONBAR3/4, camera views, screenshot, combat log, …)
+//! action pages, the right multibars' MULTIACTIONBAR3/4, camera views, combat log, …)
 //! are absent, not stubbed; the page shows only what's here, and only non-empty categories (era
 //! law). Labels/headers are the 1.12
 //! GlobalStrings (`BINDING_NAME_*`/`BINDING_HEADER_*`), defined in the window's XML.
@@ -98,8 +98,8 @@ pub(crate) mod cmd {
     // `the_cmd_handles_index_their_rows` is what makes that loud and cheap instead of silent: it
     // names the handle and the row it actually points at.
     pub(crate) const TOGGLE_UI: Cmd = Cmd(88);
-    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(89);
-    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(90);
+    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(90);
+    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(91);
 }
 
 /// The registry, 1.12 `Bindings.xml` order. Sub-tables (action buttons, shapeshift, raid
@@ -721,6 +721,25 @@ pub(crate) static SPECS: &[Spec] = &[
     // descend from one profile whose TOGGLEUI had been rebound; ALT-Z is the shipped default
     // (the one command whose default does NOT trust the cache file).
     spec!("TOGGLEUI", MISC, Kind::Host, Some("ALT-Z"), None),
+    // Print screen (decision 1487). The body is the reference's own one-liner because our
+    // `TakeScreenshot` has the same contract its does (ScreenshotStatus.xml) — hide the last
+    // shot's confirmation, then ask the engine.
+    //
+    // `PRINTSCREEN` comes from the SHIPPED default, not a player's cache: `DefaultBindings.wtf`
+    // lives inside `patch.MPQ` and its line 128 is `bind PRINTSCREEN SCREENSHOT` (wow-re's
+    // dispatch on this feature; the install's account-ONE `bindings-cache.wtf` agrees). `Edge`,
+    // not `EdgeUpDown`, is also byte-real: the `<Binding>` carries no `runOnUp`, and the
+    // reference's dispatcher returns on key-up unless that flag is set (`0x4b7bea`).
+    //
+    // On a Mac keyboard the token arrives as F13, which is the reference's own Mac mapping rather
+    // than an accommodation (`KEY_PRINTSCREEN_MAC = "F13"`); `super::chord` does the translation.
+    spec!(
+        "SCREENSHOT",
+        MISC,
+        Kind::Edge("TakeScreenshot();"),
+        Some("PRINTSCREEN"),
+        None
+    ),
     // ── Camera (BINDING_HEADER_CAMERA) ──────────────────────────────────────────────────
     spec!(
         "CAMERAZOOMIN",

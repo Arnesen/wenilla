@@ -180,6 +180,7 @@ mod tests {
             relay: Default::default(),
             last_apply_ms: 0.0,
             last_apply_pos: [0.0; 3],
+            settled_at: None,
         }
     }
 

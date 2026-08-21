@@ -71,6 +71,7 @@ mod font_block;
 mod gossip;
 mod guild;
 mod handler_prof;
+mod screenshot;
 pub use handler_prof::HandlerRow;
 mod inspect;
 mod item_stats;
@@ -503,6 +504,7 @@ impl UiScript {
         channel::install(&lua)?;
         chat_window::install(&lua)?;
         client::install(&lua)?;
+        screenshot::install(&lua)?;
         stdlib::sandbox(&lua)?;
         // Before the stdlib layer, so its aliases bind the 5.0-shaped functions (decision 1194).
         lua50::install(&lua)?;

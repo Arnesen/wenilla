@@ -22,6 +22,7 @@
 //! to text only where a Rust parser forces it (decision 1193).
 
 pub mod bindings_xml;
+pub mod civil;
 pub mod framexml;
 pub mod justify;
 pub mod layout;

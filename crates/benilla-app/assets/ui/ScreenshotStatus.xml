@@ -1,0 +1,110 @@
+<Ui>
+    <!--
+        Print screen's UI half (decision 1487) — the centred "Screen Captured" line, and the
+        `TakeScreenshot()` the SCREENSHOT binding runs.
+
+        WHAT THE REFERENCE DOES, and why this file's ordering is the whole feature. Its
+        Bindings.xml maps SCREENSHOT to `TakeScreenshot()`; that function hides this frame, THEN
+        asks the engine to capture; the engine answers later with SCREENSHOT_SUCCEEDED or
+        SCREENSHOT_FAILED, and only then does the text appear. So the message can never be in the
+        picture, on either path:
+
+          · the ordinary press — the outcome event lands frames after the readback, because the
+            readback is asynchronous (`crate::screenshot`'s writer reports through a channel);
+          · the double press inside the 1.5 s fade — the PREVIOUS shot's text is still on screen,
+            and the Hide() below is what takes it off before the shutter.
+
+        That second case is the one worth naming: it is the only way a "Screen Captured" could ever
+        have reached a file, and it is why `TakeScreenshot` hides rather than just letting the fade
+        run out. B261 asked for exactly this contract.
+
+        PROVENANCE. The mechanism, the globals' names, the 1.5 s fade and the two strings are the
+        reference's (its WorldFrame.xml/.lua carry them; the strings are GlobalStrings.lua l.3395-6,
+        quoted as data like every other user-visible byte in this tree). The code is ours: the
+        reference recomputes elapsed from `GetTime() - this.startTime` on every tick and ignores the
+        elapsed its OnUpdate is handed — we accumulate the handed value instead, which is one clock
+        read fewer per frame and one field fewer on the frame.
+
+        SEATING. `parent="UIParent" setAllPoints="true"` with a CENTER-anchored string, which is
+        AutoFollowStatus's seat in ZoneText.xml and for the same reason: the reference parents this
+        to WorldFrame, benilla's WorldFrame is a stub (UIParent.xml) rather than the 3D layer, and
+        both are full-screen in the reference so their CENTERs coincide. TOOLTIP strata is the
+        reference's own — the confirmation has to be readable over whatever panel is open.
+    -->
+    <Script>
+        <![CDATA[
+        -- The two lines this frame can show, byte-exact from the 1.12 enUS GlobalStrings
+        -- (interface.MPQ `GlobalStrings.lua`, line-cited) — user-visible text, so its bytes are the
+        -- contract. Note the capital C: it is "Screen Captured", not "Screen captured".
+        SCREENSHOT_SUCCESS = "Screen Captured";      -- GlobalStrings.lua:3396
+        SCREENSHOT_FAILURE = "Screen Capture Failed";-- GlobalStrings.lua:3395
+
+        -- Seconds the line takes to fade from full to gone. The reference's own value, and a
+        -- GLOBAL there too — an addon may read or retune it, so it keeps the name.
+        SCREENSHOT_STATUS_FADETIME = 1.5;
+
+        -- The SCREENSHOT binding's body. Hide first, capture second: see the header.
+        function TakeScreenshot()
+            if ( ScreenshotStatus:IsVisible() ) then
+                ScreenshotStatus:Hide();
+            end
+            Screenshot();
+        end
+
+        function ScreenshotStatus_OnLoad()
+            this:RegisterEvent("SCREENSHOT_SUCCEEDED");
+            this:RegisterEvent("SCREENSHOT_FAILED");
+        end
+
+        function ScreenshotStatus_OnEvent(event)
+            if ( event == "SCREENSHOT_FAILED" ) then
+                ScreenshotStatusText:SetText(SCREENSHOT_FAILURE);
+            else
+                ScreenshotStatusText:SetText(SCREENSHOT_SUCCESS);
+            end
+            -- The fade restarts from full on every outcome, so a second shot re-announces itself
+            -- at full strength instead of inheriting whatever alpha the last one had faded to.
+            this.fade = 0;
+            this:SetAlpha(1.0);
+            this:Show();
+        end
+
+        function ScreenshotStatus_OnUpdate(elapsed)
+            local fade = (this.fade or 0) + (elapsed or 0);
+            this.fade = fade;
+            if ( fade >= SCREENSHOT_STATUS_FADETIME ) then
+                this:Hide();
+                return;
+            end
+            this:SetAlpha(1.0 - fade / SCREENSHOT_STATUS_FADETIME);
+        end
+        ]]>
+    </Script>
+
+    <Frame name="ScreenshotStatus" parent="UIParent" setAllPoints="true" frameStrata="TOOLTIP" hidden="true">
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="ScreenshotStatusText" inherits="SystemFont">
+                    <Anchors>
+                        <Anchor point="CENTER" relativeTo="UIParent">
+                            <Offset>
+                                <AbsDimension x="0" y="0"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>
+                ScreenshotStatus_OnLoad();
+            </OnLoad>
+            <OnEvent>
+                ScreenshotStatus_OnEvent(event);
+            </OnEvent>
+            <OnUpdate>
+                ScreenshotStatus_OnUpdate(arg1);
+            </OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>

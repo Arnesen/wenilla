@@ -1136,6 +1136,10 @@ pub(crate) struct Model {
     /// `CMSG_PLAYED_TIME`. A COUNT, not a payload, for [`super::pvp`]'s reason: the packet is
     /// empty, so two asks in a frame are two sends rather than one collapsed intent.
     pub(crate) played_time_asks: u32,
+    /// `Screenshot()` calls queued since the app last drained them — each is one capture
+    /// (decision 1487). A COUNT for [`Self::played_time_asks`]'s reason: the request carries no
+    /// payload, so two calls in a frame are two captures.
+    pub(crate) screenshot_asks: u32,
     pub(crate) realm_name: String,
     /// The hearthstone bind location's NAME, behind `GetBindLocation()` — the app resolves the
     /// `SMSG_BINDPOINTUPDATE` area id through the same AreaTable catalog the hearthstone's `$z`
@@ -1439,6 +1443,7 @@ impl Model {
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,
+            screenshot_asks: 0,
             realm_name: String::new(),
             bind_location: String::new(),
             binder_confirms: 0,

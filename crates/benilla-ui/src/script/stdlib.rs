@@ -443,13 +443,16 @@ end
 /// they shift by a constant. Fixing it means a tz source, not a different algorithm.
 fn install_time(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
-    g.set("time", lua.create_function(|_, ()| Ok(unix_seconds()))?)?;
+    g.set(
+        "time",
+        lua.create_function(|_, ()| Ok(crate::civil::unix_seconds()))?,
+    )?;
     g.set(
         "date",
         lua.create_function(|lua, (fmt, when): (Option<String>, Option<i64>)| {
             // Bare `date()` is `%c`, as in Lua — `Recap.lua:2690` calls it with no arguments.
             let fmt = fmt.unwrap_or_else(|| "%c".to_string());
-            let secs = when.unwrap_or_else(unix_seconds);
+            let secs = when.unwrap_or_else(crate::civil::unix_seconds);
             // A leading `!` selects UTC. Every timestamp this engine holds is already UTC — there
             // is no local-time conversion anywhere here — so the flag only has to be CONSUMED, not
             // acted on. Left in the format string it would print as a literal `!`.
@@ -465,18 +468,18 @@ fn install_time(lua: &Lua) -> mlua::Result<()> {
             // the client — which is exactly what it did to the survey the moment a separate fix let
             // Accountant reach this function at all.
             if body == "*t" {
-                let (year, month, day, hour, min, sec, wday, yday) = civil_from_epoch(secs);
+                let c = crate::civil::from_unix(secs);
                 let t = lua.create_table()?;
-                t.set("year", year)?;
-                t.set("month", month)?;
-                t.set("day", day)?;
-                t.set("hour", hour)?;
-                t.set("min", min)?;
-                t.set("sec", sec)?;
+                t.set("year", c.year)?;
+                t.set("month", c.month)?;
+                t.set("day", c.day)?;
+                t.set("hour", c.hour)?;
+                t.set("min", c.min)?;
+                t.set("sec", c.sec)?;
                 // Lua counts weekdays 1..7 from SUNDAY; ours is the 0-based index into `DAYS`.
-                t.set("wday", wday + 1)?;
+                t.set("wday", c.weekday + 1)?;
                 // `yday` is already 1-based out of the conversion, which is Lua's convention too.
-                t.set("yday", yday)?;
+                t.set("yday", c.yearday)?;
                 // No timezone and no DST rules here, and `false` is the honest answer rather than
                 // the nil an absent field would give: this clock never observes daylight saving.
                 t.set("isdst", false)?;
@@ -488,15 +491,6 @@ fn install_time(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     Ok(())
-}
-
-/// Wall-clock seconds since the Unix epoch. Before the epoch is not a state a game client is in;
-/// a clock that somehow reports it clamps to 0 rather than raising inside an addon's file scope.
-fn unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 const DAYS: [&str; 7] = [
@@ -523,52 +517,6 @@ const MONTHS: [&str; 12] = [
     "December",
 ];
 
-/// Broken-down UTC time from an epoch second: (year, month 1-12, day 1-31, hour, min, sec,
-/// weekday 0=Sunday, yearday 1-366).
-///
-/// The civil-from-days conversion is Howard Hinnant's, shifted to a March-based year so the leap
-/// day lands at the end and no month-length table is needed. Chosen over a hand-rolled loop because
-/// it is a known-correct closed form with no accumulation error, which matters for the "persisted
-/// last session, compared this session" use every corpus caller has.
-fn civil_from_epoch(secs: i64) -> (i64, u32, u32, u32, u32, u32, u32, u32) {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (hour, min, sec) = (
-        (rem / 3600) as u32,
-        ((rem % 3600) / 60) as u32,
-        (rem % 60) as u32,
-    );
-    // 1970-01-01 was a Thursday (4).
-    let weekday = (days + 4).rem_euclid(7) as u32;
-
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { y + 1 } else { y };
-
-    // Day of the year, from the same conversion applied to Jan 1.
-    let jan1 = days_from_civil(year, 1, 1);
-    let yearday = (days - jan1 + 1) as u32;
-    (year, month, day, hour, min, sec, weekday, yearday)
-}
-
-/// Days since the epoch for a civil date — the inverse of the above, used only for `%j`.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
 /// The `strftime` subset the corpus actually uses, plus the obvious neighbours.
 ///
 /// Bounded on purpose: the specifiers here are the ones read off real call sites —
@@ -576,7 +524,16 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// `%c` (bare `date()`). An unknown specifier is emitted VERBATIM rather than swallowed, so a
 /// format this does not know shows up in the output instead of silently vanishing.
 fn format_epoch(secs: i64, fmt: &str) -> String {
-    let (year, month, day, hour, min, sec, wday, yday) = civil_from_epoch(secs);
+    let crate::civil::Civil {
+        year,
+        month,
+        day,
+        hour,
+        min,
+        sec,
+        weekday: wday,
+        yearday: yday,
+    } = crate::civil::from_unix(secs);
     let mut out = String::with_capacity(fmt.len() + 16);
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {

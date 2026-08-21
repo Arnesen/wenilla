@@ -99,17 +99,39 @@ fn resolve_glow(
     visual
 }
 
+/// The resolve inputs that live OUTSIDE the unit's own descriptor and the global caches — the
+/// settled sheath byte, the ceremony's per-arm visual state, and the nock lane. Compared each
+/// frame by [`resolve_equipment`]'s skip gate (1490): a unit whose descriptor tick, key, and
+/// cache epochs all held still resolves to the same loadout **by construction** — every other
+/// read in the rebuild is either a field of the store or a static-after-load catalog
+/// (`ItemDisplays::catalog`, the enchant rows; the `models` map is write-only from here) — so
+/// the rebuild (the template probes, the 7-slot enchant scans, the quiver bag walk, the
+/// ensure/glow calls) is skipped whole. The output diff below stays as the last fence: this
+/// gate may only ever skip work, never change what lands.
+#[derive(Component, Clone, Copy, PartialEq)]
+pub(in crate::entities) struct ResolveKey {
+    committed_sheath: u8,
+    visual_sheath: Option<[u8; 2]>,
+    nocked: Option<u32>,
+    latched: bool,
+}
+
 /// Resolve every unit's held items from its descriptor. Creatures read display/invType/sheath straight
 /// from the virtual-item fields; players go visible-item entry → [`crate::items::Items`] (ask-once query on
 /// a miss). Ensures each needed display id has a [`DisplayModel`] entry in [`ItemDisplays`] (built
 /// by [`super::update_display_models`] once the asset loads) and writes [`HeldItems`] on change.
+///
+/// **Skip-gated per unit** ([`ResolveKey`]): the full rebuild runs only when the unit's own
+/// descriptor changed, its key changed, or a global input moved — the [`Items`] epochs (an
+/// object ingest covers the quiver bag walk, a landed template answers every pending ask) and
+/// the two client-data load edges. The idle crowd costs one tick check and one small compare.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(in crate::entities) fn resolve_equipment(
     mut commands: Commands,
     units: Query<(
         Entity,
         &NetEntity,
-        &ObjectStore,
+        Ref<ObjectStore>,
         Option<&HeldItems>,
         Option<&Wielded>,
         Option<&Equipment>,
@@ -117,6 +139,7 @@ pub(in crate::entities) fn resolve_equipment(
         Option<&crate::creature_anim::AnimDriver>,
         Option<&NockedAmmo>,
         Has<NockLatch>,
+        Option<&ResolveKey>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
     mut templates: ResMut<Items>,
@@ -130,10 +153,19 @@ pub(in crate::entities) fn resolve_equipment(
     // The enchant column rides its own resource (decision 0915) — shared with the tooltip lane.
     glows: Option<ResMut<ItemGlows>>,
     enchants: Option<Res<crate::items::Enchants>>,
+    // The [`Items`] epochs as of the last run — the skip gate's global half. Deliberately the
+    // explicit counters and never resource change ticks: `templates` is `ResMut` in this very
+    // system (ask-once misses write it), so a tick gate would read its own writes and never
+    // close.
+    mut last_epochs: Local<Option<(u64, u64)>>,
 ) {
     let Some(mut held) = held else {
         return;
     };
+    let epochs = (templates.object_epoch(), templates.template_epoch());
+    let caches_moved = last_epochs.replace(epochs) != Some(epochs)
+        || creatures.as_ref().is_some_and(|c| c.is_changed())
+        || enchants.as_ref().is_some_and(|e| e.is_changed());
     let mut glows = glows;
     let enchant_rows = enchants.as_deref().map(|e| &e.0);
     for (
@@ -147,12 +179,32 @@ pub(in crate::entities) fn resolve_equipment(
         driver,
         nocked,
         nock_latched,
+        current_key,
     ) in &units
     {
         if !matches!(net_entity.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
         }
         let s = &store.0;
+        // The settled sheath state: the anim layer's **client-side committed state** (the
+        // setter/reconcile cache, decision 0080 — the descriptor byte plus the policy's forces);
+        // else, before the driver first runs, the raw descriptor byte.
+        let committed = driver
+            .and_then(|d| d.sheath_state())
+            .or_else(|| s.unit_sheath_state())
+            .unwrap_or(0);
+        let key = ResolveKey {
+            committed_sheath: committed,
+            visual_sheath: visual_sheath.map(|v| v.0),
+            nocked: nocked.map(|n| n.display_id),
+            latched: nock_latched,
+        };
+        if !caches_moved && !store.is_changed() && current_key == Some(&key) {
+            continue;
+        }
+        if current_key != Some(&key) {
+            commands.entity(entity).insert(key);
+        }
         // The two **equipment-display preferences** (decision 1472, B123): `PLAYER_FLAGS`'
         // `HIDE_HELM 0x400` / `HIDE_CLOAK 0x800`, read off THIS unit's own descriptor. The field is
         // public, so this is per rendered body and not a local setting — a remote player who hides
@@ -216,14 +268,8 @@ pub(in crate::entities) fn resolve_equipment(
                 commands.entity(entity).insert(eq);
             }
         }
-        // The settled sheath state: the anim layer's **client-side committed state** (the
-        // setter/reconcile cache, decision 0080 — the descriptor byte plus the policy's forces);
-        // else, before the driver first runs, the raw descriptor byte.
-        let committed = driver
-            .and_then(|d| d.sheath_state())
-            .or_else(|| s.unit_sheath_state())
-            .unwrap_or(0);
-        // …and the *visual* one governing a given slot's placement, which during a draw/stow
+        // …and the *visual* sheath governing a given slot's placement (`committed` was read
+        // into the key above), which during a draw/stow
         // ceremony is **per arm** ([`VisualSheath`]): each hand's weapon moves at its own clip's
         // authored $SHL/$SHR moment, not at the byte change. A melee → ranged toggle therefore
         // has the sword already on the back while the bow is still on its way to the other hand —
@@ -656,5 +702,67 @@ mod tests {
         let (cloak_only, helm_attached) = dress(0x800);
         assert_eq!((cloak_only.helm, cloak_only.cloak), (900, 0));
         assert!(helm_attached);
+    }
+
+    /// **The skip gate** (1490): a unit whose descriptor tick, [`super::ResolveKey`] and cache
+    /// epochs held still is not rebuilt at all. Proven the sharp way: a descriptor edit smuggled
+    /// past change detection — a thing the wire can never do — must NOT land, because the only
+    /// system that could land it skipped; the same edit under a normal (marked) touch lands on
+    /// the next pass. The control half is what guards against the gate ever wrongly holding.
+    #[test]
+    fn an_unchanged_unit_is_not_rebuilt_and_a_real_change_still_lands() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        let mut items = Items::default();
+        items.insert_template(100, Some(worn(900, 1))); // INVTYPE_HEAD
+        items.insert_template(101, Some(worn(901, 1))); // the swap target
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        app.insert_resource(items);
+        app.insert_resource(NetCommands(tx));
+        app.insert_resource(ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::new()),
+        ));
+        let player = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Player,
+                    display_id: Some(49),
+                    scale: 1.0,
+                },
+                wearing(0, &[(0, 100)]),
+            ))
+            .id();
+        app.add_systems(Update, resolve_equipment);
+        app.update(); // resolve (caches_moved: first run)
+        app.update(); // steady state — this frame already skips
+        assert_eq!(app.world().get::<Equipment>(player).unwrap().helm, 900);
+
+        // The smuggled edit: helm entry 100 → 101 with the change tick left untouched.
+        app.world_mut()
+            .get_mut::<ObjectStore>(player)
+            .unwrap()
+            .bypass_change_detection()
+            .0
+            .merge(ObjectFields::from_pairs(&[(258 + 2, 101)]));
+        app.update();
+        assert_eq!(
+            app.world().get::<Equipment>(player).unwrap().helm,
+            900,
+            "an unmarked store must not be rebuilt — the gate held"
+        );
+
+        // The wire's shape: the same store, now MARKED changed — the swap lands.
+        app.world_mut()
+            .get_mut::<ObjectStore>(player)
+            .unwrap()
+            .set_changed();
+        app.update();
+        assert_eq!(
+            app.world().get::<Equipment>(player).unwrap().helm,
+            901,
+            "a marked store rebuilds — the gate opens"
+        );
+        drop(rx);
     }
 }

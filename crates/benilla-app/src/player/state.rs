@@ -64,7 +64,7 @@ pub(super) const STATIONARY_CHASE_RATE: f32 = 8.0;
 /// radius **0.30555**, human female **0.20835** (VERIFIED, wow-re `mover-collision-scalars.md`;
 /// decision 1125). Adopting them is the same movement-fidelity question [`CAPSULE_HEIGHT`] describes
 /// below, and this radius is its other half.
-pub(super) const CAPSULE_RADIUS: f32 = 1.0 / 3.0;
+pub(crate) const CAPSULE_RADIUS: f32 = 1.0 / 3.0;
 /// Player capsule total height (yd) — the **movement** capsule avian sweeps, deliberately a
 /// constant. Numerically the vanilla ctor-default collision height it was derived from
 /// ([`DEFAULT_COLLISION_HEIGHT`]), but it is not the same quantity and no longer stands in for one:

@@ -92,7 +92,7 @@ pub use query::{
     FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, Underwater, WaterChunkInfo,
     WmoPool,
 };
-pub(crate) use spatial::WaterIndex;
+pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource};
 
 /// The frame slot where [`Underwater`] is written — the label every consumer of the submersion
@@ -117,7 +117,7 @@ impl Plugin for LiquidPlugin {
             // PreUpdate: surfaces stream in/out via Update-side commands, so the edge is visible
             // here the frame after — before any of that frame's consumers ask. A despawn's stale
             // entry in between self-filters at the consumer (`Query::get` misses).
-            .add_systems(PreUpdate, spatial::maintain_water_index)
+            .add_systems(PreUpdate, maintain_water_index)
             .add_systems(Startup, surface::setup_liquid.after(AssetSet::Open))
             .add_systems(
                 Update,

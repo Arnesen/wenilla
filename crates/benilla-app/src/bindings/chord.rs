@@ -205,6 +205,18 @@ pub(crate) fn key_token(k: KeyCode) -> Option<&'static str> {
         NumpadDecimal => "NUMPADDECIMAL",
         NumLock => "NUMLOCK",
         PrintScreen => "PRINTSCREEN",
+        // **On a Mac keyboard the print-screen key IS F13, and the reference says so itself.**
+        // 1.12 ships `KEY_PRINTSCREEN_MAC = "F13"` beside a whole family of Mac key-label
+        // overrides (GlobalStrings.lua:2476-2526 — Backspace→Delete, Insert→Help, NumLock→Clear,
+        // Pause→F15, ScrollLock→F14), which is the Mac client mapping its physical keys onto the
+        // PC binding TOKENS and relabelling them for display. macOS has no PrintScreen keycode at
+        // all — a PC keyboard's PrtSc arrives as F13 — so without this the faithful `PRINTSCREEN`
+        // default is a dead binding on every Mac, which is not fidelity, it is a broken key.
+        // `_MAC` is a label table, so this is the mapping the reference implies rather than one it
+        // was read out of; the falsifier is cheap (bind F13 in the Keybindings page — it must
+        // write `PRINTSCREEN`, not `F13`).
+        #[cfg(target_os = "macos")]
+        F13 => "PRINTSCREEN",
         // ScrollLock and Pause are deliberately absent: the reference's namer calls their key
         // codes (`0x210`/`0x211`) `UNKNOWN`, so they are unbindable there (wow-re
         // `keybinding-dispatch-law.md` §2.3), and `IsValidBindingKeyString` would refuse the
@@ -230,6 +242,12 @@ pub(crate) fn key_token(k: KeyCode) -> Option<&'static str> {
 pub(crate) fn normalize_key(k: KeyCode) -> KeyCode {
     match k {
         KeyCode::NumpadEnter => KeyCode::Enter,
+        // The Mac print-screen key — see [`key_token`]'s arm for the evidence. Folded here as well
+        // as there because the two arms serve different halves: `key_token` names the key the
+        // capture arm just swallowed, this one makes a press DISPATCH against a chord parsed from
+        // the token. Only both together make `PRINTSCREEN` a working binding on a Mac.
+        #[cfg(target_os = "macos")]
+        KeyCode::F13 => KeyCode::PrintScreen,
         other => other,
     }
 }
@@ -478,6 +496,29 @@ mod tests {
         // The alias fold: both Enters share the token and the parsed key.
         assert_eq!(key_token(KeyCode::NumpadEnter), Some("ENTER"));
         assert_eq!(token_key("ENTER"), Some(BindKey::Key(KeyCode::Enter)));
+    }
+
+    /// The Mac print-screen fold (decision 1487). macOS delivers no `PrintScreen` at all — a PC
+    /// keyboard's PrtSc arrives as F13 — so BOTH arms have to agree that F13 *is* `PRINTSCREEN`,
+    /// or the shipped `PRINTSCREEN SCREENSHOT` default is a key nobody on a Mac can press.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn f13_is_print_screen_on_a_mac() {
+        assert_eq!(
+            key_token(KeyCode::F13),
+            Some("PRINTSCREEN"),
+            "the capture arm"
+        );
+        assert_eq!(
+            normalize_key(KeyCode::F13),
+            KeyCode::PrintScreen,
+            "the dispatch arm"
+        );
+        assert_eq!(
+            token_key("PRINTSCREEN"),
+            Some(BindKey::Key(normalize_key(KeyCode::F13))),
+            "a chord parsed from the shipped default matches an F13 press"
+        );
     }
 
     #[test]

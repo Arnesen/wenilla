@@ -49,7 +49,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
-use crate::liquid::{FoamPatch, WaterChunkInfo};
+use crate::liquid::{FoamPatch, WaterChunkInfo, WaterIndex};
 use crate::particles::buffer::{
     begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
 };
@@ -308,7 +308,8 @@ fn drive_unit(
     scale: f32,
     // The unit's collision height (yd) — both depth lines below are fractions of it (0645).
     h: f32,
-    chunks: &[(Entity, &WaterChunkInfo, &FoamPatch)],
+    water: &Query<(Entity, &WaterChunkInfo, &FoamPatch)>,
+    index: &WaterIndex,
     now: f32,
 ) {
     let gate = (GATE_DEPTH_FRAC * h).max(1.0);
@@ -316,11 +317,15 @@ fn drive_unit(
     let wow = bevy_to_wow(pos);
     // The surface height under the unit, from the wet cell it stands on — not the chunk's box and
     // not the chunk's highest vertex, which on a sloped river put the wade depth ~2 yd out
-    // (decision 0642).
-    let Some(surface) = chunks
-        .iter()
-        .find_map(|(_, info, _)| info.surface_z_at(wow[0], wow[1]))
-    else {
+    // (decision 0642). Through [`WaterIndex`], not the full chunk walk: this line used to be a
+    // linear scan of every loaded surface (~2.2k at a city pin) PER UNIT PER FRAME — exactly the
+    // per-consumer shape `liquid/spatial.rs`'s module doc warns detonates; a dry-land unit now
+    // costs one hash miss. A dead index entry self-filters at `water.get` (the index contract),
+    // and overlapping surfaces were already first-match-in-arbitrary-order before this.
+    let Some(surface) = index.over(wow[0], wow[1]).iter().find_map(|&e| {
+        let (_, info, _) = water.get(e).ok()?;
+        info.surface_z_at(wow[0], wow[1])
+    }) else {
         foam_state.wading = false;
         return;
     };
@@ -345,7 +350,19 @@ fn drive_unit(
     };
     let final_size = p.size0 + p.growth * p.lifetime;
     let center = [wow[0], wow[1]];
-    if let Some((verts, chunk)) = build_patch(center, final_size, chunks) {
+    // Candidates for the patch box only — resolved here, on the EMISSION path (past the depth
+    // gate and the cooldown), never on the every-frame classify above. `over_box` unions the
+    // 1–4 cells a final-size box touches, so the set `build_patch` filters with `overlaps` is
+    // the same one the full walk offered it.
+    let candidates: Vec<_> = index
+        .over_box(
+            [center[0] - final_size, center[1] - final_size],
+            [center[0] + final_size, center[1] + final_size],
+        )
+        .into_iter()
+        .filter_map(|e| water.get(e).ok())
+        .collect();
+    if let Some((verts, chunk)) = build_patch(center, final_size, &candidates) {
         alloc(FoamRecord {
             center,
             heading,
@@ -377,6 +394,7 @@ fn drive_unit(
 
 /// Per frame: run the driver for the avatar (its real movement flags — the reference's own
 /// selection bits) and for every streamed unit (the velocity/yaw proxy), emitting pool records.
+#[allow(clippy::too_many_arguments)] // the emitter's real input set; the index ride-along tipped it
 fn emit_water_foam(
     time: Res<Time>,
     materials: Option<Res<FoamAssets>>,
@@ -385,19 +403,19 @@ fn emit_water_foam(
     self_unit: Query<&WorldUnit, With<ViewerUnit>>,
     units: Query<(Entity, &Transform, &WorldUnit), Without<ViewerUnit>>,
     water: Query<(Entity, &WaterChunkInfo, &FoamPatch)>,
+    index: Res<WaterIndex>,
 ) {
     if materials.is_none() {
         return;
     }
     let now = time.elapsed_secs();
     let dt = time.delta_secs().max(1.0e-4);
-    let chunks: Vec<_> = water.iter().collect();
 
     for uf in foam.units.values_mut() {
         uf.active = false;
     }
 
-    if !chunks.is_empty() {
+    if !water.is_empty() {
         // The avatar: byte-faithful selection off our own streamed movement flags.
         if let Some(body) = viewer.at {
             let uf = foam
@@ -432,7 +450,7 @@ fn emit_water_foam(
             let mut alloc = |rec: FoamRecord| {
                 pool[alloc_slot(self_cursor, 0, SELF_SLOTS)] = Some(rec);
             };
-            drive_unit(uf, &mut alloc, body, state, scale, h, &chunks, now);
+            drive_unit(uf, &mut alloc, body, state, scale, h, &water, &index, now);
         }
 
         // Streamed units (the avatar's own wire ghost is excluded via `Without<SelfPlayer>`).
@@ -483,7 +501,9 @@ fn emit_water_foam(
             let mut alloc = |rec: FoamRecord| {
                 pool[alloc_slot(other_cursor, SELF_SLOTS, POOL_SIZE - SELF_SLOTS)] = Some(rec);
             };
-            drive_unit(uf, &mut alloc, pos, state, unit.scale, h, &chunks, now);
+            drive_unit(
+                uf, &mut alloc, pos, state, unit.scale, h, &water, &index, now,
+            );
         }
     }
 
@@ -603,6 +623,75 @@ impl Plugin for WaterFxPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The emitter reaches its water through [`WaterIndex`], end to end: a wading unit standing
+    /// in an indexed pool emits a record on its first frame (the step-in one-shot), and a unit
+    /// on dry land emits nothing. This is the regression fence for the index rewire — an empty
+    /// or stale index is a world with NO foam, which no helper-level test would catch.
+    #[test]
+    fn the_emitter_finds_its_water_through_the_index() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<WaterIndex>()
+            .init_resource::<WaterFoam>()
+            .init_resource::<crate::view::Viewer>()
+            .insert_resource(FoamAssets {
+                ring: Handle::default(),
+                wake: Handle::default(),
+            })
+            .add_systems(
+                Update,
+                (crate::liquid::maintain_water_index, emit_water_foam).chain(),
+            );
+
+        // A 3×3-vertex all-wet grid over [0,10]², surface z = 5.
+        let mut positions = Vec::new();
+        for j in 0..3 {
+            for i in 0..3 {
+                positions.push([i as f32 * 5.0, j as f32 * 5.0, 5.0]);
+            }
+        }
+        let info = WaterChunkInfo::new(
+            crate::liquid::LiquidSource::AdtChunk,
+            benilla_formats::LiquidKind::Still,
+            [3, 3],
+            positions,
+            vec![true; 4],
+        );
+        app.world_mut().spawn((info, FoamPatch));
+
+        let unit = || WorldUnit {
+            wades: true,
+            scale: 1.0,
+            height: 2.0,
+            bound: None,
+        };
+        // Feet 1.5 yd under the surface — past the 0.4·h step-in line, so the one-shot ring
+        // fires on the first classified frame.
+        app.world_mut().spawn((
+            Transform::from_translation(wow_to_bevy([2.0, 2.0, 3.5])),
+            unit(),
+        ));
+        // The dry control, far outside every indexed cell.
+        app.world_mut().spawn((
+            Transform::from_translation(wow_to_bevy([500.0, 500.0, 3.5])),
+            unit(),
+        ));
+
+        app.update();
+        let foam = app.world().resource::<WaterFoam>();
+        let live: Vec<usize> = foam
+            .pool
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.as_ref().map(|_| i))
+            .collect();
+        assert_eq!(live.len(), 1, "one record: the wader's, not the dry unit's");
+        assert!(
+            live[0] >= SELF_SLOTS,
+            "a streamed unit allocates from the other partition"
+        );
+    }
 
     /// Pool partitioning: the self cursor wraps within [0, 32), others within [32, 128) —
     /// eviction replaces the oldest of the same partition, never crosses it.

@@ -137,6 +137,12 @@ pub struct GroundShade {
     /// The last effective target the `WOW_INTERIOR_LOG` instrument printed (log-on-change; starts
     /// off-scale so the first resolved target always prints).
     logged_target: f32,
+    /// The shade byte the descendant walk last pushed to this root's parts — the settled gate
+    /// (1490): while it matches this frame's byte and no other lane rewrote a part's tag (the
+    /// reclaim detector in [`update_ground_shade`]), the walk is skipped whole. `None` = the
+    /// parts are not known to carry any byte — fresh, or hidden by the election (a wake must
+    /// re-assert even at an unchanged byte).
+    asserted: Option<u8>,
 }
 
 impl Default for GroundShade {
@@ -151,6 +157,7 @@ impl Default for GroundShade {
             ambient: Vec3::ZERO,
             ambient_target: Vec3::ZERO,
             logged_target: -1.0,
+            asserted: None,
         }
     }
 }
@@ -197,13 +204,55 @@ impl GroundShade {
     }
 }
 
+/// Roots owed a shade re-assert this frame even at an unchanged byte: some OTHER lane rewrote a
+/// descendant part's `MeshTag` since [`detect_shade_reclaims`] last ran — the interior
+/// classifier's exterior reclaim (1358), a late-attached part (`Added` counts as changed).
+/// What lets [`update_ground_shade`]'s per-part walk skip the settled crowd (1490): steady
+/// frames have no foreign tag writes, so this is empty and every settled drawn body costs the
+/// ramp arithmetic and one map insert.
+#[derive(Resource, Default)]
+pub(crate) struct ShadeDirtyRoots(bevy::ecs::entity::EntityHashSet);
+
+/// The reclaim detector — its own system because `Changed<MeshTag>` is read access and the
+/// walk's query holds `&mut MeshTag` (B0001). Runs between the classifier and the walk, so a
+/// same-frame reclaim is caught the frame it happens; a writer scheduled after the walk
+/// (a PostUpdate fade) is caught on the next frame, exactly when the old unconditional walk
+/// would have repaired it too. The walk's own writes land after this system's baseline and so
+/// echo back as dirty for ONE extra frame — that echo walk compares every byte equal, writes
+/// nothing, and the chain goes quiet; it cannot oscillate.
+pub(crate) fn detect_shade_reclaims(
+    changed_parts: Query<Entity, (Changed<MeshTag>, Without<crate::billboard::BillboardCard>)>,
+    shade_roots: Query<(), With<GroundShade>>,
+    child_of: Query<&ChildOf>,
+    mut dirty: ResMut<ShadeDirtyRoots>,
+) {
+    dirty.0.clear();
+    for part in &changed_parts {
+        let mut node = part;
+        loop {
+            if shade_roots.contains(node) {
+                dirty.0.insert(node);
+                break;
+            }
+            let Ok(up) = child_of.get(node) else { break };
+            node = up.parent();
+        }
+    }
+}
+
 pub(crate) struct EntityShadePlugin;
 
 impl Plugin for EntityShadePlugin {
     fn build(&self, app: &mut App) {
         // After the interior classifier: its exterior reclaim writes a fresh tag (shade byte 0) the
-        // same frame this re-asserts the ramped byte, so the pair can't fight across frames.
-        app.add_systems(Update, update_ground_shade.after(classify_entity_interior));
+        // same frame this re-asserts the ramped byte, so the pair can't fight across frames. The
+        // detector sits between the two so the reclaim is observed the frame it happens.
+        app.init_resource::<ShadeDirtyRoots>().add_systems(
+            Update,
+            (detect_shade_reclaims, update_ground_shade)
+                .chain()
+                .after(classify_entity_interior),
+        );
     }
 }
 
@@ -243,6 +292,9 @@ pub(crate) fn update_ground_shade(
     // The card pass's up-walk: a card can follow a deep JOINT (`following_joint` — the swinging
     // lamp's glow), and a joint is not a shade root.
     child_of: Query<&ChildOf>,
+    // The reclaim detector's verdict ([`detect_shade_reclaims`], one stage earlier): roots owed
+    // a re-assert even at an unchanged byte.
+    dirty_roots: Res<ShadeDirtyRoots>,
     mut self_log: Local<f32>,
 ) {
     root_shade.clear();
@@ -328,20 +380,31 @@ pub(crate) fn update_ground_shade(
             ramp_toward(a.z, at.z, ambient_step),
         );
         let byte = (shade.t * 255.0).round().clamp(0.0, 255.0) as u8;
+        // Every root enters the card map, hidden or not — the insert is one hash write, and a
+        // hidden body's card used to walk its whole parent chain to a `None` precisely because
+        // its root was left out.
+        root_shade.insert(root, byte);
         // A root the election hid (1270/1475) draws nothing, so the re-assert walk below is
         // skipped whole — 1473's audit found it running over every part of every off-view body.
-        // The ramps above kept stepping, so the byte is current the frame the body wakes; this
-        // system runs one stage before the election (Update vs PostUpdate), so the wake frame's
-        // walk re-asserts at most one frame late, into parts whose tags retained their last byte.
+        // The ramps above kept stepping, so the byte is current the frame the body wakes; the
+        // cleared `asserted` is what makes the wake frame's walk unconditional, into parts
+        // whose tags retained their last byte.
         if root_vis.is_some_and(|v| *v == Visibility::Hidden) {
+            shade.asserted = None;
             continue;
         }
+        // The settled gate (1490): every part below already carries this byte (we pushed it —
+        // `asserted`) and no other lane rewrote a tag since (`dirty_roots`). The walk used to be
+        // unconditional for a drawn root as the MeshTag re-assert over the classifier's
+        // exterior reclaim (1358); the reclaim detector above answers that by observation
+        // instead of by re-walking every body every frame.
+        if shade.asserted == Some(byte) && !dirty_roots.0.contains(&root) {
+            continue;
+        }
+        shade.asserted = Some(byte);
         // Push to every part below the root (body submeshes are direct children; held items/helm ride
         // joint entities deeper down — same full-tree walk as the self-fade). Change-gated per part on
-        // the byte, so a settled entity writes nothing and never re-triggers render extraction. The
-        // walk itself is unconditional for a DRAWN root: it is the MeshTag re-assert over the
-        // classifier's exterior reclaim (1358), not a change-only push.
-        root_shade.insert(root, byte);
+        // the byte, so a settled entity writes nothing and never re-triggers render extraction.
         for part in children.iter_descendants(root) {
             let Ok((mut tag, lit)) = parts.get_mut(part) else {
                 continue;
@@ -415,6 +478,39 @@ mod tests {
     fn resolve(world: &mut World, map: &EntityHashMap<u8>, follows: Option<Entity>) -> Option<u8> {
         let mut state: SystemState<Query<&ChildOf>> = SystemState::new(world);
         card_root_shade(map, &state.get(world), follows)
+    }
+
+    /// The reclaim detector's tick contract (1490): a fresh part flags its root (Added counts
+    /// as changed); a quiet frame flags nothing; a foreign tag write flags the root again — and
+    /// only the root above the touched part, not every root in the world. This is what lets
+    /// the shade walk skip the settled crowd without ever missing 1358's exterior reclaim.
+    #[test]
+    fn a_foreign_tag_write_flags_exactly_its_root() {
+        let mut app = App::new();
+        app.init_resource::<ShadeDirtyRoots>()
+            .add_systems(Update, detect_shade_reclaims);
+        let root = app.world_mut().spawn(GroundShade::default()).id();
+        let part = app.world_mut().spawn((MeshTag(7), ChildOf(root))).id();
+        let other = app.world_mut().spawn(GroundShade::default()).id();
+        app.world_mut().spawn((MeshTag(9), ChildOf(other)));
+
+        app.update(); // both parts are Added ⇒ both roots flagged
+        let dirty = |app: &App| {
+            let d = app.world().resource::<ShadeDirtyRoots>();
+            (d.0.contains(&root), d.0.contains(&other))
+        };
+        assert_eq!(dirty(&app), (true, true), "a fresh part flags its root");
+
+        app.update(); // nobody wrote ⇒ quiet
+        assert_eq!(dirty(&app), (false, false), "a settled frame flags nothing");
+
+        app.world_mut().get_mut::<MeshTag>(part).unwrap().0 = 42;
+        app.update();
+        assert_eq!(
+            dirty(&app),
+            (true, false),
+            "a foreign write flags its own root and nobody else's"
+        );
     }
 
     /// A card's owner can sit arbitrarily deep in its root's tree (a held torch's flame card

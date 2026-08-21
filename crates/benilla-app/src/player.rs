@@ -79,18 +79,19 @@ pub(crate) use follow::{FollowRequest, FollowState};
 // The shared avatar state + movement constants live in [`state`]; the private re-imports below are
 // what lets this module and the concern modules beside it keep naming them `super::X` unchanged.
 use state::{
-    MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, CAPSULE_RADIUS, FALL_FAR_DROP, FALL_FAR_TIME,
-    FOOT_CONE_HEIGHT, GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP,
-    RUN_BACK_RATIO, SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK,
-    STEP_UP_ADVANCE, STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL,
-    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
+    GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
+    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE,
+    STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL, WEDGE_STALL_RATIO,
+    WEDGE_STILL_FRAMES,
 };
 // `SETTLE_TIMEOUT` is `pub(crate)`: the settle release lives in the terrain streamer (decision
 // 0737 — residency releases the hold, not ground contact), which owns the deadline push while the
 // resident world is still the departed map's (0710).
 pub(crate) use state::{
-    Player, PlayerCapsule, CAPSULE_HEIGHT, DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY,
-    GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, SETTLE_TIMEOUT, TERMINAL_VELOCITY,
+    Player, PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS, DEFAULT_COLLISION_HEIGHT,
+    FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, SETTLE_TIMEOUT,
+    TERMINAL_VELOCITY,
 };
 /// The swim boundary `0.75·h` — and therefore the **wade ceiling**, since wading is the implicit
 /// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature

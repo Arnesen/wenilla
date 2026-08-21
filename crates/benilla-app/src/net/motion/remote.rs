@@ -73,6 +73,18 @@ pub(crate) struct RemoteMotion {
     /// not anything the server said. Read by the runaway watch in [`extrapolate_remote_units`].
     pub(crate) last_apply_ms: f64,
     pub(crate) last_apply_pos: [f32; 3],
+    /// **The settled memo** — the position at which this mover's last world resolve was a
+    /// fixed point: flag-still, grounded on a real support, and returned bitwise where it
+    /// started. While the frame's pre-resolve position still equals it, the resolve is skipped
+    /// whole — a standing NPC was paying a depenetration contact enumeration (heap Vec + broad
+    /// phase) plus a capsule down-cast every frame for a result proven identical (1473 §3's
+    /// idle-remote row; the coordinate round-trip is sign/permutation-lossless and
+    /// `grounded_step` is pure in its inputs, so bitwise equality is the honest test, the
+    /// `facing.rs` dead-band's shape). Anything that moves the mover — a packet apply, a
+    /// direction flag, the reconcile lerp, a jump arc — changes the position or flags and
+    /// misses the memo; a mover standing where ground has not streamed in never arms it
+    /// (`ground` was `None`) and keeps resolving until the world exists under it.
+    pub(crate) settled_at: Option<[f32; 3]>,
 }
 
 /// What [`crate::net::apply`]'s `unit_move` did with an inbound relayed move — the `out=` field of
@@ -480,7 +492,10 @@ pub(in crate::net) fn extrapolate_remote_units(
         // fight it).
         let airborne = rm.flags & move_flags::FALLING != 0;
         let afloat = rm.flags & move_flags::SWIMMING != 0;
-        if !afloat && !riding && !flat_extrapolation() {
+        // The settled memo ([`RemoteMotion::settled_at`]): an idle mover standing exactly where
+        // its last resolve left it re-derives nothing — the resolve is skipped, `held` honestly
+        // stays 0.
+        if !afloat && !riding && rm.settled_at != Some(pos) && !flat_extrapolation() {
             let half_h = Vec3::Y * (crate::player::CAPSULE_HEIGHT * 0.5);
             let from = wow_to_bevy(rm.wow_pos) + half_h;
             // The frame's velocity by construction. Grounded, [`RemoteMotion::advance`] never moves
@@ -491,10 +506,19 @@ pub(in crate::net) fn extrapolate_remote_units(
             } else {
                 Vec3::ZERO
             };
-            let resolved_center = if airborne {
-                crate::player::mover::airborne_step(&world, &capsule.0, from, vel, time.delta())
+            let (resolved_center, supported) = if airborne {
+                (
+                    crate::player::mover::airborne_step(
+                        &world,
+                        &capsule.0,
+                        from,
+                        vel,
+                        time.delta(),
+                    ),
+                    false,
+                )
             } else {
-                crate::player::mover::grounded_step(
+                let g = crate::player::mover::grounded_step(
                     &world,
                     &capsule.0,
                     from,
@@ -509,10 +533,16 @@ pub(in crate::net) fn extrapolate_remote_units(
                     // watched player descending a steep face gets the ordinary cone reach, and the
                     // next packet's wire Z corrects whatever that misses.
                     crate::player::mover::Support::default(),
-                )
-                .center
+                );
+                (g.center, g.ground.is_some())
             };
             let resolved = bevy_to_wow(resolved_center - half_h);
+            // Arm the memo only at the fixed point: flag-still, on real ground, and the resolve
+            // handed back exactly its input (one snap frame after stopping, the second resolve
+            // does — deterministically, the wow↔bevy round-trip being lossless). A miss on any
+            // term keeps resolving every frame.
+            rm.settled_at = (supported && rm.flags & move_flags::ANY_MOVE == 0 && resolved == pos)
+                .then_some(resolved);
             held = (pos[0] - resolved[0]).hypot(pos[1] - resolved[1]);
             pos = resolved;
         }

@@ -88,6 +88,7 @@ mod probe_shield;
 mod quest_markers;
 mod raid_marks;
 mod run_mode;
+mod screenshot;
 mod shaders;
 mod smart_rect;
 mod sound;
@@ -681,7 +682,12 @@ pub fn run(build: BuildId) -> AppExit {
     // PLAYER_QUEST_LOG descriptor slots + the SMSG_QUEST_QUERY_RESPONSE template cache, and drives
     // QuestLogFrame.xml over the Era quest-log API.
     .add_plugins(UiQuestLogPlugin)
-    .add_plugins(UiChatPlugin);
+    .add_plugins(UiChatPlugin)
+    // Print screen (decision 1487): the SCREENSHOT binding's engine half — one PNG per
+    // `Screenshot()` call into `benilla-config/Screenshots/` (never the install — decision 1486),
+    // answered to the UI as SCREENSHOT_SUCCEEDED/FAILED so the status text can never be in the
+    // frame it announces.
+    .add_plugins(screenshot::ScreenshotPlugin);
 
     // Register benilla-assets' loaders AFTER `AssetPlugin` (they go into the live `AssetServer`).
     benilla_assets::register_asset_loaders(&mut app);

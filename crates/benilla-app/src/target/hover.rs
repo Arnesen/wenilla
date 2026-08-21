@@ -189,8 +189,12 @@ pub(super) fn update_hover(
             continue;
         }
         let Some(children) = children else { continue };
-        let skinned: Vec<_> = children.iter().filter_map(|c| parts.get(c).ok()).collect();
-        if skinned.is_empty() {
+        // Ownership probe only — no collect yet. The `skinned` Vec used to be built HERE, for
+        // every drawn unit in the scene, ahead of the few-FLOP broad phase that rejects nearly
+        // all of them (1473 §3's hover row); the survivors alone pay it now, below. Membership
+        // in `faithful` must still be decided pre-reject — a broad-phase-rejected skinned unit
+        // stays excluded from the AABB fallback by RULE, not by accident.
+        if !children.iter().any(|c| parts.contains(c)) {
             continue; // static/cube unit → the AABB fallback below
         }
         faithful.insert(entity);
@@ -215,6 +219,7 @@ pub(super) fn update_hover(
                 continue;
             }
         }
+        let skinned: Vec<_> = children.iter().filter_map(|c| parts.get(c).ok()).collect();
         // The posed joint palette (parts of one skeleton share the rig): the same
         // world-from-bind-pose matrices GPU skinning applies, read from the owned palette rows
         // (decision 0720 — last frame's propagated pose, exactly what the previous
@@ -346,6 +351,20 @@ pub(super) fn update_hover(
 /// ties by distance. Both passes stay world-occlusion-clamped. (Residual, same slice as the
 /// eligibility note below: the reference's sticky slot is cross-type, so a stuck GO pick can
 /// outrank a unit's halo there; our split picks give the unit that frame instead.)
+/// The GO picker's own state, bundled — the pick-set cache with the stream edges that rebuild
+/// it, plus the sticky-hover memory — one [`SystemParam`] because [`update_hovered_object`]
+/// sits at Bevy's 16-param function-system ceiling. See the maintenance comment at the top of
+/// that system for the cache contract.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct GoPickSet<'w, 's> {
+    added: Query<'w, 's, (), Added<GoPickPart>>,
+    removed: RemovedComponents<'w, 's, GoPickPart>,
+    cache: Local<'s, bevy::platform::collections::HashSet<Entity>>,
+    /// Last frame's GO pick, for pass 2's sticky-hover (the reference's anti-flicker cache, by
+    /// net entity — the same rung the unit picker keeps).
+    last_pick: Local<'s, Option<Entity>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_hovered_object(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
@@ -370,10 +389,39 @@ pub(super) fn update_hovered_object(
     factions: Option<Res<super::ring::Factions>>,
     self_q: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     parts: PickParts,
-    // Last frame's GO pick, for pass 2's sticky-hover (the reference's anti-flicker cache, by net
-    // entity — the same rung the unit picker keeps).
-    mut last_pick: Local<Option<Entity>>,
+    // The picker's own state, one bundled param ([`GoPickSet`] — the fn sits at Bevy's
+    // 16-param ceiling): the pick-set cache, its stream edges, and the sticky-hover memory.
+    mut cache: GoPickSet,
 ) {
+    let added_parts = &cache.added;
+    let removed_parts = &mut cache.removed;
+    let pickable = &mut *cache.cache;
+    let last_pick = &mut *cache.last_pick;
+    // The pick set (bevy's `HashSet` — the caster's type, not the `std` one this module uses
+    // elsewhere), rebuilt on GO-part stream edges ONLY — the `WaterIndex` shape. It used to be
+    // collected from every streamed GO part on every cursor frame (ChildOf hop + store probe +
+    // hash insert each); membership only actually changes when GO models spawn or despawn, and
+    // a GO's type id never changes after create. Maintained FIRST, ahead of every early return:
+    // an `Added` edge is only visible on the frame it happens (the run advances this system's
+    // change tick even through a `return`), so a rebuild parked behind the cursor gates would
+    // silently drop parts streamed in while the pointer sat on UI. A despawned entry between
+    // edges self-filters at the caster (`parts.get` on a dead entity misses).
+    //
+    // A transport-family GO (TRANSPORT 11 / MAP_OBJECT 14 / MO_TRANSPORT 15) never joins the
+    // set: in the reference it has no pick geometry at all — the GO model resolver `0x5f80e0`
+    // returns 0 for these three types (they render via the WMO/spline path, not an M2) and their
+    // strategy's interaction predicates are constant-false (w2c1 + go-render-gate + the +0x14
+    // vtable dump). Concretely: a ship's hull must not swallow the pick — an NPC on deck stays
+    // hoverable through the railing, and the hull shows no gear or tooltip.
+    if removed_parts.read().next().is_some() || !added_parts.is_empty() {
+        pickable.clear();
+        pickable.extend(go_parts.iter().filter(|&e| {
+            let root = child_of.get(e).map_or(e, |c| c.parent());
+            !stores
+                .get(root)
+                .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 11 | 14 | 15))
+        }));
+    }
     hovered.target = None;
     hovered.guid = None;
     hovered.distance = f32::MAX;
@@ -387,22 +435,6 @@ pub(super) fn update_hovered_object(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    // The caster takes bevy's `HashSet` (not the `std` one this module uses elsewhere).
-    // A transport-family GO (TRANSPORT 11 / MAP_OBJECT 14 / MO_TRANSPORT 15) never joins the pick
-    // set: in the reference it has no pick geometry at all — the GO model resolver `0x5f80e0`
-    // returns 0 for these three types (they render via the WMO/spline path, not an M2) and their
-    // strategy's interaction predicates are constant-false (w2c1 + go-render-gate + the +0x14
-    // vtable dump). Concretely: a ship's hull must not swallow the pick — an NPC on deck stays
-    // hoverable through the railing, and the hull shows no gear or tooltip.
-    let pickable: bevy::platform::collections::HashSet<Entity> = go_parts
-        .iter()
-        .filter(|&e| {
-            let root = child_of.get(e).map_or(e, |c| c.parent());
-            !stores
-                .get(root)
-                .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 11 | 14 | 15))
-        })
-        .collect();
     if pickable.is_empty() {
         *last_pick = None;
         return;
@@ -424,7 +456,7 @@ pub(super) fn update_hovered_object(
 
     // Pass 1 — the exact resident geometry, pure nearest-wins (priority-independent).
     let mut best: Option<(f32, Entity)> =
-        benilla_world::interact::cast_pick_ray(ray, &pickable, &parts, false)
+        benilla_world::interact::cast_pick_ray(ray, pickable, &parts, false)
             .into_iter()
             .next()
             .map(|(e, h)| (h.distance, e));
@@ -437,7 +469,7 @@ pub(super) fn update_hovered_object(
             return;
         }
         let mut best2: Option<(f32, u32, Entity)> = None;
-        for (part, hit) in benilla_world::interact::cast_pick_ray_inflated(ray, &pickable, &parts) {
+        for (part, hit) in benilla_world::interact::cast_pick_ray_inflated(ray, pickable, &parts) {
             let net = resolve_net(part);
             let prio = if *last_pick == Some(net) {
                 u32::MAX // the sticky-hover cache outranks everything

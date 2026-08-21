@@ -132,6 +132,11 @@ MinimapCluster.xml
 # TOC loads GameTime.xml right after Minimap.xml. After MinimapCluster (its parent) and
 # GameTooltip (the hover tooltip); driven by the app's game clock (`minimap::feed_game_time`).
 GameTime.xml
+# Print screen's UI half (decision 1487): the centred "Screen Captured"/"Screen Capture Failed"
+# line, and the `TakeScreenshot()` the SCREENSHOT binding runs. Needs Fonts.xml (SystemFont) and
+# UIParent.xml (its seat) — both far above — and nothing else; seated beside ZoneText.xml, whose
+# AutoFollowStatus is the same full-screen-frame-with-a-centred-line shape.
+ScreenshotStatus.xml
 # The zone-entry splash (decision 0287): ZoneTextFrame/SubZoneTextFrame + the inlined
 # FadingFrame kit, driven by the ZONE_CHANGED family `crate::area` fires. Needs only
 # Fonts (ZoneTextFont/SubZoneTextFont) + UIParent; kept by the minimap cluster — the
