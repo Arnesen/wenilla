@@ -19,16 +19,21 @@ fn player_lines_link_the_name_except_emote() {
     // The composer emits the REAL |Hplayer link now (ref ChatFrame.lua l.1451); the renderer
     // strips the markers and spans the [Name] (the P2 markup law).
     assert_eq!(
-        compose(&ev(K::Say, "hi there", "Bob"), K::Say).unwrap(),
+        compose(&ev(K::Say, "hi there", "Bob"), K::Say, "Common").unwrap(),
         "|Hplayer:Bob|h[Bob]|h says: hi there"
     );
     assert_eq!(
-        compose(&ev(K::WhisperInform, "hey", "Bob"), K::WhisperInform).unwrap(),
+        compose(
+            &ev(K::WhisperInform, "hey", "Bob"),
+            K::WhisperInform,
+            "Common"
+        )
+        .unwrap(),
         "To |Hplayer:Bob|h[Bob]|h: hey"
     );
     // EMOTE uses the bare name (l.1450 `type ~= "EMOTE"`).
     assert_eq!(
-        compose(&ev(K::Emote, "dances.", "Bob"), K::Emote).unwrap(),
+        compose(&ev(K::Emote, "dances.", "Bob"), K::Emote, "Common").unwrap(),
         "Bob dances."
     );
 }
@@ -36,15 +41,15 @@ fn player_lines_link_the_name_except_emote() {
 #[test]
 fn group_prefixed_kinds_wear_their_brackets() {
     assert_eq!(
-        compose(&ev(K::Party, "inc 3", "Ann"), K::Party).unwrap(),
+        compose(&ev(K::Party, "inc 3", "Ann"), K::Party, "Common").unwrap(),
         "[Party] |Hplayer:Ann|h[Ann]|h: inc 3"
     );
     assert_eq!(
-        compose(&ev(K::Guild, "gz", "Ann"), K::Guild).unwrap(),
+        compose(&ev(K::Guild, "gz", "Ann"), K::Guild, "Common").unwrap(),
         "[Guild] |Hplayer:Ann|h[Ann]|h: gz"
     );
     assert_eq!(
-        compose(&ev(K::RaidWarning, "move", "Ann"), K::RaidWarning).unwrap(),
+        compose(&ev(K::RaidWarning, "move", "Ann"), K::RaidWarning, "Common").unwrap(),
         "[Raid Warning] |Hplayer:Ann|h[Ann]|h: move"
     );
 }
@@ -54,12 +59,12 @@ fn flags_prefix_the_name_and_afk_uses_its_get() {
     let mut e = ev(K::Say, "brb", "Bob");
     e.flag = "GM".into();
     assert_eq!(
-        compose(&e, K::Say).unwrap(),
+        compose(&e, K::Say, "Common").unwrap(),
         "<GM>|Hplayer:Bob|h[Bob]|h says: brb"
     );
     // A received AFK auto-reply: CHAT_AFK_GET (whisper-pink family).
     assert_eq!(
-        compose(&ev(K::Afk, "farming", "Bob"), K::Afk).unwrap(),
+        compose(&ev(K::Afk, "farming", "Bob"), K::Afk, "Common").unwrap(),
         "|Hplayer:Bob|h[Bob]|h is Away From Keyboard: farming"
     );
 }
@@ -69,13 +74,13 @@ fn language_header_rides_non_default_tongues() {
     let mut e = ev(K::Say, "throm-ka", "Grunk");
     e.language = "Orcish".into();
     assert_eq!(
-        compose(&e, K::Say).unwrap(),
+        compose(&e, K::Say, "Common").unwrap(),
         "|Hplayer:Grunk|h[Grunk]|h says: [Orcish] throm-ka"
     );
     // Common (our default) and Universal (empty) render no header.
     e.language = "Common".into();
     assert_eq!(
-        compose(&e, K::Say).unwrap(),
+        compose(&e, K::Say, "Common").unwrap(),
         "|Hplayer:Grunk|h[Grunk]|h says: throm-ka"
     );
 }
@@ -85,7 +90,8 @@ fn system_and_loot_lines_are_verbatim() {
     assert_eq!(
         compose(
             &ChatEvent::text_only(K::System, "Additem: Wool Cloth added.".into()),
-            K::System
+            K::System,
+            "Common"
         )
         .unwrap(),
         "Additem: Wool Cloth added."
@@ -98,7 +104,8 @@ fn system_and_loot_lines_are_verbatim() {
                 K::Loot,
                 "You receive loot: |cffffffff|Hitem:117:0:0:0|h[Tough Jerky]|h|r.".into()
             ),
-            K::Loot
+            K::Loot,
+            "Common"
         )
         .unwrap(),
         "You receive loot: |cffffffff|Hitem:117:0:0:0|h[Tough Jerky]|h|r."
@@ -112,10 +119,13 @@ fn system_and_loot_lines_are_verbatim() {
 #[test]
 fn text_emote_lines_are_verbatim_and_never_wear_the_senders_name() {
     let e = ev(K::TextEmote, "Bob waves at you.", "Bob");
-    assert_eq!(compose(&e, K::TextEmote).unwrap(), "Bob waves at you.");
+    assert_eq!(
+        compose(&e, K::TextEmote, "Common").unwrap(),
+        "Bob waves at you."
+    );
     // The control: the same event as a SAY *does* get the bracketed link, so the assertion above
     // is about the TEXT_EMOTE arm and not about `compose` having stopped decorating anything.
-    assert!(compose(&ev(K::Say, "hi", "Bob"), K::Say)
+    assert!(compose(&ev(K::Say, "hi", "Bob"), K::Say, "Common")
         .unwrap()
         .contains("[Bob]"));
 }
@@ -297,14 +307,20 @@ fn exploration_lines_pick_the_reference_form() {
 #[test]
 fn monster_lines_use_the_bare_inline_name() {
     assert_eq!(
-        compose(&ev(K::MonsterSay, "Intruders!", "Guard"), K::MonsterSay).unwrap(),
+        compose(
+            &ev(K::MonsterSay, "Intruders!", "Guard"),
+            K::MonsterSay,
+            "Common"
+        )
+        .unwrap(),
         "Guard says: Intruders!"
     );
     // MONSTER_EMOTE embeds %s where the name goes (CHAT_MONSTER_EMOTE_GET = "").
     assert_eq!(
         compose(
             &ev(K::MonsterEmote, "%s beckons you closer.", "Sentinel"),
-            K::MonsterEmote
+            K::MonsterEmote,
+            "Common"
         )
         .unwrap(),
         "Sentinel beckons you closer."
@@ -316,7 +332,7 @@ fn channel_line_prefixes_the_stripped_channel() {
     let mut e = ev(K::Channel, "wts boar livers", "Bob");
     e.channel = "General - Elwynn Forest".into();
     assert_eq!(
-        compose(&e, K::Channel).unwrap(),
+        compose(&e, K::Channel, "Common").unwrap(),
         "[General] |Hplayer:Bob|h[Bob]|h: wts boar livers"
     );
 }
@@ -333,7 +349,7 @@ fn channel_notices_compose_by_the_notice_law() {
     e.channel = "General - Elwynn Forest".into();
     e.notice = "2".into(); // YOU_JOINED
     assert_eq!(
-        compose(&e, K::ChannelNotice).unwrap(),
+        compose(&e, K::ChannelNotice, "Common").unwrap(),
         "Joined Channel: [General - Elwynn Forest]"
     );
     let mut kick = ChatEvent::text_only(K::ChannelNotice, String::new());
@@ -342,14 +358,14 @@ fn channel_notices_compose_by_the_notice_law() {
     kick.target = "Mod".into();
     kick.notice = "18".into(); // PLAYER_KICKED 0x12
     assert_eq!(
-        compose(&kick, K::ChannelNotice).unwrap(),
+        compose(&kick, K::ChannelNotice, "Common").unwrap(),
         "[World] Player Ann kicked by Mod."
     );
     // A member join line is a CHANNEL_JOIN event, hyperlinked like any player line.
     let mut join = ev(K::ChannelJoin, "", "Ann");
     join.channel = "World".into();
     assert_eq!(
-        compose(&join, K::ChannelJoin).unwrap(),
+        compose(&join, K::ChannelJoin, "Common").unwrap(),
         "[World] |Hplayer:Ann|h[Ann]|h joined channel."
     );
 }
@@ -744,7 +760,7 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
         "arg8 — what the color resolves through"
     );
     assert_eq!(
-        super::frames::compose(&e, K::ChannelNotice).unwrap(),
+        super::frames::compose(&e, K::ChannelNotice, "Common").unwrap(),
         "Left Channel: [2. General - Elwynn Forest]"
     );
     assert_eq!(
@@ -1599,5 +1615,110 @@ fn an_addon_message_survives_its_own_send_and_receive() {
             "PARTY".to_string()
         )],
         "what one half composed, the other must recover — tabs in the payload included"
+    );
+}
+
+/// **The `[Language]` header keys off the frame's DEFAULT tongue, not off "Common"** (B262).
+///
+/// `ChatFrame.lua`'s test is `strlen(arg3) > 0 and arg3 ~= "Universal" and arg3 ~= this.defaultLanguage`,
+/// and `GetDefaultLanguage()` answers the **faction** language — Common for every Alliance race,
+/// Orcish for every Horde one (wow-re `chat-language-scramble.md` §12, and benilla's own
+/// `ChrRaces` field-8 join). The composer hardcoded `"Common"`, which is right for half the game
+/// and exactly backwards for the other half: a Horde character saw `[Orcish]` on every ordinary
+/// line of their own faction's chat, and no tag at all on the Common they cannot read.
+///
+/// The condition is about the default language, never about whether the listener understands it —
+/// so a fully-understood foreign line still carries its tag.
+#[test]
+fn the_language_header_suppresses_only_the_frames_own_default_tongue() {
+    let orcish = ChatEvent {
+        language: "Orcish".into(),
+        ..ev(K::Say, "lok'tar", "Grom")
+    };
+    let common = ChatEvent {
+        language: "Common".into(),
+        ..ev(K::Say, "hello", "Ann")
+    };
+
+    // An Alliance body (default Common): Orcish is tagged, Common is not.
+    assert_eq!(
+        compose(&orcish, K::Say, "Common").unwrap(),
+        "|Hplayer:Grom|h[Grom]|h says: [Orcish] lok'tar"
+    );
+    assert_eq!(
+        compose(&common, K::Say, "Common").unwrap(),
+        "|Hplayer:Ann|h[Ann]|h says: hello"
+    );
+
+    // A Horde body (default Orcish): exactly the mirror. This is the assertion that fails against
+    // the hardcoded "Common".
+    assert_eq!(
+        compose(&orcish, K::Say, "Orcish").unwrap(),
+        "|Hplayer:Grom|h[Grom]|h says: lok'tar"
+    );
+    assert_eq!(
+        compose(&common, K::Say, "Orcish").unwrap(),
+        "|Hplayer:Ann|h[Ann]|h says: [Common] hello"
+    );
+
+    // Language 0 arrives as an empty arg3 and is never tagged, whatever the default is — which is
+    // also how a GM and the narration chat types come through, since all three force the field to 0.
+    let universal = ev(K::Say, "system", "Ann");
+    assert_eq!(
+        compose(&universal, K::Say, "Orcish").unwrap(),
+        "|Hplayer:Ann|h[Ann]|h says: system"
+    );
+
+    // A language the listener fully understands still carries its tag: the test is about the
+    // default tongue, not about comprehension. A dwarf reading Dwarvish sees the header.
+    let dwarvish = ChatEvent {
+        language: "Dwarvish".into(),
+        ..ev(K::Say, "here we go", "Bran")
+    };
+    assert_eq!(
+        compose(&dwarvish, K::Say, "Common").unwrap(),
+        "|Hplayer:Bran|h[Bran]|h says: [Dwarvish] here we go"
+    );
+}
+
+/// **The talk/laugh gesture reads the PLAINTEXT, not the garbled line** — so it is
+/// language-independent, and a Horde player yelling `lol` laughs for every observer, Alliance
+/// included.
+///
+/// This is byte-verified rather than reasoned (wow-re `chat-language-scramble.md` §10.1), and it
+/// corrects an inference we had already wired: the §5's consumer census of the display path
+/// `0x49a870` found the chat line, the Lua `arg1` and the bubble all sharing the rewritten buffer,
+/// and we concluded the gesture did too. It does not — the selector is not on that path at all. It
+/// lives in the **parser** `0x49d560` at `0x49d820`-`0x49d8ae`, matching against `[ebp-0x10]`, which
+/// is the very buffer `0x49dbc2` then hands to `0x49a870` as its `src`. The garbled buffer is a
+/// local of a frame that does not exist yet, so the census could never have found this consumer.
+///
+/// The two inputs are observably different, which is the whole point of the test: feed the garbled
+/// text here and the laugh silently becomes a plain talk.
+#[test]
+fn the_talk_gesture_reads_the_plaintext_not_the_garbled_line() {
+    use crate::creature_anim::{select_gesture, Gesture};
+    use benilla_protocol::messages::CHAT_MSG_SAY;
+
+    let Some(data) = benilla_formats::wow_data() else {
+        return; // no client data — the same skip every data-gated test here takes
+    };
+    let mut chain = benilla_formats::Chain::open(&data).expect("open patch chain");
+    let words = benilla_formats::load_language_words(&mut chain).expect("load word pools");
+
+    // An Orcish `lol` heard by someone with no Orcish at all.
+    let garbled = benilla_formats::garble_chat(&words, 1, 0, "lol");
+    assert_ne!(garbled, "lol", "the two inputs must actually differ");
+
+    let laugh_words = |n: u32| (n == 1).then(|| "lol".to_string());
+    assert_eq!(
+        select_gesture(CHAT_MSG_SAY, "lol", laugh_words),
+        Some(Gesture::Laugh),
+        "the plaintext laughs"
+    );
+    assert_eq!(
+        select_gesture(CHAT_MSG_SAY, &garbled, laugh_words),
+        Some(Gesture::Talk),
+        "the garbled form would NOT laugh — which is why the feed must pass the plaintext"
     );
 }

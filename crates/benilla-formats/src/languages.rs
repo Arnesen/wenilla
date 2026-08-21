@@ -148,9 +148,14 @@ pub struct LanguageWords(HashMap<u32, LanguagePool>);
 #[derive(Debug, Default, Clone)]
 pub struct LanguagePool {
     words: Vec<String>,
-    /// `by_len[n]` = indices into `words` of every word whose length is exactly `n`; slot 0 is
-    /// always empty (the table has no zero-length word) and the vector runs to the longest word
-    /// this language authored.
+    /// `by_len[n]` = indices into `words` of every word whose length is exactly `n` **bytes**; slot
+    /// 0 is always empty (the index build skips an empty word) and the vector runs to the longest
+    /// word this language authored.
+    ///
+    /// **Bytes, because the reference's index build takes `strlen`** (`0x4982c0`, a plain byte
+    /// `0x64a6f0`), and the length key it later matches is likewise a byte count. Every shipped word
+    /// is ASCII so the two agree in this table — but the key is compared against a *source* word,
+    /// which is arbitrary player text, and there the distinction is real.
     by_len: Vec<Vec<u32>>,
 }
 
@@ -160,8 +165,8 @@ impl LanguagePool {
         &self.words
     }
 
-    /// The words of exactly `len` characters, in file order — empty when the language authored
-    /// none that long (and for `len` past its longest word).
+    /// The words of exactly `len` bytes, in file order — empty when the language authored none
+    /// that long (and for `len` past its longest word).
     pub fn of_len(&self, len: usize) -> impl Iterator<Item = &str> {
         self.by_len
             .get(len)
@@ -171,14 +176,30 @@ impl LanguagePool {
             .map(|&i| self.words[i as usize].as_str())
     }
 
-    /// How many words of exactly `len` characters this language authored.
+    /// How many words of exactly `len` bytes this language authored.
     pub fn count_of_len(&self, len: usize) -> usize {
         self.by_len.get(len).map_or(0, Vec::len)
     }
 
-    /// The longest word this language authored, in characters (0 for an empty pool).
+    /// The longest word this language authored, in bytes (0 for an empty pool).
     pub fn max_len(&self) -> usize {
         self.by_len.len().saturating_sub(1)
+    }
+
+    /// The substitute the reference picks for a word of `len` bytes whose hash is `hash`:
+    /// `node.words[hash % node.count]` (`0x49b885`), over the candidates **in DBC row order** —
+    /// which is the order the index builder appends them in, so it is the order this pool holds.
+    ///
+    /// `None` means the language authored no word of that length, which is the caller's cue to step
+    /// the length key down and ask again.
+    pub fn nth_of_len(&self, len: usize, hash: u32) -> Option<&String> {
+        let bucket = self.by_len.get(len)?;
+        let count = u32::try_from(bucket.len()).ok()?;
+        if count == 0 {
+            return None;
+        }
+        let idx = bucket[(hash % count) as usize];
+        self.words.get(idx as usize)
     }
 }
 
@@ -210,10 +231,8 @@ fn language_words_schema() -> Schema {
 
 /// Load the per-language substitution pools.
 ///
-/// Word length is counted in **`char`s, not bytes**: every word in the shipped enUS table is
-/// plain ASCII (a hyphen is the only non-letter), so the two agree today — but the count that
-/// matters is the one a length rule compares against a *source* word, and a source word is
-/// arbitrary player text.
+/// Word length is counted in **bytes**, which is what the reference's index build uses
+/// (`0x4982c0` takes `strlen`); see [`LanguagePool::by_len`].
 pub fn load_language_words(chain: &mut Chain) -> Result<LanguageWords> {
     let bytes = chain
         .read_file(LANGUAGE_WORDS)
@@ -228,7 +247,7 @@ pub fn load_language_words(chain: &mut Chain) -> Result<LanguageWords> {
             continue;
         }
         let pool = out.entry(lang).or_default();
-        let len = word.chars().count();
+        let len = word.len();
         let idx = u32::try_from(pool.words.len()).unwrap_or(u32::MAX);
         pool.words.push(word);
         if pool.by_len.len() <= len {

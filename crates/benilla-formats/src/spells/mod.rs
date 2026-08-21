@@ -501,6 +501,11 @@ pub const SPELL_EFFECT_SKINNING: u32 = 95;
 /// `SpellEffects` values `53`/`54` — `SPELL_EFFECT_ENCHANT_ITEM` (permanent) /
 /// `SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY` (vmangos `SharedDefines.h`): the item-targeted craft
 /// casts the CraftFrame sends with `TARGET_FLAG_ITEM` (0437 phase 3).
+/// `SpellEffects` value `39` — `SPELL_EFFECT_LANGUAGE`: the effect that makes a spell *be* a
+/// language. Its `EffectMiscValue_1` is the `Languages.dbc` id, which is how a language reaches a
+/// skill line at all — see [`SpellCatalog::language_spell`].
+pub const SPELL_EFFECT_LANGUAGE: u32 = 39;
+
 pub const SPELL_EFFECT_ENCHANT_ITEM: u32 = 53;
 pub const SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY: u32 = 54;
 
@@ -512,6 +517,9 @@ pub const SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY: u32 = 54;
 pub struct SpellCatalog {
     spells: HashMap<u32, SpellDisplay>,
     learned_spell: HashMap<u32, u32>,
+    /// Spell id → the `Languages.dbc` id its `Effect_1` declares
+    /// ([`SpellCatalog::declared_language`]).
+    declared_language: HashMap<u32, u32>,
     dispel_types: SpellDispelTypes,
 }
 
@@ -523,6 +531,7 @@ impl SpellCatalog {
         Self {
             spells,
             learned_spell: HashMap::new(),
+            declared_language: HashMap::new(),
             dispel_types: SpellDispelTypes::default(),
         }
     }
@@ -549,6 +558,41 @@ impl SpellCatalog {
     /// (its skill line, its display) is what this resolves to (decision 0247's taught-spell hop).
     pub fn learned_spell(&self, id: u32) -> Option<u32> {
         self.learned_spell.get(&id).copied()
+    }
+
+    /// The language a spell **declares** — its `Effect_1 == 39` (`SPELL_EFFECT_LANGUAGE`) slot's
+    /// `EffectMiscValue_1`, or `None` for a spell that is not a language.
+    ///
+    /// This is the direction the reference works in, and the direction matters. `0x4b25b0` runs on
+    /// **spell add** and stores `[0xb700ac][EffectMiscValue_1] = spellId`, so the client's
+    /// language→spell table only ever holds languages *this character has learned*, and a later
+    /// learn overwrites an earlier one on the same language id (wow-re
+    /// `system/ui/scratch/chat-language-scramble.md` §8). Exposing spell→language lets the caller
+    /// fold that table over its own known-spell set and get the reference's answer; exposing
+    /// language→spell over the whole DBC would not, and the shipped data is why:
+    ///
+    /// **Five of the fourteen language spells declare language 7 (Common), not their own.** In
+    /// 5875's `Spell.dbc`, 813 Thalassian, 814 Draconic, 815 Demon Tongue, 816 Titan and 817 Old
+    /// Tongue all carry `EffectMiscValue_1 = 7`, and four of the five are named "(NYI)". Two
+    /// consequences a re-implementation must not smooth over:
+    ///
+    /// - **Languages 8, 9, 10 and 12 are unreachable** — no shipped spell declares them, so the
+    ///   client's table never gets an entry and Demonic / Titan / Thalassian / Kalimag are *always*
+    ///   fully garbled for every character. That is correct 1.12.1 behaviour, not a gap.
+    /// - **A warlock's Demon Tongue (815) overwrites Common's entry**, so their Common is gated on
+    ///   their Demon Tongue skill. Unobservable — every language skill a character holds is 300 —
+    ///   but it is the reference's behaviour and falls out of the fold for free.
+    ///
+    /// Language 11 (Draconic) *is* reachable, via 25674 "Lesser Draconic (Language)", the one spell
+    /// that declares it correctly.
+    pub fn declared_language(&self, spell: u32) -> Option<u32> {
+        self.declared_language.get(&spell).copied()
+    }
+
+    /// Every `(spell id, language id)` pair a shipped spell declares — for the fold above, and for
+    /// the tests that pin the shipped anomaly.
+    pub fn declared_languages(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.declared_language.iter().map(|(s, l)| (*s, *l))
     }
 
     pub fn len(&self) -> usize {
@@ -634,6 +678,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
     let spells_set = parse(&spell_bytes, spell_schema(), "Spell.dbc")?;
     let mut spells: HashMap<u32, SpellDisplay> = HashMap::new();
     let mut learned_spell: HashMap<u32, u32> = HashMap::new();
+    let mut declared_language: HashMap<u32, u32> = HashMap::new();
     for r in spells_set.records() {
         let Some(id) = u32_at(r, 0) else { continue };
         // The learn-spell hop (decision 0247): a SPELL_EFFECT_LEARN_SPELL effect's EffectTriggerSpell
@@ -645,6 +690,15 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                     learned_spell.entry(id).or_insert(taught);
                     break;
                 }
+            }
+        }
+        // The language declaration (wow-re `chat-language-scramble.md` §8). **Effect slot 0 only**
+        // — the reference dispatches on `Effect_1` alone (`[SpellRec+0xf4]`) and reads
+        // `EffectMiscValue_1` (`+0x1a8`); it does not scan the other two slots the way the learn
+        // hop above does.
+        if u32_at(r, COL_EFFECT_1) == Some(SPELL_EFFECT_LANGUAGE) {
+            if let Some(lang) = i32_at(r, COL_EFFECT_MISC_1).filter(|&l| l > 0) {
+                declared_language.insert(id, lang as u32);
             }
         }
         let name = str_at(&spells_set, r, COL_NAME_ENUS).unwrap_or_default();
@@ -785,6 +839,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
     Ok(SpellCatalog {
         spells,
         learned_spell,
+        declared_language,
         dispel_types,
     })
 }

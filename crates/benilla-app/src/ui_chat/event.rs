@@ -163,13 +163,14 @@ impl ChatEventKind {
 /// in the local list — see [`super::edit::ChannelState::stamp_channel`], which is the only place
 /// they are written.
 ///
-/// **KNOWN GAP — arg1 should be GARBLED, and ours is not.** The reference garbles the body
-/// client-side (`0x49b560` from `0x49aa7c`) and passes the wire text through only when the language
-/// is Universal, there is no local player, or the player's skill in that language is ≥ 300
-/// (`0x49b599 cmp esi,0x12c`). benilla speaks Common and does not model language skill at all
-/// (0288 §3 keeps garbling out with the language picker), so arg1 is always the ungarbled wire
-/// text. An addon reading a foreign-language line therefore sees more than the reference would give
-/// it. Also unmodeled: the profanity filter `0x4a1ca0` (`0x49ab23`), which in the reference can
+/// **arg1 IS the garbled text** (B262, decision 1485). The reference fills `0x49a870`'s one buffer
+/// exactly once — a plain `SStrCopy` at `0x49a9f0` or the garble `0x49b560` at `0x49aa7c` — and
+/// never reads the raw wire pointer again, so every consumer downstream shares it: the chat line,
+/// this event's arg1, and the bubble. **An addon receiving a foreign-language line cannot recover
+/// the plaintext**, and no other slot in this ten-argument tuple carries the body. Ours now behaves
+/// the same way ([`super::language`] owns the gate, [`benilla_formats::garble`] the substitution).
+///
+/// Still unmodelled: the profanity filter `0x4a1ca0` (`0x49ab23`), which in the reference can
 /// suppress the whole event for non-whisper types.
 ///
 /// **Corrections on record.** This comment previously listed args 1-6, 8 and 9 only — arg7 and

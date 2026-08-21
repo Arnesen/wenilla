@@ -318,29 +318,25 @@ impl Plugin for WorldFoundation {
         // shipped unclaimed for the campaign's whole run because 1364's knob under-measured it
         // (the UI Camera2d leak, 1370). `WOW_INDIRECT=1` restores the upstream default for
         // re-pricing. 1370's note that the lever must cover every camera, not just the world's,
-        // is why this is a sweep.
+        // is why this covers `Camera` itself rather than our own marker.
+        //
+        // **A REQUIRED COMPONENT, not a sweep** (decision 1488). 1374/1376 shipped this as an
+        // `Update` system that inserted the marker on any camera lacking it, and that is a latent
+        // GPU crash: bevy's own doc on `NoIndirectDrawing` says *"This component should only be
+        // added when initially spawning a camera. Adding or removing after spawn can result in
+        // unspecified behavior"*, and the unspecified behaviour is concrete —
+        // `get_or_create_work_item_buffer` latches Direct-vs-Indirect work-item buffers the FIRST
+        // time it sees a view (`Entry::Occupied` returns the existing one, forever), while the
+        // preprocessing node picks its pipeline from the LIVE `Has<NoIndirectDrawing>`. A camera
+        // extracted once before the sweep's deferred insert lands therefore keeps Indirect buffers
+        // under a direct pipeline for the rest of its life, and the next dispatch is a wgpu
+        // validation panic ("bind group … not compatible … Assigned entry with binding 7 not
+        // found"). Measured: the sweep was flagging 18 cameras late at startup and one 0.5 s in.
+        // `player::setup` already knew the rule for the world camera ("it must ride the SPAWN: the
+        // phase cache latches the preprocessing mode the first time it sees the view") — this
+        // gives every other camera the same guarantee, atomically, with no frame to lose.
         if std::env::var_os("WOW_INDIRECT").is_none() {
-            app.add_systems(bevy::app::Update, force_direct_draws);
+            app.register_required_components::<bevy::camera::Camera, bevy::render::view::NoIndirectDrawing>();
         }
-    }
-}
-
-/// Insert [`NoIndirectDrawing`] on any camera that lacks it — see the note at the registration
-/// site. Runs every frame so late-spawned cameras (portrait booths, the glue booth) are covered;
-/// the query is empty in steady state.
-fn force_direct_draws(
-    mut commands: Commands,
-    cams: Query<
-        Entity,
-        (
-            With<bevy::camera::Camera>,
-            Without<bevy::render::view::NoIndirectDrawing>,
-        ),
-    >,
-) {
-    for e in &cams {
-        commands
-            .entity(e)
-            .insert(bevy::render::view::NoIndirectDrawing);
     }
 }

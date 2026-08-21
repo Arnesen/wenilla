@@ -74,12 +74,6 @@ const SCALE_FLOOR: f32 = 0.2; // [0x80679c]
 const SCALE_KNEE: f32 = 4.0; // [0x8112a8]
 const SCALE_RATE: f32 = 1.5; // [0x8112ac]
 
-/// The plate cull's squared comparand — the reference's `[0xc4d988] = 400.0 = 20²` yd², written
-/// once from `.rdata 0x80c448 = 20.0`, which no CVar registrar references: **hardcoded**, and
-/// not a distance shrink either (plate size never scales with range — verified by exhaustive
-/// absence). wow-re `nameplate-vkey.md` §5 / `nameplate-offscreen-cull.md` §2.
-const NAMEPLATE_RANGE_SQ: f32 = 400.0;
-
 /// benilla's nameplate config (the client's `0xce8720` cvar mask, reduced to what streams today),
 /// player-settable since 0992: 1.12's own `UnitNamePlayer`/`UnitNameNPC`/`UnitNameOwn` CVars over
 /// these gates (the Options window's Nameplates page, through the 0954 store — the arms live in
@@ -371,9 +365,6 @@ pub(crate) fn drive_nameplates(
         Option<&InheritedVisibility>,
     )>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    // The 20-yard cap's anchor: the reference measures from the LOCAL PLAYER, not the camera
-    // (`0x60f600`'s 3-D squared distance).
-    self_tf: Query<&Transform, With<SelfPlayer>>,
     // The show-gate inputs (one tuple param — Bevy's 16-param ceiling).
     gates: (
         Res<Selection>,
@@ -468,23 +459,18 @@ pub(crate) fn drive_nameplates(
         if !drawn.is_none_or(|v| v.get()) {
             continue;
         }
-        // **The 20-yard cap** (wow-re `nameplate-offscreen-cull.md` §2, VERIFIED): `0x60f600`
-        // destroys the frame when the 3-D squared player→unit distance exceeds
-        // `[0xc4d988] = 400 = 20²` — hardcoded (`.rdata 0x80c448`, no CVar registrar ref),
-        // measured from the LOCAL PLAYER, never the camera, with no line-of-sight term. Beyond
-        // it the reference DESTROYS the plate rather than hiding it; skipping here keeps this
-        // unit out of `seen`, and the retain sweep below IS that destroy. The reference runs
-        // this gate LAST in its admission ladder (after the projection gate) — every rung is
-        // verdict-independent, so hoisting it changes no outcome, only how much of the ladder
-        // the far crowd pays. With no self body (a capture rig without a player) the gate
-        // stands down — the reference's "no local player ⇒ destroy" rung is the fixtures' call,
-        // not this one's (named residual, 1490).
-        if let Ok(anchor) = self_tf.single() {
-            if !is_self && tf.translation.distance_squared(anchor.translation) > NAMEPLATE_RANGE_SQ
-            {
-                continue;
-            }
-        }
+        // **There is NO distance cull here, and adding one is the mistake to not make twice.**
+        // The overhead NAME (`CGUnit+0xc7c`, a `PLAYERNAMEDESC`) and the V-key nameplate FRAME
+        // (`CGUnit+0xe60`) are two systems on the same unit, and only the FRAME carries the
+        // 20-yard cap (`0x60f600` vs `[0xc4d988] = 400`) that `vplates.rs` implements. This
+        // lane's own update/cull/build (`0x6c6d40`/`0x6c6e00`/`0x6c6e90`) holds **zero** distance
+        // compares — every early-out is identity/state-based, and the one FP compare is the
+        // height law above, not a depth term (wow-re `overhead-name.md` §Q5 + `playername.md`,
+        // both VERIFIED). A far name just gets small: it is a world billboard, apparent size ∝
+        // scale/depth. The effective range is the server's interest management — no CGUnit, no
+        // desc. 1490 item 7 read the frame's law onto this lane and capped it at 20 yd; the
+        // director's Elwynn shot (named wolves up the hill) is the reference's own behaviour, and
+        // it outranked the mis-scoped citation. Superseded by 1492.
         // The ShouldShowName gate, in the client's own order (own-unit answers its cvar BEFORE
         // the rescue; everyone else: the current-TARGET bypass — `[0xb4e2d8]` is the selection,
         // not the mouseover — then the kind cvar). A unit carrying a V-key nameplate never also

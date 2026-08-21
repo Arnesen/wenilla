@@ -526,6 +526,19 @@ pub(super) fn deliver(
     }
 }
 
+/// What the **speaker** does when a line lands — the over-the-head bubble and the talk/laugh
+/// gesture, bundled because the reference arms both from the one display path (`ChatFrame.cpp`) and
+/// because a Bevy system takes at most sixteen parameters, which [`feed_chat`] had already reached.
+///
+/// They stay separate mechanisms inside the bundle: the bubble has a 20 yd range test and two CVars
+/// ([`crate::chat_bubble`]), the gesture has neither (decision 1469).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct SpeakerEffects<'w> {
+    bubbles: ResMut<'w, crate::chat_bubble::BubbleQueue>,
+    bubble_cfg: Res<'w, crate::chat_bubble::BubbleConfig>,
+    gestures: ResMut<'w, crate::creature_anim::GestureQueue>,
+}
+
 /// Drain [`ChatLog`]: resolve names (ask-once, bounded), build events, [`route`] them. Also ticks
 /// the whisper-chime throttle.
 #[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
@@ -536,11 +549,7 @@ pub(super) fn feed_chat(
     mut edit: ResMut<super::edit::ChatEditState>,
     mut channels: ResMut<ChannelState>,
     mut names: ResMut<NameCache>,
-    mut bubbles: ResMut<crate::chat_bubble::BubbleQueue>,
-    bubble_cfg: Res<crate::chat_bubble::BubbleConfig>,
-    // The client-local talk gesture (decision 1469) — armed from this same display path, beside
-    // the bubble, exactly as the reference arms both from `ChatFrame.cpp`.
-    mut gestures: ResMut<crate::creature_anim::GestureQueue>,
+    mut speaker: SpeakerEffects,
     commands: Res<NetCommands>,
     time: Res<Time>,
     // The text-emote sentence seam (decision 1274): the tables, plus the guid the composer's
@@ -552,6 +561,8 @@ pub(super) fn feed_chat(
     guids: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
     states: Res<crate::world_state::WorldStates>,
+    // The language gate (B262): the word pool + this character's fluency + the GM bit.
+    langs: Res<super::language::ChatLanguages>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -655,7 +666,17 @@ pub(super) fn feed_chat(
                 } else {
                     None
                 };
-                let text = expanded.unwrap_or_else(|| msg.text.clone());
+                let plain = expanded.unwrap_or_else(|| msg.text.clone());
+                // **The language gate** (B262, wow-re `chat-language-scramble.md`). The wire always
+                // carries plaintext; whether this character can read it is entirely ours to decide,
+                // and the answer is one rewritten buffer that EVERY consumer below shares — the
+                // chat line, the Lua `arg1`, the bubble, the gesture. That is the reference's own
+                // shape: `0x49a870` fills `[ebp-0xd0c]` exactly once (either a plain `SStrCopy` at
+                // `0x49a9f0` or the garble at `0x49aa7c`) and never reads the raw wire pointer
+                // again, so an addon receiving a foreign-language line cannot recover the
+                // plaintext. Ours cannot either, deliberately.
+                let language = langs.effective_language(msg.chat_type, msg.language);
+                let text = langs.garble(language, &plain);
                 let mut event = ChatEvent {
                     kind,
                     text: text.clone(),
@@ -666,7 +687,11 @@ pub(super) fn feed_chat(
                             String::new()
                         }
                     }),
-                    language: language_name(msg.language).to_string(),
+                    // The EFFECTIVE language, not the wire's: a narration type and GM mode both
+                    // force it to 0, which is one decision in the reference rather than two — the
+                    // `[Language]` header keys off this same field, so suppressing the garble
+                    // suppresses the header with it.
+                    language: language_name(language).to_string(),
                     channel: channel_base,
                     flag: flag_of_tag(msg.chat_tag).to_string(),
                     ..Default::default()
@@ -684,15 +709,30 @@ pub(super) fn feed_chat(
                     // The bubble shows the same expanded line the feed does — the reference's
                     // bubble spawn sits inside this same SMSG display path, downstream of the
                     // expander, so a `$n` must never survive into it either.
-                    bubbles.push(&bubble_cfg, msg.sender_guid, kind, &text);
+                    speaker
+                        .bubbles
+                        .push(&speaker.bubble_cfg, msg.sender_guid, kind, &text);
                 }
                 // …and the speaker gestures. Independent of the bubble in the reference too
                 // (different function, different gates: the bubble has a 20 yd range test and two
                 // CVars, the gesture has neither). The selector reads the RAW wire type and the
                 // expanded text, and takes its laugh words off the player's own FrameXML globals —
                 // the enumeration is the mechanism, the words are content (decision 1469).
+                //
+                // **It reads `plain`, NOT the garbled text, and that is byte-verified rather than
+                // reasoned** (wow-re `chat-language-scramble.md` §10.1). The selector is not on
+                // this display path at all: it lives in the *parser* `0x49d560` at
+                // `0x49d820`-`0x49d8ae`, and the slot it matches against — `[ebp-0x10]` — is the
+                // very buffer `0x49dbc2` then hands to `0x49a870` as its `src`. The garbled buffer
+                // is a local of a frame that does not exist yet.
+                //
+                // So the gesture is **language-independent**: a Horde player yelling `lol` laughs
+                // for every observer, Alliance included. We had this wired to the garbled text on
+                // an inference from §10's consumer census — that census was complete for
+                // `0x49a870` and could never have found a consumer reading the pre-garble value in
+                // the *caller's* frame.
                 if let Some(gesture) =
-                    crate::creature_anim::select_gesture(msg.chat_type, &text, |n| {
+                    crate::creature_anim::select_gesture(msg.chat_type, &plain, |n| {
                         script
                             .lua()
                             .globals()
@@ -700,7 +740,7 @@ pub(super) fn feed_chat(
                             .ok()
                     })
                 {
-                    gestures.push(msg.sender_guid, gesture);
+                    speaker.gestures.push(msg.sender_guid, gesture);
                 }
             }
             Pending::Notice {

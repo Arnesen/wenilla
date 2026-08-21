@@ -21,6 +21,8 @@ mod event;
 mod feed;
 mod frames;
 mod input;
+/// The language gate — the exemptions and the fluency lookup behind the chat garble (B262).
+mod language;
 #[cfg(test)]
 mod tests;
 
@@ -41,6 +43,7 @@ impl Plugin for UiChatPlugin {
             .init_resource::<edit::ChatEditState>()
             .init_resource::<edit::ChannelState>()
             .init_resource::<channels::ZoneChannelWalk>()
+            .init_resource::<language::ChatLanguages>()
             // `ChatChannels.dbc` — six rows, read once; the auto-join walk and every chat event's
             // arg7 both come out of it. **`.after(AssetSet::Open)` is load-bearing**: without it
             // this runs before the patch chain exists, takes its `assets: Option<Res<_>>` `None`
@@ -60,6 +63,18 @@ impl Plugin for UiChatPlugin {
             .add_systems(PostStartup, commands::build_slash_commands)
             // Push before the input pass so a line is on screen the same frame it decodes (mirrors
             // the loot/merchant feeds).
+            // The language gate's two feeds, both upstream of the chat drain that reads them: the
+            // word pool loads once (it retries until the chain is up), and the fluency map
+            // rebuilds off the spell book + the self descriptors.
+            .add_systems(
+                Update,
+                (
+                    language::load_language_words,
+                    language::feed_language_skills,
+                    language::feed_default_language,
+                )
+                    .before(feed::feed_chat),
+            )
             .add_systems(Update, feed::feed_chat.before(UiInput))
             // A fresh VM gets the joined-channel mirror re-pushed once (decision 1291) — before
             // the feed, so the reload frame's first routed line already renders numbered.

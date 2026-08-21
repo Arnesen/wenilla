@@ -29,6 +29,15 @@ pub(crate) struct ChatWindows {
     pub groups: [Vec<ChatGroup>; 2],
     /// Seconds left before the next received whisper chimes again ([`TELL_ALERT_SECS`]).
     pub tell_alert_left: f32,
+    /// The frame's own `this.defaultLanguage` — the name `GetDefaultLanguage()` answers, which is
+    /// the **faction** tongue (Common for every Alliance race, Orcish for every Horde one).
+    ///
+    /// It lives here rather than being derived per line because that is where the reference keeps
+    /// it: `ChatFrame.lua` stores it on the frame and the language-header test reads it from there
+    /// ([`compose`]). Empty until the self descriptors and `Languages.dbc` are both up, which
+    /// suppresses no header the reference would show — an empty default only ever makes the test
+    /// *more* likely to print one.
+    pub default_language: String,
 }
 
 impl Default for ChatWindows {
@@ -55,6 +64,7 @@ impl Default for ChatWindows {
                 vec![ChatGroup::Money, ChatGroup::CombatXpGain],
             ],
             tell_alert_left: 0.0,
+            default_language: String::new(),
         }
     }
 }
@@ -111,7 +121,9 @@ pub(crate) fn route(
         return;
     };
     // ── our own window: the transcribed ChatFrame_OnEvent, i.e. the first-registered listener ──
-    if let Some(line) = compose(event, kind) {
+    // Cloned once rather than borrowed, because `windows` goes on to be used mutably below.
+    let default_language = windows.default_language.clone();
+    if let Some(line) = compose(event, kind, &default_language) {
         let color = resolved_color(event, kind);
         for idx in 0..2 {
             if windows.wants(idx, kind) {
@@ -149,7 +161,11 @@ fn add(script: &mut benilla_ui::script::UiScript, frame: &str, text: &str, color
 
 /// `ChatFrame_OnEvent`'s composition, transcribed (ref ChatFrame.lua l.1369-1468 + the quoted
 /// GlobalStrings). Returns `None` for a notice the 1.12 UI renders silently (MODE_CHANGE).
-pub(crate) fn compose(event: &ChatEvent, kind: ChatEventKind) -> Option<String> {
+pub(crate) fn compose(
+    event: &ChatEvent,
+    kind: ChatEventKind,
+    default_language: &str,
+) -> Option<String> {
     use ChatEventKind as K;
     Some(match kind {
         // Verbatim families (l.1395-1402): the text IS the line. COMBAT_XP_GAIN rides the same
@@ -198,7 +214,22 @@ pub(crate) fn compose(event: &ChatEvent, kind: ChatEventKind) -> Option<String> 
             };
             // The language header (l.1442-1448): non-empty, non-Universal (mapped to "" by the
             // bridge), and not our own default tongue.
-            let header = if !event.language.is_empty() && event.language != "Common" {
+            //
+            // **That last clause used to read `!= "Common"`** — the comment was already right and
+            // the code was not, which cost every Horde character a `[Orcish]` tag on ordinary
+            // faction chat and stripped the tag from Common. The reference's test is
+            // `arg3 ~= this.defaultLanguage` and `GetDefaultLanguage()` answers the **faction**
+            // tongue, so it reads Orcish for a Horde body (wow-re
+            // `system/ui/scratch/chat-language-scramble.md` §10/§12: the tag is FrameXML's and its
+            // condition is about the *default* language, never about whether the language is
+            // understood — a character who knows both Common and Dwarvish still sees `[Dwarvish]`
+            // on a line they read perfectly).
+            //
+            // The `~= "Universal"` clause of the reference's condition is deliberately absent:
+            // "Universal" is in neither `Languages.dbc` nor `WoW.exe` nor `GlobalStrings.lua`, so
+            // it is vestigial in 1.12 and the empty-string test is what actually suppresses
+            // language 0 (see [`super::event::ChatEvent`]'s arg3 note).
+            let header = if !event.language.is_empty() && event.language != default_language {
                 format!("[{}] ", event.language)
             } else {
                 String::new()
