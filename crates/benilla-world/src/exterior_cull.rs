@@ -49,6 +49,16 @@
 //! So a body is exterior scene exactly when it is not in a WMO room, and the windows gate it like
 //! the ground it stands on — [`WorldUnit::bound`].
 //!
+//! **The outdoor half of the same election (decision 1475).** The reference's OUTSIDE leg is not a
+//! stand-down — it is one full-screen window through the same walk (`0x6811ff`), whose producer
+//! `0x683340` frustum-tests every node; and the sibling in-room producer `0x6834e0` submits a
+//! group's members only when the group is rendered, frustum-testing each. So outdoors a body's
+//! bound is tested against the camera's own view volume, and an in-room body draws only when its
+//! room (one portal hop padded — the doorway-straddle guard) is in the PVS *and* its box is in
+//! view. 1270 §6 deferred this half; 1473's audit is why it landed. `WOW_NO_DRAW_ELECTION=1` is
+//! the lever back to the window leg alone. Knowingly absent: the horizon-occlusion term
+//! (`0x686000`) — its own machinery, its own record.
+//!
 //! ## The clip geometry
 //!
 //! Per window, the reference bilerps the camera's four global corner rays (`0xc7bcd8`) by the window's
@@ -160,9 +170,14 @@ impl Plugin for ExteriorCullPlugin {
             apply_exterior_cull
                 .in_set(ExteriorCullSet)
                 // The windows are written by the flood in `Update`; the cull reads them and must land
-                // before Bevy's own visibility pass consumes the result this same frame.
+                // before Bevy's own visibility pass consumes the result this same frame — and before
+                // the hierarchy propagation, so a root verdict reaches `InheritedVisibility` (which
+                // 1283's consumers and the billboard mirror read) the SAME frame. 1270 only ordered
+                // against `CheckVisibility`, leaving a benign race the window leg never noticed; the
+                // frustum leg follows the camera every frame, so the frame of lag is pinned away.
                 .after(WmoPvsSet)
                 .after(bevy::transform::TransformSystems::Propagate)
+                .before(VisibilitySystems::VisibilityPropagate)
                 .before(VisibilitySystems::CheckVisibility),
         );
     }
@@ -359,20 +374,47 @@ type ElectedBody = (
 /// it is the sole authority for: terrain cells, the WDL far band, and — in the second query below,
 /// a different audience under the same law rather than a second system — the elected net bodies
 /// ([`ElectedBody`], decision 1270), whose roots nothing else writes.
+#[allow(clippy::too_many_arguments)]
+// A Bevy system's params are not an argument list to shorten — each is a distinct world access
+// the scheduler needs by name (the `update_ground_shade` precedent).
 fn apply_exterior_cull(
     windows: Res<ExteriorWindows>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     mut scene: Query<UnownedScene, UnownedSceneFilter>,
     mut bodies: Query<ElectedBody>,
+    instances: Query<&crate::wmo_portal::WmoPortalInstance>,
+    wmos: Res<Assets<benilla_assets::WmoModel>>,
     mut verdict: ResMut<ExteriorCullVerdict>,
     trace: Option<Res<CullTrace>>,
+    mut no_election: Local<Option<bool>>,
 ) {
+    // `WOW_NO_DRAW_ELECTION=1` — disable 1475's frustum + room legs only (the 1270 window leg
+    // stays: it fixes a *correctness* report, not a cost). The A/B lever that brackets the
+    // election's worth at any pin, and the escape hatch if an artifact is ever reported.
+    let no_election =
+        *no_election.get_or_insert_with(|| std::env::var_os("WOW_NO_DRAW_ELECTION").is_some());
     let set = |vis: &mut Visibility, target: Visibility| {
         if *vis != target {
             *vis = target;
         }
     };
     let gate = ExteriorGate::build(&windows, cam.iter().next());
+    // The camera's own view volume, as the full-screen window: the reference's OUTSIDE leg is
+    // literally one `{0,0,1,1}` window through the same walk (`0x6811ff`), so outdoors is not a
+    // stand-down for bodies — an out-of-frustum body is elected pass 2, not drawn and not ticked
+    // (1473's correction of 0648; decision 1475). Built from this frame's own camera transform
+    // (we run after `Propagate`), never the `Frustum` component, which another PostUpdate set
+    // may not have refreshed yet. `None` (no camera) admits: a verdict without a view matrix
+    // would be arbitrary — `ExteriorGate::build`'s own law.
+    let full_view = cam.iter().next().and_then(|(cam_t, proj)| {
+        let clip_from_world = proj.get_clip_from_view() * cam_t.to_matrix().inverse();
+        window_frustum([-1.0, -1.0, 1.0, 1.0], &clip_from_world)
+    });
+    let in_view = |gt: &GlobalTransform, bound: &Aabb| {
+        full_view
+            .as_ref()
+            .is_none_or(|f| f.intersects_obb(bound, &gt.affine(), true, true))
+    };
     let (mut tested, mut hidden, mut unbounded) = (0usize, 0usize, 0usize);
     for (gt, aabb, mut vis) in &mut scene {
         tested += 1;
@@ -410,12 +452,29 @@ fn apply_exterior_cull(
         // *outdoors* makes a mob in your own room appear a frame late, guessing *in a room* makes a
         // mob outside appear through solid rock. And `UnitWmoRoom::default()` is itself a
         // no-room claim, so this simply decides the missing component the way the present one would.
-        let exempt = room.is_some_and(|r| r.room().is_some());
-        let admitted = exempt || gate.admits(gt, Some(bound));
+        let in_room = room.is_some_and(|r| r.room().is_some());
+        let admitted = if no_election {
+            // The lever: 1270's window leg alone — in-room exempt, outdoors a stand-down.
+            in_room || gate.admits(gt, Some(bound))
+        } else if in_room {
+            // The sibling producer (`0x6834e0`): submitted with its building iff its room — or a
+            // one-hop neighbour, the doorway-straddle guard — is in this frame's portal PVS,
+            // AND its box passes the camera frustum like any other group member (the producer
+            // frustum-tests members; a body behind the camera in a visible room is pass 2).
+            // Fail-open at every resolve seam ([`crate::wmo_portal::room_pvs_visible`]).
+            crate::wmo_portal::room_pvs_visible(room, &instances, &wmos) && in_view(gt, bound)
+        } else {
+            // The exterior walk: outdoors, the one full-screen window; indoors, the portal
+            // windows — which are already sub-frusta of the view, so no second frustum term.
+            match &gate {
+                ExteriorGate::Open => in_view(gt, bound),
+                ExteriorGate::Windows(_) => gate.admits(gt, Some(bound)),
+            }
+        };
         trace_body(
             &trace,
             e,
-            if exempt { "in-room" } else { "outdoor" },
+            if in_room { "in-room" } else { "outdoor" },
             gt,
             room,
             Some(bound),
@@ -549,6 +608,7 @@ mod tests {
     ) -> (Vec<Visibility>, ExteriorCullVerdict) {
         let mut app = App::new();
         app.init_resource::<ExteriorCullVerdict>()
+            .insert_resource(Assets::<benilla_assets::WmoModel>::default())
             .insert_resource(windows)
             .add_systems(Update, apply_exterior_cull);
         // The same camera the pure-frustum tests use: origin, down −Z, 90° fov.
@@ -690,21 +750,137 @@ mod tests {
         assert_eq!((verdict.bodies, verdict.bodies_hidden), (1, 1));
     }
 
-    /// Outdoors the driver takes its `{0,0,1,1}` leg and every body is submitted as before — the
-    /// arm that must never narrow, since it is the state the client spends most of its life in.
+    /// Outdoors the driver's `{0,0,1,1}` leg IS the ordinary frustum — the reference's outside
+    /// leg is one full-screen window through the same frustum-testing walk, so a body behind the
+    /// camera is elected pass 2: not drawn (decision 1475). This test asserted the opposite under
+    /// 1270 ("`Unrestricted` is a stand-down… the arm that must never narrow") — that law was
+    /// built before wow-re's election correction and is deliberately superseded here (1473).
     #[test]
-    fn outdoors_every_body_is_submitted() {
+    fn outdoors_the_full_screen_window_elects_the_bodies() {
         let (vis, verdict) = run_bodies(
             ExteriorWindows::Unrestricted,
             &[
                 (Vec3::new(0.0, 0.0, -50.0), outdoors(), creature_box()),
-                // Behind the camera, and still submitted: `Unrestricted` is a stand-down, not a
-                // frustum test. Bevy's own cull is what drops this one, one system later.
+                // Behind the camera: pass 2. Its parts carry `NoFrustumCulling` (0648's picker
+                // law), so this root verdict is the ONLY thing standing between an off-view
+                // crowd and the draw queue — the Goldshire premium of 1473.
                 (Vec3::new(0.0, 0.0, 50.0), outdoors(), creature_box()),
             ],
         );
-        assert_eq!(vis, vec![Visibility::Inherited; 2]);
-        assert_eq!((verdict.bodies, verdict.bodies_hidden), (2, 0));
+        assert_eq!(
+            vis,
+            vec![Visibility::Inherited, Visibility::Hidden],
+            "ahead is drawn; behind the camera is elected out"
+        );
+        assert_eq!((verdict.bodies, verdict.bodies_hidden), (2, 1));
+    }
+
+    /// The in-room fork of the same election: a body in a PVS-dark room is not drawn — the
+    /// sibling producer only submits members of rendered groups — and the moment the flood
+    /// reaches its room (or a one-hop neighbour), it draws again. The imp-upstairs-in-the-inn
+    /// case from 1473's audit: visible-room wiring, resolve chain and all, not just the truth
+    /// table (which lives with [`crate::wmo_portal::room_pvs_visible`]).
+    #[test]
+    fn a_body_in_a_pvs_dark_room_is_not_drawn_until_the_flood_reaches_it() {
+        let mut app = App::new();
+        app.init_resource::<ExteriorCullVerdict>()
+            .insert_resource(Assets::<benilla_assets::WmoModel>::default())
+            .insert_resource(ExteriorWindows::Unrestricted)
+            .add_systems(Update, apply_exterior_cull);
+        app.world_mut().spawn((
+            WorldCamera,
+            GlobalTransform::IDENTITY,
+            Projection::Perspective(PerspectiveProjection {
+                fov: std::f32::consts::FRAC_PI_2,
+                aspect_ratio: 1.0,
+                near: 0.1,
+                far: 1000.0,
+                ..default()
+            }),
+        ));
+        // A two-group building whose groups share no portal: group 0's verdict is its own bit.
+        // The nav table must be REAL — an absent nav entry is a fail-open seam that reads
+        // visible ([`crate::wmo_portal::room_pvs_visible`]'s law), which is right for a
+        // still-loading model and wrong as a test of the dark-room verdict.
+        let sealed = |_g: u16| benilla_assets::WmoGroupNav {
+            flags: 0,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            ref_start: 0,
+            ref_count: 0,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: benilla_formats::NO_GROUP_LIQUID,
+        };
+        let model = benilla_assets::WmoModel {
+            wmo_id: 1,
+            group_nav: vec![sealed(0), sealed(1)],
+            portal_refs: Vec::new(),
+            ..Default::default()
+        };
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<benilla_assets::WmoModel>>()
+            .add(model);
+        let inst = app
+            .world_mut()
+            .spawn(crate::wmo_portal::WmoPortalInstance {
+                handle,
+                world_from_local: bevy::math::Affine3A::IDENTITY,
+                name_set: 0,
+                visible: vec![false, false],
+                liquid_visited: vec![false, false],
+                flooded: vec![None, None],
+            })
+            .id();
+        // Dead ahead of the camera — only the room term can hide it.
+        let body = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_translation(Vec3::new(0.0, 0.0, -50.0)),
+                crate::world_unit::WorldUnit {
+                    wades: true,
+                    scale: 1.0,
+                    height: 2.0,
+                    bound: Some(creature_box()),
+                },
+                crate::wmo_portal::UnitWmoRoom::claimed(crate::wmo_portal::WmoRoom {
+                    instance: inst,
+                    group: 0,
+                }),
+                Visibility::Inherited,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            *app.world().entity(body).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "a PVS-dark room's body is not submitted"
+        );
+        // The flood reaches its room: drawn again the same frame.
+        app.world_mut()
+            .entity_mut(inst)
+            .get_mut::<crate::wmo_portal::WmoPortalInstance>()
+            .unwrap()
+            .visible[0] = true;
+        app.update();
+        assert_eq!(
+            *app.world().entity(body).get::<Visibility>().unwrap(),
+            Visibility::Inherited,
+            "PVS reach ⇒ drawn"
+        );
+        // And a lit room does not exempt a member from the view: the sibling producer
+        // frustum-tests members too. Move the body behind the camera — hidden again.
+        *app.world_mut()
+            .entity_mut(body)
+            .get_mut::<GlobalTransform>()
+            .unwrap() = GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 50.0));
+        app.update();
+        assert_eq!(
+            *app.world().entity(body).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "a visible room's behind-camera member is still pass 2"
+        );
     }
 
     /// A doorway on the right admits the body on the right and rejects the one on the left — the

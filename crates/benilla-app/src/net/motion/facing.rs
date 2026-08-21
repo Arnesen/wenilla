@@ -304,7 +304,17 @@ pub(in crate::net) fn drive_display_facing(
         // *goal*, not a freeze, which is what swings an NPC back when you close its window.
         let goal = goal.unwrap_or(state.wire);
         let new = filter_step(cur, goal, &mut state.hist);
-        tf.rotation = Quat::from_rotation_y(new);
+        // Write-on-change only (1473): a settled unit's `new` is bitwise `goal.rem_euclid(TAU)`
+        // every frame (the dead-band leg of `filter_step` returns the goal verbatim, never a
+        // re-derivation from `cur`), so this compare goes quiet one frame after settling. The
+        // unconditional write it replaces marked every standing NPC's `Transform` changed every
+        // frame — re-propagating its whole subtree and defeating each downstream `Changed` gate
+        // for the entire idle crowd (1445's swim gate, the water-side classifier's moved sweep,
+        // mesh re-extract) — the same defect `face_billboards` fixed for cards.
+        let rot = Quat::from_rotation_y(new);
+        if tf.rotation != rot {
+            tf.rotation = rot;
+        }
         // The turn-shuffle latch (decision 0123): while the ease still has meaningful yaw to
         // cover, the anim layer sees a signed turning step; settled drops it below.
         let remaining = crate::creature_anim::wrap_pi(goal - new);
@@ -565,6 +575,70 @@ mod tests {
         assert!(
             crate::creature_anim::wrap_pi(yaw - FRAC_PI_2).abs() <= DEAD_BAND,
             "the vendor squares up on its victim (+pi/2), not on us (pi): {yaw}"
+        );
+    }
+
+    /// The rotation write is a dead-band, not a metronome: once a governed unit settles, its
+    /// `Transform` stops being marked changed. This is the regression fence for 1473's defeat
+    /// finding — an unconditional same-value write re-propagated every standing NPC's subtree
+    /// every frame and silently un-gated each downstream `Changed` consumer (1445's swim gate,
+    /// the water-side classifier's moved sweep, mesh re-extract).
+    #[test]
+    fn a_settled_unit_stops_dirtying_its_transform() {
+        #[derive(Resource, Default)]
+        struct Dirty(usize);
+        fn spy(q: Query<Entity, (Changed<Transform>, With<NetEntity>)>, mut out: ResMut<Dirty>) {
+            out.0 = q.iter().count();
+        }
+        let mut app = App::new();
+        app.init_resource::<GuidIndex>()
+            .init_resource::<crate::ui_session::InteractNpc>()
+            .init_resource::<Dirty>()
+            .add_systems(Update, (drive_display_facing, spy).chain());
+        // Us OFF the vendor's axis (bearing ≈ 2.60 rad), deliberately: a goal at exactly ±π sits
+        // on the yaw wrap, where the client's unfolded-delta dead-band (its own byte-verified
+        // quirk) never snaps — the ease still goes bitwise-quiet there, but only via float
+        // underflow, ~16 pumps later. The representative case snaps inside the band in ~9.
+        app.world_mut().spawn((
+            SelfPlayer,
+            ActiveMover,
+            Transform::from_translation(wow_to_bevy([0.0, 3.0, 0.0])),
+        ));
+        let npc = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                ObjectStore::default(),
+                Transform {
+                    translation: wow_to_bevy([5.0, 0.0, 0.0]),
+                    rotation: Quat::from_rotation_y(0.0),
+                    ..default()
+                },
+            ))
+            .id();
+        // Open a window on it: the vendor legitimately turns, dirtying the transform — the
+        // control that proves the spy sees real writes.
+        app.world_mut()
+            .resource_mut::<crate::ui_session::InteractNpc>()
+            .0 = Some(npc);
+        app.update(); // seeding frame (spawn itself also reads as Changed here)
+        app.update();
+        assert!(
+            app.world().resource::<Dirty>().0 > 0,
+            "a turning unit dirties its transform"
+        );
+        // The turn settles inside the dead-band in ~9 pumps; run past it, then check steady state.
+        for _ in 0..16 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<Dirty>().0,
+            0,
+            "a settled unit must stop dirtying its transform"
         );
     }
 

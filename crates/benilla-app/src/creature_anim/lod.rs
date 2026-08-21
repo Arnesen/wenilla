@@ -4,19 +4,26 @@
 //! the query's comment for why the old `With<AnimDriver>` filter left every animated GO
 //! sampling off-view).
 //!
-//! The reference has NO view cull on unit skeletons — every in-range, non-hidden unit is fully
-//! animated every frame (wow-re `unit-anim-visibility-gate.md`: worklist admission is the CGUnit
-//! render vtable chain, no frustum/occlusion/distance test — the 0364 §1 dispatch's verdict). So
-//! this gate is a *modernization*, not a fidelity copy, and it preserves the verdict's two
-//! observables:
+//! 0448 shipped this as a modernization against a reference that "has NO view cull on unit
+//! skeletons" — a verdict wow-re REFUTED on 2026-08-13 (`outdoor-object-pass-election.md`: every
+//! scene object, units included, is frustum/horizon/room-elected each frame, and a pass-2 unit
+//! is neither drawn, nor animated, nor event-ticked — except creatures flagged `MORE_AUDIBLE`,
+//! re-linked for tick only). So this gate turned out to be the *faithful* direction, not a
+//! departure; what still diverges is decision 1473's ledger — parked rigs keep DRAWING (the
+//! election never reached draw submission), and observable (ii) keeps every unit audible where
+//! the reference keeps only the flagged ones. The two observables preserved here:
 //!
-//! - **(i) the absolute-clock snap** — a re-appearing unit shows the pose "now" dictates. Nothing
-//!   here pauses an [`AnimationPlayer`]: Bevy's `advance_animations` keeps ticking every seek
-//!   clock, so waking is just sampling again — there is no frozen state to resume from.
-//! - **(ii) off-screen combat stays audible** — the event scanner
+//! - **(i) the absolute-clock snap** — faithful (`0x714260` samples the world clock): a
+//!   re-appearing unit shows the pose "now" dictates. Nothing here pauses an [`AnimationPlayer`]:
+//!   Bevy's `advance_animations` keeps ticking every seek clock, so waking is just sampling
+//!   again — there is no frozen state to resume from.
+//! - **(ii) off-screen combat stays audible — for EVERY unit**, which is now known to be MORE
+//!   than the reference grants (it silences all but `MORE_AUDIBLE` creatures): the event scanner
 //!   ([`super::events::fire_anim_events`]) reads the player's seek, not the bones, and the driver
 //!   state machine keeps arming clips for parked rigs; `$CSS`/`$CAH`/`$HIT` (0075), footsteps,
-//!   `$BWP`/`$BWR`, and the `$CSL`-keyed missile release (0430) all fire regardless of the camera.
+//!   `$BWP`/`$BWR`, and the `$CSL`-keyed missile release (0430) all fire regardless of the
+//!   camera. Narrowing this to the flagged set is 1473's event-gate leg — its own record when it
+//!   lands.
 //!
 //! The park mechanism is the [`AnimParked`] marker alone (decision 0712 — the evaluator took over
 //! from `animate_targets`, and the old per-joint `AnimatedBy` repoint died with the targets): the
@@ -50,13 +57,13 @@ use bevy::camera::primitives::{Frustum, Sphere as CullSphere};
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
-use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalRef};
+use benilla_assets::WmoModel;
 
 use crate::entities::mount::MountBody;
 use crate::net::Embodied;
 use crate::target::SelectionRadius;
 use benilla_world::view::WorldCamera;
-use benilla_world::wmo_portal::{UnitWmoRoom, WmoPortalInstance, WmoRoom};
+use benilla_world::wmo_portal::{room_pvs_visible, UnitWmoRoom, WmoPortalInstance};
 
 use benilla_world::rig_anim::{AnimParked, RigPose};
 
@@ -195,48 +202,11 @@ pub(super) fn gate_rig_animation(
     out_since.retain(|e, _| rigs.contains(*e));
 }
 
-/// The room leg's resolve chain: unit claim → placement instance → model → PVS bits. Fail-open
-/// at every seam (no claim, despawned placement, still-loading model) — a lookup miss must never
-/// park a drawable rig.
-fn room_pvs_visible(
-    room: Option<&UnitWmoRoom>,
-    instances: &Query<&WmoPortalInstance>,
-    wmos: &Assets<WmoModel>,
-) -> bool {
-    let Some(WmoRoom { instance, group }) = room.and_then(|r| r.room()) else {
-        return true;
-    };
-    let Ok(inst) = instances.get(instance) else {
-        return true;
-    };
-    let Some(model) = wmos.get(&inst.handle) else {
-        return true;
-    };
-    room_visible(&inst.visible, &model.group_nav, &model.portal_refs, group)
-}
-
-/// Is the claimed group — or any group one portal hop from it — in the PVS? The one-hop union is
-/// the doorway-straddle guard: a body can extend past its feet's room only through a portal
-/// opening, so the neighbour set bounds everything of the unit that could be on screen. Indices
-/// out of range read visible (fail-open, [`benilla_world::wmo_portal::WmoGroupVis::drawn_by`]'s
-/// convention); a group with no portal refs at all can only be seen with the camera inside it
-/// (the flood cannot reach it), which the direct bit already answered.
-fn room_visible(visible: &[bool], nav: &[WmoGroupNav], refs: &[WmoPortalRef], group: u16) -> bool {
-    let vis = |g: usize| visible.get(g).copied().unwrap_or(true);
-    if vis(group as usize) {
-        return true;
-    }
-    let Some(n) = nav.get(group as usize) else {
-        return true;
-    };
-    let Some(hops) = refs.get(n.ref_start as usize..(n.ref_start as usize + n.ref_count as usize))
-    else {
-        return true;
-    };
-    hops.iter().any(|r| vis(r.group as usize))
-}
-
 /// Register the gate: [`gate_rig_animation`] before the frame's pose evaluation.
+///
+/// The room predicate itself lives in [`benilla_world::wmo_portal::room_pvs_visible`] since 1475:
+/// the body draw election asks the identical question of the identical claim, and two private
+/// copies of one election term is exactly the drift 1473 catalogued.
 pub(super) fn plugin(app: &mut App) {
     app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
 }
@@ -249,7 +219,9 @@ mod tests {
 
     use benilla_assets::{
         bone_target_id, AnimClip, ModelAnimations, PoseBone, PoseClip, PoseSource, PoseTrack,
+        WmoGroupNav, WmoPortalRef,
     };
+    use benilla_world::wmo_portal::WmoRoom;
 
     use super::super::{events::fire_anim_events, AnimDriver, AnimSoundEvent};
     use super::*;
@@ -530,40 +502,6 @@ mod tests {
             group,
             side: 1,
         }
-    }
-
-    /// The room predicate's whole truth table: direct bit, the one-hop straddle guard, the
-    /// all-dark park, the sealed room, and both fail-open seams (group past every table, a
-    /// ref slice past the refs vec).
-    #[test]
-    fn room_visible_covers_the_hop_guard_and_fails_open() {
-        // Groups 0 ↔ 1 share one portal; group 2 is sealed (no refs).
-        let navs = vec![nav(0, 1), nav(1, 1), nav(2, 0)];
-        let refs = vec![pref(1), pref(0)];
-        assert!(
-            room_visible(&[true, false, false], &navs, &refs, 0),
-            "direct PVS bit"
-        );
-        assert!(
-            room_visible(&[true, false, false], &navs, &refs, 1),
-            "own bit dark but the neighbour lit — the doorway-straddle guard keeps it live"
-        );
-        assert!(
-            !room_visible(&[false, false, true], &navs, &refs, 0),
-            "own room and every hop dark ⇒ parked"
-        );
-        assert!(
-            !room_visible(&[true, true, false], &navs, &refs, 2),
-            "a sealed room's own bit decides — no hops exist to save it"
-        );
-        assert!(
-            room_visible(&[false], &navs, &refs, 9),
-            "a group past the PVS table reads visible (fail-open)"
-        );
-        assert!(
-            room_visible(&[false], &[nav(7, 2)], &refs, 0),
-            "a ref slice past the refs vec reads visible (fail-open)"
-        );
     }
 
     /// The room leg end to end: an IN-FRUSTUM rig whose claimed room (and its one hop) is

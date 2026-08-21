@@ -113,6 +113,7 @@ impl Plugin for DevProbesPlugin {
                 "WOW_PROBE_CHAT",
                 "WOW_PROBE_KEY",
                 "WOW_PROBE_LUA",
+                "WOW_PROBE_CHEST",
                 "WOW_RIG",
                 "WOW_LIVE_FPS",
             ]
@@ -258,6 +259,13 @@ impl Plugin for DevProbesPlugin {
             // B240's instrument (see `capture::ProbeBookPlugin`).
             if std::env::var("WOW_PROBE_BOOK").is_ok() {
                 app.add_plugins(crate::capture::ProbeBookPlugin);
+            }
+            // The chest live probe: `WOW_PROBE_CHEST=1` parks at a real chest spawn, opens it on the
+            // click's own route and reports the self unit's base anim id before/during/after — B84's
+            // instrument, the numeric answer to "does the player kneel at a chest" (decision 1471;
+            // see `capture::ProbeChestPlugin`).
+            if std::env::var("WOW_PROBE_CHEST").is_ok() {
+                app.add_plugins(crate::capture::ProbeChestPlugin);
             }
             // The cast-cancel live probe: `WOW_PROBE=castcancel` hearths and presses W mid-cast — the
             // local self-cancel's end-to-end timing instrument (see `capture::ProbeCastCancelPlugin`).

@@ -46,7 +46,11 @@ use benilla_world::interact::{WorldClick, WorldRightClick};
 use benilla_world::schedule::WorldStage;
 
 mod by_name;
-mod click;
+// `pub(crate)` for the chest live probe alone (decision 1471): it resolves a GameObject's
+// right-click action through the very same [`click::resolve_go_action`] the mouse does, rather
+// than re-deciding lockless-vs-opener itself — an instrument that guesses the packet is testing
+// its own guess (`probe_book`'s pattern: drive the click's own route, never a parallel one).
+pub(crate) mod click;
 // `pub(crate)` for the hover inspector's interact-gate line (`interact/inspect.rs`): the overlay
 // states the very predicate the cursor runs ([`cursor_mode::go_highlightable`]) rather than a
 // re-derivation of it, so the readout can never drift from the behaviour it is reporting on.

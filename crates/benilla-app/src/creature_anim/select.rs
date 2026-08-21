@@ -57,14 +57,23 @@ pub(super) const STEALTH_STAND: u16 = 120;
 pub(super) const MOUNT: u16 = 91;
 
 /// Loot (50) — the kneel-and-rummage held while a unit's loot window is open. Byte-verified end
-/// to end (wow-re `loot-anim-leg.md`, the 2026-07-18 §5; decision 0515): the `0x5fd8b0` chain's
-/// loot leg `0x5fd260` → 0x32 = 50, chain order locomotion → **LOOT** → standState →
-/// combat/channel (movement outranks by position — the leg itself reads no movement state), leg
-/// gates `[+0xdc]==0` (never mounted) + the `[+0xd58]&0x40` enable. The **trigger predicate**
-/// (`0x6126b0`) splits on IsActivePlayer: the **self** unit keys the client-local loot-target
-/// latch (`[player+0x1d28]`, ours [`crate::ui_loot::LootLatch`]) — armed at the `CMSG_LOOT` send,
-/// so the kneel is client-predicted — while a **remote** unit keys its descriptor:
-/// [`UNIT_FLAG_LOOTING`] set and [`UNIT_FLAG_LOOT_SUPPRESS`] clear. The clip is authored
+/// to end (wow-re `loot-anim-leg.md`, the 2026-07-18 §5 + the 08-21 §5 trio; decisions 0515 /
+/// 1471 / 1477): the `0x5fd8b0` chain's loot leg `0x5fd260` → 0x32 = 50, chain order locomotion →
+/// **LOOT** → standState → combat/channel (movement outranks by position — the leg itself reads no
+/// movement state), leg gates `[+0xdc]==0` (never mounted) + the `[+0xd58]&0x40` enable.
+///
+/// The leg needs **two** predicates, and both split on IsActivePlayer:
+/// - **A `0x6126b0` — is a session open.** Self: the client-local loot-target latch
+///   (`[player+0x1d28]`, ours [`crate::ui_loot::LootLatch`]) — armed at the `CMSG_LOOT` send for a
+///   corpse, at `SMSG_SPELL_GO` for a chest, and at an admitted `SMSG_LOOT_RESPONSE` otherwise.
+///   Remote: [`UNIT_FLAG_LOOTING`] set and [`UNIT_FLAG_LOOT_SUPPRESS`] clear.
+/// - **B `0x612710` — is that KIND of target knelt at.** Self: a per-object-class filter, ours
+///   [`crate::ui_loot::LootKneel`]. It is why a fishing bobber arms the latch and still does not
+///   kneel, and 1471 shipped without it.
+///
+/// One consequence worth stating plainly, because it looks like a bug: on vmangos, other players
+/// never see us kneel at a chest. `Player::SendLoot` sets `UNIT_FLAG_LOOTING` only for
+/// `LOOT_CORPSE`, and the remote half has nothing else to read. The clip is authored
 /// **clamp** (HumanMale: one 0.5 s sequence, no variations): kneel down, freeze in the rummage
 /// pose; the rise back is the ordinary cross-fade to Stand when the trigger drops. Weapons stow
 /// for free — row 50 carries the `WeaponFlags & 4` force-stow the per-animation sheath

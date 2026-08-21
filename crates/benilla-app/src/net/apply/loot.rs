@@ -12,20 +12,68 @@ use bevy::prelude::*;
 
 use super::super::SelfGuid;
 use crate::items::Items;
+use crate::net::ClientCommand;
 use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_items::{EquipError, EquipErrors};
 use crate::ui_loot::{LootErrors, LootLatch, LootState};
 use crate::ui_loot_roll::LootRolls;
 
-/// A loot window opened (`SMSG_LOOT_RESPONSE`'s normal shape), answering our `CMSG_LOOT`.
+/// The wire `loot_type` values `SMSG_LOOT_RESPONSE`'s **cold-latch** admission accepts
+/// (`0x5eb94b`/`0x5eb953`/`0x5eb95b`) — vmangos `LootType`'s `PICKPOCKETING(2)` · `FISHING(3)` ·
+/// `DISENCHANTING(4)`. The alphabet the bytes are drawing is *"the server started this session"*;
+/// `CORPSE(1)` is the client's own, and it is the one value a cold latch refuses.
+const SERVER_STARTED_LOOT: [u8; 3] = [2, 3, 4];
+
+/// A loot window opened (`SMSG_LOOT_RESPONSE`'s normal shape) — the answer to our `CMSG_LOOT`, or
+/// to anything else that opened a session: a chest, herb node, mining vein or fishing bobber all
+/// reach the window through an `OPEN_LOCK` cast, never through `CMSG_LOOT` (vmangos
+/// `Spell::SendLoot` → `Player::SendLoot`).
+///
+/// **This handler is an admission gate, not an unconditional open** (wow-re `loot-anim-leg.md` §7,
+/// byte-verified; decision 1477 correcting 1471). `0x5eb924`:
+///
+/// ```text
+/// ACCEPT ⇔ (latch != 0 && latch == pkt.guid) || (latch == 0 && loot_type ∈ {2,3,4})
+/// ```
+///
+/// Everything else is **refused** at `0x5eb963`: no window, a `CMSG_LOOT_RELEASE` bounced back for
+/// the *packet's* guid, and the latch cleared — **not** guid-matched, so an unsolicited response
+/// for B drops a live latch on A. The design the bytes state is a two-way handshake: type 1 means
+/// "I asked for this", and the client pre-armed at its own `CMSG_LOOT` send, so a type-1 answer
+/// with nothing latched is an answer to a question we never asked.
+///
+/// The accepted arm writes the latch verbatim (`0x5ebb60`) and — verified over the whole success
+/// path — calls **neither** the base-anim recompute nor the Loot-50 force-play. A chest is already
+/// kneeling by now: its arm was `SMSG_SPELL_GO` (§6, [`super::spells`]), one packet earlier.
 pub(super) fn loot_response(
     guid: u64,
     loot_type: u8,
     gold: u32,
     items: Vec<LootItem>,
     loot: &mut LootState,
+    latch: &mut LootLatch,
+    net: &crate::net::NetCommands,
 ) {
+    // `0x5eb924`–`0x5eb95b`, transcribed.
+    let accept = match latch.0 {
+        Some(latched) => latched == guid,
+        None => SERVER_STARTED_LOOT.contains(&loot_type),
+    };
+    if !accept {
+        // `0x5eb963`: bounce it. On this server nothing produces a refusal — a corpse always
+        // pre-arms and a chest/fishing answer carries type 2/3 — so this arm is inert today and
+        // carried for the faithful shape (and for a server that answers differently).
+        debug!(
+            "net: loot response {guid:#x} type {loot_type} REFUSED (latch {:?})",
+            latch.0
+        );
+        if loot_type != 0 {
+            let _ = net.0.send(ClientCommand::LootRelease { guid });
+        }
+        latch.0 = None; // NOT guid-matched — `0x5eb9d2` clears whatever was there
+        return;
+    }
     // The loot window opens (decision 0084): fill LootState from the wire; the feed
     // ([`crate::ui_loot`]) resolves rows + fires LOOT_OPENED next frame. `loot_type` rides along
     // for `IsFishingLoot()` (decision 1086).
@@ -34,6 +82,11 @@ pub(super) fn loot_response(
         items.len()
     );
     loot.open(guid, loot_type, gold, items);
+    // `0x5ebb60` — the packet's guid, verbatim. Re-arming a corpse's already-matching latch is a
+    // no-op; a chest re-arms what `SMSG_SPELL_GO` armed; a **fishing** bobber arms here for the
+    // first time and still does not kneel, because the pose is predicate B's call, not the
+    // latch's ([`crate::ui_loot::LootKneel`]).
+    latch.0 = Some(guid);
 }
 
 /// A fishing verdict with no loot window (`SMSG_FISH_ESCAPED` / `SMSG_FISH_NOT_HOOKED`, both
@@ -191,6 +244,7 @@ pub(super) fn item_template(entry: u32, info: Option<ItemInfo>, items: &mut Item
 /// [`PendingItemOps::clear_by_failure`]. This site has no `UiScript` to fire `ITEM_LOCK_CHANGED`
 /// through, so the transitioned slots queue in [`LockClearedByFailure`] for the container feed
 /// (`ui_items::feed::feed_containers`) to drain and fire next time it runs.
+#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn inventory_failure(
     reason: u8,
     required_level: Option<u32>,
@@ -199,6 +253,7 @@ pub(super) fn inventory_failure(
     equip_errors: &mut EquipErrors,
     pending: &mut PendingItemOps,
     lock_cleared: &mut LockClearedByFailure,
+    latch: &mut LootLatch,
 ) {
     debug!("net: inventory failure {reason:#04x} (item {item_guid:#x}, bag slot {bag_slot})");
     equip_errors.0.push(EquipError {
@@ -207,6 +262,13 @@ pub(super) fn inventory_failure(
         bag_slot,
     });
     lock_cleared.0.extend(pending.clear_by_failure(item_guid));
+    // The sixth loot-latch clear (`0x5e3a84`, wow-re `loot-anim-leg.md` §5; decision 1477): when
+    // the packet's **first item guid** is the object we are looting, the session ends here. It is
+    // how an item-container loot (a lockbox) closes when the move out of it fails — the one clear
+    // the 1471 census was missing. Guid-matched, as the bytes are.
+    if item_guid != 0 {
+        latch.clear_for(item_guid);
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +302,132 @@ mod tests {
         let g = |key: &str| s.lua().globals().get::<String>(key).expect(key);
         assert_eq!(g("ERR_FISH_NOT_HOOKED"), "No fish are hooked.");
         assert_eq!(g("ERR_FISH_ESCAPED"), "Your fish got away!");
+    }
+
+    /// A GameObject guid (HIGHGUID_GAMEOBJECT in the high dword) — a chest.
+    const CHEST: u64 = 0xF110_0000_0000_1234;
+    /// A creature guid — a corpse.
+    const CORPSE: u64 = 0xF130_0000_0000_00AB;
+
+    /// A `NetCommands` plus its receiver, so a test can read what the handler actually sent.
+    fn net() -> (
+        crate::net::NetCommands,
+        crossbeam_channel::Receiver<ClientCommand>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        (crate::net::NetCommands(tx), rx)
+    }
+
+    /// **B84 / decisions 1471 + 1477.** A chest never sends `CMSG_LOOT`, so the corpse branch's
+    /// arm-at-the-send (0515) never fires for it. `SMSG_SPELL_GO` is its real arm; the response's
+    /// own arm is the second half, and on a **cold** latch it admits only the server-started
+    /// types 2/3/4 (`0x5eb94b`–`0x5eb95b`). A chest's answer is wire type 2, so it opens and arms.
+    #[test]
+    fn a_cold_latch_admits_a_server_started_loot_and_arms_on_it() {
+        let (net, rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch::default();
+        assert_eq!(latch.0, None, "no CMSG_LOOT was sent, so nothing armed it");
+
+        loot_response(CHEST, 2, 0, Vec::new(), &mut loot, &mut latch, &net);
+        assert_eq!(latch.0, Some(CHEST), "the open window is the loot session");
+        assert_eq!(loot.source(), Some(CHEST), "…and the window opened");
+        assert!(
+            rx.try_recv().is_err(),
+            "an accepted response bounces nothing"
+        );
+
+        // The ordinary close path still ends it — the latch is guid-matched, and a chest guid is
+        // no different from a corpse one there.
+        loot_release_response(CHEST, &mut loot, &mut latch);
+        assert_eq!(latch.0, None, "the release ends the session");
+    }
+
+    /// The corpse path is untouched: the send already armed the latch with the same guid, so the
+    /// response takes the **GUID-match** branch (`0x5eb93e`) and its re-arm is a no-op.
+    #[test]
+    fn a_matching_latch_admits_any_loot_type() {
+        let (net, _rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch(Some(CORPSE)); // the `CMSG_LOOT` send, client-predicted
+        loot_response(CORPSE, 1, 0, Vec::new(), &mut loot, &mut latch, &net);
+        assert_eq!(latch.0, Some(CORPSE));
+        assert_eq!(loot.source(), Some(CORPSE));
+    }
+
+    /// **The refusal arm (`0x5eb963`, decision 1477).** `loot_type == 1` means "you asked for
+    /// this" — and a cold latch says we did not. The real client opens no window, bounces a
+    /// `CMSG_LOOT_RELEASE` for the *packet's* guid, and clears. 1471 shipped an unconditional
+    /// arm, which is exactly this case's divergence.
+    #[test]
+    fn a_cold_latch_refuses_a_corpse_typed_response_and_bounces_it() {
+        let (net, rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch::default();
+
+        loot_response(CORPSE, 1, 0, Vec::new(), &mut loot, &mut latch, &net);
+        assert_eq!(
+            loot.source(),
+            None,
+            "no window for an unasked-for corpse answer"
+        );
+        assert_eq!(latch.0, None, "…and nothing latched");
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CORPSE),
+            "the refusal releases the object the PACKET named"
+        );
+    }
+
+    /// The refuse arm's clear is **not** guid-matched (`0x5eb9d2`): an unsolicited response for B
+    /// drops a live latch on A, and releases B. Faithfully odd, and byte-verified.
+    #[test]
+    fn a_refusal_drops_whatever_latch_was_live_not_just_a_matching_one() {
+        let (net, rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch(Some(CORPSE));
+
+        loot_response(CHEST, 1, 0, Vec::new(), &mut loot, &mut latch, &net);
+        assert_eq!(latch.0, None, "A's latch is dropped by B's refusal");
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
+            "…and it is B that gets released"
+        );
+    }
+
+    /// The sixth clear (`0x5e3a84`): an inventory-move failure whose first item guid IS the loot
+    /// target ends that session. Guid-matched, so an unrelated bag failure leaves it alone.
+    #[test]
+    fn an_inventory_failure_on_the_looted_object_clears_the_latch() {
+        const LOCKBOX: u64 = 0x4000_0000_0000_0007;
+        let mut errs = EquipErrors::default();
+        let mut pending = PendingItemOps::default();
+        let mut cleared = LockClearedByFailure::default();
+        let mut latch = LootLatch(Some(LOCKBOX));
+
+        // An unrelated item's failure must not end the session.
+        inventory_failure(
+            2,
+            None,
+            0x1234,
+            0,
+            &mut errs,
+            &mut pending,
+            &mut cleared,
+            &mut latch,
+        );
+        assert_eq!(latch.0, Some(LOCKBOX));
+
+        inventory_failure(
+            2,
+            None,
+            LOCKBOX,
+            0,
+            &mut errs,
+            &mut pending,
+            &mut cleared,
+            &mut latch,
+        );
+        assert_eq!(latch.0, None);
     }
 
     const ME: u64 = 0x0000_0000_0000_002A;

@@ -384,22 +384,34 @@ fn tick_transports(
                 sample.map,
             );
         }
+        // Write-on-change only, on every component here (1473): a docked leg samples the
+        // identical pose each frame, and the unconditional writes this replaces re-dirtied the
+        // deck's whole subtree — transform propagation over every submesh plus a `Visibility`
+        // re-propagation — for every docked elevator on the map, every frame.
         if sample.map != current_map.0 {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
-        *visibility = Visibility::Inherited;
-        transform.translation = benilla_assets::coords::wow_to_bevy(sample.pos);
-        transform.rotation = Quat::from_rotation_y(sample.heading);
+        visibility.set_if_neq(Visibility::Inherited);
+        let translation = benilla_assets::coords::wow_to_bevy(sample.pos);
+        let heading = Quat::from_rotation_y(sample.heading);
+        if transform.translation != translation || transform.rotation != heading {
+            transform.translation = translation;
+            transform.rotation = heading;
+        }
         // Mirror the pose into avian's own components: its Transform→Position sync runs in the
         // physics schedule (before Update), so without this the mover's same-frame casts would
         // see the deck one frame behind — ~0.5 yd astern at cruise. The broad-phase AABB still
         // lags a step, which is harmless (a rider stands deep inside the boat's AABB).
         if let Some(mut p) = position {
-            p.0 = transform.translation;
+            if p.0 != transform.translation {
+                p.0 = transform.translation;
+            }
         }
         if let Some(mut r) = rotation {
-            r.0 = transform.rotation;
+            if r.0 != transform.rotation {
+                r.0 = transform.rotation;
+            }
         }
     }
 }
@@ -454,5 +466,76 @@ fn compose_riders(
             rm.wow_pos = benilla_assets::coords::bevy_to_wow(world);
             rm.orientation = yaw;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_formats::ElevatorKeyframe;
+
+    /// A docked lift goes QUIET: `tick_transports` writes pose and visibility on change only
+    /// (1473) — the unconditional writes it replaces re-dirtied every docked elevator's whole
+    /// subtree (transform + `Visibility` propagation over all its submeshes), map-wide, every
+    /// frame. A two-frame pause path samples the identical pose forever, so after the first
+    /// arming write nothing may be marked changed.
+    #[test]
+    fn a_docked_lift_stops_dirtying_its_transform_and_visibility() {
+        #[derive(Resource, Default)]
+        struct Dirty {
+            transforms: usize,
+            visibilities: usize,
+        }
+        fn spy(
+            t: Query<Entity, (Changed<Transform>, With<Transport>)>,
+            v: Query<Entity, (Changed<Visibility>, With<Transport>)>,
+            mut out: ResMut<Dirty>,
+        ) {
+            out.transforms = t.iter().count();
+            out.visibilities = v.iter().count();
+        }
+        let mut app = App::new();
+        app.insert_resource(CurrentMap(0))
+            .init_resource::<Dirty>()
+            .add_systems(Update, (tick_transports, spy).chain());
+        app.world_mut().spawn((
+            Guid(0xF110_0000_0000_0001),
+            Transport {
+                drive: Drive::Lift(Lift {
+                    frames: Arc::new(vec![
+                        ElevatorKeyframe {
+                            time_ms: 0,
+                            pos: [0.0; 3],
+                        },
+                        ElevatorKeyframe {
+                            time_ms: 1000,
+                            pos: [0.0; 3],
+                        },
+                    ]),
+                    period_ms: 1000,
+                    base_pos: [10.0, 20.0, 30.0],
+                    quat: [0.0, 0.0, 0.0, 1.0],
+                    yaw: 0.5,
+                    map: 0,
+                }),
+                was_moving: false,
+            },
+            TransportAnchor {
+                progress_ms: 0,
+                at: Instant::now(),
+            },
+            Transform::default(),
+            Visibility::default(),
+        ));
+        app.update(); // arming frame: the first pose write lands (and spawn reads as Changed)
+        for _ in 0..3 {
+            app.update();
+        }
+        let dirty = app.world().resource::<Dirty>();
+        assert_eq!(
+            (dirty.transforms, dirty.visibilities),
+            (0, 0),
+            "a docked lift must stop dirtying its transform and visibility"
+        );
     }
 }

@@ -222,6 +222,9 @@ pub(crate) fn update_ground_shade(
         &GlobalTransform,
         &mut GroundShade,
         Option<&crate::world_unit::ViewerUnit>,
+        // The election's verdict on this root (1270/1475) — `Option` because a fixed doodad's
+        // shade root carries no `Visibility` of its own and must keep walking.
+        Option<&Visibility>,
     )>,
     children: Query<&Children>,
     // Parts are matched by carrying a `MeshTag`; interior-classified ones are skipped (their payload
@@ -248,7 +251,7 @@ pub(crate) fn update_ground_shade(
     };
     let step = SHADE_RAMP_PER_SEC * time.delta_secs();
     let ambient_step = AMBIENT_RAMP_PER_SEC * time.delta_secs();
-    for (root, gt, shade, is_self) in &mut roots {
+    for (root, gt, shade, is_self, root_vis) in &mut roots {
         // `WOW_INTERIOR_LOG=1`: a periodic SELF-node dump (every 3 s) — the probe run's definitive
         // "what state is the parked character actually in" line, attributable unlike the
         // change-triggered `[node]` lines below (wandering NPCs fire those constantly).
@@ -325,11 +328,19 @@ pub(crate) fn update_ground_shade(
             ramp_toward(a.z, at.z, ambient_step),
         );
         let byte = (shade.t * 255.0).round().clamp(0.0, 255.0) as u8;
+        // A root the election hid (1270/1475) draws nothing, so the re-assert walk below is
+        // skipped whole — 1473's audit found it running over every part of every off-view body.
+        // The ramps above kept stepping, so the byte is current the frame the body wakes; this
+        // system runs one stage before the election (Update vs PostUpdate), so the wake frame's
+        // walk re-asserts at most one frame late, into parts whose tags retained their last byte.
+        if root_vis.is_some_and(|v| *v == Visibility::Hidden) {
+            continue;
+        }
         // Push to every part below the root (body submeshes are direct children; held items/helm ride
         // joint entities deeper down — same full-tree walk as the self-fade). Change-gated per part on
         // the byte, so a settled entity writes nothing and never re-triggers render extraction. The
-        // walk itself is unconditional: it is the MeshTag re-assert over the classifier's exterior
-        // reclaim (1358), not a change-only push.
+        // walk itself is unconditional for a DRAWN root: it is the MeshTag re-assert over the
+        // classifier's exterior reclaim (1358), not a change-only push.
         root_shade.insert(root, byte);
         for part in children.iter_descendants(root) {
             let Ok((mut tag, lit)) = parts.get_mut(part) else {

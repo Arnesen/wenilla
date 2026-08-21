@@ -6,7 +6,8 @@
 //! cite; 0989: the directed cuts — steppers and the corner X gone, the whole bar live via
 //! the engine's track-press law, the search box at the era's verbatim seat; 0992: the
 //! dropdown row shape on the 1.12 kit — Environment Detail — and the Nameplates page's
-//! three UnitName* rows).
+//! three UnitName* rows; 1476: the ground dim — a black fill over the 0.6 tile, seated clear
+//! of the rope's ink, because a 60% veil is not a page you can read over bright terrain).
 //!
 //! What these guard: the file loads clean inside the real neighbourhood (Fonts + UiPanels +
 //! GameMenuFrame); the menu's Options button is the door in (menu down, options up, on the ref's
@@ -292,6 +293,77 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     let left = washes(&mut s);
     assert_eq!(left.len(), 1);
     assert!(gold(&left[0].1));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The GROUND DIM (1476) — the plain black fill that turns 0.6 of veil into a page you can
+/// read. Two laws here, both silently breakable by hand, and neither about the taste number:
+/// the fill must draw **above** the backdrop's tiled ground (a region sorts after its frame's
+/// own draw slot, which is the whole reason a region *can* dim it), and it must sit clear of
+/// the rope's **ink** — the border's four edge slices are dead from texel 16 of 32 and the
+/// corners' ink ends by 14 (decoded from `UI-DialogBox-Border`), so anything inset 14 or more
+/// darkens the page without touching the frame. At the backdrop's own 11/12/12/11 bg insets it
+/// would smear across the rope's inner half, which is exactly the mistake this pins.
+#[test]
+fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
+    let mut s = harness();
+    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.resolve();
+
+    let edge = |frame: &str, side: &str| -> f32 {
+        s.eval(&format!("return {frame}:Get{side}()")).unwrap()
+    };
+    let (fl, fr, ft, fb) = (
+        edge("OptionsFrame", "Left"),
+        edge("OptionsFrame", "Right"),
+        edge("OptionsFrame", "Top"),
+        edge("OptionsFrame", "Bottom"),
+    );
+    let (dl, dr, dt, db) = (
+        edge("OptionsFrameGroundDim", "Left"),
+        edge("OptionsFrameGroundDim", "Right"),
+        edge("OptionsFrameGroundDim", "Top"),
+        edge("OptionsFrameGroundDim", "Bottom"),
+    );
+    for (name, inset) in [
+        ("left", dl - fl),
+        ("right", fr - dr),
+        ("top", ft - dt),
+        ("bottom", db - fb),
+    ] {
+        assert!(
+            inset >= 14.0,
+            "the dim must clear the rope's ink on the {name} — inset {inset}"
+        );
+    }
+
+    // Draw order: `extract` returns ascending z, so a later index draws later. The dim has to
+    // land after the tiled ground or it dims nothing.
+    let quads = s.extract();
+    let ground = quads
+        .iter()
+        .position(|q| match &q.content {
+            QuadContent::Backdrop { path, .. } => path.contains("UI-DialogBox-Background"),
+            _ => false,
+        })
+        .expect("the window still wears the 1.14 dialog ground");
+    let dim = quads
+        .iter()
+        .position(|q| {
+            let Some(r) = q.rect else { return false };
+            matches!(
+                &q.content,
+                QuadContent::Texture { path: None, color: Some(c), .. }
+                    if c[0] == 0.0 && c[1] == 0.0 && c[2] == 0.0 && c[3] > 0.0 && c[3] < 1.0
+            ) && (r.left - dl).abs() < 0.5
+                && (r.top - dt).abs() < 0.5
+        })
+        .expect("the black ground fill is drawn");
+    assert!(
+        dim > ground,
+        "the dim draws over the tile (ground #{ground}, dim #{dim})"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

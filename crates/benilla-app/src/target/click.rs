@@ -427,7 +427,7 @@ pub(super) fn act_on_right_click(
 
 /// The right-click action a hovered GameObject resolves to (decisions 0239 / 0545 / 0752) — chosen
 /// by its lock, through the shared chain in [`super::lock`].
-enum GoAction {
+pub(crate) enum GoAction {
     /// No lock (or no lock data): `CMSG_GAMEOBJ_USE` — door / lever / quest object / mailbox /
     /// unlocked chest.
     Use,
@@ -478,7 +478,7 @@ enum KeyFact {
 /// `Spell.cpp:7892`), and only `CMSG_USE_ITEM` supplies it. That was recorded here as the server's
 /// gap; it was ours, and wow-re's note says so in the same breath — "the client never sends a bare
 /// CMSG_CAST_SPELL for a key lock".
-fn resolve_go_action(
+pub(crate) fn resolve_go_action(
     guid: u64,
     inputs: &mut GoLockInputs,
     known: &std::collections::BTreeSet<u32>,

@@ -245,17 +245,21 @@ pub(super) fn spawn_part(
         child.insert(benilla_world::rig_palette::RigPart(dress.unit));
     }
     if dress.rigged && part.skinned_mesh.is_some() {
-        // A streamed entity's M2 is **never view-culled** — the reference registers entity render
-        // records with effectively-infinite bounds and the one frustum cull in its machinery is
-        // map-doodad-only (wow-re `unit-anim-visibility-gate.md` §2/§4). Bevy's bind-pose `Aabb` is
-        // the wrong stand-in (the duel flag plants itself 9 yd below it) and is stomped anyway by
-        // `calculate_bounds` on any `Mesh3d` change. So the renderer gets the faithful
-        // `NoFrustumCulling`, and the `Aabb` beside it serves ONE master: the mouseover picker
-        // (`target/hover.rs`) — the armed idle's authored CAaBox when it has one, else the bind
-        // box, read from the part's build-time bound (decision 0834: the static mesh is
-        // `RENDER_WORLD`-only, so its main-world data — which the old `compute_aabb` fallback
-        // read — is gone after extract). Both `calculate_bounds` queries skip `NoFrustumCulling`
-        // entities, so this box survives.
+        // A skinned entity part is never PART-culled: the reference tests ONE sphere per scene
+        // object, never per batch, so the view cull belongs to the body ROOT's election
+        // (`exterior_cull`, 1270) and `NoFrustumCulling` keeps Bevy's per-part test out of its
+        // way. (0648 originally justified the marker as "the reference never view-culls entities
+        // at all", off a ≈1e7 render-bounds reading; wow-re's `outdoor-object-pass-election.md`
+        // refuted that 2026-08-13 — those fields are a position cache, and units ARE
+        // frustum/horizon/room-elected per frame. Decision 1473 records the correction and owns
+        // the outdoor half of the election.) Bevy's bind-pose `Aabb` is the wrong stand-in for
+        // picking (the duel flag plants itself 9 yd below it) and is stomped anyway by
+        // `calculate_bounds` on any `Mesh3d` change. So the `Aabb` beside the marker serves ONE
+        // master: the mouseover picker (`target/hover.rs`) — the armed idle's authored CAaBox
+        // when it has one, else the bind box, read from the part's build-time bound (decision
+        // 0834: the static mesh is `RENDER_WORLD`-only, so its main-world data — which the old
+        // `compute_aabb` fallback read — is gone after extract). Both `calculate_bounds` queries
+        // skip `NoFrustumCulling` entities, so this box survives.
         let picker_aabb = dress.idle_aabb.or(part.aabb);
         if let Some(aabb) = picker_aabb {
             child.insert((aabb, NoFrustumCulling));

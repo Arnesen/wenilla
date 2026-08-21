@@ -332,10 +332,11 @@ pub(super) fn drive_animations(
     // client-local loot-target latch, and the frame clock.
     aux: (
         Option<Res<EmoteSounds>>,
-        // The loot-target latch (decision 0515): the SELF unit's kneel trigger — armed at the
-        // `CMSG_LOOT` send, dropped at release/refusal — read by the loot leg below. `Option`
-        // for the headless test worlds that don't build the loot seam.
-        Option<Res<crate::ui_loot::LootLatch>>,
+        // Predicate B's standing answer (decision 1477): whether the currently latched loot
+        // target is one the SELF unit kneels at — the loot leg's whole self trigger, since it is
+        // false while the latch is cold. `Option` for the headless test worlds that don't build
+        // the loot seam.
+        Option<Res<crate::ui_loot::LootKneel>>,
         // The frame clock — the key-bone cross-fade's only time source (decision 0878): its
         // retiring node is *frozen* on the clip's final frame, so unlike the wound's decay there
         // is no playback clock to read the λ window off.
@@ -348,7 +349,7 @@ pub(super) fn drive_animations(
     // diff-only filter; see the trace block after the mode machine).
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
-    let (emote_sounds, loot_latch, time) = aux;
+    let (emote_sounds, loot_kneel, time) = aux;
     let dt = time.delta_secs();
     // This frame's one-shot PLAY CALLS (swings + anim-emotes), gathered per unit and replayed
     // in the client's call order below ([`PlaySeq`] stamps — the net drain stamps packet order,
@@ -422,9 +423,11 @@ pub(super) fn drive_animations(
     let catalog = anim_data.as_deref().map(|d| &d.0);
     // `WOW_ANIM_COST=1` — the memo-sizing counter (1370 item 9's bracket): counts the frame's
     // RESTING rows, the shape an input-memo fast path would skip. Sizing only — no skip is
-    // taken here (an `AnimParked` filter is law-barred: 0448's off-screen-events law means a
-    // parked unit's driver must keep arming clips; the memo is the only safe shape, built when
-    // this number says it pays).
+    // taken here. (An `AnimParked` filter was law-barred by 0448's off-screen-events law; that
+    // law's premise — "the reference keeps every off-screen unit audible" — fell with wow-re's
+    // election correction, which keeps only `MORE_AUDIBLE` creatures ticking. Until 1473's
+    // event-gate leg lands as its own record, the driver still arms clips for every parked
+    // unit, and the memo remains the only safe skip shape.)
     let anim_cost = anim_cost_enabled();
     let (mut cost_rows, mut cost_resting) = (0u32, 0u32);
     for (
@@ -743,12 +746,21 @@ pub(super) fn drive_animations(
         }
 
         // The loot kneel's trigger (see [`select::LOOT`]; byte-verified, wow-re
-        // `loot-anim-leg.md` — the 2026-07-18 §5 fold-back, decision 0515): the predicate
-        // (`0x6126b0`) SPLITS on IsActivePlayer — the **self** unit kneels off the client-local
-        // loot-target latch ([`crate::ui_loot::LootLatch`], armed at the `CMSG_LOOT` send, so
-        // the kneel is client-predicted with no round-trip), a **remote** unit off its mirrored
-        // descriptor: `UNIT_FLAG_LOOTING` (0x400) set AND the `0x10000000` bit clear. Never
-        // mounted (the leg's `[+0xdc]==0` gate). Movement outranks by CHAIN POSITION, not an
+        // `loot-anim-leg.md` §5/§8 — decisions 0515 / 1471 / 1477): the leg needs **two**
+        // predicates, and both SPLIT on IsActivePlayer.
+        //
+        // **Self.** Predicate A (`0x6126b0`) is "a loot session is open" — the client-local
+        // loot-target latch. Predicate B (`0x612710`) is the per-object-CLASS filter: which
+        // *kind* of target the character kneels at. Only B is read here, because
+        // [`crate::ui_loot::LootKneel`] already folds in A (it is false whenever the latch is
+        // cold). Keeping them apart is the correction 1477 makes to 1471: a fishing bobber arms
+        // the latch exactly like a chest does, and the reference still does not kneel at it —
+        // the difference is entirely B's `GAMEOBJECT_TYPE_ID == 17` test.
+        //
+        // **Remote.** The mirrored descriptor: `UNIT_FLAG_LOOTING` (0x400) set AND the
+        // `0x10000000` bit clear.
+        //
+        // Never mounted (the leg's `[+0xdc]==0` gate). Movement outranks by CHAIN POSITION, not an
         // in-leg gate — the core ground selector claims first on any direction bit (`[9e8]&0xf`)
         // — transcribed as the `ANY_MOVE` test here; a stationary *swimmer* with the trigger up
         // kneels mid-tread, as the bytes order it (locomotion's swim block needs a direction
@@ -756,7 +768,7 @@ pub(super) fn drive_animations(
         let looting = !mounted
             && mv.flags & move_flags::ANY_MOVE == 0
             && if is_self {
-                loot_latch.as_ref().is_some_and(|l| l.0.is_some())
+                loot_kneel.as_ref().is_some_and(|k| k.0)
             } else {
                 store.is_some_and(|s| {
                     let f = s.0.unit_flags();

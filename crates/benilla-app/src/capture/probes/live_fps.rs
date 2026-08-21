@@ -117,9 +117,14 @@ type ScreenParams<'w, 's> = (
 );
 
 #[derive(SystemParam)]
-struct SamplePin<'w> {
+struct SamplePin<'w, 's> {
     map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
     body: Option<Res<'w, crate::player::Player>>,
+    /// The eye the leg was measured through — pose-stamped like `sys_busy_pct` time-stamps load,
+    /// and for the same reason: two legs are only comparable if this matches. 1475's bring-up
+    /// lost an hour to a probe whose camera sat first-person pitched 26° down — a per-character
+    /// saved camera file, invisible in every count — and the census read as a regression hunt.
+    cam: Query<'w, 's, &'static GlobalTransform, With<benilla_world::view::WorldCamera>>,
 }
 
 /// Wait for in-world + the delay, uncap, warm, sample, print, exit — the live twin of the
@@ -339,6 +344,17 @@ fn drive_live_fps(
                 }
                 _ => String::new(),
             };
+            let cam_pose = pin
+                .cam
+                .iter()
+                .next()
+                .map(|gt| {
+                    let [x, y, z] = benilla_assets::coords::bevy_to_wow(gt.translation());
+                    let (yaw, pitch, _) =
+                        gt.to_scale_rotation_translation().1.to_euler(EulerRot::YXZ);
+                    format!(" cam={x:.1},{y:.1},{z:.1} cam_yaw={yaw:.2} cam_pitch={pitch:.2}")
+                })
+                .unwrap_or_default();
             let gate = match (seen.room.as_deref(), seen.windows.as_deref()) {
                 (Some(room), Some(w)) => format!(" room={room} windows={w}"),
                 _ => String::new(),
@@ -379,7 +395,7 @@ fn drive_live_fps(
                 seen.mats, seen.meshes, seen.images, seen.uv_anims, seen.tint_anims,
             );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{gate}{sky}{ribbons}{culled}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{cam_pose}{gate}{sky}{ribbons}{culled}",
                 v.len(),
                 at(0.50),
                 at(0.95),

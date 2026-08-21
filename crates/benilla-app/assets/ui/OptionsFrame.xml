@@ -60,6 +60,9 @@
           through, the reference screenshot's actual mechanism; 0978 misread that ground as
           parchment) + UI-DialogBox-Border rope edge 32, insets 11/12/12/11. Title plate
           UI-DialogBox-Header at the options frames' 300x68 TOP (0,+12) seat, title on it.
+          ON TOP of that tile, inside the rope, a plain black 0.7 fill (1476) takes the
+          composite ground to 0.88: at the bare tile the world reached the option labels
+          hard enough to break them over bright terrain. The read-through stays, dimmed.
         · the era's one dark Options_InnerFrame panel → TWO 1.14 OptionsFrameListTemplate
           boxes: tooltip-border backdrops with the FILL AT ALPHA 0 (outlines — the ground
           shows through) and the border tinted LIGHTGRAY_FONT_COLOR 0.6, tops at -52 (1.14's
@@ -1525,6 +1528,37 @@
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
         </Backdrop>
         <Layers>
+            <Layer level="BACKGROUND">
+                <!-- THE GROUND DIM (1476) — a plain black fill over the tiled ground, because
+                     the tile alone is not a readable page. UI-DialogBox-Background decodes to a
+                     uniform (0,0,0,153) — pure black at 0.6 — so 40% of the world reaches the
+                     text: over snow, noon water or a lit sky the page ground lands near mid-grey
+                     and the option labels stop reading (the director's report). 0.6 is right for
+                     a dialog you glance at; the options window is a page you READ, and the era's
+                     own answer is an OPAQUE FlatPanelBackgroundTemplate panel — so darkening
+                     toward it is the era structure 0985 already gives us, wearing a plain colour
+                     fill, which 0985 names as an art byte we may author.
+                     Alpha 0.7 over the 0.6 tile composites to 0.88 (the world reaches the page at
+                     0.12), not 1.0: the faint read-through is the window's character, and 0981's
+                     "the reference was never parchment" finding stands — this dims the ground, it
+                     does not replace it.
+                     SEAT: inset 15 on all four sides, NOT the backdrop's own 11/12/12/11 bg
+                     insets. Regions sort AFTER the frame's own draw slot, which is where the
+                     backdrop's bg AND its 8 border pieces both live (extract.rs) — so this fill
+                     paints OVER the rope, and at the bg insets it would smear 0.7 black across
+                     the border's inner half. The rope's ink is measured, not guessed: every edge
+                     slice of UI-DialogBox-Border is opaque only in its outer ~11 units and dead
+                     by texel 16 of 32, and the corner slices' ink ends by 14 (decoded). 15 clears
+                     every inked texel and leaves at most a 1-unit lighter hairline inside the
+                     rope, where the rope reads as frame anyway. -->
+                <Texture name="$parentGroundDim">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="15" y="-15"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-15" y="15"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="0" g="0" b="0" a="0.7"/>
+                </Texture>
+            </Layer>
             <Layer level="ARTWORK">
                 <!-- The carved title plate at the 1.14 options frames' own seat: 300x68 at
                      TOP (0,+12) — OptionsFrameTemplates.xml l.244-255 (GameMenuFrame's plate

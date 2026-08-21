@@ -769,6 +769,7 @@ pub(super) fn apply_net_updates(
                 &mut ui_actions.2,
                 &mut ui_actions.6,
                 &mut ui_actions.7,
+                &mut loot_latch,
             ),
             SessionEvent::Chat(m) => {
                 chat::chat(m, &mut chat_log, &social, &net_commands, &mut server_said)
@@ -934,7 +935,15 @@ pub(super) fn apply_net_updates(
                 loot_type,
                 gold,
                 items,
-            } => loot_response(guid, loot_type, gold, items, &mut loot),
+            } => loot_response(
+                guid,
+                loot_type,
+                gold,
+                items,
+                &mut loot,
+                &mut loot_latch,
+                &net_commands,
+            ),
             SessionEvent::LootError { guid, error } => {
                 loot_error(guid, error, &mut ui_actions.4, &mut loot_latch)
             }
@@ -1130,6 +1139,7 @@ pub(super) fn apply_net_updates(
                 &mut ui_actions.15,
                 &mut audio.7,
                 &mut audio.10,
+                &mut loot_latch,
                 (
                     &mut ui_actions.10,
                     ui_actions.11.as_deref(),

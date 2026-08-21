@@ -296,18 +296,98 @@ pub(crate) struct LootConfig {
 }
 
 /// The client-local **loot-target latch** — the mirror of the real client's `[player+0x1d28]`
-/// guid (wow-re `loot-anim-leg.md`, the 2026-07-18 §5, decision 0515): set the instant
-/// `CMSG_LOOT` goes out (`0x5df253`, the same site that client-predicts the kneel before any
-/// server response) and cleared on release/close (`0x48f2c9`/`0x5ec0d4`). This — **not** the
-/// mirrored `UNIT_FLAG_LOOTING` descriptor bit — is what the local player's own kneel rides
-/// (the byte predicate `0x6126b0` splits: self → this latch, remote → the flag), so our kneel
-/// starts at the click and ends at the release with no wire round-trip on either edge. Ours
-/// clears **guid-matched** (release response / refusal / our own release sends) — the safe
-/// generalization of the client's clears under our corpse-switch race, where the *old* window's
-/// release response lands after the *new* loot request armed the latch — plus unconditionally at
-/// session teardown.
+/// guid (wow-re `loot-anim-leg.md` §5, the 2026-08-21 §5 trio; decisions 0515 / 1471 / **1477**).
+/// It says *a loot session is open on this object*, and it is read by far more than the kneel: the
+/// loot cursor, the re-loot lock-out (`0x5ec110`), `CMSG_LOOT_MONEY`'s gate, auto-loot.
+///
+/// **Whether we kneel at it is a separate question** — [`LootKneel`], the client's predicate B
+/// `0x612710`. Arming the latch is not arming the pose; conflating the two is what 1471 got wrong.
+///
+/// **The arms** (the real client has five; we model the three our wire can produce):
+/// - the `CMSG_LOOT` send (`0x5df253`/`0x5df40d`) — a **corpse** or player bones, armed at the
+///   click, so the kneel is client-predicted with no round-trip;
+/// - **`SMSG_SPELL_GO`** for an `OPEN_LOCK` cast that lands on a **chest**
+///   (`0x6e831b → SetLootTarget 0x5ed5f0`) — this, not the loot response, is a chest's real arm,
+///   and it is why the reference is already kneeling by the time the window opens;
+/// - `CGPlayer_C::OnLootResponse 0x5eb900`, through its **admission gate** — see
+///   [`crate::net::apply::loot::loot_response`]. Not unconditional: a `loot_type == 1` response
+///   against a cold latch is *refused and bounced*.
+///
+/// Not modelled: the `CMSG_OPEN_ITEM` arm (`0x5edcc0`, a lockbox). It would change no pose —
+/// predicate B refuses an ITEM — only the cursor and the re-loot lock-out; named in 1477 as a gap.
+///
+/// Cleared on release/close (`0x48f2c9`/`0x5ec0d4`). Ours clears **guid-matched** (release
+/// response / refusal / our own release sends) — the safe generalization of the client's clears
+/// under our corpse-switch race, where the *old* window's release response lands after the *new*
+/// loot request armed the latch — plus unconditionally at session teardown.
 #[derive(Resource, Default)]
 pub(crate) struct LootLatch(pub(crate) Option<u64>);
+
+/// **Predicate B `0x612710`, the local-player branch** — whether the object the [`LootLatch`]
+/// currently names is one the character *kneels at* (wow-re `loot-anim-leg.md` §8, byte-verified
+/// §5 trio 2026-08-21; decision 1477). The loot leg `0x5fd260` needs predicate A (a session is
+/// open) **and** this one, and the split is the whole reason a fishing bobber does not kneel while
+/// a chest does — the latch is armed identically for both.
+///
+/// The byte table, transcribed:
+///
+/// | latched object | kneels? |
+/// |---|---|
+/// | GameObject, any type but 17 (a chest, a herb node, a `FISHINGHOLE` 25) | yes |
+/// | GameObject type **17 `FISHINGNODE`** — a fishing bobber (`0x612772`) | **no** |
+/// | Unit with `UNIT_FIELD_HEALTH <= 0` — a creature corpse | yes |
+/// | Unit with health **> 0** — pickpocketing a live target (`0x61278c`) | **no** |
+/// | Item — a lockbox, a disenchant (`0x612797`, `!(TYPEMASK & 2)`) | **no** |
+/// | a guid the object manager cannot resolve (`0x612732`) | **no** |
+///
+/// Recomputed by [`resolve_loot_kneel`] each frame, **between the net drain and the anim driver**.
+/// That ordering is load-bearing, not tidiness: the reference does not poll this at all — it
+/// force-plays Loot 50 *at* the chest arm (`0x5ed619`, in the same `SMSG_SPELL_GO` handler that
+/// writes the latch), so the pose is up on the arming frame. Scheduling this system loose cost
+/// exactly one frame of Stand at the open, which the chest probe caught as 59/60.
+#[derive(Resource, Default)]
+pub(crate) struct LootKneel(pub(crate) bool);
+
+/// `GAMEOBJECT_TYPE_ID` 17 — `FISHINGNODE`, the bobber. The one GameObject type predicate B names
+/// explicitly, and the reason "the latch is armed" is not the same question as "we kneel"
+/// (`0x612772`; the test exists for exactly this case).
+const GO_TYPE_FISHINGNODE: i32 = 17;
+
+/// Recompute [`LootKneel`] from the latched object — predicate B `0x612710`'s local branch.
+/// `pub(crate)` so [`crate::creature_anim`]'s driver chain can order itself after it (see
+/// [`LootKneel`]: the reference's pose is up on the arming frame, so ours must be too).
+pub(crate) fn resolve_loot_kneel(
+    latch: Res<LootLatch>,
+    index: Res<crate::net::GuidIndex>,
+    objects: Query<(&crate::net::NetEntity, &crate::net::ObjectStore)>,
+    mut kneel: ResMut<LootKneel>,
+) {
+    let allowed = latch
+        .0
+        .and_then(|guid| index.0.get(&guid).copied())
+        .and_then(|e| objects.get(e).ok())
+        .is_some_and(|(net_entity, store)| match net_entity.kind {
+            // `0x612764`: a GameObject kneels unless it is the bobber.
+            benilla_protocol::EntityKind::GameObject => {
+                store.0.gameobject_type_id() != GO_TYPE_FISHINGNODE
+            }
+            // `0x61278c`: a unit kneels only once its `UNIT_FIELD_HEALTH` is not positive — read
+            // straight off the descriptor, as the bytes do (an unsent field is 0 in the client's
+            // descriptor array too, so `unwrap_or(0)` *is* the faithful read; this deliberately
+            // does not go through `unit_is_dead`, whose extra `max_health > 0` guard the
+            // reference has no counterpart for).
+            benilla_protocol::EntityKind::Unit | benilla_protocol::EntityKind::Player => {
+                store.0.unit_health().unwrap_or(0) == 0
+            }
+            // An ITEM never kneels (`0x612797`), and we stream no item entities anyway — the
+            // resolve above already answers `false` for a lockbox latch. Everything else
+            // (DynamicObject, Other) is not a loot target the reference reaches here.
+            _ => false,
+        });
+    if kneel.0 != allowed {
+        kneel.0 = allowed;
+    }
+}
 
 impl LootLatch {
     /// Drop the latch if it still points at `guid` (a release/refusal for that loot session).
@@ -326,6 +406,7 @@ impl Plugin for UiLootPlugin {
             .init_resource::<LootErrors>()
             .init_resource::<LootConfig>()
             .init_resource::<LootLatch>()
+            .init_resource::<LootKneel>()
             .add_systems(
                 Update,
                 (
@@ -333,6 +414,10 @@ impl Plugin for UiLootPlugin {
                     // after it so a click's intent goes out the same frame (mirrors ui_merchant).
                     feed_loot.before(UiInput),
                     drain_loot.after(UiInput),
+                    // Predicate B, per frame, after the net drain that arms the latch. The anim
+                    // driver then orders itself after THIS (`crate::creature_anim`), closing the
+                    // arm→pose gap to zero frames, as the reference's force-play does.
+                    resolve_loot_kneel.after(benilla_world::schedule::WorldStage::Net),
                 ),
             );
     }
@@ -724,6 +809,84 @@ fn drain_loot(
 mod tests {
     use super::*;
     use benilla_protocol::messages::loot_type;
+    use benilla_protocol::messages::ObjectFields;
+    use benilla_protocol::EntityKind;
+
+    /// Descriptor field indices the predicate-B table reads.
+    const F_GO_TYPE_ID: u16 = 21;
+    const F_UNIT_HEALTH: u16 = 22;
+
+    /// Drive [`resolve_loot_kneel`] once over a world holding one latched object, and report what
+    /// predicate B said. `None` for `object` = the latch names a guid that does not resolve.
+    fn kneels_at(object: Option<(EntityKind, &[(u16, u32)])>) -> bool {
+        const GUID: u64 = 0xF110_0000_0000_0042;
+        let mut app = App::new();
+        app.init_resource::<LootLatch>()
+            .init_resource::<LootKneel>()
+            .init_resource::<crate::net::GuidIndex>()
+            .add_systems(Update, resolve_loot_kneel);
+        app.world_mut().resource_mut::<LootLatch>().0 = Some(GUID);
+        if let Some((kind, fields)) = object {
+            let e = app
+                .world_mut()
+                .spawn((
+                    crate::net::NetEntity {
+                        kind,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                    crate::net::ObjectStore(ObjectFields::from_pairs(fields)),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<crate::net::GuidIndex>()
+                .0
+                .insert(GUID, e);
+        }
+        app.update();
+        app.world().resource::<LootKneel>().0
+    }
+
+    /// **Predicate B `0x612710`, the local branch** (wow-re `loot-anim-leg.md` §8; decision 1477).
+    /// The whole row set, because the *point* of this predicate is that arming the latch is not
+    /// the same question as kneeling: a fishing bobber and a chest arm it identically, and only
+    /// one of them is knelt at. Without this filter, 1471's response-arm gave benilla a kneel at
+    /// a bobber, over a lockbox, and while pickpocketing — none of which the reference does.
+    #[test]
+    fn predicate_b_decides_which_loot_targets_are_knelt_at() {
+        // A GameObject that is not the bobber — a chest, a herb node, a FISHINGHOLE(25).
+        assert!(kneels_at(Some((
+            EntityKind::GameObject,
+            &[(F_GO_TYPE_ID, 3)]
+        ))));
+        assert!(kneels_at(Some((
+            EntityKind::GameObject,
+            &[(F_GO_TYPE_ID, 25)]
+        ))));
+        // `0x612772` — GAMEOBJECT_TYPE_ID 17 FISHINGNODE, the one type named explicitly.
+        assert!(!kneels_at(Some((
+            EntityKind::GameObject,
+            &[(F_GO_TYPE_ID, 17)]
+        ))));
+        // `0x61278c` — a corpse kneels, a live target (pickpocketing) does not.
+        assert!(kneels_at(Some((EntityKind::Unit, &[(F_UNIT_HEALTH, 0)]))));
+        assert!(!kneels_at(Some((EntityKind::Unit, &[(F_UNIT_HEALTH, 1)]))));
+        // `0x612732` — a guid the object manager cannot resolve (an item latch is this, for us).
+        assert!(!kneels_at(None));
+    }
+
+    /// A cold latch is not a kneel — predicate A's half, folded into the same resource so the
+    /// anim driver reads one boolean.
+    #[test]
+    fn a_cold_latch_never_kneels() {
+        let mut app = App::new();
+        app.init_resource::<LootLatch>()
+            .init_resource::<LootKneel>()
+            .init_resource::<crate::net::GuidIndex>()
+            .add_systems(Update, resolve_loot_kneel);
+        app.update();
+        assert!(!app.world().resource::<LootKneel>().0);
+    }
 
     fn item(slot: u8, entry: u32, count: u32) -> LootItem {
         LootItem {

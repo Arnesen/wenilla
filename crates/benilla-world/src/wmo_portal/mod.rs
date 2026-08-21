@@ -32,6 +32,7 @@ use std::sync::Arc;
 mod fog;
 mod interior;
 mod probe;
+mod room_vis;
 mod seed;
 
 use fog::select_wmo_fog;
@@ -47,6 +48,7 @@ pub use interior::{
 };
 pub use probe::WmoCullProbe;
 use probe::{TraceLog, PROBE_DUMP_PATH};
+pub use room_vis::room_pvs_visible;
 use seed::dominant_axes;
 pub use seed::{down_ray_seeds, floor_z_at, DownRaySeeds};
 

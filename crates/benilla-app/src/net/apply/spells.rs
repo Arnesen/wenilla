@@ -285,6 +285,10 @@ pub(super) fn spell_start(
     }
 }
 
+/// `GAMEOBJECT_TYPE_ID` 3 — `CHEST`, the only GO type whose `OPEN_LOCK` cast arms the loot-target
+/// latch (`0x6e830c`; DOOR(0)/BUTTON(1) are skipped explicitly and every other type falls out).
+const GO_TYPE_CHEST: i32 = 3;
+
 /// The cast launched (`SMSG_SPELL_GO`): hit/miss lists + (for a ranged spell) the ammo display id
 /// for the projectile visual. The server schedules the *damage* itself off `Spell.dbc` Speed —
 /// nothing about missile travel rides this packet; the client (and we) rebuild the flight
@@ -314,6 +318,8 @@ pub(super) fn spell_go(
     queued_melee: &mut QueuedMeleeSpell,
     text: &mut MessageWriter<crate::combat_text::CombatTextSpawn>,
     go_lid: &mut MessageWriter<crate::go_anim::GoLidOpen>,
+    // The client-local loot-target latch — armed here for a chest (decision 1477, §6 above).
+    loot_latch: &mut crate::ui_loot::LootLatch,
     // The cooldown store + what its start laws read (grouped: one arm-body concern). The last
     // member is the PET's store — the reference inserts into two banks from this one handler
     // ([`pet_go_cooldown`]).
@@ -342,6 +348,37 @@ pub(super) fn spell_go(
     let (cooldowns, spells, items, net_commands, pet_bar) = cooldown_ctx;
     let now = Instant::now();
     let display = spells.and_then(|s| s.catalog.get(spell_id));
+    // **A chest's loot-target arm** (wow-re `loot-anim-leg.md` §6, byte-verified §5 trio; decision
+    // 1477). `Spell_C::HandleSpellGo 0x6e7a70` reaches `0x6e831b call SetLootTarget 0x5ed5f0`,
+    // which writes `[player+0x1d28]` and force-plays Loot 50 — so **this packet, not the loot
+    // response, is when the reference starts kneeling at a chest**. Its gates, transcribed:
+    // caster is the local player (`0x6e81b6`), the spell carries `SPELL_EFFECT_OPEN_LOCK` (0x21)
+    // or `OPEN_LOCK_ITEM` (0x3b) (`0x6e81f9`/`0x6e8202`), and the single target resolves as a
+    // GameObject whose `GAMEOBJECT_TYPE_ID` is **CHEST(3)** (`0x6e82df`–`0x6e830c`; DOOR/BUTTON
+    // are skipped explicitly, everything else falls out).
+    //
+    // One named divergence: the reference reads its target off the hit list and requires
+    // `hitCount == 1` (`0x6e82c1`). vmangos writes a GameObject target into `SpellCastTargets`,
+    // not the hit list, so we key on the packet's `go_target` — a single guid by construction,
+    // which is the same condition arrived at from the shape of our wire rather than from a count.
+    //
+    // No force-play is needed here: our loot leg is recomputed every frame from
+    // [`crate::ui_loot::LootKneel`], where the reference recomputes only on events and therefore
+    // has to kick the pose by hand.
+    if self_guid.0 == Some(caster) {
+        if let Some(go_guid) = go_target {
+            let is_open_lock = display.is_some_and(|d| d.open_lock.is_some());
+            let is_chest = index
+                .0
+                .get(&go_guid)
+                .and_then(|&e| stores.get(e).ok())
+                .is_some_and(|store| store.0.gameobject_type_id() == GO_TYPE_CHEST);
+            if is_open_lock && is_chest {
+                debug!("net: spell go — chest {go_guid:#x} becomes the loot target (kneel arm)");
+                loot_latch.0 = Some(go_guid);
+            }
+        }
+    }
     // Our own launch completes the cast bar (a shown bar fills green and fades; auto-repeat
     // shots — GO with no bar showing — no-op in the reference Lua) and opens the in-flight guard
     // (spell-id-keyed, so a triggered proc's GO mid-cast doesn't unblock the running cast early).
@@ -965,6 +1002,7 @@ mod tests {
                             &mut queued_melee,
                             &mut text,
                             &mut go_lid,
+                            &mut crate::ui_loot::LootLatch::default(),
                             (
                                 &mut cooldowns,
                                 None,
@@ -1114,6 +1152,7 @@ mod tests {
                             &mut queued_melee,
                             &mut text,
                             &mut go_lid,
+                            &mut crate::ui_loot::LootLatch::default(),
                             (
                                 &mut cooldowns,
                                 Some(&spells),
@@ -1249,6 +1288,7 @@ mod tests {
                         &mut queued_melee,
                         &mut text,
                         &mut go_lid,
+                        &mut crate::ui_loot::LootLatch::default(),
                         (
                             &mut cooldowns,
                             None,

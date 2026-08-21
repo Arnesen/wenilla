@@ -1082,15 +1082,18 @@ fn unit_flag_looting_kneels_stationary_units_only() {
 
 /// The loot kneel, SELF half (decision 0515 — the byte predicate `0x6126b0` splits on
 /// IsActivePlayer): the local player's kneel rides the client-local loot-target latch
-/// ([`crate::ui_loot::LootLatch`], the `[player+0x1d28]` mirror) — NOT its descriptor flag — so
-/// it starts the frame the `CMSG_LOOT` send arms the latch (client-predicted, before any server
-/// response reaches the descriptor) and ends the frame the latch drops.
+/// (predicate B's standing answer over the `[player+0x1d28]` latch — [`crate::ui_loot::LootKneel`],
+/// decision 1477) — NOT its descriptor flag — so it starts the frame the arm lands
+/// (client-predicted, before any server response reaches the descriptor) and ends the frame it
+/// drops. *Which* latched objects set that boolean is predicate B's own table, tested where it
+/// lives (`ui_loot::tests::predicate_b_decides_which_loot_targets_are_knelt_at`); this test is
+/// about the leg reading self and remote from two different places.
 #[test]
 fn the_self_kneel_rides_the_loot_latch_not_the_flag() {
     use benilla_protocol::messages::ObjectFields;
 
     let mut app = app();
-    app.init_resource::<crate::ui_loot::LootLatch>();
+    app.init_resource::<crate::ui_loot::LootKneel>();
     let model = ModelAnimations {
         graph: Handle::default(),
         clips: vec![clip(0, 1, true), clip(50, 2, false), clip(5, 3, true)],
@@ -1124,17 +1127,17 @@ fn the_self_kneel_rides_the_loot_latch_not_the_flag() {
         "the self unit ignores its own descriptor flag"
     );
 
-    // The CMSG_LOOT send arms the latch: the kneel is client-predicted the same frame cycle.
+    // The arm lands on a kneelable target: the kneel is client-predicted the same frame cycle.
     app.world_mut()
-        .resource_mut::<crate::ui_loot::LootLatch>()
-        .0 = Some(0x42);
+        .resource_mut::<crate::ui_loot::LootKneel>()
+        .0 = true;
     app.update();
     assert_eq!(gait(&app), Some(50), "the armed latch kneels the self unit");
 
     // The release/refusal drops the latch: straight back to Stand, no wire round-trip needed.
     app.world_mut()
-        .resource_mut::<crate::ui_loot::LootLatch>()
-        .0 = None;
+        .resource_mut::<crate::ui_loot::LootKneel>()
+        .0 = false;
     app.update();
     assert_eq!(
         gait(&app),
