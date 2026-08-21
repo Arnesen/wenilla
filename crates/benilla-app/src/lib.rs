@@ -526,6 +526,9 @@ pub fn run(build: BuildId) -> AppExit {
     // The glyph atlas (client TTFs -> baked bitmap) `ui_script`'s extraction draws `FontString`
     // regions through. Loads at Startup, after the asset chain opens (decision 0068 §2).
     .add_plugins(UiTextPlugin)
+    // The one "which NPC am I interacting with" answer, shared by the portrait booth's `"npc"`
+    // token and the interaction face-me (decision 1467) — hence its own plugin, ahead of both.
+    .add_plugins(ui_session::UiSessionPlugin)
     // Unit-frame portraits: the token -> off-screen-baked-face bridge the UI extract samples for a
     // `SetPortraitTexture`-bound region (the modern high-res 2D model bake).
     .add_plugins(PortraitPlugin)

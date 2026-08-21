@@ -37,7 +37,7 @@ use apply::{apply_net_updates, tag_self_player};
 // and are pulled in here for the plugin + the event bridge.
 pub(crate) use io::LoginRequest;
 use motion::{
-    drain_pending_moves, extrapolate_remote_units, face_target, ground_clamp_creatures,
+    drain_pending_moves, drive_display_facing, extrapolate_remote_units, ground_clamp_creatures,
     mark_swimming_creatures, sample_splines,
 };
 pub(crate) use motion::{
@@ -137,12 +137,19 @@ impl Plugin for NetPlugin {
                     // the freshly-applied state and reconcile-lerps toward the next queued head.
                     drain_pending_moves,
                     extrapolate_remote_units,
-                    // Idle creatures turn to face their target here — after the movers (spline / remote)
-                    // have set their poses, so a face turn reads the target's fresh position this frame.
-                    face_target,
+                    // The client-local facing turn runs here — after the movers (spline / remote)
+                    // have set their poses, so a turn reads the goal's fresh position this frame.
+                    // A stationary unit squares up on its target, and the NPC whose interaction
+                    // window is open turns to face us (decision 1467).
+                    drive_display_facing,
                 )
                     .chain()
-                    .in_set(WorldStage::Net),
+                    .in_set(WorldStage::Net)
+                    // `drive_display_facing` reads `InteractNpc`; ordering the chain after its
+                    // writer keeps the read deterministic rather than schedule-order-dependent.
+                    // The cost is that the writer sees last frame's window state, which cannot
+                    // matter: a window is open for seconds and the ease takes ~8 frames.
+                    .after(crate::ui_session::feed_interact_npc),
             )
             // Not part of the movement chain above: one send on the world-enter message.
             .add_systems(Update, send_query_time.in_set(WorldStage::Net))

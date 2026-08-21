@@ -14,6 +14,27 @@ use bevy::prelude::*;
 
 use crate::net::{GuidIndex, SelfPlayer};
 use crate::target::SERVICE_RANGE_SQ;
+use benilla_world::schedule::WorldStage;
+
+/// Owns the cross-window session state: [`InteractNpc`] and the one system that feeds it.
+///
+/// It has a plugin of its own because [`InteractNpc`] has **two** consumers that must not depend on
+/// each other — the portrait booth's `"npc"` token (decision 0081) and the interaction face-me
+/// (`crate::net::motion`'s display-facing chain, decision 1467). It used to be initialised and fed
+/// from inside the portrait plugin, which silently made a *facing* law contingent on the portrait
+/// plugin being mounted; a shared resource belongs to the thing it describes.
+pub(crate) struct UiSessionPlugin;
+
+impl Plugin for UiSessionPlugin {
+    fn build(&self, app: &mut App) {
+        // In `WorldStage::Net` so the facing chain can order itself against it. Deliberately
+        // unordered w.r.t. the apply pass: the sessions it reads are open for *seconds*, so
+        // whether a window's first frame is seen now or next frame is invisible against an
+        // ~8-frame facing ease.
+        app.init_resource::<InteractNpc>()
+            .add_systems(Update, feed_interact_npc.in_set(WorldStage::Net));
+    }
+}
 
 /// A UI session bound to a live NPC (or, for the mailbox, a GameObject): the shared face the range
 /// guard closes through. Implemented by [`crate::ui_merchant::MerchantOpen`],

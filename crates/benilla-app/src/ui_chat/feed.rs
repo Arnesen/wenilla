@@ -538,6 +538,9 @@ pub(super) fn feed_chat(
     mut names: ResMut<NameCache>,
     mut bubbles: ResMut<crate::chat_bubble::BubbleQueue>,
     bubble_cfg: Res<crate::chat_bubble::BubbleConfig>,
+    // The client-local talk gesture (decision 1469) — armed from this same display path, beside
+    // the bubble, exactly as the reference arms both from `ChatFrame.cpp`.
+    mut gestures: ResMut<crate::creature_anim::GestureQueue>,
     commands: Res<NetCommands>,
     time: Res<Time>,
     // The text-emote sentence seam (decision 1274): the tables, plus the guid the composer's
@@ -682,6 +685,22 @@ pub(super) fn feed_chat(
                     // bubble spawn sits inside this same SMSG display path, downstream of the
                     // expander, so a `$n` must never survive into it either.
                     bubbles.push(&bubble_cfg, msg.sender_guid, kind, &text);
+                }
+                // …and the speaker gestures. Independent of the bubble in the reference too
+                // (different function, different gates: the bubble has a 20 yd range test and two
+                // CVars, the gesture has neither). The selector reads the RAW wire type and the
+                // expanded text, and takes its laugh words off the player's own FrameXML globals —
+                // the enumeration is the mechanism, the words are content (decision 1469).
+                if let Some(gesture) =
+                    crate::creature_anim::select_gesture(msg.chat_type, &text, |n| {
+                        script
+                            .lua()
+                            .globals()
+                            .get::<String>(format!("LAUGH_WORD{n}"))
+                            .ok()
+                    })
+                {
+                    gestures.push(msg.sender_guid, gesture);
                 }
             }
             Pending::Notice {

@@ -29,8 +29,9 @@ mod spline;
 #[cfg(test)]
 mod tests;
 
+pub(in crate::net) use facing::DisplayFacing;
 pub(crate) use facing::FacingStep;
-pub(super) use facing::{face_target, resolve_facing};
+pub(super) use facing::{drive_display_facing, resolve_facing};
 pub(crate) use relay::{PendingMove, RelayMove};
 pub(crate) use remote::jump_seed;
 pub(crate) use remote::RemoteMotion;
@@ -95,7 +96,14 @@ pub(super) fn pose_transform(position: [f32; 3], rotation: Quat) -> Transform {
 /// (the renderer bakes per-display model scale into the transform; a move must not reset it). The
 /// entity may not be query-visible the very frame it spawned — then the move is simply skipped (the
 /// spawn pose already placed it, and the next move lands once commands flush).
+///
+/// **A wire pose is authoritative over the client-local facing turn**, so it drops any
+/// [`DisplayFacing`]: the smoother re-seeds its raw facing and its history ring from the pose
+/// written here, which is the client's spawn/resync shape (`0x601020` sets the goal and wipes the
+/// ring). Doing it here rather than at the call sites is deliberate — a future pose writer cannot
+/// forget it and leave a unit swinging back to a heading the server has since moved it off.
 pub(super) fn write_pose(
+    commands: &mut Commands,
     transforms: &mut Query<&mut Transform>,
     e: Entity,
     position: [f32; 3],
@@ -104,6 +112,7 @@ pub(super) fn write_pose(
     if let Ok(mut t) = transforms.get_mut(e) {
         t.translation = wow_to_bevy(position);
         t.rotation = rotation;
+        commands.entity(e).remove::<DisplayFacing>();
     }
 }
 

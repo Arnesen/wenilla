@@ -411,6 +411,20 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
+    // ---- The Tainted Scar, Blasted Lands (report B90: "the skybox is almost pure white") ----
+    // A level look across the crater from the reported spot, so the top half of the frame is
+    // nothing but sky. The zone's `LightParams` 36 is the shape that matters: cloud density
+    // **0.85** (Elwynn's is 0.50) puts near-total overcast on the dome, so whatever colour the
+    // cloud layer resolves IS the sky here — which is why this zone shows a cloud-palette defect
+    // that a half-clouded zone hides. Kept as the standing reproducer for the cloud palette.
+    Scenario {
+        name: "tainted-scar-noon",
+        map: MAP_AZEROTH,
+        eye: SCAR_EYE,
+        look: SCAR_LOOK,
+        minute: 720,
+        ui: None,
+    },
     // ---- Evicted from the blessed sweep by decision 0817, NOT deleted ----
     // The sweep had grown from 0632's six to twenty-one, i.e. 42 windows on the director's screen per
     // `selfcheck`, and the director cut it back to three spots x two day times. Everything below this
@@ -1033,3 +1047,12 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
 /// model-space coords.
 pub(super) const TRAM_EYE: [f32; 3] = [-2.44, -1250.0, -120.0];
 pub(super) const TRAM_LOOK: [f32; 3] = [-2.44, -1400.0, -118.0];
+
+/// The Tainted Scar — see the `tainted-scar-noon` scenario. The eye is the ledger's own pin for
+/// report B90 (`.go xyz -11892.70 -2647.08 -4.68 0`, `game_tele TheTaintedScar`) lifted clear of
+/// the crater floor; the look is 25 deg above level, north. The pitch is the whole point: the crater
+/// rim is tall enough that a dead-level look photographs nothing but rock, and the subject here is
+/// the dome. At 25 deg the ridge line sits low in the frame as the control and the top two thirds
+/// are sky.
+pub(super) const SCAR_EYE: [f32; 3] = [-11892.7, -2647.1, 20.0];
+pub(super) const SCAR_LOOK: [f32; 3] = [-11792.7, -2647.1, 66.6];

@@ -60,15 +60,8 @@ pub(super) fn emote_to_anim(
             continue;
         };
         let (store, movement, remote) = units.get(entity).unwrap_or((None, None, None));
-        let stand_state = store.map_or(0, |s| s.0.unit_stand_state());
-        let swimming = movement
-            .map(|m| m.flags)
-            .or_else(|| remote.map(|r| r.flags))
-            .unwrap_or(0)
-            & move_flags::SWIMMING
-            != 0;
-        if !receive_eligible(stand_state, swimming) {
-            debug!("emote_anim: suppressed anim {anim_id} for {entity:?} (SLEEP or swimming)");
+        if !play_eligible(store, movement, remote) {
+            debug!("emote_anim: suppressed anim {anim_id} for {entity:?}");
             continue;
         }
         out.write(EmoteAnim {
@@ -79,13 +72,52 @@ pub(super) fn emote_to_anim(
     }
 }
 
-/// The receive-side posture gate (module doc — `EmoteFlags`-BLIND, unlike the send-side gate in
+/// The **posture** half of the gate (module doc — `EmoteFlags`-BLIND, unlike the send-side gate in
 /// `crate::ui_chat::emote_send_eligible`): suppress only at stand-state 3 (SLEEP) or while swimming.
 /// A merely-seated performer (SIT=1 / SIT_CHAIR=2 / KNEEL=8 / chair 4-6) is **not** suppressed —
 /// its anim plays and the composition layer masks it to waist-up.
+///
+/// Both producers apply this identically — `SMSG_EMOTE`'s handler at `0x5e6706`/`0x5e66f7`, and the
+/// client-local gesture dispatcher at `0x60bb52`/`0x60bb61` — which is why it is a free function and
+/// not a step of either.
 pub(super) fn receive_eligible(stand_state: u8, swimming: bool) -> bool {
     stand_state != 3 && !swimming
 }
+
+/// The **shared player's** half of the gate — the client's `0x5fcd20`, the single function both
+/// emote producers tail into (wow-re `chat-talk-gesture.md` §4.2/§8, gates 10 and 12). Beyond the
+/// posture pair it refuses to play while the unit is **channeling** or **in combat**.
+///
+/// Two of `0x5fcd20`'s own tests are not repeated here because benilla already enforces them
+/// downstream or cannot see them: the *already-armed* test (gate 9) is the anim driver's same-id
+/// dedup, and `[+0xd58] & 0x400` (gate 11) is an internal anim-state bit with no benilla equivalent.
+fn player_eligible(channeling: bool, in_combat: bool) -> bool {
+    !channeling && !in_combat
+}
+
+/// The whole gate for one unit, from its live components — the predicate both producers call.
+pub(super) fn play_eligible(
+    store: Option<&ObjectStore>,
+    movement: Option<&MovementState>,
+    remote: Option<&RemoteMotion>,
+) -> bool {
+    let fields = store.map(|s| &s.0);
+    let stand_state = fields.map_or(0, |f| f.unit_stand_state());
+    let swimming = movement
+        .map(|m| m.flags)
+        .or_else(|| remote.map(|r| r.flags))
+        .unwrap_or(0)
+        & move_flags::SWIMMING
+        != 0;
+    let channeling = fields.is_some_and(|f| f.unit_channel_spell() != 0);
+    let in_combat = fields.is_some_and(|f| f.unit_flags() & UNIT_FLAG_IN_COMBAT != 0);
+    receive_eligible(stand_state, swimming) && player_eligible(channeling, in_combat)
+}
+
+/// `UNIT_FIELD_FLAGS & 0x800` — `UNIT_FLAG_IN_COMBAT`. The client's gate-12 test is "this flag **or**
+/// a local auto-attack target is set"; benilla checks the wire flag alone, so a unit that has swung
+/// but whose combat flag has not yet streamed can still gesture for a moment.
+const UNIT_FLAG_IN_COMBAT: u32 = 0x800;
 
 /// The pure mapping: an `Anim` emote resolves through `lookup` (the catalog's `Emotes.dbc` →
 /// `AnimID`); a `Text` emote never carries an anim id through this path — its animation, when it
@@ -123,6 +155,18 @@ mod tests {
     #[test]
     fn swimming_suppresses_the_receive_side_anim() {
         assert!(!receive_eligible(0, true));
+    }
+
+    /// The shared player refuses while channeling or in combat — the two `0x5fcd20` tests benilla
+    /// was missing on BOTH producers, not just the new one (wow-re `chat-talk-gesture.md` §9 claim 2).
+    #[test]
+    fn channeling_or_combat_suppresses_the_play() {
+        assert!(
+            player_eligible(false, false),
+            "idle and out of combat plays"
+        );
+        assert!(!player_eligible(true, false), "channeling suppresses");
+        assert!(!player_eligible(false, true), "in combat suppresses");
     }
 
     #[test]

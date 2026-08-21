@@ -55,7 +55,19 @@ pub struct EmoteSoundCatalog {
     /// `Emotes.dbc` id → its `EmoteSpecProcParam` (column 5). For `EmoteSpecProc == 1` this is the
     /// **stand state** the emote sets — see [`EmoteSoundCatalog::posture_state`].
     spec_proc_param: HashMap<u32, u32>,
+    /// The five **chat/interact gesture slots**, in [`GESTURE_FLAG_BITS`] order — see
+    /// [`EmoteSoundCatalog::gesture`].
+    gesture: [Option<u32>; GESTURE_FLAG_BITS.len()],
 }
+
+/// The five `EmoteFlags` bits the client hard-codes to build its gesture table (`0x603a60`, wow-re
+/// `object-layer/scratch/chat-talk-gesture.md` §3), in slot order — **talk, question, exclamation,
+/// shout, laugh**. The *bits* are the fidelity fact: the client never names an `Emotes.dbc` id or an
+/// `AnimationData.dbc` id here, it scans the table for whichever row carries each bit. In the
+/// shipped 1.12.1 data each bit is carried by exactly one row (ids 1 / 6 / 5 / 22 / 11 → anims
+/// 60 / 65 / 64 / 81 / 70), but transcribing those numbers instead of the scan would bake content
+/// into code.
+pub const GESTURE_FLAG_BITS: [u32; 5] = [0x08, 0x10, 0x20, 0x40, 0x100];
 
 impl EmoteSoundCatalog {
     /// Resolve a `/command` name (case-insensitive) to its text-emote id.
@@ -83,6 +95,13 @@ impl EmoteSoundCatalog {
     /// (`UNIT_NPC_EMOTESTATE`) — both carry an `Emotes.dbc` id in the same id space.
     pub fn anim(&self, emote_id: u32) -> Option<u32> {
         self.anim.get(&emote_id).copied().filter(|&a| a != 0)
+    }
+
+    /// The `Emotes.dbc` id in gesture slot `slot` — an index into [`GESTURE_FLAG_BITS`], which is
+    /// exactly the `code` the client's gesture dispatcher `0x60bb30` takes. `None` when no shipped
+    /// row carries that bit (the client's own "empty slot ⇒ no gesture" leg).
+    pub fn gesture(&self, slot: usize) -> Option<u32> {
+        self.gesture.get(slot).copied().flatten()
     }
 
     /// An `Emotes.dbc` id's raw `EmoteFlags` bits (`None` when the id isn't in the catalog; `0` is a
@@ -175,8 +194,19 @@ pub fn load_emote_sound_catalog(chain: &mut Chain) -> Result<EmoteSoundCatalog> 
     let mut emote_flags = HashMap::with_capacity(rs.records().len());
     let mut spec_proc = HashMap::with_capacity(rs.records().len());
     let mut spec_proc_param = HashMap::with_capacity(rs.records().len());
+    // The gesture slots. The client walks the record array from the LAST index DOWN and its bit
+    // tests are an else-if chain, so a row carrying two of the bits lands only in the first
+    // matching slot and a duplicated bit resolves to the LOWEST array index. Iterating forward and
+    // letting an earlier row win reproduces both, without depending on either: no shipped row
+    // carries more than one of these bits, and none of them is duplicated.
+    let mut gesture: [Option<u32>; GESTURE_FLAG_BITS.len()] = [None; GESTURE_FLAG_BITS.len()];
     for r in rs.records() {
         let Some(id) = u32_at(r, 0) else { continue };
+        if let Some(flags) = u32_at(r, 3) {
+            if let Some(slot) = GESTURE_FLAG_BITS.iter().position(|b| flags & b != 0) {
+                gesture[slot].get_or_insert(id);
+            }
+        }
         if let Some(kit) = u32_at(r, 6) {
             event_sound.insert(id, kit);
         }
@@ -203,12 +233,46 @@ pub fn load_emote_sound_catalog(chain: &mut Chain) -> Result<EmoteSoundCatalog> 
         emote_flags,
         spec_proc,
         spec_proc_param,
+        gesture,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The five gesture slots resolve off the REAL shipped `Emotes.dbc` — the check that the
+    /// flag-bit scan finds the right rows, and that each bit really is carried by exactly one of
+    /// them. The expected ids/anims are the byte-verified table in wow-re
+    /// `object-layer/scratch/chat-talk-gesture.md` §3; the *code* never names them.
+    #[test]
+    fn the_five_gesture_slots_scan_to_the_shipped_rows() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_emote_sound_catalog(&mut chain).expect("load emote catalog");
+        // slot, expected Emotes.dbc id, expected AnimationData id, name
+        for (slot, emote_id, anim_id, what) in [
+            (0usize, 1u32, 60u32, "talk"),
+            (1, 6, 65, "question"),
+            (2, 5, 64, "exclamation"),
+            (3, 22, 81, "shout"),
+            (4, 11, 70, "laugh"),
+        ] {
+            assert_eq!(cat.gesture(slot), Some(emote_id), "{what} slot -> emote id");
+            assert_eq!(cat.anim(emote_id), Some(anim_id), "{what} emote -> AnimID");
+        }
+        // Each of the five bits is carried by exactly one shipped row, so the else-if chain and
+        // the walk direction cannot matter. If a patch ever broke this, the scan would silently
+        // pick a different row and the gestures would drift — so assert it, do not assume it.
+        for bit in GESTURE_FLAG_BITS {
+            let carriers = cat
+                .emote_flags
+                .iter()
+                .filter(|(_, f)| *f & bit != 0)
+                .count();
+            assert_eq!(carriers, 1, "exactly one shipped row carries {bit:#x}");
+        }
+    }
 
     /// The joins hold on real 5875 data: WAVE resolves by name to the byte-decoded id 101 with
     /// anim emote 3; some voice row exists for a human (race 1) male; the voice map carries the

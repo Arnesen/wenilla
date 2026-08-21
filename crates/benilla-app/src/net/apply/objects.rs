@@ -204,7 +204,7 @@ pub(super) fn object_create(
                 commands.entity(e).remove::<Spline>();
             }
         }
-        write_pose(transforms, e, position, placement);
+        write_pose(commands, transforms, e, position, placement);
         // Overlay the fresh snapshot's descriptor fields onto the existing store.
         merge_fields(stores, pending, e, guid, fields);
     } else {
@@ -268,7 +268,7 @@ pub(super) fn object_move(
         commands.entity(e).remove::<Spline>();
         // A movement block carries a yaw and nothing else — the only GameObjects that get one are
         // transports, whose pose the transport tick owns from the next frame (decision 0438).
-        write_pose(transforms, e, position, wire_yaw(orientation));
+        write_pose(commands, transforms, e, position, wire_yaw(orientation));
     }
 }
 
@@ -382,7 +382,13 @@ pub(super) fn unit_move(
             debug_assert_eq!(fire_ms, now_ms, "a seeding packet fires at arrival");
             trace_relay(guid, &mv, &rm.relay, now_ms, 0, RelayOutcome::Seed);
             apply_move(e, &mv, &mut rm, now_ms, commands, landings);
-            write_pose(transforms, e, mv.position, wire_yaw(mv.orientation));
+            write_pose(
+                commands,
+                transforms,
+                e,
+                mv.position,
+                wire_yaw(mv.orientation),
+            );
             commands.entity(e).insert(rm);
         }
     }
@@ -486,14 +492,17 @@ pub(super) fn monster_move(
             duration_ms,
         );
         // Apply the dictated final facing (moveType 2/3/4) as a **snap** — faithful to the
-        // client, which stores it straight into the unit's movement facing (`0x7c6f30`).
+        // client, which stores it straight into the unit's **raw** movement facing (`0x7c6f30`).
         // This is the *packet*-driven re-face — a scripted/emote/aggro `SetFacingTo` the
-        // server actually sends. (The stationary combat re-face carries no packet — vmangos
-        // `SetInFront` is server-only — and is handled client-side by `face_target`.) When a
-        // real path follows, `sample_splines` overwrites the rotation with the travel
-        // direction each frame (faithful — the client's spline-follow snaps the mesh yaw to
-        // the path tangent; wow-re body-facing §4). The receipt snap thus only sticks for a
-        // path-less move (a `Stop`/in-place re-face); a moving unit ends on its last tangent.
+        // server actually sends. (The client-local re-faces — squaring up on a target, and
+        // turning to face you while an interaction window is open — carry no packet at all and
+        // are `motion::drive_display_facing`'s, decision 1467.) Because it is the raw facing
+        // that moved, the display smoother's state goes with it: the unit re-seeds from this
+        // pose instead of swinging back to the heading it was snapped off. When a real path
+        // follows, `sample_splines` overwrites the rotation with the travel direction each
+        // frame (faithful — the client's spline-follow snaps the mesh yaw to the path tangent;
+        // wow-re body-facing §4). The receipt snap thus only sticks for a path-less move (a
+        // `Stop`/in-place re-face); a moving unit ends on its last tangent.
         if !matches!(facing, MonsterMoveFacing::None) {
             let target_pos = |g: u64| {
                 index
@@ -505,6 +514,9 @@ pub(super) fn monster_move(
             if let Some(orientation) = resolve_facing(facing, start, target_pos) {
                 if let Ok(mut t) = transforms.get_mut(e) {
                     t.rotation = Quat::from_rotation_y(orientation);
+                    commands
+                        .entity(e)
+                        .remove::<crate::net::motion::DisplayFacing>();
                 }
             }
         }

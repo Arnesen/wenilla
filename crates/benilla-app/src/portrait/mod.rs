@@ -711,17 +711,17 @@ impl Plugin for PortraitPlugin {
             .init_resource::<BoothPanes>()
             .init_resource::<GxAspect>()
             .init_resource::<BoothLight>()
-            .init_resource::<crate::ui_session::InteractNpc>()
             .add_systems(Startup, setup_booths)
             // The variant-cache reaper: booth twins die with their world source material.
             .add_systems(Update, (light::reap_dead_variants, feed_gx_aspect))
-            // `feed_interact_npc` resolves the `"npc"` token's entity first; then the test bake owns
-            // the booths when its env is set (the live syncs yield to it). The paper-doll sync runs
-            // last (it shares the camera/booth/image resources, so the chain keeps the access ordered).
+            // The `"npc"` token's entity is resolved by `ui_session`'s own plugin (it is shared with
+            // the interaction face-me, decision 1467) — the booths read whatever it last published.
+            // Here the test bake owns the booths when its env is set (the live syncs yield to it),
+            // and the paper-doll sync runs last (it shares the camera/booth/image resources, so the
+            // chain keeps the access ordered).
             .add_systems(
                 Update,
                 (
-                    crate::ui_session::feed_interact_npc,
                     test_bake::sync_test_portraits,
                     sync_portraits,
                     sync_paperdoll,

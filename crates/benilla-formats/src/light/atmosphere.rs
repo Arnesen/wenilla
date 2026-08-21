@@ -63,6 +63,31 @@ pub(super) const LP_WATER_DEEP_ALPHA: usize = 6;
 pub(super) const LP_OCEAN_SHALLOW_ALPHA: usize = 7;
 pub(super) const LP_OCEAN_DEEP_ALPHA: usize = 8;
 
+/// The reference's answer for a band row that exists but carries **no keyframes**
+/// (`numKeys == 0`) — the case 973 of the 7668 shipped `LightIntBand` rows and 132 of the 2556
+/// `LightFloatBand` rows are in, and the one this crate used to answer with an invented
+/// "neutral daytime" constant.
+///
+/// Byte-VERIFIED (decision 1465, wow-re `system/lighting/scratch/band-zero-key-contract.md`):
+/// the colour evaluator `0x6d62e0` early-outs *before* touching the key/value arrays — key-count
+/// load `0x6d62ec`, guard `0x6d62ef`/`0x6d62f4`, store `0x6d62f6 mov [edi], 0xff000000` — an
+/// immediate, so the slot is opaque **black**: not zero-alpha, not stale, not skipped, and the
+/// driver's copy into the colour table (`0x6d6643`/`0x6d664c` for sub-12) is unconditional.
+/// The scalar evaluator does the same at `0x6d6489`/`0x6d648e` with `fld [0x7ffd74]` = `+0.0f`.
+/// We keep only the RGB; the forced 0xff alpha has no consumer on this side.
+///
+/// This is NOT [`Atmosphere::DEFAULT`]'s job. That constant answers "there is no light record at
+/// all", which decision 0987 showed is unreachable in world (a rowless map takes `Light.dbc`
+/// record 1); the reference's own whole-record default is the pre-first-map-load white table at
+/// `0x6d22ce`. Using a *daytime palette* to fill a *single missing row* was the actual defect
+/// behind report B90: `LightParams` 36 (Blasted Lands) leaves the cloud gradient base
+/// (`IB_CLOUD_GBASE`) unkeyed, so the sky took a pale grey where the data says black — under a
+/// zone that authors cloud density 0.85, that is the whole sky.
+pub const ZERO_KEY_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
+
+/// The scalar half of [`ZERO_KEY_COLOR`] — a keyless `LightFloatBand` row commits `+0.0f`.
+pub const ZERO_KEY_SCALAR: f32 = 0.0;
+
 /// Sampled atmosphere for a position + time of day. Distances are yards; colors are sRGB 0..1
 /// (feed straight into Bevy `Color::srgb`).
 #[derive(Clone, Copy, Debug)]
@@ -128,7 +153,10 @@ pub struct Atmosphere {
 }
 
 impl Atmosphere {
-    /// Neutral daytime fallback when a position has no light / the bands are missing.
+    /// Neutral daytime fallback for **no lighting data at all** — a chain with no `Light.dbc`, or a
+    /// catalog that failed to load. It is not reachable from a shipped install: every map resolves a
+    /// record (0987) and every record's 24 band rows exist, so a *row* with no keys takes
+    /// [`ZERO_KEY_COLOR`]/[`ZERO_KEY_SCALAR`] instead — this constant is never spliced into one.
     pub const DEFAULT: Atmosphere = Atmosphere {
         fog_end: 1000.0,
         fog_start_frac: 0.4,

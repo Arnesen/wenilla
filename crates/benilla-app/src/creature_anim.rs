@@ -649,7 +649,13 @@ pub(crate) use sheath::{
 /// The `SMSG_EMOTE` → [`EmoteAnim`] consumer (Part 1 of the emote-animation wiring) — kept
 /// alongside `sheath` as its own small concern.
 mod emote_anim;
+
+/// The client-local gesture producers (decision 1469): the chat talk/question/exclamation/shout/
+/// laugh, and the NPC-interact talk. The reference's `0x60bb30`, which shares the one-shot player
+/// with `SMSG_EMOTE`.
+mod gesture;
 use emote_anim::emote_to_anim;
+pub(crate) use gesture::{select_gesture, Gesture, GestureQueue};
 
 /// The Bevy driver systems that execute the state machine [`select`] picks (decision 0049 + 0073,
 /// decision 0087's one-shot routing, decision 0080's sheath execution) — kept in its own file as
@@ -982,6 +988,7 @@ impl Plugin for CreatureAnimPlugin {
             .add_message::<SwingSlowdown>()
             .init_resource::<PendingImpacts>()
             .init_resource::<PlaySeq>()
+            .init_resource::<gesture::GestureQueue>()
             .add_message::<EmoteAnim>()
             .add_message::<MountFlourish>()
             .add_message::<WoundAnim>()
@@ -1027,6 +1034,10 @@ impl Plugin for CreatureAnimPlugin {
                     // The landing predictor's dust leg (the vocal leg lives in `sound`).
                     hard_landing_dust,
                     emote_to_anim,
+                    // The client-local gestures (decision 1469) — the chat talk/shout/laugh and
+                    // the NPC-interact talk. The client's second (and only other) producer of a
+                    // one-shot emote; same place in the order as the wire one, for the same reason.
+                    gesture::drive_gestures,
                     // The flourish hop (unit → mount child) — before the driver so the
                     // one-shot lands the same frame the packet (or space press) arrived.
                     flourish_to_anim,

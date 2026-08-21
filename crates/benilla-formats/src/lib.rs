@@ -101,7 +101,7 @@ pub use ground_effects::{
     GroundEffectCatalog,
 };
 mod light;
-pub use light::{Atmosphere, LightCatalog, Submersion};
+pub use light::{Atmosphere, LightCatalog, Submersion, ZERO_KEY_COLOR, ZERO_KEY_SCALAR};
 mod loading_screen;
 pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
 mod liquid;

@@ -35,6 +35,7 @@ use atmosphere::{
     IB_RIVER_SHALLOW, IB_SKY0, IB_SUN_COLOR, LP_GLOW, LP_HIGHLIGHT, LP_OCEAN_DEEP_ALPHA,
     LP_OCEAN_SHALLOW_ALPHA, LP_WATER_DEEP_ALPHA, LP_WATER_SHALLOW_ALPHA,
 };
+pub use atmosphere::{ZERO_KEY_COLOR, ZERO_KEY_SCALAR};
 use tables::{band_schema, load_bands, load_float_bands, sample_color, sample_float, Band, DAY};
 
 const LIGHT: &str = "DBFilesClient\\Light.dbc";
@@ -393,6 +394,15 @@ impl LightCatalog {
         self.debug_param(p, time);
     }
 
+    /// Resolve an explicitly named `LightParams` id at a time of day, with no position and no slot
+    /// selection — the machine-readable twin of [`Self::debug_param`]. The band-row id for params
+    /// `p`, sub `b` is `(p-1)*per + b + 1`, an **ID** and not a row ordinal: `LightParams` ids run
+    /// 1..499 with 73 gaps, so an ordinal keying reads another zone's bands for every group past the
+    /// first gap. Exposed so a test can pin a record above a gap.
+    pub fn sample_params_id(&self, p: u32, time: u32) -> Option<Atmosphere> {
+        (p >= 1 && self.has_param(p)).then(|| self.sample_param(p, time))
+    }
+
     /// Debug: [`Self::debug_bands`] for an explicitly named `LightParams` id, with no position and no
     /// slot selection. The instrument for the rows **nothing in `Light.dbc` references**: magma and
     /// slime submersion do not read a zone's underwater slot at all, they read the fixed global rows
@@ -744,6 +754,10 @@ impl LightCatalog {
     fn sample_param(&self, p: u32, t: u32) -> Atmosphere {
         let ib = |b: u32| self.int_bands.get(&((p - 1) * 18 + b + 1));
         let fb = |b: u32| self.float_bands.get(&((p - 1) * 6 + b + 1));
+        // `d` survives only for the four `LightParams` **record fields** below (glow, highlightSky,
+        // the water alphas). Those are not band rows: their "missing" case is a record that failed
+        // to parse, not a keyless row, so they keep the record-level fallback. Every BAND row on
+        // this record takes the reference's zero-key constant instead.
         let d = Atmosphere::DEFAULT;
         // Fog distances carry the ×36 storage scale (yards = raw/36): Elwynn clear 18000→500 yd,
         // storm 10000→278 yd. Byte-VERIFIED (0327, wow-re rf-weather-fog-veil Q2·LOAD): the client
@@ -751,37 +765,49 @@ impl LightCatalog {
         // (`0x6d6090`, ×1/36 @0x7ff9d0) over each float-band record with `rowIndex % 6 == 0`, i.e.
         // ONLY the sub-0 fog-END band; the sub-1 start FRACTION is never scaled. We apply the same
         // /36 at sample time (a time-interp of scaled values ≡ the scale of the interp).
+        // A row with no keyframes commits the reference's own constant, never an invented one
+        // (`ZERO_KEY_SCALAR`/`ZERO_KEY_COLOR`, decision 1465). The `.filter(|v| v > 1.0)` that used
+        // to sit here substituted `d.fog_end` for an authored ZERO as well as for a keyless row —
+        // it is gone, and no shipped row lands in the (0, 1] yd window it also covered (checked
+        // across all 426 params: the only sub-1 values are the exact 0.0 that params 9 and 93
+        // author). `min(end − start, 0.001)` in the fog shaders is what keeps end = 0 finite.
         let fog_end = fb(FB_FOG_END)
             .and_then(|b| sample_float(b, t))
             .map(|v| v / POS_SCALE)
-            .filter(|&v| v > 1.0)
-            .unwrap_or(d.fog_end);
+            .unwrap_or(ZERO_KEY_SCALAR);
         let fog_start_frac = fb(FB_FOG_START_MULT)
             .and_then(|b| sample_float(b, t))
-            .unwrap_or(d.fog_start_frac);
-        let col = |idx: u32, fallback: [f32; 3]| {
-            ib(idx).and_then(|b| sample_color(b, t)).unwrap_or(fallback)
+            .unwrap_or(ZERO_KEY_SCALAR);
+        let col = |idx: u32| {
+            ib(idx)
+                .and_then(|b| sample_color(b, t))
+                .unwrap_or(ZERO_KEY_COLOR)
         };
         Atmosphere {
             fog_end,
             // UNCLAMPED, negative under storm (Elwynn −0.5) — the negative start IS the constant
             // near veil the reference shows in rain; clamping it to 0 was the veil-killing bug.
             fog_start_frac,
-            fog_color: col(IB_FOG_COLOR, d.fog_color),
-            sun_diffuse: col(IB_DIFFUSE, d.sun_diffuse),
-            sun_color: col(IB_SUN_COLOR, d.sun_color),
-            ambient: col(IB_AMBIENT, d.ambient),
-            sky: std::array::from_fn(|i| col(IB_SKY0 + i as u32, d.sky[i])),
+            fog_color: col(IB_FOG_COLOR),
+            sun_diffuse: col(IB_DIFFUSE),
+            sun_color: col(IB_SUN_COLOR),
+            ambient: col(IB_AMBIENT),
+            sky: std::array::from_fn(|i| col(IB_SKY0 + i as u32)),
             // Dedicated water-tint rows (RAW, no scale): 16/17 river/lake, 14/15 ocean — the 2-endpoint
             // depth-swatch lerp (`FUN_0068a830`). These are real per-zone rows, NOT the sky gradient.
-            water_river: [
-                col(IB_RIVER_SHALLOW, d.water_river[0]),
-                col(IB_RIVER_DEEP, d.water_river[1]),
-            ],
-            water_ocean: [
-                col(IB_OCEAN_SHALLOW, d.water_ocean[0]),
-                col(IB_OCEAN_DEEP, d.water_ocean[1]),
-            ],
+            //
+            // ⚠ The zero-key arm is WIDEST here and least self-corroborating. 125/149/59/59 of the
+            // 426 params leave ocean-shallow/ocean-deep/river-shallow/river-deep unkeyed, and 53
+            // CLEAR-slot spheres on maps 0/1 are among them — so this is where black actually
+            // reaches player water. Unlike the cloud base (209 of 308 keyed rows are exactly
+            // `(0,0,0)`, not one is pale — black is that lane's modal authored value), only 3-10 of
+            // ~300 keyed water rows are black: a keyless water row answering black is out of family
+            // for the authored data. Both halves are byte-verified — the slot is black (1465) and
+            // the swatch builder reads the slot (0686) — so this is what the reference computes;
+            // what it LOOKS like in one of those 53 zones is the director's to judge, and this note
+            // is the pointer back if it reads wrong.
+            water_river: [col(IB_RIVER_SHALLOW), col(IB_RIVER_DEEP)],
+            water_ocean: [col(IB_OCEAN_SHALLOW), col(IB_OCEAN_DEEP)],
             // Per-zone water-blend alphas (static LightParams fields 5–8); fall back to the DEFAULT
             // ramp endpoints when the record didn't carry them.
             water_river_alpha: self
@@ -800,12 +826,8 @@ impl LightCatalog {
             // the coverage threshold and the visible dome's colors (wow-re cloud pipeline §3c/§4).
             cloud_density: fb(FB_CLOUD_DENSITY)
                 .and_then(|b| sample_float(b, t))
-                .unwrap_or(d.cloud_density),
-            cloud_colors: [
-                col(IB_CLOUD_SUN, d.cloud_colors[0]),
-                col(IB_CLOUD_SLOPE, d.cloud_colors[1]),
-                col(IB_CLOUD_GBASE, d.cloud_colors[2]),
-            ],
+                .unwrap_or(ZERO_KEY_SCALAR),
+            cloud_colors: [col(IB_CLOUD_SUN), col(IB_CLOUD_SLOPE), col(IB_CLOUD_GBASE)],
             // Per-zone highlightSky flag (static); gates the dawn/dusk dome warp. Fallback 0.0.
             highlight_sky: self
                 .light_params_highlight

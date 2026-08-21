@@ -26,7 +26,7 @@ use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// The emote-audio catalog (also the chat sender's `/name` → text-id resolver).
 #[derive(Resource)]
-pub(crate) struct EmoteSounds(EmoteSoundCatalog);
+pub(crate) struct EmoteSounds(pub(crate) EmoteSoundCatalog);
 
 impl EmoteSounds {
     /// Resolve a `/command` name (case-insensitive) to its EmotesText id.
@@ -44,6 +44,12 @@ impl EmoteSounds {
     /// anim emote — e.g. `/thank`). Promoted for `crate::ui_chat`'s send-side posture-eligibility gate.
     pub(crate) fn text_emote(&self, text_id: u32) -> Option<u32> {
         self.0.text_emote(text_id)
+    }
+
+    /// The `Emotes.dbc` id in one of the five hard-coded **gesture slots** — promoted for
+    /// `crate::creature_anim::gesture`, the client-local chat/interact gesture producer.
+    pub(crate) fn gesture(&self, slot: usize) -> Option<u32> {
+        self.0.gesture(slot)
     }
 
     /// An `Emotes.dbc` id's raw `EmoteFlags` bits — promoted for `crate::ui_chat`'s send-side

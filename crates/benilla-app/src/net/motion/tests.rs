@@ -10,7 +10,7 @@ use bevy::prelude::Quat;
 use crate::creature_anim::move_flags;
 use crate::player::{GRAVITY, TERMINAL_VELOCITY};
 
-use super::facing::{resolve_facing, turn_toward};
+use super::facing::resolve_facing;
 use super::relay::RelayChain;
 use super::remote::{facing_lerp, fall_arc_step, jump_seed, reconcile_lerp};
 use super::spline::monster_move_spline;
@@ -98,23 +98,6 @@ fn swim_dead_reckon_folds_the_pitch_into_the_travel() {
     idle.pitch = -1.0;
     let (pos, _, _, speed) = idle.advance(speeds(), 1.0);
     assert_eq!((pos[0], pos[2], speed), (0.0, 0.0, 0.0));
-}
-
-#[test]
-fn turn_toward_caps_and_takes_short_way() {
-    use std::f32::consts::{FRAC_PI_2, PI, TAU};
-    // Big turn, small cap: advances by exactly the cap, positive (short) direction (0 → +π/2 caps).
-    let a = turn_toward(0.0, FRAC_PI_2, 0.1);
-    assert!((a - 0.1).abs() < 1e-5, "caps the step: {a}");
-    // Short way is negative: from 0.1 toward (2π − 0.1) the client turns −, not + all the way round.
-    let b = turn_toward(0.1, TAU - 0.1, 0.05);
-    assert!((b - 0.05).abs() < 1e-5, "turns the short (−) way: {b}");
-    // Within a step of the goal → lands on the goal (no overshoot/oscillation).
-    let c = turn_toward(0.0, 0.03, 1.0);
-    assert!((c - 0.03).abs() < 1e-5, "reaches the goal: {c}");
-    // Already facing (Δ≈0) → unchanged.
-    let d = turn_toward(PI, PI, 1.0);
-    assert!((d - PI).abs() < 1e-4, "no turn when aligned: {d}");
 }
 
 #[test]
