@@ -447,6 +447,19 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_pvp_toggles`] drain — the outbound seam ([`pvp`]). A count, not a
     /// payload: `CMSG_TOGGLE_PVP` carries no body.
     pub(crate) pvp_toggles: u32,
+    /// The two **equipment-display** preferences as the VM currently believes them —
+    /// `ShowingHelm()` / `ShowingCloak()` ([`worn_display`], decision 1472). Not a setting: the
+    /// truth is `PLAYER_FLAGS`' `HIDE_HELM`/`HIDE_CLOAK` bits, pushed here on the descriptor edge
+    /// by [`super::UiScript::set_worn_display`]. Both start **shown**, which is both the reference's
+    /// panel default and the zero-flags state a fresh character logs in with.
+    pub(crate) helm_shown: bool,
+    /// The cloak half of [`Self::helm_shown`].
+    pub(crate) cloak_shown: bool,
+    /// Worn-display flips (`ShowHelm`/`ShowCloak` asked for a state we were not in) queued since
+    /// the app's last [`super::UiScript::take_worn_display_toggles`] drain — one
+    /// `CMSG_TOGGLE_HELM`/`CMSG_TOGGLE_CLOAK` each. A list, not a count like [`Self::pvp_toggles`]:
+    /// the two slots are different packets.
+    pub(crate) worn_display_toggles: Vec<super::worn_display::WornDisplay>,
 
     /// Sounds queued by the Lua `PlaySound`/`PlaySoundFile` bindings since the app's last
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
@@ -1269,6 +1282,9 @@ impl Model {
             follow_requests: Vec::new(),
             session_requests: Vec::new(),
             pvp_toggles: 0,
+            helm_shown: true,
+            cloak_shown: true,
+            worn_display_toggles: Vec::new(),
             sound_queue: Vec::new(),
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),

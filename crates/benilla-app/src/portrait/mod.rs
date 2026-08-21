@@ -143,6 +143,12 @@ pub(super) const DRESSUP_LAYER: usize = GLUE_LAYER + 1;
 /// rule as [`GLUE_LAYER`]). This camera exists only while the warm pass runs
 /// ([`spawn_warm_booth`]); nothing but menagerie rigs ever rides its layer.
 pub(crate) const WARM_BOOTH_LAYER: usize = DRESSUP_LAYER + 1;
+/// The **minimap interior composite**'s render layer (decision 1466) — the next one past the warm
+/// booth's. Not a portrait booth, but it is an offscreen camera with its own layer, and 0775's rule
+/// is that EVERY such layer is computed in this one ladder: the two booths that each worked out
+/// "the next layer past the paper doll's" in their own file landed on the same number, and the
+/// clash was silent in both rendering and the emitter→camera match.
+pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_BOOTH_LAYER + 1;
 
 // The ladder must stay collision-free: a booth camera's layer is its identity for both rendering
 // and the emitter→camera match, and the failure above was silent in both.
@@ -154,7 +160,8 @@ const _: () = assert!(
         && PAPERDOLL_LAYER != GLUE_LAYER
         && INSPECT_LAYER != GLUE_LAYER
         && DRESSUP_LAYER > GLUE_LAYER
-        && WARM_BOOTH_LAYER > DRESSUP_LAYER,
+        && WARM_BOOTH_LAYER > DRESSUP_LAYER
+        && MINIMAP_COMPOSITE_LAYER > WARM_BOOTH_LAYER,
     "booth render layers must be distinct — see GLUE_LAYER"
 );
 const _: () = assert!(

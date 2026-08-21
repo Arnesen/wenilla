@@ -237,10 +237,28 @@ pub(crate) struct BoneAttach {
 /// per slot (decision 0826): a slot that didn't change keeps its root, and a slot that only changed
 /// attach point has its root moved. Only a slot whose item really changed is despawned and rebuilt.
 #[derive(Component, Default)]
-pub(super) struct HeldAttached {
+pub(crate) struct HeldAttached {
     applied: HeldItems,
     spawned: [Option<Entity>; ATTACH_SLOTS],
 }
+
+impl HeldAttached {
+    /// The spawned root per attach slot, read-only — for the **instruments** (`WOW_DRESS_CENSUS`),
+    /// which need the *visual* truth and not just the resolution: "is a helm model actually hanging
+    /// off this body right now" is a different question from "did we resolve a helm display id",
+    /// and a report about a piece of gear showing when it should not (B123) turns on the gap
+    /// between them. Nothing in gameplay reads this — the diff owns the array (decision 0026's
+    /// dev seam: dev may see anything, nothing may depend on dev).
+    pub(crate) fn spawned_slots(&self) -> &[Option<Entity>; ATTACH_SLOTS] {
+        &self.spawned
+    }
+}
+
+/// The attach-slot names, in [`HeldAttached::spawned_slots`] order — the instruments' labels for
+/// the eight slots [`resolve_equipment`](super::equipment::resolve) fills.
+pub(crate) const ATTACH_SLOT_NAMES: [&str; ATTACH_SLOTS] = [
+    "main", "off", "ranged", "helm", "shL", "shR", "ammo", "quiver",
+];
 
 /// The glow id of a slot the reference never glows: **helm (attach 11), shoulders (5/6) and the
 /// quiver (26) push a literal `0`** into the item-attach primitive `0x4798c0` — byte-read at

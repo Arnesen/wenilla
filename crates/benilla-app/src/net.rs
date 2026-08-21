@@ -1401,6 +1401,13 @@ pub(crate) enum ClientCommand {
     /// the unit popup's PvP row, both through the VM's intent queue. Nothing local changes; the
     /// answer is the descriptor's PvP bit (and flagging *off* waits out the server's 300 s timer).
     TogglePvp,
+    /// Ask to flip our own show-helm preference (`CMSG_TOGGLE_HELM`, empty body — decision 1472):
+    /// the Options window's *Show Helm* row, through the VM's intent queue. Nothing local changes;
+    /// the answer is `PLAYER_FLAGS`' `HIDE_HELM` bit, which is what dresses the body — ours and
+    /// every other player's, since the field is public.
+    ToggleHelm,
+    /// The cloak half of [`Self::ToggleHelm`] (`CMSG_TOGGLE_CLOAK`, empty body).
+    ToggleCloak,
     // ── The guild family (writer bodies in benilla-protocol `world/writer/guild.rs`) ──────────
     //
     //    Three things shape every caller of this band. **Members are addressed by NAME**, not by

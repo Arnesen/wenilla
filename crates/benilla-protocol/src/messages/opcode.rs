@@ -720,6 +720,23 @@ pub const CMSG_UNLEARN_SKILL: u16 = 0x0202; // 514
 /// and turning the preference *off* changes nothing until the server's 300 s drop timer expires.
 pub const CMSG_TOGGLE_PVP: u16 = 0x0253; // 595
 
+/// The two **equipment-display** toggles — "show my helm" / "show my cloak" (VERIFIED vmangos
+/// `Opcodes_1_12_1.h`: 697/698, handlers `HandleShowingHelmOpcode`/`HandleShowingCloakOpcode` in
+/// `Handlers/CharacterHandler.cpp:753-761`). Both are **empty-bodied pure toggles**: the handler
+/// is a bare `ToggleFlag(PLAYER_FLAGS, PLAYER_FLAGS_HIDE_HELM | HIDE_CLOAK)` with no target-state
+/// form at all, unlike [`CMSG_TOGGLE_PVP`] above — so a client that wants a *specific* state must
+/// compare against the flag it already holds and send only on a difference.
+///
+/// No ack, exactly like the PvP toggle: the answer is the `PLAYER_FLAGS` bit arriving in the next
+/// descriptor update. That field is `UF_FLAG_PUBLIC` (vmangos `UpdateFields_1_12_1`), which is what
+/// makes the preference *everyone's* — a remote player's hidden helm hides on our screen too, off
+/// their own descriptor. The server round-trips the same preference through the char-enum record's
+/// `CHARACTER_FLAG_HIDE_HELM`/`HIDE_CLOAK` at load and save (`Player.cpp:14839-14842` /
+/// `16504-16505`), so the glue lane's flags and this one are the same stored bit (decision 1472).
+pub const CMSG_TOGGLE_HELM: u16 = 0x02B9; // 697
+/// The cloak half of [`CMSG_TOGGLE_HELM`] — same shape, `PLAYER_FLAGS_HIDE_CLOAK`.
+pub const CMSG_TOGGLE_CLOAK: u16 = 0x02BA; // 698
+
 // The solo-loot wire family (VERIFIED vmangos `Opcodes_1_12_1.h`: 264, 349-355, 357-358).
 // Bodies in [`super::loot`].
 pub const CMSG_AUTOSTORE_LOOT_ITEM: u16 = 0x0108; // 264

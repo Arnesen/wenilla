@@ -917,6 +917,8 @@ fn writer_loop(
                     ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
                     ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
                     ClientCommand::TogglePvp => w.toggle_pvp(),
+                    ClientCommand::ToggleHelm => w.toggle_helm(),
+                    ClientCommand::ToggleCloak => w.toggle_cloak(),
                     ClientCommand::FriendListRequest => w.friend_list(),
                     ClientCommand::AddFriend { name } => w.add_friend(&name),
                     ClientCommand::DelFriend { guid } => w.del_friend(guid),

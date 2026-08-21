@@ -426,6 +426,22 @@ impl ObjectFields {
     pub fn player_is_ghost(&self) -> bool {
         self.player_flags() & 0x10 != 0
     }
+    /// Whether this player has asked for their **helm** not to be drawn —
+    /// `PLAYER_FLAGS_HIDE_HELM (0x400)` (vmangos `Player.h:325`), flipped by `CMSG_TOGGLE_HELM`
+    /// and persisted per character through the char-enum record's `CHARACTER_FLAG_HIDE_HELM`.
+    ///
+    /// `PLAYER_FLAGS` is `UF_FLAG_PUBLIC`, which is the whole point of reading it *here* rather
+    /// than off a local setting: the preference streams for every player in range, so a remote
+    /// player's hidden helm hides on our screen too, and ours hides on theirs (decision 1472).
+    /// Creatures have no `PLAYER_FLAGS` and read `false`.
+    pub fn player_hides_helm(&self) -> bool {
+        self.player_flags() & 0x400 != 0
+    }
+    /// Whether this player has asked for their **cloak** not to be drawn —
+    /// `PLAYER_FLAGS_HIDE_CLOAK (0x800)`, [`Self::player_hides_helm`]'s twin in every respect.
+    pub fn player_hides_cloak(&self) -> bool {
+        self.player_flags() & 0x800 != 0
+    }
     /// Whether the player is inside a rest area (inn/city) — `PLAYER_FLAGS_RESTING (0x20)`
     /// (vmangos `Player.h:320`), set/cleared by the area-trigger/zone rest checks
     /// (`SetRestType`). The real client's `IsResting()` and the player frame's flashing zzz

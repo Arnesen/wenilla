@@ -353,8 +353,13 @@ pub(in crate::entities) fn build_dressup_preview(
         hair_color: look.hair_color,
         facial_hair: look.facial_hair,
         equipment: look.equipment,
-        // The world path honours no hide-helm/hide-cloak flag for a live player either (the helm
-        // comes straight off the visible-item slot), so the preview of that player carries none.
+        // **No hide flags here, because the hiding already happened upstream** (decision 1472).
+        // The dressing room DOES honour show-helm/show-cloak — byte-verified: `SetUnit 0x476cb0`
+        // clones the live player's per-bodyslot display pointers, so a suppressed piece is not in
+        // what is cloned — but a TRY-ON must preview the helm regardless, and only
+        // [`crate::ui_dressup`]'s look builder knows which slots are worn and which are tried on.
+        // So it applies the preference there, per slot, and hands us an already-correct array;
+        // re-applying a flag mask over it here would hide the very item being previewed.
         flags: 0,
         // The widget's law, not the mannequin's (decision 1076). Unconditional, because the ranged
         // slot of a dressing-room look is only ever filled by a TRY-ON: `crate::ui_dressup` leaves

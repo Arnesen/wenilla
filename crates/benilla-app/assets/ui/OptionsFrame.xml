@@ -618,10 +618,14 @@
             Graphics = { "RowUiScale", "RowWorldDetail", "RowVerticalSync" },
             Nameplates = { "RowPlayerNames", "RowNpcNames", "RowOwnName" },
             -- The stock globals that were already defined AND consumed when 1134 opened the store
-            -- (1136; Buff Durations 1139), in the reference's own on-screen order — its Basic
-            -- Options anchor chain, Display block (CheckButton42 → 39 → 66) before Help (29).
+            -- (1136; Buff Durations 1139), plus the two equipment-display toggles (1472), in the
+            -- reference's own on-screen order. Its Basic Options Display box is three COLUMNS read
+            -- left to right: A gives Status Text (CheckButton2), B gives Show Cloak → Show Helm
+            -- (31 → 20, sitting under the name toggles that live on our Nameplates page), C gives
+            -- the 42 → 39 → 66 chain. Help (29) closes the page, as before.
             Interface = {
-                "RowStatusText", "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch",
+                "RowStatusText", "RowShowCloak", "RowShowHelm",
+                "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch",
                 "RowNewbieTips",
             },
             -- The two chat-bubble switches (decision 1139), in the reference's relative order —
@@ -670,15 +674,23 @@
             end
         end
 
-        -- ── The row's STORE: a CVar, or a saved-variable global (decision 1134) ────────────
-        -- 1.12's own Interface panel has TWO stores, not one: each UIOptionsFrameCheckButtons
-        -- entry carries either `cvar = "name"` (an engine knob) or `uvar = "GLOBAL"` (a
-        -- RegisterForSave'd Lua global), and UIOptionsFrame_Load/_Save fork on exactly that field
-        -- (UIOptionsFrame.lua l.230-377). Values are strings either way — "1"/"0" for a toggle —
-        -- so only the accessor differs, and every row in this file now reads and writes through
-        -- this trio instead of calling Get/SetCVar directly.
+        -- ── The row's STORE: a CVar, a saved-variable global, or an API pair (1134, 1472) ──
+        -- 1.12's own Interface panel has THREE stores, not one: each UIOptionsFrameCheckButtons
+        -- entry carries `cvar = "name"` (an engine knob), `uvar = "GLOBAL"` (a RegisterForSave'd
+        -- Lua global), or a `func`/`setFunc` pair (an engine getter/setter with no client-side
+        -- store at all) — and UIOptionsFrame_Load/_Save fork on exactly that field
+        -- (UIOptionsFrame.lua l.230-377; the func fork at l.237-238 and l.296-297). Values are
+        -- strings in all three — "1"/"0" for a toggle — so only the accessor differs, and every row
+        -- in this file reads and writes through this trio instead of calling Get/SetCVar directly.
+        --
+        -- The third kind is what Show Helm / Show Cloak are: the preference is a bit of the
+        -- character's own server-side PLAYER_FLAGS, so there is nothing local to save and nothing
+        -- to restore at load — the getter IS the state (decision 1472).
         function OptionsRow_Get(row)
             if row.uvar then return getglobal(row.uvar) end
+            if row.getFunc then
+                if row.getFunc() then return "1" else return "0" end
+            end
             return GetCVar(row.cvar)
         end
 
@@ -699,6 +711,14 @@
                 if row.applyFunc then row.applyFunc() end
                 return
             end
+            -- An API row hands the setter the row's own "1"/"0" STRING, which is what 1.12 does
+            -- (UIOptionsFrame_Save l.290-297 builds value.value as a string and passes it
+            -- straight through) — so the engine binding reads its argument numerically and "0"
+            -- means off. No applyFunc: the setter IS the side effect.
+            if row.setFunc then
+                row.setFunc(value)
+                return
+            end
             SetCVar(row.cvar, value, row.cvarEvent)
         end
 
@@ -710,6 +730,7 @@
         -- drift from it, where the reference's table carries a second hand-written copy.
         function OptionsRow_Default(row)
             if row.uvar then return row.udefault end
+            if row.getFunc then return row.fdefault end
             return GetCVarDefault(row.cvar)
         end
 
@@ -720,6 +741,17 @@
             OptionsRow_OnLoad(row, nil, label, tip, child)
             row.uvar = uvar
             row.udefault = getglobal(uvar)
+        end
+
+        -- A row with no store: an engine getter/setter pair, 1.12's own `func`/`setFunc` shape
+        -- (decision 1472). `default` has to be stated because there is no registered default to
+        -- ask for — the reference states it the same way, as a hand-written arm of
+        -- UIOptionsFrame_SetDefaults (l.631-634, SHOW_CLOAK and SHOW_HELM both SetChecked(1)).
+        function OptionsFuncRow_OnLoad(row, getFunc, setFunc, default, label, tip, child)
+            OptionsRow_OnLoad(row, nil, label, tip, child)
+            row.getFunc = getFunc
+            row.setFunc = setFunc
+            row.fdefault = default
         end
 
         -- The other end of `applyFunc`, and the reason a saved "off" used to come back on
@@ -2327,13 +2359,17 @@
                                     </Frames>
                                 </Frame>
                                 <!-- The INTERFACE page (decision 1136; the Buff Durations row is
-                                     1139) — the second store's second page, and the one 1134 §3
-                                     named as ready: stock globals already defined AND consumed,
-                                     needing only a row. Rows in the reference's own on-screen
-                                     order — Basic Options' anchor chain runs CheckButton42 → 39 →
-                                     62 → 66 in Display, then 29 in Help, and we hold all of those
-                                     but 62 (HIDE_OUTDOOR_WORLD_STATE: there is no zone-objective
-                                     tracker to hide). Labels and OPTION_TOOLTIP_* keys are its
+                                     1139, the two equipment-display rows 1472) — the second
+                                     store's second page, and the one 1134 §3 named as ready: stock
+                                     globals already defined AND consumed, needing only a row. Rows
+                                     in the reference's own on-screen order — Basic Options' anchor
+                                     chain runs CheckButton42 → 39 → 62 → 66 in Display, then 29 in
+                                     Help, and we hold all of those but 62
+                                     (HIDE_OUTDOOR_WORLD_STATE: there is no zone-objective tracker
+                                     to hide); Show Cloak → Show Helm (31 → 20) are that box's
+                                     middle column, seated after Status Text because the two rows
+                                     above them there — the player/NPC name toggles — live on our
+                                     Nameplates page. Labels and OPTION_TOOLTIP_* keys are its
                                      GlobalStrings verbatim.
 
                                      Only Buff Durations carries an `applyFunc`, and the split is
@@ -2368,10 +2404,38 @@
                                                 self.cvarEvent = "STATUS_BAR_TEXT"
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowInstantQuestText" inherits="OptionsCheckboxRowTemplate">
+                                        <!-- The two equipment-display toggles (decision 1472,
+                                             B123). Neither has a store: the preference is a bit of
+                                             this character's own server-side PLAYER_FLAGS, so the
+                                             row reads the engine getter and writes the engine
+                                             setter — 1.12's own `func`/`setFunc` pair for exactly
+                                             these two rows (UIOptionsFrame.lua l.18-19), and the
+                                             reason there is no CVar to register. Default "1" for
+                                             both, the reference's own hand-written arm. -->
+                                        <Frame name="$parentRowShowCloak" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsFuncRow_OnLoad(self, ShowingCloak, ShowCloak, "1",
+                                                    "Show Cloak", "OPTION_TOOLTIP_SHOW_CLOAK")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowShowHelm" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowShowCloak" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowShowCloak" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsFuncRow_OnLoad(self, ShowingHelm, ShowHelm, "1",
+                                                    "Show Helm", "OPTION_TOOLTIP_SHOW_HELM")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowInstantQuestText" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowShowHelm" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowShowHelm" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "QUEST_FADING_DISABLE",

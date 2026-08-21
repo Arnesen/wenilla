@@ -183,6 +183,19 @@ pub(crate) struct UiQuad {
     /// Splits the run like `additive`/`circular`; a booth target is its own texture anyway, so no
     /// batching is lost.
     pub premultiplied: bool,
+    /// **Alpha TEST** instead of alpha blend, at this reference value on the client's
+    /// `texel.a × vertexColour.a` — `Some(224.0 / 255.0)` is the WMO-interior minimap tile draw and
+    /// nothing else so far. A passing fragment writes FULLY OPAQUE (the screen mask still cuts it);
+    /// a failing one is discarded, so partial coverage never exists on this path.
+    ///
+    /// The reference's minimap tile draw sets EGxBlend **1**, whose applicator `glDisable`s
+    /// blending outright, and the `SetRenderState` id-7→id-8 cascade then arms
+    /// `glAlphaFunc(GL_GEQUAL, 0.87843144)` (`.data 0x85ad20[1] = 224`; wow-re
+    /// `wmo-interior-minimap-composite.md`). Blending those tiles instead leaves `(1−a)(1−b)` of
+    /// the black clear at EVERY boundary where two group tiles meet — up to 25% black where the
+    /// two filtered edges are complementary — which is B141's "odd black lines" (they recoloured
+    /// with the backing quad, which is how they were caught). Splits the batch run.
+    pub alpha_test: Option<f32>,
     /// CPU-clip stand-in for a real scissor rect (see the module doc). `None` = unclipped.
     pub clip: Option<Rect>,
     /// Rotate the quad's corners by this many radians **clockwise on screen** about the rect's
@@ -229,6 +242,7 @@ impl Default for UiQuad {
             circular: false,
             desaturated: false,
             premultiplied: false,
+            alpha_test: None,
             clip: None,
             rotation: 0.0,
             mask: None,
@@ -312,6 +326,9 @@ pub(crate) struct UiQuadMaterial {
     /// The texel is already premultiplied (a booth bake) — see [`UiQuad::premultiplied`].
     #[uniform(8)]
     premultiplied: u32,
+    /// Alpha-TEST reference on `texel.a × colour.a`; `<= 0` disables — see [`UiQuad::alpha_test`].
+    #[uniform(9)]
+    alpha_ref: f32,
     /// The screen-anchored mask span in **physical framebuffer px** (`min.xy, max.xy` — the
     /// fragment shader compares `@builtin(position)`, which is physical): [`UiQuadMask::rect`]
     /// scaled by the window's scale factor at mesh build. `z <= x` (degenerate) disables masking.
@@ -322,6 +339,30 @@ pub(crate) struct UiQuadMaterial {
     #[texture(5)]
     #[sampler(6)]
     mask: Option<Handle<Image>>,
+}
+
+impl UiQuadMaterial {
+    /// The **WMO-interior minimap tile** material (decision 1466): the texture, an alpha TEST at
+    /// `alpha_ref`, and nothing else — no tint, no mask, no circle, no desaturate. It is built here
+    /// rather than through the quad stream because these tiles do not draw at the screen at all:
+    /// they draw into the minimap's own 256² composite target on its own camera
+    /// ([`crate::minimap`]'s `composite`), one shared quad mesh per tile under a Transform.
+    ///
+    /// The forced `(One, OneMinusSrcAlpha)` blend in [`Self::specialize`] is what makes this
+    /// reproduce the client's *disabled* blending exactly: a fragment that passes the test emits
+    /// `a = 1`, so the state degenerates to a plain replace — and one that fails emits nothing.
+    pub(crate) fn interior_tile(texture: Handle<Image>, alpha_ref: f32) -> Self {
+        Self {
+            additive: 0,
+            texture: Some(texture),
+            circular: 0,
+            desaturate: 0,
+            premultiplied: 0,
+            alpha_ref,
+            mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
+            mask: None,
+        }
+    }
 }
 
 impl Material2d for UiQuadMaterial {
@@ -560,6 +601,7 @@ struct Run {
     circular: bool,
     desaturated: bool,
     premultiplied: bool,
+    alpha_test: Option<f32>,
     mask: Option<UiQuadMask>,
     positions: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
@@ -574,6 +616,7 @@ impl Run {
         circular: bool,
         desaturated: bool,
         premultiplied: bool,
+        alpha_test: Option<f32>,
         mask: Option<UiQuadMask>,
     ) -> Self {
         Self {
@@ -582,6 +625,7 @@ impl Run {
             circular,
             desaturated,
             premultiplied,
+            alpha_test,
             mask,
             positions: Vec::new(),
             uvs: Vec::new(),
@@ -741,6 +785,7 @@ type MatKey = (
     bool,
     bool,
     bool,
+    u32,
     Option<AssetId<Image>>,
     [u32; 4],
 );
@@ -926,6 +971,7 @@ fn rebuild_ui_mesh(
                 && r.circular == q.circular
                 && r.desaturated == q.desaturated
                 && r.premultiplied == q.premultiplied
+                && r.alpha_test == q.alpha_test
                 && r.mask == q.mask
         });
         if !same_run {
@@ -935,6 +981,7 @@ fn rebuild_ui_mesh(
                 q.circular,
                 q.desaturated,
                 q.premultiplied,
+                q.alpha_test,
                 q.mask.clone(),
             ));
         }
@@ -996,12 +1043,14 @@ fn rebuild_ui_mesh(
                 run.mask.as_ref().map(|m| m.texture.id())
             );
         }
+        let alpha_ref = run.alpha_test.unwrap_or(0.0);
         let key: MatKey = (
             run.texture.id(),
             run.additive,
             run.circular,
             run.desaturated,
             run.premultiplied,
+            alpha_ref.to_bits(),
             mask.as_ref().map(bevy::asset::Handle::id),
             mask_rect.to_array().map(f32::to_bits),
         );
@@ -1121,6 +1170,7 @@ fn rebuild_ui_mesh(
                     circular: u32::from(run.circular),
                     desaturate: u32::from(run.desaturated),
                     premultiplied: u32::from(run.premultiplied),
+                    alpha_ref,
                     mask_rect,
                     mask,
                 })

@@ -40,7 +40,7 @@
 //! | [`trade`] | the player-trade dance |
 //! | [`duel`] | accept and cancel |
 //! | [`mail`] | the mailbox |
-//! | [`pvp`] | the one PvP-flag toggle |
+//! | [`player_flags`] | the empty-bodied `PLAYER_FLAGS` toggles: PvP, show-helm, show-cloak |
 //! | [`social`] | friends, ignores, and `/who` |
 //! | [`area_trigger`] | the one "I walked into trigger N" report |
 
@@ -70,9 +70,9 @@ mod loot;
 mod mail;
 mod names;
 mod pet;
+mod player_flags;
 mod pose;
 mod progression;
-mod pvp;
 mod quest;
 mod reputation;
 mod selection;

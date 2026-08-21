@@ -28,11 +28,12 @@
 //! hover tooltip).
 
 mod blips;
+mod composite;
 mod interior;
 
 use std::collections::HashMap;
 
-use bevy::math::Rect;
+use bevy::math::{Affine3A, Rect};
 use bevy::prelude::*;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
@@ -45,7 +46,7 @@ use interior::{interior_group_selection, wmo_minimap_stem};
 use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
 
 use crate::player::Player;
-use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads};
+use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads, UvRect};
 use benilla_assets::MapCatalogRes;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::wmo_portal::{
@@ -78,6 +79,28 @@ const ZOOM_CHUNKS: [f32; 6] = [14.0, 12.0, 10.0, 8.0, 6.0, 4.0];
 /// initializer*, missing the per-frame write `mov [esi+0xc], radiusTable[indoorZoom]` that reaches
 /// the field through a computed pointer. Superseded in wow-re; do not "restore" a constant here.
 const INTERIOR_ZOOM_RADIUS: [f32; 6] = [150.0, 120.0, 90.0, 60.0, 40.0, 25.0];
+
+/// The client's half-texel UV inset, as the quad scale that reproduces it: a tile spanning
+/// `extent` yards is baked at [`YD_PER_TEXEL`](benilla_assets::minimap_grid::YD_PER_TEXEL), so it
+/// is `W = extent / 0.5` texels wide, and mapping texel *centres* to the quad's edges instead of
+/// texel *edges* stretches it by `W / (W − 1)`. See the call site for why it matters.
+fn texel_stretch(extent_yd: f32) -> f32 {
+    let texels = extent_yd / benilla_assets::minimap_grid::YD_PER_TEXEL;
+    if texels > 1.0 {
+        texels / (texels - 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// The interior tile draw's **alpha-test reference** — `224/255`, the client's
+/// `glAlphaFunc(GL_GEQUAL, 0.87843144)`. It is never set explicitly: the tile draw sets EGxBlend
+/// **1** (whose applicator `glDisable`s blending), and `SetRenderState`'s id-7→id-8 cascade reads
+/// `.data 0x85ad20[1] = 224` and multiplies by the f32 reciprocal of 255 — `0x3F60E0E2`, one ULP
+/// above `224/255` (wow-re `system/minimap/scratch/wmo-interior-minimap-composite.md`, VERIFIED).
+/// Written as the exact f32 the client computes rather than the ratio, because that ULP is the
+/// value fragments are compared against.
+const INTERIOR_TILE_ALPHA_REF: f32 = f32::from_bits(0x3F60_E0E2);
 
 /// The corpse blip's edge as a fraction of the widget side (the POIIcons cell is authored 16px on
 /// a 140px minimap ≈ 0.11; INTERIM eyeball beside [`ARROW_FRACTION`]'s).
@@ -271,6 +294,57 @@ fn setup_minimap(
     }
 }
 
+/// The minimap's **one** containment verdict — which map family draws, and (through
+/// [`feed_minimap_inside`]) which zoom index the +/- buttons drive. The client keeps a single flag
+/// for both (`0xceaa60`), so this must be computed once and shared: two probes drifting apart is
+/// how the map ends up drawn at the wrong scale for the family it is showing.
+///
+/// The reference hard-switches map families on interior containment: standing inside a WMO group it
+/// draws that building's OWN minimap tiles and SUPPRESSES the terrain (mutually exclusive, not a
+/// transparent overlay). Returns the placement, model, `md5translate.trs` path stem and seed group
+/// of the WMO the player is in, or `None` for the terrain family.
+///
+/// **The gate is the client's one indoor byte** (`0xbc8300`), and that byte is the CGLight node's
+/// down-ray bit `[node+0x90] & 1` (`0x670547` — wow-re `wmo-interior-minimap-composite.md`, which
+/// CORRECTED the old note's "containment resolves to a group with `0x10` set": that `0x10` is a
+/// ctor-set class tag, not a group flag). The predicate is a **position cast, faces only**: the
+/// nearest surface within 1000 yd straight down — terrain racing the WMO faces, closer wins and the
+/// WMO wins ties — is a WMO face whose group lacks MOGP `0x8`. Terrain below ⇒ outdoors, whatever
+/// building you are geometrically inside. That is exactly [`CurrentAreaInterior`]'s law
+/// (`wmo_portal::area_down_ray`, the zone-text bit), so the gate reads it rather than re-deriving
+/// one: the portal-crossing leg in [`down_ray_seeds`] belongs to the CAMERA's current-group system
+/// and claiming an interior through a doorway plane under the eye is the abbey-yard bug's shape.
+/// [`down_ray_seeds`] still supplies the flood SEED once the gate has said indoors.
+fn minimap_interior<'a>(
+    player: &Player,
+    instances: &Query<&WmoPortalInstance>,
+    wmos: &'a Assets<WmoModel>,
+    world: &benilla_world::world_point::WorldPoint,
+    asset_server: &AssetServer,
+) -> Option<(Affine3A, &'a WmoModel, String, usize)> {
+    if !player.active || player.detached || world.area_interior().is_none() {
+        return None;
+    }
+    let eye = player.pos + Vec3::Y * INTERIOR_PROBE_HEIGHT;
+    // The down-ray races the terrain, exactly as the interior/zone tracker does — standing on the
+    // grass above a mine's tunnels is not standing in the mine.
+    let terrain = world.terrain_height_under(eye);
+    instances.iter().find_map(|inst| {
+        let model = wmos.get(&inst.handle)?;
+        if model.wmo_id == 0 {
+            return None;
+        }
+        let local_from_world = inst.world_from_local.inverse();
+        let eye_local = bevy_to_wow(local_from_world.transform_point3(eye));
+        let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, eye, z));
+        let in_group = down_ray_seeds(model, eye_local, terrain_local).in_group?;
+        let stem = asset_server
+            .get_path(inst.handle.id())
+            .and_then(|p| wmo_minimap_stem(&p.path().to_string_lossy()))?;
+        Some((inst.world_from_local, model, stem, in_group))
+    })
+}
+
 /// Fills the extracted widget hole: the visible tile quads (clipped to the widget, masked to the
 /// circle) and the player arrow, appended at the widget's own z (stable sort keeps append order
 /// within a key, so the arrow rides above the tiles and below the widget's children).
@@ -289,6 +363,8 @@ fn emit_minimap(
     asset_server: Res<AssetServer>,
     death_net: Res<crate::death::DeathNet>,
     blip_inputs: blips::BlipInputs,
+    mut composite: ResMut<composite::MinimapComposite>,
+    rig: Option<Res<composite::CompositeRig>>,
     mut quads: ResMut<UiQuads>,
 ) {
     let (
@@ -317,6 +393,11 @@ fn emit_minimap(
     if side <= 0.0 {
         return;
     }
+    // The composite is off unless the interior branch below turns it on this frame.
+    composite.active = false;
+    let Some(rt_image) = rig.map(|r| r.image.clone()) else {
+        return; // the composite rig's Startup system has not run yet
+    };
     // `WOW_MM_ZOOM=0..5` forces the zoom level of whichever map is showing — a capture instrument
     // (pairs with the `WOW_MM_PROBE` interior probe). Indoors and outdoors each carry their own
     // persisted index, so the override stands in for both.
@@ -339,35 +420,12 @@ fn emit_minimap(
         rect: slot.rect,
     });
 
-    // The reference hard-switches map families on interior containment: standing inside a WMO group,
-    // it draws that building's OWN minimap tiles and SUPPRESSES the terrain (mutually exclusive, not
-    // a transparent overlay). Find the WMO the player is in via the same down-ray as the interior
-    // audio/zone tracker (`wmo_portal`), plus its `md5translate.trs` path stem.
-    let interior = (player.active && !player.detached).then(|| {
-        let eye = player.pos + Vec3::Y * INTERIOR_PROBE_HEIGHT;
-        // The down-ray races the terrain, exactly as the interior/zone tracker does — standing on the
-        // grass above a mine's tunnels is not standing in the mine.
-        let terrain = world.terrain_height_under(eye);
-        instances.iter().find_map(|inst| {
-            let model = wmos.get(&inst.handle)?;
-            if model.wmo_id == 0 {
-                return None;
-            }
-            let local_from_world = inst.world_from_local.inverse();
-            let eye_local = bevy_to_wow(local_from_world.transform_point3(eye));
-            let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, eye, z));
-            let in_group = down_ray_seeds(model, eye_local, terrain_local).in_group?;
-            let stem = asset_server
-                .get_path(inst.handle.id())
-                .and_then(|p| wmo_minimap_stem(&p.path().to_string_lossy()))?;
-            Some((inst.world_from_local, model, stem, in_group))
-        })
-    });
+    let interior = minimap_interior(&player, &instances, &wmos, &world, &asset_server);
 
     // The player's containment verdict, kept as a bool for the quest-dot grey (the branch
     // below consumes `interior` itself).
-    let player_indoors = matches!(&interior, Some(Some(_)));
-    if let Some(Some((world_from_local, model, stem, in_group))) = interior {
+    let player_indoors = interior.is_some();
+    if let Some((world_from_local, model, stem, in_group)) = interior {
         // INTERIOR: the WMO's own per-group tiles, drawn FULL WHITE (the day-night tint is outdoor-
         // only). The tiles are baked in the WMO's MODEL frame (north = model +X, sized to the model
         // footprint — verified against the 97°-yaw Goldshire Inn: group 3's tile is 64×32 px = its
@@ -378,17 +436,6 @@ fn emit_minimap(
             cache.interior.clear();
             cache.interior_stem = Some(stem.clone());
         }
-        // Black disc behind the (mostly-transparent) tiles — the reference clears the interior
-        // minimap to black. Appended first (same z) so the stable sort keeps it under the tiles.
-        quads.overlays.push(UiQuad {
-            rect: slot.rect,
-            z_key: slot.z,
-            color: [0.0, 0.0, 0.0, slot.alpha],
-            clip: Some(slot.rect),
-            mask: mask.clone(),
-            ..default()
-        });
-
         // INTERIOR ZOOM: indoors has its OWN zoom index and its own table — the view radius is
         // `radiusTable[inside_zoom]` in raw yards (150 widest … 25 tightest), not the outdoor chunk
         // half-extent. The zoom buttons drive `inside_zoom` while you're inside, and it persists
@@ -397,18 +444,27 @@ fn emit_minimap(
         let px_per_yd = (side * 0.5) / radius;
         blip_px_per_yd = px_per_yd;
 
-        // A model point → its north-up minimap screen px (through the placement to world, then the
-        // same world→screen map the terrain tiles use: screen up = world +X north, left = +Y west).
-        let to_screen = |m: [f32; 3]| {
+        // The tiles are composited into the client's own 256² TARGET, not drawn at the screen —
+        // both halves of the mechanism matter and only work together (decision 1466; the module
+        // docs in [`composite`] carry the why). Target space: y-UP, origin at the target's centre
+        // (= the player), and `RT_HALF_EXTENT_SCALE · radius` yards to an edge.
+        #[allow(clippy::cast_precision_loss)] // 256 is exact in f32
+        let units_per_yd =
+            (composite::RT_SIZE as f32 * 0.5) / (composite::RT_HALF_EXTENT_SCALE * radius);
+        // A model point → its north-up target position (through the placement to world, then the
+        // same north-up map the terrain tiles use: up = world +X north, left = +Y west).
+        let to_target = |m: [f32; 3]| {
             let w = bevy_to_wow(world_from_local.transform_point3(wow_to_bevy(m)));
-            Vec2::new(
-                center.x + (wy - w[1]) * px_per_yd,
-                center.y - (w[0] - wx) * px_per_yd,
-            )
+            Vec2::new((wy - w[1]) * units_per_yd, (w[0] - wx) * units_per_yd)
         };
-        // The one placement rotation: where the model +X axis points on the screen (same per tile).
-        let x_axis = to_screen([1.0, 0.0, 0.0]) - to_screen([0.0, 0.0, 0.0]);
-        let rotation = x_axis.y.atan2(x_axis.x);
+        // The one placement rotation: where the model +X axis points, as a CLOCKWISE-on-screen
+        // angle (the target's y-up frame negates it at the Transform). Same for every tile.
+        let x_axis = to_target([1.0, 0.0, 0.0]) - to_target([0.0, 0.0, 0.0]);
+        let rotation = (-x_axis.y).atan2(x_axis.x);
+        // The target's own edge, in target units, for the window cull below.
+        #[allow(clippy::cast_precision_loss)]
+        let rt_half = composite::RT_SIZE as f32 * 0.5;
+        composite.active = true;
 
         // GROUP SELECTION: the portal flood-fill from the player's current group (wow-re
         // `wmo-interior-minimap.md` Sub-Q4b, byte-verified) — NOT draw-every-group. Only the groups
@@ -447,9 +503,11 @@ fn emit_minimap(
                 for row in 0..ny {
                     let mcx = gn.bbox_min[0] + (col as f32 + 0.5) * tw_x;
                     let mcy = gn.bbox_min[1] + (row as f32 + 0.5) * tw_y;
-                    let sc = to_screen([mcx, mcy, mid_z]);
-                    // Window cull: skip tiles whose centre lands well outside the disc.
-                    if sc.distance(center) > side * 0.5 + tw_x.max(tw_y) * px_per_yd {
+                    let tc = to_target([mcx, mcy, mid_z]);
+                    // Window cull: skip tiles whose centre lands well outside the TARGET (which
+                    // holds 1.5× what the blit shows, so this is wider than the visible disc —
+                    // deliberately: the client composites the same margin).
+                    if tc.length() > rt_half + tw_x.max(tw_y) * units_per_yd {
                         continue;
                     }
                     let handle = cache.interior.entry((gi, col, row)).or_insert_with(|| {
@@ -459,21 +517,48 @@ fn emit_minimap(
                     let Some(handle) = handle else {
                         continue; // this group cell has no authored tile
                     };
-                    quads.overlays.push(UiQuad {
-                        rect: Rect::from_center_size(
-                            sc,
-                            Vec2::new(tw_x * px_per_yd, tw_y * px_per_yd),
+                    let order = composite.tiles.len();
+                    composite.tiles.push(composite::CompositeTile {
+                        texture: handle.clone(),
+                        center: tc,
+                        // The client's HALF-TEXEL UV INSET (`0x4ebfca`–`0x4ec03b`: `du = 0.5/W`,
+                        // `dv = 0.5/H`), expressed as the scale it is: sampling `[du, 1-du]` across
+                        // a quad of size `S` is the same as sampling `[0, 1]` across a quad of
+                        // `S·W/(W−1)` about the same centre, so the shared unit mesh keeps its UVs
+                        // and the inset rides the Transform like everything else here. The quad
+                        // edges then land on the outermost texel CENTRES, which stretches each
+                        // tile's art outward by half a texel per side — and that is what closes
+                        // the ~20% of group joints that butt rather than overlap. Without it a
+                        // butt joint leaves a texel-wide strip that no tile covers, and the clear
+                        // reads through it for the whole length of the wall (B141's residue after
+                        // the alpha test alone).
+                        size: Vec2::new(
+                            tw_x * units_per_yd * texel_stretch(tw_x),
+                            tw_y * units_per_yd * texel_stretch(tw_y),
                         ),
-                        z_key: slot.z,
-                        texture: Some(handle.clone()),
-                        color: [1.0, 1.0, 1.0, slot.alpha],
                         rotation,
-                        mask: mask.clone(),
-                        ..default()
+                        order,
                     });
                 }
             }
         }
+
+        // THE BLIT: the target's middle two-thirds, which is what nets `1.0 · radius` on screen
+        // (the client's `0x4ec440` under EGxBlend 2). One quad, masked to the minimap circle — the
+        // round cut belongs HERE and not to the tiles, exactly as the reference's does. The target
+        // is opaque everywhere (its clear is opaque black), so this quad IS the black backing the
+        // screen path used to push separately.
+        let lo = 0.5 - composite::RT_BLIT_FRACTION * 0.5;
+        let hi = 0.5 + composite::RT_BLIT_FRACTION * 0.5;
+        quads.overlays.push(UiQuad {
+            rect: Rect::from_center_size(center, Vec2::splat(side)),
+            z_key: slot.z,
+            texture: Some(rt_image),
+            uv: UvRect::from_tex_coords([lo, hi, lo, hi]),
+            color: [1.0, 1.0, 1.0, slot.alpha],
+            mask: mask.clone(),
+            ..default()
+        });
     } else if let Some(dir) = catalog.0.directory(map.0) {
         // OUTDOOR: the ADT terrain tiles, MODULATEd by the day-night light tint (not full white —
         // else too bright, the reference's CWorldFrame minimap draw). Absent lighting ⇒ white.
@@ -701,8 +786,11 @@ fn emit_minimap(
 /// Push the player's WMO-containment state onto the Minimap widget (the client's `0xceaa60`), so the
 /// zoom buttons drive the **indoor** zoom index while indoors and the outdoor one while outside, each
 /// persisting across the transition. Runs before the script tick, so a `SetZoom` fired from a button
-/// handler this frame routes to the right index. `CurrentWmoInterior` is the same containment test the
-/// interior audio/zone tracker uses.
+/// handler this frame routes to the right index. The verdict is [`minimap_interior`]'s — the SAME
+/// one [`emit_minimap`] draws by, because the client keeps one flag for both (it used to read the
+/// camera-eye `CurrentWmoInterior` instead, which is a different ray *and*, since 1466, a different
+/// mask: the buttons would have kept driving the indoor index on a Stormwind street the map was
+/// drawing from terrain tiles).
 /// The state is pushed on the inside↔outside *edge* and whenever the VM's Minimap-creation count
 /// moved (the cluster XML loads late, and an addon can build one whenever it likes — the counter
 /// is what keeps "a widget created after the last transition is still told" true without walking
@@ -712,14 +800,19 @@ fn emit_minimap(
 /// — the client's own signal for "the effective zoom changed" (FrameXML `Minimap_OnEvent`). Without it
 /// the buttons keep the level you left (e.g. `ZoomIn` greyed from an outdoor max-zoom, still greyed
 /// indoors at level 3), which is the director's report (2026-07-09).
+#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn feed_minimap_inside(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     world: benilla_world::world_point::WorldPoint,
+    player: Res<Player>,
+    instances: Query<&WmoPortalInstance>,
+    wmos: Res<Assets<WmoModel>>,
+    asset_server: Res<AssetServer>,
     mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
     mut pushed_at: Local<crate::ui_script::VmMemo<u64>>,
 ) {
     let Some(mut script) = script else { return };
-    let inside = world.interior().is_some();
+    let inside = minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some();
     let edge = *was_inside.get(&script) != Some(inside);
     let created = script.minimap_widgets_created();
     if edge || *pushed_at.get(&script) != created {
@@ -772,11 +865,17 @@ impl Plugin for MinimapPlugin {
             .init_resource::<MinimapZoom>()
             .init_resource::<MinimapTileCache>()
             .init_resource::<blips::MinimapBlipHover>()
+            .init_resource::<composite::MinimapComposite>()
             .add_systems(Startup, setup_minimap.after(AssetSet::Open))
+            .add_systems(Startup, composite::setup_composite)
             .add_systems(
                 Update,
                 (
                     emit_minimap.in_set(UiQuadAppend),
+                    // After the emit that fills it: the composite camera draws what THIS frame's
+                    // interior branch asked for, so the target the blit quad samples is never a
+                    // frame behind the pan.
+                    composite::drive_composite.after(UiQuadAppend),
                     // Before the script tick, so a zoom button pressed this frame routes to the
                     // indoor/outdoor index that matches where the player actually is.
                     feed_minimap_inside.before(crate::ui_script::UiInput),

@@ -194,6 +194,14 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_UNIT_VISUALS").is_ok() {
                 app.add_plugins(crate::capture::UnitVisualsPlugin);
             }
+            // The dress census: `WOW_DRESS_CENSUS=<secs>[,<every>]` prints one line per streamed
+            // PLAYER — what the wire asked for (`PLAYER_FLAGS`' hide bits), what we resolved
+            // (helm/cloak display ids) and what is actually attached — plus a `contradictions=`
+            // count for a body dressed in a piece its own preference asked us to hide. B123's
+            // instrument (see `capture::DressCensusPlugin`, decision 1472).
+            if std::env::var("WOW_DRESS_CENSUS").is_ok() {
+                app.add_plugins(crate::capture::DressCensusPlugin);
+            }
             // The entity census: `WOW_ENTITY_CENSUS=<secs>` prints per-archetype entity counts once —
             // what the resident entity count is made of (see `capture::EntityCensusPlugin`).
             if std::env::var("WOW_ENTITY_CENSUS").is_ok() {

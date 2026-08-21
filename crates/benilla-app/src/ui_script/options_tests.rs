@@ -21,7 +21,7 @@
 //! farclip min-anchored 60), the 1.12 master→ambience dependency greys, and Defaults walks the
 //! visible page back to the registered defaults.
 
-use benilla_ui::script::{QuadContent, SoundRequest, UiScript};
+use benilla_ui::script::{QuadContent, SoundRequest, UiScript, WornDisplay};
 
 /// The window's real neighbourhood, in the manifest's own order (options before the menu — the
 /// game_menu_tests::harness_with idiom, minus the extras this file never needs).
@@ -1700,8 +1700,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 20 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
     // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's) + the Combat page's 14
     // saved-variable rows (1134) + the Interface page's 4 (3 from 1136, Buff Durations 1139) and
-    // the Action Bars page's 1 (1136).
-    assert_eq!(checked, 39, "every row but one carries a live 1.12 key");
+    // the Action Bars page's 1 (1136) + the Interface page's 2 API rows (Show Cloak / Show Helm,
+    // 1472) — which is the point of counting here rather than per page: the third store's rows are
+    // held to the same "the key is 1.12's own and it resolves" bar as the other two.
+    assert_eq!(checked, 41, "every row but one carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec!["ControlsRowAutoLoot".to_string()],
@@ -1792,8 +1794,9 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     }
     // 20 of the 21 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
     // Max Camera Distance 1140's; Vertical Sync 1394's), plus the Combat page's 14 saved-variable
-    // rows (1134), the Interface page's 4 (1136, + Buff Durations 1139) and Action Bars' 1 (1136).
-    assert_eq!(raised, 39, "every row but Auto Loot has a 1.12 description");
+    // rows (1134), the Interface page's 4 (1136, + Buff Durations 1139), Action Bars' 1 (1136) and
+    // the Interface page's 2 API rows (Show Cloak / Show Helm, 1472).
+    assert_eq!(raised, 41, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2156,6 +2159,117 @@ fn the_interface_page_writes_the_three_stock_globals() {
         .unwrap(),
         "these three need no apply hook"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The **equipment-display rows** — Show Cloak and Show Helm (decision 1472, B123). They are the
+/// window's third kind of row and the only one with no store at all: the preference is a bit of the
+/// character's own server-side `PLAYER_FLAGS`, so the row reads an engine getter and writes an
+/// engine setter, 1.12's own `func`/`setFunc` pair for exactly these two entries.
+///
+/// Three things are asserted that no other row shape can be: the read comes from the API rather
+/// than a saved value (a page revisit re-asks), the write leaves both the CVar table and the global
+/// namespace untouched and produces a **wire** intent instead, and the getter follows the click
+/// immediately — before the server's descriptor answers — because the wire verb is a blind flip and
+/// a second click inside that round trip would otherwise compute the wrong direction.
+#[test]
+fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
+    let mut s = interface_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+
+    // Both ship shown — the model's own default, and the reference's hand-written one.
+    for row in ["RowShowHelm", "RowShowCloak"] {
+        assert!(
+            s.eval::<bool>(&format!(
+                "return OptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
+            ))
+            .unwrap(),
+            "{row} reads the API"
+        );
+    }
+
+    let _ = s.take_cvar_changes();
+    let _ = s.take_worn_display_toggles();
+    s.run("OptionsFrameContainerBodyInterfaceRowShowHelmCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_worn_display_toggles(),
+        vec![WornDisplay::Helm],
+        "the click is a CMSG_TOGGLE_HELM intent, not a stored value"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "an API row must not touch the CVar table"
+    );
+    assert!(
+        !s.eval::<bool>("return ShowingHelm() and true or false")
+            .unwrap(),
+        "the getter follows the click at once — the server has not answered yet"
+    );
+    assert!(
+        s.eval::<bool>("return ShowingCloak() and true or false")
+            .unwrap(),
+        "and the other slot is a different bit"
+    );
+
+    // The read is a re-ask, not a remembered string: leave the page and come back.
+    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
+             and true or false"
+        )
+        .unwrap(),
+        "the revisit re-asks the getter"
+    );
+
+    // The wire is the truth: a descriptor edge that disagrees wins over the optimistic belief.
+    s.set_worn_display(true, true);
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    assert!(
+        s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
+             and true or false"
+        )
+        .unwrap(),
+        "the server said the helm is shown, so the row says so"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Defaults on an API row: both boxes go back to shown, and the flip is sent **only** for the one
+/// that was actually off — the setter is a *set* over a wire verb that is a blind *toggle*, so a
+/// no-op default must not queue a packet that would turn the preference on its head.
+#[test]
+fn defaults_sends_a_flip_only_for_the_row_that_moved() {
+    let mut s = interface_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    s.run("OptionsFrameContainerBodyInterfaceRowShowCloakCheck:Click()")
+        .unwrap();
+    let _ = s.take_worn_display_toggles();
+    assert!(!s
+        .eval::<bool>("return ShowingCloak() and true or false")
+        .unwrap());
+
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.take_worn_display_toggles(),
+        vec![WornDisplay::Cloak],
+        "only the cloak had moved"
+    );
+    assert!(s
+        .eval::<bool>("return ShowingCloak() and true or false")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return ShowingHelm() and true or false")
+        .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

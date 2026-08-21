@@ -76,6 +76,21 @@
 // how a transparent-clear pane lost the R14 pauldrons' fire entirely and kept a weapon glow only
 // where it overlapped the model's own opaque pixels.
 @group(2) @binding(8) var<uniform> premultiplied: u32;
+// **Alpha TEST** reference — `<= 0` disables. The WMO-interior minimap tiles, and nothing else so
+// far: the reference draws them under EGxBlend **1**, whose applicator `glDisable`s blending
+// outright, with the `SetRenderState` id-7→id-8 cascade arming `glAlphaFunc(GL_GEQUAL,
+// 0.87843144)` — `.data 0x85ad20[1] = 224`, times the f32 reciprocal of 255 (wow-re
+// `system/minimap/scratch/wmo-interior-minimap-composite.md`). So a tile fragment either writes
+// FULLY OPAQUE or is discarded; partial coverage does not exist on that path, and two overlapping
+// group tiles can never leave the clear colour showing between them. Blending them the ordinary
+// way leaves `(1−a)(1−b)` of the black clear at every boundary — B141's "odd black lines".
+//
+// The tested value is `texel.a × colour.a`, the client's MODULATE of the texel against the
+// stride-0 vertex dword `(frameAlpha << 24) | 0xFFFFFF`. The SCREEN MASK is deliberately NOT in
+// it: the reference alpha-tests each tile into an offscreen and cuts the round mask at the BLIT,
+// so folding the mask ramp into the test would saw the disc's soft rim into a hard, undersized
+// circle.
+@group(2) @binding(9) var<uniform> alpha_ref: f32;
 
 // ITU-R BT.601 luma — the `PARAM c[0]` of that shader, read as raw f32 words: `0x3E991687`,
 // `0x3F1645A2`, `0x3DE978D5`. Not `(0.3, 0.3, 0.3)`, not `(0.3, 0.59, 0.11)` (this file's own first
@@ -127,6 +142,22 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let inside = f32(all(muv >= vec2<f32>(0.0)) && all(muv <= vec2<f32>(1.0)));
         let m = textureSampleLevel(mask_texture, mask_sampler, clamp(muv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).a;
         k *= m * inside;
+    }
+    // The alpha TEST arm (see `alpha_ref`): pass ⇒ fully opaque, fail ⇒ nothing.
+    //
+    // It returns the **un-encoded** texel, not `rgb`: this arm draws only into the minimap's own
+    // 256² composite target, which is un-encoded float like the portrait booths' (decisions
+    // 0254/0804 — the UI arc does its one sRGB encode at the end, so a target that pre-encoded
+    // would land a second one downstream). The blit quad that samples that target is an ordinary
+    // quad and takes the `linear_to_srgb` above, which is where the authored byte comes back.
+    // Nothing is lost by skipping it here: the composite does no colour arithmetic at all — no
+    // blend, no day-night tint, a white vertex colour — so this path is a pure copy, and there is
+    // no gamma-space multiply to preserve.
+    if alpha_ref > 0.0 {
+        if t.a * c.a < alpha_ref {
+            discard;
+        }
+        return vec4<f32>(t.rgb * c.rgb, 1.0);
     }
     let a = t.a * k;
     // Premultiply in GAMMA (decision 0160's lesson, here for the UI): the hardware `SrcAlpha` factor

@@ -40,6 +40,13 @@ pub(crate) use ground_census::GroundCensusPlugin;
 mod visual_census;
 pub(crate) use visual_census::UnitVisualsPlugin;
 
+/// The dress census — per-player "what did the wire ask for, what did we resolve, what is actually
+/// hanging off the skeleton": the three things a screenshot of a geared character conflates, and
+/// the reader that turns "my show-helm preference is ignored" into a counted contradiction (B123,
+/// decision 1472).
+mod dress_census;
+pub(crate) use dress_census::DressCensusPlugin;
+
 /// The two exclusive-`World` reflection dumps: the bevy_ui node inventory and the archetype
 /// census — "what is resident right now, and what is it made of".
 mod world_census;

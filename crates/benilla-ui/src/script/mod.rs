@@ -126,6 +126,7 @@ mod types;
 mod unit;
 mod weapon_enchant;
 mod worldmap;
+mod worn_display;
 
 pub use action::{ActionSlot, ActionState};
 pub use addon::AddOnInfo;
@@ -200,6 +201,7 @@ pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
 pub use weapon_enchant::WeaponEnchant;
 pub use worldmap::{WorldMapContinentView, WorldMapOverlayView, WorldMapState, WorldMapZoneView};
+pub use worn_display::WornDisplay;
 
 use mlua::Lua;
 
@@ -518,6 +520,7 @@ impl UiScript {
         follow::install(&lua)?;
         session::install(&lua)?;
         pvp::install(&lua)?;
+        worn_display::install(&lua)?;
         death::install(&lua)?;
         aura::install(&lua)?;
         cvars::install(&lua)?;

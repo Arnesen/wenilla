@@ -261,6 +261,20 @@ fn player_look(
             equipment[idx] = worn;
             continue;
         }
+        // …and past that point we are dressing the player's OWN gear, which is where the two
+        // equipment-display preferences apply — and where the reference applies them too, by
+        // construction rather than by a test (decision 1472). `DressUpModel::SetUnit 0x476cb0`
+        // `rep movsd`s all twelve per-bodyslot `ItemDisplayInfo` pointers verbatim off the live
+        // player (head `+0x4a8`, cloak `+0x4d0`) and deep-copies its attach tree, so a piece the
+        // world already suppressed is simply not in what gets cloned: **hidden in the world ⇒
+        // hidden in the dressing room.** A TRY-ON gates on nothing and previews the helm or cloak
+        // regardless — which is the branch above, and the reason this test sits *below* it — and
+        // `Dress()` (the Reset button) drops the substitutions and so re-clones back to hidden.
+        // (wow-re `object-layer/scratch/helm-cloak-hide.md` §8, byte-verified; this replaced an
+        // INFERRED guess that the mannequin was unconditional.)
+        if (idx == 0 && s.player_hides_helm()) || (idx == 14 && s.player_hides_cloak()) {
+            continue;
+        }
         let Some(entry) = s.player_visible_item_entry(slot).filter(|e| *e != 0) else {
             continue;
         };
@@ -611,5 +625,56 @@ mod tests {
                 "the main hand keeps its sword beside {what}"
             );
         }
+    }
+
+    /// **The dressing room inherits the equipment-display preferences, and a try-on overrides
+    /// them** (decision 1472; wow-re `object-layer/scratch/helm-cloak-hide.md` §8, byte-verified
+    /// off `DressUpModel::SetUnit 0x476cb0`'s verbatim clone of the live player's display
+    /// pointers). Hidden helm + hidden cloak, so the player's own two pieces are absent from the
+    /// look — and then a tried-on helm shows anyway, because previewing it is the whole feature.
+    #[test]
+    fn a_hidden_helm_stays_hidden_on_the_mannequin_until_one_is_tried_on() {
+        let (cmds, _rx) = commands();
+        let mut items = Items::default();
+        items.insert_template(1000, Some(worn("Worn Helm", 5000, 1)));
+        items.insert_template(1100, Some(worn("Worn Cloak", 5100, 16)));
+        items.insert_template(1200, Some(worn("Worn Chest", 5200, 5)));
+        items.insert_template(2000, Some(worn("Shiny Helm", 7000, 1)));
+        // `PLAYER_FLAGS` (field 190) carrying HIDE_HELM 0x400 | HIDE_CLOAK 0x800.
+        let mut store = player(&[(0, 1000), (14, 1100), (4, 1200)]);
+        store
+            .0
+            .merge(ObjectFields::from_pairs(&[(190u16, 0x400 | 0x800)]));
+
+        let mut room = DressUpRoom::default();
+        room.apply(DressUpIntent::Dress);
+        let look = player_look(&store, &net(), &room, &mut items, &cmds).expect("a look");
+        assert_eq!(
+            look.equipment[0].display_id, 0,
+            "the player's own helm is hidden"
+        );
+        assert_eq!(look.equipment[14].display_id, 0, "and so is their cloak");
+        assert_eq!(
+            look.equipment[4].display_id, 5200,
+            "everything else they are wearing is untouched"
+        );
+
+        // A try-on is not their own gear, so nothing suppresses it — this is the branch the
+        // reference reaches by never testing the flag on the TryOn path at all.
+        room.apply(DressUpIntent::TryOn(2000));
+        room.resolve_pending(&mut items, &cmds);
+        let look = player_look(&store, &net(), &room, &mut items, &cmds).expect("a look");
+        assert_eq!(
+            look.equipment[0].display_id, 7000,
+            "the tried-on helm previews regardless of the preference"
+        );
+
+        // …and Reset drops the substitution, so the mannequin goes back to bare-headed.
+        room.apply(DressUpIntent::Dress);
+        let look = player_look(&store, &net(), &room, &mut items, &cmds).expect("a look");
+        assert_eq!(
+            look.equipment[0].display_id, 0,
+            "Reset re-clones the hidden helm away"
+        );
     }
 }

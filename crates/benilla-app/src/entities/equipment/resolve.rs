@@ -153,6 +153,23 @@ pub(in crate::entities) fn resolve_equipment(
             continue;
         }
         let s = &store.0;
+        // The two **equipment-display preferences** (decision 1472, B123): `PLAYER_FLAGS`'
+        // `HIDE_HELM 0x400` / `HIDE_CLOAK 0x800`, read off THIS unit's own descriptor. The field is
+        // public, so this is per rendered body and not a local setting — a remote player who hides
+        // their helm hides it on our screen, exactly as ours hides on theirs. A creature has no
+        // `PLAYER_FLAGS` and reads `false` for both (its head/shoulder columns come from
+        // CreatureDisplayInfoExtra, which carries no such preference).
+        //
+        // The suppression is a **display id of zero**, applied below to every place the piece is
+        // resolved — which is the same thing "no helm equipped" means everywhere else in this
+        // module, so the whole downstream chain follows for free: the helm's attach sub-model is not
+        // requested, its RF-0083 HelmetGeosetVisData hide-masks are not applied (hair, facial hair
+        // and ears come back), the cloak's geoset group is not selected and its cape texture is not
+        // resolved. It is also the shape the glue lane has honoured since 0465 (`attach::preview`
+        // zeroes the same two slots off the char-enum record's `CHARACTER_FLAG_HIDE_*`, which
+        // vmangos round-trips into these very bits at login) — the world was the half that never
+        // consumed it.
+        let (hide_helm, hide_cloak) = (s.player_hides_helm(), s.player_hides_cloak());
         // Worn armor (players; decision 0074): resolve the composite slots' entries → display ids.
         // `settled` only once every non-empty entry has an answer, so the first attach composites the
         // dressed atlas directly (the template cache makes later logins instant).
@@ -171,6 +188,10 @@ pub(in crate::entities) fn resolve_equipment(
                 }
             }
             // The cloak (equipment slot 14): geoset + cape texture, resolved the same way.
+            // The hide preference zeroes the RESOLVED id rather than skipping the lookup, so
+            // `settled` keeps meaning "every worn entry has an answer" — switching the preference
+            // back on then re-dresses from a warm template cache instead of stalling a frame on a
+            // round trip the player would see as a flicker.
             if let Some(entry) = s.player_visible_item_entry(14).filter(|e| *e != 0) {
                 match templates.held(entry, &net) {
                     Some(t) => eq.cloak = t.display_info_id,
@@ -184,6 +205,12 @@ pub(in crate::entities) fn resolve_equipment(
                     Some(t) => eq.helm = t.display_info_id,
                     None => eq.settled = false,
                 }
+            }
+            if hide_cloak {
+                eq.cloak = 0;
+            }
+            if hide_helm {
+                eq.helm = 0;
             }
             if current_equipment != Some(&eq) {
                 commands.entity(entity).insert(eq);
@@ -412,7 +439,9 @@ pub(in crate::entities) fn resolve_equipment(
                         .filter(|d| *d != 0)
                         .unwrap_or(0)
                 };
-                let helm = resolve(0);
+                // The helm's attach sub-model. Zero when hidden — the same id the geoset half
+                // above was given, so the two halves of one preference can never disagree.
+                let helm = if hide_helm { 0 } else { resolve(0) };
                 let shoulder = resolve(2);
                 Some((helm, shoulder, race, sex))
             }
@@ -476,7 +505,14 @@ pub(in crate::entities) fn resolve_equipment(
 
 #[cfg(test)]
 mod tests {
-    use super::{ammo_attach, attach_id, placement};
+    use bevy::prelude::*;
+
+    use super::super::{Equipment, HeldItems, ItemDisplays};
+    use super::{ammo_attach, attach_id, placement, resolve_equipment};
+    use crate::items::Items;
+    use crate::net::{ClientCommand, NetCommands, NetEntity, ObjectStore};
+    use benilla_protocol::messages::{ItemInfo, ObjectFields};
+    use benilla_protocol::EntityKind;
 
     /// The ranged slot's whole placement law: in hand only while ranged-drawn (state 2) — bow
     /// (INVTYPE_RANGED 15) to the left hand, gun/crossbow/wand/thrown (RANGEDRIGHT 26 / THROWN 25)
@@ -517,5 +553,108 @@ mod tests {
         assert_eq!(ammo_attach(Some(0x19), true), None); // thrown — directory 0x19, never an id
         assert_eq!(ammo_attach(Some(0x1a), true), None); // gun/xbow/wand — the gunXbow early return
         assert_eq!(ammo_attach(None, true), None); // no ranged record
+    }
+
+    /// `PLAYER_FLAGS` (field 190) and the visible-item block (`PLAYER_VISIBLE_ITEM_1_CREATOR` 258,
+    /// +12 per slot, the entry at +2) by their raw wire indices — the constants are crate-private
+    /// to benilla-protocol, so every descriptor fixture in this crate spells them out.
+    const PLAYER_FLAGS: u16 = 190;
+    const BYTES_0: u16 = 36;
+
+    fn wearing(flags: u32, entries: &[(u8, u32)]) -> ObjectStore {
+        let mut pairs = vec![
+            (BYTES_0, 1 | 1 << 8), // race 1 (human), class 1, gender 0 (male)
+            (PLAYER_FLAGS, flags),
+        ];
+        for (slot, entry) in entries {
+            pairs.push((258 + 2 + 12 * u16::from(*slot), *entry));
+        }
+        ObjectStore(ObjectFields::from_pairs(&pairs))
+    }
+
+    fn worn(display_info_id: u32, inventory_type: u32) -> ItemInfo {
+        ItemInfo {
+            display_info_id,
+            inventory_type,
+            ..crate::items::test_template("Worn")
+        }
+    }
+
+    /// Run one `resolve_equipment` pass over a player wearing helm 900 / cloak 800 / chest 700,
+    /// with `flags` on their descriptor, and return what the body was dressed with: the
+    /// [`Equipment`] triple and whether the helm's ATTACH sub-model slot was filled.
+    fn dress(flags: u32) -> (Equipment, bool) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        let mut items = Items::default();
+        items.insert_template(100, Some(worn(900, 1))); // INVTYPE_HEAD
+        items.insert_template(200, Some(worn(800, 16))); // INVTYPE_CLOAK
+        items.insert_template(300, Some(worn(700, 5))); // INVTYPE_CHEST
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        app.insert_resource(items);
+        app.insert_resource(NetCommands(tx));
+        app.insert_resource(ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::new()),
+        ));
+        let player = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Player,
+                    display_id: Some(49),
+                    scale: 1.0,
+                },
+                wearing(flags, &[(0, 100), (14, 200), (4, 300)]),
+            ))
+            .id();
+        app.add_systems(Update, resolve_equipment);
+        app.update();
+        drop(rx);
+        let w = app.world();
+        let eq = *w.get::<Equipment>(player).expect("equipment resolved");
+        let helm_attached = w
+            .get::<HeldItems>(player)
+            .is_some_and(|h| h.slots[3].is_some());
+        (eq, helm_attached)
+    }
+
+    /// **B123** (decision 1472): the two equipment-display preferences are consumed on the WORLD
+    /// body, not only on the character-select one. `PLAYER_FLAGS_HIDE_HELM 0x400` /
+    /// `HIDE_CLOAK 0x800` zero the resolved display id, which is what makes every downstream
+    /// consumer follow — no cape geoset, no cape texture, no helm attach model, and no RF-0083
+    /// hide-mask stripping the hair.
+    #[test]
+    fn the_hide_preferences_undress_the_helm_and_cloak_on_a_world_body() {
+        let (shown, helm_attached) = dress(0);
+        assert_eq!(shown.helm, 900, "no preference set: the helm is worn");
+        assert_eq!(shown.cloak, 800, "…and so is the cloak");
+        assert!(
+            helm_attached,
+            "…and the helm's attach sub-model is asked for"
+        );
+
+        let (hidden, helm_attached) = dress(0x400 | 0x800);
+        assert_eq!(hidden.helm, 0, "hide-helm zeroes the head slot");
+        assert_eq!(hidden.cloak, 0, "hide-cloak zeroes the back slot");
+        assert!(
+            !helm_attached,
+            "the ATTACH half follows the geoset half — the two can never disagree"
+        );
+        assert_eq!(
+            hidden.bodyslots, shown.bodyslots,
+            "and nothing else the player is wearing moves"
+        );
+        assert!(hidden.settled, "the worn set is still fully resolved");
+    }
+
+    /// The two bits are independent: hiding one leaves the other worn.
+    #[test]
+    fn the_two_hide_preferences_do_not_reach_each_other() {
+        let (helm_only, helm_attached) = dress(0x400);
+        assert_eq!((helm_only.helm, helm_only.cloak), (0, 800));
+        assert!(!helm_attached);
+        let (cloak_only, helm_attached) = dress(0x800);
+        assert_eq!((cloak_only.helm, cloak_only.cloak), (900, 0));
+        assert!(helm_attached);
     }
 }

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{power_token, ScriptValue, UiScript, UnitState};
+use benilla_ui::script::{power_token, ScriptValue, UiScript, UnitState, WornDisplay};
 
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
@@ -142,6 +142,11 @@ struct UnitFeedMemo {
     /// (decision 0652). `None` until first seen: the reference reacts to a *changed*-bits mask, so
     /// the descriptor that first carries the flag at login announces nothing.
     pvp_desired: Option<bool>,
+    /// The self unit's last `(HIDE_HELM, HIDE_CLOAK)` pair, for the worn-display push (decision
+    /// 1472). Pushed on the **edge** and never per frame: the Options row's setter flips the VM's
+    /// belief optimistically and the server's answer is a round trip away, so a per-frame push
+    /// would snap the value back to the stale descriptor in between.
+    worn_hidden: Option<(bool, bool)>,
 }
 
 /// Adds the per-frame unit feed. The `Unit*` bindings themselves live in `benilla-ui`; this only
@@ -178,6 +183,7 @@ impl Plugin for UiUnitPlugin {
                 .before(UiInput),
         )
         .add_systems(Update, drain_pvp_toggles.after(UiInput))
+        .add_systems(Update, drain_worn_display_toggles.after(UiInput))
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
         // `load_exhaustion_rows` pushes into the VM, so it runs per VM in `Update` (1290);
         // `load_default_languages` only builds a Bevy resource and stays a one-shot.
@@ -623,6 +629,24 @@ fn drain_pvp_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetComm
     }
 }
 
+/// Drain the `ShowHelm`/`ShowCloak` flips into `CMSG_TOGGLE_HELM`/`CMSG_TOGGLE_CLOAK` (decision
+/// 1472) — the Options window's two equipment-display rows, and the only callers there are.
+///
+/// The VM has already decided *whether* a flip is needed (the setter compares the asked-for state
+/// against the belief it holds and queues nothing when they agree), because only the VM knows what
+/// the row just did optimistically. This end is the pure send, the PvP drain's shape exactly.
+fn drain_worn_display_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for which in script.take_worn_display_toggles() {
+        let _ = commands.0.send(match which {
+            WornDisplay::Helm => crate::net::ClientCommand::ToggleHelm,
+            WornDisplay::Cloak => crate::net::ClientCommand::ToggleCloak,
+        });
+    }
+}
+
 /// `PLAYER_FLAGS_PVP_DESIRED` — the PvP *preference* bit (vmangos `PlayerDefines.h`), which is what
 /// `CMSG_TOGGLE_PVP` flips. Not to be confused with `UNIT_FIELD_FLAGS`' `PVP` bit `0x1000`, the flag
 /// the icon draws: the preference clears instantly, the flag lingers for the server's timer.
@@ -1059,6 +1083,11 @@ fn feed_units(
         memo.last_combo = None;
         memo.in_combat = None;
         memo.pvp_desired = None;
+        // The worn-display pair is a player-global like the rest, and forgetting it is what makes
+        // the next character's preference reach the VM at all: the push is an EDGE, so a memo
+        // carrying the last body's bits would silently skip a new body that happens to disagree
+        // with the VM's fresh "both shown" default (decision 1472).
+        memo.worn_hidden = None;
     }
 
     for (token, snap) in [("player", &player), ("target", &target)] {
@@ -1129,6 +1158,20 @@ fn feed_units(
             ));
         }
         memo.pvp_desired = Some(desired);
+    }
+
+    // The worn-display pair (decision 1472): `PLAYER_FLAGS`' two hide bits, mirrored into the VM
+    // so `ShowingHelm()`/`ShowingCloak()` — the Options rows' getters — read the server's truth.
+    // On the EDGE, not per frame: the setter flips the VM's belief the instant the box is clicked,
+    // and the descriptor only catches up a round trip later. Re-pushing the stale pair in between
+    // would un-click the box and make a second click compute the wrong flip.
+    if let Some((store, _)) = self_pair {
+        let hidden = (store.0.player_hides_helm(), store.0.player_hides_cloak());
+        if memo.worn_hidden != Some(hidden) {
+            gate.audit("feed_units", "the worn-display pair");
+            memo.worn_hidden = Some(hidden);
+            script.set_worn_display(!hidden.0, !hidden.1);
+        }
     }
 
     // The combo-point feed: `PLAYER_FIELD_BYTES` byte 1 and the `PLAYER_FIELD_COMBO_TARGET` GUID
