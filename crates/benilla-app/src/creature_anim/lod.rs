@@ -17,13 +17,14 @@
 //!   re-appearing unit shows the pose "now" dictates. Nothing here pauses an [`AnimationPlayer`]:
 //!   Bevy's `advance_animations` keeps ticking every seek clock, so waking is just sampling
 //!   again — there is no frozen state to resume from.
-//! - **(ii) off-screen combat stays audible — for EVERY unit**, which is now known to be MORE
-//!   than the reference grants (it silences all but `MORE_AUDIBLE` creatures): the event scanner
-//!   ([`super::events::fire_anim_events`]) reads the player's seek, not the bones, and the driver
-//!   state machine keeps arming clips for parked rigs; `$CSS`/`$CAH`/`$HIT` (0075), footsteps,
-//!   `$BWP`/`$BWR`, and the `$CSL`-keyed missile release (0430) all fire regardless of the
-//!   camera. Narrowing this to the flagged set is 1473's event-gate leg — its own record when it
-//!   lands.
+//! - **(ii) off-screen combat is audible for `MORE_AUDIBLE` creatures — and only them**
+//!   (decision 1482, the tick half of the election): a parked rig's event tracks are not
+//!   scanned ([`super::events::fire_anim_events`] skips it, memory and all), except when its
+//!   cached creature template carries the `0x20` flag — the reference's `0x607da0` re-link arm.
+//!   The driver state machine still arms clips for every parked rig (pose correctness on wake —
+//!   the memo design of 1370 item 9 is the only safe skip there), so a flagged creature's
+//!   `$CSS`/`$CAH`/`$HIT` (0075), `$BWP`/`$BWR`, and `$CSL` (0430) fire off-screen exactly as
+//!   the reference's do.
 //!
 //! The park mechanism is the [`AnimParked`] marker alone (decision 0712 — the evaluator took over
 //! from `animate_targets`, and the old per-joint `AnimatedBy` repoint died with the targets): the
@@ -352,6 +353,9 @@ mod tests {
         ));
         app.init_asset::<WmoModel>();
         app.add_message::<AnimSoundEvent>();
+        // The event scanner's MORE_AUDIBLE read (decision 1482) — empty ⇒ every parked rig
+        // reads unflagged, the fail-closed default.
+        app.init_resource::<crate::names::NameCache>();
         // The live schedule's shape: the gate ahead of the frame's pose evaluation; the event
         // scanner reading the advanced seek after it.
         app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
@@ -384,13 +388,14 @@ mod tests {
             .translation
     }
 
-    /// The three gate laws in one flow (decision 0448): an off-frustum rig parks (joints
-    /// repointed at the park entity, bones frozen) while its seek clock keeps advancing and its
-    /// event keyframes keep firing (the 0075 trap — off-screen swings must not go silent); a
-    /// woken rig and a never-parked twin sample the SAME pose — the absolute-clock snap, not
-    /// resume-from-freeze.
+    /// The gate laws in one flow (0448, events re-lawed by 1482): an off-frustum rig parks
+    /// (joints repointed at the park entity, bones frozen) while its seek clock keeps advancing —
+    /// and its event keyframes FALL SILENT, because the reference's pass-2 walk never ticks an
+    /// unflagged model (the 0448 "off-screen swings must not go silent" law rested on the verdict
+    /// wow-re refuted on 2026-08-13; the flagged exception is the next test's). A woken rig and a
+    /// never-parked twin sample the SAME pose — the absolute-clock snap, not resume-from-freeze.
     #[test]
-    fn parked_rig_keeps_clock_and_events_and_wakes_to_the_absolute_pose() {
+    fn parked_rig_keeps_its_clock_falls_silent_and_wakes_to_the_absolute_pose() {
         let mut app = app();
         spawn_camera(&mut app);
         // `behind` starts off-frustum (+Z, behind the camera); `twin` stays in frame at −Z.
@@ -408,25 +413,29 @@ mod tests {
             !app.world().entity(twin).contains::<AnimParked>(),
             "the in-frame twin stays live"
         );
-        // While parked: the bone holds, the clock runs, the mid-loop event keyframe still fires.
+        // While parked: the bone holds, the clock runs — and the event track is not scanned.
         let frozen = bone(&app, behind_joint);
         let seek_at_park = seek(&app, behind);
         let mut cursor = app
             .world()
             .resource::<Messages<AnimSoundEvent>>()
             .get_cursor_current();
-        let mut fired = 0usize;
+        let (mut fired_parked, mut fired_twin) = (0usize, 0usize);
         for _ in 0..6 {
             // > one full loop in total, so the keyframe is crossed whatever the phase.
             std::thread::sleep(std::time::Duration::from_secs_f32(DUR * 0.3));
             app.update();
             let messages = app.world().resource::<Messages<AnimSoundEvent>>();
-            fired += cursor
-                .read(messages)
-                .filter(|ev| ev.entity == behind && &ev.ident == b"$TST")
-                .count();
+            for ev in cursor.read(messages).filter(|ev| &ev.ident == b"$TST") {
+                fired_parked += usize::from(ev.entity == behind);
+                fired_twin += usize::from(ev.entity == twin);
+            }
         }
-        assert!(fired > 0, "a parked rig's event keyframes keep firing");
+        assert_eq!(
+            fired_parked, 0,
+            "an unflagged parked rig's event keyframes are not scanned (1482)"
+        );
+        assert!(fired_twin > 0, "the live twin keeps firing — the control");
         assert_eq!(
             frozen,
             bone(&app, behind_joint),
@@ -458,6 +467,63 @@ mod tests {
             bone(&app, behind_joint),
             bone(&app, twin_joint),
             "the woken pose equals the never-parked twin's — the absolute-clock snap"
+        );
+    }
+
+    /// The exception the silence is built around (1482): a parked creature whose cached template
+    /// carries `MORE_AUDIBLE` (`0x20`) keeps firing — the reference's `0x607da0` pass-2 re-link,
+    /// the arm that keeps an off-screen flagged creature's combat audible.
+    #[test]
+    fn a_more_audible_parked_rig_keeps_firing() {
+        let mut app = app();
+        spawn_camera(&mut app);
+        let (behind, _) = spawn_rig(&mut app, Vec3::Z * 50.0);
+        // A creature guid whose entry the cache answers with the flag set — composed the way
+        // vmangos composes one (`counter | entry << 24 | high << 48`).
+        const ENTRY: u32 = 69;
+        let guid =
+            7u64 | (u64::from(ENTRY) << 24) | (u64::from(benilla_protocol::guid::HIGH_UNIT) << 48);
+        app.world_mut()
+            .entity_mut(behind)
+            .insert(crate::net::Guid(guid));
+        app.world_mut()
+            .resource_mut::<crate::names::NameCache>()
+            .insert_creature(
+                ENTRY,
+                Some(crate::names::CreatureRecord {
+                    name: "Growler".into(),
+                    subname: None,
+                    creature_type: 1,
+                    pet_family: 0,
+                    rank: 0,
+                    type_flags: 0x20,
+                    civilian: false,
+                    racial_leader: false,
+                }),
+            );
+        app.update();
+        advance(&mut app, PARK_AFTER_SECS + 0.2, 4);
+        assert!(
+            app.world().entity(behind).contains::<AnimParked>(),
+            "flagged or not, the POSE still parks — the flag is tick-only"
+        );
+        let mut cursor = app
+            .world()
+            .resource::<Messages<AnimSoundEvent>>()
+            .get_cursor_current();
+        let mut fired = 0usize;
+        for _ in 0..6 {
+            std::thread::sleep(std::time::Duration::from_secs_f32(DUR * 0.3));
+            app.update();
+            let messages = app.world().resource::<Messages<AnimSoundEvent>>();
+            fired += cursor
+                .read(messages)
+                .filter(|ev| ev.entity == behind && &ev.ident == b"$TST")
+                .count();
+        }
+        assert!(
+            fired > 0,
+            "MORE_AUDIBLE keeps the off-screen event track scanned"
         );
     }
 

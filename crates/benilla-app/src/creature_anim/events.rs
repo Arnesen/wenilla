@@ -9,6 +9,13 @@ use bevy::prelude::*;
 
 use super::{resolved_id, AnimData, AnimDriver};
 
+/// Bit `0x20` of the cached creature template's `type_flags` word — the one flag the reference's
+/// pass-2 election re-links a model for tick-only (`0x607da0`'s `0x623b70` arm), so an off-screen
+/// flagged creature's combat stays audible. The *name* is vmangos corroboration
+/// (`CREATURE_TYPEFLAGS_MORE_AUDIBLE`, `CreatureDefines.h:151`); the byte fact is the bit
+/// (wow-re `outdoor-object-pass-election.md` §4).
+const CREATURE_TYPEFLAGS_MORE_AUDIBLE: u32 = 0x20;
+
 /// A model **event keyframe** crossed during playback this frame (the M2 `$xxx` tags — decision
 /// 0070 slice 3): the animation timeline's outbound trigger surface. The sound subsystem routes
 /// the audio tags (`$SND` kits, footsteps, `$CSS` swings, fidgets); future consumers (camera
@@ -83,8 +90,16 @@ pub(crate) type TrackMemory = bevy::ecs::entity::EntityHashMap<TrackSeek>;
 /// Arming is [`advance_track`]'s: an arm frame fires nothing, the frame after it opens the clip's
 /// head window (so `t = 0` keyframes are real), and a clip that doesn't survive its arm frame
 /// fires nothing at all — the reference's own walker rule, byte-cited there.
+#[allow(clippy::type_complexity)] // one Bevy query tuple — the house convention
 pub(super) fn fire_anim_events(
-    units: Query<(Entity, &ModelAnimations, &AnimationPlayer, &AnimDriver)>,
+    units: Query<(
+        Entity,
+        &ModelAnimations,
+        &AnimationPlayer,
+        &AnimDriver,
+        Has<benilla_world::rig_anim::AnimParked>,
+        Option<&crate::net::Guid>,
+    )>,
     mut last: Local<TrackMemory>,
     // The **masked overlay** track's own memory (decision 0087): a swing/emote routed to the
     // SpineLow overlay plays *beside* the base, so its events (a swing's `$CSS`, an emote's `$CSD`)
@@ -92,9 +107,30 @@ pub(super) fn fire_anim_events(
     mut last_overlay: Local<TrackMemory>,
     mut out: MessageWriter<AnimSoundEvent>,
     anim_data: Option<Res<AnimData>>,
+    names: Res<crate::names::NameCache>,
 ) {
     let catalog = anim_data.as_deref().map(|d| &d.0);
-    for (entity, anims, player, drv) in &units {
+    for (entity, anims, player, drv, parked, guid) in &units {
+        // The election's TICK half (decision 1482): a parked unit's event tracks are not
+        // scanned — the reference's pass-2 walk never inserts the model into the tick worklist
+        // (`0x683dd0` walk 2 skips `0x710b90`) — unless its cached template carries
+        // `MORE_AUDIBLE`, the `0x607da0` re-link arm that keeps an off-screen flagged
+        // creature's combat audible. A missing template record reads NOT audible (the
+        // reference's `0x623b70` null leg — fail closed; the record lands within a second of
+        // streaming anyway). The track memories are dropped so a waking track re-ARMS — firing
+        // nothing on the wake frame — instead of scanning the whole parked gap as one
+        // crossing; the reference's re-admission is likewise a fresh record.
+        if parked
+            && !guid.is_some_and(|g| {
+                names
+                    .peek_type_flags(g.0)
+                    .is_some_and(|f| f & CREATURE_TYPEFLAGS_MORE_AUDIBLE != 0)
+            })
+        {
+            last.remove(&entity);
+            last_overlay.remove(&entity);
+            continue;
+        }
         // Base track: the **resolved** id (decision 0082) — the clip whose timeline is actually
         // advancing, which can differ from the requested `active_anim()` when this model falls back —
         // then the id's **playing variation** (decision 0114: a one-shot rolled one of the id's

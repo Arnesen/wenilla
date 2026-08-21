@@ -64,6 +64,15 @@ pub(super) fn update_model_particles(
         let Some(geometry) = emitter.geometry.clone() else {
             continue;
         };
+        // A GATED emitter's pool is frozen and the sim already edge-hid its instances
+        // (decision 1480): running this body anyway re-showed them the same frame —
+        // `Visibility::Inherited` below undid the hide, so a frozen emitter's shards drew
+        // forever — and kept every instance's Transform/GlobalTransform/MeshTag/material a
+        // per-frame write. The sim clears `gated` before this system in the same chained set,
+        // so a thawed pool resumes the frame it wakes.
+        if emitter.gated {
+            continue;
+        }
         let Some(model) = models.get(&geometry) else {
             continue; // still loading — particles simulate meanwhile, nothing draws yet
         };

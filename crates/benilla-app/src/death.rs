@@ -369,11 +369,25 @@ fn drive_death_look(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut ffx: ResMut<benilla_world::ffx_glow::FfxDeathFade>,
 ) {
-    let ghost = self_q.single().is_ok_and(|store| store.0.player_is_ghost());
+    let ghost = ghost_probe()
+        .unwrap_or_else(|| self_q.single().is_ok_and(|store| store.0.player_is_ghost()));
     let target = if ghost { 1.0 } else { 0.0 };
     if ffx.0 != target {
         ffx.0 = target;
     }
+}
+
+/// `WOW_GHOST_PROBE=1|0` — pin the ghost **screen pass** on or off without dying, so the
+/// ghost-world look (and everything that must NOT inherit it — the portrait bakes, decision 1481)
+/// can be A/B'd from a capture instead of from a corpse run. It overrides only this look; the
+/// death arc's state machine, its events and its UI are untouched and still follow the wire.
+fn ghost_probe() -> Option<bool> {
+    static PROBE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| match std::env::var("WOW_GHOST_PROBE").ok()?.trim() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    })
 }
 
 /// Per-frame (after `UiInput`, so this frame's clicks drain this frame): map the queued Lua death

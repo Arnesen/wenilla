@@ -12,6 +12,12 @@
 //! (plus its debug toggle) is gone. Applied to both the world camera and the portrait-booth bake
 //! cameras (`portrait::mod`): the booth rides the same final node so its bake reads at exact world
 //! parity, the FFXGlow combine owning the frame's ONE gamma decode.
+//!
+//! **What a bake does NOT inherit.** The node's two other lanes are keyed on the *viewer's own
+//! state*, not on the scene — the drunk/underwater haze and the ghost's FFXDeath combine — and the
+//! reference runs its FFX pass inside the WorldFrame's paint, with every UI frame compositing
+//! afterwards. [`FfxGlow::state_scale`] is that whole class in one field, `0` on every bake
+//! (decision 1481).
 
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
@@ -42,27 +48,41 @@ use crate::view::WorldCamera;
 pub struct FfxGlow {
     /// Per-view multiplier on the zone glow weight. See [`Self::WORLD`] / [`Self::UI_PANE`].
     pub(crate) gain_scale: f32,
-    /// Per-view multiplier on the haze mix `z` ([`FfxHazeMix`] — the drunk/underwater
-    /// screen-toward-blur cross-fade). `1.0` only on the true world view: the haze is a
-    /// *player-state* effect on the viewed scene, and a booth bake that stands in for a UI pane
-    /// must never inherit it (the reference paints UI model widgets after the FFX pass).
-    pub(crate) haze_scale: f32,
+    /// Per-view multiplier on the whole **player-state** class of screen effects: the haze mix
+    /// `z` ([`FfxHazeMix`] — the drunk/underwater screen-toward-blur cross-fade) *and* the
+    /// FFXDeath gate `y` ([`FfxDeathFade`] — the ghost combine). `1.0` only on the true world
+    /// view.
+    ///
+    /// **The law, and why it is ONE field.** The reference runs its FFX pass inside the
+    /// WorldFrame's own paint (`0x48350e` → the apply hook `0x6cd890`, wow-re `ffxeffects.md`);
+    /// every UI frame — a `<PlayerModel>` pane, and our portrait bakes standing in for one —
+    /// composites *afterwards*, so no effect keyed on the **viewer's own state** can reach a bake.
+    /// The zone glow is not in this class (it is authored scene data, and a bake wants world
+    /// parity for it — decision 0638), which is why [`Self::gain_scale`] stays separate.
+    ///
+    /// The haze had its own `haze_scale` and the death gate had none, so a released ghost's
+    /// portraits baked through the FFXDeath combine and came back steel-blue luma (report B49,
+    /// decision 1481). Naming the *class* rather than the member is the fix: the next
+    /// player-state pass is gated by construction.
+    pub(crate) state_scale: f32,
 }
 
 impl FfxGlow {
     /// The reference's own full-screen glow, at the zone's authored weight — the world camera:
-    /// zone glow AND the player-state haze (drunk / camera-eye-submerged blur).
+    /// zone glow AND the player-state passes (drunk / camera-eye-submerged blur, ghost death
+    /// combine). The only view that carries the latter.
     pub const WORLD: Self = Self {
         gain_scale: 1.0,
-        haze_scale: 1.0,
+        state_scale: 1.0,
     };
     /// A portrait/booth bake at world parity for *lighting and glow* (decision 0638) — but never
-    /// the haze: a bake stands in for a UI model widget, which the reference composites after
-    /// the WorldFrame's FFX pass, so a drunk player's unit frame stays sharp while the world
-    /// swims.
+    /// a player-state pass: a bake stands in for a UI model widget, which the reference
+    /// composites after the WorldFrame's FFX pass. So a drunk player's unit frame stays sharp
+    /// while the world swims, and a **ghost's portrait keeps its living face** while the world
+    /// goes steel-blue (decision 1481, report B49).
     pub const BOOTH: Self = Self {
         gain_scale: 1.0,
-        haze_scale: 0.0,
+        state_scale: 0.0,
     };
     /// **Decode only, no glow** — for a bake that stands in for a 1.12 *UI model widget*. The
     /// reference applies its FFX pass inside the WorldFrame's own paint (`0x48350e` → the apply
@@ -71,7 +91,7 @@ impl FfxGlow {
     /// glows itself. (The give-away in-game: the reference's chat text and buttons don't bloom.)
     pub const UI_PANE: Self = Self {
         gain_scale: 0.0,
-        haze_scale: 0.0,
+        state_scale: 0.0,
     };
 }
 
@@ -89,7 +109,9 @@ pub struct FfxGlowGain(pub f32);
 /// The FFXDeath gate (decision 0308 §7, byte-VERIFIED wow-re death-pass.md): `1.0` while the
 /// player is a released ghost — the combine swaps to the FFXDeath program whole — else `0.0`.
 /// INSTANT on both edges (the client has no time ramp; the ghost tint is a shader constant).
-/// Driven by [`crate::death`] off `PLAYER_FLAGS_GHOST`; uploaded as the combine uniform's `y`.
+/// Driven by `benilla-app`'s death arc off `PLAYER_FLAGS_GHOST`; uploaded as the combine
+/// uniform's `y`, scaled per view by [`FfxGlow::state_scale`] — it is a **player-state** pass and
+/// reaches the world view only (decision 1481).
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct FfxDeathFade(pub f32);
 
@@ -100,7 +122,7 @@ pub struct FfxDeathFade(pub f32);
 /// `z = max(min(drunkByte,100)/100, submerged ? 84/255 : 0)` — fully blurred at 100 inebriation,
 /// and a fixed ≈0.329 floor whenever the **camera eye** is in any liquid (the vanilla underwater
 /// blur; `0x672470`'s eye-liquid probe, `0xf` = dry). Synced by [`sync_haze`]; uploaded as the
-/// combine uniform's `z`, scaled per view by [`FfxGlow::haze_scale`].
+/// combine uniform's `z`, scaled per view by [`FfxGlow::state_scale`].
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct FfxHazeMix(pub f32);
 
@@ -358,6 +380,25 @@ fn prepare_textures(
     }
 }
 
+/// The combine's `(x, y, z, w)` uniform for one view — the whole per-view scaling law in one
+/// pure function, so it can be tested without a render world.
+///
+/// - **x** — the zone glow weight, scaled by [`FfxGlow::gain_scale`]: authored *scene* data, so a
+///   portrait bake carries it at world parity (decision 0638) and only a UI model pane drops it,
+///   keeping the combine for its gamma decode alone.
+/// - **y/z** — the FFXDeath gate and the haze mix, both scaled by [`FfxGlow::state_scale`]: these
+///   are keyed on the **viewer's own state**, which the reference paints inside the WorldFrame and
+///   every UI frame composites over, so neither may reach a bake (decision 1481).
+/// - **w** — reserved.
+fn combine_uniform(zone_gain: f32, death: f32, haze: f32, glow: &FfxGlow) -> [f32; 4] {
+    [
+        zone_gain * glow.gain_scale,
+        death * glow.state_scale,
+        haze * glow.state_scale,
+        0.0,
+    ]
+}
+
 #[derive(Default)]
 struct FfxGlowNode;
 
@@ -377,13 +418,12 @@ impl ViewNode for FfxGlowNode {
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<FfxGlowPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        // The zone weight, scaled per view: 1× on the world (and the portrait bakes), 0× on a UI
-        // model pane, where the combine runs only for its gamma decode ([`FfxGlow::UI_PANE`]).
-        let gain = world.resource::<FfxGlowGain>().0 * glow.gain_scale;
-        let death = world.resource::<FfxDeathFade>().0;
-        // The haze mix, world-view only ([`FfxGlow::haze_scale`]): a booth bake never inherits
-        // the drunk/underwater screen blur.
-        let haze = world.resource::<FfxHazeMix>().0 * glow.haze_scale;
+        let uniform = combine_uniform(
+            world.resource::<FfxGlowGain>().0,
+            world.resource::<FfxDeathFade>().0,
+            world.resource::<FfxHazeMix>().0,
+            glow,
+        );
         let (Some(downsample), Some(gauss_h), Some(gauss_v), Some(combine)) = (
             pipeline_cache.get_render_pipeline(pipelines.downsample),
             pipeline_cache.get_render_pipeline(pipelines.gauss_h),
@@ -396,7 +436,7 @@ impl ViewNode for FfxGlowNode {
         world.resource::<RenderQueue>().write_buffer(
             &textures.gain_buf,
             0,
-            bytemuck::cast_slice(&[gain, death, haze, 0.0]),
+            bytemuck::cast_slice(&uniform),
         );
         let post = view_target.post_process_write();
         let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
@@ -518,5 +558,60 @@ impl Plugin for FfxGlowPlugin {
                     Node3d::Bloom,
                 ),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The zone glow is scene data — a portrait bake wants it at world parity (decision 0638) —
+    /// while the death and haze lanes are player state and must stop at the world view
+    /// (decision 1481). One preset table, checked as a whole so a new preset can't quietly join
+    /// the wrong side.
+    #[test]
+    fn only_the_world_view_carries_the_player_state_lanes() {
+        for (name, view) in [("BOOTH", FfxGlow::BOOTH), ("UI_PANE", FfxGlow::UI_PANE)] {
+            assert_eq!(view.state_scale, 0.0, "{name} must not carry player state");
+        }
+        assert_eq!(FfxGlow::WORLD.state_scale, 1.0);
+        // The glow half is unchanged by that law: a bake still glows like the world.
+        assert_eq!(FfxGlow::BOOTH.gain_scale, 1.0);
+        assert_eq!(FfxGlow::UI_PANE.gain_scale, 0.0);
+    }
+
+    /// B49: a released ghost's portrait baked through the FFXDeath combine and came back steel-blue
+    /// luma. The gate reaches the world view and nothing else — while the zone glow still does.
+    #[test]
+    fn a_ghosts_bake_is_not_death_combined() {
+        let (zone, ghost, sober) = (0.5, 1.0, 0.0);
+        assert_eq!(
+            combine_uniform(zone, ghost, sober, &FfxGlow::WORLD),
+            [0.5, 1.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            combine_uniform(zone, ghost, sober, &FfxGlow::BOOTH),
+            [0.5, 0.0, 0.0, 0.0],
+            "the booth keeps the zone glow and drops the death gate"
+        );
+        assert_eq!(
+            combine_uniform(zone, ghost, sober, &FfxGlow::UI_PANE),
+            [0.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    /// The control this refactor must not disturb: the drunk/underwater haze was already
+    /// world-only, and still is.
+    #[test]
+    fn a_drunk_players_bake_stays_sharp() {
+        let (zone, alive, drunk) = (0.5, 0.0, 1.0);
+        assert_eq!(
+            combine_uniform(zone, alive, drunk, &FfxGlow::WORLD),
+            [0.5, 0.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            combine_uniform(zone, alive, drunk, &FfxGlow::BOOTH),
+            [0.5, 0.0, 0.0, 0.0]
+        );
     }
 }

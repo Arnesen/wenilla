@@ -659,6 +659,15 @@ impl WorldSession {
         )
     }
 
+    /// Echo a cross-map worldport ack — the unsplit twin of [`WorldWriter::worldport_ack`]
+    /// (`MSG_MOVE_WORLDPORT_ACK`, empty body). Without it the server never runs
+    /// `HandleMoveWorldportAckOpcode`, so nothing on the destination map is ever streamed: no self
+    /// create block, and none of the arrival's own side effects (the `--mount-tele` probe's whole
+    /// subject — the mount strip a map that forbids mounting performs right there).
+    pub fn worldport_ack(&mut self) -> Result<()> {
+        self.send(opcode::MSG_MOVE_WORLDPORT_ACK, &[])
+    }
+
     /// **Acknowledge a granted mover mode** — root, water-walk, feather-fall or hover (the ack'd
     /// family; decision 0866) — the unsplit twin of [`WorldWriter::move_mode_ack`], for the
     /// `--death` probe: the server roots us at death, unroots and grants walk-on-water at release,

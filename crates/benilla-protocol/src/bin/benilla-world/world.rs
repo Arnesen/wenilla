@@ -386,6 +386,34 @@ impl World {
                 );
                 self.speed_changes_seen.push((*kind, *counter, *speed));
             }
+            // A cross-map port. Unacked, `HandleMoveWorldportAckOpcode` never runs, so the
+            // destination map streams NOTHING — no self create, and none of the arrival's own
+            // side effects (`--mount-tele`'s subject: the mount strip a map that forbids mounting
+            // performs right there). The tracked set is deliberately NOT purged here: the ack for
+            // whatever the arrival sends needs a pose, and ours is the landing point the packet
+            // just gave us.
+            SessionEvent::Worldport {
+                map_id,
+                position,
+                orientation,
+                needs_ack,
+            } => {
+                self.self_map = *map_id;
+                if let Some(t) = self.tracked.get_mut(&self.self_guid) {
+                    t.position = *position;
+                    t.orientation = *orientation;
+                }
+                if *needs_ack {
+                    session.worldport_ack()?;
+                }
+                println!(
+                    "SMSG_NEW_WORLD: map {map_id} at ({:.1}, {:.1}, {:.1}){}",
+                    position[0],
+                    position[1],
+                    position[2],
+                    if *needs_ack { " — ack sent" } else { "" }
+                );
+            }
             SessionEvent::Teleport {
                 guid,
                 counter,

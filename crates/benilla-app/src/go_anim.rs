@@ -774,11 +774,27 @@ fn drive_go_collision(
 /// head, a loop wrap fires tail-then-head — and a frozen rate-0 leg never advances, so it never
 /// fires.
 fn fire_go_anim_events(
-    gos: Query<(Entity, &ModelAnimations, &AnimationPlayer), With<GoAnim>>,
+    gos: Query<
+        (
+            Entity,
+            &ModelAnimations,
+            &AnimationPlayer,
+            Has<benilla_world::rig_anim::AnimParked>,
+        ),
+        With<GoAnim>,
+    >,
     mut last: Local<crate::creature_anim::TrackMemory>,
     mut out: MessageWriter<AnimSoundEvent>,
 ) {
-    for (entity, anims, player) in &gos {
+    for (entity, anims, player, parked) in &gos {
+        // The election's tick half, GO twin (decision 1482): a parked GO's event track is not
+        // scanned — and there is no `MORE_AUDIBLE` exception here, because the flag lives on
+        // CREATURE templates only (the reference's re-link arm reads the creature query cache).
+        // Memory dropped so a wake re-arms instead of scanning the parked gap as one crossing.
+        if parked {
+            last.remove(&entity);
+            continue;
+        }
         let playing = anims
             .clips
             .iter()

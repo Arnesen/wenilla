@@ -194,6 +194,19 @@ impl NameCache {
         }
     }
 
+    /// The cached creature template's `type_flags` for a live guid — read-only, no query on a
+    /// miss. `None` = not a creature guid, or its template answer hasn't landed; the caller that
+    /// exists for (the parked-event gate, decision 1482) fails CLOSED on `None`, exactly as the
+    /// reference's `0x623b70` does on a null cached query record.
+    pub(crate) fn peek_type_flags(&self, guid_val: u64) -> Option<u32> {
+        if guid::pet_number(guid_val).is_some() || !guid::is_creature_or_pet(guid_val) {
+            return None; // a pet's cache entry is name-only; players/GOs carry no template flags
+        }
+        self.creatures
+            .get(&guid::entry(guid_val)?)
+            .and_then(|n| n.as_ref().map(|r| r.type_flags))
+    }
+
     /// Record a player-name answer. An empty wire name means the server doesn't know the guid —
     /// cached as a negative answer.
     ///

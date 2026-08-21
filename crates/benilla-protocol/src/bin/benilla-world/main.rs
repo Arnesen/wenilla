@@ -22,9 +22,9 @@ use benilla_protocol::{decode, EntityKind, WorldSession, WORLD_PORT};
 use clap::Parser;
 
 use probes::{
-    Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, OpenItem, Probe,
-    QueryNames, Quest, QuestItem, QuestLog, QuestTimer, Speed, Spells, Spirit, SwapPackSlots,
-    UsePackSlot, Vendor, WorldState,
+    Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, MountTele,
+    OpenItem, Probe, QueryNames, Quest, QuestItem, QuestLog, QuestTimer, Speed, Spells, Spirit,
+    SwapPackSlots, UsePackSlot, Vendor, WorldState,
 };
 use world::{DeathArc, Tracked, World};
 
@@ -181,6 +181,19 @@ struct Cli {
     /// GM account (the deploy's probes are gmlevel 6).
     #[arg(long)]
     speed: bool,
+
+    /// Live-verify what the server sends when a teleport DISMOUNTS you (B213, decision 1478):
+    /// `.aura 458` (Brown Horse — a real `SPELL_AURA_MOUNTED` holder, unlike `.modify mount`),
+    /// require the mounted `SMSG_FORCE_RUN_SPEED_CHANGE`, then `.go xyz` into Ragefire Chasm
+    /// (map 389 — a dungeon, so `MapEntry::IsMountAllowed()` is false) and require, in this order:
+    /// `SMSG_NEW_WORLD`, our own create block on the new map **still carrying the mount's** run
+    /// speed (vmangos sends it from `Map::Add` → `SendInitSelf`), and then the strip's
+    /// `SMSG_FORCE_RUN_SPEED_CHANGE` back at 7.0 — printing the gap between the two. Both are
+    /// written by one `HandleMoveWorldportAckOpcode` call, which is why a client draining its
+    /// socket once a frame sees them in a single drain. Leaves the character unmounted and back on
+    /// map 0. Needs a GM account (the deploy's probes are gmlevel 6); pair with `--seconds 30`+.
+    #[arg(long)]
+    mount_tele: bool,
 
     /// Live-verify the aura wire (decision 0255 phase 1): GM-apply Mark of the Wild (1126, a
     /// cancelable buff) and Shadow Word: Pain (589, a periodic-damage DoT, unambiguously negative)
@@ -397,6 +410,9 @@ fn main() -> Result<()> {
     }
     if cli.speed {
         probes.push(Box::new(Speed::default()));
+    }
+    if cli.mount_tele {
+        probes.push(Box::new(MountTele::default()));
     }
     if cli.death {
         probes.push(Box::new(Death::default()));

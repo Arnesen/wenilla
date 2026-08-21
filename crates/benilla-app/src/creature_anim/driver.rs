@@ -423,11 +423,10 @@ pub(super) fn drive_animations(
     let catalog = anim_data.as_deref().map(|d| &d.0);
     // `WOW_ANIM_COST=1` — the memo-sizing counter (1370 item 9's bracket): counts the frame's
     // RESTING rows, the shape an input-memo fast path would skip. Sizing only — no skip is
-    // taken here. (An `AnimParked` filter was law-barred by 0448's off-screen-events law; that
-    // law's premise — "the reference keeps every off-screen unit audible" — fell with wow-re's
-    // election correction, which keeps only `MORE_AUDIBLE` creatures ticking. Until 1473's
-    // event-gate leg lands as its own record, the driver still arms clips for every parked
-    // unit, and the memo remains the only safe skip shape.)
+    // taken here. (The EVENT scan is 1482's to gate now — a parked unflagged unit's tracks go
+    // unscanned — but the driver still arms clips for every parked rig: the wake pose must be
+    // the absolute-clock pose of the RIGHT clip, and only the state machine knows which clip
+    // that is. The memo remains the only safe skip shape for these rows.)
     let anim_cost = anim_cost_enabled();
     let (mut cost_rows, mut cost_resting) = (0u32, 0u32);
     for (

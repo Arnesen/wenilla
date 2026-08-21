@@ -3,6 +3,7 @@
 //! and the creature path packet. Each `pub(super)` fn here is exactly one arm's body; the match at
 //! the call site stays the dispatcher, one call per arm.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use benilla_assets::coords::bevy_to_wow;
@@ -78,6 +79,7 @@ pub(super) fn object_create(
     transforms: &mut Query<&mut Transform>,
     stores: &mut Query<&mut ObjectStore>,
     pending: &mut HashMap<u64, ObjectFields>,
+    speed_stage: &mut SpeedStage,
     names: &mut NameCache,
     go_templates: &mut GameObjectTemplates,
     net_commands: &NetCommands,
@@ -175,8 +177,11 @@ pub(super) fn object_create(
         // Re-create of a tracked guid: refresh identity + pose. A create is a fresh server snapshot, so
         // any in-flight extrapolation is stale too — clear it.
         commands.entity(e).insert(net).remove::<RemoteMotion>();
+        // Speeds go through the drain's stage, never straight onto the entity — a
+        // `SMSG_FORCE_*_SPEED_CHANGE` riding the same tick as this create has to be able to land
+        // on top of it (decision 1478, B213).
         if let Some(s) = speeds {
-            commands.entity(e).insert(UnitSpeeds(s));
+            speed_stage.seed(guid, s);
         }
         if let Some(anchor) = transport_anchor {
             commands.entity(e).insert(anchor);
@@ -227,7 +232,7 @@ pub(super) fn object_create(
         // root's `Visibility` through `Mut` writes, which don't re-add the sweep row.
         entity.vis_chain_only();
         if let Some(s) = speeds {
-            entity.insert(UnitSpeeds(s));
+            speed_stage.seed(guid, s); // staged, like the re-create arm above (1478)
         }
         if let Some(anchor) = transport_anchor {
             entity.insert(anchor);
@@ -589,17 +594,55 @@ fn merge_fields(
     }
 }
 
-/// Write one speed-kind slot on a mover's speed set — the two speed arms' shared body (the
-/// extrapolator + the anim selector read the set).
-fn set_speed(
-    index: &GuidIndex,
-    speeds: &mut Query<&mut UnitSpeeds>,
-    guid: u64,
-    kind: SpeedKind,
-    speed: f32,
-) {
-    if let Some(s) = index.0.get(&guid).and_then(|&e| speeds.get_mut(e).ok()) {
-        let s = &mut s.into_inner().0;
+/// Per-drain staging for every mover's [`UnitSpeeds`] — the drain's single speed writer
+/// (decision 1478).
+///
+/// The two speed sources used to disagree about *when* they land. [`object_create`] inserts a whole
+/// speed set through `Commands`, which is deferred to the drain's sync point; a
+/// `SMSG_FORCE_*_SPEED_CHANGE` edited one slot of the live component immediately. Mixed in one
+/// drain, the **later packet loses** either way: on an entity born this drain the component isn't
+/// there yet so the query miss was silent, and on one that already existed the create's deferred
+/// insert landed afterwards and overwrote it.
+///
+/// vmangos puts exactly those two packets back to back on purpose. `HandleMoveWorldportAckOpcode`
+/// sends the self create block inside `Map::Add` → `SendInitSelf` (carrying the speeds the player
+/// still has) and then, three statements later, strips the mount on a map that forbids one
+/// (`if (!mEntry->IsMountAllowed()) RemoveSpellsCausingAura(SPELL_AURA_MOUNTED)`) — whose
+/// `SMSG_FORCE_RUN_SPEED_CHANGE` therefore rides the same tick, and so the same drain. That is
+/// B213: `.tele` into BWL/LBRS on a mount auto-dismounted you and left the mount's run speed on
+/// foot, because the create's 11.2 yd/s landed last.
+///
+/// So both sources stage here instead, **in packet order**, and the drain flushes once at the end —
+/// the `pending: HashMap<u64, ObjectFields>` pattern (decision 0061) applied to speeds. Nothing
+/// writes the component directly any more, which is what makes the order the wire's order.
+#[derive(Default)]
+pub(super) struct SpeedStage(HashMap<u64, MoveSpeeds>);
+
+impl SpeedStage {
+    /// A create block's whole speed set. A create is the server's newest snapshot of the mover, so
+    /// it **replaces** anything staged for that guid rather than merging into it.
+    fn seed(&mut self, guid: u64, speeds: MoveSpeeds) {
+        self.0.insert(guid, speeds);
+    }
+
+    /// Write one speed-kind slot, seeding the staged set from the live component on first touch.
+    /// `live` is only called when nothing is staged yet; `None` from it means there is nowhere to
+    /// write — an untracked guid, or a mover whose create carried no movement block — and the
+    /// change is reported unapplied rather than silently dropped.
+    fn set(
+        &mut self,
+        guid: u64,
+        kind: SpeedKind,
+        speed: f32,
+        live: impl FnOnce() -> Option<MoveSpeeds>,
+    ) -> bool {
+        let s = match self.0.entry(guid) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => match live() {
+                Some(s) => v.insert(s),
+                None => return false,
+            },
+        };
         match kind {
             SpeedKind::Walk => s.walk = speed,
             SpeedKind::Run => s.run = speed,
@@ -608,10 +651,31 @@ fn set_speed(
             SpeedKind::SwimBack => s.swim_back = speed,
             SpeedKind::TurnRate => s.turn_rate = speed,
         }
+        true
+    }
+
+    /// Land every staged set on its entity, now that this drain's spawn `Command`s have run.
+    /// `try_insert`: the same drain may have queued a despawn for it (a stream-out, the worldport
+    /// purge), and a guid the purge dropped from the index resolves to nothing at all.
+    pub(super) fn flush(self, commands: &mut Commands, index: &GuidIndex) {
+        for (guid, speeds) in self.0 {
+            if let Some(&e) = index.0.get(&guid) {
+                commands.entity(e).try_insert(UnitSpeeds(speeds));
+            }
+        }
     }
 }
 
-/// A forced speed change on a mover (aura/mount/GM `.modify speed`): apply the new value to the
+/// Read a mover's live speed set — [`SpeedStage::set`]'s seed for a mover that already exists.
+fn live_speeds(index: &GuidIndex, speeds: &Query<&UnitSpeeds>, guid: u64) -> Option<MoveSpeeds> {
+    index
+        .0
+        .get(&guid)
+        .and_then(|&e| speeds.get(e).ok())
+        .map(|s| s.0)
+}
+
+/// A forced speed change on a mover (aura/mount/GM `.modify speed`): stage the new value onto the
 /// entity's speed set, and — when the mover is our own player — forward to the controller, which
 /// answers the mandatory ack with its live pose (the TeleportMessage pattern). An unknown guid
 /// still acks if it's ours-by-guid; a foreign mover (we never control others) is only applied,
@@ -623,13 +687,23 @@ pub(super) fn force_speed_change(
     counter: u32,
     speed: f32,
     index: &GuidIndex,
-    speeds: &mut Query<&mut UnitSpeeds>,
+    speeds: &Query<&UnitSpeeds>,
+    stage: &mut SpeedStage,
     self_guid: &SelfGuid,
     speed_changes: &mut MessageWriter<SpeedChangeMessage>,
 ) {
-    set_speed(index, speeds, guid, kind, speed);
+    let applied = stage.set(guid, kind, speed, || live_speeds(index, speeds, guid));
     if self_guid.0 == Some(guid) {
         info!("net: force {kind:?} speed change -> {speed} yd/s (counter {counter})");
+        // Our own mover having no speed set to write is B213's failure shape, and it was silent
+        // for as long as it existed. It should be unreachable now that the create stages too —
+        // so if it ever fires, the next report starts from a line instead of from a guess.
+        if !applied {
+            warn!(
+                "net: force {kind:?} speed change for OUR mover {guid:#x} landed nowhere \
+                 (no speed set staged or live) — we still ack, so the server and we now disagree"
+            );
+        }
         speed_changes.write(SpeedChangeMessage {
             guid,
             kind,
@@ -637,19 +711,142 @@ pub(super) fn force_speed_change(
             speed,
         });
     } else {
-        debug!("net: force speed change for foreign mover {guid:#x} — applied, no ack");
+        debug!("net: force speed change for foreign mover {guid:#x} — applied {applied}, no ack");
     }
 }
 
 /// An observed unit's speed changed (the SPLINE_SET / MOVE_SET families — another player
-/// mounting up, a hastened creature): apply to its speed set, nothing to ack (decision 0441).
-/// The MOVE_SET flavour's pose already arrived as its own UnitMove.
+/// mounting up, a hastened creature): stage it onto that unit's speed set, nothing to ack
+/// (decision 0441). The MOVE_SET flavour's pose already arrived as its own UnitMove.
 pub(super) fn speed_changed(
     guid: u64,
     kind: SpeedKind,
     speed: f32,
     index: &GuidIndex,
-    speeds: &mut Query<&mut UnitSpeeds>,
+    speeds: &Query<&UnitSpeeds>,
+    stage: &mut SpeedStage,
 ) {
-    set_speed(index, speeds, guid, kind, speed);
+    if !stage.set(guid, kind, speed, || live_speeds(index, speeds, guid)) {
+        // Ordinary: a unit's speed broadcast can outrun its create block. Nothing to ack and the
+        // create that follows carries the same set, so this self-heals.
+        debug!("net: {kind:?} speed change for untracked mover {guid:#x} — nothing to write");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: u64 = 0x0000_0000_0000_002A;
+
+    /// A dismounted human's set — 1.12.1's base run 7.0 (the `--speed` probe's own golden).
+    fn on_foot() -> MoveSpeeds {
+        MoveSpeeds {
+            walk: 2.5,
+            run: 7.0,
+            run_back: 4.5,
+            swim: 4.722_222,
+            swim_back: 2.5,
+            turn_rate: std::f32::consts::PI,
+        }
+    }
+
+    /// The same set with a 60% mount's run speed on it — what `SendInitSelf` puts in the create
+    /// block of a worldport that is *about* to strip the mount.
+    fn mounted() -> MoveSpeeds {
+        MoveSpeeds {
+            run: 11.2,
+            ..on_foot()
+        }
+    }
+
+    /// **B213, pinned.** vmangos's `HandleMoveWorldportAckOpcode` sends the self create block
+    /// (`Map::Add` → `SendInitSelf`, still carrying the mount's 11.2 yd/s) and then, three
+    /// statements later, strips the mount because the destination map forbids one — so
+    /// `SMSG_FORCE_RUN_SPEED_CHANGE` 7.0 rides the same tick and lands in the same drain.
+    /// Staged in packet order the change wins; before 1478 the create's *deferred* `UnitSpeeds`
+    /// insert landed last and `.tele` into BWL left the avatar running at mount speed on foot.
+    #[test]
+    fn a_force_change_beats_a_create_from_the_same_drain() {
+        let mut stage = SpeedStage::default();
+        stage.seed(ME, mounted());
+        assert!(stage.set(ME, SpeedKind::Run, 7.0, || panic!(
+            "the create staged a set this drain — the live component must not be consulted"
+        )));
+        stage.flush_into(|guid, s| {
+            assert_eq!(guid, ME);
+            assert_eq!(s.run, 7.0, "the dismount is the newer packet");
+            assert_eq!(
+                s.walk, 2.5,
+                "the other slots still come from the create block"
+            );
+        });
+    }
+
+    /// The reverse order is just as much the wire's order: a create block is the server's newest
+    /// snapshot of the mover, so one arriving *after* a change replaces it whole rather than
+    /// merging under it.
+    #[test]
+    fn a_create_after_a_change_replaces_it() {
+        let mut stage = SpeedStage::default();
+        assert!(stage.set(ME, SpeedKind::Run, 7.0, || Some(mounted())));
+        stage.seed(ME, mounted());
+        stage.flush_into(|_, s| assert_eq!(s.run, 11.2));
+    }
+
+    /// Nothing staged yet (an entity that has existed since an earlier drain): the live component
+    /// seeds the cell, so a one-slot change keeps every other slot it isn't addressing.
+    #[test]
+    fn a_change_on_a_live_mover_seeds_from_the_component() {
+        let mut stage = SpeedStage::default();
+        assert!(stage.set(ME, SpeedKind::Run, 11.2, || Some(on_foot())));
+        stage.flush_into(|_, s| {
+            assert_eq!(s.run, 11.2);
+            assert_eq!(s.run_back, on_foot().run_back);
+            assert_eq!(s.turn_rate, on_foot().turn_rate);
+        });
+    }
+
+    /// A change with nowhere to land — an untracked guid, or a mover whose create carried no
+    /// movement block — reports itself unapplied rather than vanishing. It stages nothing, so a
+    /// later create can't inherit a slot invented for a set that never existed.
+    #[test]
+    fn a_change_with_no_speed_set_is_reported_not_swallowed() {
+        let mut stage = SpeedStage::default();
+        assert!(!stage.set(ME, SpeedKind::Run, 7.0, || None));
+        let mut flushed = 0;
+        stage.flush_into(|_, _| flushed += 1);
+        assert_eq!(flushed, 0);
+    }
+
+    /// The trap itself, machine-checked rather than asserted in prose: a component inserted
+    /// through this drain's `Commands` is **not** visible to a query in the same drain — the spawn
+    /// only runs at the sync point. That is why staging is the fix and why a live-component write
+    /// could never have been the fix: the force-change arm had nothing to write onto.
+    #[test]
+    fn a_component_this_drain_queued_is_invisible_until_the_sync_point() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let missed = world
+            .run_system_once(|mut commands: Commands, live: Query<&UnitSpeeds>| {
+                let e = commands.spawn(UnitSpeeds(mounted())).id();
+                live.get(e).is_err()
+            })
+            .expect("the probe system runs");
+        assert!(
+            missed,
+            "a create's UnitSpeeds must be unreadable later in the same drain — if this ever \
+             passes, `Commands` stopped being deferred and 1478's staging can be reconsidered"
+        );
+    }
+
+    impl SpeedStage {
+        /// [`SpeedStage::flush`] without the ECS half — the staged sets in the shape the flush
+        /// would insert them, so the ordering rules above are testable as the pure thing they are.
+        fn flush_into(self, mut f: impl FnMut(u64, MoveSpeeds)) {
+            for (guid, speeds) in self.0 {
+                f(guid, speeds);
+            }
+        }
+    }
 }

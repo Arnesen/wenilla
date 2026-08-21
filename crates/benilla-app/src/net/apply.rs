@@ -300,7 +300,9 @@ pub(super) fn apply_net_updates(
         ResMut<crate::ui_aura::AuraDurations>,
         Res<Time<Real>>,
         Res<super::PingShared>,
-        Query<&mut super::UnitSpeeds>,
+        // READ-only: every write to a mover's speed set goes through this drain's
+        // `objects::SpeedStage` and lands in one flush at the end (decision 1478).
+        Query<&super::UnitSpeeds>,
         // The PlayAnimation call-order counter (`creature_anim::PlaySeq`): every
         // animation-bearing message this drain emits stamps `next()`, in packet order.
         ResMut<crate::creature_anim::PlaySeq>,
@@ -378,6 +380,10 @@ pub(super) fn apply_net_updates(
     // This also removes a latent clobber: a plain per-delta `insert` on a not-yet-spawned entity would
     // overwrite an earlier partial rather than merge it (decision 0061).
     let mut pending: HashMap<u64, ObjectFields> = HashMap::new();
+    // The same deferral trap for movers' speeds, and the one B213 fell into: a create's
+    // `UnitSpeeds` insert is a Command, so a `SMSG_FORCE_*_SPEED_CHANGE` arriving later in this
+    // same drain could not land on top of it. Both stage here in packet order (decision 1478).
+    let mut speed_stage = objects::SpeedStage::default();
     for ev in events.0.try_iter() {
         match ev {
             SessionEvent::LoginStage { stage } => session::login_stage(stage, &mut login_stages),
@@ -479,6 +485,7 @@ pub(super) fn apply_net_updates(
                     &mut transforms,
                     &mut stores,
                     &mut pending,
+                    &mut speed_stage,
                     &mut names,
                     &mut go_templates,
                     &net_commands,
@@ -1369,12 +1376,13 @@ pub(super) fn apply_net_updates(
                 counter,
                 speed,
                 &index,
-                &mut aura.3,
+                &aura.3,
+                &mut speed_stage,
                 &self_guid,
                 &mut speed_changes,
             ),
             SessionEvent::SpeedChanged { guid, kind, speed } => {
-                objects::speed_changed(guid, kind, speed, &index, &mut aura.3)
+                objects::speed_changed(guid, kind, speed, &index, &aura.3, &mut speed_stage)
             }
             // ── The mount arc (decision 0441) — arm bodies in `mount` ─────────────────────────
             SessionEvent::MountResult { mount, code } => {
@@ -1453,6 +1461,9 @@ pub(super) fn apply_net_updates(
             commands.entity(e).insert(ObjectStore(fields));
         }
     }
+    // And the movers' speed sets, for the same reason (decision 1478) — one insert each, carrying
+    // the create block and every force-change this drain saw, folded in the order they arrived.
+    speed_stage.flush(&mut commands, &index);
 }
 
 /// Tag our own player's streamed entity with [`SelfPlayer`] once we know our guid — by matching the

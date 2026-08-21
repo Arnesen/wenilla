@@ -184,22 +184,32 @@ pub fn rig_cost_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_RIG_COST").is_some())
 }
 
-/// `Arc::make_mut` on the shared rows, timing the calls that actually deep-copy: between a
-/// publish and the frame's first write the extract holds a second reference, so that write
-/// clones the whole ~6.3 MB vec. A static helper (not a method) so call sites keep their
-/// split-field borrows.
+/// Copy-on-write on the shared rows, timing the calls that actually copy: between a publish and
+/// the frame's first write the extract holds a second reference, so that write must clone. A
+/// static helper (not a method) so call sites keep their split-field borrows.
+///
+/// **The clone is bounded by the bone watermark, never the capacity** (decision 1479).
+/// `Arc::make_mut` cloned the whole 3×131072-row vec — ~6.3 MB, once per frame, at every spot in
+/// the world, however few rigs were awake (1473's fixed-tax finding). A fresh zeroed vec is a
+/// calloc — the kernel hands back zero pages untouched — so the real cost is the live-prefix
+/// memcpy alone: ~250 KB at a busy pin. Everything at or above the watermark is bitwise zero by
+/// invariant (see [`RigPalettes::bone_watermark`]), so the prefix IS the whole content.
 fn rows_make_mut<'a>(
     rows: &'a mut Arc<Vec<[f32; 4]>>,
+    watermark_bones: u32,
     copies: &mut u32,
     copy_us: &mut f32,
 ) -> &'a mut Vec<[f32; 4]> {
     if Arc::strong_count(rows) > 1 || Arc::weak_count(rows) > 0 {
         let t = std::time::Instant::now();
-        let out = Arc::make_mut(rows);
+        let live = 3 * watermark_bones as usize;
+        let mut new = vec![[0.0f32; 4]; rows.len()];
+        new[..live].copy_from_slice(&rows[..live]);
+        *rows = Arc::new(new);
         *copy_us += t.elapsed().as_secs_f32() * 1e6;
         *copies += 1;
-        return out;
     }
+    // Sole owner here either way: no clone left to happen.
     Arc::make_mut(rows)
 }
 
@@ -237,6 +247,21 @@ pub(crate) fn rebase_origin(root_world: Vec3) -> Vec3 {
 
 impl RigPalettes {
     /// Claim a slot + a bone range for a rig. `None` when either slab is exhausted — the caller
+    /// The bone offset above which every row is bitwise ZERO — the COW clone's bound (1479).
+    ///
+    /// The invariant, and why it holds: [`Self::alloc`] is first-fit over a sorted, coalescing
+    /// free list, so allocations pack low; [`Self::free`] zeroes the rows it returns **before**
+    /// the range re-enters the free list (its own `rows_make_mut` call still counts the range as
+    /// live, so the zeroing lands inside the copied prefix); and rows above everything ever
+    /// allocated are zeros from construction. So a tail free range that touches capacity is all
+    /// zeros, and its base bounds the content.
+    fn bone_watermark(&self) -> u32 {
+        match self.free_ranges.last() {
+            Some(&(base, len)) if base + len == MAX_PALETTE_BONES as u32 => base,
+            _ => MAX_PALETTE_BONES as u32,
+        }
+    }
+
     /// warns and falls back to the static (bind-pose) mesh, graceful and visible in the log
     /// rather than wrong.
     pub(crate) fn alloc(&mut self, bones: u32) -> Option<(u16, u32)> {
@@ -287,8 +312,12 @@ impl RigPalettes {
         self.free_slots.push(slot);
         self.live_bones -= len;
         self.table_generation += 1;
+        // Watermark BEFORE the range re-enters the free list — the zeroing below must land
+        // inside the copied prefix (the invariant's own ordering, [`Self::bone_watermark`]).
+        let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -353,8 +382,10 @@ impl RigPalettes {
         let n = (joints.len().min(ibp.len()) as u32).min(rig.len);
         self.cost_rows += n;
         self.set_origin(slot, origin);
+        let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -395,8 +426,10 @@ impl RigPalettes {
         let (slot, base) = (rig.slot, rig.base);
         self.cost_rows += n;
         self.set_origin(slot, origin);
+        let wm = self.bone_watermark();
         let rows = rows_make_mut(
             &mut self.rows,
+            wm,
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -1003,6 +1036,65 @@ mod tests {
         assert_eq!(p.rows[3 * base as usize], [0.0; 4]);
         // The free is a dirty range too — the GPU mirror zeroes with us.
         assert!(p.dirty.contains(&(base, 2, false)));
+    }
+
+    /// The COW clone copies the live prefix and nothing else (decision 1479): a shared-Arc write
+    /// used to `Arc::make_mut` all 3×131072 rows — ~6.3 MB, once per frame, wherever any rig
+    /// wrote — where the bone watermark bounds the content. The invariant it leans on is pinned
+    /// here too: rows at or above the watermark are bitwise zero, through alloc, write, free and
+    /// coalesce — including free()'s own ordering (watermark before the range re-enters the
+    /// list, so the zeroing lands inside the copied prefix).
+    #[test]
+    fn a_shared_arc_write_copies_only_the_live_prefix() {
+        let mut p = RigPalettes::default();
+        let (_s1, b1) = p.alloc(2).unwrap();
+        let (s2, b2) = p.alloc(3).unwrap();
+        for r in 3 * b1 as usize..3 * (b1 + 2) as usize {
+            Arc::make_mut(&mut p.rows)[r] = [1.0; 4];
+        }
+        for r in 3 * b2 as usize..3 * (b2 + 3) as usize {
+            Arc::make_mut(&mut p.rows)[r] = [2.0; 4];
+        }
+        assert_eq!(p.bone_watermark(), 5, "first-fit packs the content low");
+        // The extract's held reference — the shared state every first-write-of-a-frame sees.
+        let held = p.rows.clone();
+        let wm = p.bone_watermark();
+        let rows = rows_make_mut(&mut p.rows, wm, &mut p.cost_copies, &mut p.cost_copy_us);
+        rows[0] = [9.0; 4];
+        assert_eq!(p.cost_copies, 1, "the shared write copied");
+        assert_eq!(
+            p.rows[3 * b2 as usize],
+            [2.0; 4],
+            "the neighbour survived the prefix copy"
+        );
+        assert_eq!(held[0], [1.0; 4], "the held (extracted) side is untouched");
+        // Free the top rig while shared again: the zeroing must land inside the copied prefix.
+        let held2 = p.rows.clone();
+        p.free(s2);
+        assert_eq!(
+            p.rows[3 * b2 as usize],
+            [0.0; 4],
+            "freed rows zeroed through the COW"
+        );
+        assert_eq!(
+            held2[3 * b2 as usize],
+            [2.0; 4],
+            "the held side keeps the old frame"
+        );
+        assert_eq!(
+            p.bone_watermark(),
+            2,
+            "the tail grew back down to the live rig"
+        );
+        // A fresh shared write after the shrink still carries the survivor whole.
+        let _held3 = p.rows.clone();
+        let wm = p.bone_watermark();
+        let rows = rows_make_mut(&mut p.rows, wm, &mut p.cost_copies, &mut p.cost_copy_us);
+        rows[1] = [7.0; 4];
+        assert_eq!(
+            p.rows[0], [9.0; 4],
+            "the live rig's rows survive every bounded copy"
+        );
     }
 
     #[test]
