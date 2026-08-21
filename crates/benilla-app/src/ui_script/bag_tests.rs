@@ -115,12 +115,19 @@ fn backpack_toggle_plays_open_and_close_kits() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The 'B' binding / backpack button opens or closes EVERY bag at once (ref ToggleBackpack), not
-/// just the backpack: an equipped bag (here bag 2) opens alongside it, while empty bag slots (1,3,4
-/// — no container, GetContainerNumSlots == 0) stay shut. A second toggle closes them all. And ESC's
-/// CloseAllWindows must sweep all of them, not only the backpack.
+/// **B / the backpack button open the BACKPACK ALONE** (ref ToggleBackpack, ContainerFrame.lua
+/// l.67-82) — the director's report, and the fix in 1494. Until then both ran an all-bags toggle
+/// and an equipped bag came up beside the backpack every time.
+///
+/// The reference's shape is deliberately asymmetric, and all three arms are pinned here:
+///   * shut → `ToggleBag(0)`: bag 0 and nothing else, however many bags are equipped;
+///   * bag 0 OPEN → hide every container window there is (the close arm is the all-bags one);
+///   * bag 0 shut but ANOTHER bag open → the condition reads bag 0 specifically, so this is still
+///     the open arm: the backpack joins the open bag rather than closing it.
+///
+/// ESC's CloseAllWindows must still sweep all of them.
 #[test]
-fn b_toggles_all_bags_open_and_closed() {
+fn b_opens_the_backpack_alone_and_closes_every_bag() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
@@ -151,40 +158,141 @@ fn b_toggles_all_bags_open_and_closed() {
     let shown =
         |s: &mut UiScript, name: &str| s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap();
 
-    // Toggle open: backpack + bag 2 open; the empty slots do not.
+    // Toggle open: the BACKPACK, and only the backpack — bag 2 is equipped and stays shut.
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
     assert!(shown(&mut s, "BenillaBagFrame"), "backpack opens");
     assert!(
-        shown(&mut s, "BenillaBagFrame2"),
-        "the equipped bag opens too"
+        !shown(&mut s, "BenillaBagFrame2"),
+        "the equipped bag stays shut — this is the backpack's own toggle, not open-all"
     );
+    assert!(
+        !shown(&mut s, "BenillaBagFrame1")
+            && !shown(&mut s, "BenillaBagFrame3")
+            && !shown(&mut s, "BenillaBagFrame4"),
+        "and the empty slots have no window to show either way"
+    );
+
+    // The close arm IS the all-bags one: with bag 2 also open by some other path, one toggle
+    // takes the lot down.
+    s.run("ToggleBag(2)").unwrap();
+    assert!(shown(&mut s, "BenillaBagFrame2"));
+    s.run("BenillaBagToggle_OnClick()").unwrap();
+    let _ = s.take_sounds();
+    assert!(
+        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
+        "bag 0 open ⇒ the toggle hides every container window"
+    );
+
+    // Bag 0 shut, bag 2 open: the ref's condition reads bag 0, so this is the OPEN arm — the
+    // backpack joins the bag already up instead of closing it.
+    s.run("ToggleBag(2)").unwrap();
+    s.run("BenillaBagToggle_OnClick()").unwrap();
+    let _ = s.take_sounds();
+    assert!(
+        shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"),
+        "with only another bag open, B opens the backpack beside it"
+    );
+
+    // ESC's CloseAllWindows sweeps every open bag, not just the backpack.
+    s.run("CloseAllWindows()").unwrap();
+    assert!(
+        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
+        "CloseAllWindows hides every bag window"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **SHIFT-B / a shift-click on the backpack button open ALL of them** (ref OpenAllBags,
+/// ContainerFrame.lua l.662-700) — the other half of the split 1494 restored. It is a TOGGLE, and
+/// its arms are decided by a COUNT, not by "is anything open":
+///   * anything less than everything open → open the lot (the backpack plus each equipped bag);
+///   * everything already open → the counting pass IS the close;
+///   * `forceOpen` → always the open arm (what a vendor window would pass).
+///
+/// The keyring is swept by the counting pass but never counted and never opened — the reference's
+/// own `GetID() ~= KEYRING_CONTAINER` exclusion.
+#[test]
+fn shift_b_toggles_every_bag_at_once() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "BagFrame.xml");
+    s.set_money(0);
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots: std::collections::HashMap::new(),
+        }),
+    );
+    s.set_container(
+        2,
+        Some(ContainerState {
+            name: Some("Small Pouch".into()),
+            num_slots: 6,
+            slots: std::collections::HashMap::new(),
+        }),
+    );
+    let shown =
+        |s: &mut UiScript, name: &str| s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap();
+
+    // From nothing open: the backpack AND the equipped bag; the empty slots have no window.
+    s.run("OpenAllBags()").unwrap();
+    let _ = s.take_sounds();
+    assert!(shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"));
     assert!(
         !shown(&mut s, "BenillaBagFrame1")
             && !shown(&mut s, "BenillaBagFrame3")
             && !shown(&mut s, "BenillaBagFrame4"),
         "empty bag slots (no container) have no window to show"
     );
+    assert!(
+        !shown(&mut s, "BenillaKeyRingFrame"),
+        "the keyring is not one of your bags — open-all never opens it"
+    );
 
-    // Toggle again: every open bag closes.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    // Everything open ⇒ the next one closes the lot.
+    s.run("OpenAllBags()").unwrap();
+    let _ = s.take_sounds();
+    assert!(!shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"));
+
+    // PARTIAL is the open arm, not the close arm — the count is what decides. Backpack alone up
+    // (1 of 2) ⇒ open-all still opens rather than closing what is there.
+    s.run("ToggleBag(0)").unwrap();
+    s.run("OpenAllBags()").unwrap();
+    let _ = s.take_sounds();
+    assert!(
+        shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"),
+        "1 of 2 open is not 'all open': the lot opens"
+    );
+
+    // An open keyring rides the sweep down without ever counting toward "all open" — so this
+    // still reads 2-of-2 and closes.
+    s.run("ToggleKeyRing()").unwrap();
+    assert!(shown(&mut s, "BenillaKeyRingFrame"));
+    s.run("OpenAllBags()").unwrap();
     let _ = s.take_sounds();
     assert!(
         !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
-        "the second toggle closes them all"
+        "the keyring does not count as an open bag"
+    );
+    assert!(
+        !shown(&mut s, "BenillaKeyRingFrame"),
+        "…but it IS swept by the same pass"
     );
 
-    // ESC's CloseAllWindows sweeps every open bag, not just the backpack.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    // forceOpen skips the close arm: from all-open, everything stays open.
+    s.run("OpenAllBags(1)").unwrap();
+    s.run("OpenAllBags(1)").unwrap();
     let _ = s.take_sounds();
     assert!(
-        shown(&mut s, "BenillaBagFrame2"),
-        "reopened for the ESC check"
-    );
-    s.run("CloseAllWindows()").unwrap();
-    assert!(
-        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
-        "CloseAllWindows hides every bag window"
+        shown(&mut s, "BenillaBagFrame") && shown(&mut s, "BenillaBagFrame2"),
+        "forceOpen means open, never toggle"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -223,8 +331,9 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
             .unwrap()
     };
 
-    // Open-all: the backpack button and the equipped bag's slot light; the empty slots don't.
-    s.run("BenillaBagToggle_OnClick()").unwrap();
+    // Open-all (SHIFT-B's knob since 1494 — the backpack button alone would light only its own
+    // ring now): the backpack button and the equipped bag's slot light; the empty slots don't.
+    s.run("OpenAllBags()").unwrap();
     assert!(
         checked(&mut s, "MainMenuBarBackpackButton"),
         "backpack ring lights"
@@ -1944,7 +2053,7 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     )
     .unwrap();
 
-    // The button's own OnClick path — what the 'B' binding and the backpack button both run.
+    // The button's own OnClick path — what the B binding and a plain backpack-button click run.
     s.run("BenillaBagToggle_OnClick()").unwrap();
 
     assert_eq!(
@@ -2022,13 +2131,15 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
 
 /// The backpack button's checked law after the stated divergence (BenillaBagToggle_OnClick's
 /// comment): checked belongs to the WINDOWS' OnShow/OnHide writes, and the button's XML click
-/// wrapper only undoes the CheckButton widget's pre-handler flip. The killer case is the click
-/// that never touches the backpack window — backpack shut, another bag's window open →
-/// ToggleBackpack sees an open window and CLOSES ALL; the backpack never transitions, nothing
-/// writes its button, and only the wrapper's undo keeps the widget flip from leaving it
-/// lit-while-shut (the job the ref's native-window scan tail used to do).
+/// wrapper only undoes the CheckButton widget's pre-handler flip.
+///
+/// Driven through REAL input (the widget flip fires only on real clicks) over the case 1494
+/// changed: backpack shut with another bag's window open. That used to be the close-all arm —
+/// nothing transitioned the backpack and only the undo kept the button from ending lit-while-shut.
+/// It is now the OPEN arm, so the pin runs the whole cycle: the click opens bag 0 beside bag 1 and
+/// its OnShow lights the button, the next click closes everything and the OnHide clears it.
 #[test]
-fn a_close_others_click_leaves_the_backpack_button_dark() {
+fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
@@ -2071,21 +2182,30 @@ fn a_close_others_click_leaves_the_backpack_button_dark() {
     s.mouse_button(r[0], r[1], "LeftButton", true);
     s.mouse_button(r[0], r[1], "LeftButton", false);
     assert!(
+        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        "the click opens the backpack (ToggleBackpack's open arm reads bag 0, not 'anything open')"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
+        "…and leaves the bag that was already up alone"
+    );
+    assert!(
+        checked(&mut s),
+        "open ⇒ lit, written by the window's OnShow over the widget flip"
+    );
+
+    // The second real click: bag 0 is open now, so this is the close-all arm — both windows go,
+    // and the OnHide write clears the ring.
+    s.mouse_button(r[0], r[1], "LeftButton", true);
+    s.mouse_button(r[0], r[1], "LeftButton", false);
+    assert!(!s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(
         !s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
-        "the click closes the other bag's window (ToggleBackpack's close-all arm)"
+        "the close arm takes every container down"
     );
     assert!(
         !checked(&mut s),
-        "no backpack transition happened, so the button must stay dark — the widget flip undone"
-    );
-
-    // The second real click opens the backpack (plus the equipped bag): its OnShow writes the light.
-    s.mouse_button(r[0], r[1], "LeftButton", true);
-    s.mouse_button(r[0], r[1], "LeftButton", false);
-    assert!(s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
-    assert!(
-        checked(&mut s),
-        "open ⇒ lit, written by the window's OnShow"
+        "shut ⇒ dark, written by the window's OnHide"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

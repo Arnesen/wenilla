@@ -1429,4 +1429,102 @@ mod tests {
             "a UI wheel is the frame's"
         );
     }
+
+    /// **B opens the backpack, SHIFT-B opens all of them** — the director's report, pinned end to
+    /// end (1494): a real keyboard event, through the chord table and the registry's shipped
+    /// defaults, into the binding body, into the Lua that shows the windows.
+    ///
+    /// This is the seam the bug lived in and nothing else covers it. `bag_tests` drive the Lua
+    /// globals directly, so they could not see that BOTH chords were registered on one command;
+    /// the registry tests read the table, so they could not see what the bodies do. Only pressing
+    /// the key joins the two.
+    #[test]
+    fn b_opens_the_backpack_and_shift_b_opens_every_bag() {
+        let mut script = UiScript::new().expect("VM");
+        script.register_bindings(&registry_commands());
+        script.set_screen_size(1024.0, 768.0);
+        for file in [
+            "Fonts.xml",
+            "UiPanels.xml",
+            "MerchantFrame.xml",
+            "Cooldown.xml",
+            "BagFrame.xml",
+        ] {
+            let text = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets/ui")
+                    .join(file),
+            )
+            .expect("shipped asset");
+            let doc = benilla_ui::framexml::parse(&text).expect("parse");
+            let report = benilla_ui::loader::load(&script, &doc, &|_| None);
+            assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+        }
+        script.set_money(0);
+        // The backpack, plus one equipped bag in slot 2 — so "all bags" is two windows and
+        // "the backpack alone" is visibly different from it.
+        script.set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                name: Some("Backpack".into()),
+                num_slots: 16,
+                slots: std::collections::HashMap::new(),
+            }),
+        );
+        script.set_container(
+            2,
+            Some(benilla_ui::script::ContainerState {
+                name: Some("Small Pouch".into()),
+                num_slots: 6,
+                slots: std::collections::HashMap::new(),
+            }),
+        );
+        let mut app = vm_harness(script);
+        let shown = |app: &App, name: &str| {
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<bool>(&format!("return {name}:IsShown()"))
+                .expect("eval")
+        };
+
+        // B — TOGGLEBACKPACK's shipped default. The backpack, and nothing else.
+        press_key(&mut app, KeyCode::KeyB);
+        app.update();
+        release_key(&mut app, KeyCode::KeyB);
+        app.update();
+        assert!(shown(&app, "BenillaBagFrame"), "B opens the backpack");
+        assert!(
+            !shown(&app, "BenillaBagFrame2"),
+            "B does NOT open the equipped bag — this is the bug 1494 fixes"
+        );
+
+        // B again: bag 0 is open, so this is the close arm.
+        press_key(&mut app, KeyCode::KeyB);
+        app.update();
+        release_key(&mut app, KeyCode::KeyB);
+        app.update();
+        assert!(!shown(&app, "BenillaBagFrame"), "B again shuts it");
+
+        // SHIFT-B — OPENALLBAGS' shipped default, a DIFFERENT command with a different body.
+        press_key(&mut app, KeyCode::ShiftLeft);
+        press_key(&mut app, KeyCode::KeyB);
+        app.update();
+        release_key(&mut app, KeyCode::KeyB);
+        app.update();
+        assert!(
+            shown(&app, "BenillaBagFrame") && shown(&app, "BenillaBagFrame2"),
+            "SHIFT-B opens every bag"
+        );
+
+        // …and closes them again, the count now reading all-open.
+        press_key(&mut app, KeyCode::KeyB);
+        app.update();
+        release_key(&mut app, KeyCode::KeyB);
+        release_key(&mut app, KeyCode::ShiftLeft);
+        app.update();
+        assert!(
+            !shown(&app, "BenillaBagFrame") && !shown(&app, "BenillaBagFrame2"),
+            "SHIFT-B again shuts them all"
+        );
+    }
 }

@@ -772,3 +772,181 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
     drop(app);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// **B293's headline, at the edge that produces it** (decision 1495). An addon that fails to load
+/// *without raising* — the commonest shape by far, a `.toc` naming a file the package does not
+/// ship — used to `warn!` to the terminal and vanish. Nothing raised, so 1305's dialog could not
+/// fire; the walk's failure list was dropped on the floor at `load_ingame_ui_on_world_entry`; and
+/// the per-frame drain kept no history. From the player's chair the addon simply was not there and
+/// the client said nothing, which is the literal content of *"there are a lot of addons that still
+/// doesn't work"*.
+///
+/// Three claims, and the third is the one that makes the first two reachable: the failure is
+/// **retained**, it is **readable from Lua** (so the window is a view of it, not a second copy),
+/// and the player is **told to look**.
+#[test]
+fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("addon-missing-file");
+    // Alphabetically first, so the probe behind it also proves this class drops only itself.
+    let dir = tmp.join("benilla-config/AddOns/AaMissing");
+    std::fs::create_dir_all(&dir).expect("addon dir");
+    std::fs::write(
+        dir.join("AaMissing.toc"),
+        "## Interface: 11200\nBossnames\\BossNames.xml\n",
+    )
+    .expect("toc");
+    // …and no such file is written. This is the director's own AtlasLoot copy, reduced.
+    let mut world = booted_world();
+    world.init_resource::<crate::ui_chat::ChatLog>();
+
+    log_in_as(&mut world, "Onehunter", 1);
+
+    assert_eq!(
+        probe_saw(&world).as_deref(),
+        Some("Onehunter"),
+        "the addon after the broken one still loads"
+    );
+
+    let script = world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("VM");
+
+    // 1 · retained, and tagged as a LOAD failure — the kind that means "this addon is not running".
+    let rows = script.diagnostics();
+    let row = rows
+        .iter()
+        .find(|d| d.message.contains("AaMissing"))
+        .unwrap_or_else(|| panic!("the missing file is in the log; got {rows:#?}"));
+    assert_eq!(
+        row.kind,
+        benilla_ui::script::diagnostics::DiagnosticKind::Load
+    );
+    assert!(
+        row.message.contains("not found"),
+        "the row says what went wrong, verbatim as the terminal line: {:?}",
+        row.message
+    );
+
+    // 2 · readable from Lua by the same three reads the window uses.
+    let count: i64 = script
+        .eval("local shown = BenillaGetNumScriptErrors() return shown")
+        .expect("BenillaGetNumScriptErrors is installed");
+    assert!(count >= 1, "the window's own read sees it");
+    let seen: String = script
+        .eval(
+            "local text = '' \
+             for i = 1, BenillaGetNumScriptErrors() do \
+                local seq, kind, message = BenillaGetScriptErrorInfo(i) \
+                if kind == 'load' then text = message end \
+             end \
+             return text",
+        )
+        .expect("BenillaGetScriptErrorInfo is installed");
+    assert!(
+        seen.contains("AaMissing"),
+        "the window walks the log and finds it: {seen:?}"
+    );
+
+    // …and the window itself materialized, so `/errors` has something to toggle.
+    assert!(
+        script
+            .eval::<bool>("return BenillaScriptLogFrame ~= nil")
+            .expect("eval"),
+        "ScriptLogFrame.xml loaded and built the window"
+    );
+
+    // **The repaint actually runs, over a log that has a row in it.** Asserting the globals exist
+    // would prove nothing: this drives the real path — `FauxScrollFrame_Update`, the row rebind,
+    // `strfind`/`strsub`/`strlen`/`format`, `SetTextColor`, the highlight seat and the detail
+    // pane — and a `nil` global anywhere in it raises here instead of on the player's first
+    // `/errors` (which is exactly the shape of failure this whole record exists to stop shipping).
+    script
+        .eval::<()>("BenillaScriptLog_Update() return nil")
+        .expect("the window repaints over a real log without raising");
+    let row_label: String = script
+        .eval::<Option<String>>("return BenillaScriptLogRow1Label:GetText()")
+        .expect("eval")
+        .unwrap_or_default();
+    assert!(
+        row_label.contains("AaMissing"),
+        "row 1 shows the failure, trimmed to the row's width: {row_label:?}"
+    );
+    let summary: String = script
+        .eval::<Option<String>>("return BenillaScriptLogSummary:GetText()")
+        .expect("eval")
+        .unwrap_or_default();
+    assert!(
+        summary.contains("error"),
+        "the summary line counted them: {summary:?}"
+    );
+
+    // 3 · **this class deliberately does NOT seize the screen.** Nothing raised; the reference's
+    // answer to an unparseable/absent document is a log line and silence, and 1495 keeps that.
+    // What it changes is that the silence is no longer total — hence the chat notice below.
+    assert!(
+        !script
+            .eval::<bool>("return ScriptErrors:IsVisible()")
+            .expect("ScriptErrors exists"),
+        "a non-raising load failure must not pop the red dialog — that would put non-errors \
+         through `_ERRORMESSAGE` and through every addon handler that replaces it"
+    );
+
+    // 4 · the player is told to look. Without this the log is a room nobody knows about, and
+    // silence — not the missing list — is the actual defect B293 reports.
+    assert_eq!(
+        world.resource::<crate::ui_chat::ChatLog>().pending_len(),
+        1,
+        "world entry queued the 'N addon load failures — type /errors' line"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **The burst 1305 measured, as the log sees it.** An `OnUpdate` that raises every frame produced
+/// 470–1113 collected errors in 1305's own runs, of which `_ERRORMESSAGE` shows the **first** and
+/// the per-frame drain keeps none. Deduplication is what makes a log survive that: one row with a
+/// count, not 1,113 rows and not a truncated window of the last few.
+#[test]
+fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("addon-repeat");
+    let mut world = booted_world();
+    log_in_as(&mut world, "Onehunter", 1);
+
+    let mut script = world
+        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("VM");
+    let before = script.diagnostics().len();
+    // The same failure, over and over, through the engine's own catch path — a slash command whose
+    // body raises is the cheapest real one to drive from a test.
+    script
+        .run("SlashCmdList = SlashCmdList or {} SLASH_B293BOOM1 = '/b293boom' SlashCmdList['B293BOOM'] = function() error('every frame') end")
+        .expect("register");
+    for _ in 0..500 {
+        script.run_slash_command("b293boom", "");
+    }
+
+    let rows = script.diagnostics();
+    assert_eq!(
+        rows.len(),
+        before + 1,
+        "500 identical raises are ONE new row: {rows:#?}"
+    );
+    let row = rows.last().expect("a row");
+    assert_eq!(row.count, 500, "the count is where the 500 went");
+    assert_eq!(
+        row.kind,
+        benilla_ui::script::diagnostics::DiagnosticKind::Error,
+        "code ran and raised — the addon is loaded, unlike a Load row"
+    );
+
+    drop(script);
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -12,6 +12,7 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 
 use avian3d::prelude::*;
 
+use crate::creature_anim::wrap_pi;
 use crate::net::Embodied;
 use benilla_assets::materials::WowModelMaterial;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
@@ -194,6 +195,95 @@ impl LookConfig {
         LOOK_SENSITIVITY * self.sensitivity
     }
 }
+/// The auto-follow's angular rate — 1.12's `cameraYawSmoothSpeed`, whose registrar default is
+/// **180 °/s** (`WoW.exe` `[0xbe1070]`, the yaw transition channel's own CVar float — wow-re
+/// `ui/scratch/camera-control.md`). The reference exposes it as the AUTO_FOLLOW_SPEED slider
+/// (`UIOptionsFrameSliders`, 90 … 270 °/s by 10) and *disables that slider* when the style is
+/// Never; benilla ships the registrar default as a constant, since it has no row for it yet.
+const FOLLOW_RATE: f32 = std::f32::consts::PI;
+
+/// **Camera Following Style** — 1.12's `cameraSmoothStyle` (decision 1493): does the camera swing
+/// back behind the character on its own?
+///
+/// benilla shipped the reference behaviour *removed* from the day the camera was written (the
+/// orbit offset simply persisted, a director's call) — this is the setting that gives it back, and
+/// the director's call now is the reference's own default: **Smart**.
+///
+/// The three values are the reference's, dropdown order and all (`UIOptionsFrameCameraDropDown`,
+/// which writes this CVar): `"1"` Smart, `"2"` Always, `"3"` Never — note that Never is **3**, not
+/// 0. The registrar default is `"1"`.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum FollowStyle {
+    /// Stay where placed, *except while the character is moving* — the reference's own
+    /// "(Recommended Mode)" and its registrar default.
+    #[default]
+    Smart,
+    /// Always prefer being behind the character.
+    Always,
+    /// Never auto-adjust: the orbit offset stays exactly where the hand left it. This is what
+    /// benilla did unconditionally before 1493.
+    Never,
+}
+
+impl FollowStyle {
+    /// From the CVar's number. Anything off the three stops reads as the registrar default —
+    /// a hand-edited config or an addon's stray write gets the shipped behaviour, not a dead
+    /// camera.
+    pub(crate) fn from_cvar(v: f32) -> Self {
+        match v as i32 {
+            2 => Self::Always,
+            3 => Self::Never,
+            _ => Self::Smart,
+        }
+    }
+
+    /// The CVar string this style is — the value the table and `config.toml` carry.
+    pub(crate) fn cvar(self) -> &'static str {
+        match self {
+            Self::Smart => "1",
+            Self::Always => "2",
+            Self::Never => "3",
+        }
+    }
+
+    /// Should the camera chase the character's facing this frame? `moving` is the character's own
+    /// translation intent (Smart's gate — the reference's "except when your character is moving").
+    fn chases(self, moving: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Smart => moving,
+            Self::Never => false,
+        }
+    }
+}
+
+/// What [`seat_camera`] needs to run the auto-follow this frame — the style, where "behind" is,
+/// and whether the character is moving. Bundled because the three are one question, and
+/// `seat_camera` is already at its argument ceiling.
+pub(super) struct FollowInput {
+    pub(super) style: FollowStyle,
+    /// The character's own facing (same yaw convention as [`FlyCam::yaw`] — a right-drag couples
+    /// the two directly).
+    pub(super) face_yaw: f32,
+    /// Is the character translating this frame? (Turn-in-place is not movement here: a keyboard
+    /// turn already carries the camera rigidly, so there is no offset left for the chase.)
+    pub(super) moving: bool,
+}
+
+impl FollowInput {
+    /// The yaw this frame's chase adds — the shortest arc to the character's facing, capped at
+    /// [`FOLLOW_RATE`]·dt so the camera *slews* rather than snapping, and exactly zero on a style
+    /// (or a stillness) that isn't chasing. The cap stops **at** the target: the clamp can never
+    /// overshoot, so a settled camera writes nothing and the no-op gate downstream stays quiet.
+    fn step(&self, cam_yaw: f32, dt: f32) -> f32 {
+        if !self.style.chases(self.moving) {
+            return 0.0;
+        }
+        let step = FOLLOW_RATE * dt;
+        wrap_pi(self.face_yaw - cam_yaw).clamp(-step, step)
+    }
+}
+
 /// Camera pitch clamp (radians) — **VERIFIED ±89.00°** (`WoW.exe` `0x8089d8`/`0x8089dc` =
 /// 1.5533430576 rad; the pitch integrate `FUN_00510120`, wow-re `follow-camera`). A single uniform
 /// clamp at every zoom level — the reference has **no** distinct first-person look-down limit.
@@ -530,7 +620,8 @@ pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl, m
 /// deck turning under the rider is frame motion and is applied to `cam.yaw` at the ride block in
 /// [`super::control`], bypassing this function's look-session gate (routing it here was the
 /// right-drag drift bug — the gate ate the deck's share while a drag was held). A left-drag orbit
-/// offset otherwise **persists** (no auto-follow — director's call, see the body).
+/// offset is then reeled back in by the **auto-follow**, on the player's `cameraSmoothStyle`
+/// setting ([`FollowStyle`], decision 1493) — or kept forever, on Never.
 /// `head`/`player_pos` are precomputed by [`super::control`] (which owns the avatar capsule
 /// constants); `cam_pivot_height` is the world pivot height it derived from [`CameraPivot`] this
 /// frame.
@@ -546,6 +637,7 @@ pub(super) fn seat_camera(
     cam_t: &mut Mut<Transform>,
     collide: &benilla_world::collision::WorldCollision<'_, '_>,
     cam_probe: &Collider,
+    follow: &FollowInput,
 ) {
     // A keyboard turn carries the camera RIGIDLY (char and camera rotate as one — the reference
     // look, director's call closing 0050's open "camera follow on turn"): an eased chase of a
@@ -554,12 +646,14 @@ pub(super) fn seat_camera(
     // — no INPUT-turn carry against the user's hand. (A transport deck's turn is not an input and
     // never arrives here — the ride block applies it to `cam.yaw` directly, drag or no drag.)
     //
-    // A left-drag orbit offset now **persists** once released: the vanilla `cameraSmoothStyle`
-    // auto-follow that eased the camera back behind the character while moving/turning is removed
-    // (director's call — we don't want it even though it's faithful). The camera stays where you
-    // put it; only a fresh drag, or a right-drag/movement that resyncs `face_yaw`, moves it.
+    // **The auto-follow** (decision 1493, 1.12's `cameraSmoothStyle`) rides the same gate for the
+    // same reason — a held drag owns the camera, hand on it: swing the camera back behind the
+    // character, along the shortest arc, at [`FOLLOW_RATE`]. Which frames it runs on is the
+    // player's setting — Always every frame, Smart only while the character is translating, Never
+    // not at all (the behaviour benilla shipped unconditionally until now).
     if rig.look.is_none() {
         cam.yaw += turn_delta;
+        cam.yaw += follow.step(cam.yaw, dt);
     }
     // Orient the camera, then orbit it behind the avatar's torso. The framing **pivot** is
     // `feet + cam_pivot_height` (model-derived, ~neck height — [`CameraPivot`]); the camera looks at
@@ -1014,6 +1108,49 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(slow.rate(), LOOK_SENSITIVITY * 0.5);
+    }
+
+    /// **The auto-follow** (decision 1493) — 1.12's `cameraSmoothStyle`, the setting benilla spent
+    /// its whole life behaving as "Never". Four properties, and the last two are the ones a
+    /// re-derivation gets wrong: the style gate (Smart is *movement*-gated, Always is not, Never is
+    /// never), the rate cap, the fact that the chase takes the SHORT way round the ±π seam, and
+    /// that it stops exactly ON the facing rather than oscillating across it.
+    #[test]
+    fn the_auto_follow_chases_on_the_styles_that_chase_and_never_overshoots() {
+        const DT: f32 = 1.0 / 60.0;
+        let step = |style, moving, face_yaw, cam_yaw| {
+            FollowInput {
+                style,
+                face_yaw,
+                moving,
+            }
+            .step(cam_yaw, DT)
+        };
+
+        // Never is inert — the camera stays exactly where the hand left it, moving or not.
+        assert_eq!(step(FollowStyle::Never, true, 1.0, 0.0), 0.0);
+        // Smart is gated on the character actually translating ("except when your character is
+        // moving"); Always is not.
+        assert_eq!(step(FollowStyle::Smart, false, 1.0, 0.0), 0.0);
+        assert!(step(FollowStyle::Smart, true, 1.0, 0.0) > 0.0);
+        assert!(step(FollowStyle::Always, false, 1.0, 0.0) > 0.0);
+
+        // A big gap slews at the rate, not in one frame.
+        let capped = step(FollowStyle::Always, true, 3.0, 0.0);
+        assert!((capped - FOLLOW_RATE * DT).abs() < 1.0e-6, "{capped}");
+        // A gap smaller than one frame's slew lands ON the facing — no overshoot, and the next
+        // frame writes exactly nothing (which is what keeps the no-op transform gate quiet).
+        let small = 0.5 * FOLLOW_RATE * DT;
+        let landed = step(FollowStyle::Always, true, small, 0.0);
+        assert!((landed - small).abs() < 1.0e-6, "{landed} vs {small}");
+        assert_eq!(step(FollowStyle::Always, true, 0.0, 0.0), 0.0);
+
+        // Across the ±π seam the chase takes the short way: a facing at −3.1 from a camera at 3.1
+        // is 0.08 rad AHEAD, not 6.2 rad behind.
+        assert!(
+            step(FollowStyle::Always, true, -3.1, 3.1) > 0.0,
+            "the shortest arc, not the long way round"
+        );
     }
 
     /// The second arm: between 200 and 800 world the travel gate applies, per axis and independently

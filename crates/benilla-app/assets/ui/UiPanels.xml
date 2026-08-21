@@ -34,6 +34,13 @@
         -- UISpecialFrames — the table exists now (1206) but it is the ADDONS' list, and mixing our
         -- windows into it would make an addon's `tremove` able to break the client's own ESC.
         UIPanelWindows["MailFrame"] = { area = "left", pushable = 0 }
+        -- The script error log (decision 1495) — OURS, with no reference row to transcribe. It is
+        -- registered here for exactly one reason: an unregistered frame takes ShowUIPanel's bare
+        -- `frame:Show()` branch (no left-slot placement, and `CloseAllWindows` never sees it), so
+        -- without this row the window would flip IsShown() without landing on screen and ESC would
+        -- not close it. `pushable = 9` puts it behind everything already registered: a diagnostic
+        -- must never shove a player's real window out of the slot it wanted.
+        UIPanelWindows["BenillaScriptLogFrame"] = { area = "left", pushable = 9 }
         -- The trade window (decision 0592 P1, TradeFrame.xml): the ref's own UIParent.lua l.27
         -- registration (`UIPanelWindows["TradeFrame"] = { area = "left", pushable = 1 }`). Without
         -- this row ShowUIPanel takes its unregistered branch — a bare frame:Show() with no left-slot
@@ -502,7 +509,8 @@
         -- tracks `backpackWasOpen` so a bag you already had open is LEFT open on the window's close;
         -- benilla stores that on each frame (`wasOpen`). benilla DIVERGES from the ref here on
         -- purpose: the real OpenBackpack touches only the backpack, but ours opens EVERY equipped
-        -- bag with the window (director's call — decision 0561 — matching the 'B' all-bags toggle),
+        -- bag with the window (director's call — decision 0561; its stated reason was matching the
+        -- 'B' all-bags toggle, which 1494 split apart — the call itself stands on its own),
         -- so the names keep the ref's caller contract while the body loops the five windows. Every
         -- step is guarded, so a surface without the bag file — a headless panel test — no-ops
         -- rather than erroring.

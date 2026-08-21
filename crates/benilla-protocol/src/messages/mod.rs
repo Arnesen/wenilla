@@ -16,6 +16,7 @@
 //! `tests/common`).
 
 mod action_bar;
+pub mod addons;
 mod area_trigger;
 mod attack;
 mod bank;
@@ -60,6 +61,7 @@ mod world_state;
 pub use action_bar::{
     set_action_button, ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
 };
+pub use addons::{SecureAddon, STANDARD_MODULUS_CRC, STOCK_SECURE_ADDONS};
 pub use area_trigger::area_trigger;
 pub use attack::{attack_swing, AttackerState};
 pub use bank::{

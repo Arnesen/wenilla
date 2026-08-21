@@ -56,11 +56,14 @@
           2. NO SORT CHECKBOX (ref l.215-241's own XML-commented-out "Replace once code is ready..."
              `SkillSortButton`): the ref itself ships this dead/commented, so there is nothing to
              transcribe (TradeSkillFrame.xml's own "ref's own dead code is dropped" precedent).
-          3. NO ACCEPT/CANCEL BUTTONS (ref l.318-357's `SkillFrameAcceptButton`/`SkillFrameCancelButton`,
-             the latter ALSO commented dead in the ref): both back the training-point economy (Accept/
-             CancelSkillUps) this pane doesn't ship, AND this page has no window of its own to close —
-             `CharacterFrame`'s single shared close X (CharacterFrame.xml) already covers every
-             tab, matching `PaperDollFrame`'s own lack of a per-page close button.
+          3. NO ACCEPT BUTTON (ref l.318-337's `SkillFrameAcceptButton`) — it is XML-commented dead
+             in the ref, and it backs the training-point economy this pane doesn't ship (deviation 1),
+             so there is nothing to transcribe. Its neighbour `SkillFrameCancelButton` (l.339-357) is
+             NOT dead and IS built: the ref's comment closes at l.337, one line above it, and the real
+             client draws a CLOSE button in the page's bottom-right seat. This list used to claim both
+             were commented out, and that misread is exactly why that seat rendered empty — decision
+             1496. Only its `CancelSkillUps()` call drops (deviation 1's dead economy again); the two
+             hides are transcribed.
           4. THE RANK TEXT FORMAT IS THE REF'S BYTE-EXACT ONE, not the task brief's own paraphrase:
              `ref-ui/SkillFrame.lua` l.178-186 builds `rank .. " (" .. color .. modifier .. close ..
              ")/" .. max` (e.g. "57 (|cff20ff20+3|r)/75") — transcribed verbatim (the
@@ -333,6 +336,7 @@
             end
 
             BenillaSkillFrame_UpdateDetail()
+            BenillaSkillExpandButtonFrame_Fit()
         end
 
         -- A rank-bar click selects it (ref SkillBar_OnClick, l.450-455).
@@ -379,6 +383,38 @@
                 FauxScrollFrame_SetOffset(getglobal("SkillListScrollFrame"), 0)
             end
             BenillaSkillFrame_Update()
+        end
+
+        -- The tab is as wide as its own label (ref SkillFrameExpandButtonFrame's OnLoad, l.312-316:
+        -- SetWidth(SkillFrameCollapseAllButton:GetTextWidth()+45)) — the 45 is the two 8px caps plus
+        -- the label's 25px seat plus the margin the ref leaves before the right cap, and the middle
+        -- slab stretches into whatever that leaves off its own two anchors.
+        --
+        -- Run from BOTH the ref's own OnLoad and every Update, because a measure here is not the
+        -- ref's synchronous one: benilla seats the VM's font engine at the frame boundary
+        -- (`ui_script::extract`, ahead of the tick), and XML load happens BEFORE any frame — so the
+        -- OnLoad call reads 0 and the tab would keep a 45px stump forever. The zero guard is what
+        -- makes the pair safe: an unmeasured call leaves the width alone rather than squashing the
+        -- tab, and the first Update after the atlas exists fits it. (The house's own preference is
+        -- two opposing anchors and no Lua width — UiPanels.xml's tab-highlight note — but a span
+        -- can only be resolved from two anchors when both edges are frames; a text width has to be
+        -- asked for.)
+        function BenillaSkillExpandButtonFrame_Fit()
+            local label = getglobal("SkillCollapseAllButton")
+            local w = label:GetTextWidth()
+            if w and w > 0 then
+                getglobal("SkillExpandButtonFrame"):SetWidth(w + 45)
+            end
+        end
+
+        -- The page's own CLOSE (ref SkillFrameCancelButton's OnClick, l.350-356). The ref's
+        -- CancelSkillUps() drops out with the training-point economy this pane doesn't ship (this
+        -- file's header comment deviation 1); the two hides are the ref's own, in its own order —
+        -- the page first, then the window (CharacterFrame_OnHide's subframe loop would reach this
+        -- page anyway, but the ref hides it explicitly and so do we).
+        function BenillaSkillFrameCancelButton_OnClick()
+            getglobal("SkillFrame"):Hide()
+            HideUIPanel(getglobal("CharacterFrame"))
         end
 
         -- The window's wheel handler (bubbled up the parent chain from a row) → one row via the faux
@@ -552,27 +588,71 @@
             </Button>
 
             <!-- The expand/collapse-all tab (ref SkillFrameExpandButtonFrame, l.242-317 — the SAME
-                 QuestLogSortTab art TrainerFrame.xml's own BenillaTrainerExpandButtonFrame uses). -->
+                 QuestLogSortTab art TrainerFrame.xml's own BenillaTrainerExpandButtonFrame uses).
+                 The tab is SIZED BY ITS LABEL, the ref's own OnLoad law (l.312-316:
+                 SetWidth(GetTextWidth()+45)) — the middle slab stretches between the two 8px caps
+                 off its OWN two anchors (ref l.279-287), so the 45 is exactly the two caps plus the
+                 label's seat. Was a fixed 54 with a fixed 38 middle, copied off
+                 TrainerFrame.xml rather than read off THIS ref; the label's own font fix below
+                 (12px, not 10) would have run under the right cap at that width. -->
             <Frame name="SkillExpandButtonFrame">
                 <Size><AbsDimension x="54" y="32"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-49"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="BACKGROUND">
                     <Texture name="SkillExpandTabLeft" file="Interface\QuestFrame\UI-QuestLogSortTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
-                    <Texture name="SkillExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="38" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"/></Anchors></Texture>
-                    <Texture file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabMiddle" relativePoint="RIGHT"/></Anchors></Texture>
+                    <Texture name="SkillExpandTabRight" file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture name="SkillExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="0" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="SkillExpandTabRight" relativePoint="LEFT"/></Anchors></Texture>
                 </Layer></Layers>
                 <Frames>
+                    <!-- The ALL fold (ref SkillFrameCollapseAllButton, l.292-310). Its face is the
+                         ref's SkillLabelTemplate one — the SAME face every SkillTypeLabel row wears
+                         (BenillaSkillHeaderTemplate above, l.83-128 of the ref): the +/- glyph at
+                         LEFT+3, the label at LEFT+25, and GameFontHighlight — WHITE at 12px, not
+                         GameFontNormalSmall's yellow 10. Spelled out here rather than inherited
+                         because this button keeps its own OnClick (this engine's
+                         CollapseSkillHeader(0)/ExpandSkillHeader(0) fold everything at once, so it
+                         needs no skillIndex/isExpanded bookkeeping) and this loader CONCATENATES an
+                         instance's children onto its template's rather than replacing them, so an
+                         inherited <Scripts> would stand alongside ours. Its seat is the ref's own
+                         (-3,-3) off the left cap: the tab art's visible lip sits BELOW the
+                         texture's geometric middle, so the label rides 3px low, not 3px high — the
+                         +3 copied from TrainerFrame.xml put the whole "- All" 6px above where the
+                         reference seats it. -->
                     <Button name="SkillCollapseAllButton" text="ALL">
                         <Size><AbsDimension x="40" y="22"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
-                        <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></NormalTexture>
-                        <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></HighlightTexture>
-                        <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="18" y="0"/></Offset></Anchor></Anchors></ButtonText>
-                        <NormalFont inherits="GameFontNormalSmall" justifyH="LEFT"/>
+                        <Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="-3" y="-3"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors></NormalTexture>
+                        <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors></HighlightTexture>
+                        <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="25" y="0"/></Offset></Anchor></Anchors></ButtonText>
+                        <NormalFont inherits="GameFontHighlight" justifyH="LEFT"/>
                         <Scripts><OnClick>BenillaSkillCollapseAllButton_OnClick()</OnClick></Scripts>
                     </Button>
                 </Frames>
+                <Scripts><OnLoad>BenillaSkillExpandButtonFrame_Fit()</OnLoad></Scripts>
             </Frame>
+
+            <!-- The page's own CLOSE button (ref SkillFrameCancelButton, l.339-357: 80x22,
+                 UIPanelButtonTemplate, CENTER of TOPLEFT (305,-422), text CLOSE). LIVE in the
+                 reference, not dead: the ref's XML comment that swallows SkillFrameAcceptButton
+                 CLOSES at l.337, one line ABOVE this button — this file's own header comment
+                 deviation 3 read that boundary wrong and dropped a button the real client draws,
+                 which is why the page's bottom-right seat sat empty (decision 1496). The
+                 UIPanelButtonTemplate face is reconstructed locally, the house convention every
+                 window here follows (CraftFrame.xml's BenillaCraftPanelButtonTemplate note) — one
+                 site, so inline rather than a virtual template (GroupLootFrame.xml's own precedent
+                 for a single ref-template button). -->
+            <Button name="SkillFrameCancelButton" text="CLOSE">
+                <Size><AbsDimension x="80" y="22"/></Size>
+                <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="305" y="-422"/></Offset></Anchor></Anchors>
+                <NormalFont inherits="GameFontNormal"/>
+                <HighlightFont inherits="GameFontHighlight"/>
+                <DisabledFont inherits="GameFontDisable"/>
+                <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+                <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+                <Scripts><OnClick>BenillaSkillFrameCancelButton_OnClick()</OnClick></Scripts>
+            </Button>
 
             <!-- The persistent selection highlight (Trainer/TradeSkillFrame's own precedent, this
                  file's header comment deviation 7): 281×15, ARTWORK-layer UI-Listbox-Highlight2.

@@ -31,7 +31,7 @@ use bevy::prelude::*;
 use crate::chat_bubble::BubbleConfig;
 use crate::minimap::MinimapZoom;
 use crate::nameplates::NameConfig;
-use crate::player::camera::{LookConfig, ZoomLimit, MOUSE_SPEED_RANGE};
+use crate::player::camera::{FollowStyle, LookConfig, ZoomLimit, MOUSE_SPEED_RANGE};
 use crate::portrait::PaneRate;
 use crate::sound::SoundConfig;
 use crate::target::ClickConfig;
@@ -107,6 +107,13 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // raised — because that IS benilla's shipped 30 yd ceiling, a knowing divergence from the
     // reference's registrar "1" that camera.rs has carried in prose since it was written.
     ("cameraDistanceMaxFactor", "2"),
+    // Camera Following Style (1493): 1.12's `cameraSmoothStyle` — the auto-follow that swings the
+    // camera back behind the character. Registered "1" = Smart, which is BOTH the reference's
+    // registrar default and the director's call; benilla behaved as "3" (Never) unconditionally
+    // until this row, so the knob is what un-freezes a camera that was frozen by design. The three
+    // values are the reference dropdown's own (UIOptionsFrameCameraDropDown: 1 Smart, 2 Always,
+    // 3 Never) — see `FollowStyle`.
+    ("cameraSmoothStyle", "1"),
     // Status Text (1140): 1.12's `statusBarText`, the "always show value / max on a status bar"
     // switch. **No host knob** — its consumer is Lua (TextStatusBar.xml, decision 1082, which was
     // written waiting for this key and reads it on every repaint). Default "0": the reference's
@@ -234,6 +241,7 @@ struct Knobs<'a> {
     minimap: &'a mut MinimapZoom,
     bubbles: &'a mut BubbleConfig,
     zoom: &'a mut ZoomLimit,
+    follow: &'a mut FollowStyle,
     video: &'a mut VideoConfig,
     pane_rate: &'a mut PaneRate,
 }
@@ -261,6 +269,9 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
         "mouseinvertpitch" => knobs.look.invert_pitch = v != 0.0,
         "cameradistancemaxfactor" => knobs.zoom.set_factor(v),
+        // The three stops are 1 Smart / 2 Always / 3 Never; anything else reads as the registrar
+        // default rather than as a dead camera (`FollowStyle::from_cvar`).
+        "camerasmoothstyle" => *knobs.follow = FollowStyle::from_cvar(v),
         // The 1.12 slider's own range; an off-grid hand-edit rides between stops, like the others.
         "mousespeed" => {
             knobs.look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
@@ -321,6 +332,7 @@ fn load_config(
     mut minimap: ResMut<MinimapZoom>,
     mut bubbles: ResMut<BubbleConfig>,
     mut zoom: ResMut<ZoomLimit>,
+    mut follow: ResMut<FollowStyle>,
     mut video: ResMut<VideoConfig>,
     mut pane_rate: ResMut<PaneRate>,
 ) {
@@ -336,6 +348,7 @@ fn load_config(
         minimap: &mut minimap,
         bubbles: &mut bubbles,
         zoom: &mut zoom,
+        follow: &mut follow,
         video: &mut video,
         pane_rate: &mut pane_rate,
     };
@@ -414,6 +427,7 @@ fn sync_cvars(
     mut minimap: ResMut<MinimapZoom>,
     mut bubbles: ResMut<BubbleConfig>,
     mut zoom: ResMut<ZoomLimit>,
+    mut follow: ResMut<FollowStyle>,
     mut video: ResMut<VideoConfig>,
     mut pane_rate: ResMut<PaneRate>,
 ) {
@@ -435,7 +449,7 @@ fn sync_cvars(
         );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 25] = [
+        let session: [(&str, String); 26] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -450,6 +464,7 @@ fn sync_cvars(
             ("mouseInvertPitch", flag(look.invert_pitch)),
             ("mousespeed", look.sensitivity.to_string()),
             ("cameraDistanceMaxFactor", zoom.factor().to_string()),
+            ("cameraSmoothStyle", follow.cvar().to_string()),
             ("autoLootDefault", flag(loot.auto_loot)),
             ("UnitNamePlayer", flag(names.player)),
             ("UnitNameNPC", flag(names.npc)),
@@ -488,6 +503,7 @@ fn sync_cvars(
         minimap: &mut minimap,
         bubbles: &mut bubbles,
         zoom: &mut zoom,
+        follow: &mut follow,
         video: &mut video,
         pane_rate: &mut pane_rate,
     };
@@ -532,6 +548,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         Option<ResMut<MinimapZoom>>,
         Option<ResMut<BubbleConfig>>,
         Option<ResMut<ZoomLimit>>,
+        Option<ResMut<FollowStyle>>,
         Option<ResMut<VideoConfig>>,
         Option<ResMut<PaneRate>>,
     )> = bevy::ecs::system::SystemState::new(world);
@@ -549,6 +566,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         minimap,
         bubbles,
         zoom,
+        follow,
         video,
         pane_rate,
     ) = state.get_mut(world);
@@ -572,11 +590,12 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
             Some(mut minimap),
             Some(mut bubbles),
             Some(mut zoom),
+            Some(mut follow),
             Some(mut video),
             Some(mut pane_rate),
         ) = (
-            sound, scale, view, look, click, loot, names, clutter, minimap, bubbles, zoom, video,
-            pane_rate,
+            sound, scale, view, look, click, loot, names, clutter, minimap, bubbles, zoom, follow,
+            video, pane_rate,
         ) {
             let mut knobs = Knobs {
                 sound: &mut sound,
@@ -590,6 +609,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
                 minimap: &mut minimap,
                 bubbles: &mut bubbles,
                 zoom: &mut zoom,
+                follow: &mut follow,
                 video: &mut video,
                 pane_rate: &mut pane_rate,
             };
@@ -736,6 +756,14 @@ mod tests {
         );
         assert_eq!(d["mousespeed"], LookConfig::default().sensitivity);
         assert_eq!(d["cameraDistanceMaxFactor"], ZoomLimit::default().factor());
+        // The following style (1493) welds to the enum's own Default — and BOTH sides are the
+        // reference's registrar "1" = Smart, the one row in this arc that agrees with the binary
+        // outright.
+        assert_eq!(
+            d["cameraSmoothStyle"],
+            FollowStyle::default().cvar().parse::<f32>().unwrap()
+        );
+        assert_eq!(FollowStyle::default(), FollowStyle::Smart);
         assert_eq!(d["autoLootDefault"] != 0.0, LootConfig::default().auto_loot);
         // The name trio (0992) welds to NameConfig's defaults the same way.
         let names = NameConfig::default();
@@ -782,6 +810,7 @@ mod tests {
         let mut minimap = MinimapZoom::default();
         let mut bubbles = BubbleConfig::default();
         let mut zoom = ZoomLimit::default();
+        let mut follow = FollowStyle::default();
         let mut video = VideoConfig::default();
         let mut pane_rate = PaneRate::default();
         let mut knobs = Knobs {
@@ -796,6 +825,7 @@ mod tests {
             minimap: &mut minimap,
             bubbles: &mut bubbles,
             zoom: &mut zoom,
+            follow: &mut follow,
             video: &mut video,
             pane_rate: &mut pane_rate,
         };
@@ -821,6 +851,14 @@ mod tests {
         assert_eq!(knobs.look.sensitivity, 1.4);
         assert!(apply_to_knobs("mousespeed", "9", &mut knobs));
         assert_eq!(knobs.look.sensitivity, 1.5);
+        // The following style lands as the enum, on the reference's own numbering — and an
+        // off-grid value reads as the registrar default rather than as a dead camera.
+        assert!(apply_to_knobs("cameraSmoothStyle", "3", &mut knobs));
+        assert_eq!(*knobs.follow, FollowStyle::Never);
+        assert!(apply_to_knobs("camerasmoothstyle", "2", &mut knobs));
+        assert_eq!(*knobs.follow, FollowStyle::Always);
+        assert!(apply_to_knobs("cameraSmoothStyle", "0", &mut knobs));
+        assert_eq!(*knobs.follow, FollowStyle::Smart);
         // The max-orbit factor lands as YARDS on the knob (base 15 x factor), clamped to 1..2.
         assert!(apply_to_knobs("cameraDistanceMaxFactor", "1", &mut knobs));
         assert_eq!(knobs.zoom.max, 15.0);
@@ -915,6 +953,7 @@ mod tests {
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()
             .init_resource::<ZoomLimit>()
+            .init_resource::<FollowStyle>()
             .init_resource::<VideoConfig>()
             .init_resource::<PaneRate>()
             .add_plugins(CvarPlugin);
@@ -985,6 +1024,7 @@ mod tests {
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()
             .init_resource::<ZoomLimit>()
+            .init_resource::<FollowStyle>()
             .init_resource::<VideoConfig>()
             .init_resource::<PaneRate>()
             .add_plugins(CvarPlugin);

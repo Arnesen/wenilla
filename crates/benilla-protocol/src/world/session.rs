@@ -98,11 +98,15 @@ impl WorldSession {
             seed.into_client_header_crypto(&username_n, session_key, server_seed);
 
         // 3. CMSG_AUTH_SESSION goes out unencrypted; obfuscation begins immediately after.
+        // The addon block is the tail of this packet and is NOT optional: cmangos-classic kicks a
+        // session whose addon size is zero, which is what benilla used to send (B277, decision
+        // 1497). `STOCK_SECURE_ADDONS` is what a stock 1.12.1 install reports.
         let body = messages::auth_session(
             u32::from(crate::CLIENT_BUILD),
             &username.to_uppercase(),
             client_seed,
             &client_proof,
+            &messages::STOCK_SECURE_ADDONS,
         );
         send_packet(&mut stream, None, opcode::CMSG_AUTH_SESSION, &body)
             .context("sending CMSG_AUTH_SESSION")?;

@@ -273,6 +273,35 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the defaults
     // always win and nothing can ever be remembered.
     finish_ui_load(&mut script);
+    // **Say it out loud when an addon didn't load** (decision 1495). Every failure the walk found
+    // is retained now, but a log nobody knows to open does not fix silence — and silence is the
+    // actual defect B293 reports: *"there are a lot of addons that still doesn't work"*, with
+    // nothing on screen to say which or why. Counted off the retained log rather than the walk's
+    // `failures` vec so the number matches what `/errors` will show: the log deduplicates, and one
+    // broken addon that fails four files should not read as four broken addons. The VM is fresh
+    // per world entry, so every `Load` row here is this load's.
+    // Placed AFTER `finish_ui_load` so the count covers the WHOLE load edge — the saved-variables
+    // chunks and `ADDON_LOADED`/`VARIABLES_LOADED` handlers it runs are part of loading, and an
+    // addon that dies in one of them is as absent as one whose file was missing.
+    let failed = script
+        .diagnostics()
+        .iter()
+        .filter(|d| d.kind == benilla_ui::script::diagnostics::DiagnosticKind::Load)
+        .count();
+    if failed > 0 {
+        if let Some(mut chat) = world.get_resource_mut::<crate::ui_chat::ChatLog>() {
+            // Queued, not drawn: `ChatLog` is a pending buffer the chat feed drains once the UI is
+            // up, which is what makes it safe to push from inside the world-entry load edge.
+            chat.push_event(crate::ui_chat::ChatEvent::text_only(
+                crate::ui_chat::ChatEventKind::System,
+                format!(
+                    "{failed} addon load {} — type /errors to see {}.",
+                    if failed == 1 { "failure" } else { "failures" },
+                    if failed == 1 { "it" } else { "them" }
+                ),
+            ));
+        }
+    }
     // The load edge is over: disarm the instruction bound `load_ingame_ui` installed (decision
     // 1306). From here every OnUpdate and event handler runs unhooked — a session must not kill
     // a player's addon for being slow; only a load that never returns is fair game.

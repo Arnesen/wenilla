@@ -1769,13 +1769,15 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 20 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
-    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's) + the Combat page's 14
-    // saved-variable rows (1134) + the Interface page's 4 (3 from 1136, Buff Durations 1139) and
-    // the Action Bars page's 1 (1136) + the Interface page's 2 API rows (Show Cloak / Show Helm,
-    // 1472) — which is the point of counting here rather than per page: the third store's rows are
-    // held to the same "the key is 1.12's own and it resolves" bar as the other two.
-    assert_eq!(checked, 41, "every row but one carries a live 1.12 key");
+    // 21 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
+    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's; Camera Following Style
+    // 1493's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 4 (3 from
+    // 1136, Buff Durations 1139) and the Action Bars page's 1 (1136) + the Interface page's 2 API
+    // rows (Show Cloak / Show Helm, 1472) — which is the point of counting here rather than per
+    // page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
+    // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
+    // OPTION_TOOLTIP_CAMERA1); the other two ride the same census as the selection moves.
+    assert_eq!(checked, 42, "every row but one carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec!["ControlsRowAutoLoot".to_string()],
@@ -1864,11 +1866,12 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // 20 of the 21 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
-    // Max Camera Distance 1140's; Vertical Sync 1394's), plus the Combat page's 14 saved-variable
-    // rows (1134), the Interface page's 4 (1136, + Buff Durations 1139), Action Bars' 1 (1136) and
-    // the Interface page's 2 API rows (Show Cloak / Show Helm, 1472).
-    assert_eq!(raised, 41, "every row but Auto Loot has a 1.12 description");
+    // 21 of the 22 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
+    // Max Camera Distance 1140's; Vertical Sync 1394's; Camera Following Style 1493's), plus the
+    // Combat page's 14 saved-variable rows (1134), the Interface page's 4 (1136, + Buff Durations
+    // 1139), Action Bars' 1 (1136) and the Interface page's 2 API rows (Show Cloak / Show Helm,
+    // 1472).
+    assert_eq!(raised, 42, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2796,6 +2799,114 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
         s.eval::<String>("return GetCVar(\"cameraDistanceMaxFactor\")")
             .unwrap(),
         "2"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Camera Following Style** (decision 1493) — 1.12's `cameraSmoothStyle`, worn as a Controls-page
+/// dropdown, and the setting that decides whether the camera swings back behind the character at
+/// all. Three things pinned: the reference's own values *and* their order (Smart `"1"`, Always
+/// `"2"`, Never `"3"` — Never is **3**, not 0, which is exactly what a tidy-up would get wrong);
+/// the registered default landing on Smart, where benilla behaved as Never for its whole life
+/// before this row; and the plate following the SELECTION rather than the row — the reference's own
+/// dropdown repaints its tooltip per entry (`OPTION_TOOLTIP_CAMERA1/2/3`) and this is the first row
+/// here whose description is not a property of the row alone.
+#[test]
+fn the_camera_following_style_dropdown_carries_the_reference_values_and_plate() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+
+    // The registrar default is the reference's, and it is what the director asked to ship.
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Smart"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleLabel:GetText()"
+        )
+        .unwrap(),
+        "Camera Following Style"
+    );
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyControlsRowCameraFollowStyle.tip")
+            .unwrap(),
+        "OPTION_TOOLTIP_CAMERA1"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on select must not write it back"
+    );
+
+    // The list is the reference dropdown's, entry for entry: Smart, Always, Never — with the
+    // stored value checked.
+    s.run("OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
+        3.0
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return DropDownList1Button1:GetText() .. \",\" .. DropDownList1Button2:GetText() \
+             .. \",\" .. DropDownList1Button3:GetText()"
+        )
+        .unwrap(),
+        "Smart,Always,Never"
+    );
+    assert!(s
+        .eval::<bool>("return DropDownList1Button1Check:IsVisible()")
+        .unwrap());
+
+    // Never stores "3" — the value the reference writes, not the 0 a fresh enum would invent —
+    // and the row's plate becomes Never's own description.
+    s.run("DropDownList1Button3:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("cameraSmoothStyle".to_string(), "3".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Never"
+    );
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyControlsRowCameraFollowStyle.tip")
+            .unwrap(),
+        "OPTION_TOOLTIP_CAMERA3",
+        "the plate follows the selection, like the reference dropdown's own"
+    );
+
+    // Always is the middle entry and stores "2" (the pairing that goes wrong if the order is read
+    // off the alphabet instead of off the reference).
+    s.run("OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
+        .unwrap();
+    s.run("DropDownList1Button2:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("cameraSmoothStyle".to_string(), "2".to_string())]
+    );
+
+    // Defaults walks it back to Smart.
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"cameraSmoothStyle\")")
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Smart"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

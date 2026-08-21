@@ -19,8 +19,9 @@
 //!
 //! Recorded default divergences (0997): `TOGGLEUI` ships `ALT-Z` (0870: the cache's `CTRL-Z` is
 //! a player rebind all three accounts inherited, not the shipped default — the one row that does
-//! not trust the cache); `OPENALLBAGS` ships `B` + `SHIFT-B` (1.12 splits B/TOGGLEBACKPACK from
-//! SHIFT-B/OPENALLBAGS; benilla's one bag knob is the open-all toggle that already lived on B).
+//! not trust the cache). That is now the ONLY one — the bag row's divergence (`OPENALLBAGS` wearing
+//! both `B` and `SHIFT-B`, because benilla had a single all-bags knob) is gone as of 1494: the
+//! reference's split ships whole, keys and bodies alike.
 
 /// A command's index into [`SPECS`] — the engine-side handle (`cmd::JUMP`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -72,39 +73,77 @@ macro_rules! spec {
 /// Engine-side handles for the host-dispatched commands (indexes into [`SPECS`], asserted by
 /// test). Lua-bodied commands need no handle — nothing in Rust names them.
 pub(crate) mod cmd {
-    use super::Cmd;
-    pub(crate) const MOVE_AND_STEER: Cmd = Cmd(0);
-    pub(crate) const MOVE_FORWARD: Cmd = Cmd(1);
-    pub(crate) const MOVE_BACKWARD: Cmd = Cmd(2);
-    pub(crate) const TURN_LEFT: Cmd = Cmd(3);
-    pub(crate) const TURN_RIGHT: Cmd = Cmd(4);
-    pub(crate) const STRAFE_LEFT: Cmd = Cmd(5);
-    pub(crate) const STRAFE_RIGHT: Cmd = Cmd(6);
-    pub(crate) const JUMP: Cmd = Cmd(7);
-    pub(crate) const SIT_OR_STAND: Cmd = Cmd(8);
-    pub(crate) const TOGGLE_SHEATH: Cmd = Cmd(9);
-    pub(crate) const TOGGLE_AUTORUN: Cmd = Cmd(10);
-    pub(crate) const OPEN_CHAT: Cmd = Cmd(12);
-    pub(crate) const OPEN_CHAT_SLASH: Cmd = Cmd(13);
-    pub(crate) const REPLY: Cmd = Cmd(17);
-    pub(crate) const TARGET_NEAREST_ENEMY: Cmd = Cmd(51);
-    pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = Cmd(52);
-    pub(crate) const NAMEPLATES: Cmd = Cmd(63);
-    pub(crate) const FRIEND_NAMEPLATES: Cmd = Cmd(64);
-    pub(crate) const ALL_NAMEPLATES: Cmd = Cmd(65);
-    pub(crate) const ATTACK_TARGET: Cmd = Cmd(66);
-    // These three shift whenever a row lands ahead of them in SPECS (1057's `TOGGLECHARACTER3`
-    // moved them 86/87/88 → 87/88/89; 1136's `TOGGLEACTIONBARLOCK` → 88/89/90).
-    // `the_cmd_handles_index_their_rows` is what makes that loud and cheap instead of silent: it
-    // names the handle and the row it actually points at.
-    pub(crate) const TOGGLE_UI: Cmd = Cmd(88);
-    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(90);
-    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(91);
+    use super::{Cmd, TABLE};
+
+    /// Resolve a command NAME to its [`Cmd`] handle at compile time — a linear scan of [`TABLE`]
+    /// in a `const fn`, so a name that is not in the registry is a BUILD error, not a runtime
+    /// surprise.
+    ///
+    /// These handles used to be hand-written row numbers, and every row that landed ahead of one
+    /// silently re-pointed it at its neighbour: 1057's `TOGGLECHARACTER3` moved three of them
+    /// 86/87/88 → 87/88/89, 1136's `TOGGLEACTIONBARLOCK` moved the same three again, and 1494's
+    /// bag family would have moved them a third time (`TOGGLE_UI` landing on `MINIMAPZOOMOUT`). A
+    /// guard test named the drift but the numbers still had to be re-typed by hand each time; the
+    /// name is the thing we actually mean, so the name is what the table is asked for now.
+    const fn by_name(name: &str) -> Cmd {
+        let mut i = 0;
+        while i < TABLE.len() {
+            if const_str_eq(TABLE[i].name, name) {
+                return Cmd(i as u16);
+            }
+            i += 1;
+        }
+        panic!("no such binding command")
+    }
+
+    const fn const_str_eq(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    pub(crate) const MOVE_AND_STEER: Cmd = by_name("MOVEANDSTEER");
+    pub(crate) const MOVE_FORWARD: Cmd = by_name("MOVEFORWARD");
+    pub(crate) const MOVE_BACKWARD: Cmd = by_name("MOVEBACKWARD");
+    pub(crate) const TURN_LEFT: Cmd = by_name("TURNLEFT");
+    pub(crate) const TURN_RIGHT: Cmd = by_name("TURNRIGHT");
+    pub(crate) const STRAFE_LEFT: Cmd = by_name("STRAFELEFT");
+    pub(crate) const STRAFE_RIGHT: Cmd = by_name("STRAFERIGHT");
+    pub(crate) const JUMP: Cmd = by_name("JUMP");
+    pub(crate) const SIT_OR_STAND: Cmd = by_name("SITORSTAND");
+    pub(crate) const TOGGLE_SHEATH: Cmd = by_name("TOGGLESHEATH");
+    pub(crate) const TOGGLE_AUTORUN: Cmd = by_name("TOGGLEAUTORUN");
+    pub(crate) const OPEN_CHAT: Cmd = by_name("OPENCHAT");
+    pub(crate) const OPEN_CHAT_SLASH: Cmd = by_name("OPENCHATSLASH");
+    pub(crate) const REPLY: Cmd = by_name("REPLY");
+    pub(crate) const TARGET_NEAREST_ENEMY: Cmd = by_name("TARGETNEARESTENEMY");
+    pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = by_name("TARGETPREVIOUSENEMY");
+    pub(crate) const NAMEPLATES: Cmd = by_name("NAMEPLATES");
+    pub(crate) const FRIEND_NAMEPLATES: Cmd = by_name("FRIENDNAMEPLATES");
+    pub(crate) const ALL_NAMEPLATES: Cmd = by_name("ALLNAMEPLATES");
+    pub(crate) const ATTACK_TARGET: Cmd = by_name("ATTACKTARGET");
+    pub(crate) const TOGGLE_UI: Cmd = by_name("TOGGLEUI");
+    pub(crate) const CAMERA_ZOOM_IN: Cmd = by_name("CAMERAZOOMIN");
+    pub(crate) const CAMERA_ZOOM_OUT: Cmd = by_name("CAMERAZOOMOUT");
 }
 
 /// The registry, 1.12 `Bindings.xml` order. Sub-tables (action buttons, shapeshift, raid
 /// targets) are written out because each row carries its own Lua body string.
-pub(crate) static SPECS: &[Spec] = &[
+///
+/// `TABLE` is the `const` view [`cmd::by_name`] scans at compile time (a `static` cannot be read
+/// during const evaluation); `SPECS` is the one everything else uses.
+pub(crate) static SPECS: &[Spec] = TABLE;
+
+const TABLE: &[Spec] = &[
     // ── Movement (BINDING_HEADER_MOVEMENT) ──────────────────────────────────────────────
     spec!("MOVEANDSTEER", MOVEMENT, Kind::Held, Some("BUTTON3"), None),
     spec!("MOVEFORWARD", MOVEMENT, Kind::Held, Some("W"), Some("UP")),
@@ -556,21 +595,64 @@ pub(crate) static SPECS: &[Spec] = &[
         Some("C"),
         None
     ),
-    // 1.12 splits TOGGLEBACKPACK (B, F12) from OPENALLBAGS (SHIFT-B); benilla's one bag knob is
-    // the open-all toggle that already lived on B — so OPENALLBAGS ships with both defaults
-    // (recorded divergence, 0997).
+    // The bag family, in the reference's own `Bindings.xml` order and with its own bodies and
+    // defaults (1494). 0997 collapsed all of this onto ONE command — `OPENALLBAGS` wearing both
+    // `B` and `SHIFT-B` over a `ToggleBackpack()` that opened every bag — because benilla had a
+    // single all-bags knob to hang keys off. The reference has three knobs and the director
+    // reported the difference: `B` opens the backpack ALONE, `SHIFT-B` opens the lot.
     //
-    // The body is the bare GLOBAL, exactly the ref's own Bindings.xml (`ToggleBackpack();`) —
-    // NOT the backpack button's OnClick handler it used to run: the handler carries the button's
-    // checked bookkeeping, and routing the key through it dragged that onto a path the reference
-    // keeps clean (with a bag addon holding `ToggleBackpack`, the key press is the path that
-    // lights the backpack button on the real client — the addon's OnShow write is the last word).
+    // Every default here is byte-real from the client's own `bindings-cache.wtf`, identical across
+    // all three independent accounts (ONE, TWO, WINUSER) — which is what rules out a player rebind
+    // (the `TOGGLEUI` trap, 0870).
+    //
+    // Each body is the bare GLOBAL, exactly the ref's own `Bindings.xml` — NOT a button's OnClick
+    // handler: a handler carries the button's checked bookkeeping, and routing a key through it
+    // drags that onto a path the reference keeps clean (with a bag addon holding `ToggleBackpack`,
+    // the key press is the path that lights the backpack button on the real client — the addon's
+    // OnShow write is the last word).
     spec!(
-        "OPENALLBAGS",
+        "TOGGLEBACKPACK",
         INTERFACE,
         Kind::Edge("ToggleBackpack()"),
         Some("B"),
-        Some("SHIFT-B")
+        Some("F12")
+    ),
+    // TOGGLEBAG**N** is bag **5-N**: the reference's numbering runs the bar right-to-left, so F8
+    // opens the slot FARTHEST from the backpack. Quoted from ref Bindings.xml l.564-575.
+    spec!(
+        "TOGGLEBAG1",
+        INTERFACE,
+        Kind::Edge("ToggleBag(4)"),
+        Some("F8"),
+        None
+    ),
+    spec!(
+        "TOGGLEBAG2",
+        INTERFACE,
+        Kind::Edge("ToggleBag(3)"),
+        Some("F9"),
+        None
+    ),
+    spec!(
+        "TOGGLEBAG3",
+        INTERFACE,
+        Kind::Edge("ToggleBag(2)"),
+        Some("F10"),
+        None
+    ),
+    spec!(
+        "TOGGLEBAG4",
+        INTERFACE,
+        Kind::Edge("ToggleBag(1)"),
+        Some("F11"),
+        None
+    ),
+    spec!(
+        "OPENALLBAGS",
+        INTERFACE,
+        Kind::Edge("OpenAllBags()"),
+        Some("SHIFT-B"),
+        None
     ),
     spec!(
         "TOGGLECHARACTER1",
@@ -1074,43 +1156,6 @@ pub(crate) static SPECS: &[Spec] = &[
 mod tests {
     use super::*;
 
-    /// The named handles in [`cmd`] must index the rows they claim — the table is the truth,
-    /// the consts are the readable view of it.
-    #[test]
-    fn the_cmd_handles_index_their_rows() {
-        for (handle, name) in [
-            (cmd::MOVE_AND_STEER, "MOVEANDSTEER"),
-            (cmd::MOVE_FORWARD, "MOVEFORWARD"),
-            (cmd::MOVE_BACKWARD, "MOVEBACKWARD"),
-            (cmd::TURN_LEFT, "TURNLEFT"),
-            (cmd::TURN_RIGHT, "TURNRIGHT"),
-            (cmd::STRAFE_LEFT, "STRAFELEFT"),
-            (cmd::STRAFE_RIGHT, "STRAFERIGHT"),
-            (cmd::JUMP, "JUMP"),
-            (cmd::SIT_OR_STAND, "SITORSTAND"),
-            (cmd::TOGGLE_SHEATH, "TOGGLESHEATH"),
-            (cmd::TOGGLE_AUTORUN, "TOGGLEAUTORUN"),
-            (cmd::OPEN_CHAT, "OPENCHAT"),
-            (cmd::OPEN_CHAT_SLASH, "OPENCHATSLASH"),
-            (cmd::REPLY, "REPLY"),
-            (cmd::TARGET_NEAREST_ENEMY, "TARGETNEARESTENEMY"),
-            (cmd::TARGET_PREVIOUS_ENEMY, "TARGETPREVIOUSENEMY"),
-            (cmd::NAMEPLATES, "NAMEPLATES"),
-            (cmd::FRIEND_NAMEPLATES, "FRIENDNAMEPLATES"),
-            (cmd::ALL_NAMEPLATES, "ALLNAMEPLATES"),
-            (cmd::ATTACK_TARGET, "ATTACKTARGET"),
-            (cmd::TOGGLE_UI, "TOGGLEUI"),
-            (cmd::CAMERA_ZOOM_IN, "CAMERAZOOMIN"),
-            (cmd::CAMERA_ZOOM_OUT, "CAMERAZOOMOUT"),
-        ] {
-            assert_eq!(
-                SPECS[handle.0 as usize].name, name,
-                "cmd handle {name} points at SPECS[{}] = {}",
-                handle.0, SPECS[handle.0 as usize].name
-            );
-        }
-    }
-
     /// Every default chord in the table parses — a typo'd token would otherwise silently ship
     /// an unpressable default.
     #[test]
@@ -1214,13 +1259,6 @@ mod tests {
                 s.name
             );
             let ours: Vec<&str> = [s.d1, s.d2].into_iter().flatten().collect();
-            if s.name == "OPENALLBAGS" {
-                // The one recorded divergence (0997): 1.12 splits `B`/TOGGLEBACKPACK from
-                // `SHIFT-B`/OPENALLBAGS, and benilla's single bag knob is the open-all toggle
-                // that already lived on B — so it ships wearing both.
-                assert_eq!(ours, ["B", "SHIFT-B"]);
-                continue;
-            }
             assert_eq!(
                 ours,
                 defaults.get(s.name).cloned().unwrap_or_default(),

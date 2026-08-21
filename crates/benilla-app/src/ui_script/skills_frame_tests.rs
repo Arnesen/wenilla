@@ -297,3 +297,169 @@ fn a_real_hunters_block_lists_exactly_what_the_reference_client_lists() {
         "Beast Mastery's skillMaxRank"
     );
 }
+
+/// The page's own **CLOSE** button (decision 1496). `SkillFrameCancelButton` is live in the
+/// reference — the XML comment that swallows its `SkillFrameAcceptButton` neighbour closes one
+/// line above it (ref `SkillFrame.xml` l.337/339) — and the director's screenshot of an empty
+/// bottom-right seat is what that misread cost. Pins the button's existence, the ref's own seat
+/// (80x22 centred on the page's TOPLEFT + (305,-422)), and that it closes the window.
+#[test]
+fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_window() {
+    let mut s = shown_skills_page();
+
+    assert!(
+        s.eval::<bool>("return SkillFrameCancelButton ~= nil")
+            .unwrap(),
+        "the ref's SkillFrameCancelButton is built"
+    );
+    assert!(
+        s.eval::<bool>("return SkillFrameCancelButton:IsVisible()")
+            .unwrap(),
+        "and shown — nothing in the ref's SkillFrame.lua ever hides it"
+    );
+
+    // The ref's geometry, read page-relative so the assertion is the ref's own numbers.
+    let (page_top, page_left) = s
+        .eval::<(f64, f64)>("return SkillFrame:GetTop(), SkillFrame:GetLeft()")
+        .unwrap();
+    let (top, bottom, left, right) = s
+        .eval::<(f64, f64, f64, f64)>(
+            "local b = SkillFrameCancelButton \
+             return b:GetTop(), b:GetBottom(), b:GetLeft(), b:GetRight()",
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            (left + right) / 2.0 - page_left,
+            (top + bottom) / 2.0 - page_top,
+            right - left,
+            top - bottom,
+        ),
+        (305.0, -422.0, 80.0, 22.0),
+        "CENTER of the page's TOPLEFT at (305,-422), 80x22 (ref l.339-348)"
+    );
+
+    // Its label is the CLOSE global string's seat, in the panel-button gold.
+    let label = s
+        .extract()
+        .iter()
+        .find_map(|q| match &q.content {
+            QuadContent::Text {
+                text: Some(t),
+                color,
+                ..
+            } if t == "CLOSE" => Some(*color),
+            _ => None,
+        })
+        .expect("the CLOSE label draws");
+    assert_eq!(
+        label,
+        Some([1.0, 0.82, 0.0, 1.0]),
+        "GameFontNormal — the UIPanelButtonTemplate face's own normal font"
+    );
+
+    // And it does what the ref's OnClick does: page down, window down.
+    s.run("SkillFrameCancelButton:Click()").unwrap();
+    s.resolve();
+    assert!(
+        !s.eval::<bool>("return SkillFrame:IsVisible()").unwrap(),
+        "the page hides"
+    );
+    assert!(
+        !s.eval::<bool>("return CharacterFrame:IsVisible()").unwrap(),
+        "and the window with it (ref l.352-355)"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// The **ALL** fold's face and seat (decision 1496). Both halves of the director's report: the
+/// label is the row font — `GameFontHighlight`, WHITE at 12 — not `GameFontNormalSmall`'s yellow
+/// 10, and the button rides 3px BELOW the tab cap's centre (the ref's own `(-3,-3)` off the left
+/// cap), not 3px above it, which is where the offset copied from `TrainerFrame.xml` put it.
+#[test]
+fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
+    let s = shown_skills_page();
+
+    let label = s
+        .extract()
+        .iter()
+        .find_map(|q| match &q.content {
+            QuadContent::Text {
+                text: Some(t),
+                color,
+                font_height,
+                ..
+            } if t == "ALL" => Some((*color, *font_height)),
+            _ => None,
+        })
+        .expect("the ALL label draws");
+    assert_eq!(
+        label,
+        (Some([1.0, 1.0, 1.0, 1.0]), Some(12.0)),
+        "GameFontHighlight — the SAME face every SkillTypeLabel row wears"
+    );
+
+    let (tab_top, tab_bottom) = s
+        .eval::<(f64, f64)>("return SkillExpandTabLeft:GetTop(), SkillExpandTabLeft:GetBottom()")
+        .unwrap();
+    let (btn_top, btn_bottom, btn_left) = s
+        .eval::<(f64, f64, f64)>(
+            "local b = SkillCollapseAllButton \
+             return b:GetTop(), b:GetBottom(), b:GetLeft()",
+        )
+        .unwrap();
+    assert_eq!(
+        (tab_top + tab_bottom) / 2.0 - (btn_top + btn_bottom) / 2.0,
+        3.0,
+        "the fold sits 3px BELOW the cap's centre (ref's -3); +3 above was the bug"
+    );
+    let cap_right = s
+        .eval::<f64>("return SkillExpandTabLeft:GetRight()")
+        .unwrap();
+    assert_eq!(
+        btn_left - cap_right,
+        -3.0,
+        "and 3px back over the cap (ref's -3 on x)"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// The tab's **fit law** (ref `SkillFrameExpandButtonFrame`'s OnLoad, l.312-316:
+/// `SetWidth(GetTextWidth()+45)`). benilla seats the VM's font engine at the frame boundary, so
+/// the XML-load call reads 0 — the guard leaves the declared width standing, and the first Update
+/// with a measurer fits the tab. Both states are pinned here because only the second one is the
+/// reference's, and only the first is what a cold load sees.
+#[test]
+fn the_expand_tab_fits_its_label_once_a_measure_answers() {
+    let mut s = shown_skills_page();
+    assert_eq!(
+        s.eval::<f64>("return SkillExpandButtonFrame:GetWidth()")
+            .unwrap(),
+        54.0,
+        "unmeasured, the declared width stands — a 0 measure must not squash the tab to 45"
+    );
+
+    s.set_text_measurer(Box::new(super::FixedWidthFont(7.0)));
+    s.run("BenillaSkillFrame_Update()").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f64>("return SkillExpandButtonFrame:GetWidth()")
+            .unwrap(),
+        7.0 * 3.0 + 45.0,
+        "then the ref's own law: the label's width + 45"
+    );
+    // The middle slab is the span between the two caps, so the fit reaches the art for free.
+    let (mid_l, mid_r, cap_r_l) = s
+        .eval::<(f64, f64, f64)>(
+            "return SkillExpandTabMiddle:GetLeft(), SkillExpandTabMiddle:GetRight(), \
+             SkillExpandTabRight:GetLeft()",
+        )
+        .unwrap();
+    assert_eq!(mid_r, cap_r_l, "the middle stretches to the right cap");
+    assert_eq!(
+        mid_r - mid_l,
+        66.0 - 16.0,
+        "and carries the whole span minus the two caps"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}

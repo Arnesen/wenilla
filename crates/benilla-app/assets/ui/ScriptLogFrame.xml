@@ -1,0 +1,366 @@
+<Ui>
+    <!--
+        benilla's **script error log** (decision 1495) — the window B293 asked for, and it is
+        entirely OURS: 1.12 has no counterpart, so every name here wears the `Benilla` prefix (1254's
+        rule, `tests::reference_surface`'s gate).
+
+        ## Why it exists beside `ScriptErrors`
+
+        `BasicControls.xml`'s red `ScriptErrors` dialog is the reference's whole answer to a Lua
+        fault, transcribed and installed by 1305 — and it stays exactly as it is. It shows **one**
+        message, because `_ERRORMESSAGE` guards on `ScriptErrors:IsVisible()`, and it remembers
+        nothing. Two reporters said so within days of it shipping: Goudy, *minutes after
+        screenshotting that dialog working*, *"some kind of lua error frame probably needs to be
+        implemented, as there are a lot of addons that still doesn't work"*; nazriel_0, *"probably we
+        should start using something like Bug Grabber to report those stack traces better"*.
+
+        So: the dialog is the interrupt, this is the log. Additive, no divergence — the reference
+        simply never had this instrument.
+
+        ## Shape
+
+        `CraftFrame.xml`'s shape, which is the house idiom for "windowed panel, faux-scrolled row
+        list, detail pane that repaints on selection": 13 fixed 16px rows over a
+        `FauxScrollFrameTemplate`, and a **real** `<ScrollFrame>` detail pane below (the real kit,
+        not the faux one — a message is a `mlua` error string with its `stack traceback:` tail
+        attached, so the detail is genuinely variable-height content, which is what the real kit is
+        for; `GossipFrame.xml`'s greeting pane is the same wiring).
+
+        The window is registered in `UIPanelWindows` (`UiPanels.xml`), which is what seats it in the
+        left slot and gets it closed by `CloseAllWindows()` — i.e. by ESC — with no code here. Our
+        own toplevels deliberately stay OUT of `UISpecialFrames`: that table is the addons' (0544's
+        note, 1206).
+
+        ## Reading the model
+
+        Three engine reads, all from the retained log on the model
+        (`benilla_ui::script::diagnostics`): `BenillaGetNumScriptErrors()` →
+        `retained, totalEverRecorded`; `BenillaGetScriptErrorInfo(i)` → `seq, kind, message, count`
+        (1-based, oldest first, nil past the end); `BenillaClearScriptErrors()`. There is no per-frame
+        feed and nothing to keep in step — the window polls the log it is a view of.
+    -->
+    <Script><![CDATA[
+        BENILLA_SCRIPTLOG_ROWS = 13
+        BENILLA_SCRIPTLOG_ROW_HEIGHT = 16
+        -- How much of a message a ROW shows. The full text is the detail pane's job; a row is an
+        -- index, and a row that wraps would break the fixed-height list the faux kit requires.
+        BENILLA_SCRIPTLOG_ROW_CHARS = 52
+
+        -- Which row is selected (a `seq`, not an index — indices shift when the cap evicts, and a
+        -- selection that silently slides onto a different error is worse than one that goes away).
+        BenillaScriptLogSelected = nil
+
+        -- The first line of a message, trimmed to a row's width. A traceback's later lines are
+        -- indented continuations; on one row they read as noise.
+        function BenillaScriptLog_RowText(message)
+            local cut = strfind(message, "\n", 1, 1)
+            local head = message
+            if cut then head = strsub(message, 1, cut - 1) end
+            if strlen(head) > BENILLA_SCRIPTLOG_ROW_CHARS then
+                head = strsub(head, 1, BENILLA_SCRIPTLOG_ROW_CHARS - 3) .. "..."
+            end
+            return head
+        end
+
+        -- `load` rows are red and `error` rows amber, and the split is by CONSEQUENCE: a `load` row
+        -- means an addon is not running at all, which is the thing the player can act on. Colours
+        -- come from the shipped tables so this window matches the rest of the UI.
+        function BenillaScriptLog_RowColor(kind)
+            if kind == "load" then return 1.0, 0.3, 0.3 end
+            return 1.0, 0.82, 0.0
+        end
+
+        function BenillaScriptLog_Update()
+            local shown, total = BenillaGetNumScriptErrors()
+
+            -- The summary line carries the one number a bug report needs and the window cannot
+            -- otherwise show: how many were DROPPED. `total` counts distinct failures ever
+            -- recorded; `shown` is what survived the cap.
+            local summary
+            if total == 0 then
+                summary = "No errors this session."
+            elseif total > shown then
+                summary = format("%d errors (%d older not kept)", total, total - shown)
+            elseif total == 1 then
+                summary = "1 error"
+            else
+                summary = format("%d errors", total)
+            end
+            getglobal("BenillaScriptLogSummary"):SetText(summary)
+
+            local scrollFrame = getglobal("BenillaScriptLogListScrollFrame")
+            FauxScrollFrame_Update(scrollFrame, shown, BENILLA_SCRIPTLOG_ROWS, BENILLA_SCRIPTLOG_ROW_HEIGHT)
+            local offset = FauxScrollFrame_GetOffset(scrollFrame)
+
+            local selectedRow = nil
+            for i = 1, BENILLA_SCRIPTLOG_ROWS do
+                local button = getglobal("BenillaScriptLogRow" .. i)
+                local index = offset + i
+                local seq, kind, message, count = BenillaGetScriptErrorInfo(index)
+                if seq then
+                    button.seq = seq
+                    button.message = message
+                    -- The count rides the index, not the text: `#12 x1113` says "this is one
+                    -- failure that happened 1,113 times", which is the whole reason the log
+                    -- deduplicates instead of listing 1,113 rows.
+                    local label = "#" .. seq
+                    if count > 1 then label = label .. " x" .. count end
+                    button.index:SetText(label)
+                    button.label:SetText(BenillaScriptLog_RowText(message))
+                    button.label:SetTextColor(BenillaScriptLog_RowColor(kind))
+                    button:Show()
+                    if seq == BenillaScriptLogSelected then selectedRow = button end
+                else
+                    button.seq = nil
+                    button.message = nil
+                    button:Hide()
+                end
+            end
+
+            -- The moving highlight, seated onto the selected row only when that row is on screen —
+            -- scrolling the selection away hides the glow rather than stranding it (CraftFrame's
+            -- own behaviour).
+            local highlight = getglobal("BenillaScriptLogHighlightFrame")
+            if selectedRow then
+                highlight:SetPoint("TOPLEFT", selectedRow:GetName(), "TOPLEFT", 0, 0)
+                highlight:Show()
+            else
+                highlight:Hide()
+            end
+
+            BenillaScriptLog_UpdateDetail()
+        end
+
+        -- The detail pane: the FULL message of the selected row, traceback and all. Selection is by
+        -- `seq`, so this walks the log rather than indexing it.
+        function BenillaScriptLog_UpdateDetail()
+            local text = ""
+            if BenillaScriptLogSelected then
+                local shown = BenillaGetNumScriptErrors()
+                for i = 1, shown do
+                    local seq, _, message = BenillaGetScriptErrorInfo(i)
+                    if seq == BenillaScriptLogSelected then
+                        text = message
+                        break
+                    end
+                end
+            end
+            if text == "" then
+                text = "Select an error above to read it in full."
+            end
+            getglobal("BenillaScriptLogDetailText"):SetText(text)
+        end
+
+        -- Frame-late by nature (the shared kit's own note): text rects resolve after Lua runs, so
+        -- the child is re-measured from OnUpdate until it stops changing, after which this is a
+        -- no-op compare per frame. OnUpdate only fires on visible frames, so a closed window costs
+        -- nothing.
+        function BenillaScriptLogFrame_OnUpdate()
+            BenillaScroll_ResizeChild("BenillaScriptLogDetailScroll", { "BenillaScriptLogDetailText" })
+        end
+
+        function BenillaScriptLogRow_OnClick(button)
+            if not button.seq then return end
+            -- Clicking the selected row deselects: the detail pane is a drawer, and a list with no
+            -- way back to "nothing selected" is a small trap.
+            if BenillaScriptLogSelected == button.seq then
+                BenillaScriptLogSelected = nil
+            else
+                BenillaScriptLogSelected = button.seq
+            end
+            BenillaScriptLog_Update()
+        end
+
+        function BenillaScriptLogFrame_OnLoad(self)
+            getglobal("BenillaScriptLogListScrollFrame").updateFunc = BenillaScriptLog_Update
+        end
+
+        -- The shared helper steps the faux frame's bar, whose OnValueChanged runs the kit's
+        -- offset handler and thence `updateFunc` — so the repaint is wired once, at OnLoad, and
+        -- not repeated here.
+        function BenillaScriptLogFrame_OnMouseWheel(delta)
+            BenillaFauxScrollFrame_OnMouseWheel(getglobal("BenillaScriptLogListScrollFrame"), delta)
+        end
+
+        -- ── The three entry points the client and the player reach this by ────────────────────
+
+        function BenillaScriptLog_Toggle()
+            local frame = getglobal("BenillaScriptLogFrame")
+            if frame:IsVisible() then
+                HideUIPanel(frame)
+            else
+                ShowUIPanel(frame)
+            end
+        end
+
+        -- `/errors clear`. Forgets the rows, keeps the numbering (the engine's own rule — a number
+        -- must never name two different failures across a screenshot). Prints a confirmation
+        -- because a command whose whole effect is "a window you may not have open is now empty"
+        -- is otherwise indistinguishable from a typo.
+        function BenillaScriptLog_Clear()
+            BenillaClearScriptErrors()
+            BenillaScriptLogSelected = nil
+            if getglobal("BenillaScriptLogFrame"):IsVisible() then
+                BenillaScriptLog_Update()
+            end
+            DEFAULT_CHAT_FRAME:AddMessage("Script error log cleared.", 1.0, 1.0, 0.0)
+        end
+    ]]></Script>
+
+    <!-- One list row: the `#N xCount` index column, then the message head. Same shape as
+         BenillaCraftSkillButtonTemplate (fixed columns — this engine has no FontString-width-based
+         dynamic anchor). -->
+    <Button name="BenillaScriptLogRowTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="293" y="16"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentIndex" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="56" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentLabel" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="229" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="62" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <HighlightTexture file="Interface\Buttons\UI-Listbox-Highlight2" alphaMode="ADD"/>
+        <Scripts>
+            <OnLoad>
+                self.index = getglobal(self:GetName() .. "Index")
+                self.label = getglobal(self:GetName() .. "Label")
+            </OnLoad>
+            <OnClick>BenillaScriptLogRow_OnClick(self)</OnClick>
+        </Scripts>
+    </Button>
+
+    <Frame name="BenillaScriptLogFrame" hidden="true">
+        <!-- 384x512, the standard left-slot panel size. No <Anchors>: ShowUIPanel seats it. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="BenillaScriptLogFramePortrait" file="Interface\Icons\INV_Misc_Note_01">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <!-- The four quadrant slabs. The ClassTrainer family, all four, because it is the one
+                 UNIFORM set in the 1.12 art (CraftFrame's own note) and this window belongs to no
+                 profession — borrowing a themed half would make it look like a window it isn't. -->
+            <Layer level="BORDER">
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="TOPLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="TOPRIGHT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="BOTTOMLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="BOTTOMRIGHT"/></Anchors></Texture>
+                <FontString name="BenillaScriptLogTitle" inherits="GameFontNormal" justifyH="CENTER" text="Script Errors">
+                    <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- The summary line, and the ONLY place the dropped-row count can be told. -->
+                <FontString name="BenillaScriptLogSummary" inherits="GameFontHighlightSmall" justifyH="LEFT" text="">
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="26" y="-76"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The top-right X. This engine ships no UIPanelCloseButton; the minimize-button art
+                 stands in, MacroFrame/TrainerFrame's precedent. -->
+            <Button name="BenillaScriptLogCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>HideUIPanel(getglobal("BenillaScriptLogFrame"))</OnClick></Scripts>
+            </Button>
+
+            <!-- Declared BEFORE the rows so row text paints over the glow (the house z-tiebreak). -->
+            <Frame name="BenillaScriptLogHighlightFrame" hidden="true">
+                <Size><AbsDimension x="293" y="16"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <Layers><Layer level="ARTWORK">
+                    <Texture file="Interface\Buttons\UI-Listbox-Highlight2">
+                        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+                    </Texture>
+                </Layer></Layers>
+            </Frame>
+
+            <Button name="BenillaScriptLogRow1" inherits="BenillaScriptLogRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-94"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BenillaScriptLogRow2" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow3" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow4" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow5" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow6" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow7" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow8" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow9" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow10" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow11" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow10" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow12" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow11" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaScriptLogRow13" inherits="BenillaScriptLogRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaScriptLogRow12" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+
+            <!-- The faux kit over the 13-row span; only its right-hand Slider renders. -->
+            <Frame name="BenillaScriptLogListScrollFrame" inherits="FauxScrollFrameTemplate">
+                <Size><AbsDimension x="293" y="208"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-94"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The detail pane: the REAL scroll kit, because a message carries its `stack
+                 traceback:` tail and is genuinely variable-height. GossipFrame's greeting pane is
+                 the same wiring. -->
+            <ScrollFrame name="BenillaScriptLogDetailScroll">
+                <Size><AbsDimension x="293" y="128"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-314"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>self:SetScrollChild(getglobal(self:GetName() .. "Child"))</OnLoad>
+                    <OnMouseWheel>BenillaScroll_OnMouseWheel(self, arg1)</OnMouseWheel>
+                    <OnVerticalScroll>BenillaScroll_SyncBar(self)</OnVerticalScroll>
+                    <OnScrollRangeChanged>BenillaScroll_SyncBar(self)</OnScrollRangeChanged>
+                </Scripts>
+                <Frames>
+                    <Slider name="$parentBar" inherits="BenillaScrollBarTemplate" hidden="true">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="-16"/></Offset></Anchor>
+                            <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="6" y="16"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts><OnValueChanged>BenillaScrollBar_OnValueChanged(self, arg1)</OnValueChanged></Scripts>
+                    </Slider>
+                    <Frame name="$parentChild">
+                        <Size><AbsDimension x="293" y="128"/></Size>
+                        <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <!-- 270 wide so the engine wraps the traceback rather than clipping
+                                     it; the pane pans over whatever height that comes to. -->
+                                <FontString name="BenillaScriptLogDetailText" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP" text="">
+                                    <Size><AbsDimension x="270" y="0"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="6" y="-6"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+
+            <Button name="BenillaScriptLogClearButton" inherits="UIPanelButtonTemplate" text="Clear">
+                <Size><AbsDimension x="96" y="22"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-455"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaScriptLog_Clear()</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaScriptLogCloseBottomButton" inherits="UIPanelButtonTemplate" text="Close">
+                <Size><AbsDimension x="96" y="22"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="219" y="-455"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>HideUIPanel(getglobal("BenillaScriptLogFrame"))</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaScriptLogFrame_OnLoad(self)</OnLoad>
+            <!-- The list wheel lives on the WINDOW: the engine bubbles a spin up the parent chain
+                 (CraftFrame's own note). The detail pane has its own, which wins over its own rect. -->
+            <OnMouseWheel>BenillaScriptLogFrame_OnMouseWheel(arg1)</OnMouseWheel>
+            <OnShow>BenillaScriptLog_Update()</OnShow>
+            <OnUpdate>BenillaScriptLogFrame_OnUpdate()</OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>

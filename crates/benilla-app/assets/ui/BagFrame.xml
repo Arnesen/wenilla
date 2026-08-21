@@ -497,13 +497,24 @@
             BenillaBagWindow_Repaint(frame)
         end
 
-        -- OpenAllBags / CloseAllBags / ToggleBackpack (ref ContainerFrame.lua l.152-217): the 'B'
-        -- binding (OPENALLBAGS) and the backpack button BOTH open or close EVERY bag at once, not
-        -- just the backpack — the real client's own behavior (MainMenuBarBackpackButton's OnClick and
-        -- the OPENALLBAGS binding both route to ToggleBackpack). "All bags" = the backpack (bag 0,
-        -- which always exists) plus each equipped-bag slot 1..4 that actually holds a bag
-        -- (GetContainerNumSlots > 0); an empty slot has no window to show. The five windows, indexed
-        -- by bag id (BENILLA_BAG_WINDOWS[bagId+1]) — one code path over all of them.
+        -- ToggleBag / ToggleBackpack / OpenAllBags (ref ContainerFrame.lua l.46-82, l.662-700) —
+        -- TWO DISTINCT KNOBS, and benilla ran them as one until 1494. The reference's split, which
+        -- is now ours:
+        --
+        --   B / F12  TOGGLEBACKPACK -> ToggleBackpack()  — the BACKPACK's toggle. Closed: opens
+        --            bag 0 ALONE. Already open: hides every container window there is. The
+        --            asymmetry is the reference's own — one bag out, all bags in.
+        --   SHIFT-B  OPENALLBAGS    -> OpenAllBags()     — the ALL-bags toggle: everything open
+        --            already closes the lot, anything else opens the lot.
+        --   F8..F11  TOGGLEBAG1..4  -> ToggleBag(4..1)   — one equipped bag each (note the
+        --            reference's REVERSED numbering: TOGGLEBAG1 is bag 4).
+        --
+        -- "All bags" = the backpack (bag 0, which always exists) plus each equipped-bag slot 1..4
+        -- that actually holds a bag (GetContainerNumSlots > 0); an empty slot has no window to
+        -- show. The five windows, indexed by bag id (BENILLA_BAG_WINDOWS[bagId+1]) — one code path
+        -- over all of them. The keyring is a seventh window with its own ToggleKeyRing: swept by
+        -- the two close arms below (the ref's sweeps are over ALL ContainerFrames, which is what
+        -- its keyring lives in), never counted as an open bag and never opened by them.
         BENILLA_BAG_WINDOWS = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2", "BenillaBagFrame3", "BenillaBagFrame4" }
 
         -- THE REFERENCE'S NAMES ARE THE REAL ENTRY POINTS, and our own UI calls THEM.
@@ -512,7 +523,7 @@
         -- client to call its replacement. `Bagnon_Core/core/Overrides.lua` is the canonical shape —
         --     local bToggleBackpack = ToggleBackpack
         --     ToggleBackpack = function() ... end
-        -- and until now that override was INERT here, because the 'B' binding and the bag button
+        -- and until now that override was INERT here, because the bag bindings and the bag button
         -- called `BenillaBagToggle_OnClick` directly and nothing ever looked up `ToggleBackpack`.
         -- Bagnon loaded, appeared in the AddOns list, replaced the globals, and the player still
         -- got the stock bags. The director saw that; no instrument here could, because the corpus
@@ -522,23 +533,50 @@
         -- silently inert wherever our UI calls a benilla-named equivalent instead of the
         -- reference's name. `CloseAllBags`/`OpenBackpack`/`CloseBackpack` already lived under the
         -- ref's names in UiPanels.xml for exactly this reason; these are the three that did not.
-        function OpenAllBags()
-            for bagId = 0, 4 do
-                -- The backpack always exists; an equipped-bag slot only when a bag is in it.
-                if bagId == 0 or GetContainerNumSlots(bagId) > 0 then
-                    local frame = getglobal(BENILLA_BAG_WINDOWS[bagId + 1])
-                    if frame and not frame:IsShown() then
-                        BenillaBagWindow_Repaint(frame) -- bag 0 routes through its observable alias
-                        frame:Show()
-                    end
+        --
+        -- `OpenAllBags(forceOpen)` is the ref's SHIFT-B body (ContainerFrame.lua l.662-700) and it
+        -- is a TOGGLE, not a plain open: one pass hides every open window while counting them
+        -- against how many CAN be open, and if everything already was, that pass IS the close and
+        -- it returns. `forceOpen` (the ref's own argument, used by callers that mean "open") skips
+        -- the close arm. The open arm calls the GLOBALS `ToggleBackpack()`/`ToggleBag(1..4)` on a
+        -- now-closed set — the ref's exact tail, so a bag addon holding either name gets both.
+        function OpenAllBags(forceOpen)
+            if UIParent and not UIParent:IsVisible() then return end
+            local totalBags = 1 -- the backpack always counts
+            for bagId = 1, 4 do
+                if GetContainerNumSlots(bagId) > 0 then totalBags = totalBags + 1 end
+            end
+            local bagsOpen = 0
+            for _, name in ipairs(BENILLA_BAG_WINDOWS) do
+                local frame = getglobal(name)
+                if frame and frame:IsShown() then
+                    frame:Hide()
+                    bagsOpen = bagsOpen + 1
                 end
             end
+            -- Swept with the rest, but never counted (ref: `if GetID() ~= KEYRING_CONTAINER`).
+            local keyring = getglobal("BenillaKeyRingFrame")
+            if keyring and keyring:IsShown() then keyring:Hide() end
+            if bagsOpen >= totalBags and not forceOpen then return end
+            ToggleBackpack()
+            ToggleBag(1)
+            ToggleBag(2)
+            ToggleBag(3)
+            ToggleBag(4)
         end
 
-        -- `ToggleBag(id)` — the ref's per-bag toggle (ContainerFrame.lua l.152-170), and the other
+        -- `ToggleBag(id)` — the ref's per-bag toggle (ContainerFrame.lua l.46-65), and the other
         -- global Bagnon replaces. Ours drives the same window the all-bags path does.
+        --
+        -- The ref's `if size > 0` gate is load-bearing here and was missing until 1494: it is what
+        -- keeps `OpenAllBags`' blind `ToggleBag(1..4)` tail from showing an empty slot's window.
+        -- Bag 0 is exempt for the same reason `OpenBag` exempts it (it always exists even when the
+        -- feed has not told us its size yet) — the ref gets that for free from its own always-16
+        -- backpack.
         function ToggleBag(id)
-            local frame = getglobal(BENILLA_BAG_WINDOWS[(id or 0) + 1])
+            id = id or 0
+            if id ~= 0 and GetContainerNumSlots(id) <= 0 then return end
+            local frame = getglobal(BENILLA_BAG_WINDOWS[id + 1])
             if not frame then return end
             if frame:IsShown() then
                 frame:Hide()
@@ -584,16 +622,28 @@
             return nil
         end
 
-        -- `ToggleBackpack()` — the ref's all-bags toggle ("if numOpen > 0 then CloseAllBags() else
-        -- OpenAllBags()"). It calls the two GLOBALS by name rather than local bodies, so hooking
-        -- either of those works too.
+        -- `ToggleBackpack()` — ref ContainerFrame.lua l.67-82, and NOT the all-bags toggle it was
+        -- here until 1494:
+        --
+        --     if ( IsBagOpen(0) ) then  <hide every ContainerFrame>  else  ToggleBag(0)  end
+        --
+        -- Open arm: `ToggleBag(0)`, the backpack ALONE (through the global, so a bag addon holding
+        -- `ToggleBag` gets it). Close arm: the ref's own frame sweep — every window, keyring
+        -- included — and NOT a `CloseAllBags()` call, because the reference does not make one here
+        -- and an addon holding that name would fire on a path the real client never runs it on.
+        -- The condition reads bag 0 SPECIFICALLY: with only bag 2 open, B opens the backpack
+        -- beside it rather than closing anything.
         function ToggleBackpack()
-            local anyOpen = false
-            for _, name in ipairs(BENILLA_BAG_WINDOWS) do
-                local frame = getglobal(name)
-                if frame and frame:IsShown() then anyOpen = true end
+            if IsBagOpen(0) then
+                for _, name in ipairs(BENILLA_BAG_WINDOWS) do
+                    local frame = getglobal(name)
+                    if frame and frame:IsShown() then frame:Hide() end
+                end
+                local keyring = getglobal("BenillaKeyRingFrame")
+                if keyring and keyring:IsShown() then keyring:Hide() end
+            else
+                ToggleBag(0)
             end
-            if anyOpen then CloseAllBags() else OpenAllBags() end
         end
 
         -- The backpack button (MainMenuBarBackpackButton): if any bag window is open, close them
@@ -643,7 +693,7 @@
         -- (backpack included), INCLUDING the real fn's keyring fork: the keyring has its own
         -- jingling KeyRingOpen/KeyRingClose pair (both real SoundEntries kits), every other window
         -- the plain igBackPackOpen/igBackPackClose. Fired on every visibility transition (a Show/Hide
-        -- from a toggle button, the 'B' binding, a close button, or ESC), never at load (every window
+        -- from a toggle button, a bag binding, a close button, or ESC), never at load (every window
         -- is authored hidden="true", so none ever transitions on startup).
         --
         -- The `this` legacy global (RF-0025, script/event.rs) names the window that just
@@ -844,14 +894,15 @@
         --
         -- ref MainMenuBarBackpackButton OnEnter (ref-MainMenuBarBagButtons.xml l.91-99). The ref
         -- appends the live binding key with GameTooltip:AppendText; ours concatenates the same
-        -- suffix from a LIVE GetBindingKey read since 0997 (our one bag knob is OPENALLBAGS —
-        -- the toggle this very button runs), rendered through the Key Bindings window's display
-        -- law when it is loaded. Unbound: the bare label, the ref's own read.
+        -- suffix from a LIVE GetBindingKey read since 0997, rendered through the Key Bindings
+        -- window's display law when it is loaded. Unbound: the bare label, the ref's own read.
+        -- The command is TOGGLEBACKPACK — the ref's own read here, and since 1494 ours too: it is
+        -- the key that runs what a plain click on this button runs.
         function BenillaBagToggle_OnEnter(button)
             if not GameTooltip then return end -- engine tests load file subsets
             GameTooltip:SetOwner(button, "ANCHOR_LEFT")
             local text = BACKPACK_TOOLTIP
-            local key = GetBindingKey("OPENALLBAGS")
+            local key = GetBindingKey("TOGGLEBACKPACK")
             if key then
                 if KeyBindings_KeyText then key = KeyBindings_KeyText(key) end
                 text = text .. " " .. NORMAL_FONT_COLOR_CODE .. "(" .. key .. ")" .. FONT_COLOR_CODE_CLOSE
@@ -860,9 +911,14 @@
         end
 
         -- ref BagSlotButton_OnEnter (ref-MainMenuBarBagButtons.lua l.86-96): the equipped bag's own
-        -- item tooltip, or "Equip Container" for an empty slot. The ref's "(F1)".."(F4)" suffix
-        -- needs GetBindingKey AND the TOGGLEBAG1..4 bindings — benilla ships neither, so no slot
-        -- carries one; the day those bind, this is where the suffix goes.
+        -- item tooltip, or "Equip Container" for an empty slot. The ref's "(F8)".."(F11)" suffix
+        -- needed GetBindingKey AND the TOGGLEBAG1..4 bindings; those bind as of 1494, so the ONE
+        -- thing still missing is `GameTooltip:AppendText` — our tooltip has SetText/AddLine and no
+        -- append verb, and the ref's suffix lands on a plate SetInventoryItem already wrote. That
+        -- verb's byte semantics (which line does it extend?) are unverified, so the suffix waits
+        -- rather than guessing; this is where it goes, over `GetBindingKey("TOGGLEBAG"..(5 -
+        -- button.bagId))` — the ref's index is REVERSED against the bar, so the slot nearest the
+        -- backpack (bagId 1) is TOGGLEBAG4/F11 and the farthest (bagId 4) is TOGGLEBAG1/F8.
         function BenillaBagBarSlot_OnEnter(button)
             if not GameTooltip then return end
             GameTooltip:SetOwner(button, "ANCHOR_LEFT")
@@ -1676,10 +1732,13 @@
         exactly as ContainerFrame.lua does it. Its 20 template buttons cover the keyring's 16-slot
         ceiling; the level-gated remainder hides through the ordinary physIndex-past-size branch.
 
-        It is deliberately NOT in BENILLA_BAG_WINDOWS: the keyring is not one of "your bags", so 'B'
-        / the backpack toggle / a vendor's auto-open never touch it, which is the reference's own
-        arrangement (OpenAllBags counts it out, and CloseAllBags is id-driven over 1..4). ESC still
-        closes it — UiPanels.xml's CloseAllWindows hides every open container, the ref's own loop.
+        It is deliberately NOT in BENILLA_BAG_WINDOWS: the keyring is not one of "your bags", so no
+        bag toggle ever OPENS it and a vendor's auto-open never touches it — the reference's own
+        arrangement (OpenAllBags' open arm is ToggleBackpack + ToggleBag(1..4), and its count
+        explicitly excludes KEYRING_CONTAINER). It is still SWEPT by the two close arms, which the
+        ref runs over every ContainerFrame — the keyring lives in one there, so 1494 sweeps ours by
+        name alongside the list. ESC closes it too — UiPanels.xml's CloseAllWindows hides every open
+        container, the ref's own loop.
     -->
     <Frame name="BenillaKeyRingFrame" id="-2" inherits="BenillaBagWindowTemplate">
         <Scripts>
@@ -1750,10 +1809,17 @@
             </OnLoad>
             <!-- The undo repairs the CheckButton widget's own pre-handler flip; from there the
                  checked state belongs to the windows' OnShow/OnHide writes (ours and any
-                 addon's) — the stated divergence at BenillaBagToggle_OnClick's comment. -->
+                 addon's) — the stated divergence at BenillaBagToggle_OnClick's comment.
+                 The shift fork is the ref's own (MainMenuBarBagButtons.xml l.81-87): the button
+                 carries the SAME pair of knobs the B / SHIFT-B keys do (1494), so a shift-click
+                 opens all bags and a plain one toggles the backpack. -->
             <OnClick>
                 self:SetChecked(not self:GetChecked())
-                BenillaBagToggle_OnClick()
+                if IsShiftKeyDown() then
+                    OpenAllBags()
+                else
+                    BenillaBagToggle_OnClick()
+                end
             </OnClick>
             <OnEnter>BenillaBagToggle_OnEnter(self)</OnEnter>
             <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>

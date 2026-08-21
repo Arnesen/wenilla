@@ -328,6 +328,12 @@ pub(crate) struct Model {
     /// inside the failed call). A message produced *by* the handler itself goes to `errors` only —
     /// that asymmetry is the recursion guard.
     pub(crate) pending_error_dispatch: Vec<String>,
+    /// The **retained** script-error log — what [`errors`](Self::errors) and the load walk both
+    /// throw away once logged (decision 1495). `errors` is a per-frame drain for the host's
+    /// terminal; this is the session's memory, deduplicated and bounded, and the only thing a
+    /// player can actually read. See [`super::diagnostics`] for why the reference's own dialog is
+    /// not enough on its own.
+    pub(crate) diagnostics: super::diagnostics::DiagnosticLog,
     /// Non-fatal warnings surfaced to the host (e.g. `CreateFrame`'s ignored `inherits=` template).
     pub(crate) warnings: Vec<String>,
     /// The screen-root rect (`[bottom, left, top, right]`), the anchor base for top-level frames.
@@ -1194,6 +1200,11 @@ impl Model {
     /// a failure raised by the error handler *itself* is pushed to `errors` directly instead,
     /// which is what keeps the dispatch from recursing.
     pub(crate) fn record_script_error(&mut self, msg: String) {
+        // Three channels now, and the third is the one with a memory (decision 1495): the dialog
+        // shows a burst's first message and the host drain empties every frame, so without this
+        // the 1,112 raises after the first exist nowhere a player can reach.
+        self.diagnostics
+            .record(super::diagnostics::DiagnosticKind::Error, &msg);
         self.pending_error_dispatch.push(msg.clone());
         self.errors.push(msg);
     }
@@ -1259,6 +1270,7 @@ impl Model {
             pending_size_changed: Vec::new(),
             errors: Vec::new(),
             pending_error_dispatch: Vec::new(),
+            diagnostics: Default::default(),
             warnings: Vec::new(),
             // Classic Era's UIParent virtual space is 1024×768-ish; a sensible default the host can
             // override with `set_screen_size`. y-up: [bottom, left, top, right].

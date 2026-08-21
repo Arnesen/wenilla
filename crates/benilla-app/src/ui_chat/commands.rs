@@ -93,6 +93,13 @@ pub(crate) enum SlashIndex {
     /// `GlobalStrings.lua` has no `SLASH_RELOADUI`), so this alias is a literal in [`Self::build`]
     /// rather than data read off the chain, exactly like the ESC-menu AddOns window is ours (1197).
     ReloadUi,
+    /// `/errors` `/err` — **benilla's own addition** (decision 1495): opens the script error log,
+    /// which is ours because 1.12 has no such window to alias. The reference's whole answer to a
+    /// Lua fault is the `ScriptErrors` modal, which shows a burst's first message and remembers
+    /// nothing; B293 is two reporters asking for the list that modal cannot be. **Player-facing,
+    /// not a `DevCmd`**: the people who need it are the people running addons, and gating it on a
+    /// dev build would leave exactly the reporters who asked unable to type it.
+    ScriptErrors,
 }
 
 impl SlashIndex {
@@ -137,13 +144,16 @@ impl SlashIndex {
             // No shipped alias string exists under this key (the walk finds nothing); the `/reload`
             // alias is inserted as a literal in `build` — see the variant's doc.
             Self::ReloadUi => "RELOADUI",
+            // No shipped `SLASH_BENILLASCRIPTERRORS1` exists — the aliases are literals in
+            // `build`. The key is still ours to name so the variant round-trips like any other.
+            Self::ScriptErrors => "BENILLASCRIPTERRORS",
         }
     }
 
     /// Every registered index — the registry proper. A reference command NOT in this list resolves
     /// nowhere and answers `HELP_TEXT_SIMPLE`, exactly as an unknown command does in the reference
     /// (better than a registered handler that silently does nothing).
-    const ALL: [Self; 36] = [
+    const ALL: [Self; 37] = [
         Self::Reply,
         Self::Join,
         Self::Leave,
@@ -180,6 +190,7 @@ impl SlashIndex {
         Self::MacroHelp,
         Self::Console,
         Self::ReloadUi,
+        Self::ScriptErrors,
     ];
 }
 
@@ -297,6 +308,13 @@ impl SlashCommands {
             "reload",
             Command::Slash(SlashIndex::ReloadUi),
         );
+        for alias in ["errors", "err"] {
+            insert(
+                &mut by_alias,
+                alias,
+                Command::Slash(SlashIndex::ScriptErrors),
+            );
+        }
         let added_aliases = by_alias.len() - slash_aliases - emote_aliases;
 
         // 4 · benilla's instruments, last so they can never shadow a shipped command.

@@ -2,28 +2,29 @@
 //! the `ServerPacket` vocabulary stay in [`super`]; spell/attack builders live with their family
 //! in [`super::spells`]). Framing/encryption is `world.rs`'s job; these produce plain body bytes.
 
+use super::addons::{addon_tail, SecureAddon};
 use super::{CharCreateReq, MovementInfo};
 
-/// `CMSG_AUTH_SESSION` body: build, server id, account name, client seed, proof, and an empty
-/// zlib-wrapped addon block (`decompressed_size = 0` + zlib of no bytes — what the client sends and
-/// vmangos accepts).
+/// `CMSG_AUTH_SESSION` body: build, server id, account name, client seed, proof, and the
+/// **addon-info block** — `addons`' uncompressed size plus its zlib stream, exactly as the writer
+/// at `0x51d910` appends it (see [`super::addons`], decision 1497). Pass
+/// [`super::STOCK_SECURE_ADDONS`] for what a stock install sends.
 pub fn auth_session(
     build: u32,
     username: &str,
     client_seed: u32,
     client_proof: &[u8; 20],
+    addons: &[SecureAddon],
 ) -> Vec<u8> {
-    let mut body = Vec::with_capacity(40 + username.len());
+    let tail = addon_tail(addons);
+    let mut body = Vec::with_capacity(34 + username.len() + tail.len());
     body.extend_from_slice(&build.to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes()); // server_id
     body.extend_from_slice(username.as_bytes());
     body.push(0);
     body.extend_from_slice(&client_seed.to_le_bytes());
     body.extend_from_slice(client_proof);
-    body.extend_from_slice(&0u32.to_le_bytes()); // addon decompressed_size
-    let encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    let empty_addon_zlib = encoder.finish().expect("zlib finish on empty input");
-    body.extend_from_slice(&empty_addon_zlib);
+    body.extend_from_slice(&tail);
     body
 }
 

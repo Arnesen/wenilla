@@ -400,6 +400,18 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
         // The console command match is case-insensitive like the engine's console; `0x4035f0`
         // reads no arguments, so anything after `reloadUI` is ignored rather than an error.
         S::ReloadUi => ParsedChat::ReloadUi,
+        // `/errors` (ours, 1495) → the script error log. Routed as Lua rather than a new
+        // `ParsedChat` variant for the same reason `/macro` is: the window is FrameXML, the
+        // toggle is a FrameXML function, and a Rust arm would only forward to it.
+        // `/errors clear` empties the log — the reporter's workflow is clear, reproduce,
+        // screenshot, and without it the shot carries a session's worth of unrelated rows.
+        S::ScriptErrors => ParsedChat::Lua {
+            body: if args.trim().eq_ignore_ascii_case("clear") {
+                "BenillaScriptLog_Clear()".into()
+            } else {
+                "BenillaScriptLog_Toggle()".into()
+            },
+        },
         S::Console => match args.split_whitespace().next() {
             Some(cmd) if cmd.eq_ignore_ascii_case("reloadui") => ParsedChat::ReloadUi,
             _ => ParsedChat::ConsoleUnknown {

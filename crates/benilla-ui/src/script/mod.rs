@@ -55,6 +55,7 @@ mod cooldown;
 mod craft;
 mod cursor;
 mod death;
+pub mod diagnostics;
 mod editbox;
 pub(crate) use editbox::adopt_text_region;
 pub(crate) mod addon;
@@ -569,6 +570,7 @@ impl UiScript {
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
         net_stats::install(&lua)?;
+        diagnostics::install(&lua)?;
 
         let s = UiScript {
             lua,
@@ -1238,13 +1240,21 @@ impl UiScript {
 
     /// Report a script error the host caught **outside** the VM's own dispatch — an addon file
     /// that failed to compile or raised at file scope during the load walk. It joins the
-    /// handler-dispatch queue only: the caller has already logged it (the load walk's per-file
-    /// `error!` + `failures` contract), so putting it in `errors` too would double-log at the
-    /// app's per-frame drain.
+    /// handler-dispatch queue and the retained log, but **not** `errors`: the caller has already
+    /// logged it (the load walk's per-file `error!` + `failures` contract), so putting it there too
+    /// would double-log at the app's per-frame drain.
+    ///
+    /// Its silent sibling is [`Self::report_load_failure`] (decision 1495) — same retention, no
+    /// dispatch, for the load failures that never raise at all.
     pub fn report_script_error(&self, msg: &str) {
-        self.model_mut()
-            .pending_error_dispatch
-            .push(msg.to_string());
+        let mut model = self.model_mut();
+        // Retained as a **Load** row, not an Error one (decision 1495): every caller of this is
+        // the load walk, and from the player's side "the addon's file scope raised" and "the
+        // addon's file was missing" are the same fact — the addon is not running.
+        model
+            .diagnostics
+            .record(diagnostics::DiagnosticKind::Load, msg);
+        model.pending_error_dispatch.push(msg.to_string());
     }
 
     /// Hand every queued script error to the Lua-side error handler — the reference's own shape:

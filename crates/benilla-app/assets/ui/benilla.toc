@@ -358,6 +358,14 @@ ChatFrame.xml
 # show/hide), and it must come AFTER SpellBookFrame, whose shift-click reaches
 # `BenillaMacroFrame_AddMacroLine`. Before GameMenuFrame, whose Macros button opens it.
 MacroFrame.xml
+# The script error log (decision 1495): the window `/errors` opens — the list B293's two
+# reporters asked for, which the reference's one-message-at-a-time ScriptErrors modal cannot
+# be. Ours entirely (1.12 has no counterpart), reading the retained log on the model rather
+# than any per-frame feed. Needs ScrollTemplates (BOTH kits — the faux one for the fixed row
+# list, the real one for the traceback pane), UIPanelTemplates (the Clear/Close buttons) and
+# UiPanels (ShowUIPanel/HideUIPanel + the UIPanelWindows row that seats it and gets it closed
+# by ESC). Before GameMenuFrame, which is deliberately last.
+ScriptLogFrame.xml
 # The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
 # the templates + script of the Options window's Keybindings category, over the
 # engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12

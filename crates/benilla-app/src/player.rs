@@ -10,8 +10,10 @@
 //! forward** (vanilla's "both-button move"), steering with the mouse like a right-drag. The **scroll
 //! wheel** zooms the third-person
 //! distance (clamped to the vanilla `cameraDistanceMax` range; the camera *glides* to the new
-//! distance). A left-drag orbit offset *persists* — the vanilla `cameraSmoothStyle` auto-follow that
-//! swung the camera back behind the character while moving is deliberately removed (director's call).
+//! distance). A left-drag orbit offset is reeled back in by the **auto-follow** — vanilla's
+//! `cameraSmoothStyle`, a real player setting since decision 1493 ([`camera::FollowStyle`]):
+//! Smart (the shipped default) chases while the character moves, Always chases always, Never
+//! leaves the camera exactly where the hand put it.
 //! The **dev chord + `F`** toggles free-fly (1043); the **dev chord + `G`** lands the avatar where
 //! the camera is ([`land`]).
 //!
@@ -187,6 +189,7 @@ impl Plugin for PlayerPlugin {
         );
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
+        app.init_resource::<camera::FollowStyle>();
         // Far sight: resolve `PLAYER_FARSIGHT` into a pose before `control` reads it to seat the
         // camera. A separate system rather than another query on `control` for a hard reason —
         // `control` already holds the self entity's `Transform` mutably, so it cannot also read an
@@ -340,13 +343,15 @@ fn control(
     buttons: Res<ButtonInput<MouseButton>>,
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit. (The
     // scroll wheel left this tuple with 0997: zoom reads the CAMERAZOOM bindings now.)
-    // The pointer's motion this frame + the two knobs that scale what it does with it. Bundled
-    // because a Bevy system takes at most 16 parameters and this one is at the ceiling — the
-    // grouping is the existing `mouse` tuple, widened rather than a seventeenth argument.
+    // The pointer's motion this frame + the camera knobs that scale what it does with it — the
+    // two look/zoom knobs and the auto-follow style (decision 1493). Bundled because a Bevy system
+    // takes at most 16 parameters and this one is at the ceiling — the grouping is the existing
+    // `mouse` tuple, widened rather than a seventeenth argument.
     pointer: (
         Res<AccumulatedMouseMotion>,
         Res<camera::LookConfig>,
         Res<camera::ZoomLimit>,
+        Res<camera::FollowStyle>,
     ),
     // The net bridge, bundled into one param (16-param limit): the outbound command channel + the
     // inbound teleport/worldport messages `apply_net_updates` wrote earlier this frame
@@ -488,6 +493,15 @@ fn control(
     let view_subject = &speed_capsule.8;
     let self_guid = speed_capsule.9 .0;
     let scoped = &speed_capsule.10;
+    // The auto-follow style (decision 1493), with far sight's one exception folded in here so both
+    // camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
+    // Totem), our own facing is not what "behind" means, so the chase is forced off rather than
+    // reeling that camera toward a heading with nothing to do with the view.
+    let follow_style = if view_subject.remote.is_some() {
+        camera::FollowStyle::Never
+    } else {
+        *pointer.3
+    };
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
@@ -718,9 +732,17 @@ fn control(
             // which reads as the view detaching into free flight (director, 2026-08-13). A
             // `reseat` window is excluded — there the resource still describes the body we are
             // letting go of, and `apply_server_moves` owns the adoption.
+            //
+            // The same sync answers the auto-follow's Smart gate (1493): is the body we are NOT
+            // driving nevertheless moving? A taxi, a Charge, a knockback or a fear all translate
+            // the avatar while the controller stands down, and a camera that ignored them would
+            // sit at the angle you left it while the body ran out from under it. A spline ride is
+            // translation by definition; a driven body is measured against the pose we held.
+            let mut driven_moving = player.server_riding;
             if player.control_lost && !player.reseat {
                 if let Ok((_, t, ..)) = body.single() {
                     let yaw = server_ride::yaw_of(t.rotation);
+                    driven_moving |= t.translation.distance_squared(player.pos) > 1.0e-6;
                     player.pos = t.translation;
                     player.face_yaw = yaw;
                     player.model_yaw = yaw;
@@ -750,6 +772,11 @@ fn control(
                 &mut cam_t,
                 &collide,
                 cam_probe,
+                &camera::FollowInput {
+                    style: follow_style,
+                    face_yaw: player.face_yaw,
+                    moving: driven_moving,
+                },
             );
             // Flush a stale run once, so observers stop extrapolating it — but never under a ride,
             // whose FORWARD report is deliberate and would be cancelled every frame.
@@ -1679,6 +1706,13 @@ fn control(
         // — the deck's yaw delta was already applied to `cam.yaw` at the ride block (frame motion
         // carries the camera unconditionally; only input turns respect `seat_camera`'s
         // look-session gate).
+        // The auto-follow's own three facts (decision 1493): the player's style, where "behind"
+        // is, and whether the character is translating — Smart's gate.
+        let follow = camera::FollowInput {
+            style: follow_style,
+            face_yaw: player.face_yaw,
+            moving,
+        };
         seat_camera(
             dt,
             turn_delta,
@@ -1690,6 +1724,7 @@ fn control(
             &mut cam_t,
             &collide,
             cam_probe,
+            &follow,
         );
 
         // The cast bar's local self-cancel trigger (`ui_cast::local_self_cancel`): a fresh

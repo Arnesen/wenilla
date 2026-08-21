@@ -36,10 +36,32 @@ fn faction_language_per_race() {
 #[test]
 fn client_bodies_golden() {
     let proof: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
+    // The tail is the addon-info block: `342` uncompressed + the zlib stream of the stock twelve
+    // (decision 1497). Byte-identical to a real 1.12.1.5875 client's — the same 130 compressed
+    // bytes as the 2006 retail capture wow-5875-re verified this against.
     assert_eq!(
-        messages::auth_session(5875, "TESTUSER", 0x1122_3344, &proof),
-        hx("f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d4000000000789c030000000001"),
+        messages::auth_session(
+            5875,
+            "TESTUSER",
+            0x1122_3344,
+            &proof,
+            &messages::STOCK_SECURE_ADDONS
+        ),
+        hx(concat!(
+            "f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d40",
+            "56010000",
+            "789c75ccbd0ec2300c04e0f21ebc0c614095c842c38c4ce2220bc7a98ccb4f9f1e16240673eb777781",
+            "695940cb693367a326c7be5bd5c77adf7d12be16c08c7124e41249a8c2e495480ac9c53dd8b67a064b",
+            "f8340f15467367bb38cc7ac7978bbddc26ccfe3042d6e6ca01a8b8908051fcb7a45070b812f33f2641",
+            "fdb5379019668f",
+        )),
         "CMSG_AUTH_SESSION body"
+    );
+    // No secure addons: the tail is *absent*, never a zero size (which no real client emits).
+    assert_eq!(
+        messages::auth_session(5875, "TESTUSER", 0x1122_3344, &proof, &[]),
+        hx("f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d40"),
+        "CMSG_AUTH_SESSION body with no secure addons"
     );
     // Zero-appearance body (the create-if-empty starter): name + [race,class,gender] + 5 zeros + 0.
     assert_eq!(

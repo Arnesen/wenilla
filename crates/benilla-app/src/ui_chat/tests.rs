@@ -1368,8 +1368,11 @@ fn real_alias_table_resolves_the_shipped_commands() {
     // 1291 added CONSOLE's `/console` — one distinct alias, SLASH_CONSOLE1 and 2 are both the
     // same string).
     //
-    // The third number is benilla's own player-facing additions (1291): `/reload` — present in
+    // The third number is benilla's own player-facing additions: `/reload` (1291) and
+    // `/errors` `/err` (1495, the script error log) — 3 aliases over 2 commands. Present in
     // every build, deliberately counted apart from the shipped surface so the seam stays visible.
+    // The error log is player-facing on purpose and NOT an instrument: gating it on
+    // `dev_affordances()` would leave exactly the reporters who asked for it unable to type it.
     //
     // The fourth is the instrument **seam** (decision 1179): benilla's own instrument commands
     // (`/castvis` `/chattest` `/partytest` `/shot` `/liquid` `/reaction` `/react` — 7 aliases over 6
@@ -1383,7 +1386,7 @@ fn real_alias_table_resolves_the_shipped_commands() {
     };
     assert_eq!(
         table.counts(),
-        (68, 225, 1, instruments),
+        (68, 225, 3, instruments),
         "(slash, emote, benilla addition, instrument) aliases"
     );
 }

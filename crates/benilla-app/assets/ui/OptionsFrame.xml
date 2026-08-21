@@ -612,7 +612,7 @@
         OPTIONS_PAGE_ROWS = {
             Controls = {
                 "RowStickyTarget", "RowAutoLoot", "RowInvertMouse", "RowMouseSpeed",
-                "RowMaxCameraDistance",
+                "RowCameraFollowStyle", "RowMaxCameraDistance",
             },
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
@@ -867,6 +867,12 @@
             if match then
                 dd.selectedValue = match.value
                 UIDropDownMenu_SetText(match.text, dd)
+                -- A dropdown whose ENTRIES each carry their own description repaints the row's
+                -- plate as the selection moves — the reference's own shape for exactly this row
+                -- (UIOptionsFrameCameraDropDown_OnClick: `tooltip = getglobal("OPTION_TOOLTIP_
+                -- CAMERA"..GetSelectedID())`). Rows whose entries carry no `tip` keep the single
+                -- key OptionsRow_OnLoad gave them.
+                if match.tip then row.tip = match.tip end
             else
                 dd.selectedValue = v
                 UIDropDownMenu_SetText(v, dd)
@@ -1983,10 +1989,33 @@
                                              "22" means the wheel stops at 22 yards, which is the
                                              thing being chosen. Our default is the factor fully
                                              raised (30 yd), where 1.12 ships 1.0. -->
-                                        <Frame name="$parentRowMaxCameraDistance" inherits="OptionsSliderRowTemplate">
+                                        <!-- Camera Following Style (decision 1493): 1.12's own
+                                             dropdown (UIOptionsFrameCameraDropDown), values and
+                                             order and all — Smart "1", Always "2", Never "3", with
+                                             each entry carrying the reference's own description key
+                                             so the row's plate changes with the selection, the way
+                                             that dropdown's does. Seated at the head of the camera
+                                             block because it decides whether the camera follows at
+                                             all; the distance slider under it decides how far. -->
+                                        <Frame name="$parentRowCameraFollowStyle" inherits="OptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "cameraSmoothStyle",
+                                                    "Camera Following Style", "OPTION_TOOLTIP_CAMERA1")
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Smart", value = "1", tip = "OPTION_TOOLTIP_CAMERA1" },
+                                                    { text = "Always", value = "2", tip = "OPTION_TOOLTIP_CAMERA2" },
+                                                    { text = "Never", value = "3", tip = "OPTION_TOOLTIP_CAMERA3" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMaxCameraDistance" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowCameraFollowStyle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowCameraFollowStyle" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "cameraDistanceMaxFactor",
