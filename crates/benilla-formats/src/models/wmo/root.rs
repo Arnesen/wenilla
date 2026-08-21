@@ -120,6 +120,28 @@ impl WmoRoot {
         }
     }
 
+    /// Per-material MOMT `diffColor` (`+0x1C`), RGB 0..1. Read for one consumer: an **interior**
+    /// WMO liquid pool's body colour is `MOMT[MLIQ.materialId].diffColor`, taken raw, because the
+    /// reference's interior water kernel runs unlit with no pixel shader (wow-re
+    /// `terrain/scratch/water-shading-law.md`). Indexed by [`LiquidMesh::material_id`].
+    pub fn material_diff_colors(&self) -> Vec<[f32; 3]> {
+        match &self.parsed {
+            ParsedWmo::Root(r) => r
+                .materials
+                .iter()
+                .map(|m| {
+                    let [red, green, blue] = m.diff_color;
+                    [
+                        f32::from(red) / 255.0,
+                        f32::from(green) / 255.0,
+                        f32::from(blue) / 255.0,
+                    ]
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The root's portal graph (MOPV/MOPT/MOPR) — the data that drives per-group visibility culling
     /// (see [`WmoPortals`]). Empty for WMOs with no portals (most single-group props).
     pub fn portals(&self) -> &WmoPortals {

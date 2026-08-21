@@ -3,24 +3,42 @@
 //! by the terrain loader); this is the Bevy render glue — one shared [`LiquidMaterial`] per
 //! [`LiquidKind`], a `texture_2d_array` of its animated frames, and a 24 fps frame-index cycler.
 //!
-//! Faithful model (RE'd from `WoW.exe` + `ocean0_s.bls` + apitrace WoW.17 program 159, all agree).
-//! `ocean0_s.bls`: `rgb = primary·colorTex.rgb + detailTex.rgb + (secondary+0.25)·detailTex.a`,
-//! `alpha = colorTex.a`. The body colour is **`primary · waterTint`**, where:
+//! **This is the ADT path, and we render WMO liquid through it too — which is wrong.** The reference
+//! has three liquid renderers, not one: ADT MCLQ (below), WMO MLIQ water (`0x6b62e0` category 0,
+//! split again into exterior `0x6b6630` / interior `0x6b6420` on the group's `MOGP.flags & 0x48` —
+//! one texture stage, no depth ramp, alpha from a per-vertex authored byte), and magma/slime. The
+//! `wmo_liquid_arms` census sizes them: 30 exterior water groups (Stormwind's canals) against 134
+//! interior (every dungeon pool, Blackfathom's included). Neither is what this file implements.
+//! Recorded in wow-re `terrain/scratch/water-shading-law.md`.
+//!
+//! Faithful ADT model — the combiner is an **asset**, extracted from `patch.MPQ` and read, not
+//! inferred: `Shaders\Pixel\ocean0_s.bls` is `rgb = primary·colorTex.rgb + detailTex.rgb +
+//! (secondary+0.25)·detailTex.a`, `alpha = colorTex.a`, with `0.25` its own scalar `PARAM`. The
+//! formula this module has always carried is right verbatim; its **provenance was not** — the
+//! citation here used to name an "apitrace WoW.17 program 159" and a `docs/knowledge/terrain.md`,
+//! neither of which exists, and wow-re had the program attributed to a character draw. The body
+//! colour is **`primary · waterTint`**, where:
 //! - **`waterTint`** is a plain **2-endpoint linear lerp** of the zone's dedicated `Light.dbc` water
 //!   rows, RAW (no ×0.711): IntBand rows 16/17 (river/lake) or 14/15 (ocean), shallow→deep, by the
 //!   per-vertex depth `V` (river/lake `V = clamp(byte/42)`, VERIFIED `c81768`/`FUN_0068d790`; saturates
-//!   ~5 yd so the channel middle reaches the deep/teal row). Swatch builder VERIFIED: WoW.exe
-//!   `FUN_0068a830`, golden-vector-matched to the apitrace swatch ≤1/255 over all 64 rows. (The earlier
-//!   "reflected sky × 0.711 via `FUN_0068c250`" model fingered the WRONG builder — a separate grey edge
-//!   texture never bound on the water unit; and `byte/255` was the wrong LUT → river never went teal.)
+//!   ~5 yd so the channel middle reaches the deep/teal row). The swatch is rebuilt **per world frame**,
+//!   not baked once at bootstrap: the dirty flags `[0xc8117c]`/`[0xc81b70]` clear at
+//!   `0x680b90`/`0x680b97` and refill via `0x58acd0`, so colour and opacity track the zone and the
+//!   clock. (The earlier "reflected sky × 0.711 via `FUN_0068c250`" model fingered the WRONG builder —
+//!   a separate grey edge texture never bound on the water unit; and `byte/255` was the wrong LUT →
+//!   river never went teal. The `FUN_0068a830` attribution this line used to carry was also wrong:
+//!   wow-re reads `0x68a830` as a sky-band row fill.)
 //! - **`primary`** is the lit vertex colour `clamp(ambient + N·L·sun)`.
 //! - the animated `lake_a`/`ocean_h` frame is the **`detailTex`** (near-black RGB + ripple alpha): a
 //!   faint flat lift + an achromatic shimmer on crests — NOT the body colour. Mipped + 16× aniso so the
 //!   ripple averages out at distance (near-field samples mip 0, so near sparkle is the term itself).
 //! - **opacity** = the SAME `V` indexes both colour and alpha (one swatch row → RGB + A): a ramp between
-//!   the LightParams shallow/deep alphas — river 0.5→1.0, ocean 0.75→1.0 (VERIFIED WoW.exe `FUN_0068a830`
-//!   α = `127+2·row`). The river channel reaches α=1.0 (opaque, deep teal) by byte 42 ≈ 5 yd; the shore
-//!   stays see-through (the pale edge band, faithful — the bottom shows).
+//!   the LightParams shallow/deep alphas — river 0.5→1.0, ocean 0.75→1.0. The river channel reaches
+//!   α=1.0 (opaque, deep teal) by byte 42 ≈ 5 yd; the shore stays see-through (the pale edge band —
+//!   the bottom shows). **OPEN:** we ramp it linearly (`127+2·row`), but wow-re reads the byte-verified
+//!   ADT water alpha as the `0xc7fbc0` LUT's `1.6·(i/63)^8` — a curve that stays near-transparent far
+//!   longer and then climbs hard. Unchanged so far: it is a look change to every ADT water surface in
+//!   the game, so it belongs in one A/B with the WMO arms rather than landing on its own.
 //!
 //! River/lake `V = clamp(byte/42)` (steep `c81768` LUT, `FUN_0068d790`) — NOT `byte/255` (the `c7fcd8`
 //! LUT, a different draw list the from-above river path doesn't use; it left the river middle stuck on

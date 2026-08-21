@@ -506,6 +506,8 @@ pub(super) fn spawn_loaded_placements(
                                 &p.transform,
                                 m.group_bounds.get(gi),
                             ),
+                            // The root's MOMT diffColor table — an interior pool's body colour.
+                            &m.material_diff_color,
                             &mut ents,
                         );
                         if let Some(instance) = p.portal_instance {

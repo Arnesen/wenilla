@@ -17,41 +17,59 @@ use crate::models::{remap_submesh, ModelBlend, RenderSubmesh, WmoBatchClass};
 /// path). Either kernel places grid vertex `(i, j)` at `base + (i·STEP, j·STEP)`.
 const MLIQ_CELL_STEP: f32 = f32::from_bits(0x4085_5555);
 
-/// Yards per water-texture repeat: the per-cell UV step is ¼, so one repeat spans `4·MLIQ_CELL_STEP`
-/// ≈ 16.67 yd. We anchor each vertex's UV to its **model-space position** over this period so the
-/// texture is one continuous field across all of a WMO's MLIQ surfaces — no per-surface seam.
+/// Yards per water-texture repeat: **one repeat per grid cell**, `MLIQ_CELL_STEP` ≈ 4.167 yd.
 ///
-/// **The mechanism this was built on has since been REFUTED, and the number is now known to be 4×
-/// too large** (wow-re `liquid-uv-scroll-law.md`, a six-agent §5 that supersedes
-/// `rf-mliq-liquid-uv-texgen.md`). That earlier note claimed the reference reaches seamlessness with
-/// a world-anchored `GL_TEXTURE` matrix pushed at transform index 8. It does not: index 8 is the
-/// **world/modelview** transform (`0x59ca60`'s first block feeds slots 10 and 8 to `0x5a0090` →
-/// `glMatrixMode(GL_MODELVIEW)`; only 0–7 are texture stages), and the water arms push no texture
-/// matrix at all — the sole `0x58b210` call in `[0x6b6000,0x6b7000)` is the magma/slime scroll.
+/// The reference's water kernel `0x6b6630` writes `u = (float)i`, `v = (float)j` — the raw integer
+/// tile indices, from loop counters that both start at a literal 0 (VERIFIED wow-re
+/// `liquid-uv-scroll-law.md`, a six-agent §5). One repeat per cell means every surface boundary
+/// lands on an exact repeat boundary, so a neighbour restarting at 0 is invisible: the seam-free
+/// look is the *scale*.
 ///
-/// What the reference actually does is simpler: `0x6b6630` writes `u = (float)i`, `v = (float)j`,
-/// the **raw integer tile indices**, from loop counters that both start at a literal 0. One repeat
-/// per grid cell means every surface boundary lands on an exact repeat boundary, so a neighbour
-/// restarting at 0 is invisible — the seam-free look is the *scale*, not a matrix. Our `¼` is a
-/// quarter of that, i.e. our WMO water texture is four times too big, and the model-space anchoring
-/// is machinery we do not need.
+/// **This used to be `4 ×` that**, i.e. every WMO water surface in the game carried a texture four
+/// times too large, on a mechanism that was later refuted — the earlier note claimed seamlessness
+/// came from a world-anchored `GL_TEXTURE` matrix at transform index 8, but index 8 is the
+/// world/modelview transform and the water arms push no texture matrix at all. Decision 1271 carried
+/// the correction and deliberately did not apply it, the look being the director's call; B136 and
+/// the director's "Stormwind water seems too rough on the surface" are that call. The 4× cost more
+/// than size: it is exactly **two mip levels**, so the surface sat on mip 0 across the whole near
+/// field and never reached the authored chain that drops the sheet's peak ripple alpha 255 → 136 →
+/// 68 → a flat 51. Measured at the Stormwind canal before the fix, near water and mid-distance water
+/// had the same ripple contrast (σ 15.9 vs 15.2) — the ripple was not attenuating with distance at
+/// all.
 ///
-/// **NOT changed here on purpose.** Correcting it is a 4× visual change to every WMO water surface
-/// in the game (Stormwind's canals and fountains, every dungeon pool) and the look is the director's
-/// call, not a byte-fidelity autopilot's (`method.md` §9 / the contract §7). Decision 1271 carries the
-/// evidence and the proposal; this constant stands until they have looked at the A/B.
+/// We still anchor each vertex's UV to its **model-space position** rather than emitting the raw
+/// `(i, j)`. At one repeat per cell the two agree wherever surfaces are cell-aligned (they differ by
+/// a whole number of repeats, which `Repeat` wrapping erases), and where they are *not* aligned the
+/// position anchor is the one that does not seam.
 ///
-/// Magma/slime have a *separate* correction pending in the same record: the reference reads their
-/// `st` from the MLIQ vertex's authored `int16` pair × `1/256` (`movsx`, `0x6b6993`), which we do not
-/// parse at all and generate over this period instead.
-const MLIQ_UV_PERIOD: f32 = 4.0 * MLIQ_CELL_STEP;
+/// Magma/slime have a separate correction still pending: the reference reads their `st` from the
+/// MLIQ vertex's authored `int16` pair × `1/256` (`movsx`, `0x6b6993`), which we do not parse at all
+/// and generate over this period instead.
+const MLIQ_UV_PERIOD: f32 = MLIQ_CELL_STEP;
 
-/// The swatch-coord `V` fed to every WMO **water/ocean** vertex. WMO liquid verts carry flow bytes,
-/// not a depth byte (unlike MCLQ), so there is no per-vertex bathymetry to ramp; the reference's WMO
-/// water alpha comes from a separate shore LUT (`0xc7fbc0`, wow-re — not yet RE'd for this path). We
-/// render the flat surface at the DEEP endpoint: opaque, deep-tinted canal water (the vanilla look),
-/// which the zone's `Light.dbc` rows still colour per-zone. Tunable; the exact shore LUT is deferred.
-const WMO_WATER_DEPTH_V: f32 = 1.0;
+/// The **opacity ramp coordinate** fed to a WMO water vertex: its authored byte, normalised.
+///
+/// WMO liquid carries no bathymetry, so there is nothing to ramp by depth the way ADT MCLQ water is
+/// ramped — and the reference does not try. It indexes a 256-entry alpha ramp with the vertex's own
+/// byte 0 (`0x6b64c6 movzx`), and that ramp is a plain **linear** lerp between the zone's river
+/// shallow and deep alphas: `LUT[i] = (c0·256 + i·(c1 − c0)) >> 8`, rebuilt per frame, which for the
+/// static-init endpoints (0.5, 1.0) runs 127 → 191 → 254. **Not** the ADT path's
+/// `1.6·(i/63)^8` curve; the two systems do not even share a delivery mechanism (the ADT ramp is
+/// uploaded as a GPU texture and never CPU-indexed). VERIFIED wow-re
+/// `terrain/scratch/water-shading-law.md` §11 — including the refutation of a first reading that had
+/// the step sign-extended as a byte and the ramp *decreasing*.
+///
+/// So `byte / 255` is exactly the lerp coordinate our shader already applies to the shallow/deep
+/// alpha pair off the shared light buffer, and passing it through the existing per-vertex channel
+/// reproduces the reference's LUT without a second mechanism.
+///
+/// This replaces a hard `1.0` — the deep, fully-opaque endpoint, pinned for every WMO pool in the
+/// game because we believed those bytes were flow data. That pin is why Blackfathom's Pool of
+/// Ask'ar rendered as a sheet you cannot see through where the real client shows 9–15 yd of bottom
+/// (B136), and it was documented as "tunable; the exact shore LUT is deferred".
+fn wmo_water_alpha_v(opacity_byte: u8) -> f32 {
+    f32::from(opacity_byte) / 255.0
+}
 
 /// MOGP `groupLiquid`'s sentinel: **this group holds no liquid of its own**. Any other value is the
 /// whole-group submersion override — see [`WmoGroupHeader::group_liquid`].
@@ -306,39 +324,17 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
         first_wet
     };
     let kind = LiquidKind::from_nibble(type_nibble)?;
-    let depth_v = if kind.is_fullbright() {
-        0.0
-    } else {
-        WMO_WATER_DEPTH_V
-    };
+    // Fullbright kinds read no ramp at all (their sheet IS the body), and their leading four vertex
+    // bytes are an authored int16 UV pair rather than an opacity — so the byte is meaningless there
+    // and the channel stays 0, a statement rather than a value.
+    let water = !kind.is_fullbright();
 
-    // Grid vertices (row-major `j·xverts + i`), WMO model space. Every vertex is emitted (dry-tile
-    // corners included, unreferenced) so the tile indices line up; the AABB stays tight because WMO
-    // liquid heights are real, flat values (no MCLQ FLT_MAX sentinel).
-    let mut positions = Vec::with_capacity(xv * yv);
-    let mut uvs = Vec::with_capacity(xv * yv);
-    let mut depths = Vec::with_capacity(xv * yv);
-    for j in 0..yv {
-        for i in 0..xv {
-            let mx = lq.base[0] + i as f32 * MLIQ_CELL_STEP;
-            let my = lq.base[1] + j as f32 * MLIQ_CELL_STEP;
-            let h = lq.heights[j * xv + i];
-            positions.push([mx, my, if h.is_finite() { h } else { lq.base[2] }]);
-            // UV from the vertex's MODEL-SPACE position, NOT its per-surface tile index. A per-surface
-            // `(i·¼, j·¼)` resets to 0 at each surface's origin; a surface's tile count is arbitrary
-            // (Stormwind g099 is 11 tiles = 2.75 repeats), so that reset lands mid-texture and SEAMS at
-            // every surface boundary. Dividing the shared model-space position by the repeat period
-            // ties all of a WMO's MLIQ surfaces to ONE continuous UV field, so grid-aligned neighbours
-            // tile seamlessly. (Same per-cell ¼ step as before — `i·STEP/period = i·¼` — plus the
-            // `base/period` offset that couples the surfaces.)
-            uvs.push([mx / MLIQ_UV_PERIOD, my / MLIQ_UV_PERIOD]);
-            depths.push(depth_v);
-        }
-    }
-
-    // 2 tris per wet tile (low nibble `!= 0xf`). Winding is irrelevant (drawn two-sided).
+    // 2 tris per wet tile (low nibble `!= 0xf`). Winding is irrelevant (drawn two-sided). Built
+    // BEFORE the vertices because which vertices the triangles actually reference is what decides
+    // the substitution below.
     let mut indices = Vec::with_capacity(xt * yt * 6);
     let mut wet = vec![false; xt * yt];
+    let mut drawn = vec![false; xv * yv];
     for ty in 0..yt {
         for tx in 0..xt {
             if lq.tile_flags[ty * xt + tx] & 0xf == 0xf {
@@ -350,10 +346,68 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
             let bl = ((ty + 1) * xv + tx) as u32;
             let br = bl + 1;
             indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+            for v in [tl, tr, bl, br] {
+                drawn[v as usize] = true;
+            }
         }
     }
     if indices.is_empty() {
         return None; // grid present but every tile a hole
+    }
+
+    // The height every **unreferenced** vertex is filled with — see the loop below. The lowest
+    // drawn height, so the substitute can never push the AABB past the geometry that is really
+    // there. `indices` is non-empty by the check above, so at least one drawn height exists.
+    let fill_z = (0..xv * yv)
+        .filter(|&n| drawn[n] && lq.heights[n].is_finite())
+        .map(|n| lq.heights[n])
+        .fold(f32::INFINITY, f32::min);
+    let fill_z = if fill_z.is_finite() {
+        fill_z
+    } else {
+        lq.base[2]
+    };
+
+    // Grid vertices (row-major `j·xverts + i`), WMO model space. Every vertex is emitted — hole
+    // corners included — so the tile indices line up.
+    //
+    // **A hole corner's authored height is not a height.** MLIQ carries a full `xverts × yverts`
+    // height array whether or not a tile is wet, and the shipped files leave the hole interiors at
+    // a literal `0.0`: Blackfathom g007 has 186 of 868 (its water sits at model z −58.28) and even
+    // Stormwind's canal g099 has 36 of 108 (water at −6.48). Emitting those verbatim is invisible in
+    // the draw — no triangle references them — but it stretches the Bevy mesh AABB from the flat
+    // sheet all the way to model z 0, i.e. 58 yd of phantom vertical extent on that one pool, and
+    // every AABB consumer (frustum culling first) then reasons about a box that is mostly nothing.
+    // (The comment that used to sit here claimed the opposite — "the AABB stays tight because WMO
+    // liquid heights are real, flat values" — which is false on both files above. The MCLQ path has
+    // always substituted for its own `FLT_MAX` sentinel for exactly this reason; WMO liquid needed
+    // the same treatment against a different degenerate value, and the robust test is *is this
+    // vertex drawn*, not *does its height look wrong*.)
+    let mut positions = Vec::with_capacity(xv * yv);
+    let mut uvs = Vec::with_capacity(xv * yv);
+    let mut depths = Vec::with_capacity(xv * yv);
+    for j in 0..yv {
+        for i in 0..xv {
+            let n = j * xv + i;
+            let mx = lq.base[0] + i as f32 * MLIQ_CELL_STEP;
+            let my = lq.base[1] + j as f32 * MLIQ_CELL_STEP;
+            let h = lq.heights[n];
+            let z = if drawn[n] && h.is_finite() { h } else { fill_z };
+            positions.push([mx, my, z]);
+            depths.push(if water {
+                wmo_water_alpha_v(lq.opacity.get(n).copied().unwrap_or(0))
+            } else {
+                0.0
+            });
+            // UV from the vertex's MODEL-SPACE position, NOT its per-surface tile index. A per-surface
+            // `(i·¼, j·¼)` resets to 0 at each surface's origin; a surface's tile count is arbitrary
+            // (Stormwind g099 is 11 tiles = 2.75 repeats), so that reset lands mid-texture and SEAMS at
+            // every surface boundary. Dividing the shared model-space position by the repeat period
+            // ties all of a WMO's MLIQ surfaces to ONE continuous UV field, so grid-aligned neighbours
+            // tile seamlessly. (Same per-cell ¼ step as before — `i·STEP/period = i·¼` — plus the
+            // `base/period` offset that couples the surfaces.)
+            uvs.push([mx / MLIQ_UV_PERIOD, my / MLIQ_UV_PERIOD]);
+        }
     }
     Some(LiquidMesh {
         grid: [xv as u32, yv as u32],
@@ -365,6 +419,9 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
         // The `0x6ba970`-resolved nibble (groupLiquid override / first wet tile) IS the WMO
         // surface's sound class — the ambient-loop key (see `LiquidMesh::sound_nibble`).
         sound_nibble: type_nibble,
+        // How an interior pool finds its body colour: MOMT lives in the ROOT, so the group file
+        // cannot resolve it and the spawner does (see `liquid::surface::spawn_wmo_liquids`).
+        material_id: Some(lq.material_id),
         kind,
     })
 }
@@ -753,6 +810,8 @@ mod tests {
             base: [100.0, 200.0, -3.0],
             material_id: 0,
             heights: vec![-3.0; 6],
+            // Byte 0 per vertex — the authored opacity index (see `wmo_water_alpha_v`).
+            opacity: vec![0, 51, 102, 153, 204, 255],
             tile_flags: vec![0x44, 0x0f], // wet (type 4 + fishable), hole
         };
         let m = build_wmo_liquid_mesh(&lq, 0xf).expect("a wet mesh");
@@ -762,8 +821,15 @@ mod tests {
                                         // Grid vertex (i=1, j=0) sits at base + (1·STEP, 0, height).
         assert!((m.positions[1][0] - (100.0 + MLIQ_CELL_STEP)).abs() < 1e-3);
         assert_eq!(m.positions[0], [100.0, 200.0, -3.0]);
-        // Water is rendered at the deep (opaque) V.
-        assert!(m.depths.iter().all(|&v| v == WMO_WATER_DEPTH_V));
+        // Opacity is the vertex's OWN authored byte, normalised — not a pinned deep endpoint.
+        // Before this, every WMO pool in the game was rendered at a hard 1.0 (fully opaque).
+        for (n, &v) in m.depths.iter().enumerate() {
+            assert!(
+                (v - f32::from(lq.opacity[n]) / 255.0).abs() < 1e-6,
+                "vertex {n}: depth channel {v} should carry byte {}/255",
+                lq.opacity[n]
+            );
+        }
         // The wet tile is the LEFT one (indices reference the left cell's 4 corners: 0,1,3,4).
         assert!(m.indices.iter().all(|&i| [0u32, 1, 3, 4].contains(&i)));
     }
@@ -771,7 +837,8 @@ mod tests {
     /// Two grid-aligned WMO liquid surfaces (a canal split across groups) must share ONE continuous
     /// UV field, so the animated water texture doesn't seam at the boundary. Surface B begins exactly
     /// where A's last column sits (base offset by 2·STEP in X), so the vertex they share in model space
-    /// must get the SAME UV in both — the property the old per-surface `(i·¼, j·¼)` reset broke (each
+    /// must get the SAME UV in both — the property a per-surface `(i, j)` reset would break wherever
+    /// surfaces are NOT cell-aligned (each
     /// surface restarted at UV 0, and an arbitrary tile count put that restart mid-texture → the seam).
     #[test]
     fn adjacent_surfaces_share_a_continuous_uv_field() {
@@ -784,6 +851,7 @@ mod tests {
             base,
             material_id: 0,
             heights: vec![-3.0; 6],
+            opacity: Vec::new(),
             tile_flags: vec![0x44, 0x44], // both tiles wet
         };
         // B's origin column coincides with A's rightmost column (one 2-tile span east).
@@ -795,6 +863,7 @@ mod tests {
             base: [base[0] + 2.0 * MLIQ_CELL_STEP, base[1], base[2]],
             material_id: 0,
             heights: vec![-3.0; 6],
+            opacity: Vec::new(),
             tile_flags: vec![0x44, 0x44],
         };
         let ma = build_wmo_liquid_mesh(&a, 0xf).unwrap();
@@ -806,8 +875,10 @@ mod tests {
             (ua[0] - ub[0]).abs() < 1e-4 && (ua[1] - ub[1]).abs() < 1e-4,
             "seam: shared-vertex UVs differ A={ua:?} B={ub:?}"
         );
-        // The field is position-derived: UV.x still steps exactly ¼ per cell (same ripple size as before).
-        assert!((ma.uvs[1][0] - ma.uvs[0][0] - 0.25).abs() < 1e-4);
+        // The field is position-derived, and it steps exactly ONE repeat per cell — the reference's
+        // `u = (float)i` (`0x6b6630`). This used to assert ¼, i.e. a texture 4x too large; correcting
+        // it is what took the ripple off mip 0 across the whole near field (`MLIQ_UV_PERIOD`).
+        assert!((ma.uvs[1][0] - ma.uvs[0][0] - 1.0).abs() < 1e-4);
     }
 
     #[test]
@@ -821,6 +892,7 @@ mod tests {
             base: [0.0, 0.0, 0.0],
             material_id: 0,
             heights: vec![0.0; 4],
+            opacity: Vec::new(),
             tile_flags: vec![0x40], // nibble 0 (would be Still), but the override wins
         };
         let m = build_wmo_liquid_mesh(&lq, 2).expect("magma mesh");

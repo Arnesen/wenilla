@@ -514,6 +514,13 @@ pub struct LiquidExt {
     ///   `secondary` Blinn term — water's own exponent, not the shared row-3 terrain shininess.
     #[uniform(102)]
     pub kind: Vec4,
+    /// - `x` = **which renderer** this surface belongs to (`liquid::surface::LiquidPath`): `0` = ADT
+    ///   MCLQ (`ocean0_s.bls`), `1` = WMO exterior (`MapObjExtWater0.bls`), `2` = WMO interior
+    ///   (fixed-function, unlit). The reference has three liquid renderers with genuinely different
+    ///   combines, stage counts and opacity sources; this is which one `liquid.wgsl` runs.
+    /// - `y`/`z`/`w` reserved.
+    #[uniform(102)]
+    pub path: Vec4,
     /// `x` = reserved (frame 0), `y` = frame count, `z` = scroll flag, `w` = clock enable —
     /// the shader derives frame index and scroll from `globals.time` (liquid.wgsl `anim_time`);
     /// nothing mutates this uniform after build.

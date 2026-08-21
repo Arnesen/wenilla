@@ -46,6 +46,18 @@ pub struct Material {
     /// EMISSION on lit batches (`flags & 0x10` — the windows-glow-at-night mechanism). Meaningless
     /// (usually zero) when the SIDN flag is clear.
     pub sidn_rgb: [u8; 3],
+    /// **MOMT+0x1C — `diffColor`**, the material's authored diffuse colour (BGRA on disk, RGB here).
+    ///
+    /// Read for exactly one consumer: it is the **body colour of an interior WMO liquid pool**. The
+    /// reference's interior water kernel `0x6b6420` runs with lighting forced off and no pixel
+    /// shader, and its whole RGB is this dword taken raw — `Cf = MOMT[MLIQ.materialId].diffColor`,
+    /// combined with the animated sheet as `clamp(Cf + Ct)`. The pool's material's own alpha at
+    /// `+0x1f` is discarded; opacity comes from the per-vertex LUT instead.
+    ///
+    /// The offset is anchored on both sides by fields this repo verified independently of water:
+    /// `+0x18` texture 2 and `+0x20` [`Self::ground_type`]. Stride 0x40, base `[CMapObj+0x1d8]`
+    /// (`0x6c3ace` + `0x6c3ad7 shr edx,6`). VERIFIED wow-re `terrain/scratch/water-shading-law.md`.
+    pub diff_color: [u8; 3],
     /// **MOMT+0x20 — the surface's `TerrainType.dbc` id**, i.e. what walking on this material
     /// sounds like. The footstep chain's WMO leg: the client's down-ray arbitrates a terrain probe
     /// against a WMO probe and the nearer surface supplies the terrain type, so a building's own
@@ -124,8 +136,33 @@ pub struct WmoLiquid {
     /// selects its texture from the tile-flag type; kept for completeness).
     pub material_id: u16,
     /// Per-vertex absolute liquid height (WMO-local Z), row-major `j·xverts + i`, `xverts·yverts` long.
-    /// (For water verts the leading 4 bytes are flow data, not depth; the height is the last f32.)
+    /// The MLIQ vertex is 8 bytes and the height is its trailing `f32`; what the leading 4 bytes mean
+    /// is per liquid type — see [`Self::opacity`] for the water reading.
     pub heights: Vec<f32>,
+    /// Per-vertex **opacity index** — the water vertex's byte 0, row-major beside [`Self::heights`].
+    ///
+    /// WMO liquid carries no bathymetry, so nothing here can be ramped by depth the way ADT MCLQ's
+    /// water is; this byte **is** the authored opacity. The reference indexes a 256-entry alpha ramp
+    /// (`[0xca7f10]`, rebuilt per frame from the zone's river shallow/deep alpha pair) with it and
+    /// uses the result as the vertex alpha — the water arms bind no depth-ramp texture at all
+    /// (VERIFIED wow-re `terrain/scratch/water-shading-law.md`; zero references to the ADT ramp
+    /// globals `0xc7fbc0`/`0xc81768`/`0xc7fcd8` anywhere in `[0x6b0000, 0x6c4000)`).
+    ///
+    /// It was parsed as nothing for a long time — the field it replaced was documented as "flow
+    /// data" — which is why every WMO pool in benilla rendered at one pinned opacity.
+    ///
+    /// On the **magma/slime** arm the same four bytes are an authored `int16` `(s, t)` UV pair
+    /// instead, so byte 0 there is half a texture coordinate and means nothing as an opacity. The
+    /// consumer picks by liquid type; this parser just carries the byte.
+    ///
+    /// That split is also what corroborates the reading against the shipped data, independently of
+    /// the disassembly. Censused over every drawn liquid vertex in the corpus: on the **water** arms
+    /// the byte is structured — Stormwind's canals are **91.2% a single value (86)** across 3492
+    /// vertices with only 41 distinct values, exactly the shape of an authored per-surface opacity —
+    /// while on **magma/slime** it is near-uniform noise over all 256 values (each ≈0.7–1.4%), which
+    /// is what half of a texture coordinate should look like. A byte that is a constant on one arm
+    /// and white noise on the other is not being read at the wrong offset.
+    pub opacity: Vec<u8>,
     /// Per-tile flag bytes, row-major `j·xtiles + i`, `xtiles·ytiles` long. Low nibble = liquid type;
     /// `0xf` = hole (skip the tile). High bits are fishable (`0x40`) / shared (`0x80`).
     pub tile_flags: Vec<u8>,
@@ -207,11 +244,13 @@ fn parse_root(b: &[u8]) -> Result<WmoRoot> {
                 for m in p.chunks_exact(64) {
                     // CImVector — BGRA bytes on disk, so the LE u32 reads B | G<<8 | R<<16 | A<<24.
                     let sidn = m.u32_at(0x10).ok_or(Error::Truncated("MOMT"))?;
+                    let diff = m.u32_at(0x1c).ok_or(Error::Truncated("MOMT"))?;
                     root.materials.push(Material {
                         flags: m.u32_at(0).ok_or(Error::Truncated("MOMT"))?,
                         blend_mode: m.u32_at(8).ok_or(Error::Truncated("MOMT"))?,
                         texture_1: m.u32_at(12).ok_or(Error::Truncated("MOMT"))?,
                         sidn_rgb: [(sidn >> 16) as u8, (sidn >> 8) as u8, sidn as u8],
+                        diff_color: [(diff >> 16) as u8, (diff >> 8) as u8, diff as u8],
                         ground_type: m.u32_at(0x20).ok_or(Error::Truncated("MOMT"))?,
                     });
                 }
@@ -366,9 +405,12 @@ fn parse_mliq(s: &[u8]) -> Result<Option<WmoLiquid>> {
     if s.len() < tbase + ntiles {
         return Ok(None); // declared grid runs past the payload — treat as no liquid
     }
-    let heights = (0..nverts)
+    let heights: Vec<f32> = (0..nverts)
         .map(|k| s.f32_at(vbase + k * 8 + 4).unwrap_or(0.0))
         .collect();
+    // Byte 0 of the same 8-byte vertex — the water opacity index (see `WmoLiquid::opacity`). The
+    // bounds are already guaranteed by the `tbase` check above.
+    let opacity: Vec<u8> = (0..nverts).map(|k| s[vbase + k * 8]).collect();
     let tile_flags = s[tbase..tbase + ntiles].to_vec();
     Ok(Some(WmoLiquid {
         xverts,
@@ -378,6 +420,7 @@ fn parse_mliq(s: &[u8]) -> Result<Option<WmoLiquid>> {
         base,
         material_id,
         heights,
+        opacity,
         tile_flags,
     }))
 }

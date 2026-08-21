@@ -168,6 +168,12 @@ pub struct LiquidMesh {
     /// beside `kind` because the render kind collapses the river speeds (nibbles 0 and 4 both
     /// draw `lake_a`) that the sound table splits (RiverStill 1111 vs RiverSlow 1112).
     pub sound_nibble: u8,
+    /// **WMO only** — the MLIQ header's `materialId`, i.e. this pool's index into the owning root's
+    /// MOMT array. The reference's INTERIOR water kernel takes its whole body colour from
+    /// `MOMT[materialId].diffColor` (see `benilla_wmo::Material::diff_color`), so this is how a pool
+    /// finds its own colour; the group file alone cannot resolve it, because MOMT lives in the root.
+    /// `None` on the ADT path, which has no such index and no such lookup.
+    pub material_id: Option<u16>,
     /// The texture set / render path this surface uses.
     pub kind: LiquidKind,
 }
@@ -324,6 +330,7 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
         depths,
         indices,
         sound_nibble,
+        material_id: None, // ADT liquid has no MOMT to index
         kind,
     })
 }

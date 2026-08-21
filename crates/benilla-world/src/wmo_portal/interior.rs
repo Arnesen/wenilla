@@ -809,6 +809,7 @@ mod tests {
             group_bounds: Vec::new(),
             group_footprints: Vec::new(),
             material_ground_type: Vec::new(),
+            material_diff_color: Vec::new(),
             group_footprint_bounds: Vec::new(),
             group_footprint_grids: Vec::new(),
             group_light_refs: Vec::new(),

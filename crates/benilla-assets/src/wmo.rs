@@ -173,6 +173,10 @@ pub struct WmoModel {
     /// `FootprintTris::mopy_material` resolves to. Shared by every group (MOMT lives on the root),
     /// and the tail of the footstep chain's WMO leg (decision 1161).
     pub material_ground_type: Vec<u32>,
+    /// Root MOMT `diffColor` per material, RGB 0..1 — the body colour an **interior** MLIQ pool
+    /// takes, indexed by its `LiquidMesh::material_id`. MOMT lives in the root, so a group file
+    /// cannot resolve its own pool's colour; the spawner does it from here.
+    pub material_diff_color: Vec<[f32; 3]>,
     /// Per-group AABB of the faces [`Self::group_footprints`] actually references (parallel;
     /// `None` = no footprint faces), computed at load from the triangles themselves — the broad
     /// phase for the footprint down-ray, the same exact-cull argument as
@@ -729,6 +733,7 @@ impl AssetLoader for WmoModelLoader {
             doodad_groups,
             group_footprints,
             material_ground_type: root.material_ground_types(),
+            material_diff_color: root.material_diff_colors(),
             group_footprint_bounds,
             group_footprint_grids,
             group_light_refs,

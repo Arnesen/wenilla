@@ -1017,6 +1017,7 @@ mod tests {
             depths: vec![1.0; 4],
             indices: vec![0, 1, 2, 1, 3, 2],
             sound_nibble: 0,
+            material_id: None,
             kind: LiquidKind::Still,
         }
     }
