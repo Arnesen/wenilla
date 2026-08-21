@@ -296,33 +296,129 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| get_slot_texture(lua, &this, Slot::Text))?,
     )?;
 
-    // SetFontString(fontString) — ADOPT a caller-made FontString as this Button's label
-    // (`0x780a60`; the pointer it writes is the Button's `+0x338`, the field
-    // `GetFontString`/`SetText`/`GetTextWidth` all read — wow-re `widget-api-batch-benilla.md` Q8).
+    // SetFontString(fontString) — ADOPT a caller-made FontString as this Button's label.
     //
-    // The idiom it exists for: build the label yourself so you can style and place it, then hand it
-    // to the button so `SetText` and the per-state font machinery drive it.
+    // Byte-carved end to end by wow-re (decision 1505,
+    // `system/ui/scratch/resize-bounds-and-button-fontstring.md`
+    // §5): the binding `0x780a60` is gates + a delegate to `CSimpleButton::SetFontString
+    // 0x778d20`, which is the SAME function `SetText`'s lazy creation path funnels through — so
+    // adopting and creating share their whole tail, and only the allocation differs.
     //
-    //     local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    //     btn:SetFontString(fs)
+    // The idiom it exists for: build the label yourself so you can style and place it, then hand
+    // it to the button so `SetText` and the per-state font machinery drive it. Quiver's
+    // `Component/Select.wow.lua` builds every dropdown option row that way, and with the method
+    // nil the row died on its first line — the second of B267's three walls.
     //
-    // Quiver's `Component/Select.wow.lua` builds every dropdown option row that way, and with the
-    // method nil the row died on its first line — the second of B267's three walls.
+    // **It raises, in three distinct ways, and never silently no-ops on a bad argument** — the
+    // first shape I built here was a lenient no-op and the bytes say otherwise:
     //
-    // Adoption only: no region is created, and the argument keeps its own parent and its own
-    // anchors (callers anchor it after the call as often as before). A non-region argument leaves
-    // the button unchanged rather than raising — the reference marshals it and writes a pointer,
-    // and what it does with a bad one is not byte-read.
+    //  · a **missing** argument, `nil`, a number, a string or a boolean → `lua_type(L,2) != TABLE`
+    //    → `Usage: %s:SetFontString(fontstring)` (`0x87a100`). Missing and nil take the identical
+    //    leg (`index2adr` answers NULL → type −1), so `SetFontString(nil)` **cannot clear the
+    //    label from Lua**; the C++ clear exists but no binding reaches it.
+    //  · a **table that is not a widget** → `%s:SetFontString(): Couldn't find 'this' in
+    //    fontstring` (`0x87a160`).
+    //  · a **Frame or a Texture** — anything that is not a FontString → `%s:SetFontString():
+    //    Wrong object type, expected fontstring` (`0x87a124`), gated by an `IsA` against the
+    //    FontString token, which a Texture fails.
+    //
+    // `%s` is the BUTTON's name (or `<unnamed>`), never the argument's. Zero return values.
+    //
+    // What `0x778d20` then does, all four clauses VERIFIED and all four here:
+    //
+    //  · **`new == old` is a total no-op** — the first compare, before anything is touched.
+    //  · **the previous label is DESTROYED**, not orphaned (`old->vtable[0](1)`, the scalar
+    //    deleting destructor, returning the storage to the FontString pool). So a button whose
+    //    `SetText` already lazily made one does not leak a stray string behind the new label.
+    //  · **the string is RE-PARENTED to the button and its draw layer forced to ARTWORK**
+    //    (`0x77fd10(parent, 2, 1)` — layer id 2 in the client's own `.rdata 0x811a80` name table).
+    //    Always, whatever it was parented to or drawn in before.
+    //  · **it is anchored only if it has NO anchors of its own** (a scan of all nine
+    //    `anchorPoints` slots): LEFT/RIGHT/CENTER by the justify bits, to the matching point on
+    //    the button. That is exactly [`super::region::implicit_creation_anchor`]'s FontString arm,
+    //    which already transcribes the same `& 7` → LEFT(1)/RIGHT(4)/else-CENTER chain, so it is
+    //    reused rather than re-written. One stated difference: the reference reads the *button's*
+    //    Normal `CSimpleFont` justify word and ours reads the string's own — they agree in the
+    //    ordinary case, because our extract resolves the button's per-state font onto the label
+    //    every frame anyway.
+    //
+    // The fifth clause — apply the button's per-state font immediately — needs no code: our
+    // extract re-points the label at the current state's font object every frame
+    // ([`ButtonState::normal_font`]), so binding the label IS applying it.
     m.set(
         "SetFontString",
-        lua.create_function(|lua, (this, fs): (Table, Value)| {
-            let Value::Table(fs) = fs else { return Ok(()) };
-            let Ok(rh) = super::region::region_handle_of(lua, &fs) else {
-                return Ok(());
+        lua.create_function(|lua, args: MultiValue| {
+            let mut it = args.into_iter();
+            let this = match it.next() {
+                Some(Value::Table(t)) => t,
+                _ => return Err(mlua::Error::runtime("expected a button")),
             };
+            let who = {
+                let h = frame_handle_of(lua, &this)?;
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .arena
+                    .frame(h)
+                    .and_then(|f| f.name.clone())
+                    .unwrap_or_else(|| "<unnamed>".to_string())
+            };
+            let Some(Value::Table(fs)) = it.next() else {
+                return Err(mlua::Error::runtime(format!(
+                    "Usage: {who}:SetFontString(fontstring)"
+                )));
+            };
+            // The two remaining legs are DIFFERENT questions and the reference asks them in this
+            // order: first "is this a framescript object at all" (`0x780b27`), then "is it a
+            // FontString" (`0x780b90`'s `IsA` against the FontString token). A Frame or a Texture
+            // passes the first and fails the second — so resolving straight to a region handle
+            // would collapse both onto the first message and mislabel every widget argument.
+            let rh = {
+                let not_an_object = || {
+                    mlua::Error::runtime(format!(
+                        "{who}:SetFontString(): Couldn't find 'this' in fontstring"
+                    ))
+                };
+                let id = super::object::decode_id(&fs).map_err(|_| not_an_object())?;
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let known_widget =
+                    model.id_to_frame.contains_key(&id) || model.id_to_region.contains_key(&id);
+                if !known_widget {
+                    return Err(not_an_object());
+                }
+                match model.id_to_region.get(&id).copied() {
+                    Some(rh)
+                        if model.arena.region(rh).map(|r| r.kind)
+                            == Some(RegionKind::FontString) =>
+                    {
+                        rh
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "{who}:SetFontString(): Wrong object type, expected fontstring"
+                        )))
+                    }
+                }
+            };
+            let old = with_button(lua, &this, |bs| bs.text)?;
+            if old == Some(rh) {
+                return Ok(());
+            }
+            let owner = frame_handle_of(lua, &this)?;
             with_button(lua, &this, |bs| bs.text = Some(rh))?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // The label is a measured region, and its new role feeds the button's text extents.
+            if let Some(dead) = old {
+                // DESTROYED, not orphaned — the shared region-lifetime law, whose doc carries the
+                // reason (`0x778d3c`'s scalar deleting destructor).
+                super::region::free_region(&mut model, dead);
+            }
+            model.arena.set_region_owner(rh, Some(owner));
+            if let Some(r) = model.arena.region_mut(rh) {
+                r.draw_layer = DrawLayer::Artwork;
+            }
+            super::region::implicit_creation_anchor(&mut model, rh);
+            // A new label, a new owner and a possible new anchor — the layout's read set moved,
+            // and the string's extents are what the button's own `GetTextWidth` reports.
+            model.touch_layout();
             model.touch_measure(rh);
             Ok(())
         })?,

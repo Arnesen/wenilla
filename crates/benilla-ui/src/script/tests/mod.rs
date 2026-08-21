@@ -27,6 +27,7 @@ mod object_model;
 mod reference_surface;
 mod region_map;
 mod regions;
+mod resize_bounds;
 mod scrollframe;
 mod setparent;
 mod simplehtml;

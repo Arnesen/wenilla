@@ -31,8 +31,6 @@
         -- GameTooltip_SetDefaultAnchor's position math (ref-GameTooltip.lua l.6,73-77): the
         -- bottom-right screen corner, -CONTAINER_OFFSET_X - 13 in x, CONTAINER_OFFSET_Y in y.
         DEFAULT_TOOLTIP_POSITION = -13
-        CONTAINER_OFFSET_X = CONTAINER_OFFSET_X or 0
-        CONTAINER_OFFSET_Y = CONTAINER_OFFSET_Y or 70
         -- The shopping-compare pair count (ref GameTooltip.lua l.7; PaperDollFrame's listener
         -- bounds arg2 by it).
         NUM_SHOPPING_TOOLTIPS = 2
@@ -86,8 +84,17 @@
         -- owner anchor (tooltip.rs SetOwner), so no ClearAllPoints - the ref has none either.
         function GameTooltip_SetDefaultAnchor(tooltip, parent)
             tooltip:SetOwner(parent, "ANCHOR_NONE")
+            -- Read the two managed globals FRESH, and fall back AT USE rather than assigning a
+            -- copy: this file used to open with `CONTAINER_OFFSET_X = CONTAINER_OFFSET_X or 0`,
+            -- which is a second written statement of numbers UIParent.xml owns. Harmless in the
+            -- shipped load order (UIParent.xml is manifest 42, this file later) but it is the same
+            -- shape as the shadow pair that froze the bag stack at the no-bars corner, so the law
+            -- of 1499 forbids it outright: nothing outside UIParent.xml assigns a managed offset.
+            -- The `or` defaults below cover the tooltip-only harnesses that load no UIParent.
+            local offsetX = CONTAINER_OFFSET_X or 0
+            local offsetY = CONTAINER_OFFSET_Y or 70
             tooltip:SetPoint("BOTTOMRIGHT", "UIParent", "BOTTOMRIGHT",
-                -CONTAINER_OFFSET_X + DEFAULT_TOOLTIP_POSITION, CONTAINER_OFFSET_Y)
+                -offsetX + DEFAULT_TOOLTIP_POSITION, offsetY)
             tooltip.default = 1
         end
 

@@ -500,19 +500,19 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     // The bar stubs carry a no-op SetPoint: `MultiBarBottomLeft` and `ShapeshiftBarFrame` are
     // themselves rows in UIPARENT_MANAGED_FRAME_POSITIONS, so since those frames wear their
     // reference names the pass positions them as well as reading their visibility.
-    s.run("MultiBarBottomLeft = { IsShown = function() return true end, SetPoint = function() end }; MultiBarBottomRight = MultiBarBottomLeft; UIParent_ManageFramePositions()")
+    s.run("MultiBarBottomLeft = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; MultiBarBottomRight = MultiBarBottomLeft; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 102.0, "60 + bottomEither 42 — the row engaged");
 
     // The stance bar shows on top of them.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 144.0, "60 + 42 + pet 42");
 
     // And it settles back when the stance bar hides.
-    s.run("ShapeshiftBarFrame = { IsShown = function() return false end, SetPoint = function() end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame = { IsShown = function() return false end, SetPoint = function() end, ClearAllPoints = function() end }; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 102.0, "back to the multibar-only stack");

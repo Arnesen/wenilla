@@ -120,6 +120,31 @@ fn spell_and_action_wire() {
         "packed 0 clears the slot"
     );
 
+    // CMSG_SET_ACTIONBAR_TOGGLES opcode (703 / 0x02BF) + body: ONE u8 and nothing else — VERIFIED
+    // at the bytes, wow-re `system/ui/scratch/action-bar-toggles.md` §3 (`0x4e771d push 0x2bf`,
+    // the one emitter image-wide; PutUInt32 opcode + PutUInt8 byte; NetClient::Send computes the
+    // payload as 5 = 4 + 1). vmangos corroborates: `Misc.cpp:150-153` reads a single uint8.
+    assert_eq!(
+        messages::opcode::CMSG_SET_ACTIONBAR_TOGGLES,
+        0x02BF,
+        "CMSG_SET_ACTIONBAR_TOGGLES opcode"
+    );
+    assert_eq!(
+        messages::set_actionbar_toggles(0x0b),
+        hx("0b"),
+        "bars 1, 2 and 4 shown (bits 0x01|0x02|0x08)"
+    );
+    assert_eq!(
+        messages::set_actionbar_toggles(0),
+        hx("00"),
+        "every extra bar hidden — the default, and a real value rather than an empty body"
+    );
+    assert_eq!(
+        messages::set_actionbar_toggles(0x0f),
+        hx("0f"),
+        "all four — the largest value the reference binding can ever accumulate (§2)"
+    );
+
     // CMSG_SETSHEATHED opcode (480 / 0x01E0 — vmangos Opcodes_1_12_1.h) + body: one u32 state.
     assert_eq!(
         messages::opcode::CMSG_SETSHEATHED,

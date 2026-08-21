@@ -547,3 +547,131 @@ fn a_button_reports_its_labels_extent() {
         "GetTextWidth is Button's, not Region's (wow-re Q8's own split)"
     );
 }
+
+/// **`Button:SetFontString` adopts aggressively, and it RAISES** — wow-re
+/// `system/ui/scratch/resize-bounds-and-button-fontstring.md` §5, byte-carved.
+///
+/// The first cut of this binding was a lenient no-op on a bad argument and a bare pointer swap on
+/// a good one. Every line below is a clause of that carve that the plausible reading got wrong.
+#[test]
+fn set_font_string_adopts_the_label_and_raises_on_anything_else() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "Btn")
+        b:SetWidth(120) b:SetHeight(24)
+        b:SetPoint("CENTER", nil, "CENTER", 0, 0)
+        fs = b:CreateFontString("MyLabel", "BACKGROUND")
+        "#,
+    )
+    .unwrap();
+
+    // Adoption binds the string as the label the whole rest of the surface reads.
+    s.run("b:SetFontString(fs)").unwrap();
+    assert!(s.eval::<bool>("return b:GetFontString() == fs").unwrap());
+    s.run("b:SetText(\"Okay\")").unwrap();
+    assert_eq!(s.eval::<String>("return fs:GetText()").unwrap(), "Okay");
+    assert_eq!(s.eval::<String>("return b:GetText()").unwrap(), "Okay");
+
+    // Re-parented — always, whatever it was parented to before.
+    assert!(s.eval::<bool>("return fs:GetParent() == b").unwrap());
+    // The draw layer is forced to ARTWORK on the same call (`0x77fd10(parent, 2, 1)`), and that
+    // half is NOT asserted here for a stated reason: `GetDrawLayer` is one of the client's nine
+    // per-leaf verbs we deliberately do not install (`script::REGION_LEAF_SHARED`'s own note —
+    // "absent is absent"), so there is no Lua way to read it back yet. The binding does it; when
+    // that verb lands, this is where it gets pinned.
+
+    // Adopting the SAME string again is a total no-op — the first compare in the client, and the
+    // one path that must not run the destroy below.
+    s.run("b:SetFontString(fs)").unwrap();
+    assert!(s.eval::<bool>("return b:GetFontString() == fs").unwrap());
+    assert_eq!(s.eval::<String>("return fs:GetText()").unwrap(), "Okay");
+
+    // A SECOND adoption DESTROYS the first label rather than orphaning it.
+    s.run("fs2 = b:CreateFontString(\"MyLabel2\", \"OVERLAY\") b:SetFontString(fs2)")
+        .unwrap();
+    assert!(s.eval::<bool>("return b:GetFontString() == fs2").unwrap());
+    let err = s.run("fs:GetText()").unwrap_err().to_string();
+    assert!(
+        err.contains("stale") || err.contains("invalid"),
+        "the replaced label must be destroyed, not left live: {err}"
+    );
+
+    // Three distinct raises, all naming the BUTTON — never a silent no-op, and `nil` cannot clear
+    // the label from Lua at all.
+    for (call, want) in [
+        ("b:SetFontString()", "Usage: Btn:SetFontString(fontstring)"),
+        (
+            "b:SetFontString(nil)",
+            "Usage: Btn:SetFontString(fontstring)",
+        ),
+        ("b:SetFontString(7)", "Usage: Btn:SetFontString(fontstring)"),
+        (
+            "b:SetFontString(\"x\")",
+            "Usage: Btn:SetFontString(fontstring)",
+        ),
+        (
+            "b:SetFontString({})",
+            "Btn:SetFontString(): Couldn't find 'this' in fontstring",
+        ),
+        (
+            "b:SetFontString(b)",
+            "Btn:SetFontString(): Wrong object type, expected fontstring",
+        ),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(want), "`{call}` → {err}");
+    }
+    // A TEXTURE is the near-miss the type gate exists for: it is a Region, and it still fails.
+    s.run("tex = b:CreateTexture(nil, \"ARTWORK\")").unwrap();
+    let err = s.run("b:SetFontString(tex)").unwrap_err().to_string();
+    assert!(
+        err.contains("Wrong object type, expected fontstring"),
+        "{err}"
+    );
+    // …and none of that changed the label.
+    assert!(s.eval::<bool>("return b:GetFontString() == fs2").unwrap());
+}
+
+/// Adoption anchors the string **only when it has none of its own** — and leaves an already
+/// anchored one exactly where the caller put it.
+#[test]
+fn set_font_string_anchors_only_an_unanchored_label() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "Btn")
+        b:SetWidth(120) b:SetHeight(24)
+        b:SetPoint("CENTER", nil, "CENTER", 0, 0)
+        bare = b:CreateFontString(nil, "OVERLAY")
+        bare:ClearAllPoints()
+        placed = b:CreateFontString(nil, "OVERLAY")
+        placed:ClearAllPoints()
+        placed:SetPoint("TOPLEFT", b, "TOPLEFT", 7, -3)
+        "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<i64>("return bare:GetNumPoints()").unwrap(), 0);
+
+    s.run("b:SetFontString(placed)").unwrap();
+    let (p, _rel, rp, x, y): (String, mlua::Value, String, f64, f64) =
+        s.eval("return placed:GetPoint(1)").unwrap();
+    assert_eq!(
+        (p.as_str(), rp.as_str(), x, y),
+        ("TOPLEFT", "TOPLEFT", 7.0, -3.0),
+        "an already-anchored label keeps its own anchors"
+    );
+    assert_eq!(s.eval::<i64>("return placed:GetNumPoints()").unwrap(), 1);
+
+    // The unanchored one gets the justify-derived point, to the matching point on the button.
+    s.run("b:SetFontString(bare)").unwrap();
+    assert_eq!(s.eval::<i64>("return bare:GetNumPoints()").unwrap(), 1);
+    let (p, _rel, rp, x, y): (String, mlua::Value, String, f64, f64) =
+        s.eval("return bare:GetPoint(1)").unwrap();
+    assert_eq!(
+        (p.as_str(), rp.as_str(), x, y),
+        ("CENTER", "CENTER", 0.0, 0.0)
+    );
+}

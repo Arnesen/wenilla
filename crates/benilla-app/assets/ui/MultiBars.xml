@@ -1,9 +1,39 @@
 <Ui>
     <!--
-        The two bottom multibars (vanilla MultiBarBottomLeft / MultiBarBottomRight), ALWAYS ON —
-        the director's call: no interface-options toggles, no SHOW_MULTI_ACTIONBAR_* state, no
-        CMSG_SET_ACTION_BAR_TOGGLES roaming (the server-side PLAYER_FIELD_BYTES byte the real
-        options screen persists is ignored entirely).
+        **The four extra action bars — MultiBarBottomLeft/BottomRight and the vertical
+        MultiBarRight/MultiBarLeft — are PLAYER OPTIONS, and all four ship OFF (decision 1500,
+        which reverses 0270 and the half of 1219 that made "hidden" unconditional).**
+
+        0270 made the two bottom bars unconditionally on and the toggles unshippable; 1219 added
+        the two vertical ones as unconditionally hidden frames for the addons that index them. Both
+        were the director's call at the time, and 1500 is the director's call now: the four bars
+        become rows on the Options window's Action Bars page, and a fresh character sees none of
+        them.
+
+        THE STORE IS THE SERVER'S, not a CVar and not a saved variable — verified against the real
+        1.12.1 binary by a wow-re §5 cross-check (three independent derivations, arbitrated;
+        wow-5875-re commit 417c2d31, node system/ui/scratch/action-bar-toggles.md):
+        - The four bits live in **PLAYER_FIELD_BYTES byte 2**, written with
+          **CMSG_SET_ACTIONBAR_TOGGLES (opcode 703)**. Per-character and server-persisted, which is
+          what makes "off by default" fall out for free: a fresh character's byte is 0.
+        - `SetActionBarToggles` takes exactly **FOUR** arguments (`cmp esi,4` at 0x4e770e) and packs
+          them as arg1→0x01, arg2→0x02, arg3→0x04, arg4→0x08. **A FIFTH argument is silently
+          DROPPED by the binding** — it never reaches the byte or the wire — even though the
+          reference's own options panel passes ALWAYS_SHOW_MULTIBARS as one. That is why the grid
+          option below is a saved variable and the four bars are not: the split is a verified
+          consequence of the binding's arity, not an authoring choice.
+        - `GetActionBarToggles` returns exactly FOUR values, each the Lua number `1` or `nil` —
+          never booleans, and four nils when not in world.
+        - The client NEVER writes that field locally and NOTHING fires on a change to it. So the
+          LIVE state is the four Lua globals below; `GetActionBarToggles()` is read ONCE, on
+          PLAYER_ENTERING_WORLD (UIParent.xml), purely as their seed. Nothing re-reads it.
+
+        The bar↔bit mapping is a FrameXML-layer rule — the binary is bar-agnostic: 0x01 →
+        MultiBarBottomLeft, 0x02 → MultiBarBottomRight, 0x04 → MultiBarRight, 0x08 → MultiBarLeft,
+        and **MultiBarLeft shows only when bar 3 is ALSO on** (confirmed by reading the install's
+        own MultiActionBars.lua l.73, `if ( SHOW_MULTI_ACTIONBAR_3 and SHOW_MULTI_ACTIONBAR_4 )`).
+        That conjunction is not arbitrary: MultiBarLeft's TOPRIGHT hangs off MultiBarRight's
+        TOPLEFT, so on its own it would be a column of buttons anchored to a bar that is not there.
 
         Geometry + slot ranges QUOTED from the real 1.12 FrameXML (extracted from patch.MPQ):
         - ref-MultiActionBars.xml l.36-39/496-513: each bar a 500x38 frame; BottomLeft's
@@ -24,11 +54,16 @@
           the ref (no MULTIACTIONBAR* line in any of the install's bindings-cache.wtf files), so
           out of the box the hotkey corner still carries the ref's range dot — a bound slot wears
           its abbreviated label exactly like the main bar (ActionBar.xml's PaintHotkey law).
-        - Empty wells hide (the ref's own default) and appear as drop-target rings only while a
-          cursor payload is held — unlike the main bar's always-visible wells (its art has
-          sockets; floating rings over bare world would not read as a bar).
-        - The vertical MultiBarRight/MultiBarLeft (pages 3/4, actions 25..48) stay OUT — only the
-          two bottom bars were asked for; the base-as-data mechanism extends to them for free.
+        - Empty wells hide (the ref's own default) and appear as drop-target rings only while the
+          grid is asked for — a held cursor payload, or ALWAYS_SHOW_MULTIBARS below — unlike the
+          main bar's always-visible wells (its art has sockets; floating rings over bare world
+          would not read as a bar).
+        - MULTIACTIONBAR3/4BUTTON (the vertical bars' commands) still stay OUT of
+          `bindings::commands`. 1008's honest tree held while those bars could never be shown, and
+          it holds differently now that they can: the keybind screen lists what the player can
+          reach, and a bar behind an option is reachable. Registering them is a separate slice with
+          its own default-bindings question; until then painting a hotkey from an unregistered
+          command is a no-op (GetBindingKey answers nil) and the label is simply blank.
     -->
     <Script><![CDATA[
         -- ref ActionButton.lua:6-7 — BOTTOMLEFT_ACTIONBAR_PAGE = 6, BOTTOMRIGHT_ACTIONBAR_PAGE = 5;
@@ -38,6 +73,170 @@
         -- ref ActionButton.lua:8-9 — LEFT_ACTIONBAR_PAGE = 4, RIGHT_ACTIONBAR_PAGE = 3.
         BENILLA_MULTIBAR_LEFT_BASE = 36
         BENILLA_MULTIBAR_RIGHT_BASE = 24
+
+        -- ref MultiActionBars.lua:1 — every extra bar is twelve wells wide.
+        NUM_MULTIBAR_BUTTONS = 12
+
+        -- ── The four toggles: LIVE state, seeded once from the server byte ──────────────────────
+        -- These names are the REFERENCE's and they are a published contract, not a private cache —
+        -- the addon corpus reads and writes them directly. Bartender2.lua:45-48 sets all four to 1
+        -- at load (it takes the bars over), and CT_BarMod reads each one by name in three separate
+        -- places to decide whether a button of ours is its business (CT_BarMod.lua:232-235,
+        -- 1573-1576, 1624-1627). So the names are fixed and the VALUES have to be what the corpus
+        -- expects: 1 or nil, exactly what GetActionBarToggles returns, never true/false.
+        --
+        -- nil here = OFF, which is also the whole of "off by default": a fresh character's server
+        -- byte is 0, and the seed on PLAYER_ENTERING_WORLD (UIParent.xml) writes these four back
+        -- to nil. Declared explicitly anyway rather than left absent — an undeclared global reads
+        -- nil too, but then nothing in this file says the state exists.
+        SHOW_MULTI_ACTIONBAR_1 = nil
+        SHOW_MULTI_ACTIONBAR_2 = nil
+        SHOW_MULTI_ACTIONBAR_3 = nil
+        SHOW_MULTI_ACTIONBAR_4 = nil
+
+        -- The FIFTH switch, and the one with a different store — see the header: the engine
+        -- binding drops a fifth argument, so this one has no server side and is an ordinary
+        -- saved-variable global, exactly as the reference makes it (UIOptionsFrame.lua l.106-107
+        -- assigns "0" and RegisterForSave's it). It holds the four bars' EMPTY wells open so the
+        -- player can see the shape of a bar they have not filled yet. String "1"/"0", because that
+        -- is what the options row's uvar store writes; zBar reads it as either
+        -- (zActionButton.lua:61 tests both spellings) and so does the reader below.
+        --
+        -- This assignment is also the row's registered DEFAULT: OptionsGlobalRow_OnLoad captures
+        -- the file-scope value at load, so this line is the single source of it.
+        ALWAYS_SHOW_MULTIBARS = "0"
+
+        -- The four bars in toggle (and bit) order, each paired with the main-bar page it takes OUT
+        -- of the paging cycle while it is up — a page a multibar already displays must not also be
+        -- reachable on the main bar, or paging up shows you the twelve actions already on screen
+        -- beside it. ActionBar.xml declares VIEWABLE_ACTION_BAR_PAGES with all six viewable (all
+        -- four bars start hidden) and this file does the arithmetic from there.
+        BENILLA_MULTIBARS = {
+            {frame = "MultiBarBottomLeft",  page = BOTTOMLEFT_ACTIONBAR_PAGE},
+            {frame = "MultiBarBottomRight", page = BOTTOMRIGHT_ACTIONBAR_PAGE},
+            {frame = "MultiBarRight",       page = RIGHT_ACTIONBAR_PAGE},
+            {frame = "MultiBarLeft",        page = LEFT_ACTIONBAR_PAGE},
+        }
+
+        -- One bar: on screen or not, and the main-bar page it owns settled to match. Split out so
+        -- MultiActionBar_Update below reads as the four-line list it actually is — which is where
+        -- the one thing a reader must not miss lives (bar 4's compound condition).
+        function BenillaMultiBar_Settle(bar, up)
+            local frame = getglobal(bar.frame)
+            if up then
+                frame:Show()
+                VIEWABLE_ACTION_BAR_PAGES[bar.page] = nil
+            else
+                frame:Hide()
+                VIEWABLE_ACTION_BAR_PAGES[bar.page] = 1
+            end
+        end
+
+        -- Re-derive all four bars from the four globals. Every writer of that state calls this —
+        -- the options rows, the PLAYER_ENTERING_WORLD seed, and any addon that sets a global and
+        -- asks for the bars back (the reference's own contract, and Bartender2 relies on it).
+        --
+        -- **The manage pass runs from HERE, not from per-bar OnShow/OnHide**, and that is a choice
+        -- worth naming because both work. A bar coming up or going down moves the cast bar, the
+        -- chat frames, the stance/pet row and the bag stack's corner
+        -- (UIPARENT_MANAGED_FRAME_POSITIONS), and the pass reads the bars' own :IsShown() rather
+        -- than these globals — so it must run AFTER the last Show/Hide, not four times in the
+        -- middle of them. One call at the end of the one function that moves them is that; four
+        -- OnShow/OnHide hooks would fire the pass up to four times per click, and three of those
+        -- times against a half-applied state. The reference reaches the same place from the other
+        -- side: its options panel calls MultiActionBar_Update() and UIParent_ManageFramePositions()
+        -- back to back at every one of its five click sites (UIOptionsFrame.xml l.665-666 et al).
+        function MultiActionBar_Update()
+            local bars = BENILLA_MULTIBARS
+            BenillaMultiBar_Settle(bars[1], SHOW_MULTI_ACTIONBAR_1)
+            BenillaMultiBar_Settle(bars[2], SHOW_MULTI_ACTIONBAR_2)
+            BenillaMultiBar_Settle(bars[3], SHOW_MULTI_ACTIONBAR_3)
+            -- Bar 4 is the one bar with a COMPOUND condition (ref MultiActionBars.lua l.73) — see
+            -- the header for why MultiBarLeft cannot stand without MultiBarRight under it.
+            BenillaMultiBar_Settle(bars[4], SHOW_MULTI_ACTIONBAR_3 and SHOW_MULTI_ACTIONBAR_4)
+            UIParent_ManageFramePositions()
+        end
+
+        -- ── The empty-well grid over the four bars ──────────────────────────────────────────────
+        -- The three verbs are the reference's own published names and signatures, and the corpus
+        -- is why they are worth shipping as such: CT_BarMod REPLACES MultiActionBar_UpdateGrid
+        -- wholesale (CT_BarMod.lua:1649) and zBar WRAPS ShowAllGrids/HideAllGrids around its own
+        -- bars (zActionButton.lua:83-94), both by name and both expecting this shape. The
+        -- per-button half lives in ActionBar.xml (ActionButton_ShowGrid/_HideGrid over
+        -- `button.showgrid`), which is where the reference keeps it too.
+        function MultiActionBar_UpdateGrid(barName, show)
+            for i = 1, NUM_MULTIBAR_BUTTONS do
+                local button = getglobal(barName .. "Button" .. i)
+                if show then
+                    ActionButton_ShowGrid(button)
+                else
+                    ActionButton_HideGrid(button)
+                end
+            end
+        end
+
+        function MultiActionBar_ShowAllGrids()
+            for _, bar in ipairs(BENILLA_MULTIBARS) do
+                MultiActionBar_UpdateGrid(bar.frame, 1)
+            end
+        end
+
+        function MultiActionBar_HideAllGrids()
+            for _, bar in ipairs(BENILLA_MULTIBARS) do
+                MultiActionBar_UpdateGrid(bar.frame)
+            end
+        end
+
+        -- The option's apply: re-derive the grid from ALWAYS_SHOW_MULTIBARS. Run on every write of
+        -- that global (the row's applyFunc) and once at startup over the restored saved value —
+        -- the reference does the same restore by hand in its VARIABLES_LOADED ladder
+        -- (UIOptionsFrame.lua l.217-220); ours is OptionsFrame_ApplySavedSettings' walk.
+        --
+        -- Both spellings tested because the global is published and the two stores disagree: our
+        -- options row writes the STRING "1", while an addon setting it writes the number (zBar
+        -- tests both for exactly this reason, zActionButton.lua:61).
+        --
+        -- The `held` latch is ours and it is what makes this option a WELL-BEHAVED holder of the
+        -- count: one asker may hold at most one. Without it, re-applying an "off" that was already
+        -- off decrements every button again — so applying defaults while a payload is in hand would
+        -- close the wells that payload is holding open. The reference has exactly that flaw; the
+        -- latch also means the startup apply of the default "0" is a no-op instead of a decrement.
+        BENILLA_MULTIBAR_GRID_HELD = nil
+
+        function MultiActionBar_UpdateGridVisibility()
+            local want
+            if ALWAYS_SHOW_MULTIBARS == "1" or ALWAYS_SHOW_MULTIBARS == 1 then want = 1 end
+            if want == BENILLA_MULTIBAR_GRID_HELD then return end
+            BENILLA_MULTIBAR_GRID_HELD = want
+            if want then
+                MultiActionBar_ShowAllGrids()
+                return
+            end
+            MultiActionBar_HideAllGrids()
+        end
+
+        -- ── The write half of a bar toggle (the Options rows' setter) ───────────────────────────
+        -- The reference has no counterpart: its panel edits SHOW_MULTI_ACTIONBAR_n inline in each
+        -- checkbox's OnClick and batches ONE SetActionBarToggles into UIOptionsFrame_Save. Our
+        -- window commits on the click (0961's grammar, no Save button), so the whole edit — the
+        -- global, the bars, the packet — is this one function and the rows pass it a bar index.
+        --
+        -- `value` is the row's "1"/"0" STRING (OptionsRow_Set hands an API row its own string), and
+        -- the number/boolean spellings are tolerated because this is reachable from addon code too.
+        -- What is stored is 1 or nil and nothing else: that is what GetActionBarToggles returns and
+        -- what the corpus expects to read back (see the globals' own comment above).
+        --
+        -- **FOUR arguments.** Not five. The reference passes ALWAYS_SHOW_MULTIBARS as a fifth and
+        -- the binding drops it on the floor (`cmp esi,4` at 0x4e770e) — see the header. The whole
+        -- byte is re-sent every time because the packet carries the byte, not a delta.
+        function BenillaMultiBar_SetShown(bar, value)
+            local on
+            if value and value ~= "0" and value ~= 0 then on = 1 end
+            setglobal("SHOW_MULTI_ACTIONBAR_" .. bar, on)
+            MultiActionBar_Update()
+            SetActionBarToggles(SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2,
+                SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4)
+        end
 
         -- The MULTIACTIONBAR keybind pair — ref MultiActionBars.lua:24-45 MultiActionButtonDown/Up,
         -- the same NORMAL→PUSHED debounce dance as the main bar's ActionButtonDown/Up
@@ -73,8 +272,13 @@
          HorizontalMultiBar1/2). They share the bottom band with the bag windows, which are MEDIUM on
          both sides by design — and both sides carry deep nested button trees, so co-tenanting one
          stratum is exactly the level-outranks-insertion collision decision 0597 fixed for the party
-         frame. HIGH is what keeps the bars above an open bag. -->
-    <Frame name="MultiBarBottomLeft" frameStrata="HIGH">
+         frame. HIGH is what keeps the bars above an open bag.
+
+         `hidden="true"` on ALL FOUR bars since 1500 — the reference's own posture for every one of
+         them (its HorizontalMultiBar1/2 templates carry it too, l.36/l.151), and the shipped state
+         a character with a zero toggle byte lands in. MultiActionBar_Update is the only thing that
+         opens one. -->
+    <Frame name="MultiBarBottomLeft" frameStrata="HIGH" hidden="true">
         <Size><AbsDimension x="500" y="38"/></Size>
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="ActionButton1" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="17"/></Offset></Anchor>
@@ -131,8 +335,8 @@
         </Frames>
     </Frame>
 
-    <!-- HIGH, same as BottomLeft above (ref `MultiActionBars.xml` l.151). -->
-    <Frame name="MultiBarBottomRight" frameStrata="HIGH">
+    <!-- HIGH and hidden, same as BottomLeft above (ref `MultiActionBars.xml` l.151). -->
+    <Frame name="MultiBarBottomRight" frameStrata="HIGH" hidden="true">
         <Size><AbsDimension x="500" y="38"/></Size>
         <Anchors>
             <Anchor point="LEFT" relativeTo="MultiBarBottomLeft" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor>
@@ -189,31 +393,24 @@
         </Frames>
     </Frame>
 
-    <!-- **The two VERTICAL bars, built but never shown.**
+    <!-- **The two VERTICAL bars — now the same kind of thing as the two above them.**
 
-         They were scoped out (see the header's ref-divergence note) on the reasonable reading that
-         a bar nobody asked for should not exist. Measuring the corpus corrected the reading: the
-         reference does not choose between "shown" and "absent" — `MultiActionBars.xml` l.515/523
-         instantiates BOTH as real `parent="UIParent"` frames whose templates (VerticalMultiBar3/4,
-         l.266/381) carry `hidden="true"`. On the real client they exist from load and stay hidden
-         until SHOW_MULTI_ACTIONBAR_3/4. So declaring them costs nothing on screen and is what the
-         reference actually does.
+         They were scoped out first (a bar nobody asked for should not exist), then 1219 built them
+         as real frames that shipped unconditionally hidden — because the reference does not choose
+         between "shown" and "absent": `MultiActionBars.xml` l.515/523 instantiates BOTH as real
+         `parent="UIParent"` frames whose templates (VerticalMultiBar3/4, l.266/381) carry
+         `hidden="true"`, and they stay hidden until SHOW_MULTI_ACTIONBAR_3/4 says otherwise.
 
-         What it buys: Atlas, Bartender2 and FuBartender2 all DIE at session start on
-         `MultiBarLeft` — Atlas at `Atlas.lua:387` (`MultiBarLeft:SetFrameStrata("MEDIUM")`),
-         Bartender2 at `Bartender2.lua:74` (`MultiBarLeft:ClearAllPoints()`). Neither shows the bar;
-         both only need it to be there. Five more addons index `MultiBarRight` (decision 1218's
-         corrected ranking).
+         What 1219 bought, and still buys, is that Atlas, Bartender2 and FuBartender2 stopped DYING
+         at session start on `MultiBarLeft` — Atlas at `Atlas.lua:387`
+         (`MultiBarLeft:SetFrameStrata("MEDIUM")`), Bartender2 at `Bartender2.lua:74`
+         (`MultiBarLeft:ClearAllPoints()`). Neither shows the bar; both only need it to be there.
+         Five more addons index `MultiBarRight` (decision 1218's corrected ranking).
 
-         Still no SHOW_MULTI_ACTIONBAR_* state and still no options toggle — 0270's call stands, and
-         these two are simply hidden rather than optional. An addon that calls `MultiBarLeft:Show()`
-         gets a working bar on actions 37..48, which is exactly what the reference gives it.
-
-         The buttons carry the reference's own MULTIACTIONBAR3/4BUTTON command names, and those
-         commands stay OUT of `bindings::commands` — 1008's "honest tree" holds: the keybind screen
-         lists what the player can actually reach, and a bar we never show is not that. Painting a
-         hotkey from an unregistered command is a no-op (GetBindingKey answers nil), so the label is
-         simply blank until someone registers them.
+         What 1500 changed is only the last sentence of that story: "hidden, and nothing can show
+         it" has become "hidden, until the player ticks its row" — SHOW_MULTI_ACTIONBAR_3/4 and the
+         Options page's two Right ActionBar rows. `MultiBarLeft` still needs `MultiBarRight` under
+         it (the header's conjunction), which is why its row is a dependent child of bar 3's.
 
          Pages from ref-ActionButton.lua l.8-9: LEFT_ACTIONBAR_PAGE = 4 (actions 37..48),
          RIGHT_ACTIONBAR_PAGE = 3 (actions 25..36). Geometry from ref-MultiActionBars.xml: a 38x500

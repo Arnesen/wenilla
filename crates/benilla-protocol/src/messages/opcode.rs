@@ -133,6 +133,16 @@ pub const CMSG_SET_AMMO: u16 = 0x0268; // 616
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 296 — `MiscHandler.cpp:885`'s `HandleSetActionButtonOpcode`
 /// (decision 0216 §7/0218 §4). Body in [`super::action_bar::set_action_button`].
 pub const CMSG_SET_ACTION_BUTTON: u16 = 0x0128; // 296
+/// The four extra action bars' visibility byte (`PLAYER_FIELD_BYTES` byte 2) — VERIFIED at the
+/// bytes, wow-re `system/ui/scratch/action-bar-toggles.md` §3: `0x4e771d push 0x2bf` is the ONE
+/// site image-wide that emits this opcode, and the frame it builds is `u32 opcode` + a single `u8`
+/// and nothing else (`0x418190` PutUInt32 then `0x418070` PutUInt8; `0x5379b3` computes the
+/// payload as size − read = **5**). Body in [`super::action_bar::set_actionbar_toggles`].
+///
+/// Corroborated by vmangos `Opcodes_1_12_1.h`: 703 → `HandleSetActionBarTogglesOpcode`
+/// (`Packets/Misc.cpp:150-153` reads one `uint8`; `Handlers/MiscHandler.cpp:923-932` stores it with
+/// `SetByteValue(PLAYER_FIELD_BYTES, 2, …)`).
+pub const CMSG_SET_ACTIONBAR_TOGGLES: u16 = 0x02BF; // 703
 pub const SMSG_ACTION_BUTTONS: u16 = 0x0129; // 297
 pub const SMSG_INITIAL_SPELLS: u16 = 0x012A; // 298
 

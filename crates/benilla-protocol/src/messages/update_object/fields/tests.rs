@@ -249,17 +249,26 @@ fn player_ammo_id_reads_the_field() {
 }
 
 #[test]
-fn player_field_bytes_splits_into_combo_points_and_honor_rank() {
+fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     // flags=0x01 / combo=0x02 / actionBars=0x03 / highestHonorRank=5 packed little-endian: the
-    // dword's two live readers take byte 1 and byte 3 without bleeding into each other.
+    // dword's three live readers take bytes 1, 2 and 3 without bleeding into each other. The
+    // offsets are the binary's own — the reads sit at `[[player+0xe68]+0x1029/0x102a/0x102b]`
+    // (wow-re `action-bar-toggles.md` §4), i.e. bytes 1/2/3 of field 1222.
     let f = ObjectFields::from_pairs(&[(1222, 0x05_03_02_01)]);
     assert_eq!(f.player_honor_rank(), Some(5));
+    assert_eq!(f.player_action_bar_toggles(), Some(3));
     assert_eq!(f.player_combo_points(), Some(2));
     // A full five points with everything else clear.
     let capped = ObjectFields::from_pairs(&[(1222, 0x00_00_05_00)]);
     assert_eq!(capped.player_combo_points(), Some(5));
+    assert_eq!(capped.player_action_bar_toggles(), Some(0));
     assert_eq!(capped.player_honor_rank(), Some(0));
+    // The server may legally hold a high nibble here (it stores the whole byte); the accessor is
+    // the raw byte and does not mask — the four-bit law is the Lua binding's, not the field's.
+    let high = ObjectFields::from_pairs(&[(1222, 0x00_f5_00_00)]);
+    assert_eq!(high.player_action_bar_toggles(), Some(0xf5));
     assert_eq!(ObjectFields::default().player_honor_rank(), None);
+    assert_eq!(ObjectFields::default().player_action_bar_toggles(), None);
     assert_eq!(ObjectFields::default().player_combo_points(), None);
 }
 

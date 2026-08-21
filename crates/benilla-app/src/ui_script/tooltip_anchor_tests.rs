@@ -219,8 +219,10 @@ fn action_button_hover_takes_the_default_corner() {
 
 /// The other leg of that same branch, live since B230 registered the CVar: with `UberTooltips`
 /// off, an action button's plate leaves the screen corner and seats BESIDE the button — LEFT for
-/// the bars the reference lists (`MultiBarBottomRight` is the only one benilla ships; the two
-/// vertical bars are not), RIGHT for everything else, including the main bar.
+/// the three bars the reference lists (`MultiBarBottomRight`, `MultiBarRight`, `MultiBarLeft`: the
+/// ones at or against the right edge, whose plates have to open toward the centre), RIGHT for
+/// everything else, including the main bar. All three exist here since 1219/1500; the set used to
+/// be the first alone.
 ///
 /// The two anchors are read off the resolved SetPoint pair, which is what `SetOwner` actually
 /// writes: ANCHOR_RIGHT = the plate's BOTTOMLEFT on the button's TOPRIGHT, ANCHOR_LEFT its mirror
@@ -255,14 +257,17 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
         "ANCHOR_RIGHT — the main bar is not in the ref's LEFT set"
     );
 
-    // MultiBarBottomRight IS in that set — the one shipped member of it.
-    s.run("BenillaActionButton_OnEnter(MultiBarBottomRightButton1)")
-        .unwrap();
-    assert_eq!(
-        seat(&s),
-        "BOTTOMRIGHT/MultiBarBottomRightButton1/TOPLEFT",
-        "ANCHOR_LEFT — MultiBarBottomRight opens toward screen centre"
-    );
+    // All three members of the ref's LEFT set, by frame — membership is not gated on visibility,
+    // and the two vertical bars are hidden until their option is ticked.
+    for bar in ["MultiBarBottomRight", "MultiBarRight", "MultiBarLeft"] {
+        s.run(&format!("BenillaActionButton_OnEnter({bar}Button1)"))
+            .unwrap();
+        assert_eq!(
+            seat(&s),
+            format!("BOTTOMRIGHT/{bar}Button1/TOPLEFT"),
+            "ANCHOR_LEFT — {bar} opens toward screen centre"
+        );
+    }
 
     // And the CVar back on restores the corner — the fork is a fork, not a one-way door.
     s.set_cvar_engine("UberTooltips", "1");

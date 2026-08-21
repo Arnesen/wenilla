@@ -96,10 +96,16 @@ BinderConfirm.xml
 # consumers (ActionBar's buttons, the multibars, the stance bar, BagFrame's slots).
 Cooldown.xml
 ActionBar.xml
-# The two always-on bottom multibars (actions 61-72 / 49-60): pure XML/Lua over
-# ActionBar.xml's shared button template + handler set — loads right after it
-# (inherits BenillaActionButtonTemplate, anchors to ActionButton1, and its
-# buttons join the BENILLA_ACTION_BUTTONS roster ActionBar.xml declares).
+# The four OPTIONAL extra bars (bottom left/right 61-72 / 49-60, vertical right/left
+# 25-36 / 37-48), all shipping hidden until the player ticks their row (decision 1500):
+# pure XML/Lua over ActionBar.xml's shared button template + handler set. Loads right
+# after it, and the order is a REQUIREMENT, not tidiness: it inherits
+# BenillaActionButtonTemplate, anchors to ActionButton1, its buttons join the
+# BENILLA_ACTION_BUTTONS roster ActionBar.xml declares, its grid verbs call that file's
+# ActionButton_ShowGrid/_HideGrid, and its BENILLA_MULTIBARS table reads that file's
+# *_ACTIONBAR_PAGE constants at FILE SCOPE. UIParent.xml (far above) owns the manage pass
+# MultiActionBar_Update ends with, and the PLAYER_ENTERING_WORLD seed that fills the four
+# SHOW_MULTI_ACTIONBAR_* globals from the server's byte.
 MultiBars.xml
 # The stance/shapeshift bar: hidden until `crate::ui_shapeshift`'s feed pushes a
 # non-empty form list (a formless class never shows it). After Cooldown.xml

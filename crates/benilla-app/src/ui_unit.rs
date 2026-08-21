@@ -147,6 +147,11 @@ struct UnitFeedMemo {
     /// belief optimistically and the server's answer is a round trip away, so a per-frame push
     /// would snap the value back to the stale descriptor in between.
     worn_hidden: Option<(bool, bool)>,
+    /// The self player's last-pushed `PLAYER_FIELD_BYTES` byte 2 — the four extra bars' visibility
+    /// (wow-re `action-bar-toggles.md`). A player-global like the combo pair, pushed on the edge.
+    /// `None` until first seen; there is no event to fire on it, because the real client registers
+    /// no field-change callback anywhere near this offset.
+    action_bar_toggles: Option<u8>,
 }
 
 /// Adds the per-frame unit feed. The `Unit*` bindings themselves live in `benilla-ui`; this only
@@ -184,6 +189,7 @@ impl Plugin for UiUnitPlugin {
         )
         .add_systems(Update, drain_pvp_toggles.after(UiInput))
         .add_systems(Update, drain_worn_display_toggles.after(UiInput))
+        .add_systems(Update, drain_action_bar_toggles.after(UiInput))
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
         // `load_exhaustion_rows` pushes into the VM, so it runs per VM in `Update` (1290);
         // `load_default_languages` only builds a Bevy resource and stays a one-shot.
@@ -647,6 +653,26 @@ fn drain_worn_display_toggles(script: Option<NonSendMut<UiScript>>, commands: Re
     }
 }
 
+/// Drain the `SetActionBarToggles` posts into `CMSG_SET_ACTIONBAR_TOGGLES` (wow-re
+/// `system/ui/scratch/action-bar-toggles.md` §3) — the Options window's four extra-bar rows, and
+/// the only callers there are.
+///
+/// **Every queued call becomes a packet**, with no did-it-change gate and no coalescing: the real
+/// binding has neither (unlike `ShowHelm`/`ShowCloak`, which send only on a difference), so two
+/// calls in a frame are two sends. The byte is absolute rather than a flip, so a duplicate is
+/// harmless — but dropping one would be an optimisation the reference does not make, and the
+/// server is the only store this preference has.
+fn drain_action_bar_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for toggles in script.take_action_bar_toggle_sends() {
+        let _ = commands
+            .0
+            .send(crate::net::ClientCommand::SetActionBarToggles { toggles });
+    }
+}
+
 /// `PLAYER_FLAGS_PVP_DESIRED` — the PvP *preference* bit (vmangos `PlayerDefines.h`), which is what
 /// `CMSG_TOGGLE_PVP` flips. Not to be confused with `UNIT_FIELD_FLAGS`' `PVP` bit `0x1000`, the flag
 /// the icon draws: the preference clears instantly, the flag lingers for the server's timer.
@@ -1051,6 +1077,35 @@ fn feed_units(
         }
     }
 
+    // The action-bar toggle feed: `PLAYER_FIELD_BYTES` byte 2 — which of the four extra bars the
+    // player has switched on (wow-re `system/ui/scratch/action-bar-toggles.md`). PRIVATE, like the
+    // combo byte one address down (`+0x1029` vs `+0x102a`), and pushed on the EDGE.
+    //
+    // **This push is the ONLY thing that moves the VM's copy**, and that is the mechanism rather
+    // than our simplification: no instruction in the real client writes this cell (§4.1 — the one
+    // `+0x102a` access image-wide is `GetActionBarToggles`' read), so `SetActionBarToggles` posts
+    // the byte and leaves the descriptor alone until the server's UPDATE_OBJECT echoes it. Nothing
+    // is notified when it lands either (§4.2: all 49 field-change registrations at `0x468070` were
+    // enumerated; none sits at an offset ≥ `0x1000`), so there is **no event to fire here** — the
+    // reference reads the binding exactly once, in `UIParent.lua`'s `PLAYER_ENTERING_WORLD`
+    // handler, and keeps `SHOW_MULTI_ACTIONBAR_1..4` as its optimistic copy in between.
+    //
+    // Which is why this sits ABOVE the fire, on 1087's precedent for the XP/rest pushes: the
+    // handler that reads `GetActionBarToggles()` runs synchronously inside `fire_event`, so a push
+    // below it would hand the first-paint the previous frame's value — four nils.
+    //
+    // `unwrap_or(0)` is faithful, not a shrug: with no local player the reference's chain fails
+    // soft and the getter returns four `nil`s, which is exactly what a zero byte returns — "not in
+    // world" and "byte == 0" share the branch and are indistinguishable to Lua (§5).
+    if let Some((store, _)) = self_q.iter().next() {
+        let toggles = store.0.player_action_bar_toggles().unwrap_or(0);
+        if memo.action_bar_toggles != Some(toggles) {
+            gate.audit("feed_units", "the action-bar toggle byte");
+            memo.action_bar_toggles = Some(toggles);
+            script.set_action_bar_toggles(toggles);
+        }
+    }
+
     // Initial pull: fire PLAYER_ENTERING_WORLD once PER WORLD ENTRY so frames do their first
     // paint on their own — gated on our avatar's descriptor EXISTING. 1087 stated the real
     // client's guarantee (the player object lands before this event) and moved the XP/rest
@@ -1088,6 +1143,10 @@ fn feed_units(
         // carrying the last body's bits would silently skip a new body that happens to disagree
         // with the VM's fresh "both shown" default (decision 1472).
         memo.worn_hidden = None;
+        // Same reason as the worn-display pair: the push is an EDGE, so a memo carrying the last
+        // body's byte would skip a new character whose own toggles happen to match it — and this
+        // one has no optimistic default to fall back on, only four nils.
+        memo.action_bar_toggles = None;
     }
 
     for (token, snap) in [("player", &player), ("target", &target)] {

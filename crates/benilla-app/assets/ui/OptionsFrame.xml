@@ -635,11 +635,27 @@
             -- its Advanced Options chat chain runs CheckButton37 → 46 (Loot Spam, no knob of ours)
             -- → 38, so ours are adjacent with that gap named rather than silently closed.
             Social = { "RowChatBubbles", "RowPartyChatBubbles" },
-            -- 1.12's Advanced Options "Action Bars" group is six rows; five of them are the
-            -- multibar show/hide toggles, which read `func = MultiBarN_IsVisible` — not a store at
-            -- all, and our two bottom multibars are always on (MultiBars.xml). So the honest page
-            -- is the sixth (decision 1136).
-            ActionBars = { "RowLockActionBar" },
+            -- 1.12's Advanced Options "Action Bars" group, whole (decision 1500 completing 1136).
+            -- Its six rows, the four bar toggles then the grid switch then the lock. That is the
+            -- DIRECTOR's order, not the reference's: 1.12's box is two columns and leads with the
+            -- lock (CheckButton32 at its TOPLEFT, then 33/40/34 down the left, 35/36 down the
+            -- right), which does not survive being flattened into one column — the five switches
+            -- that decide what is on screen belong above the one that decides whether it can be
+            -- dragged. 1136 could ship only the lock, because the other five had
+            -- nothing behind them: the two bottom bars were unconditionally on and the two vertical
+            -- ones unconditionally hidden (0270/1219). 1500 made all four bars options, which is
+            -- what gave the five rows a store to read.
+            --
+            -- Two DIFFERENT stores on one page, and the split is verified rather than chosen: the
+            -- four bar rows are `func` rows over the server's own PLAYER_FIELD_BYTES byte 2 (no
+            -- local store exists to save), while Always Show ActionBars is a `uvar` row — the
+            -- engine binding takes exactly four arguments and silently drops the fifth the
+            -- reference passes it, so that switch has no server side at all. MultiBars.xml's
+            -- header carries the byte-level evidence.
+            ActionBars = {
+                "RowMultiBar1", "RowMultiBar2", "RowMultiBar3", "RowMultiBar4",
+                "RowAlwaysShowMultibars", "RowLockActionBar",
+            },
             -- The floating-combat-text family (decision 1134), in the reference's own on-screen
             -- order — its AdvancedOptionsCombatText box's anchor chain, master → scroll mode →
             -- the twelve, NOT its check-button index order (which jumps 58→60→63…59→69).
@@ -1077,6 +1093,16 @@
                             getglobal("OptionsFrameContainerBodyCombat" .. rkey), live)
                     end
                 end
+                return
+            end
+            if key == "ActionBars" then
+                -- 1.12's own rule for this pair, verbatim in effect (UIOptionsFrame.lua l.722-726):
+                -- Show Right ActionBar 2 is dead while Show Right ActionBar is unticked, because
+                -- MultiBarLeft does not appear without MultiBarRight under it (MultiBars.xml's
+                -- conjunction). It is the only cross-row dependency on this page — the two bottom
+                -- bars, the grid switch and the lock are all independent.
+                OptionsRow_SetEnabled(OptionsFrameContainerBodyActionBarsRowMultiBar4,
+                    SHOW_MULTI_ACTIONBAR_3)
                 return
             end
             if key ~= "Audio" then return end
@@ -2409,23 +2435,123 @@
                                         </Frame>
                                     </Frames>
                                 </Frame>
-                                <!-- The ACTION BARS page (decision 1136). One row, because the
-                                     reference's group is the lock plus five multibar show/hide
-                                     toggles whose store is a `func`, not a uvar or a CVar — and our
-                                     two bottom multibars are unconditionally on. The lock itself
-                                     had to be BUILT before it could have a row: ActionBar.xml and
-                                     PetActionBar.xml now guard their drag ends on it, the way the
-                                     reference does. -->
+                                <!-- The ACTION BARS page (1136's lock row; the five switches above
+                                     it are 1500). 1.12's Advanced Options group, whole.
+
+                                     The four bar rows are API (`func`) rows — the third store, the
+                                     one Show Cloak / Show Helm opened in 1472 — because there is
+                                     nothing local to save: the preference is four bits of this
+                                     CHARACTER's server-side PLAYER_FIELD_BYTES byte 2, written with
+                                     CMSG_SET_ACTIONBAR_TOGGLES. The getter reads the live Lua
+                                     global (the client never re-reads the field and nothing fires
+                                     on a change to it, so the global IS the state between logins);
+                                     the setter writes the global, re-derives the bars, and re-sends
+                                     the whole byte. Default OFF for all four — a fresh character's
+                                     byte is 0.
+
+                                     Always Show ActionBars is a SAVED-VARIABLE row instead, and the
+                                     split is a verified consequence of the engine binding rather
+                                     than an authoring choice: `SetActionBarToggles` takes exactly
+                                     four arguments and silently DROPS the fifth that the reference
+                                     passes it (`cmp esi,4` at 0x4e770e), so that switch has no
+                                     server store to write and the reference RegisterForSave's it
+                                     locally too (UIOptionsFrame.lua l.106-107). MultiBars.xml's
+                                     header carries the whole byte-level finding.
+
+                                     The getters and setters are written here as closures rather
+                                     than captured from MultiBars.xml by name, deliberately: a row's
+                                     OnLoad captures a function VALUE, so a named import would make
+                                     this page depend on load ORDER — and a harness (or a manifest
+                                     reordering) that loaded the window without the bars would give
+                                     every row a nil store instead of an unticked box. A closure
+                                     resolves its callee when the player clicks.
+
+                                     Labels and OPTION_TOOLTIP_* keys are 1.12's GlobalStrings
+                                     verbatim (SHOW_MULTIBAR1..4_TEXT l.3444-3447,
+                                     ALWAYS_SHOW_MULTIBARS_TEXT l.51) — including the leading
+                                     "Show ", which is part of the reference's own display text.
+
+                                     The lock itself had to be BUILT before it could have a row:
+                                     ActionBar.xml and PetActionBar.xml guard their drag ends on it,
+                                     the way the reference does. -->
                                 <Frame name="$parentActionBars" hidden="true">
                                     <Anchors>
                                         <Anchor point="TOPLEFT"/>
                                         <Anchor point="BOTTOMRIGHT"/>
                                     </Anchors>
                                     <Frames>
-                                        <Frame name="$parentRowLockActionBar" inherits="OptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowMultiBar1" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsFuncRow_OnLoad(self,
+                                                    function() return SHOW_MULTI_ACTIONBAR_1 end,
+                                                    function(value) BenillaMultiBar_SetShown(1, value) end,
+                                                    "0", "Show Bottom Left ActionBar", "OPTION_TOOLTIP_SHOW_MULTIBAR1")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMultiBar2" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMultiBar1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMultiBar1" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsFuncRow_OnLoad(self,
+                                                    function() return SHOW_MULTI_ACTIONBAR_2 end,
+                                                    function(value) BenillaMultiBar_SetShown(2, value) end,
+                                                    "0", "Show Bottom Right ActionBar", "OPTION_TOOLTIP_SHOW_MULTIBAR2")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMultiBar3" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMultiBar2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMultiBar2" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsFuncRow_OnLoad(self,
+                                                    function() return SHOW_MULTI_ACTIONBAR_3 end,
+                                                    function(value) BenillaMultiBar_SetShown(3, value) end,
+                                                    "0", "Show Right ActionBar", "OPTION_TOOLTIP_SHOW_MULTIBAR3")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- Bar 4 is a CHILD row: MultiBarLeft only shows when bar 3
+                                             is also on (MultiBars.xml's conjunction — its column
+                                             hangs off MultiBarRight's edge), so the switch is
+                                             meaningless on its own. `child` carries the era's
+                                             indent-and-small-font subordination; the GREYING is
+                                             OptionsPage_UpdateDependencies' ActionBars arm, which
+                                             is the reference's own rule for this exact pair
+                                             (UIOptionsFrame.lua l.722-726 disables CheckButton36
+                                             while 35 is unchecked). -->
+                                        <Frame name="$parentRowMultiBar4" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMultiBar3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMultiBar3" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsFuncRow_OnLoad(self,
+                                                    function() return SHOW_MULTI_ACTIONBAR_4 end,
+                                                    function(value) BenillaMultiBar_SetShown(4, value) end,
+                                                    "0", "Show Right ActionBar 2", "OPTION_TOOLTIP_SHOW_MULTIBAR4", 1)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAlwaysShowMultibars" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMultiBar4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMultiBar4" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "ALWAYS_SHOW_MULTIBARS",
+                                                    "Always Show ActionBars", "OPTION_TOOLTIP_ALWAYS_SHOW_MULTIBARS")
+                                                self.applyFunc = MultiActionBar_UpdateGridVisibility
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowLockActionBar" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAlwaysShowMultibars" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAlwaysShowMultibars" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "LOCK_ACTIONBAR",

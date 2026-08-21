@@ -59,7 +59,8 @@ mod update_object;
 mod vendor;
 mod world_state;
 pub use action_bar::{
-    set_action_button, ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
+    set_action_button, set_actionbar_toggles, ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO,
+    ACTION_KIND_SPELL,
 };
 pub use addons::{SecureAddon, STANDARD_MODULUS_CRC, STOCK_SECURE_ADDONS};
 pub use area_trigger::area_trigger;

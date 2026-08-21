@@ -677,13 +677,24 @@ fn interface_harness() -> UiScript {
     harness_on(s)
 }
 
-/// The Action Bars page's harness (decision 1136): `ActionBar.xml` declares `LOCK_ACTIONBAR`, and
-/// it needs `UIParent.xml` (the managed bottom stack it seats into) and `Cooldown.xml`
-/// (`CooldownFrame_SetTimer`, every button's child) ahead of it — the manifest's own order.
+/// The Action Bars page's harness (1136's lock row, 1500's five switches): `ActionBar.xml` declares
+/// `LOCK_ACTIONBAR` and `MultiBars.xml` the four `SHOW_MULTI_ACTIONBAR_*` globals plus
+/// `ALWAYS_SHOW_MULTIBARS` (whose file-scope "0" IS the row's registered default), and both need
+/// `UIParent.xml` (the managed bottom stack the bars move) and `Cooldown.xml`
+/// (`CooldownFrame_SetTimer`, every button's child) ahead of them — the manifest's own order.
 fn actionbars_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(&s, &["UIParent.xml", "Cooldown.xml", "ActionBar.xml"]);
+    load_definers(
+        &s,
+        &[
+            "Fonts.xml",
+            "UIParent.xml",
+            "Cooldown.xml",
+            "ActionBar.xml",
+            "MultiBars.xml",
+        ],
+    );
     harness_on(s)
 }
 
@@ -1772,12 +1783,13 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 21 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
     // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's; Camera Following Style
     // 1493's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 4 (3 from
-    // 1136, Buff Durations 1139) and the Action Bars page's 1 (1136) + the Interface page's 2 API
-    // rows (Show Cloak / Show Helm, 1472) — which is the point of counting here rather than per
-    // page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
+    // 1136, Buff Durations 1139) and the Action Bars page's 2 (the lock 1136, Always Show
+    // ActionBars 1500) + 6 API rows (the Interface page's Show Cloak / Show Helm, 1472; the Action
+    // Bars page's four multibar switches, 1500) — which is the point of counting here rather than
+    // per page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1); the other two ride the same census as the selection moves.
-    assert_eq!(checked, 42, "every row but one carries a live 1.12 key");
+    assert_eq!(checked, 47, "every row but one carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec!["ControlsRowAutoLoot".to_string()],
@@ -1869,9 +1881,9 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // 21 of the 22 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
     // Max Camera Distance 1140's; Vertical Sync 1394's; Camera Following Style 1493's), plus the
     // Combat page's 14 saved-variable rows (1134), the Interface page's 4 (1136, + Buff Durations
-    // 1139), Action Bars' 1 (1136) and the Interface page's 2 API rows (Show Cloak / Show Helm,
-    // 1472).
-    assert_eq!(raised, 42, "every row but Auto Loot has a 1.12 description");
+    // 1139), Action Bars' 2 (the lock 1136, Always Show ActionBars 1500) and 6 API rows (Show
+    // Cloak / Show Helm, 1472; the four multibar switches, 1500).
+    assert_eq!(raised, 47, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2109,10 +2121,10 @@ fn what_the_combat_page_writes_survives_a_restart() {
     );
 }
 
-/// The **Action Bars page** (decision 1136) — one row, over the one global on that group whose
-/// store is a uvar at all (the five multibar toggles read a `func`, and our two bottom multibars
-/// are unconditionally on). It is also the page whose setting had to be BUILT first: 1134 §3 listed
-/// `LOCK_ACTIONBAR` as "not defined, and no guard exists".
+/// The **Action Bars page**'s lock row (decision 1136) — the one global on that group whose store
+/// is a uvar. It is also the page whose setting had to be BUILT first: 1134 §3 listed
+/// `LOCK_ACTIONBAR` as "not defined, and no guard exists". The five switches above it are 1500's
+/// and have their own test below.
 ///
 /// The end-to-end teeth are the last block: the row's write reaches the shipped bar's own drag
 /// guard in the same VM. `action_bar_tests`/`pet_bar_tests` own the guard's full behaviour
@@ -2924,5 +2936,159 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
         .unwrap(),
         "Smart"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The **Action Bars page's five switches** (decision 1500) — the four bar toggles and the grid
+/// option, on ONE page over TWO different stores, which is the whole point of the test.
+///
+/// The four bar rows are API (`func`) rows: there is nothing local to save, because the preference
+/// is four bits of this character's server-side `PLAYER_FIELD_BYTES` byte 2. A click writes the
+/// live Lua global, re-derives the bars and re-sends the whole byte — with **four** arguments, the
+/// binding's verified arity. Always Show ActionBars is a saved-variable row instead, and NOT
+/// because someone preferred it: the same binding silently drops the fifth argument the reference
+/// passes it, so that switch has no server store to write.
+///
+/// The end-to-end teeth are the real bars moving in the same VM — the row's write reaches
+/// `MultiActionBar_Update`, which reaches `UIParent_ManageFramePositions`.
+#[test]
+fn the_action_bars_page_toggles_the_real_bars() {
+    let mut s = actionbars_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowActionBars:Click()")
+        .unwrap();
+
+    let box_of = |row: &str| format!("OptionsFrameContainerBodyActionBars{row}Check");
+    let checked = |s: &UiScript, row: &str| {
+        s.eval::<bool>(&format!(
+            "return {}:GetChecked() and true or false",
+            box_of(row)
+        ))
+        .unwrap()
+    };
+    let shown =
+        |s: &UiScript, bar: &str| s.eval::<bool>(&format!("return {bar}:IsShown()")).unwrap();
+
+    // Read: every switch ships OFF, and so does every bar.
+    for row in [
+        "RowMultiBar1",
+        "RowMultiBar2",
+        "RowMultiBar3",
+        "RowMultiBar4",
+        "RowAlwaysShowMultibars",
+    ] {
+        assert!(!checked(&s, row), "{row} ships unticked");
+    }
+    for bar in [
+        "MultiBarBottomLeft",
+        "MultiBarBottomRight",
+        "MultiBarRight",
+        "MultiBarLeft",
+    ] {
+        assert!(!shown(&s, bar), "{bar} ships down");
+    }
+
+    // Bar 4's row is DEAD while bar 3's is unticked — MultiBarLeft cannot stand without
+    // MultiBarRight (the reference's own rule for this pair, UIOptionsFrame.lua l.722-726).
+    assert!(
+        !s.eval::<bool>(&format!("return {}:IsEnabled()", box_of("RowMultiBar4")))
+            .unwrap(),
+        "Show Right ActionBar 2 is disabled until Show Right ActionBar is on"
+    );
+
+    // The write: a click raises the bar, writes the global as the number 1, and sends the byte.
+    let _ = s.take_cvar_changes();
+    s.run(&format!("{}:Click()", box_of("RowMultiBar1")))
+        .unwrap();
+    assert!(shown(&s, "MultiBarBottomLeft"), "the row reached the bar");
+    assert_eq!(s.eval::<i64>("return SHOW_MULTI_ACTIONBAR_1").unwrap(), 1);
+    assert_eq!(
+        s.take_action_bar_toggle_sends(),
+        vec![0x01],
+        "one CMSG_SET_ACTIONBAR_TOGGLES carrying the whole byte"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "an API row must not touch the CVar table"
+    );
+
+    // …and the managed bottom stack moved with it (CONTAINER_OFFSET_Y's bottomEither 27).
+    assert_eq!(s.eval::<f64>("return CONTAINER_OFFSET_Y").unwrap(), 97.0);
+
+    // Ticking bar 3 wakes bar 4's row; ticking bar 4 then brings MultiBarLeft up beside it.
+    s.run(&format!("{}:Click()", box_of("RowMultiBar3")))
+        .unwrap();
+    assert!(
+        s.eval::<bool>(&format!("return {}:IsEnabled()", box_of("RowMultiBar4")))
+            .unwrap(),
+        "bar 3 on wakes bar 4's row"
+    );
+    assert!(shown(&s, "MultiBarRight"));
+    assert!(!shown(&s, "MultiBarLeft"), "bar 4 is still off");
+    s.run(&format!("{}:Click()", box_of("RowMultiBar4")))
+        .unwrap();
+    assert!(shown(&s, "MultiBarLeft"));
+    assert_eq!(
+        s.take_action_bar_toggle_sends(),
+        vec![0x05, 0x0d],
+        "one packet per click — bars 1+3, then 1+3+4"
+    );
+
+    // Untick bar 3 and MultiBarLeft goes with it, even though bar 4's own flag is still set — the
+    // conjunction is in MultiActionBar_Update, not in the row.
+    s.run(&format!("{}:Click()", box_of("RowMultiBar3")))
+        .unwrap();
+    assert!(!shown(&s, "MultiBarRight"));
+    assert!(!shown(&s, "MultiBarLeft"), "MultiBarLeft rides on bar 3");
+    assert_eq!(s.eval::<i64>("return SHOW_MULTI_ACTIONBAR_4").unwrap(), 1);
+    assert!(
+        !s.eval::<bool>(&format!("return {}:IsEnabled()", box_of("RowMultiBar4")))
+            .unwrap(),
+        "…and its row goes back to sleep"
+    );
+
+    // The grid switch is the OTHER store: a saved-variable global, no packet, and an applyFunc
+    // that opens every extra bar's empty wells.
+    let _ = s.take_action_bar_toggle_sends();
+    s.run(&format!("{}:Click()", box_of("RowAlwaysShowMultibars")))
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return ALWAYS_SHOW_MULTIBARS").unwrap(),
+        "1",
+        "a uvar row stores the panel's string"
+    );
+    assert!(
+        s.take_action_bar_toggle_sends().is_empty(),
+        "and sends NOTHING — the binding has no room for a fifth argument"
+    );
+    assert!(
+        s.eval::<bool>("return MultiBarBottomLeftButton5:IsShown()")
+            .unwrap(),
+        "the applyFunc opened the empty wells"
+    );
+
+    // Defaults walks the whole page back: every bar down, the grid off, the lock unlocked.
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    for bar in [
+        "MultiBarBottomLeft",
+        "MultiBarBottomRight",
+        "MultiBarRight",
+        "MultiBarLeft",
+    ] {
+        assert!(!shown(&s, bar), "{bar} back down");
+    }
+    assert_eq!(
+        *s.take_action_bar_toggle_sends()
+            .last()
+            .expect("Defaults writes every bar row"),
+        0,
+        "the last packet Defaults sends is the empty byte"
+    );
+    assert_eq!(
+        s.eval::<String>("return ALWAYS_SHOW_MULTIBARS").unwrap(),
+        "0",
+        "MultiBars.xml's own file-scope assignment IS the registered default"
+    );
+    assert_eq!(s.eval::<f64>("return CONTAINER_OFFSET_Y").unwrap(), 70.0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

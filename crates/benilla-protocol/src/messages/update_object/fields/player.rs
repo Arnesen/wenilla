@@ -526,6 +526,36 @@ impl ObjectFields {
     pub fn player_combo_target(&self) -> u64 {
         self.get_guid(FIELD_PLAYER_FIELD_COMBO_TARGET).unwrap_or(0)
     }
+    /// `PLAYER_FIELD_BYTES` byte 2 — the **action-bar toggle** byte: which of the four extra bars
+    /// the player has switched on (vmangos `Player.h:360-363`
+    /// `PLAYER_FIELD_BYTES_OFFSET_ACTION_BARS = 2`, written by `HandleSetActionBarTogglesOpcode`'s
+    /// `SetByteValue(PLAYER_FIELD_BYTES, 2, packet.actionBar)`). PRIVATE — the field is only
+    /// *allocated* on our own player (self 1282 dwords vs 486 for any other player), which is why
+    /// the reference binding resolves the local GUID itself instead of taking a unit token.
+    ///
+    /// Byte-VERIFIED (wow-re `system/ui/scratch/action-bar-toggles.md` §4): `GetActionBarToggles
+    /// 0x4e7660` reads it at `[[player+0xe68]+0x102a]`, and `0x2f0 + 0x1028 = 0x1318 = 1222·4`
+    /// closes the arithmetic against index 1222 — the same player-block base that puts
+    /// [`Self::player_combo_points`] at `+0x1029` and [`Self::player_honor_rank`] at `+0x102b`.
+    /// (vmangos's inline comment on the field reads `// 0x4C0`, six low; its own arithmetic
+    /// `UNIT_END + 0x40A` and the binary both say `0x4C6`. The comment is stale — do not copy it.)
+    ///
+    /// **This is the ONLY source of the value: the client never writes the byte.** Displacement
+    /// `0x102a` occurs exactly once image-wide and it is that read; `SetActionBarToggles` stores
+    /// nothing outside its own stack frame and only posts `CMSG_SET_ACTIONBAR_TOGGLES`
+    /// ([`crate::messages::set_actionbar_toggles`]), so the cell moves solely through the generic
+    /// `SMSG_UPDATE_OBJECT` value-apply — and nothing is notified when it does (§4.2). A purely
+    /// field-driven UI therefore lags a round trip; the reference keeps its optimistic copy in Lua
+    /// and re-reads this exactly once, at `PLAYER_ENTERING_WORLD`.
+    ///
+    /// Only bits `0x01`..`0x08` are meaningful to the client — the binding tests four and can set
+    /// four (§2/§5); the high nibble is never read and is destroyed by the next `Set`. Bit→bar is a
+    /// FrameXML convention, not the descriptor's, so it is not named here. `None` before the field
+    /// streams.
+    pub fn player_action_bar_toggles(&self) -> Option<u8> {
+        self.get_u32(FIELD_PLAYER_FIELD_BYTES)
+            .map(|b| ((b >> 16) & 0xff) as u8)
+    }
     /// `PLAYER_FIELD_BYTES` byte 3 — the player's **highest lifetime honor rank** (vmangos
     /// `PLAYER_FIELD_BYTES_OFFSET_HIGHEST_HONOR_RANK`, written by `HonorMgr`): what the client's
     /// item-usable gate compares an item's `RequiredHonorRank` against (`0x5ea930` reads the

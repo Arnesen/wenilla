@@ -39,11 +39,23 @@
           a mount, which has no stack; the engine-side law is ItemInfo::is_consumable, byte-cited
           from 0x4e5250).
         - Empty-slot grid (ref ActionButton.lua:241-259's ShowGrid/HideGrid, a per-button COUNTER):
-          simplified to one bar-level BOOLEAN — the cursor is a single global payload, so no two
-          "shows" can ever nest, and a counter would just be a boolean with extra steps. Unlike the
-          ref (which HIDES an empty, non-grid slot entirely), our bar always shows all 12 wells; the
-          grid only swaps an EMPTY slot's ring art between the occupied and empty Quickslot textures
-          — the default (nothing held) look is unchanged from before this slice, no capture regression.
+          the counter is BACK, and the argument that retired it is exactly why. 0216 §7 collapsed it
+          to one global boolean because "the cursor is a single global payload, so no two shows can
+          ever nest" — true while the payload was the only thing that could ask for a grid. Decision
+          1500 gives it a second asker (ALWAYS_SHOW_MULTIBARS, which holds the four extra bars'
+          empty wells open with no payload in hand), and with two independent askers the boolean is
+          wrong by its own reasoning: dropping a payload would close wells the option is still
+          asking for. So `button.showgrid` COUNTS, exactly as the reference's does, and
+          ActionButton_ShowGrid/_HideGrid below are its two verbs.
+          The count — rather than a flag — is also what the addon corpus already assumes: zBar
+          REPLACES both verbs and writes `button.showgrid = 1/0`, CT_BarMod writes 0/1/2 and
+          increments it on OUR ActionButton1-12, and Bartender2 HOOKS ActionButton_ShowGrid at
+          load — which died on a nil global here until now, the same session-start crash class
+          1218/1219 fixed for MultiBarLeft.
+          Unlike the ref (which HIDES an empty, non-grid slot entirely), our MAIN bar always shows
+          all 12 wells; the grid only swaps an EMPTY slot's ring art between the occupied and empty
+          Quickslot textures. The ref's extra SetVertexColor(1,1,1,0.5) dim on a grid ring is NOT
+          ours — that look is unchanged since 0216 and is the director's to move.
         - Exhaustion tick + rest fill, XP text (hover/cvar-gated), MaxLevelBar: OUT. The bar's
           right-hand cluster is otherwise complete — the backpack toggle + four bag slots live in
           BagFrame.xml and the eight micro buttons in MicroMenu.xml (both anchored into
@@ -125,10 +137,6 @@
             end
         end
 
-        -- Whether a placeable cursor payload is held (decision 0216 §7's ACTIONBAR_SHOWGRID/
-        -- _HIDEGRID pair, simplified to a boolean — see the SCOPE note above).
-        BENILLA_ACTIONBAR_GRID_SHOWN = false
-
         -- Every live action button — the main bar's 12 plus the multibars' (MultiBars.xml joins
         -- at OnLoad). The fan-out roster for the bar-level events below: the ref registers the
         -- feedback events per-button; our bar-level fan needs the full set in one place.
@@ -146,23 +154,17 @@
         CURRENT_ACTIONBAR_PAGE = 1
         -- "Table of actionbar pages and whether they're viewable or not" (the reference's own
         -- comment). The page walk below honours it rather than counting, which is what makes the
-        -- next two lines work at all.
+        -- whole thing work: a page an extra bar already displays must not ALSO be reachable on the
+        -- main bar, or paging up shows you the twelve actions already on screen beside it.
         --
-        -- **Pages 5 and 6 are deliberately NOT viewable, and that is the reference's own rule
-        -- applied to our configuration rather than a deviation from it.**
-        -- `MultiActionBar_Update` (ref MultiActionBars.lua l.49-60) blanks
-        -- `VIEWABLE_ACTION_BAR_PAGES[BOTTOMLEFT_ACTIONBAR_PAGE]` whenever MultiBarBottomLeft is
-        -- SHOWN — a page a multibar already displays must not also be reachable on the main bar,
-        -- or paging up shows you the twelve actions already on screen below. benilla's two bottom
-        -- bars are always-on with no `SHOW_MULTI_ACTIONBAR_*` state (0270, the director's call),
-        -- and they own pages 6 and 5 (MultiBars.xml: BottomLeft = actions 61..72, BottomRight =
-        -- 49..60), so the two rows are blanked at declaration instead of by a toggle.
-        --
-        -- MultiBarLeft/Right (pages 4 and 3) stay viewable because ours ship HIDDEN (1219), which
-        -- is the same state the reference is in with SHOW_MULTI_ACTIONBAR_3/4 unset.
-        VIEWABLE_ACTION_BAR_PAGES = {1, 1, 1, 1}
-        VIEWABLE_ACTION_BAR_PAGES[BOTTOMRIGHT_ACTIONBAR_PAGE] = nil
-        VIEWABLE_ACTION_BAR_PAGES[BOTTOMLEFT_ACTIONBAR_PAGE] = nil
+        -- **This is the shipped START state, not a constant: it FOLLOWS the four bar toggles.**
+        -- All six pages are viewable here because all four extra bars now ship hidden (decision
+        -- 1500 — they are player options, off by default), and `MultiActionBar_Update`
+        -- (MultiBars.xml) does the arithmetic from then on: a bar that comes up takes its page out
+        -- of the cycle, a bar that goes down puts it back. Blanking two rows at declaration was
+        -- only ever right because visibility was static (0270's always-on bottom pair), and the
+        -- moment the player can move it a declaration cannot be the answer.
+        VIEWABLE_ACTION_BAR_PAGES = {1, 1, 1, 1, 1, 1}
 
         -- `ChangeActionBarPage()` takes NO arguments — every reference caller sets
         -- CURRENT_ACTIONBAR_PAGE first and then calls this to apply it (l.79, l.100), and
@@ -339,6 +341,9 @@
             button.cooldown = getglobal(n .. "Cooldown")
             button.flashing = button.flashing or 0
             button.flashtime = button.flashtime or 0
+            -- The grid count, same posture: a foreign button reaching ActionButton_HideGrid with
+            -- no count would raise on the arithmetic, which is 1199's class of silent-wrong-shape.
+            button.showgrid = button.showgrid or 0
         end
 
         function BenillaActionButton_Action(button)
@@ -369,14 +374,21 @@
         -- it; 0954 ended that and cvars.rs now registers the key (default "1", byte-read — the
         -- evidence lives on that row), so the fork is live and the stock look is unchanged.
         --
-        -- The ref's LEFT set is {MultiBarBottomRight, MultiBarRight, MultiBarLeft}. Only the first
-        -- exists here — the two VERTICAL bars are deliberately not shipped (see the header of
-        -- MultiBars.xml) — so it is the whole test, and the day they land they join it.
+        -- The ref's LEFT set is {MultiBarBottomRight, MultiBarRight, MultiBarLeft} — the three bars
+        -- that sit at (or against) the right edge, so their plates have to open toward the centre.
+        -- All three exist here now: the two VERTICAL bars landed with 1219 and became player
+        -- options with 1500, and this comment said "only the first exists" for as long as that was
+        -- true. Membership is by FRAME, not by visibility — a hidden bar is never hovered anyway.
         function BenillaActionButton_OnEnter(button)
             BenillaActionButton_Adopt(button)
             if not GameTooltip then return end -- engine tests load file subsets
             if GetCVar("UberTooltips") == "0" then
-                if button:GetParent() == MultiBarBottomRight then
+                -- `parent and` first: an orphan button's nil parent would otherwise match a nil
+                -- MultiBarRight in a harness that loaded no multibars, and anchor the wrong way.
+                local parent = button:GetParent()
+                local edgeBar = parent and (parent == MultiBarBottomRight
+                    or parent == MultiBarRight or parent == MultiBarLeft)
+                if edgeBar then
                     GameTooltip:SetOwner(button, "ANCHOR_LEFT")
                 else
                     GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
@@ -400,6 +412,8 @@
             button.flashing = 0
             button.flashtime = 0
             button.rangeTimer = nil
+            -- ref ActionButton_OnLoad l.104: the empty-well grid count starts at zero.
+            button.showgrid = 0
             -- Every bar button carries its binding COMMAND (0997 main bar, 1008 multibars):
             -- the caller names the command family (MultiBars.xml passes MULTIACTIONBAR1/2BUTTON
             -- — the ref's own bar↔page mapping quoted there); nothing passed = the main bar's
@@ -673,10 +687,16 @@
             local button = this
             if not button then return end
             BenillaActionButton_Adopt(button)
+            -- Through the two verbs, ref-verbatim in shape (ActionButton_OnEvent l.317-324) and
+            -- no longer the 1/0 assignment this arm shipped with: `showgrid` is a COUNT now, and a
+            -- foreign button handed a bare 0 while the option still wanted its wells open would
+            -- close them. Each verb repaints, so these arms return rather than fall through.
             if event == "ACTIONBAR_SHOWGRID" then
-                button.showgrid = 1
+                ActionButton_ShowGrid(button)
+                return
             elseif event == "ACTIONBAR_HIDEGRID" then
-                button.showgrid = 0
+                ActionButton_HideGrid(button)
+                return
             elseif event == "UPDATE_BINDINGS" then
                 BenillaActionButton_PaintHotkey(button)
             end
@@ -702,6 +722,46 @@
 
         function ActionButton_UpdateUsable()
             BenillaActionButton_UpdateUsable(this)
+        end
+
+        -- ── The empty-slot grid (ref ActionButton.lua l.243-260) ────────────────────────────────
+        -- `button.showgrid` is a COUNT of how many things currently want this button's empty well
+        -- visible, and it is the reference's own field under its own name — see the SCOPE note for
+        -- why a count and not a flag, and for the three corpus addons that already write it.
+        --
+        -- Today there are exactly two askers and they are independent: the cursor's placeable
+        -- payload (the ACTIONBAR_SHOWGRID/_HIDEGRID pair, fanned over the whole roster in
+        -- BenillaActionBar_OnEvent) and ALWAYS_SHOW_MULTIBARS (MultiBars.xml's
+        -- MultiActionBar_UpdateGridVisibility, over the four extra bars only). Either alone holds
+        -- the wells open; the count is what lets one let go without closing what the other holds.
+        --
+        -- Divergence from the ref, deliberate: ours re-derive the whole button through
+        -- BenillaActionButton_Update rather than doing their own Show/Hide + vertex tint. There is
+        -- one paint path in this file and the grid is one of its inputs, so a verb that painted
+        -- directly would be a second, slightly different answer to "what does an empty well look
+        -- like" — which is how the two got out of step in the ref (its ShowGrid dims the ring, its
+        -- Update never restores the dim).
+        function BenillaActionButton_GridShown(button)
+            return button.showgrid ~= nil and button.showgrid > 0
+        end
+
+        function ActionButton_ShowGrid(button)
+            button = button or this
+            BenillaActionButton_Adopt(button)
+            button.showgrid = (button.showgrid or 0) + 1
+            BenillaActionButton_Update(button)
+        end
+
+        function ActionButton_HideGrid(button)
+            button = button or this
+            BenillaActionButton_Adopt(button)
+            -- Clamped at zero. The ref subtracts unconditionally and can go negative — a button
+            -- that joined the roster mid-payload takes one HIDEGRID it never took a SHOWGRID for,
+            -- and from then on its wells need TWO shows to open. Ours simply cannot owe.
+            local count = (button.showgrid or 0) - 1
+            if count < 0 then count = 0 end
+            button.showgrid = count
+            BenillaActionButton_Update(button)
         end
 
         function BenillaActionButton_Update(button)
@@ -730,24 +790,25 @@
                 button.hotkey:SetVertexColor(0.6, 0.6, 0.6)
                 button:SetChecked(0)
                 BenillaActionButton_StopFlash(button)
+                local grid = BenillaActionButton_GridShown(button)
                 if button.base then
                     -- An EMPTY multibar well is the ref's own default: hidden entirely, appearing
-                    -- as a drop-target ring only while a payload is held (ActionButton_Update's
-                    -- showgrid==0 Hide; MultiActionBar_ShowAllGrids). Only the MAIN bar keeps our
-                    -- always-visible wells divergence (the SCOPE note) — its art has sockets;
-                    -- floating rings over bare world would not read as a bar.
+                    -- as a drop-target ring only while the grid is asked for (a held payload, or
+                    -- ALWAYS_SHOW_MULTIBARS). Only the MAIN bar keeps our always-visible wells
+                    -- divergence (the SCOPE note) — its art has sockets; floating rings over bare
+                    -- world would not read as a bar.
                     button.hotkey:SetText("")
-                    if BENILLA_ACTIONBAR_GRID_SHOWN then
+                    if grid then
                         button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
                         button:Show()
                     else
                         button:Hide()
                     end
                 else
-                    -- While a payload is held, an empty slot shows the ref's own "no action" ring
+                    -- While the grid is up, an empty slot shows the ref's own "no action" ring
                     -- (Interface\Buttons\UI-Quickslot) so it reads as a drop target; otherwise the
                     -- plain occupied-style ring, unchanged from before this slice (SCOPE note).
-                    if BENILLA_ACTIONBAR_GRID_SHOWN then
+                    if grid then
                         button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
                     else
                         button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
@@ -863,8 +924,20 @@
                 end)
                 return
             end
+            -- The payload edge, routed through the two PUBLISHED verbs rather than a private flag
+            -- — which is what makes Bartender2's `self:Hook("ActionButton_ShowGrid")` see a cursor
+            -- pick-up at all. The engine fires this pair strictly on the cursor's None↔Some edges
+            -- (`script/model.rs`), so the count it drives is balanced by construction.
             if event == "ACTIONBAR_SHOWGRID" or event == "ACTIONBAR_HIDEGRID" then
-                BENILLA_ACTIONBAR_GRID_SHOWN = (event == "ACTIONBAR_SHOWGRID")
+                local show = (event == "ACTIONBAR_SHOWGRID")
+                for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
+                    if show then
+                        ActionButton_ShowGrid(BENILLA_ACTION_BUTTONS[i])
+                    else
+                        ActionButton_HideGrid(BENILLA_ACTION_BUTTONS[i])
+                    end
+                end
+                return -- each verb already repainted its own button
             end
             for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
                 BenillaActionButton_Update(BENILLA_ACTION_BUTTONS[i])

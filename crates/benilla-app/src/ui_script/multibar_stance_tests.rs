@@ -1,6 +1,9 @@
-//! The always-on multibars (`MultiBars.xml`) + the stance bar (`StanceBar.xml`) driven end to
+//! The four optional extra bars (`MultiBars.xml`) + the stance bar (`StanceBar.xml`) driven end to
 //! end through the REAL shipped XML — split out of `action_bar_tests.rs` (one file per bar
 //! family; self-contained loader per the `bag_tests` precedent).
+//!
+//! Since decision 1500 all four bars are player options that ship OFF, so most of what is here
+//! raises the bar it is about first — through the same two globals the Options rows write.
 
 use benilla_ui::script::{ActionSlot, QuadContent, SpellTooltipView, UiScript};
 
@@ -40,12 +43,28 @@ fn load_action_bar(s: &UiScript) {
     }
 }
 
-/// The two always-on bottom multibars (MultiBars.xml) through the REAL shipped XML: the fixed
+/// Raise exactly the bars named, through the globals the Options rows write.
+fn show_bars(s: &UiScript, bars: &[u32]) {
+    let mut lua = String::new();
+    for bar in 1..=4u32 {
+        lua.push_str(&format!(
+            "SHOW_MULTI_ACTIONBAR_{bar} = {} ",
+            if bars.contains(&bar) { "1" } else { "nil" }
+        ));
+    }
+    lua.push_str("MultiActionBar_Update()");
+    s.run(&lua).unwrap();
+}
+
+/// The two bottom multibars (MultiBars.xml) through the REAL shipped XML, RAISED: the fixed
 /// page bases (BottomLeft = actions 61..72, BottomRight = 49..60 — ref ActionButton_GetPagedID's
 /// parent-name fork), the vanilla anchor chain (BottomLeft's BOTTOMLEFT on ActionButton1's
 /// TOPLEFT +17, BottomRight 10 to its right), empty wells HIDDEN except while a payload is held
 /// (the ref's own multibar default, unlike the main bar's always-visible wells), a click queuing
 /// the multibar id, and the bonus-bar page flip leaving multibar ids untouched.
+///
+/// The raise is the first thing this does since 1500 — the bars ship off, and everything below is
+/// about what a bar looks like once the player has asked for it.
 #[test]
 fn shipped_multibars_drive_end_to_end() {
     let mut s = UiScript::new().unwrap();
@@ -100,6 +119,7 @@ fn shipped_multibars_drive_end_to_end() {
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    show_bars(&s, &[1, 2]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s.resolve();
     let quads = s.extract();
@@ -223,10 +243,12 @@ fn shipped_stance_bar_drives_end_to_end() {
     load_action_bar(&s);
     // MultiBars.xml too, and it is load-bearing for the geometry below: the stance bar's OnShow
     // re-fires UIParent_ManageFramePositions, whose `ShapeshiftBarFrame` row computes the y as
-    // baseY 0 + bottomLeft 45 — the same +45 the XML anchor carries statically, but only while
-    // the always-on bottom multibar (0270) exists to raise the flag. Without this file the pass
-    // sees no bottom bar, drops the 45 and the bar sits on MainMenuBar's top edge.
+    // baseY 0 + bottomLeft 45 — the same +45 the XML anchor carries statically, but only while a
+    // bottom multibar is UP to raise the flag. Since 1500 that is a player option rather than a
+    // given, so this test raises it; `the_stance_bar_sits_where_the_pass_puts_it` below owns the
+    // other state.
     load_xml(&s, "MultiBars.xml");
+    show_bars(&s, &[1]);
     let text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/StanceBar.xml"),
     )
@@ -438,6 +460,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
         );
     }
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    show_bars(&s, &[1, 2]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     let hover_name = |s: &UiScript, button: &str| -> Option<String> {
@@ -483,7 +506,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **The two vertical multibars exist and stay hidden** — the reference's own posture, and the
+/// **The two vertical multibars exist and start hidden** — the reference's own posture, and the
 /// reason three corpus addons stopped dying at session start.
 ///
 /// `MultiActionBars.xml` l.515/523 instantiates `MultiBarRight`/`MultiBarLeft` as real
@@ -491,6 +514,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
 /// `hidden="true"`. Atlas (`Atlas.lua:387`, `MultiBarLeft:SetFrameStrata`) and Bartender2
 /// (`Bartender2.lua:74`, `MultiBarLeft:ClearAllPoints`) only need them to BE there — neither shows
 /// one. So all three claims below are the fix: present, hidden, and on the reference's pages.
+/// Since 1500 "hidden" is where they START rather than where they stay — see the toggle tests.
 #[test]
 fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
     let s = UiScript::new().unwrap();
@@ -526,4 +550,501 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
             "{bar}'s last slot"
         );
     }
+}
+
+/// **Every extra bar is down until its own toggle says otherwise, and `MultiBarLeft` needs two.**
+///
+/// The four bits of `PLAYER_FIELD_BYTES` byte 2 map to bars 1-4 at the FrameXML layer (the binary
+/// is bar-agnostic — wow-5875-re `system/ui/scratch/action-bar-toggles.md`), and a fresh
+/// character's byte is 0, which is the whole of "off by default": nothing here fakes a default,
+/// the bars simply have nothing telling them to show.
+///
+/// The conjunction on bar 4 is the reference's own (`MultiActionBars.lua` l.73,
+/// `if ( SHOW_MULTI_ACTIONBAR_3 and SHOW_MULTI_ACTIONBAR_4 )`) and it is not cosmetic:
+/// `MultiBarLeft` anchors its TOPRIGHT to `MultiBarRight`'s TOPLEFT, so alone it would be a column
+/// hanging off a bar that is not on screen.
+#[test]
+fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+
+    const BARS: [&str; 4] = [
+        "MultiBarBottomLeft",
+        "MultiBarBottomRight",
+        "MultiBarRight",
+        "MultiBarLeft",
+    ];
+    let shown =
+        |s: &UiScript, bar: &str| s.eval::<bool>(&format!("return {bar}:IsShown()")).unwrap();
+
+    // The zero byte, applied through the same path a login takes.
+    s.run("MultiActionBar_Update()").unwrap();
+    for bar in BARS {
+        assert!(!shown(&s, bar), "{bar} must be down at a zero toggle byte");
+    }
+
+    // Each of the first three raises ITS bar and only its bar.
+    for (flag, want) in [(1u32, 0usize), (2, 1), (3, 2)] {
+        show_bars(&s, &[flag]);
+        for (i, bar) in BARS.iter().enumerate() {
+            assert_eq!(
+                shown(&s, bar),
+                i == want,
+                "bar {flag} alone: {bar} shown {}, expected {}",
+                shown(&s, bar),
+                i == want
+            );
+        }
+    }
+
+    // Bar 4 alone does nothing at all — not even to itself.
+    show_bars(&s, &[4]);
+    for bar in BARS {
+        assert!(
+            !shown(&s, bar),
+            "{bar}: SHOW_MULTI_ACTIONBAR_4 without 3 raises nothing"
+        );
+    }
+
+    // 3 and 4 together bring up both vertical bars.
+    show_bars(&s, &[3, 4]);
+    assert!(shown(&s, "MultiBarRight"));
+    assert!(shown(&s, "MultiBarLeft"), "MultiBarLeft rides on bar 3");
+    assert!(!shown(&s, "MultiBarBottomLeft"));
+    assert!(!shown(&s, "MultiBarBottomRight"));
+
+    // All four on, then all four off again — the toggle is a toggle, not a one-way door.
+    show_bars(&s, &[1, 2, 3, 4]);
+    for bar in BARS {
+        assert!(shown(&s, bar), "{bar} up with the full byte");
+    }
+    show_bars(&s, &[]);
+    for bar in BARS {
+        assert!(!shown(&s, bar), "{bar} down again");
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Raising a bottom bar moves everything that shares the bottom band with it.**
+///
+/// `MultiActionBar_Update` ends by running `UIParent_ManageFramePositions`, and that is the whole
+/// reason a bar toggle is safe to expose: the cast bar, the chat frames and the bag stack's corner
+/// all seat themselves off that pass. Pinned on the two the pass expresses differently — a VAR row
+/// (`CONTAINER_OFFSET_Y`, the number the bag stack reads: 70 with the band clear, +27 with either
+/// bottom bar up) and a FRAME row (`CastingBarFrame`, baseY 60 +40 on `bottomEither`).
+///
+/// The regression it locks is the pass never firing at all, which would leave every one of those
+/// frames drawing straight through a bar the player just asked for (decision 1499's screenshot).
+#[test]
+fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "CastingBar.xml");
+
+    // The pass writes the y of a frame row into its anchor; read it back off the anchor rather
+    // than off a resolved rect, so a hidden cast bar answers the same as a visible one.
+    let cast_y = |s: &UiScript| {
+        s.eval::<f64>("local _, _, _, _, y = CastingBarFrame:GetPoint() return y")
+            .unwrap()
+    };
+    let offset_y = |s: &UiScript| s.eval::<f64>("return CONTAINER_OFFSET_Y").unwrap();
+
+    show_bars(&s, &[]);
+    assert_eq!(offset_y(&s), 70.0, "band clear: the row's base");
+    let low = cast_y(&s);
+    assert_eq!(low, 60.0, "CastingBarFrame's baseY");
+
+    show_bars(&s, &[1]);
+    assert_eq!(
+        offset_y(&s),
+        97.0,
+        "bottom-left up: 70 + the row's bottomEither 27"
+    );
+    assert_eq!(cast_y(&s), 100.0, "the cast bar rises with it (60 + 40)");
+
+    // The RIGHT bottom bar raises the same flag — either one, not both.
+    show_bars(&s, &[2]);
+    assert_eq!(offset_y(&s), 97.0, "bottomEither is either");
+    assert_eq!(cast_y(&s), 100.0);
+
+    // Both up is still one step for these two rows (`bottomEither` is paid once); the bag corner's
+    // own `bottomRight` delta is 0, which is why this number does not move again.
+    show_bars(&s, &[1, 2]);
+    assert_eq!(offset_y(&s), 97.0);
+
+    // And down again — the pass is re-derived, never accumulated.
+    show_bars(&s, &[]);
+    assert_eq!(offset_y(&s), 70.0);
+    assert_eq!(cast_y(&s), low);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **A raised bar takes its page out of the main bar's cycle, and a lowered one gives it back.**
+///
+/// `ActionBar.xml` now declares all six pages viewable, because all four extra bars ship off; the
+/// arithmetic lives in `MultiActionBar_Update`. Before 1500 two rows were blanked at DECLARATION,
+/// which was only ever right because visibility was static.
+#[test]
+fn viewable_action_bar_pages_follow_the_bar_toggles() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+
+    let viewable = |s: &UiScript| {
+        s.eval::<String>(
+            "local out = {} \
+             for i = 1, NUM_ACTIONBAR_PAGES do \
+               if VIEWABLE_ACTION_BAR_PAGES[i] then table.insert(out, i) end \
+             end \
+             return table.concat(out, \",\")",
+        )
+        .unwrap()
+    };
+
+    show_bars(&s, &[]);
+    assert_eq!(viewable(&s), "1,2,3,4,5,6", "no bar up, no page claimed");
+
+    // ref ActionButton.lua:6-9 — BottomLeft 6, BottomRight 5, Right 3, Left 4.
+    show_bars(&s, &[1]);
+    assert_eq!(viewable(&s), "1,2,3,4,5", "BottomLeft owns page 6");
+    show_bars(&s, &[2]);
+    assert_eq!(viewable(&s), "1,2,3,4,6", "BottomRight owns page 5");
+    show_bars(&s, &[3]);
+    assert_eq!(viewable(&s), "1,2,4,5,6", "MultiBarRight owns page 3");
+    show_bars(&s, &[3, 4]);
+    assert_eq!(
+        viewable(&s),
+        "1,2,5,6",
+        "…and MultiBarLeft page 4 beside it"
+    );
+
+    // Bar 4 without bar 3 shows nothing, so it claims nothing either — the page arithmetic reads
+    // the same conjunction the Show/Hide does, not the raw flag.
+    show_bars(&s, &[4]);
+    assert_eq!(viewable(&s), "1,2,3,4,5,6");
+
+    show_bars(&s, &[1, 2, 3, 4]);
+    assert_eq!(viewable(&s), "1,2", "all four up: only the main pages left");
+    show_bars(&s, &[]);
+    assert_eq!(viewable(&s), "1,2,3,4,5,6", "and every page comes back");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Always Show ActionBars holds every extra bar's empty wells open — and lets go without closing
+/// what a held payload is still holding.**
+///
+/// That last clause is why `button.showgrid` is a COUNT rather than a flag (`ActionBar.xml`'s SCOPE
+/// note): the option and the cursor payload are two independent askers, and 0216's "no two shows
+/// can ever nest" stopped being true the moment this switch existed.
+#[test]
+fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    show_bars(&s, &[1]);
+
+    let well = |s: &UiScript| {
+        s.eval::<bool>("return MultiBarBottomLeftButton5:IsShown()")
+            .unwrap()
+    };
+    assert!(!well(&s), "an empty multibar well is hidden by default");
+
+    s.run("ALWAYS_SHOW_MULTIBARS = \"1\" MultiActionBar_UpdateGridVisibility()")
+        .unwrap();
+    assert!(well(&s), "the option opens it with nothing in hand");
+    // Every one of the four bars, not just the raised one — the reference's ShowAllGrids names all
+    // four, and a bar the player turns on later must already be holding its wells open.
+    for bar in ["MultiBarBottomRight", "MultiBarRight", "MultiBarLeft"] {
+        assert!(
+            s.eval::<bool>(&format!("return {bar}Button5:IsShown()"))
+                .unwrap(),
+            "{bar}'s wells are held open too"
+        );
+    }
+
+    // A payload arrives on top of the option, then the option lets go: the well stays open because
+    // the payload is still asking for it. A boolean would have closed it here.
+    s.fire_event("ACTIONBAR_SHOWGRID", vec![]);
+    assert!(well(&s));
+    s.run("ALWAYS_SHOW_MULTIBARS = \"0\" MultiActionBar_UpdateGridVisibility()")
+        .unwrap();
+    assert!(well(&s), "the payload still holds the well open");
+    s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
+    assert!(!well(&s), "and it closes when the last asker lets go");
+
+    // Re-applying an "off" that is already off must not owe anything: with a payload in hand the
+    // wells stay open through it (the reference's own idempotence bug, closed by the latch).
+    s.fire_event("ACTIONBAR_SHOWGRID", vec![]);
+    s.run("MultiActionBar_UpdateGridVisibility()").unwrap();
+    s.run("MultiActionBar_UpdateGridVisibility()").unwrap();
+    assert!(well(&s), "a no-op apply may not decrement");
+    s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
+    assert!(!well(&s));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The byte the row sends is the four globals, and the seed brings that byte back.**
+///
+/// The whole round trip, over the REAL bindings (`benilla_ui::script::action_bar_toggles`): the
+/// row's setter writes a global, re-derives the bars and posts `CMSG_SET_ACTIONBAR_TOGGLES` with
+/// the WHOLE byte — bits `0x01/0x02/0x04/0x08`, verified against the 1.12.1 binary (wow-5875-re
+/// `417c2d31`). Coming back, the server's descriptor push is the only thing that moves the getter,
+/// and `UIParent.xml`'s `PLAYER_ENTERING_WORLD` arm reads it exactly once as the seed.
+///
+/// Every `Set` is one packet, deliberately (the binding gates nothing), which is why the drain is a
+/// list and each step below checks the packet it just caused.
+#[test]
+fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    let _ = s.take_action_bar_toggle_sends();
+
+    // The row's own setter, with the row's own "1"/"0" strings.
+    s.run("BenillaMultiBar_SetShown(1, \"1\")").unwrap();
+    assert_eq!(s.take_action_bar_toggle_sends(), vec![0x01]);
+    s.run("BenillaMultiBar_SetShown(3, \"1\")").unwrap();
+    assert_eq!(
+        s.take_action_bar_toggle_sends(),
+        vec![0x05],
+        "the WHOLE byte re-sent, not a delta"
+    );
+    s.run("BenillaMultiBar_SetShown(4, \"1\")").unwrap();
+    assert_eq!(s.take_action_bar_toggle_sends(), vec![0x0d]);
+    s.run("BenillaMultiBar_SetShown(1, \"0\")").unwrap();
+    assert_eq!(
+        s.take_action_bar_toggle_sends(),
+        vec![0x0c],
+        "the row hands the setter a STRING, and \"0\" is off"
+    );
+
+    // What is stored is 1 or nil and nothing else — GetActionBarToggles' own shape, and what the
+    // corpus reads back (Bartender2 writes 1s; CT_BarMod tests `not SHOW_MULTI_ACTIONBAR_n`).
+    assert_eq!(
+        s.eval::<String>(
+            "return type(SHOW_MULTI_ACTIONBAR_3) .. \"/\" .. type(SHOW_MULTI_ACTIONBAR_1)"
+        )
+        .unwrap(),
+        "number/nil"
+    );
+
+    // The way back in. Wipe the live state, push the byte the server would hold, and run the seed
+    // `UIParent.xml`'s PLAYER_ENTERING_WORLD arm runs — nothing else re-reads that field, so this
+    // one read is the whole restore.
+    show_bars(&s, &[]);
+    let _ = s.take_action_bar_toggle_sends();
+    s.set_action_bar_toggles(0x0c);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert!(
+        s.eval::<bool>("return MultiBarRight:IsShown() and MultiBarLeft:IsShown()")
+            .unwrap(),
+        "the seed brings back exactly the byte that was sent"
+    );
+    assert!(!s
+        .eval::<bool>("return MultiBarBottomLeft:IsShown()")
+        .unwrap());
+    assert!(
+        s.take_action_bar_toggle_sends().is_empty(),
+        "the seed READS — a login must not post the byte back at the server"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The shipped setter passes exactly FOUR arguments** — the one claim the real binding cannot be
+/// asked, which is why this is the one place that shadows it.
+///
+/// `SetActionBarToggles` loops `i = 0..3` (`0x4e770e cmp esi,4`) and never fetches a fifth, so a
+/// call with five is *behaviourally* identical to one with four — the difference is invisible from
+/// outside and only a spy on the Lua side can see it. The reference's own panel does pass five
+/// (`UIOptionsFrame_Save` l.363, with `ALWAYS_SHOW_MULTIBARS` on the end) and that fifth is the
+/// reason its grid option looks server-backed and is not. Ours passes four and this holds it there,
+/// so the day someone "restores fidelity" by appending the fifth, they are told what it costs.
+///
+/// A later reader: the shadowing here is deliberate and is NOT a leftover shim. Everything else in
+/// this file drives the real binding.
+#[test]
+fn the_shipped_setter_passes_exactly_four_arguments() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+
+    // `r##`: the Lua contains `select("#", ...)`, and `"#` would close a single-hash raw string.
+    s.run(
+        r##"
+        BENILLA_TEST_TOGGLE_ARGC = nil
+        function SetActionBarToggles(...)
+            BENILLA_TEST_TOGGLE_ARGC = select("#", ...)
+        end
+        "##,
+    )
+    .unwrap();
+    s.run("BenillaMultiBar_SetShown(2, \"1\")").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return BENILLA_TEST_TOGGLE_ARGC").unwrap(),
+        4,
+        "four — never the reference's five, which the binding drops on the floor"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The stance bar's seat is the manage pass's, in BOTH bottom-bar states.**
+///
+/// `StanceBar.xml`'s XML anchor carries the RAISED value (`MainMenuBar` TOPLEFT +(30,45)) so the
+/// frame is somewhere sane before the first pass; the truth is the `ShapeshiftBarFrame` row
+/// (baseY 0, bottomLeft 45). That distinction did not matter while the bottom bars were always on
+/// — the two agreed by construction — and 1500 makes the unraised state reachable, so it is pinned
+/// here rather than assumed.
+#[test]
+fn the_stance_bar_sits_where_the_pass_puts_it() {
+    use benilla_ui::script::ShapeshiftFormView;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "StanceBar.xml");
+    s.set_shapeshift_forms(vec![ShapeshiftFormView {
+        spell_id: 2457,
+        texture: Some("Interface\\Icons\\Stance_A".into()),
+        name: "Battle Stance".into(),
+        active: true,
+        castable: true,
+        cooldown: None,
+    }]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+
+    let seat = |s: &UiScript| {
+        s.eval::<f64>("local _, _, _, _, y = ShapeshiftBarFrame:GetPoint() return y")
+            .unwrap()
+    };
+
+    show_bars(&s, &[]);
+    assert_eq!(
+        seat(&s),
+        0.0,
+        "no bottom bar: the row's baseY, on the main bar"
+    );
+    show_bars(&s, &[1]);
+    assert_eq!(seat(&s), 45.0, "bottom-left up: +45, the ref's raised seat");
+    show_bars(&s, &[2]);
+    assert_eq!(
+        seat(&s),
+        0.0,
+        "the RIGHT bottom bar is not under it — the row's flag is bottomLeft, not bottomEither"
+    );
+    show_bars(&s, &[]);
+    assert_eq!(seat(&s), 0.0);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The stance bar's SHELF ART follows the same pass as its seat** (ref
+/// `ShapeshiftBar_UpdatePosition`, BonusActionBarFrame.lua l.229-251).
+///
+/// Sitting on the main bar, the shelf IS the bar's border: the two end caps show, the middle strip
+/// shows only past two forms, and each button's ring grows to 64. Raised a row over the bottom-left
+/// multibar the strips would draw across whatever is underneath, so all three hide and the rings
+/// drop to 50.
+///
+/// This was dead code until 1500. With the bottom bars always on (0270) only the raised branch was
+/// reachable; now the unraised bar is what every form class sees on a fresh character, which makes
+/// the missing border the DEFAULT look rather than an edge case.
+///
+/// The last block is the point of the whole test: one `MultiActionBar_Update()` flips the seat AND
+/// the art, which is what proves the art rides `UIParent_RegisterManagedPositionListener` rather
+/// than having been set once at load.
+#[test]
+fn the_stance_shelf_follows_the_bottom_left_bar() {
+    use benilla_ui::script::ShapeshiftFormView;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "StanceBar.xml");
+
+    let form = |id: u32| ShapeshiftFormView {
+        spell_id: id,
+        texture: Some(format!("Interface\\Icons\\Stance_{id}")),
+        name: format!("Form {id}"),
+        active: false,
+        castable: true,
+        cooldown: None,
+    };
+    let shown = |s: &UiScript, region: &str| {
+        s.eval::<bool>(&format!("return {region}:IsShown()"))
+            .unwrap()
+    };
+    let ring = |s: &UiScript| {
+        s.eval::<f64>("return ShapeshiftButton1NormalTexture:GetWidth()")
+            .unwrap()
+    };
+
+    // A three-form warrior, no bottom bar: the whole shelf, and the big ring.
+    s.set_shapeshift_forms(vec![form(2457), form(71), form(2458)]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    show_bars(&s, &[]);
+    assert!(shown(&s, "ShapeshiftBarLeft"), "the left end cap");
+    assert!(shown(&s, "ShapeshiftBarRight"), "the right end cap");
+    assert!(
+        shown(&s, "ShapeshiftBarMiddle"),
+        "3 forms: the middle strip"
+    );
+    assert_eq!(ring(&s), 64.0, "unraised rings are the ref's 64");
+
+    // Two forms drop the middle strip and nothing else — the ref's own `> 2`.
+    s.set_shapeshift_forms(vec![form(2457), form(71)]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    assert!(shown(&s, "ShapeshiftBarLeft"));
+    assert!(shown(&s, "ShapeshiftBarRight"));
+    assert!(
+        !shown(&s, "ShapeshiftBarMiddle"),
+        "exactly 2 forms: end caps only"
+    );
+    assert_eq!(ring(&s), 64.0);
+
+    // Raising the bottom-left bar flips the SEAT and the ART in the one pass — the listener seam.
+    show_bars(&s, &[1]);
+    assert_eq!(
+        s.eval::<f64>("local _, _, _, _, y = ShapeshiftBarFrame:GetPoint() return y")
+            .unwrap(),
+        45.0,
+        "the seat rose"
+    );
+    for region in [
+        "ShapeshiftBarLeft",
+        "ShapeshiftBarMiddle",
+        "ShapeshiftBarRight",
+    ] {
+        assert!(
+            !shown(&s, region),
+            "{region} must not draw across the row below"
+        );
+    }
+    assert_eq!(ring(&s), 50.0, "raised rings are the ref's 50");
+
+    // Even at three forms, raised keeps the middle strip down — the fork is on the BAR, not the
+    // form count; the count only decides the middle strip within the unraised branch.
+    s.set_shapeshift_forms(vec![form(2457), form(71), form(2458)]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    assert!(!shown(&s, "ShapeshiftBarMiddle"));
+    assert_eq!(ring(&s), 50.0);
+
+    // …and back down again, in one call.
+    show_bars(&s, &[]);
+    assert!(shown(&s, "ShapeshiftBarMiddle"));
+    assert_eq!(ring(&s), 64.0);
+    assert_eq!(
+        s.eval::<f64>("local _, _, _, _, y = ShapeshiftBarFrame:GetPoint() return y")
+            .unwrap(),
+        0.0
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

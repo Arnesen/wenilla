@@ -467,6 +467,19 @@ pub(crate) struct Model {
     /// the two slots are different packets.
     pub(crate) worn_display_toggles: Vec<super::worn_display::WornDisplay>,
 
+    /// The server's `PLAYER_FIELD_BYTES` **byte 2** — which of the four extra action bars are on
+    /// ([`action_bar_toggles`], wow-re `system/ui/scratch/action-bar-toggles.md`). `None` until the
+    /// app pushes it ([`super::UiScript::set_action_bar_toggles`]), which is the ONLY thing that
+    /// moves it: the real client never writes this cell, so `SetActionBarToggles` deliberately
+    /// leaves it alone and the value lags the setter by a round trip. That is the opposite
+    /// arrangement to [`Self::helm_shown`] next door, and the difference is the wire verb's — a
+    /// blind flip has to be predicted, an absolute post does not.
+    pub(crate) action_bar_toggles: Option<u8>,
+    /// `CMSG_SET_ACTIONBAR_TOGGLES` payloads queued since the app's last
+    /// [`super::UiScript::take_action_bar_toggle_sends`] drain — one per `SetActionBarToggles`
+    /// call. A list, because the binding gates nothing: two calls in a frame are two packets.
+    pub(crate) action_bar_toggle_sends: Vec<u8>,
+
     /// Sounds queued by the Lua `PlaySound`/`PlaySoundFile` bindings since the app's last
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
     pub(crate) sound_queue: Vec<SoundRequest>,
@@ -1301,6 +1314,8 @@ impl Model {
             helm_shown: true,
             cloak_shown: true,
             worn_display_toggles: Vec::new(),
+            action_bar_toggles: None,
+            action_bar_toggle_sends: Vec::new(),
             sound_queue: Vec::new(),
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),

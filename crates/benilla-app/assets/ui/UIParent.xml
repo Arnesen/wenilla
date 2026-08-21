@@ -8,14 +8,23 @@
         load-time anchor - the "tooltip on my character" bug). String anchors ("UIParent" in
         SetPoint) had silently fallen back to the screen root, which has the same rect, so only
         the *global* was ever missing. No enableMouse: the hit test gates on it (pointer.rs), so
-        the full-screen plate swallows nothing. The ref's OnLoad/OnEvent (UIParent_OnLoad's
-        global event routing) is not ours to ship - no consumer yet.
+        the full-screen plate swallows nothing.
+
+        The ref's UIParent_OnLoad registers a long list of globally-routed events and its OnEvent
+        is a chain of `if event == ...` arms; ours ships exactly the ONE arm that has a consumer
+        (the extra bars' login seed, below) and grows an arm at a time as consumers appear. A
+        transcription of the whole routing table would be a list of no-ops that reads as coverage.
 
         Known seam, stated: the real client PARENTS every FrameXML frame under UIParent (scale/
         visibility cascade); benilla's top-level frames still attach to the screen root. Same
         rect, so anchors agree - re-parenting is a separate arc if a cascade consumer appears.
     -->
-    <Frame name="UIParent" setAllPoints="true" frameStrata="MEDIUM"/>
+    <Frame name="UIParent" setAllPoints="true" frameStrata="MEDIUM">
+        <Scripts>
+            <OnLoad>this:RegisterEvent("PLAYER_ENTERING_WORLD")</OnLoad>
+            <OnEvent>UIParent_OnEvent(event)</OnEvent>
+        </Scripts>
+    </Frame>
 
     <!--
         WorldFrame — the reference's full-screen, bottom-of-the-strata frame that the 3D world
@@ -167,6 +176,31 @@
             end
         end
 
+        -- ── The login seed for the extra action bars ──────────────────────────────────────────
+        --
+        -- The four extra bars' visibility is stored SERVER-SIDE, in `PLAYER_FIELD_BYTES` byte 2,
+        -- and the client never writes that byte itself — `SetActionBarToggles` only posts
+        -- `CMSG_SET_ACTIONBAR_TOGGLES` and waits for the field to come back (wow-re
+        -- `system/ui/scratch/action-bar-toggles.md` §5: the setter's every store is into its own
+        -- stack frame, and nothing in the binary fires on a change to that byte). So the live UI
+        -- state is the four Lua globals `MultiBars.xml` owns, and `GetActionBarToggles()` is read
+        -- exactly ONCE, here, to seed them. Reading it again later would fight the optimistic
+        -- value the options rows just set and lose a round trip's worth of clicks.
+        --
+        -- This is the reference's own seam, arm for arm (its UIParent_OnEvent does the same two
+        -- statements on the same event). `MultiActionBar_Update` is existence-guarded because the
+        -- ~25 per-window harnesses that load this file load no bars; the binding itself is engine
+        -- level and always installed. Decision 1500.
+        function UIParent_OnEvent(event)
+            if ( event == "PLAYER_ENTERING_WORLD" ) then
+                SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2, SHOW_MULTI_ACTIONBAR_3,
+                    SHOW_MULTI_ACTIONBAR_4 = GetActionBarToggles()
+                if ( MultiActionBar_Update ) then
+                    MultiActionBar_Update()
+                end
+            end
+        end
+
         -- ── Everything that has to move when the bottom of the screen fills up ──────────────────
         --
         -- One row per thing whose seat depends on which bars are raised. A row reads:
@@ -203,6 +237,29 @@
             BATTLEFIELD_TAB_OFFSET_Y = {baseY = 210, bottomRight = 40, reputation = 9, isVar = "yAxis"},
             PETACTIONBAR_YPOS = {baseY = 97, bottomLeft = 43, reputation = 9, maxLevel = -5, isVar = "yAxis"},
         }
+
+        -- ── Consumers of the VAR rows ──────────────────────────────────────────────────────────
+        -- A row with `isVar` leaves a NUMBER in a global and anchors nothing, so whoever seats
+        -- itself from that number has to be told when the number changes — otherwise it keeps the
+        -- seat it computed the first time and the bars grow underneath it. That is not a
+        -- hypothetical: the open-bag stack read a file-local copy of CONTAINER_OFFSET_X/Y and sat
+        -- at the no-bars corner forever, so a bottom multibar drew straight through the lowest bag
+        -- window (director-caught, decision 1499).
+        --
+        -- The reference closes the same loop by hard-calling `updateContainerFrameAnchors()` from
+        -- the end of its own pass (UIParent.lua:1774). This is that call generalized: a consumer
+        -- registers itself and the pass calls it after every recompute, so the NEXT var consumer
+        -- does not have to edit this file to be noticed. Order of registration is the order of
+        -- call; listeners are independent (nothing here reads what another writes).
+        --
+        -- The law, stated once so it can be pointed at: **nothing outside this file may keep its
+        -- own copy of a managed offset.** Read the global fresh at use, and if you cache a SEAT
+        -- derived from it, register here. `bottom_hud_tests.rs` enforces both halves.
+        UIPARENT_MANAGED_POSITION_LISTENERS = {}
+
+        function UIParent_RegisterManagedPositionListener(fn)
+            table.insert(UIPARENT_MANAGED_POSITION_LISTENERS, fn)
+        end
 
         function UIParent_ManageFramePositions()
             -- Frames that affect offsets in y axis
@@ -280,6 +337,18 @@
                     elseif ( row.isVar ) then
                         _G[index] = yOffset
                     else
+                        -- ClearAllPoints first: the row states the frame's WHOLE seat, so the pass
+                        -- must own it outright. `SetPoint` only replaces the same-NAMED point, so
+                        -- any other anchor the frame was authored with survives and fights this
+                        -- one — ChatFrame2 is declared in XML with both a TOPLEFT and a
+                        -- BOTTOMRIGHT onto ChatFrame1, and the row's BOTTOMRIGHT replaced only
+                        -- the second, leaving the pane stretched from ChatFrame1's top-left
+                        -- corner to the screen's bottom-right. Masked today only because
+                        -- ChatFrame2 ships hidden, which is the worst kind of latent (decision
+                        -- 1499). Every row here supplies a single complete anchor, so this is a
+                        -- no-op for the other eight and the reference's plain SetPoint is
+                        -- behaviour-identical on its own frames.
+                        frame:ClearAllPoints()
                         frame:SetPoint(row.point or "BOTTOM", row.anchorTo or "UIParent",
                             row.rpoint or "BOTTOM", xOffset, yOffset)
                     end
@@ -370,6 +439,14 @@
             -- any config without a quest log) ships no such frame.
             if ( QuestWatchFrame ) then
                 QuestWatchFrame:SetPoint("TOPRIGHT", "MinimapCluster", "BOTTOMRIGHT", -CONTAINER_OFFSET_X, anchorY)
+            end
+
+            -- Last: everything that seats itself from a var row this pass just rewrote. After the
+            -- frames, so a listener may measure one (the bag stack reads GetScreenHeight and its
+            -- own windows' heights, not another managed frame — but the ordering costs nothing and
+            -- removes a class of question).
+            for _, fn in ipairs(UIPARENT_MANAGED_POSITION_LISTENERS) do
+                fn()
             end
         end
 

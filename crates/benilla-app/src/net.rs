@@ -930,6 +930,21 @@ pub(crate) enum ClientCommand {
     /// engine's own `kind<<24 | action` word. Sent by the action drain on every queued
     /// `PickupAction`/`PlaceAction` mutation — client-authoritative, no answer packet.
     SetActionButton { button: u8, packed: u32 },
+    /// Post the four extra bars' visibility byte (`CMSG_SET_ACTIONBAR_TOGGLES`, `PLAYER_FIELD_BYTES`
+    /// byte 2 — wow-re `system/ui/scratch/action-bar-toggles.md`). Sent by the toggle drain, one
+    /// per `SetActionBarToggles` call: the binding gates nothing, so two calls in a frame are two
+    /// packets.
+    ///
+    /// **Nothing answers it, and the sender is not allowed to answer itself.** Unlike
+    /// [`Self::SetActionButton`], whose state is genuinely ours, this byte is *server-owned*: the
+    /// real client has no instruction that writes the cell (the one `+0x102a` access image-wide is
+    /// a read), so the value only becomes true when the server's `SMSG_UPDATE_OBJECT` echoes it
+    /// into the descriptor — and no field-change callback fires when it does. The owner therefore
+    /// sees its own change come back the long way round, and the UI's optimism lives in Lua.
+    ///
+    /// A send while disconnected is a **silent no-op**, matching the reference's three unreported
+    /// drops (`0x5ab637`, `0x5379ab`, `0x5379b6`) behind a binding that returns zero Lua values.
+    SetActionBarToggles { toggles: u8 },
     /// Press one pet bar slot (`CMSG_PET_ACTION`, decisions 0982/0988). `packed` is the slot's OWN
     /// word as the server last sent it — command, reaction and spell all ride this one command,
     /// because the server dispatches on the type byte inside the word. `target_guid` is the

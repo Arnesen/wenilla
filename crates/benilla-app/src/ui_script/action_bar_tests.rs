@@ -1181,11 +1181,20 @@ fn both_reference_action_button_templates_are_inheritable() {
 /// paging must be the `else` arm and not an addition. And **page-up wraps to the literal page 1**
 /// while page-down rescans for the last viewable page: that asymmetry is the reference's, and it
 /// is observable the moment a page is blanked from `VIEWABLE_ACTION_BAR_PAGES`.
+///
+/// Since 1500 the blanking is driven here the way the client drives it — by raising the two bottom
+/// multibars — rather than read off a declaration. All six pages are viewable at rest now, because
+/// every extra bar ships off and nothing has claimed a page yet.
 #[test]
 fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
+    for file in [
+        "UIParent.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "MultiBars.xml",
+    ] {
         let text = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets/ui")
@@ -1204,6 +1213,20 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         1,
         "page 1 button 1 is action 1"
     );
+    assert!(
+        s.eval::<bool>(
+            "for i = 1, NUM_ACTIONBAR_PAGES do \
+               if not VIEWABLE_ACTION_BAR_PAGES[i] then return false end \
+             end return true"
+        )
+        .unwrap(),
+        "all six pages are viewable at rest — every extra bar ships off (1500)"
+    );
+
+    // Raise the two bottom bars the way the client does, which is what takes pages 6 and 5 out of
+    // the cycle from here on.
+    s.run("SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 MultiActionBar_Update()")
+        .unwrap();
 
     // Page up walks to 2, so button 1 shows action 13.
     s.run("ActionBar_PageUp()").unwrap();
@@ -1227,16 +1250,16 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(),
         4,
         "page-down off the bottom rescans for the last VIEWABLE page — 4, not 6, because the \
-         always-on bottom multibars own pages 5 and 6"
+         two raised bottom multibars own pages 5 and 6"
     );
     assert_eq!(
         s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
             .unwrap(),
         37
     );
-    // The pages the bottom bars already display are unreachable from the main bar, which is what
-    // MultiActionBar_Update does on the reference the moment those bars are shown. Without this,
-    // paging up lands on a duplicate of the twelve actions already on screen below.
+    // The pages the bottom bars already display are unreachable from the main bar — which is
+    // exactly what MultiActionBar_Update did above. Without it, paging up lands on a duplicate of
+    // the twelve actions already on screen below.
     assert!(s
         .eval::<bool>(
             "return VIEWABLE_ACTION_BAR_PAGES[5] == nil and VIEWABLE_ACTION_BAR_PAGES[6] == nil"

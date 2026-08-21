@@ -404,24 +404,12 @@ fn anchor_for(prev_block: Option<u32>, frame_id: u32, point: Point, next_y: f32)
     }
 }
 
-/// Free one block region and every trace of its identity — the arena slot, the paint, the resolved
-/// rect, and the stable id both directions. A block is anonymous, so nothing in `region_names`
-/// points at it; anything that had fetched its wrapper now resolves to a stale-handle error, which
-/// is the honest answer for an object the widget destroyed.
+/// Free one block region — [`crate::script::region::free_region`], which is where this function's
+/// body went when the button's label swap needed the same five-map teardown. Kept as a name
+/// because `set_text`'s call sites read better with it, and because the doc that explains *why* a
+/// destroyed region must answer stale rather than linger lives on the shared law now.
 fn free_block(model: &mut Model, rh: RegionHandle) {
-    model.region_data.remove(&rh);
-    model.region_resolved.remove(&rh);
-    if let Some(id) = model.region_to_id.remove(&rh) {
-        model.id_to_region.remove(&id);
-    }
-    model.arena.destroy_region(rh);
-    // A death is the archetypal STRUCTURAL change — it takes a node out of the layout roster and
-    // its reverse edges with it, which is exactly what a per-node ledger cannot describe
-    // (decision 1388). `set_text`, this function's only caller, already ends in the same
-    // conservative touch, so this is redundant today; it is here because the redundancy is the
-    // point. A destruction site that does not invalidate the graph it destroys part of is a
-    // stale rect waiting for a second caller.
-    model.touch_layout();
+    crate::script::region::free_region(model, rh);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

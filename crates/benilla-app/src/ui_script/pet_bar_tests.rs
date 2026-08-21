@@ -355,9 +355,10 @@ fn a_disabled_bar_greys_rather_than_hides() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The pet bar as it lands with the bottom-left multibar loaded and shown — which is how benilla
-/// actually runs (0270: the bottom bars are always on). `shelf` counts the two `UI-PetBar` strips;
-/// `attack_top` is the top edge of Attack's icon, the bar's own row in one number.
+/// The pet bar with and without the bottom-left multibar RAISED. Since 1500 that bar is a player
+/// option shipping off, so the flag now raises it rather than merely loading the file — both states
+/// are ones a real session lands in. `shelf` counts the two `UI-PetBar` strips; `attack_top` is the
+/// top edge of Attack's icon, the bar's own row in one number.
 fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -369,8 +370,10 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     ] {
         load_xml(&s, file);
     }
+    load_xml(&s, "MultiBars.xml");
     if with_multibar {
-        load_xml(&s, "MultiBars.xml");
+        s.run("SHOW_MULTI_ACTIONBAR_1 = 1 MultiActionBar_Update()")
+            .unwrap();
     }
     load_xml(&s, "PetActionBar.xml");
     declare_token_strings(&s);

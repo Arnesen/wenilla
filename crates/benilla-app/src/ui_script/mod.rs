@@ -615,6 +615,17 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
         // Set before PLAYER_ENTERING_WORLD so the bar's first Update reads it.
         script.set_player_xp(4200, 6000);
         script.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+        // The two bottom multibars are player options and ship OFF since 1500, and a capture runs
+        // with no server behind it — so the login seed reads a zero toggle byte and neither bar
+        // comes up. Raise them the way the Options rows do, or the 61../49.. wells seeded above
+        // draw nowhere and `ui-actionbar` loses two rows it exists to show. This is the DEMO's
+        // choice about what to photograph, not a default: `MultiActionBar_Update` is the same
+        // function the row calls, so nothing here is a private door into the bars. Guarded because
+        // this feed also runs with `WOW_CAPTURE_UI` unset, where no interface has been loaded.
+        let _ = script.run(
+            "SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 \
+             if MultiActionBar_Update then MultiActionBar_Update() end",
+        );
         script.fire_event("PLAYER_XP_UPDATE", vec![]);
         for token in ["player", "target"] {
             script.fire_event("UNIT_HEALTH", vec![ScriptValue::Str(token.into())]);
@@ -849,6 +860,9 @@ mod errors_tests;
 
 #[cfg(test)]
 mod shipped_xml_tests;
+
+#[cfg(test)]
+mod bottom_hud_tests;
 
 #[cfg(test)]
 mod bagnon_render_tests;

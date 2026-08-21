@@ -76,12 +76,153 @@ pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     }
 }
 
+/// `GetBoolOrDefault` (`0x6f1c10`) — the reference's **boolean argument** coercion, which is *not*
+/// Lua truthiness and gets three arms backwards from the obvious reading. Byte-VERIFIED: wow-re
+/// `system/ui/scratch/action-bar-toggles.md` §2.1 re-derives the whole jump table at `0x6f1ce8`
+/// (`ui.md`, `tooltip-content-law.md` and `object-layer/scratch/helm-cloak-hide.md` cite the same
+/// helper).
+///
+/// `v` is `None` for an **absent** argument (`LUA_TNONE` = −1, unsigned-compares above the table's
+/// bound and takes the default arm). mlua collapses "missing" into `Value::Nil` for a plain
+/// `Value` parameter, and the two are *different* here, so a binding whose default is `true` must
+/// take its argument as a `MultiValue` to tell them apart.
+///
+/// | Lua type | result |
+/// |---|---|
+/// | absent (`None`) | `default` |
+/// | `nil` | **false** |
+/// | boolean | itself |
+/// | lightuserdata | `default` |
+/// | number | truncate toward zero (`0x40a2b0`), then `!= 0` |
+/// | string | the table below |
+/// | table / function / userdata / thread | `default` |
+///
+/// The **string** arm is the one that bites. It does not parse the number; it dispatches on the
+/// **first byte** through the 0x4a-entry remap table at `0x6f1d08` (indexed `byte − 0x30`,
+/// *signed*, so anything outside `'0'..='y'` — an empty string's terminator included — falls to the
+/// keyword arm):
+///
+/// - first byte `'0' 'F' 'N' 'f' 'n'` → **false**
+/// - first byte `'1'..='9' 'T' 'Y' 't' 'y'` → **true**
+/// - anything else → whole-string, case-insensitive (`SStrCmpI 0x64a4c0`): `"off"`/`"disabled"` →
+///   false, `"on"`/`"enabled"` → true, and **anything unrecognised takes the `default`**
+///
+/// So `"0"` is FALSE where Lua truthiness says true (in Lua every string is truthy), which is
+/// load-bearing rather than pedantic: 1.12's own Interface panel hands its option bindings the
+/// *strings* `"0"`/`"1"`, and a re-implementation wired to `lua_toboolean` inverts every
+/// string-valued option in the game. Equally, `"0.5"` and `"-1"` are decided by their first byte
+/// alone — false and `default` — never by their numeric value.
+pub(crate) fn bool_or_default(v: Option<&Value>, default: bool) -> bool {
+    let Some(v) = v else {
+        return default; // LUA_TNONE
+    };
+    match v {
+        Value::Nil => false,
+        Value::Boolean(b) => *b,
+        Value::LightUserData(_) => default,
+        // `lua_tonumber` then `0x40a2b0`, whose RC = chop makes it a C cast; the caller tests the
+        // low dword only, which is why the double round-trips through `i64 as i32` (see
+        // [`number_arg`]).
+        Value::Integer(i) => (*i as i32) != 0,
+        Value::Number(n) => (*n as i64 as i32) != 0,
+        Value::String(s) => {
+            let bytes = s.as_bytes();
+            match bytes.first() {
+                Some(b'0' | b'F' | b'N' | b'f' | b'n') => false,
+                Some(b'1'..=b'9' | b'T' | b'Y' | b't' | b'y') => true,
+                // The keyword arm — and the fall-through for every byte the remap table cannot
+                // index, which is why an empty string lands here too.
+                _ => {
+                    if bytes.eq_ignore_ascii_case(b"off") || bytes.eq_ignore_ascii_case(b"disabled")
+                    {
+                        false
+                    } else if bytes.eq_ignore_ascii_case(b"on")
+                        || bytes.eq_ignore_ascii_case(b"enabled")
+                    {
+                        true
+                    } else {
+                        default
+                    }
+                }
+            }
+        }
+        _ => default,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn lua() -> Lua {
         Lua::new()
+    }
+
+    /// Every arm of `0x6f1c10`, including the three a plausible implementation gets backwards.
+    #[test]
+    fn bool_or_default_is_not_lua_truthiness() {
+        let lua = lua();
+        let st = |t: &str| Value::String(lua.create_string(t).unwrap());
+
+        // Absent takes the DEFAULT; an explicit nil is FALSE. The two are different arms.
+        assert!(bool_or_default(None, true));
+        assert!(!bool_or_default(None, false));
+        assert!(!bool_or_default(Some(&Value::Nil), true));
+
+        // Booleans pass through.
+        assert!(bool_or_default(Some(&Value::Boolean(true)), false));
+        assert!(!bool_or_default(Some(&Value::Boolean(false)), true));
+
+        // Numbers TRUNCATE toward zero — they do not round. `0.5` is off, not on.
+        assert!(!bool_or_default(Some(&Value::Number(0.5)), true));
+        assert!(!bool_or_default(Some(&Value::Number(-0.5)), true));
+        assert!(!bool_or_default(Some(&Value::Number(-0.999)), true));
+        assert!(bool_or_default(Some(&Value::Number(1.5)), false));
+        assert!(bool_or_default(Some(&Value::Number(-1.5)), false));
+        assert!(!bool_or_default(Some(&Value::Integer(0)), true));
+        assert!(bool_or_default(Some(&Value::Integer(7)), false));
+
+        // THE headline: `"0"` is FALSE, where Lua truthiness would say true.
+        assert!(!bool_or_default(Some(&st("0")), true));
+        assert!(bool_or_default(Some(&st("1")), false));
+        // First byte only — `"0.5"` is false because it starts `'0'`, not because it truncates.
+        assert!(!bool_or_default(Some(&st("0.5")), true));
+        assert!(bool_or_default(Some(&st("9lives")), false));
+
+        // The letter arms.
+        for t in ["false", "F", "no", "NIL", "nope"] {
+            assert!(
+                !bool_or_default(Some(&st(t)), true),
+                "{t} starts F/N → false"
+            );
+        }
+        for t in ["true", "T", "yes", "Yup"] {
+            assert!(
+                bool_or_default(Some(&st(t)), false),
+                "{t} starts T/Y → true"
+            );
+        }
+
+        // The keyword arm, case-insensitive whole-string.
+        assert!(!bool_or_default(Some(&st("off")), true));
+        assert!(!bool_or_default(Some(&st("OFF")), true));
+        assert!(!bool_or_default(Some(&st("Disabled")), true));
+        assert!(bool_or_default(Some(&st("on")), false));
+        assert!(bool_or_default(Some(&st("ENABLED")), false));
+
+        // Unrecognised strings — and every byte the remap table cannot index — take the DEFAULT.
+        for t in ["", "-1", "?", "maybe", "@"] {
+            assert!(bool_or_default(Some(&st(t)), true), "{t:?} → default true");
+            assert!(
+                !bool_or_default(Some(&st(t)), false),
+                "{t:?} → default false"
+            );
+        }
+
+        // Table/function take the default arm, like an absent argument.
+        let tbl = Value::Table(lua.create_table().unwrap());
+        assert!(bool_or_default(Some(&tbl), true));
+        assert!(!bool_or_default(Some(&tbl), false));
     }
 
     #[test]

@@ -59,6 +59,31 @@ impl Loader<'_> {
                 dbg,
             );
         }
+        // `<ResizeBounds><minResize><AbsDimension x= y=/></minResize><maxResize>…` → the resize
+        // quad (rf24 `0x769820`'s child-loop arm at `0x769baa`; wow-re
+        // `system/ui/scratch/resize-bounds-and-button-fontstring.md` §4). Three clauses from that
+        // carve rather than from the shape of the element:
+        //
+        //  · **Both pairs are written unconditionally once `<ResizeBounds>` matches**, each side
+        //    defaulting to `0` before its lookup — so a block carrying only `<minResize>` RESETS
+        //    the max pair to unbounded. That is why this writes both calls, never just the one it
+        //    found.
+        //  · `x` is the WIDTH and `y` the HEIGHT, through the same logical→internal transform
+        //    `<Size>` uses — the same `abs_dim` reader, and the same inline-or-`AbsDimension` pair
+        //    of forms.
+        //  · `<Size>` and `<Anchors>` are consumed by the base-class `CLayoutFrame::LoadXML`
+        //    *before* the child loop is entered at all, so they always precede this structurally
+        //    whatever the document order — and neither path clamps, so an authored `<Size>`
+        //    outside the authored bounds survives load unchanged.
+        //
+        // The shipped 1.12.1 FrameXML uses it exactly once (`FloatingChatFrame.xml:223`,
+        // min 296×75 / max 608×400) and never calls the Lua setters at all.
+        if let Some(rb) = children_named(el, "ResizeBounds").next() {
+            for (tag, verb) in [("minResize", "SetMinResize"), ("maxResize", "SetMaxResize")] {
+                let (x, y) = children_named(rb, tag).next().map_or((None, None), abs_dim);
+                self.call(wrapper, verb, (x.unwrap_or(0.0), y.unwrap_or(0.0)), dbg);
+            }
+        }
         // `movable`/`resizable` → SetMovable/SetResizable — the same flag word the methods write
         // (`0x76a3c0` with mask 0x100 / 0x200; wow-re `rf24-framexml-loader.md` records the loader
         // calling that very setter). Both were in the gap list below until the movable family

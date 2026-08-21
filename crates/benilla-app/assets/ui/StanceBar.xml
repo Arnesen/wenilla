@@ -6,12 +6,28 @@
         wow-re bonusbar-shapeshift.md), grey icon when not castable, cooldown swipe, click casts
         the form (`crate::ui_shapeshift` drains CastShapeshiftForm onto the wire).
 
-        Geometry QUOTED from the ref, permanently in its RAISED mode (ShapeshiftBar_UpdatePosition's
-        MultiBarBottomLeft.isShowing branch — our bottom multibars are ALWAYS ON, MultiBars.xml):
-        frame BOTTOMLEFT at MainMenuBar TOPLEFT +(30,45); the ShapeshiftBarEnds/Middle shelf art
-        HIDDEN (raised mode hides it, so it is not modeled at all); buttons 30x30, button1 at frame
-        BOTTOMLEFT +(11,3), chained +7; NormalTexture UI-Quickslot2 at the raised mode's 50x50
-        (ref l.236-237), CENTER (0,-1) like the action template. Max 10 slots (NUM_SHAPESHIFT_SLOTS).
+        Geometry QUOTED from the ref's ShapeshiftBar_UpdatePosition (BonusActionBarFrame.lua
+        l.229-251), which forks on whether MultiBarBottomLeft is up: buttons 30x30, button1 at frame
+        BOTTOMLEFT +(11,3), chained +7; NormalTexture UI-Quickslot2 at the RAISED mode's 50x50 (ref
+        l.236-237), CENTER (0,-1) like the action template. Max 10 slots (NUM_SHAPESHIFT_SLOTS).
+
+        THE SEAT IS NOT THIS FILE'S — the XML anchor below (MainMenuBar TOPLEFT +(30,45)) is only
+        the value the manage pass computes with the bottom-left bar up, written statically so the
+        frame is somewhere sane before the first pass runs. `ShapeshiftBarFrame` is a managed row
+        (UIParent.xml: baseY 0, bottomLeft 45, xOffset 30), so the pass re-derives +45 raised and
+        +0 unraised — the ref's own two positions — and re-seats the frame on every bar change. That
+        used to be a distinction without a difference (0270's bottom bars were always on, so raised
+        was the only state); decision 1500 made all four extra bars player options, and the unraised
+        state is now reachable. It is covered, and `multibar_stance_tests` pins both seats.
+
+        The ART half of that same fork IS this file's, and it is `ShapeshiftBar_UpdatePosition` in
+        the script below: the ref's unraised branch also shows the ShapeshiftBarEnds/Middle shelf
+        strips and grows each button's ring from 50x50 to 64x64. That branch was dead code while the
+        bottom bars were always on, and 1500 made it the DEFAULT — every form class meets the
+        unraised bar on a fresh character — so a shelf-less bar would be the shipped look rather than
+        an edge case. It rides `UIParent_RegisterManagedPositionListener` (decision 1499's
+        after-every-recompute hook, the same one the bag stack uses) so the art settles when the pass
+        that decides raised-ness has finished, and it needs no edit to UIParent.xml.
 
         Ref divergences (deliberate):
         - ONE refresh event: the app diffs the whole pushed form list (identity, active, castable,
@@ -112,6 +128,64 @@
                     button:Hide()
                 end
             end
+            -- The art depends on the form COUNT too (the middle strip's `> 2`), so it is re-derived
+            -- here as well as on every managed-position pass. Pure derivation, so running it twice
+            -- costs nothing and missing it costs a strip.
+            ShapeshiftBar_UpdatePosition()
+        end
+
+        -- ── The raised/unraised ART fork (ref ShapeshiftBar_UpdatePosition, l.229-251) ──────────
+        -- The reference's function does TWO things and we only owe it one. Its two SetPoints —
+        -- MainMenuBar TOPLEFT +(30,45) with the bottom-left multibar up, +(30,0) without — are
+        -- already `UIParent_ManageFramePositions`' job here: `ShapeshiftBarFrame` is a managed row
+        -- (baseY 0, bottomLeft 45, xOffset 30), which IS those two positions, and a second
+        -- SetPoint from this file would be a competing answer to a question already answered.
+        -- What the pass does NOT carry is the art half, and that is this:
+        --
+        --   raised   — the three shelf strips hidden, each button's ring 50x50. The shelf art IS
+        --              the bar's border and only reads as one while the bar sits on the main bar;
+        --              a row up it would draw across whatever is underneath (the same rule the
+        --              pass applies to the pet bar's sliding strips).
+        --   unraised — the two END-CAPS shown, the MIDDLE strip shown only past two forms, each
+        --              button's ring 64x64.
+        --
+        -- The `> 2` on the middle strip is the ref's own and easy to miss: a two-form class (a
+        -- priest with Shadowform, a warrior before Berserker) gets the end caps and no middle.
+        --
+        -- **This became load-bearing with 1500.** While the bottom bars were always on (0270) the
+        -- raised branch was the only reachable state and this whole fork was dead code; now every
+        -- form class sees the UNRAISED bar on a fresh character, so the shelf-less version would be
+        -- the shipped default look rather than an edge case.
+        --
+        -- It keeps the reference's NAME because the corpus replaces that name wholesale:
+        -- CT_BottomBar.lua:712/741 saves and overwrites `ShapeshiftBar_UpdatePosition` to take the
+        -- bar over. The listener below therefore calls it through the GLOBAL, so an addon that
+        -- replaces it really does take the art with it.
+        function ShapeshiftBar_UpdatePosition()
+            local raised = MultiBarBottomLeft and MultiBarBottomLeft:IsShown()
+            local ring = 64
+            if raised then
+                ring = 50
+                ShapeshiftBarLeft:Hide()
+                ShapeshiftBarMiddle:Hide()
+                ShapeshiftBarRight:Hide()
+            else
+                ShapeshiftBarLeft:Show()
+                ShapeshiftBarRight:Show()
+                if GetNumShapeshiftForms() > 2 then
+                    ShapeshiftBarMiddle:Show()
+                else
+                    ShapeshiftBarMiddle:Hide()
+                end
+            end
+            -- The ref sizes only the buttons a form occupies; ours sizes all ten. Same pixels (a
+            -- hidden button draws nothing) and one less thing to get wrong — a button that appears
+            -- later is already the right size, without this needing to run again for it.
+            for i = 1, NUM_SHAPESHIFT_SLOTS do
+                local ringTexture = getglobal("ShapeshiftButton" .. i .. "NormalTexture")
+                ringTexture:SetWidth(ring)
+                ringTexture:SetHeight(ring)
+            end
         end
 
         function ShapeshiftBar_OnLoad()
@@ -124,6 +198,16 @@
         function ShapeshiftBar_OnEvent()
             local frame = this
             ShapeshiftBar_Update()
+        end
+
+        -- Re-derive the art after every managed-position recompute (decision 1499's hook — the same
+        -- after-the-pass seam the bag stack registers on). The pass is what decides whether this bar
+        -- is raised, so the art fork has to run when the pass has finished and not before. Called
+        -- through the global name so an addon replacement is honoured (see the function's comment).
+        -- Guarded for the harnesses that load this file without UIParent.xml, the way BagFrame.xml
+        -- guards its own registration.
+        if UIParent_RegisterManagedPositionListener then
+            UIParent_RegisterManagedPositionListener(function() ShapeshiftBar_UpdatePosition() end)
         end
     ]]></Script>
 
@@ -186,9 +270,15 @@
              Absent, `ShapeshiftBarLeft:ClearAllPoints()` is `attempt to index global` and takes the
              addon's whole handler with it.
 
-             Geometry and TexCoords quoted: Left and Right are two crops of ONE `ShapeshiftBarEnds`
-             file (0..0.453125 and 0.453125..0.875), Middle its own. hidden="true" is the state
-             raised mode leaves them in, so this still draws nothing. -->
+             Geometry, anchor chain and TexCoords quoted whole: Left and Right are two crops of ONE
+             `ShapeshiftBarEnds` file (0..0.453125 and 0.453125..0.875), Middle its own, and Right
+             hangs off Middle's RIGHT exactly as the ref chains them — which is why hiding the
+             middle strip leaves its gap rather than closing it, the reference's own result.
+
+             `hidden="true"` is the RAISED state, and it is only the pre-pass value now:
+             `ShapeshiftBar_UpdatePosition` (above) shows and hides all three from the bottom-left
+             multibar's state on every managed-position pass. Declared hidden rather than shown so a
+             harness that never runs the pass draws nothing new. -->
         <Layers>
             <Layer level="OVERLAY">
                 <Texture name="ShapeshiftBarLeft" file="Interface\ShapeshiftBar\ShapeshiftBarEnds" hidden="true">

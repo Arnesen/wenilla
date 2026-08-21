@@ -37,6 +37,7 @@
 //! (an opaque identity in a lightuserdata) — only the *encoding* differs.
 
 mod action;
+mod action_bar_toggles;
 mod addon_message;
 mod aura;
 mod backdrop;
@@ -535,6 +536,7 @@ impl UiScript {
         sound::install(&lua)?;
         pointer::install(&lua)?;
         action::install(&lua)?;
+        action_bar_toggles::install(&lua)?;
         container::install(&lua)?;
         cursor::install(&lua)?;
         spellbook::install(&lua)?;
@@ -674,13 +676,24 @@ impl UiScript {
     /// it; changing it invalidates the next `resolve`. The app calls this every frame with an
     /// almost-always-identical size — compared before writing so the per-frame idiom doesn't
     /// dirty the layout gate's tier 1 (`Model::touch_layout`).
-    pub fn set_screen_size(&mut self, width: f32, height: f32) {
+    ///
+    /// **Returns whether the size actually changed.** Anchors follow the new rect on their own, so
+    /// most of the UI needs nothing; what does not follow is anything that *computed* a seat from
+    /// the old height and stored it — the open-bag stack wraps into a fresh column from
+    /// `GetScreenHeight()`, and that answer is stale the moment the window is resized. The 1.12
+    /// client never had to care (its resolution changed through a restart, and its own
+    /// `DISPLAY_SIZE_CHANGED` listeners are three model panes, none of them the manage pass), but
+    /// benilla runs in a freely resizable window, so the caller re-runs
+    /// `UIParent_ManageFramePositions()` on a true return. Decision 1499.
+    pub fn set_screen_size(&mut self, width: f32, height: f32) -> bool {
         let new = Rect::new(0.0, 0.0, height, width);
         let mut model = self.model_mut();
-        if model.screen != new {
-            model.screen = new;
-            model.touch_layout();
+        if model.screen == new {
+            return false;
         }
+        model.screen = new;
+        model.touch_layout();
+        true
     }
 
     /// Replace the Era atlas table (decision 0950) — pushed once at boot, before the XML loads.

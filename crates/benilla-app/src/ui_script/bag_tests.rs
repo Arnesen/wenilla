@@ -1865,6 +1865,19 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         s.eval::<f32>(&format!("return {name}ItemAnim:GetAlpha()"))
             .unwrap()
     };
+    // The card's centre relative to its button's BOTTOMRIGHT corner — the reference's OWN frame of
+    // reference for this widget (it anchors the `<Model>`'s BOTTOMRIGHT to the button's), and the
+    // only one the numbers are stable in: the card's placement depends on the anchor offset and
+    // the M2 bounding box, NOT on how big the button is. Measuring against the button's centre
+    // instead is what let 0887's placement look plausible.
+    let corner = |s: &UiScript, name: &str| -> (f32, f32) {
+        s.eval::<(f32, f32)>(&format!(
+            "local a, b = {name}ItemAnim, {name} \
+             local ax, ay = a:GetLeft() + a:GetWidth() / 2, a:GetBottom() + a:GetHeight() / 2 \
+             return ax - b:GetRight(), ay - b:GetBottom()"
+        ))
+        .unwrap()
+    };
 
     // Nothing is animating until a push arrives.
     for b in [
@@ -1907,24 +1920,34 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         "the card wears the pushed item's icon (ITEM_PUSH's arg2)"
     );
 
-    // t=0: invisible, full size, held a whole fall above the button (and a drift to its left) —
-    // the .m2's alpha key (0.000, 0.0), scale key (0.000, 1.0), translation (0.000, (0,0)).
+    // Every figure below is the REFERENCE's, from wow-re's §5-cross-checked
+    // `modelframe-implicit-size-law.md` §3 — not a ratio we chose. The three it publishes
+    // (t = 0, 0.133, 1.0) are asserted to a tenth of a pixel; the rest assert the SHAPE of the
+    // motion, which is where 0887's authored placement actually went wrong.
     //
-    // The pixel figures below are the model's own ratios at the <Model> widget's REAL projection
-    // (1280 px per model unit at this template's modelScale of 1 — BagFrame.xml's header carries
-    // the derivation and why the 1200 that produced 36/48/12 was a back-fit). Same animation,
-    // 6.7% larger: a 38.4 px card, a 51.2 px fall, a 12.8 px drift.
-    let (dx, dy) = offset(&s, "CharacterBag1Slot");
+    // What changed from 0887, and why the old numbers looked right: it measured against the
+    // button's CENTRE and drove both axes off one shared 0..1 "drop" curve, which happens to land
+    // within ~1 px of the truth in y for a 36 px button. In x it was wrong in DIRECTION — the card
+    // drifts RIGHT as it falls, and the old code had it starting left and ending centred.
+
+    // t=0: invisible, full size, parked high above the button. The .m2's alpha key (0.000, 0.0),
+    // scale key (0.000, 1.0), translation (0.000, (0,0)).
+    let (cx, cy) = corner(&s, "CharacterBag1Slot");
     assert!(
-        (dy - 51.2).abs() < 0.5 && (dx + 12.8).abs() < 0.5,
-        "starts one fall (51.2px) above and one drift (12.8px) left: got ({dx}, {dy})"
+        (cx + 30.14).abs() < 0.1 && (cy - 68.99).abs() < 0.1,
+        "starts at the ref's (-30.14, 68.99) from the button's bottom-right: got ({cx}, {cy})"
+    );
+    assert!(
+        (size(&s, "CharacterBag1Slot") - 36.86).abs() < 0.1,
+        "the quad is 0.0288 model units, not the 0.03 that 0887 rounded it to: got {}",
+        size(&s, "CharacterBag1Slot")
     );
     assert!(
         alpha(&s, "CharacterBag1Slot") < 0.01,
         "fades in from nothing"
     );
 
-    // t=0.133: fully faded in, at the 1.2x swell — the pop the director sees above the bar.
+    // t=0.133: fully faded in, at the 1.2x swell.
     s.tick(0.133);
     s.resolve();
     assert!(
@@ -1932,33 +1955,46 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         "opaque by the alpha track's second key"
     );
     assert!(
-        (size(&s, "CharacterBag1Slot") - 38.4 * 1.2).abs() < 0.5,
-        "swollen to 1.2x the 38.4px card at the scale track's peak"
+        (size(&s, "CharacterBag1Slot") - 44.24).abs() < 0.1,
+        "swollen to the ref's 44.24 px peak: got {}",
+        size(&s, "CharacterBag1Slot")
+    );
+    // The pop moves the centre by a twentieth of a pixel, and that tiny drift is the tell that the
+    // bone's PIVOT is not the quad's centre — scaling up pushes the centre away from the pivot,
+    // scaling down pulls it in, one mechanism at both ends. Folding the pivot into the centre (the
+    // obvious simplification) loses this and misses the landing point by a fifth of a pixel.
+    let (px, py) = corner(&s, "CharacterBag1Slot");
+    assert!(
+        (px + 30.18).abs() < 0.02 && (py - 68.98).abs() < 0.02,
+        "the 1.2x pop drifts the centre off the pivot by the ref's (-0.046, -0.015): got ({px}, {py})"
     );
 
     // t=0.267: back to the icon's own size, still opaque, still parked.
     s.tick(0.134);
     s.resolve();
     assert!(
-        (size(&s, "CharacterBag1Slot") - 38.4).abs() < 0.5,
-        "settled back to the 38.4px card at the scale track's third key"
+        (size(&s, "CharacterBag1Slot") - 36.86).abs() < 0.1,
+        "settled back at the scale track's third key"
     );
-    let (_, dy) = offset(&s, "CharacterBag1Slot");
-    assert!((dy - 51.2).abs() < 0.5, "has not started falling: got {dy}");
+    let (_, cy) = corner(&s, "CharacterBag1Slot");
+    assert!(
+        (cy - 68.99).abs() < 0.1,
+        "has not started falling: got {cy}"
+    );
 
     // t=0.5: STILL PARKED — the translation track's second key is (0,0), so the whole first half
-    // second is a hang above the bar. The other two tracks are already running down, though: the
-    // three curves keep different schedules, which is the thing a "hold everything then drop"
-    // reading would get wrong (scale/alpha ≈ 0.686/0.682 here, the 0.267→1.000 ramps at t=0.5).
+    // second is a hang. The other two tracks are already running down, though: the three curves
+    // keep different schedules, which is the thing a "hold everything then drop" reading would get
+    // wrong (scale/alpha are 0.687/0.682 here, on the 0.267→1.000 ramps).
     s.tick(0.233);
     s.resolve();
-    let (_, dy) = offset(&s, "CharacterBag1Slot");
+    let (_, cy) = corner(&s, "CharacterBag1Slot");
     assert!(
-        (dy - 51.2).abs() < 0.5,
-        "has not moved yet at the half second: got {dy}"
+        (cy - 69.0).abs() < 0.1,
+        "has not moved yet at the half second: got {cy}"
     );
     assert!(
-        (size(&s, "CharacterBag1Slot") - 38.4 * 0.686).abs() < 0.5,
+        (size(&s, "CharacterBag1Slot") - 25.31).abs() < 0.2,
         "but is already dwindling: got {}",
         size(&s, "CharacterBag1Slot")
     );
@@ -1968,26 +2004,38 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         alpha(&s, "CharacterBag1Slot")
     );
 
-    // t=0.75: halfway down.
+    // t=0.75: halfway through the fall — and moving RIGHT as it drops, which is the axis 0887 had
+    // backwards. The translation is per-axis (+0.0104, -0.0402 model units), not one shared curve.
     s.tick(0.25);
     s.resolve();
-    let (_, dy) = offset(&s, "CharacterBag1Slot");
+    let (cx, cy) = corner(&s, "CharacterBag1Slot");
     assert!(
-        (dy - 25.6).abs() < 0.5,
-        "half the fall travelled by t=0.75: got {dy}"
+        (cx + 23.34).abs() < 0.2,
+        "drifted RIGHT by half the 13.3 px total: got {cx}"
+    );
+    assert!(
+        (cy - 43.33).abs() < 0.2,
+        "half of the 51.4 px fall travelled by t=0.75: got {cy}"
     );
 
-    // Just short of the end: landed on the button, shrunk to nothing, faded out.
+    // Just short of the end: down on the button, shrunk to nothing, faded out.
     s.tick(0.24);
     s.resolve();
+    let (cx, cy) = corner(&s, "CharacterBag1Slot");
+    assert!(
+        (cx + 16.87).abs() < 0.2 && (cy - 18.68).abs() < 0.2,
+        "arrives at the ref's landing point: got ({cx}, {cy})"
+    );
+    // Which is also, within a pixel, the button's own centre — the reference's card really does
+    // drop INTO the bag button, and that is the one thing 0887 got right for the wrong reason.
     let (dx, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
-        dx.abs() < 1.0 && dy.abs() < 1.5,
-        "lands centred on the button it went into: got ({dx}, {dy})"
+        dx.abs() < 1.5 && dy.abs() < 1.5,
+        "lands on the button it went into: got ({dx}, {dy})"
     );
     assert!(
         size(&s, "CharacterBag1Slot") < 2.0,
-        "collapsed to the scale track's 0.014"
+        "collapsed to the scale track's 0.0144"
     );
     assert!(alpha(&s, "CharacterBag1Slot") < 0.05, "faded out");
 

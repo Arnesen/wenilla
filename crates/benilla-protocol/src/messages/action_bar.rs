@@ -5,6 +5,10 @@
 //! `u32`s and hands them back at login, and the client sends one `CMSG_SET_ACTION_BUTTON` per local
 //! slot mutation. There is no server-side edit in normal play, so `SMSG_ACTION_BUTTONS` is a
 //! login-only packet in practice — which is why the whole family is three items.
+//!
+//! The **visibility** of the four extra bars is the opposite arrangement and shares this file only
+//! because it shares the subject: it is one server-owned byte the client can post but never write
+//! locally. See [`set_actionbar_toggles`].
 
 use std::io::{self};
 
@@ -62,4 +66,31 @@ pub fn set_action_button(button: u8, packed: u32) -> Vec<u8> {
     body.push(button);
     body.extend_from_slice(&packed.to_le_bytes());
     body
+}
+
+/// Body of `CMSG_SET_ACTIONBAR_TOGGLES` (opcode [`super::opcode::CMSG_SET_ACTIONBAR_TOGGLES`]):
+/// **one `u8`**, and nothing else — VERIFIED at the bytes, wow-re
+/// `system/ui/scratch/action-bar-toggles.md` §3. `SetActionBarToggles 0x4e76e0` builds a stack
+/// `CDataStore`, appends the opcode with `PutUInt32 0x418190` and the byte with `PutUInt8
+/// 0x418070`, and sends; those two appends are the only ones between construction and send, and
+/// `NetClient::Send 0x5379b3` computes the payload length as `size − read` = **5** — the
+/// independent confirmation that 4 + 1 is the whole frame.
+///
+/// **The byte is server-owned; this is a post, not a write.** No instruction in the real client
+/// stores to `PLAYER_FIELD_BYTES` byte 2 (§4.1: displacement `0x102a` occurs exactly once
+/// image-wide and it is the *read* inside `GetActionBarToggles`) — the cell only ever moves through
+/// the generic `SMSG_UPDATE_OBJECT` value-apply. So the sender's own field copy still holds the old
+/// value until the server echoes, and nothing is notified when it does (§4.2: all 49 field-change
+/// registrations at `0x468070` were enumerated and none sits at an offset ≥ `0x1000`). Read it back
+/// with [`super::ObjectFields::player_action_bar_toggles`].
+///
+/// **Only the low nibble is reachable.** The real binding accumulates from zero and ORs at most
+/// bits 0..3 (§2), so a value it produces is always `0x00..=0x0f` and a `Set` *destroys* whatever
+/// the server held in the high nibble. This encoder does not mask: what the caller packed is what
+/// goes on the wire, and the four-bit law belongs where the packing happens (the Lua binding).
+///
+/// The bit→bar meaning is **not** the binary's — it is bar-agnostic (§7), and naming the bars here
+/// would put a FrameXML convention in the protocol layer.
+pub fn set_actionbar_toggles(toggles: u8) -> Vec<u8> {
+    vec![toggles]
 }

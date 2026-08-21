@@ -717,6 +717,9 @@ fn writer_loop(
                     ClientCommand::SetActionButton { button, packed } => {
                         w.set_action_button(button, packed)
                     }
+                    ClientCommand::SetActionBarToggles { toggles } => {
+                        w.set_actionbar_toggles(toggles)
+                    }
                     ClientCommand::PetAction {
                         pet_guid,
                         packed,

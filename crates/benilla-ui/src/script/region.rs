@@ -528,6 +528,35 @@ pub(super) fn region_type_name(model: &Model, rh: RegionHandle) -> &'static str 
     }
 }
 
+/// Free one region and **every trace of its identity** — the arena slot, its paint, its resolved
+/// rect, its name registration, and the stable id both directions.
+///
+/// Anything that had fetched its wrapper now resolves to a stale-handle error, which is the honest
+/// answer for an object the widget destroyed. That matters because the client really does destroy:
+/// `CSimpleButton::SetFontString 0x778d20` runs the *scalar deleting* destructor on the label it
+/// replaces (`old->vtable[0](1)`, returning the storage to the FontString pool), so a caller
+/// holding the old string is holding a freed object — orphaning it instead would leave a live,
+/// parentless label that still answers every getter, which is a different and quieter bug.
+///
+/// One law, two callers ([`super::simplehtml`]'s block free and the button's label swap); it lives
+/// here because the region side owns region lifetime, and because two hand-written copies of a
+/// five-map teardown is how one of them ends up forgetting a map.
+pub(crate) fn free_region(model: &mut Model, rh: RegionHandle) {
+    model.region_data.remove(&rh);
+    model.region_resolved.remove(&rh);
+    if let Some(id) = model.region_to_id.remove(&rh) {
+        model.id_to_region.remove(&id);
+        // A NAMED region also holds a slot in the name registry — anonymous ones (every SimpleHTML
+        // block, most labels) do not, which is why the first caller of this law never needed it.
+        model.region_names.retain(|_, v| *v != id);
+    }
+    model.arena.destroy_region(rh);
+    // A death is the archetypal STRUCTURAL change — it takes a node out of the layout roster and
+    // its reverse edges with it, which is exactly what a per-node ledger cannot describe
+    // (decision 1388).
+    model.touch_layout();
+}
+
 pub(super) fn region_owner_id(model: &mut Model, rh: RegionHandle) -> u32 {
     match model.arena.region(rh).map(|r| r.owner) {
         Some(owner) => model.frame_id(owner),
