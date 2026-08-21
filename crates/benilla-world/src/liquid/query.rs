@@ -1007,6 +1007,7 @@ mod tests {
         LiquidMesh {
             grid: [2, 2],
             wet: vec![true],
+            shared: vec![false],
             positions: vec![
                 [0.0, 0.0, z],
                 [10.0, 0.0, z],

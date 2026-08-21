@@ -701,6 +701,7 @@ impl AssetLoader for WmoModelLoader {
             positions: cam_pos,
             indices: cam_idx,
         });
+        resolve_shared_liquid_cells(&mut group_liquids);
         let portals = root.portals();
         let (group_collision_bounds, collision_bounds) =
             collision_tri_bounds(&group_collision_tris);
@@ -743,6 +744,65 @@ impl AssetLoader for WmoModelLoader {
 
     fn extensions(&self) -> &[&str] {
         &["wmo"]
+    }
+}
+
+/// Apply the MLIQ **shared-tile gate** across a model's groups: a cell flagged `0x80`
+/// ([`LiquidMesh::shared`]) is claimed by TWO groups and authored in both, and exactly one of them
+/// may draw it. Both drawing means the translucent sheet composites twice over the overlap band —
+/// the visible line along the Stormwind canals (B141's water half).
+///
+/// The reference picks the winner by 2-colouring the portal graph on the depth parity of the flood
+/// that reached each group, recomputed every frame (`0x6b41c0`/`0x6b4074`/`0x6b61a0`, wow-re
+/// `terrain/scratch/wmo-liquid-shared-tile-gate.md`). We pick **the lowest group index**, which is
+/// pixel-identical and needs no flood: the RE measured all 415 corners of Stormwind's 190 shared
+/// cells and the two claimants agree exactly — the same per-vertex alpha byte (415/415) and heights
+/// within 5e-6 yd. Which one draws cannot be seen; that two draw can.
+///
+/// Cells are matched on their XY centre quantised to a hundredth of a yard — the two authors share
+/// the same MLIQ lattice, so the coordinates agree to float exactness and the quantisation is only
+/// there to make them hashable.
+fn resolve_shared_liquid_cells(group_liquids: &mut [Option<LiquidMesh>]) {
+    let key = |m: &LiquidMesh, c: usize| -> Option<(i32, i32)> {
+        let (cols, rows) = (m.grid[0] as usize, m.grid[1] as usize);
+        let (xt, yt) = (cols.checked_sub(1)?, rows.checked_sub(1)?);
+        let (tx, ty) = (c % xt, c / xt);
+        if ty >= yt {
+            return None;
+        }
+        let a = m.positions.get(ty * cols + tx)?;
+        let b = m.positions.get((ty + 1) * cols + tx + 1)?;
+        #[allow(clippy::cast_possible_truncation)]
+        Some((
+            (0.5 * (a[0] + b[0]) * 100.0).round() as i32,
+            (0.5 * (a[1] + b[1]) * 100.0).round() as i32,
+        ))
+    };
+    // First claimant wins, walking groups in index order.
+    let mut owner: bevy::platform::collections::HashMap<(i32, i32), usize> =
+        bevy::platform::collections::HashMap::default();
+    for (gi, slot) in group_liquids.iter().enumerate() {
+        let Some(m) = slot else { continue };
+        for c in 0..m.wet.len() {
+            if !m.wet[c] || !m.shared[c] {
+                continue;
+            }
+            if let Some(k) = key(m, c) {
+                owner.entry(k).or_insert(gi);
+            }
+        }
+    }
+    if owner.is_empty() {
+        return;
+    }
+    for (gi, slot) in group_liquids.iter_mut().enumerate() {
+        let Some(m) = slot else { continue };
+        let keys: Vec<Option<(i32, i32)>> = (0..m.wet.len()).map(|c| key(m, c)).collect();
+        let shared = m.shared.clone();
+        m.retain_cells(|c| !shared[c] || keys[c].is_none_or(|k| owner.get(&k) == Some(&gi)));
+        if m.indices.is_empty() {
+            *slot = None; // every cell this group held belonged to a neighbour
+        }
     }
 }
 

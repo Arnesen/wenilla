@@ -43,6 +43,9 @@ pub enum BlpVariant {
     /// and the field becomes flickering speckle.
     /// (wow-re `system/lighting/scratch/rf-snow-flake-render.md` §2.1/§6.)
     PointSprite,
+    /// A **minimap tile** (ADT `map<X>_<Y>` or a WMO group's interior tile) — clamp, mip 0, linear,
+    /// and filtered in **gamma space**, the reference's `GL_SKIP_DECODE_EXT`. See [`map_tile_image`].
+    MapTile,
     /// OS cursor image — `Rgba8UnormSrgb`, single mip.
     Cursor,
 }
@@ -81,6 +84,10 @@ impl AssetLoader for BlpImageLoader {
             BlpVariant::Sprite => {
                 let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
                 sprite_image(w, h, rgba)
+            }
+            BlpVariant::MapTile => {
+                let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
+                map_tile_image(w, h, rgba)
             }
             BlpVariant::Effect => {
                 let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
@@ -179,6 +186,27 @@ fn sprite_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         ..Default::default()
     });
     image
+}
+
+/// A **minimap tile** — clamp, mip 0, **LINEAR**, and filtered in **GAMMA** space.
+///
+/// The reference binds one sampler object for every minimap tile it draws, interior and outdoor
+/// alike, and the trace reads it whole: `CLAMP_TO_EDGE` both axes, `MAG_FILTER = MIN_FILTER =
+/// GL_LINEAR` with no mip term, LOD bias 0, anisotropy 1, and — the part that is not the default —
+/// **`GL_TEXTURE_SRGB_DECODE_EXT = GL_SKIP_DECODE_EXT`**, plus `GL_TEXTURE_MAX_LEVEL = 0` per tile.
+/// (wow-re `system/minimap/scratch/wmo-interior-no-adt-underlay.md` §7, device-observed and matching
+/// its own binary derivation; a positive control in the same trace emits `GL_NEAREST` for a
+/// different sampler, so the layer would have shown point sampling had the client asked for it.)
+///
+/// SKIP_DECODE is the whole reason this is not [`sprite_image`]: it means the hardware **filters the
+/// authored bytes**, not their linearisation. An `Rgba8UnormSrgb` upload decodes each texel to
+/// linear before the filter weights it, so every blend across an edge lands on a different colour
+/// than the reference's — darker, because averaging in linear space and re-encoding is darker than
+/// averaging the gamma bytes. On a 1-bit-alpha bake whose edges sit against black that is a visible
+/// dark fringe at every alpha boundary. So the tile arrives as gamma bytes ([`color_format`], no
+/// decode) and the shader converts AFTER the filter.
+fn map_tile_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
+    effect_image(width, height, rgba)
 }
 
 /// Gamma-lane effect sprite: `Rgba8Unorm` (the shader does WoW's byte-space combine), clamp,

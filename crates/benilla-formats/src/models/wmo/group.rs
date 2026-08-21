@@ -334,6 +334,9 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
     // the substitution below.
     let mut indices = Vec::with_capacity(xt * yt * 6);
     let mut wet = vec![false; xt * yt];
+    // The `0x80` "a neighbour also claims this cell" bit — kept per cell, gated model-wide later
+    // (see `LiquidMesh::shared`).
+    let mut shared = vec![false; xt * yt];
     let mut drawn = vec![false; xv * yv];
     for ty in 0..yt {
         for tx in 0..xt {
@@ -341,6 +344,7 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
                 continue; // hole — no liquid on this tile
             }
             wet[ty * xt + tx] = true;
+            shared[ty * xt + tx] = lq.tile_flags[ty * xt + tx] & 0x80 != 0;
             let tl = (ty * xv + tx) as u32;
             let tr = tl + 1;
             let bl = ((ty + 1) * xv + tx) as u32;
@@ -412,6 +416,7 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
     Some(LiquidMesh {
         grid: [xv as u32, yv as u32],
         wet,
+        shared,
         positions,
         uvs,
         depths,

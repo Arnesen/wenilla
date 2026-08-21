@@ -80,6 +80,14 @@ const ZOOM_CHUNKS: [f32; 6] = [14.0, 12.0, 10.0, 8.0, 6.0, 4.0];
 /// the field through a computed pointer. Superseded in wow-re; do not "restore" a constant here.
 const INTERIOR_ZOOM_RADIUS: [f32; 6] = [150.0, 120.0, 90.0, 60.0, 40.0, 25.0];
 
+/// The **outer-edge bleed**: a minimap tile on the boundary of its group's grid is drawn 1.0 yd
+/// larger on that side, so a group's art extends 1 yd past its bbox all the way round and two
+/// groups whose boxes touch overlap by 2 yd. Interior cell edges are shared exactly. Byte-verified
+/// (`0x6a549e`…`0x6a54db`, the constant `0xca8098` built in the emitter as `0.5 + 0.5`) and fitted
+/// to the reference's captured quads with zero error — wow-re
+/// `system/minimap/scratch/wmo-interior-no-adt-underlay.md` §8.
+const EDGE_BLEED_YD: f32 = 1.0;
+
 /// The client's half-texel UV inset, as the quad scale that reproduces it: a tile spanning
 /// `extent` yards is baked at [`YD_PER_TEXEL`](benilla_assets::minimap_grid::YD_PER_TEXEL), so it
 /// is `W = extent / 0.5` texels wide, and mapping texel *centres* to the quad's edges instead of
@@ -146,10 +154,35 @@ fn load_tile(asset_server: &AssetServer) -> impl Fn(&str) -> Handle<Image> + '_ 
         asset_server.load_with_settings(
             format!("mpq://textures/Minimap/{hash}"),
             |s: &mut benilla_assets::BlpLoaderSettings| {
-                s.variant = benilla_assets::BlpVariant::Sprite;
+                s.variant = benilla_assets::BlpVariant::MapTile;
             },
         )
     }
+}
+
+/// The **headless probe's** minimap widget. `WOW_MM_PROBE` drops the player inside a building in a
+/// server-less capture ([`crate::capture`]), but the real slot comes from the FrameXML `<Minimap>`
+/// extraction, which needs a logged-in UI — so without this the interior branch never runs and the
+/// composite cannot be looked at offline. Under the probe (and only then) we synthesise the slot the
+/// script would have published: a square in the top-right corner at the client's default zoom.
+///
+/// This is the instrument the B141 arc needed and did not have — the interior composite was being
+/// argued about from screenshots because nothing could render it without a server.
+fn probe_minimap_widget(mut widget: ResMut<MinimapWidget>, windows: Query<&Window>) {
+    if widget.0.is_some() || std::env::var("WOW_MM_PROBE").is_err() {
+        return;
+    }
+    let Ok(win) = windows.single() else { return };
+    let side = (win.height() * 0.22).min(win.width() * 0.22);
+    let margin = side * 0.15;
+    let min = Vec2::new(win.width() - side - margin, margin);
+    widget.0 = Some(MinimapSlot {
+        rect: Rect::from_corners(min, min + Vec2::splat(side)),
+        z: u64::MAX / 2,
+        zoom: 3,
+        inside_zoom: 3,
+        alpha: 1.0,
+    });
 }
 
 /// This frame's extracted `<Minimap>` widget slot, written by `ui_script::extract::drive_script` (the
@@ -501,9 +534,36 @@ fn emit_minimap(
             let mid_z = 0.5 * (gn.bbox_min[2] + gn.bbox_max[2]);
             for col in 0..nx {
                 for row in 0..ny {
-                    let mcx = gn.bbox_min[0] + (col as f32 + 0.5) * tw_x;
-                    let mcy = gn.bbox_min[1] + (row as f32 + 0.5) * tw_y;
-                    let tc = to_target([mcx, mcy, mid_z]);
+                    // The tile's world rect: the grid cell PLUS the client's outer-edge BLEED. The
+                    // cells themselves stride exactly `tw`, sharing their interior edges — but a
+                    // cell on the grid's boundary is grown by 1.0 yd on that side alone
+                    // (`0x6a549e`/`0x6a54ae`/`0x6a54be`/`0x6a54d1`, each an `fsub`/`fadd` of
+                    // `0xca8098 = 0.5 + 0.5`; wow-re `wmo-interior-no-adt-underlay.md` §8, fitted
+                    // to the reference's own captured quads with zero error on every bound). A
+                    // 1×1 grid is therefore `tw + 2` across, an end cell `tw + 1`, an interior
+                    // cell exactly `tw`.
+                    //
+                    // THIS is what makes the joints work. The bleed grows every group's art 1 yd
+                    // past its bbox on each outer side, so two groups whose boxes touch OVERLAP by
+                    // 2 yd. Without it their art merely abuts — and abutting art does not survive
+                    // the composite's alpha test: `GEQUAL 224/255` on a LINEAR-filtered silhouette
+                    // reaches only 0.122 of a texel past the last opaque texel centre (nearest
+                    // would reach the texel edge, 0.5), so an abutting pair loses ~0.38 texel and
+                    // the black clear reads through the strip for the length of the wall. That is
+                    // B141's dashed hairline; a 2 yd overlap absorbs the same erosion with four
+                    // texels to spare. In the reference's captured frame 16 of 220 inter-group
+                    // tile contacts exist ONLY because of the bleed.
+                    let x0 = gn.bbox_min[0] + col as f32 * tw_x
+                        - if col == 0 { EDGE_BLEED_YD } else { 0.0 };
+                    let x1 = gn.bbox_min[0]
+                        + (col + 1) as f32 * tw_x
+                        + if col + 1 == nx { EDGE_BLEED_YD } else { 0.0 };
+                    let y0 = gn.bbox_min[1] + row as f32 * tw_y
+                        - if row == 0 { EDGE_BLEED_YD } else { 0.0 };
+                    let y1 = gn.bbox_min[1]
+                        + (row + 1) as f32 * tw_y
+                        + if row + 1 == ny { EDGE_BLEED_YD } else { 0.0 };
+                    let tc = to_target([0.5 * (x0 + x1), 0.5 * (y0 + y1), mid_z]);
                     // Window cull: skip tiles whose centre lands well outside the TARGET (which
                     // holds 1.5× what the blit shows, so this is wider than the visible disc —
                     // deliberately: the client composites the same margin).
@@ -521,26 +581,36 @@ fn emit_minimap(
                     composite.tiles.push(composite::CompositeTile {
                         texture: handle.clone(),
                         center: tc,
-                        // The client's HALF-TEXEL UV INSET (`0x4ebfca`–`0x4ec03b`: `du = 0.5/W`,
-                        // `dv = 0.5/H`), expressed as the scale it is: sampling `[du, 1-du]` across
-                        // a quad of size `S` is the same as sampling `[0, 1]` across a quad of
-                        // `S·W/(W−1)` about the same centre, so the shared unit mesh keeps its UVs
-                        // and the inset rides the Transform like everything else here. The quad
-                        // edges then land on the outermost texel CENTRES, which stretches each
-                        // tile's art outward by half a texel per side — and that is what closes
-                        // the ~20% of group joints that butt rather than overlap. Without it a
-                        // butt joint leaves a texel-wide strip that no tile covers, and the clear
-                        // reads through it for the whole length of the wall (B141's residue after
-                        // the alpha test alone).
+                        // The client's HALF-TEXEL UV INSET, expressed as the scale it is: it
+                        // samples `[0.5/W, 1−0.5/W]` across the rect above (verified on the
+                        // captured quads — every one carries exactly that UV rect), and sampling
+                        // that range across a quad of size `Q` is the same as sampling `[0, 1]`
+                        // across `Q·W/(W−1)` about the same centre. So the shared unit mesh keeps
+                        // its UVs and the inset rides the Transform like everything else here, and
+                        // the texel centres land where the client's do. `W` comes from the TILE
+                        // (`tw / 0.5`), never from the bled rect.
                         size: Vec2::new(
-                            tw_x * units_per_yd * texel_stretch(tw_x),
-                            tw_y * units_per_yd * texel_stretch(tw_y),
+                            (x1 - x0) * units_per_yd * texel_stretch(tw_x),
+                            (y1 - y0) * units_per_yd * texel_stretch(tw_y),
                         ),
                         rotation,
                         order,
                     });
                 }
             }
+        }
+
+        // `WOW_MM_STATS=1` reports what the interior branch actually put in the target this frame —
+        // how many groups the flood-fill kept out of how many, and how many tiles that came to. The
+        // reference's own Stormwind capture emitted 57 tiles at indoor zoom 3, which is the number
+        // this is here to be compared against (wow-re `wmo-interior-no-adt-underlay.md`).
+        if std::env::var("WOW_MM_STATS").is_ok() {
+            eprintln!(
+                "MM-STATS: radius {radius} yd, groups {}/{} selected, {} tiles composited",
+                drawable.iter().filter(|d| **d).count(),
+                drawable.len(),
+                composite.tiles.len(),
+            );
         }
 
         // THE BLIT: the target's middle two-thirds, which is what nets `1.0 · radius` on screen
@@ -871,6 +941,10 @@ impl Plugin for MinimapPlugin {
             .add_systems(
                 Update,
                 (
+                    // The headless probe's synthetic widget, ahead of the emit that reads it.
+                    probe_minimap_widget
+                        .in_set(UiQuadAppend)
+                        .before(emit_minimap),
                     emit_minimap.in_set(UiQuadAppend),
                     // After the emit that fills it: the composite camera draws what THIS frame's
                     // interior branch asked for, so the target the blit quad samples is never a

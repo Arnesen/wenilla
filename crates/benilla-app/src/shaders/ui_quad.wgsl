@@ -110,6 +110,15 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(higher, lower, c <= vec3<f32>(0.0031308));
 }
 
+// sRGB → linear — the inverse of `linear_to_srgb`, for a texture uploaded UNDECODED so the hardware
+// filters its authored bytes (the minimap tiles' `GL_SKIP_DECODE_EXT`). The conversion happens here,
+// after the filter, which is exactly the order the reference's fixed-function pipe uses.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let higher = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    let lower = c / 12.92;
+    return select(higher, lower, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let t = textureSample(quad_texture, quad_sampler, in.uv);
@@ -157,7 +166,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if t.a * c.a < alpha_ref {
             discard;
         }
-        return vec4<f32>(t.rgb * c.rgb, 1.0);
+        // The tile arrived as gamma bytes (SKIP_DECODE) and the composite target is un-encoded, so
+        // the conversion the sampler did not do happens HERE — after the filter, which is the point.
+        return vec4<f32>(srgb_to_linear(t.rgb) * c.rgb, 1.0);
     }
     let a = t.a * k;
     // Premultiply in GAMMA (decision 0160's lesson, here for the UI): the hardware `SrcAlpha` factor

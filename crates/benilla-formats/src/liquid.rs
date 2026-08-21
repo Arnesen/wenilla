@@ -136,6 +136,21 @@ pub struct LiquidMesh {
     /// truth for containment — a liquid grid is sparse (nibble `0xf` = hole), so its bounding box
     /// routinely spans dry ground it never touches (decision 0635).
     pub wet: Vec<bool>,
+    /// Per-**cell**, parallel to [`Self::wet`]: the MLIQ tile flag's **`0x80`** bit — "a neighbouring
+    /// group also claims this cell". Authored on **both** claimants, never on a cell only one group
+    /// covers (measured over `Stormwind.wmo`: 190 of 2685 wet cells, each claimed by exactly two
+    /// groups and flagged in both; zero overlap among the `0x80`-clear cells — wow-re
+    /// `terrain/scratch/wmo-liquid-shared-tile-gate.md`).
+    ///
+    /// The reference's strip builder emits a tile iff `(f & 0xf) != 0xf` **and** (`f & 0x80 == 0`
+    /// **or** this group won the gate) — a per-frame 2-colouring of the portal graph that lets
+    /// exactly ONE of the two claimants draw. Without it both surfaces draw, coplanar, and the
+    /// overlap band composites the translucent water twice: the visible line across the Stormwind
+    /// canals (B141's water half). Resolved model-wide in `benilla_assets::wmo`, not here — a group
+    /// file cannot see its neighbours.
+    ///
+    /// Always `false` on the ADT path: MCLQ has no such bit and no such overlap.
+    pub shared: Vec<bool>,
     /// Vertex positions `[x, y, z]` in WoW yards — `cols·rows` entries, row-major.
     pub positions: Vec<[f32; 3]>,
     /// Texture UVs parallel to `positions`. No scroll for water.
@@ -324,6 +339,7 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
 
     Some(LiquidMesh {
         grid: [GRID as u32, GRID as u32],
+        shared: vec![false; wet.len()],
         wet,
         positions,
         uvs,
@@ -333,6 +349,41 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
         material_id: None, // ADT liquid has no MOMT to index
         kind,
     })
+}
+
+impl LiquidMesh {
+    /// Drop the cells `keep` rejects (indexed like [`Self::wet`]), rebuilding [`Self::indices`].
+    /// The vertex arrays are left alone — a vertex no triangle references costs nothing to keep and
+    /// the grid stays addressable by cell index.
+    ///
+    /// This is how the MLIQ [`Self::shared`] gate is applied once the owning model can see every
+    /// group at once.
+    pub fn retain_cells(&mut self, keep: impl Fn(usize) -> bool) {
+        let (cols, rows) = (self.grid[0] as usize, self.grid[1] as usize);
+        let (xt, yt) = (cols.saturating_sub(1), rows.saturating_sub(1));
+        let mut dropped = false;
+        for c in 0..self.wet.len() {
+            if self.wet[c] && !keep(c) {
+                self.wet[c] = false;
+                dropped = true;
+            }
+        }
+        if !dropped {
+            return;
+        }
+        self.indices.clear();
+        for ty in 0..yt {
+            for tx in 0..xt {
+                if !self.wet[ty * xt + tx] {
+                    continue;
+                }
+                let tl = (ty * cols + tx) as u32;
+                let (tr, bl) = (tl + 1, ((ty + 1) * cols + tx) as u32);
+                let br = bl + 1;
+                self.indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
