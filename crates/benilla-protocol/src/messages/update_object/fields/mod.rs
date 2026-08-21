@@ -419,8 +419,10 @@ const FIELD_PLAYER_MOD_DAMAGE_DONE_PCT: u16 = 1215; // ×7, **FLOAT despite the 
                                                     // `SetFloatValue(PLAYER_FIELD_MOD_DAMAGE_DONE_PCT +
                                                     // school, multiplier)` — decision 0208's flagged
                                                     // question, now closed: a true float, default 1.0.
-const FIELD_PLAYER_SKILL_INFO_1_1: u16 = 718; // UNIT_END+0x212, ×384 (128 skills × 3 dwords) — see
-                                              // [`PlayerSkillSlot`] for the verified packing.
+                                                    // UNIT_END+0x212, ×384 (128 skills × 3 dwords) — see [`PlayerSkillSlot`] for the verified
+                                                    // packing. `pub` for fixtures that seed a skill block through [`ObjectFields::from_pairs`]
+                                                    // (the lock resolver's skill-term tests); live reads go through [`ObjectFields::player_skill`].
+pub const FIELD_PLAYER_SKILL_INFO_1_1: u16 = 718;
 
 // PLAYER_CHARACTER_POINTS1/2 (INT, PRIVATE — self only): unspent talent points / free primary
 // professions — the reference's `UnitCharacterPoints("player")` pair (decision 0304). Derived by

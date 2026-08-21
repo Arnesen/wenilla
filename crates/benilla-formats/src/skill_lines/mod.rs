@@ -289,6 +289,34 @@ pub struct SkillLineCatalog {
 }
 
 impl SkillLineCatalog {
+    /// Build a catalog holding only a spell→line map — for tests and synthetic fixtures
+    /// ([`crate::SpellCatalog::from_displays`]'s sibling). The live path is
+    /// [`load_skill_line_catalog`]; everything but [`Self::spell_to_line`]/[`Self::ability`]
+    /// answers empty.
+    pub fn from_spell_lines(pairs: impl IntoIterator<Item = (u32, u32)>) -> Self {
+        Self {
+            abilities: pairs
+                .into_iter()
+                .map(|(spell, line)| {
+                    (
+                        spell,
+                        SlaInfo {
+                            skill_id: line,
+                            req_skill_value: 0,
+                            forward_spell_id: 0,
+                            trivial_low: 0,
+                            trivial_high: 0,
+                        },
+                    )
+                })
+                .collect(),
+            lines: HashMap::new(),
+            categories: HashMap::new(),
+            race_class: HashMap::new(),
+            rank_prev: HashMap::new(),
+        }
+    }
+
     /// The skill line a spell belongs to, if `SkillLineAbility.dbc` names one.
     pub fn spell_to_line(&self, spell_id: u32) -> Option<u32> {
         self.abilities.get(&spell_id).map(|a| a.skill_id)

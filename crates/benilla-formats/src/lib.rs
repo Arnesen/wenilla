@@ -52,7 +52,9 @@ pub use factions::{
 mod creature_types;
 pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
 mod languages;
-pub use languages::{load_default_languages, DefaultLanguages};
+pub use languages::{
+    load_default_languages, load_language_words, DefaultLanguages, LanguagePool, LanguageWords,
+};
 mod creature_families;
 pub use creature_families::{
     load_creature_families, load_pet_food_names, CreatureFamilies, CreatureFamily, PetFoodNames,

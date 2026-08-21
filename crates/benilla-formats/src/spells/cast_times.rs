@@ -39,12 +39,13 @@ pub struct SpellCastTime {
 
 impl SpellCastTime {
     /// The level-scaled cast time, ms — `Spell_C::GetCastTime 0x6e3340`'s walk over this row
-    /// (module docs): `base + perLevel·(casterLevel − spellLevel)`, floored to the row minimum
-    /// and to zero. `spell_level` is the `SpellRec+0x70` column the client scales against
-    /// ([`crate::spells::SpellDisplay::spell_level`]). Spellmod op `0xa` (SPELLMOD_CASTING_TIME)
-    /// is the caller's concern — no downstream consumer models spellmods yet.
-    pub fn resolved_ms(&self, caster_level: u32, spell_level: u32) -> u32 {
-        let delta = i64::from(caster_level.saturating_sub(spell_level));
+    /// (module docs): `base + perLevel·(casterLevel − baseLevel)`, floored to the row minimum
+    /// and to zero. `base_level` is the `SpellRec+0x70` column the client scales against
+    /// ([`crate::spells::SpellDisplay::base_level`] — the DBC's `baseLevel`, col 28, not its
+    /// `spellLevel`, col 29). Spellmod op `0xa` (SPELLMOD_CASTING_TIME) is the caller's
+    /// concern — no downstream consumer models spellmods yet.
+    pub fn resolved_ms(&self, caster_level: u32, base_level: u32) -> u32 {
+        let delta = i64::from(caster_level.saturating_sub(base_level));
         let scaled = i64::from(self.base_ms) + i64::from(self.per_level_ms) * delta;
         scaled.max(i64::from(self.minimum_ms)).max(0) as u32
     }

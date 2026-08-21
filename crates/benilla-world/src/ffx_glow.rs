@@ -54,10 +54,18 @@ pub struct FfxGlow {
     /// view.
     ///
     /// **The law, and why it is ONE field.** The reference runs its FFX pass inside the
-    /// WorldFrame's own paint (`0x48350e` → the apply hook `0x6cd890`, wow-re `ffxeffects.md`);
-    /// every UI frame — a `<PlayerModel>` pane, and our portrait bakes standing in for one —
-    /// composites *afterwards*, so no effect keyed on the **viewer's own state** can reach a bake.
-    /// The zone glow is not in this class (it is authored scene data, and a bake wants world
+    /// WorldFrame's own paint — a BEGIN/END pair, `0x6cd890`/`0x6cda70`, bracketed at
+    /// `0x48350e`/`0x48379d` inside the one paint method `0x483460` (wow-re `death-pass.md` §5,
+    /// VERIFIED). It **cannot reach a bake**, for reasons that need no frame ordering: the pass's
+    /// render targets come from three module globals (`0xce8b5c` full, `0xce8ae8` quarter,
+    /// `0xce8b98` backbuffer) and it never observes the ambient binding — while the reference's
+    /// own portrait bake `0x524f60` binds no target at all and *copies* the framebuffer corner
+    /// out (`0x58acd0`/`0x449bf0`), so the pixels it keeps are pre-pass in every ordering.
+    ///
+    /// The binary does not separate the two lanes: the haze is `primary.z` of the glow combine
+    /// `0x6cb020`, which shares the single active-pass slot `0xce8bb4` with the death pass and
+    /// runs through the same bracket into the same three targets. So they are **one class**, and
+    /// this is one field. The zone glow is not in it (authored scene data, and a bake wants world
     /// parity for it — decision 0638), which is why [`Self::gain_scale`] stays separate.
     ///
     /// The haze had its own `haze_scale` and the death gate had none, so a released ghost's
@@ -85,10 +93,11 @@ impl FfxGlow {
         state_scale: 0.0,
     };
     /// **Decode only, no glow** — for a bake that stands in for a 1.12 *UI model widget*. The
-    /// reference applies its FFX pass inside the WorldFrame's own paint (`0x48350e` → the apply
-    /// hook `0x6cd890`, wow-re `ffxeffects.md`); every UI frame paints afterwards, at its own
-    /// strata, so a `<PlayerModel>` pane is composited over an already-glowed world and never
-    /// glows itself. (The give-away in-game: the reference's chat text and buttons don't bloom.)
+    /// reference applies its FFX pass inside the WorldFrame's own paint (the `0x6cd890`/`0x6cda70`
+    /// BEGIN/END bracket at `0x48350e`/`0x48379d`, wow-re `death-pass.md` §5); every UI frame
+    /// paints afterwards, at its own strata, so a `<PlayerModel>` pane is composited over an
+    /// already-glowed world and never glows itself. (The give-away in-game: the reference's chat
+    /// text and buttons don't bloom.)
     pub const UI_PANE: Self = Self {
         gain_scale: 0.0,
         state_scale: 0.0,

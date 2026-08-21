@@ -69,8 +69,17 @@ pub struct SpellDisplay {
     /// spells: "Opening" for keyless chests, "Mining"/"Herb Gathering"/"Pick Lock" for skill locks.
     /// The skill it *provides* is [`Self::open_lock_skill`].
     pub open_lock: Option<OpenLock>,
-    /// `spellLevel` (column 28, `SpellRec+0x70`) — the level this spell's effect values are quoted
-    /// at; the effect-value walk scales by `casterLevel − spellLevel`, floored at 0 (`0x6e3854`).
+    /// `baseLevel` (column 28, `SpellRec+0x70`; **not** `spellLevel`, column 29 `+0x74` — wow-re
+    /// `openlock-spell-store-order.md` §4a pinned the split) — the level the effect values are
+    /// quoted at: the effect-value walk subtracts it, floored at 0 (`0x6e3826`), and the
+    /// cast-time scaling reads the same column (`0x6e3340`).
+    pub base_level: u32,
+    /// `maxLevel` (column 27, `SpellRec+0x6c`) — caps the skill-derived level term in
+    /// [`Self::open_lock_skill`] at `maxLevel × 5` (`0x5ea6e3`); `0` = uncapped.
+    pub max_level: u32,
+    /// `spellLevel` (column 29, `SpellRec+0x74`) — the DBC's actual spellLevel. One consumer:
+    /// the Beast Training rank comparator, whose recorded law names `+0x74` (`benilla-ui`
+    /// `craft.rs`). Everything level-scaled here reads [`Self::base_level`] instead.
     pub spell_level: u32,
     /// `Dispel` (column 4, `SpellRec+0x10`) — the `SpellDispelType.dbc` id. The reference client
     /// reads exactly this field for `GetPlayerBuffDispelType` / `UnitDebuff`'s third return
@@ -266,6 +275,8 @@ impl Default for SpellDisplay {
             cast_ui: 0,
             effects: [0, 0, 0],
             open_lock: None,
+            base_level: 0,
+            max_level: 0,
             spell_level: 0,
             dispel: 0,
             category: 0,
@@ -332,20 +343,39 @@ impl SpellDisplay {
         self.open_lock.map(|o| o.lock_type)
     }
 
-    /// The **skill value this spell provides** to a lock at `caster_level` — the client's
-    /// effect-value *min* (`0x6e3800`) put through its caller's rounding (`0x6e3760`:
-    /// `round(2x ∓ 0.5) >> 1`), and the left-hand side of the lock resolver's satisfaction test
-    /// (`0x5f850f`: `cmp eax,esi; jge`). `None` when the spell opens no lock.
+    /// The **skill value this spell provides** to a lock, given the player's skill in the
+    /// spell's own line — the client's effect-value *min* (`0x6e3800`) put through its caller's
+    /// rounding (`0x6e3760`: `round(2x ∓ 0.5) >> 1`), and the left-hand side of the lock
+    /// resolver's satisfaction test (`0x5f850f`: `cmp eax,esi; jge`). `None` when the spell
+    /// opens no lock.
     ///
-    /// The client compares **this**, never the player's skill block — and that is faithful,
-    /// because the DBC encodes the same number: Pick Lock 1804 at 60 → `4 + 1 + 5.0·(60−1)` =
-    /// **300**, a rogue's Lockpicking cap; Mining 2575 at 60 → `−1 + 1 + 5.0·60` = **300**; and
-    /// Small Seaforium Charge 4056 → `149 + 1` = **150**, exactly the `Blasting 150` its lock
-    /// (id 92) asks for. The universally-known "Opening" spells are flat 100.
-    pub fn open_lock_skill(&self, caster_level: u32) -> Option<i32> {
+    /// **The level term IS the player's skill** (wow-re `openlock-spell-store-order.md` §4a,
+    /// byte-verified 2026-08-14, overturning `cursor-system.md` §8.8's "no player skill block is
+    /// read anywhere in the chain" — and this doc's own earlier "never the player's skill block"
+    /// gloss with it): `0x6e3800`'s level call (`0x6e384d → 0x6e3130`) resolves the CGPlayer
+    /// vtable slot `+0xa8` = `0x5ea690`, which reads `PLAYER_SKILL_INFO` for the spell's
+    /// SkillLineAbility line — value **plus** bonuses (`0x5ea56d`/`0x5ea578`/`0x5ea580`) —
+    /// clamps it to `maxLevel × 5` (`0x5ea6e3`), and returns it `/5` (`0x6e3195`). So:
+    /// `Δ = max(0, min(skill, maxLevel·5)/5 − baseLevel)`. Pick Lock 1804 at skill 300 → `4 +
+    /// 1 + 5.0·(60−1)` = **300**; at skill 150 → **150**. Mining 2575 → exactly the skill. The
+    /// flat spells are unchanged: Small Seaforium Charge 4056 → `149 + 1` = **150**, the
+    /// "Opening" family flat 100.
+    ///
+    /// The old reading fed the **caster level** here — indistinguishable at skill cap (where
+    /// `skill/5 == level`, which is how it survived every at-cap cross-check) and wrong
+    /// everywhere else: a level-60 with 1 Mining satisfied a 300-skill vein. `skill_value = 0`
+    /// (line unknown, or the player lacks it) is the fail-closed leg — the opener provides only
+    /// its flat terms.
+    pub fn open_lock_skill(&self, skill_value: u32) -> Option<i32> {
         let e = self.open_lock?.effect;
-        // `0x6e3826`: level delta, floored at 0, and only subtracted when spellLevel > 0.
-        let delta = caster_level.saturating_sub(self.spell_level) as f32;
+        // `0x5ea6e3`: skill capped at maxLevel·5 (0 = uncapped); `0x6e3195`: /5 (integer);
+        // `0x6e3826`: baseLevel subtraction, floored at 0.
+        let capped = if self.max_level > 0 {
+            skill_value.min(self.max_level * 5)
+        } else {
+            skill_value
+        };
+        let delta = (capped / 5).saturating_sub(self.base_level) as f32;
         let v = self.effect_base_points[e] as f32
             + self.effect_base_dice[e] as f32
             + self.effect_dice_per_level[e] as f32 * delta
@@ -602,6 +632,25 @@ impl SpellDisplay {
             .any(|a| TRACKING_AURA_TYPES.contains(a))
     }
 
+    /// The spell's `Stances` mask is an **allow-list, not a requirement** — `AttributesEx2`
+    /// bit 19. Two independent consumers test exactly this bit: the form gate `0x612480` (which
+    /// [`Self::form_refusal`] transcribes) and, separately, the spell tooltip's required-form
+    /// line at `52f115` (wow-re §3-REQFORM) — the builder duplicates the test inline rather than
+    /// calling the gate, so one predicate here keeps our two callers from drifting the way they
+    /// did in 1483.
+    ///
+    /// 5875 leans on this hard, and reading `Stances != 0` as "requires a form" without it is
+    /// simply wrong: every Shadowform-castable priest spell carries `Stances` bit 27 (Inner Fire,
+    /// Psychic Scream, Shadow Word: Pain, Power Word: Shield…), every Spirit-of-Redemption-castable
+    /// heal carries bit 31 (Flash Heal, Renew, Prayer of Healing), and the 52 balance-druid spells
+    /// castable in Moonkin carry bit 30 (Wrath, Moonfire, Starfire, Thorns…) — the mask records
+    /// "may ALSO be cast in that form". All 244 of them carry bit 19; **none** of the 274 spells
+    /// that genuinely require a form (the warrior stances, the druid forms, the stealth openers)
+    /// does. So this is the clean separator between the two readings of one column.
+    pub fn form_mask_is_permissive(&self) -> bool {
+        self.attributes_ex2 & ATTR_EX2_ALLOW_WHILE_NOT_SHAPESHIFTED != 0
+    }
+
     /// The shapeshift-form gate as a boolean — the usable walk's leg 6. See
     /// [`Self::form_refusal`], the reason-carrying transcription this wraps.
     pub fn usable_in_form(&self, form: u8, form_is_stance: bool) -> bool {
@@ -637,9 +686,7 @@ impl SpellDisplay {
             } else {
                 None
             }
-        } else if self.stances != 0
-            && self.attributes_ex2 & ATTR_EX2_ALLOW_WHILE_NOT_SHAPESHIFTED == 0
-        {
+        } else if self.stances != 0 && !self.form_mask_is_permissive() {
             // Unshifted (or a stance): a form-requiring spell is refused here unless waived.
             Some(FormRefusal::OnlyShapeshift)
         } else {

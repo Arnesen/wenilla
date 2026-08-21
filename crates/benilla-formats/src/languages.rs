@@ -35,6 +35,7 @@ use crate::Chain;
 
 const LANGUAGES: &str = "DBFilesClient\\Languages.dbc";
 const CHR_RACES: &str = "DBFilesClient\\ChrRaces.dbc";
+const LANGUAGE_WORDS: &str = "DBFilesClient\\LanguageWords.dbc";
 
 /// How many locale columns a `Name_lang` block carries in 5875 (`Languages.dbc` is
 /// `ID + 8 names + NameFlags` = 10 fields).
@@ -117,6 +118,127 @@ pub fn load_default_languages(chain: &mut Chain) -> Result<DefaultLanguages> {
     Ok(DefaultLanguages(out))
 }
 
+/// `LanguageWords.dbc` — the fake-word pool the client substitutes, word for word, when it renders
+/// speech in a language the listener's character does not know.
+///
+/// **The wire carries plaintext.** `SMSG_MESSAGECHAT` ships the real sentence plus a language id
+/// and the server never rewrites it (vmangos `ChatHandler.cpp`); turning it into gibberish is
+/// entirely the client's job, which is why an unmodelled garble step renders opposite-faction
+/// speech perfectly readable (B262). The reference's garble routine is `0x49b560`, called from the
+/// chat display chokepoint `0x49a870` at `0x49aa7c` — the same function whose `cmp edi,-0x1` at
+/// `0x49a89b` is the `LANG_ADDON` test.
+///
+/// **The shipped table**, read off this install's chain: **1481 rows x 3 fields, 12-byte records**
+/// — `ID`, `LanguageID`, `Word` — over **13 languages** (ids 1, 2, 3, 6-14, 33: the same id set
+/// `Languages.dbc` carries, minus none and plus none). Each language's pool is 79-128 words, and
+/// the words are authored in **runs of ascending length**, one to seventeen characters: Orcish
+/// opens `A N G O L` (one letter), then `Ha Ko No Mu Ag Ka Gi` (two), and so on. That authored
+/// shape is what makes a length index the natural read of the pool — a substitution that ignored
+/// length would have no use for a table built this way.
+#[derive(Debug, Default, Clone)]
+pub struct LanguageWords(HashMap<u32, LanguagePool>);
+
+/// One language's substitution pool: the words in file order, plus an index from word length to
+/// the rows of exactly that length.
+///
+/// The index is **shape, not policy**. Storing which words are one character long commits us to
+/// nothing about *how* the reference picks among them (exact-length match, a clamp at the longest
+/// authored word, buckets); every one of those rules reads this index. The rule itself is
+/// `0x49b560`'s and is filled in from the RE verdict, not guessed here.
+#[derive(Debug, Default, Clone)]
+pub struct LanguagePool {
+    words: Vec<String>,
+    /// `by_len[n]` = indices into `words` of every word whose length is exactly `n`; slot 0 is
+    /// always empty (the table has no zero-length word) and the vector runs to the longest word
+    /// this language authored.
+    by_len: Vec<Vec<u32>>,
+}
+
+impl LanguagePool {
+    /// Every word in the pool, in file order.
+    pub fn words(&self) -> &[String] {
+        &self.words
+    }
+
+    /// The words of exactly `len` characters, in file order — empty when the language authored
+    /// none that long (and for `len` past its longest word).
+    pub fn of_len(&self, len: usize) -> impl Iterator<Item = &str> {
+        self.by_len
+            .get(len)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .map(|&i| self.words[i as usize].as_str())
+    }
+
+    /// How many words of exactly `len` characters this language authored.
+    pub fn count_of_len(&self, len: usize) -> usize {
+        self.by_len.get(len).map_or(0, Vec::len)
+    }
+
+    /// The longest word this language authored, in characters (0 for an empty pool).
+    pub fn max_len(&self) -> usize {
+        self.by_len.len().saturating_sub(1)
+    }
+}
+
+impl LanguageWords {
+    /// The substitution pool for a `Languages.dbc` id, or `None` for an id the table has no rows
+    /// for — which includes `0` (universal) and `-1` (`LANG_ADDON`), neither of which is ever
+    /// garbled.
+    pub fn pool(&self, language: u32) -> Option<&LanguagePool> {
+        self.0.get(&language)
+    }
+
+    /// How many languages have a pool.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// `LanguageWords.dbc` — `ID`, `LanguageID`, `Word`.
+fn language_words_schema() -> Schema {
+    let mut s = Schema::new("LanguageWords");
+    s.add_field(SchemaField::new("ID", FieldType::UInt32));
+    s.add_field(SchemaField::new("LanguageID", FieldType::UInt32));
+    s.add_field(SchemaField::new("Word", FieldType::String));
+    s
+}
+
+/// Load the per-language substitution pools.
+///
+/// Word length is counted in **`char`s, not bytes**: every word in the shipped enUS table is
+/// plain ASCII (a hyphen is the only non-letter), so the two agree today — but the count that
+/// matters is the one a length rule compares against a *source* word, and a source word is
+/// arbitrary player text.
+pub fn load_language_words(chain: &mut Chain) -> Result<LanguageWords> {
+    let bytes = chain
+        .read_file(LANGUAGE_WORDS)
+        .with_context(|| format!("reading {LANGUAGE_WORDS}"))?;
+    let table = parse(&bytes, language_words_schema(), "LanguageWords.dbc")?;
+    let mut out: HashMap<u32, LanguagePool> = HashMap::new();
+    for r in table.records() {
+        let (Some(lang), Some(word)) = (u32_at(r, 1), str_at(&table, r, 2)) else {
+            continue;
+        };
+        if word.is_empty() {
+            continue;
+        }
+        let pool = out.entry(lang).or_default();
+        let len = word.chars().count();
+        let idx = u32::try_from(pool.words.len()).unwrap_or(u32::MAX);
+        pool.words.push(word);
+        if pool.by_len.len() <= len {
+            pool.by_len.resize(len + 1, Vec::new());
+        }
+        pool.by_len[len].push(idx);
+    }
+    Ok(LanguageWords(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +266,51 @@ mod tests {
         assert_eq!(langs.name(99, 0), None);
         // Only enUS is populated in this install; a higher locale column is empty, not a panic.
         assert_eq!(langs.name(1, 5), None);
+    }
+
+    /// The garble pool, against the real chain for the same reason as above — the shape of the
+    /// shipped table *is* the finding, and a fixture would only test the parser.
+    #[test]
+    fn the_shipped_word_pools_cover_every_language_and_index_by_length() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = Chain::open(&data).expect("open patch chain");
+        let words = load_language_words(&mut chain).expect("load");
+
+        // One pool per `Languages.dbc` row — the id sets match exactly, so no spoken language can
+        // reach the garble step and find nothing to substitute.
+        assert_eq!(words.len(), 13, "one pool per language");
+        let langs = load_default_languages(&mut chain).expect("load languages");
+        let _ = &langs; // the join above already asserts that table; here only the count matters.
+        for id in [1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 33] {
+            assert!(words.pool(id).is_some(), "language {id} has no word pool");
+        }
+        // 0 (universal) and the addon sentinel are absent by construction, never garbled.
+        assert!(words.pool(0).is_none());
+
+        // Orcish (1), the shipped numbers: 100 words, the shortest one character, the longest
+        // thirteen, and the one-character run is the five vowels-and-consonants `A N G O L`.
+        let orcish = words.pool(1).expect("orcish pool");
+        assert_eq!(orcish.words().len(), 100);
+        assert_eq!(orcish.max_len(), 13);
+        assert_eq!(orcish.count_of_len(1), 5);
+        assert_eq!(
+            orcish.of_len(1).collect::<Vec<_>>(),
+            ["A", "N", "G", "O", "L"]
+        );
+        // Nothing is authored at length zero, and asking past the longest word is empty, not a
+        // panic — the two edges any length rule will lean on.
+        assert_eq!(orcish.count_of_len(0), 0);
+        assert_eq!(orcish.count_of_len(99), 0);
+
+        // Every pool is non-trivial and its length index accounts for every word it holds.
+        let mut total = 0;
+        for id in [1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 33] {
+            let p = words.pool(id).expect("pool");
+            assert!(p.words().len() >= 79, "language {id} pool is thin");
+            let indexed: usize = (0..=p.max_len()).map(|n| p.count_of_len(n)).sum();
+            assert_eq!(indexed, p.words().len(), "language {id} length index");
+            total += p.words().len();
+        }
+        assert_eq!(total, 1481, "every LanguageWords row landed in a pool");
     }
 }

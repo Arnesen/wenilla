@@ -274,11 +274,12 @@ pub fn spawn_model_entities(
         );
         // The blend twin for the distance-fade feather pass (reuse the cutout when already blend, or when
         // this is a non-fading interior prop). A MULTIPLY batch (Mod/Mod2x — the weapon-rack
-        // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so no
-        // material swap can feather it — the reference's instanceAlpha fade leaves it at full
-        // strength (0528). Since decision 0865 the tag alpha it already carries is no longer inert:
-        // `wow_model.wgsl` lerps a multiply batch's colour toward the blend identity by it, so the
-        // rack sheen now rides the distance fade too (the deliberate deviation).
+        // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so
+        // no material swap can feather it — the fade rides the SOURCE COLOUR instead:
+        // `wow_model.wgsl` lerps a multiply batch's colour toward the blend identity by the tag
+        // alpha it already carries, which is the reference's own preset-5 mechanism (0865 built
+        // it as a deviation; 1489 re-lawed it byte-faithful), so the rack sheen rides the
+        // distance fade like everything else.
         let blend = if steady_interior_prop
             || matches!(
                 sub.blend,

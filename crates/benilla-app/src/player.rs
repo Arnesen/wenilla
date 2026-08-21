@@ -1068,6 +1068,11 @@ fn control(
         } else {
             run_speed
         };
+        // Root is refused HERE (the reference refuses it twice upstream of the handler: the Lua
+        // gate's `test ch,0x12` and the replay allow-list `0x615c71`/`0x618030`, where command
+        // id 7 is blocked). HOVER's refusal is NOT here — it belongs to the movement handler
+        // itself (`0x7c623a`, the breach term below and [`mover::step`]'s grounded arm), which
+        // is what keeps the mounted flourish reachable while hovering, as the reference has it.
         let mut want_jump = binds.fired(crate::bindings::cmd::JUMP) && !player.modes.rooted;
 
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,
@@ -1090,7 +1095,13 @@ fn control(
         // frame — the byte handler runs before the mover, clearing SWIMMING unconditionally —
         // so the latch drops now and this frame's mover, flags, and wire all see the leap as a
         // jump.
-        let breach = swimming && want_jump;
+        // HOVER refuses the breach too: `0x7c623a`'s test sits AHEAD of the SWIMMING take-off
+        // select (`0x7c6261` only picks the seed velocity, it gates nothing), and hover does not
+        // suppress swim entry — `0x6030c0` tests only LEVITATING (`0x400`) — so a hovering
+        // swimmer is a real state and their Space does nothing at all (wow-re
+        // `fall-steep-response.md` §10). The land leg's refusal lives in [`mover::step`],
+        // the same handler's grounded arm.
+        let breach = swimming && want_jump && !player.modes.hover;
         if breach {
             player.swimming = false;
         }

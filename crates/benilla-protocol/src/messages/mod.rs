@@ -198,8 +198,8 @@ pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_sta
 pub use update_object::{
     quest_slot_state, CreateSpline, MovementBlock, Object, ObjectFields, ObjectType, OwnerFallback,
     PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK,
-    PLAYER_EXPLORED_ZONES_SLOTS, PLAYER_QUEST_LOG_SLOTS, PLAYER_SKILL_SLOTS,
-    UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
+    FIELD_PLAYER_SKILL_INFO_1_1, PLAYER_EXPLORED_ZONES_SLOTS, PLAYER_QUEST_LOG_SLOTS,
+    PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };
 pub use vendor::{
     buy_item, buy_result, buyback_item, list_inventory, repair_item, sell_item, sell_result,

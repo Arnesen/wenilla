@@ -1138,16 +1138,19 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         out_rgb = out_rgb * faded_alpha;
     }
     // MULTIPLY batches (Mod bit 7 / Mod2x bit 8 — the ARMORREFLECT sheen family, 0528): their
-    // blend equation reads no source alpha, so the instance fade cannot ride the alpha channel —
-    // the reference genuinely pops these at full strength through every instanceAlpha ramp
-    // (byte-confirmed for items: wow-re `m2-item-texture-fill.md` — the type-3 stage is never
-    // bound and draws the flat primary colour, ~white, so Mod2x is a full-strength ×2 layer
-    // mid-fade). benilla fades them anyway, a deliberate deviation (decision 0865): lerp the
-    // source colour toward the blend IDENTITY — Mod: white (src·dst = dst); Mod2x: 0.5 grey
-    // (2·0.5·dst = dst) — by the instance fade `obj_fade` (never the texture alpha). At
-    // obj_fade 1 this is exact parity with the steady look; at 0 the layer contributes nothing,
-    // so the sheen rides the appear/despawn/stealth/distance ramps like every other batch
-    // instead of popping over a body that hasn't faded in.
+    // blend equation reads no source alpha, so the instance fade cannot ride the alpha channel.
+    // It rides the SOURCE COLOUR instead, and that is the reference's own mechanism, not a
+    // deviation: texenv preset 5 (`INTERPOLATE, TEXTURE·PREVIOUS·PREVIOUS`) computes
+    // `mix(prev.rgb, tex.rgb, prev.a)`, the mode-5/6 arms force the primary colour to the blend
+    // IDENTITY — V_A=0, V_B = white (Mod: src·dst = dst) / 0.5 grey (Mod2x: 2·0.5·dst = dst),
+    // discarding tint AND the M2Color track — and prev.a is the combined instance alpha, so a
+    // fading Mod batch converges continuously onto "framebuffer unchanged", the same endpoint
+    // as the A<=0 cull (wow-re `m2-mod-fade-source-colour.md`, byte-verified; decision 1489,
+    // re-lawing 0865's identical mechanism from deliberate deviation to byte-faithful; 0528's
+    // "holds full strength and pops" and its non-white-M2Color residual both fall with it).
+    // The lerp factor is `obj_fade` (never the texture alpha) and it commutes with the White/
+    // Grey fog above exactly because the fog target IS the identity colour. At obj_fade 1 the
+    // mix degenerates to the texture colour — the steady look — for any identity value.
     let is_mod = (u32(m.clutter_fade.z) & 128u) != 0u;
     let is_mod2x = (u32(m.clutter_fade.z) & 256u) != 0u;
     if (is_mod || is_mod2x) {

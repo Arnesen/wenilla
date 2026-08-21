@@ -116,6 +116,27 @@ fn fireball_view_on_real_data() {
     );
     let v = spell_tooltip_view(100, &spells, &mut t.ctx(17, None)).expect("Charge view");
     assert!(v.form_met, "form 17 = Battle Stance satisfies the mask");
+
+    // 1483 — a PERMISSIVE Stances mask prints no line at all. 5875 overloads the column: with
+    // `AttributesEx2` bit 19 set the bits say "may ALSO be cast in these forms", so reading them
+    // as a requirement invented a red "Requires Shadowform" on Inner Fire / Psychic Scream and
+    // "Requires Spirit of Redemption" on Flash Heal. Bit 27 = form 28, bit 31 = form 32 — the
+    // names resolve, which is exactly why the bug looked plausible.
+    for (id, name, mask) in [
+        (588u32, "Inner Fire", 0x0800_0000u32),
+        (8122, "Psychic Scream", 0x0800_0000),
+        (2061, "Flash Heal", 0x8000_0000),
+        (5176, "Wrath", 0x4000_0000),
+    ] {
+        let d = spells.catalog.get(id).expect(name);
+        assert_eq!(d.stances, mask, "{name} carries the permissive mask");
+        assert!(
+            d.form_mask_is_permissive(),
+            "{name} carries AttributesEx2 b19"
+        );
+        let v = spell_tooltip_view(id, &spells, &mut t.ctx(0, None)).expect(name);
+        assert_eq!(v.requires_form, None, "{name} demands no form");
+    }
 }
 
 /// The cost and cast cells' full law on the REAL 5875 data (decision 1074, B192): the health

@@ -239,11 +239,11 @@ impl M2BatchMaterials<'_> {
             &light,
         );
         // A multiply batch (Mod/Mod2x) and an authored-Blend batch are their own twin: the first
-        // because its blend equation reads no alpha at all — the reference's instanceAlpha ramp
-        // cannot feather it, and benilla's deliberate deviation feathers it through the shader's
-        // identity-lerp on the tag alpha instead (decision 0865) — the second because its colour
-        // pass already blends. Everything else gets a real twin, built from the SOURCE blend so
-        // the 224/255 cutout marker matches what the colour pass discards (decision 0842).
+        // because its blend equation reads no alpha at all — the fade rides the shader's
+        // identity-lerp on the tag alpha instead (0865's mechanism, 1489-verified as the
+        // reference's own preset-5 shape) — the second because its colour pass already blends.
+        // Everything else gets a real twin, built from the SOURCE blend so the 224/255 cutout
+        // marker matches what the colour pass discards (decision 0842).
         let own_twin = matches!(
             sub.blend,
             ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x

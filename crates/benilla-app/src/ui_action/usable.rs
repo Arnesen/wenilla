@@ -220,7 +220,10 @@ pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
     } else {
         store.0.unit_max_power(power_type as u8).unwrap_or(0)
     };
-    let level_delta = i64::from(store.0.unit_level().unwrap_or(0)) - i64::from(d.spell_level);
+    // The per-level column here has ALWAYS read `+0x70` (baseLevel); whether `0x6e31b0`'s own
+    // level term reads `+0x70` or `+0x74` is un-re-verified — dormant either way, since every
+    // nonzero `manaCostPerlevel` row is a creature spell (the fn doc above).
+    let level_delta = i64::from(store.0.unit_level().unwrap_or(0)) - i64::from(d.base_level);
     let cost = i64::from(d.mana_cost)
         + level_delta * i64::from(d.mana_cost_per_level)
         + i64::from(base) * i64::from(d.mana_cost_pct) / 100;

@@ -278,10 +278,23 @@ pub const SPELL_EFFECT_SKILL_STEP: u32 = 44;
 /// interact-cast matches (decision 0239; RE `cursor-system.md` §8, the client's
 /// `cmp [SpellRec+0xf4], 0x21`). A spell carrying it opens the `LockType` its `EffectMiscValue` names.
 const SPELL_EFFECT_OPEN_LOCK: u32 = 0x21;
-/// `spellLevel` — column 28 (`SpellRec+0x70`, the level the effect-value walk subtracts at
-/// `0x6e3854`). Pinned by value on the extracted 5875 file: Pick Lock 1804 and Fireball rank 1
-/// read `1`, the professions' openers `0`.
-const COL_SPELL_LEVEL: usize = 28;
+/// `baseLevel` — column 28 (`SpellRec+0x70`), the level term the effect-value walk subtracts at
+/// `0x6e3826`/`0x6e3854` and the cast-time scaling's base (`0x6e3340`). **Not** the DBC's
+/// `spellLevel` (column 29, `+0x74`) — nothing here reads that one; the field carried that name
+/// for a while (wow-re `openlock-spell-store-order.md` §4a pinned the split at the bytes).
+/// Pinned by value on the extracted 5875 file: Pick Lock 1804 and Fireball rank 1 read `1`, the
+/// professions' openers `0`.
+const COL_BASE_LEVEL: usize = 28;
+/// `maxLevel` — column 27 (`SpellRec+0x6c`), the cap on the skill-derived level term in an
+/// opener's value: the player's skill is clamped to `maxLevel × 5` at `0x5ea6e3` before the
+/// `/5` (`0x6e3195`); `0` = uncapped (the professions' openers read 0 here, and their §4a table
+/// rows would compute 0 under an unconditional clamp). Same wow-re record.
+const COL_MAX_LEVEL: usize = 27;
+/// `spellLevel` — column 29 (`SpellRec+0x74`), the DBC's actual spellLevel. Parsed for the ONE
+/// consumer whose recorded law names `+0x74` (the Beast Training rank comparator,
+/// `benilla-ui` `craft.rs`); before [`COL_BASE_LEVEL`]'s rename that consumer was silently fed
+/// column 28.
+const COL_SPELL_LEVEL: usize = 29;
 /// `EffectApplyAuraName[0]` (column 91, `61 + 10×3` — tenth of the effect-`[3]` blocks; pinned on
 /// the extracted 5875 file: every form spell — Battle Stance 2457, Bear 5487, Cat 768, Stealth
 /// 1784, Moonkin 24858 — carries `36` here, and columns 94-96 don't). The stance bar's
@@ -663,6 +676,8 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 passive: attributes & ATTR_PASSIVE != 0,
                 cast_ui: u32_at(r, COL_CAST_UI).unwrap_or(0),
                 effects: [0, 1, 2].map(|i| u32_at(r, COL_EFFECT_1 + i).unwrap_or(0)),
+                base_level: u32_at(r, COL_BASE_LEVEL).unwrap_or(0),
+                max_level: u32_at(r, COL_MAX_LEVEL).unwrap_or(0),
                 spell_level: u32_at(r, COL_SPELL_LEVEL).unwrap_or(0),
                 // Scan the three effects for OPEN_LOCK and take that effect's LockType (its
                 // EffectMiscValue) together with the value inputs the lock resolver compares

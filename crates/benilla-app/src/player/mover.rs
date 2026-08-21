@@ -167,7 +167,17 @@ pub(super) fn step(
         player.horiz_vel = Vec3::ZERO;
     } else if grounded {
         player.vel_y = 0.0;
-        if want_jump {
+        // **HOVER refuses the jump** — the FIRST test in `CMovement::Jump 0x7c6230`
+        // (`0x7c623a test [ecx+0x40], 0x40000000`; wow-re `fall-steep-response.md` §10). The
+        // keyboard jump IS the forced jump (`moveflag-family.md` §4.2, CORRECTED 2026-08-08:
+        // the queued command's replay pushes force=1 at `0x615eba`; the sole force=0 caller is
+        // the wire's SetHover(0) path, which exists so a server move can jump a hovering unit).
+        // The refusal is SILENT, byte-for-byte: the caller drops it at `0x615ec5` — no
+        // MSG_MOVE_JUMP (its only emission site sits behind this very test), no toast, no retry
+        // latch, no cooldown. The mounted flourish is deliberately NOT gated on hover —
+        // `0x60dea0` diverts to MountSpecial before the command ever reaches this handler
+        // (`player::control`'s flourish block runs upstream of this call, same order).
+        if want_jump && !player.modes.hover {
             player.vel_y = JUMP_SPEED;
             player.wedged = false;
             player.steep_support = false;
@@ -1841,6 +1851,55 @@ mod tests {
         let n = face(60.0);
         // …and the true plane no longer opposes what is left, so nothing further is clipped.
         assert!(out.dot(n) >= -1e-6);
+    }
+
+    #[test]
+    fn a_hovering_mover_refuses_the_jump_and_leaves_no_trace() {
+        // `0x7c623a` — HOVER is the FIRST test in `CMovement::Jump 0x7c6230`, and the keyboard
+        // jump is the forced jump it applies to (wow-re `fall-steep-response.md` §10;
+        // `moveflag-family.md` §4.2 CORRECTED 2026-08-08 — every player-side call site pushes
+        // force=1). Refused means NOTHING happens: no take-off velocity, `jumped` false (the
+        // wire's MSG_MOVE_JUMP rides that bit), no latch. The same press with hover off is the
+        // control that proves this fixture can jump at all.
+        let flat: [(f32, f32); 2] = [(-3.0, 0.0), (3.0, 0.0)];
+        let rows = world_from_profile(&flat)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                [true, false].map(|hover| {
+                    let mut player = Player {
+                        modes: super::super::state::MoveModes {
+                            hover,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let out = step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        false,
+                        Vec3::X,
+                        0.0,
+                        true,
+                        None,
+                    );
+                    (out.jumped, player.vel_y)
+                })
+            })
+            .unwrap();
+        let [(hover_jumped, hover_vy), (plain_jumped, plain_vy)] = rows;
+        assert!(
+            !hover_jumped && hover_vy == 0.0,
+            "hover must refuse the jump silently: jumped {hover_jumped}, vel_y {hover_vy}"
+        );
+        assert!(
+            plain_jumped && plain_vy > 0.0,
+            "the hover-free control must take off: jumped {plain_jumped}, vel_y {plain_vy}"
+        );
     }
 
     /// **The Elwynn hillside the director jump-climbed** — a 55° face (`ny = +0.574`, the normal

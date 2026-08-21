@@ -779,6 +779,7 @@ pub(super) fn classify_cursor(
                     slots,
                     &player_actions.spells,
                     go_inputs.spells.as_deref(),
+                    go_inputs.skill_lines.as_ref().map(|s| &s.catalog),
                     Some(self_store),
                     &go_inputs.items,
                     facts,

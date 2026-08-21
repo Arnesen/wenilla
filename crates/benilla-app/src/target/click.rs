@@ -503,6 +503,7 @@ pub(crate) fn resolve_go_action(
         slots,
         known,
         inputs.spells.as_deref(),
+        inputs.skill_lines.as_ref().map(|s| &s.catalog),
         me_store,
         &inputs.items,
         facts,

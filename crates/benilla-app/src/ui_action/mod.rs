@@ -153,9 +153,9 @@ pub(crate) struct Spells {
 impl Spells {
     /// The resolved cast time, ms — `GetCastTime 0x6e3340`'s level-scaled walk (wow-re
     /// `wave-cooldown.md`/`moving-cast-gate.md`, byte-verified): `CastingTimeIndex` resolves the
-    /// [`Self::cast_times`] row, `base + perLevel·(casterLevel − spellLevel)` floors to the
+    /// [`Self::cast_times`] row, `base + perLevel·(casterLevel − baseLevel)` floors to the
     /// row's minimum (row 1, the all-zero instant sentinel, resolves 0). The level term keys on
-    /// the `SpellRec+0x70` column ([`SpellDisplay::spell_level`]); spellmod op `0xa`
+    /// the `SpellRec+0x70` column ([`SpellDisplay::base_level`]); spellmod op `0xa`
     /// (SPELLMOD_CASTING_TIME) is unmodeled — benilla has no spellmod system — a named
     /// micro-divergence (a talent-shortened 0-second cast doesn't exist in the 1.12 data).
     /// A missing row reads 0 (instant), like a failed catalog load everywhere else.
@@ -166,7 +166,7 @@ impl Spells {
     ) -> u32 {
         self.cast_times
             .get(def.casting_time_index)
-            .map_or(0, |row| row.resolved_ms(caster_level, def.spell_level))
+            .map_or(0, |row| row.resolved_ms(caster_level, def.base_level))
     }
 }
 

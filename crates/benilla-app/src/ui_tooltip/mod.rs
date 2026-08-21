@@ -184,7 +184,25 @@ fn spell_tooltip_view(
     });
     // The required-form line (law §3.6): the Stances mask's form names off
     // SpellShapeshiftForm.dbc, joined; bit b = form id b+1. Met against the CURRENT form.
-    let requires_form = (d.stances != 0)
+    //
+    // `Stances != 0` is NOT the gate on its own — the column is overloaded. When `AttributesEx2`
+    // bit 19 is set the mask is *permissive* ("may ALSO be cast in these forms"), which is how
+    // 5875 encodes Shadowform-castable priest spells, Spirit-of-Redemption-castable heals and
+    // Moonkin-castable balance spells; reading those as requirements put a red "Requires
+    // Shadowform" on Inner Fire and "Requires Spirit of Redemption" on Flash Heal (1483).
+    //
+    // Now byte-carved as wow-re §3-REQFORM, `[0x52f10a, 0x52f2ae)`: `52f115` reads AttributesEx2,
+    // ands `0x80000`, and jumps *over the whole name loop* — the loop is the only writer of the
+    // "nothing appended" flag `[ebp-8]`, so the AddLine is skipped entirely. The line is
+    // **suppressed, not recoloured**. Three earned negatives came with it: StancesNot `+0x30` is
+    // never read here, `Attributes` bit 16 is never tested, and `0x612480` is never called — the
+    // builder duplicates the gate inline rather than sharing the usable walk's helper, which is
+    // why the two could drift apart in the first place.
+    //
+    // Two ref behaviours we knowingly don't model, both unreachable for us: the composed text is
+    // capped at 0x80 bytes (our longest join is "Battle Stance, Berserker Stance"), and a *met*
+    // requirement is dropped in the COMPACT tooltip — benilla has no compact spell tooltip.
+    let requires_form = (d.stances != 0 && !d.form_mask_is_permissive())
         .then(|| {
             let names: Vec<&str> = (0..32u32)
                 .filter(|b| d.stances & (1 << b) != 0)
@@ -733,6 +751,7 @@ fn drive_mouseover_tooltip(
                     slots,
                     &player_actions.spells,
                     go_inputs.spells.as_deref(),
+                    go_inputs.skill_lines.as_ref().map(|s| &s.catalog),
                     self_store,
                     &go_inputs.items,
                     facts,

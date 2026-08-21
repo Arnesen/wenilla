@@ -19,13 +19,18 @@
 //! gate hands every padlocked door in the game to every player. The Searing Gorge gate (lock 84)
 //! was the one that refused because it is the one that carries no `Action 0` slot.
 //!
-//! ## Satisfaction is the SPELL's value, not the player's skill
+//! ## Satisfaction is the SPELL's value — and the value's level term IS the player's skill
 //!
 //! `0x5f850f` compares the matched spell's own OPEN_LOCK **effect value**
 //! ([`benilla_formats::SpellDisplay::open_lock_skill`]) against the slot's requirement — which is
-//! `Skill[i]`, or **`GAMEOBJECT_LEVEL × 5`** when `Skill[i]` is zero (`0x5f84be`). It never reads
-//! the skill block. That is not an approximation on the client's part: the DBC encodes the same
-//! number (Pick Lock at 60 → 300, a rogue's cap; Mining at 60 → 300).
+//! `Skill[i]`, or **`GAMEOBJECT_LEVEL × 5`** when `Skill[i]` is zero (`0x5f84be`). The sentence
+//! that used to stand here — "it never reads the skill block" — was `cursor-system.md` §8.8's
+//! absolute, and wow-re REFUTED it at the bytes (`openlock-spell-store-order.md` §4a,
+//! 2026-08-14): the value's level term routes through the CGPlayer vtable (`0x6e384d → 0x6e3130
+//! → [vtbl+0xa8] = 0x5ea690`) into `PLAYER_SKILL_INFO` for the spell's own SkillLineAbility
+//! line ([`spell_skill_value`]). At skill cap the two readings coincide (`skill/5 == level`),
+//! which is how the old one survived every at-cap cross-check while a level-60 with 1 Mining
+//! satisfied a 300-skill vein (decision 1320 named the bug; this module now carries the fix).
 
 use std::collections::BTreeSet;
 
@@ -46,6 +51,9 @@ pub(crate) struct GoLockInputs<'w> {
     pub(crate) locks: Option<Res<'w, crate::go_templates::Locks>>,
     pub(crate) lock_types: Option<Res<'w, crate::go_templates::LockTypes>>,
     pub(crate) spells: Option<Res<'w, crate::ui_action::Spells>>,
+    /// The skill-line catalog — the opener-value level term's spell→line hop
+    /// ([`spell_skill_value`]). Absent without client data, which reads as skill 0 (fail-closed).
+    pub(crate) skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
     pub(crate) items: ResMut<'w, crate::items::Items>,
 }
 
@@ -140,16 +148,17 @@ pub(crate) const GO_FLAG_LOCKED: u32 = 0x2;
 /// — so iterating a `HashSet` put Blizzard's placeholder name on the cast bar at the hash's whim
 /// (B247). `known` is a [`BTreeSet`] for exactly that reason: ascending spell id is the reference
 /// array's own order after login, the server building `SMSG_INITIAL_SPELLS` out of a `std::map`.
+#[allow(clippy::too_many_arguments)] // the reference fn's own inputs, plus the two out-params
 pub(crate) fn resolve_lock(
     slots: &[LockSlot],
     known: &BTreeSet<u32>,
     spells: Option<&crate::ui_action::Spells>,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
     me: Option<&ObjectStore>,
     items: &crate::items::Items,
     go: GoFacts,
     matched_spell: &mut Option<u32>,
 ) -> LockOutcome {
-    let caster_level = me.and_then(|s| s.0.unit_level()).unwrap_or(0);
     let mut real = false;
     for slot in slots {
         match slot.key_type {
@@ -169,7 +178,8 @@ pub(crate) fn resolve_lock(
                     // `0x5f84f8` — the out-param is written on the LockType match, before the
                     // value test.
                     matched_spell.get_or_insert(id);
-                    let provides = spell.open_lock_skill(caster_level).unwrap_or(0);
+                    let skill = spell_skill_value(me, skill_lines, id);
+                    let provides = spell.open_lock_skill(skill).unwrap_or(0);
                     if provides >= required_skill(slot, go.level) {
                         return LockOutcome::OpenBySpell(id);
                     }
@@ -192,6 +202,45 @@ pub(crate) fn resolve_lock(
     } else {
         LockOutcome::Unlocked
     }
+}
+
+/// The player's skill value for `spell_id`'s own line — the opener-value level term's source
+/// (wow-re `openlock-spell-store-order.md` §4a): `0x5ea690` hops spell → SkillLineAbility line
+/// (`0x6de040`, `[+4]`), then `0x5ea520` scans `PLAYER_SKILL_INFO` (`PLAYER_SKILL_INFO_1_1 +
+/// 3·slot`) and returns value **plus both bonus halves** (`0x5ea56d`/`0x5ea578`/`0x5ea580`).
+/// Every absent leg is fail-closed like the reference's null paths: no catalog, no store, no
+/// SLA record, or a line the player does not carry all answer **0** — the opener then provides
+/// only its flat terms.
+fn spell_skill_value(
+    me: Option<&ObjectStore>,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    spell_id: u32,
+) -> u32 {
+    let Some(line) = skill_lines.and_then(|c| c.spell_to_line(spell_id)) else {
+        return 0;
+    };
+    let Some(store) = me else { return 0 };
+    line_skill_value(
+        (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
+            .filter_map(|slot| store.0.player_skill(slot)),
+        line,
+    )
+}
+
+/// The `0x5ea520` sum on one line's slot: `value + temp_bonus + perm_bonus`, floored at 0 (the
+/// bonuses are signed — a curse can push the sum below the base). First matching slot wins;
+/// a line absent from the block reads 0.
+fn line_skill_value(
+    slots: impl Iterator<Item = benilla_protocol::messages::PlayerSkillSlot>,
+    line: u32,
+) -> u32 {
+    for s in slots {
+        if u32::from(s.skill_id) == line {
+            let v = i32::from(s.value) + i32::from(s.temp_bonus) + i32::from(s.perm_bonus);
+            return v.max(0) as u32;
+        }
+    }
+    0
 }
 
 /// **`0x5f8260`** — the *targeting cursor's* lock question, and this chain's **third** consumer
@@ -369,6 +418,89 @@ mod tests {
         assert_eq!(required_skill(&skill_slot(1, 280, 1), 60), 280);
     }
 
+    /// **The 1320 bug, fixed** (wow-re `openlock-spell-store-order.md` §4a): the opener's level
+    /// term is the player's SKILL in the spell's own line, never their character level — so a
+    /// level-60 with 1 Mining is refused by a 250-skill vein the old caster-level reading handed
+    /// them. Also pins the two fail-closed legs (`0x623b70`-style: absent data reads skill 0)
+    /// and the bonus halves of the `0x5ea520` sum.
+    #[test]
+    fn the_lock_value_tracks_the_players_skill_not_their_level() {
+        use benilla_formats::{OpenLock, SkillLineCatalog, SpellCatalog, SpellDisplay};
+        use benilla_protocol::messages::{ObjectFields, FIELD_PLAYER_SKILL_INFO_1_1};
+
+        // Mining 2575, real shape: `−1 + 1 + 5.0·Δ`, baseLevel 0, LockType 3.
+        let mining = SpellDisplay {
+            open_lock: Some(OpenLock {
+                lock_type: 3,
+                effect: 0,
+            }),
+            effect_base_points: [-1, 0, 0],
+            effect_base_dice: [1, 0, 0],
+            effect_real_points_per_level: [5.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        let spells = crate::ui_action::Spells {
+            catalog: SpellCatalog::from_displays([(2575, mining)].into_iter().collect()),
+            ..crate::ui_action::Spells::empty_for_tests()
+        };
+        // Spell → line: Mining is SkillLine 186.
+        let lines = SkillLineCatalog::from_spell_lines([(2575, 186)]);
+        let known = BTreeSet::from([2575]);
+        let items = crate::items::Items::default();
+        // A 250-skill vein, available (Action 0, READY, not flagged).
+        let mut vein = [LockSlot::default(); 8];
+        vein[0] = skill_slot(3, 250, 0);
+        let facts = GoFacts {
+            state: GO_STATE_READY,
+            flag_locked: false,
+            level: 0,
+        };
+        // A level-60 store (UNIT_FIELD_LEVEL = 34) whose skill block holds Mining at `value`,
+        // with the bonus dwords in the third word ([`PlayerSkillSlot`]'s verified packing).
+        let store_with_mining = |value: u32, bonus_word: u32| {
+            ObjectStore(ObjectFields::from_pairs(&[
+                (34, 60),
+                (FIELD_PLAYER_SKILL_INFO_1_1, 186),
+                (FIELD_PLAYER_SKILL_INFO_1_1 + 1, value | (300 << 16)),
+                (FIELD_PLAYER_SKILL_INFO_1_1 + 2, bonus_word),
+            ]))
+        };
+        let resolve = |store: Option<&ObjectStore>, lines: Option<&SkillLineCatalog>| {
+            resolve_lock(
+                &vein,
+                &known,
+                Some(&spells),
+                lines,
+                store,
+                &items,
+                facts,
+                &mut None,
+            )
+        };
+
+        // 300 Mining opens; 1 Mining — the level-60 the old reading waved through — is refused.
+        let skilled = store_with_mining(300, 0);
+        assert_eq!(
+            resolve(Some(&skilled), Some(&lines)),
+            LockOutcome::OpenBySpell(2575)
+        );
+        let unskilled = store_with_mining(1, 0);
+        assert_eq!(resolve(Some(&unskilled), Some(&lines)), LockOutcome::Unmet);
+
+        // The `0x5ea520` sum counts both bonus halves: 235 + 10 temp + 5 perm = 250, exactly
+        // enough.
+        let buffed = store_with_mining(235, 10 | (5 << 16));
+        assert_eq!(
+            resolve(Some(&buffed), Some(&lines)),
+            LockOutcome::OpenBySpell(2575)
+        );
+
+        // Fail-closed legs: no skill-line catalog, or no store, reads skill 0 — refused, never
+        // a fall-back to the character level.
+        assert_eq!(resolve(Some(&skilled), None), LockOutcome::Unmet);
+        assert_eq!(resolve(None, Some(&lines)), LockOutcome::Unmet);
+    }
+
     /// A door whose only opener is gated out by its Action must refuse, **not** fall through to
     /// `CMSG_GAMEOBJ_USE`: the binary marks the lock real (`[ebp-1] = 1`) *before* asking
     /// `0x5f81d0`. This is the difference between "locked door refuses" and "locked door opens".
@@ -383,6 +515,7 @@ mod tests {
         let out = resolve_lock(
             &slots,
             &BTreeSet::new(),
+            None,
             None,
             None,
             &items,
@@ -447,7 +580,7 @@ mod tests {
             effect_base_points: [4, 0, 0],
             effect_base_dice: [1, 0, 0],
             effect_real_points_per_level: [5.0, 0.0, 0.0],
-            spell_level: 1,
+            base_level: 1,
             ..Default::default()
         };
         let spells = crate::ui_action::Spells {
@@ -471,6 +604,7 @@ mod tests {
                 &BTreeSet::from([6247]),
                 Some(&spells),
                 None,
+                None,
                 &items,
                 locked_shut,
                 &mut matched,
@@ -490,6 +624,7 @@ mod tests {
                 &BTreeSet::from([6247]),
                 Some(&spells),
                 None,
+                None,
                 &items,
                 GoFacts {
                     flag_locked: false,
@@ -500,15 +635,18 @@ mod tests {
             LockOutcome::OpenBySpell(6247),
         );
 
-        // Pick Lock sits on an Action 1 slot, so the flag *selects* it — but with no self store
-        // the level reads 0, Pick Lock provides 5, and 5 < 280 refuses. The out-param is still
-        // written, which is §8.8's `0xdf`-vs-`0xe0` discriminator.
+        // Pick Lock sits on an Action 1 slot, so the flag *selects* it — but with no store and no
+        // skill-line catalog the skill reads 0 (the fail-closed leg), Pick Lock provides its flat
+        // 5, and 5 < 280 refuses. The out-param is still written, which is §8.8's
+        // `0xdf`-vs-`0xe0` discriminator. (The satisfied-by-skill path is
+        // `the_lock_value_tracks_the_players_skill_not_their_level` below.)
         let mut matched = None;
         assert_eq!(
             resolve_lock(
                 &scholomance,
                 &BTreeSet::from([1804]),
                 Some(&spells),
+                None,
                 None,
                 &items,
                 locked_shut,
@@ -537,6 +675,7 @@ mod tests {
                 &searing_gorge,
                 &BTreeSet::from([6247]),
                 Some(&spells),
+                None,
                 None,
                 &items,
                 locked_shut,
@@ -568,6 +707,7 @@ mod tests {
                 &vein,
                 &BTreeSet::from([2575]),
                 Some(&with_mining),
+                None,
                 None,
                 &items,
                 GoFacts {
@@ -633,6 +773,7 @@ mod tests {
                 &BTreeSet::from([6478, 22810]),
                 Some(&spells),
                 None,
+                None,
                 &items,
                 unlocked,
                 &mut matched,
@@ -649,6 +790,7 @@ mod tests {
                 &mushroom,
                 &BTreeSet::from([22810, 6478]),
                 Some(&spells),
+                None,
                 None,
                 &items,
                 unlocked,
@@ -668,6 +810,7 @@ mod tests {
             resolve_lock(
                 &slots,
                 &BTreeSet::new(),
+                None,
                 None,
                 None,
                 &items,

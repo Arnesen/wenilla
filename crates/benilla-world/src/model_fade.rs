@@ -635,7 +635,8 @@ impl FadeMaterials {
 /// opaque while its unit is still ramping. A MULTIPLY batch (Mod/Mod2x) passes its **steady self**
 /// as the twin: its blend equation reads no alpha (decision 0528), so no material swap can feather
 /// it — instead it arms the ramp like any other part and `wow_model.wgsl` lerps its colour toward
-/// the blend identity by the tag alpha (the deliberate deviation of decision 0865).
+/// the blend identity by the tag alpha — 0865's mechanism, since proven the reference's own
+/// (preset 5 lerps the source colour by the instance alpha; decision 1489).
 pub struct FadeSet<'a> {
     pub steady: &'a Handle<WowModelMaterial>,
     pub blend: Option<&'a Handle<WowModelMaterial>>,

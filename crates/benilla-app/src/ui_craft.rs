@@ -255,6 +255,9 @@ fn feed_craft(
                     reagents,
                     tools,
                     tooltip: craft_tooltip(s, d),
+                    // The engine field's law names `+0x74` (real spellLevel, col 29); until the
+                    // base_level rename this was silently fed col 28. Identical on every ranked
+                    // trainer family observed, but the wiring now matches the recorded law.
                     spell_level: d.spell_level,
                 })
             })

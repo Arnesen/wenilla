@@ -341,41 +341,51 @@ fn real_spell_catalog_pins_the_skin_latch_effects() {
 }
 
 /// The **skill an opener provides** on the real Spell.dbc — the left-hand side of the client's lock
-/// satisfaction test (`0x5f850f`; decision 0752). This walk decides whether a right-click opens a
-/// lock at all, so its inputs (spellLevel 28 · EffectDieSides 64 · EffectBaseDice 67 ·
+/// satisfaction test (`0x5f850f`; decision 0752, level term corrected by wow-re
+/// `openlock-spell-store-order.md` §4a). This walk decides whether a right-click opens a lock at
+/// all, so its inputs (maxLevel 27 · baseLevel 28 · EffectDieSides 64 · EffectBaseDice 67 ·
 /// EffectDicePerLevel 70 · EffectRealPointsPerLevel 73 · EffectBasePoints 76) are pinned by
-/// *result*, against anchors whose right answers are known from the game rather than the file.
-/// Skips without client data.
+/// *result*, against anchors whose right answers are known from the game rather than the file —
+/// the below-cap rows are §4a's own discriminating table (the values the refuted caster-level
+/// reading could not produce). Skips without client data.
 #[test]
 fn real_spell_catalog_computes_the_lock_skill_an_opener_provides() {
     let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
-    // Pick Lock (1804): `4 + 1 + 5.0×(level − 1)` — a rogue's Lockpicking cap, 5×level, exactly.
-    assert_eq!(cat.get(1804).unwrap().open_lock_skill(60), Some(300));
-    assert_eq!(cat.get(1804).unwrap().open_lock_skill(45), Some(225));
-    // Mining (2575) / Herb Gathering (2366): `−1 + 1 + 5.0×level` — the same profession cap, but
-    // quoted at spellLevel 0, so they do not lose the first level the way Pick Lock does.
-    assert_eq!(cat.get(2575).unwrap().open_lock_skill(60), Some(300));
-    assert_eq!(cat.get(2366).unwrap().open_lock_skill(60), Some(300));
+    // Pick Lock (1804): `4 + 1 + 5.0×(skill/5 − 1)` — the skill itself, exactly: a capped rogue
+    // provides 300, and a 150-skill rogue provides 150 (§4a's discriminator; the old reading
+    // said 300 for both at level 60).
+    assert_eq!(cat.get(1804).unwrap().open_lock_skill(300), Some(300));
+    assert_eq!(cat.get(1804).unwrap().open_lock_skill(225), Some(225));
+    assert_eq!(cat.get(1804).unwrap().open_lock_skill(150), Some(150));
+    // Mining (2575) / Herb Gathering (2366): `−1 + 1 + 5.0×(skill/5)` — the skill, quoted at
+    // baseLevel 0, so they do not lose the first rung the way Pick Lock does. 1 Mining provides
+    // 0 — the level-60-with-1-Mining bug (decision 1320) is the 300 the old reading put here.
+    assert_eq!(cat.get(2575).unwrap().open_lock_skill(300), Some(300));
+    assert_eq!(cat.get(2575).unwrap().open_lock_skill(100), Some(100));
+    assert_eq!(cat.get(2575).unwrap().open_lock_skill(1), Some(0));
+    assert_eq!(cat.get(2366).unwrap().open_lock_skill(300), Some(300));
     // Small / Large Seaforium Charge (4056 / 4075): flat `149 + 1` = 150 and `249 + 1` = 250 — and
     // lock 92 asks for `Blasting 150`. The charge exists to open exactly that door, so the equality
-    // is the cross-check: a column slip anywhere in the walk breaks it.
-    assert_eq!(cat.get(4056).unwrap().open_lock_skill(1), Some(150));
-    assert_eq!(cat.get(4075).unwrap().open_lock_skill(1), Some(250));
-    // The universally-known "Opening"/"Closing" family is flat 100 at every level — which is why
+    // is the cross-check: a column slip anywhere in the walk breaks it. Skill-independent — the
+    // caster's Engineering changes nothing.
+    assert_eq!(cat.get(4056).unwrap().open_lock_skill(0), Some(150));
+    assert_eq!(cat.get(4056).unwrap().open_lock_skill(300), Some(150));
+    assert_eq!(cat.get(4075).unwrap().open_lock_skill(0), Some(250));
+    // The universally-known "Opening"/"Closing" family is flat 100 at every skill — which is why
     // the Action gate, not the value test, is what keeps them off a padlocked door (decision 0752).
     for id in [3365, 6233, 6246, 6247, 6477, 6478, 21651, 21652] {
         assert_eq!(
-            cat.get(id).unwrap().open_lock_skill(1),
+            cat.get(id).unwrap().open_lock_skill(0),
             Some(100),
             "spell {id} is a flat-100 opener"
         );
-        assert_eq!(cat.get(id).unwrap().open_lock_skill(60), Some(100));
+        assert_eq!(cat.get(id).unwrap().open_lock_skill(300), Some(100));
     }
     // A spell with no OPEN_LOCK effect provides nothing.
-    assert_eq!(cat.get(133).unwrap().open_lock_skill(60), None);
+    assert_eq!(cat.get(133).unwrap().open_lock_skill(300), None);
 }
 
 /// The cooldown/cost/range columns on the real build-5875 `Spell.dbc`, pinned 2026-07-10
