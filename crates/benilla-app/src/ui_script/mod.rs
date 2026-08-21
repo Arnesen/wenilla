@@ -853,6 +853,11 @@ mod shipped_xml_tests;
 #[cfg(test)]
 mod bagnon_render_tests;
 
+/// Bug B267 end to end: a hunter's Quiver publishes its global functions (see the file header for
+/// the three walls that stopped it).
+#[cfg(test)]
+mod quiver_tests;
+
 /// The UI's per-world-entry lifecycle: teardown at the character screen, a genuine second load at
 /// the next login (decision 1290).
 #[cfg(test)]

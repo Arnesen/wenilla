@@ -69,6 +69,14 @@ const CLEAR_AFTER_READY_FRAMES: u32 = 3;
 /// nothing extra.
 const WAIT_LOG_AFTER: f32 = 3.0;
 const WAIT_LOG_EVERY: f32 = 2.0;
+/// How far a same-map snap must move the body before its destination is treated as a **load** at
+/// all (yards). Under this, a teleport cannot outrun the streamer — the ground and buildings you
+/// land on are the ones you left — and the raise below would only be able to flash a cover over
+/// content that happened to be arriving anyway. Sized to clear every *combat* relocation with
+/// room to spare (charge/intercept 25 yd, blink 20 yd, the knockbacks under 30), because those
+/// end in a server teleport too and a black screen mid-fight is the one thing this must never
+/// do; the reported case — `.tele` across a city — is 458 yd.
+const SNAP_LOAD_MIN_YD: f32 = 100.0;
 
 /// Bevy resource wrapper around the format-crate [`LoadingScreenCatalog`] (the `LoadingScreenID` → BLP
 /// path table). Paired with [`MapCatalogRes`] (the `mapId` → `LoadingScreenID` FK) to resolve art.
@@ -109,6 +117,10 @@ pub(crate) struct LoadingScreen {
     /// [`WAIT_LOG_AFTER`]).
     active_since: f32,
     last_wait_log: f32,
+    /// The avatar's position as of LAST frame — so a snap's own displacement is knowable here
+    /// (the snap is applied in `Input`, a stage before this one). Read only by the snap raise
+    /// below, which uses it to tell a relocation from a spell's little hop.
+    last_pos: Option<Vec3>,
 }
 
 impl LoadingScreen {
@@ -385,7 +397,8 @@ fn drive_loading_screen(
     for w in worldports.read() {
         screen.raise("worldport", false, Some(w.map_id), now);
     }
-    if teleports.read().next().is_some() {
+    let teleported = teleports.read().next().is_some();
+    if teleported {
         screen.awaiting_snap = false;
         screen.pending_map = None;
     }
@@ -435,6 +448,34 @@ fn drive_loading_screen(
         && *state.get() == crate::char_select::ClientState::InWorld
     {
         screen.raise("focus not resident", false, None, now);
+    }
+
+    // --- …and the same test at the SNAP, on everything the reveal actually needs. The backstop
+    // above watches one term — the focus TERRAIN tile — and a teleport inside the streamer's keep
+    // band (up to ~1600 yd, three tiles) lands on ground that is already resident, so it never
+    // fires. The destination's *buildings* are a different question: their placements may still be
+    // spawning, and since the retained pass (1429) a spawned building still has a bake between it
+    // and the screen. That is how `.tele` across a city put the player down in a Stormwind with no
+    // Stormwind in it, uncovered, for the frames it took to arrive.
+    //
+    // Only at a snap, and only against the same predicate that CLEARS the screen: a summon across
+    // a room whose world is already there raises nothing (no flash), and ordinary walking — which
+    // crosses tile lines with placements pending all day — is not a snap and cannot reach this. ---
+    let body = player.as_ref().map(|p| p.pos);
+    let relocated = match (teleported, screen.last_pos, body) {
+        (true, Some(was), Some(now_pos)) => was.distance(now_pos) >= SNAP_LOAD_MIN_YD,
+        // No previous position to compare (the entry frame): treat the snap as a relocation, the
+        // conservative arm — a covered load is recoverable, a naked one is what this closes.
+        (true, _, _) => true,
+        _ => false,
+    };
+    screen.last_pos = body;
+    if relocated
+        && !screen.active
+        && *state.get() == crate::char_select::ClientState::InWorld
+        && !(progress.is_ready() && progress.presentable())
+    {
+        screen.raise("teleport, destination not presentable", false, None, now);
     }
 
     // --- Clear: the destination snap has landed, the scene is presentable (tiles + focus

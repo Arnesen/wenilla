@@ -195,43 +195,65 @@ impl LookConfig {
         LOOK_SENSITIVITY * self.sensitivity
     }
 }
-/// The auto-follow's angular rate — 1.12's `cameraYawSmoothSpeed`, whose registrar default is
-/// **180 °/s** (`WoW.exe` `[0xbe1070]`, the yaw transition channel's own CVar float — wow-re
-/// `ui/scratch/camera-control.md`). The reference exposes it as the AUTO_FOLLOW_SPEED slider
-/// (`UIOptionsFrameSliders`, 90 … 270 °/s by 10) and *disables that slider* when the style is
-/// Never; benilla ships the registrar default as a constant, since it has no row for it yet.
-const FOLLOW_RATE: f32 = std::f32::consts::PI;
+/// The auto-follow's angular rate — 1.12's `cameraYawSmoothSpeed`, registrar default **180 °/s**
+/// (`WoW.exe` `[0xbe1070]`, read at `0x512d75`). It is not a slew rate but a *duration* divisor:
+/// the transition below lasts `|Δyaw| / rate × factor`, so 180 °/s is the **average** rate at
+/// factor 1, and the cosine profile peaks at π/2 × that. 1.12 exposes it as the AUTO_FOLLOW_SPEED
+/// slider (`UIOptionsFrameSliders`, 90 … 270 by 10), disabled while the style is Never.
+pub(crate) const FOLLOW_SPEED_DEFAULT: f32 = 180.0;
+/// The 1.12 slider's own range for [`FollowConfig::yaw_speed`].
+pub(crate) const FOLLOW_SPEED_RANGE: std::ops::RangeInclusive<f32> = 90.0..=270.0;
+/// `cameraSmoothTimeMin`/`Max` — the transition's duration floor and ceiling, **VERIFIED
+/// 0.1 s / 2.0 s** (`[0xbe105c]`/`[0xbe1038]`, clamped at `0x510f4d`). These are why the felt
+/// rate is *not* 180 °/s at the ends: a 5° correction still takes 0.1 s, and a lazy `Track`
+/// return (factor 10) is capped at 2 s however far it has to come.
+const FOLLOW_TIME_MIN: f32 = 0.1;
+const FOLLOW_TIME_MAX: f32 = 2.0;
+/// The "already there / already arming this" epsilon — the reference's own `0.001`
+/// (`[0x801360]`, `0x512ce4`/`0x512d41`). A float-equality guard, not a perceptible deadzone.
+const FOLLOW_EPS: f32 = 1.0e-3;
 
-/// **Camera Following Style** — 1.12's `cameraSmoothStyle` (decision 1493): does the camera swing
-/// back behind the character on its own?
+/// **Camera Following Style** — 1.12's `cameraSmoothStyle` (decisions 1493/1502): does the camera
+/// return to behind the character on its own?
 ///
 /// benilla shipped the reference behaviour *removed* from the day the camera was written (the
-/// orbit offset simply persisted, a director's call) — this is the setting that gives it back, and
-/// the director's call now is the reference's own default: **Smart**.
+/// orbit offset simply persisted, a director's call) — this is the setting that gives it back, at
+/// the reference's own default: **Smart**.
 ///
-/// The three values are the reference's, dropdown order and all (`UIOptionsFrameCameraDropDown`,
-/// which writes this CVar): `"1"` Smart, `"2"` Always, `"3"` Never — note that Never is **3**, not
-/// 0. The registrar default is `"1"`.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// **The enum is the ENGINE's, `0 = Never · 1 = Smart · 2 = Always`** — byte-verified twice over
+/// (wow-re `ui/scratch/camera-smooth-style.md` §2: the registration loop walks
+/// `{"Never","Smart","Always"}` filling three blocks in order, and both consumers index by
+/// `style × stride`). 1.12's own *dropdown* writes `1/2/3` instead (`UIOptionsFrameCameraDropDown`
+/// — Smart 1, Always 2, Never **3**), and 3 is not a style at all: the validator accepts it
+/// (`0x50b330(v, 0, 3)`) but the terrain-tilt consumer does not bound-check and indexes 360 bytes
+/// past its table. So the reference's shipped UI writes an out-of-range value for Never, and a
+/// client must clamp to 0..2. We do: our own dropdown writes the engine's numbers, and a stray
+/// `3` is *read* as Never — what whoever wrote it meant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum FollowStyle {
-    /// Stay where placed, *except while the character is moving* — the reference's own
+    /// Never auto-adjust: the orbit offset stays exactly where the hand left it. This is what
+    /// benilla did unconditionally before 1493. It does **not** stop the rigid keyboard-turn
+    /// carry — in the reference that is a different mechanism entirely (the camera yaw is stored
+    /// *relative* to the followed unit's facing), and Never leaves it running.
+    Never,
+    /// Stay where placed, *except* while the character is being driven — the reference's own
     /// "(Recommended Mode)" and its registrar default.
     #[default]
     Smart,
-    /// Always prefer being behind the character.
+    /// Always prefer being behind the character: every input edge arms a return, standing still
+    /// included.
     Always,
-    /// Never auto-adjust: the orbit offset stays exactly where the hand left it. This is what
-    /// benilla did unconditionally before 1493.
-    Never,
 }
 
 impl FollowStyle {
-    /// From the CVar's number. Anything off the three stops reads as the registrar default —
-    /// a hand-edited config or an addon's stray write gets the shipped behaviour, not a dead
-    /// camera.
+    /// From the CVar's number. `3` is the shipped-UI's Never (see the type doc); anything else off
+    /// the ladder reads as the registrar default rather than as a dead camera.
     pub(crate) fn from_cvar(v: f32) -> Self {
         match v as i32 {
+            0 => Self::Never,
             2 => Self::Always,
+            // The 1.12 dropdown's own Never. Out of range for the engine's tables — accepted here
+            // because a config or addon carrying it means Never, not "surprise me".
             3 => Self::Never,
             _ => Self::Smart,
         }
@@ -240,47 +262,292 @@ impl FollowStyle {
     /// The CVar string this style is — the value the table and `config.toml` carry.
     pub(crate) fn cvar(self) -> &'static str {
         match self {
+            Self::Never => "0",
             Self::Smart => "1",
             Self::Always => "2",
-            Self::Never => "3",
         }
     }
 
-    /// Should the camera chase the character's facing this frame? `moving` is the character's own
-    /// translation intent (Smart's gate — the reference's "except when your character is moving").
-    fn chases(self, moving: bool) -> bool {
+    /// The `cameraSmooth<Style><State>{Delay,Factor}` row — family A at `[0xbe0e70]`, dumped at
+    /// its defaults in wow-re `camera-smooth-style.md` §3. Factor `0` means *cancel*: the armed
+    /// transition is dropped and the camera keeps the offset it has.
+    ///
+    /// Family B (`cameraSmoothViewData<Style>Yaw{Delay,Factor}`) multiplies in: its Yaw factor is
+    /// `1.0` under Smart and Always and `0.0` under Never, and its delay is `0.0` at every style —
+    /// so for the yaw channel the composition is the identity and the table below is the answer.
+    fn row(self, state: FollowState) -> (f32, f32) {
         match self {
-            Self::Always => true,
-            Self::Smart => moving,
-            Self::Never => false,
+            // Every row is 0/0 — and family B's Never Yaw factor is 0.0 as well, twice over.
+            Self::Never => (0.0, 0.0),
+            Self::Smart => match state {
+                // The two states that make Smart *smart*: nothing returns while you stand or stop.
+                FollowState::Idle | FollowState::Stop => (0.0, 0.0),
+                // Driven from outside (a taxi, a spline, a fear): a lazy return — 0.4 s of delay
+                // and factor 10, which is 18 °/s of average rate before the 2 s cap bites.
+                FollowState::Track | FollowState::Fear => (0.4, 10.0),
+                FollowState::Move | FollowState::Strafe | FollowState::Turn => (0.0, 1.0),
+            },
+            // Always is factor 1.0 in every state, Idle and Stop included.
+            Self::Always => (0.0, 1.0),
         }
     }
 }
 
-/// What [`seat_camera`] needs to run the auto-follow this frame — the style, where "behind" is,
-/// and whether the character is moving. Bundled because the three are one question, and
+/// The seven arming states of 1.12's auto-return classifier (`0x510960`, wow-re
+/// `camera-smooth-style.md` §6.2), **in the reference's own priority order — highest first**. The
+/// winner is the highest-priority bit set, and the states are read off the *camera's* input
+/// command word, not off the character's velocity: right-mouse alone is a `Turn`, a turn key
+/// under right-mouse is a `Strafe`, and both mouse buttons are a `Move`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum FollowState {
+    /// Driven by something that is not us and is not a spline — the reference's external-control
+    /// flag `[cam+0x90] & 0x1000`.
+    Fear,
+    Turn,
+    Strafe,
+    Move,
+    /// Externally-driven movement (taxi / server spline) — `[cam+0x90] & 0x100`.
+    Track,
+    /// This edge released a movement input (the reference's `stopping` argument). Carries the same
+    /// `(0, 0)` / `(0, 1)` rows as [`FollowState::Idle`] at every shipped style, so the two are
+    /// currently indistinguishable in behaviour — kept apart because the *matrix* keeps them apart.
+    Stop,
+    Idle,
+}
+
+/// The camera's input command word — 1.12's `[InputControl+0x4]` bit for bit (wow-re
+/// `camera-smooth-style.md` §6.1), because the state classifier and the *edge* that arms a
+/// transition are both defined on it. benilla has no PitchUp/PitchDown bindings, so those two bits
+/// are simply never set.
+pub(super) mod follow_cmd {
+    /// `TurnOrAction` — right mouse / mouselook.
+    pub(in crate::player) const RIGHT_MOUSE: u32 = 0x1;
+    /// `CameraOrSelectOrMove` — left mouse.
+    pub(in crate::player) const LEFT_MOUSE: u32 = 0x2;
+    pub(in crate::player) const FORWARD: u32 = 0x10;
+    pub(in crate::player) const BACKWARD: u32 = 0x20;
+    pub(in crate::player) const STRAFE_LEFT: u32 = 0x40;
+    pub(in crate::player) const STRAFE_RIGHT: u32 = 0x80;
+    pub(in crate::player) const TURN_LEFT: u32 = 0x100;
+    pub(in crate::player) const TURN_RIGHT: u32 = 0x200;
+    pub(in crate::player) const AUTORUN: u32 = 0x1000;
+    /// The union of bits 20/21/23, which the reference folds into the camera's `Track` flag —
+    /// externally-driven movement.
+    pub(in crate::player) const TRACK: u32 = 0x100000;
+    /// External control (the reference's own `[cam+0x90] & 0x1000`, not an InputControl bit —
+    /// carried here so one word carries every edge the arming function reacts to).
+    pub(in crate::player) const FEAR: u32 = 0x2000_0000;
+
+    /// The bits `Move` reads: forward, backward, autorun.
+    pub(in crate::player) const MOVE_BITS: u32 = FORWARD | BACKWARD | AUTORUN;
+    pub(in crate::player) const STRAFE_BITS: u32 = STRAFE_LEFT | STRAFE_RIGHT;
+    pub(in crate::player) const TURN_BITS: u32 = TURN_LEFT | TURN_RIGHT;
+}
+
+/// The knobs behind the auto-follow (decision 1502) — the style, the style the *externally-driven*
+/// states use instead, and the rate. All three are 1.12 CVars with the reference's own defaults.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct FollowConfig {
+    /// `cameraSmoothStyle`.
+    pub(crate) style: FollowStyle,
+    /// `cameraSmoothTrackingStyle` — the selector the reference swaps in when the state mask so
+    /// much as *contains* `Track` or `Fear` (`0x510a51 test bl,0x44`, before the priority scan),
+    /// indexing the very same matrices. Registrar default `"1"` = Smart, like its sibling.
+    pub(crate) tracking_style: FollowStyle,
+    /// `cameraYawSmoothSpeed`, °/s — see [`FOLLOW_SPEED_DEFAULT`].
+    pub(crate) yaw_speed: f32,
+}
+
+impl Default for FollowConfig {
+    fn default() -> Self {
+        Self {
+            style: FollowStyle::default(),
+            tracking_style: FollowStyle::default(),
+            yaw_speed: FOLLOW_SPEED_DEFAULT,
+        }
+    }
+}
+
+/// What [`seat_camera`] needs to run the auto-follow this frame: the knobs, where "behind" is, and
+/// the input word whose *edges* arm a return. Bundled because they are one question, and
 /// `seat_camera` is already at its argument ceiling.
 pub(super) struct FollowInput {
-    pub(super) style: FollowStyle,
+    pub(super) cfg: FollowConfig,
     /// The character's own facing (same yaw convention as [`FlyCam::yaw`] — a right-drag couples
-    /// the two directly).
+    /// the two directly), so the camera's *offset* is `cam.yaw − face_yaw`.
     pub(super) face_yaw: f32,
-    /// Is the character translating this frame? (Turn-in-place is not movement here: a keyboard
-    /// turn already carries the camera rigidly, so there is no offset left for the chase.)
-    pub(super) moving: bool,
+    /// This frame's [`follow_cmd`] word.
+    pub(super) command: u32,
 }
 
 impl FollowInput {
-    /// The yaw this frame's chase adds — the shortest arc to the character's facing, capped at
-    /// [`FOLLOW_RATE`]·dt so the camera *slews* rather than snapping, and exactly zero on a style
-    /// (or a stillness) that isn't chasing. The cap stops **at** the target: the clamp can never
-    /// overshoot, so a settled camera writes nothing and the no-op gate downstream stays quiet.
-    fn step(&self, cam_yaw: f32, dt: f32) -> f32 {
-        if !self.style.chases(self.moving) {
-            return 0.0;
+    /// The winning state — the reference's descending priority scan, highest bit first.
+    fn state(&self, stopping: bool) -> FollowState {
+        let mf = self.command;
+        let held = |bits: u32| mf & bits != 0;
+        if held(follow_cmd::FEAR) {
+            FollowState::Fear
+        } else if held(follow_cmd::TURN_BITS) || held(follow_cmd::RIGHT_MOUSE) {
+            FollowState::Turn
+        } else if held(follow_cmd::STRAFE_BITS)
+            || (held(follow_cmd::RIGHT_MOUSE) && held(follow_cmd::TURN_BITS))
+        {
+            FollowState::Strafe
+        } else if held(follow_cmd::MOVE_BITS)
+            || (held(follow_cmd::RIGHT_MOUSE) && held(follow_cmd::LEFT_MOUSE))
+        {
+            FollowState::Move
+        } else if held(follow_cmd::TRACK) {
+            FollowState::Track
+        } else if stopping {
+            FollowState::Stop
+        } else {
+            FollowState::Idle
         }
-        let step = FOLLOW_RATE * dt;
-        wrap_pi(self.face_yaw - cam_yaw).clamp(-step, step)
+    }
+
+    /// Which style picks the row: the *tracking* style whenever the mask so much as contains
+    /// `Track` or `Fear`, even when a higher-priority state supplies the row.
+    fn style(&self) -> FollowStyle {
+        if self.command & (follow_cmd::TRACK | follow_cmd::FEAR) != 0 {
+            self.cfg.tracking_style
+        } else {
+            self.cfg.style
+        }
+    }
+}
+
+/// The armed yaw transition — the reference's descriptor `[+0x208 startMs, +0x20c dur,
+/// +0x210 target, +0x214 start]`, in seconds and in *offset* space.
+#[derive(Clone, Copy, Debug)]
+struct FollowArm {
+    /// The offset the transition started from, radians (camera yaw minus character facing).
+    from: f32,
+    /// Where it is going. `0.0` — directly behind — at the shipped defaults, because
+    /// `cameraYawSmoothMin`/`Max` are both `0.0` and the reference *substitutes* the crossed bound
+    /// for the saved view yaw whenever the live offset is outside the band.
+    to: f32,
+    /// Seconds the move takes, already clamped to `[FOLLOW_TIME_MIN, FOLLOW_TIME_MAX]`.
+    dur: f32,
+    /// Seconds of dead time before it starts (`Track`/`Fear` under Smart: 0.4).
+    delay: f32,
+    /// Seconds since it was armed.
+    elapsed: f32,
+    /// What it was armed with — the reference's re-arm memo (`[+0x218, +0x21c]`), so a repeated
+    /// edge asking for the same transition is a no-op instead of restarting the swing.
+    armed_with: (f32, f32),
+}
+
+/// The auto-follow's own state on the rig: the input word we last saw (edges are what arm a
+/// return) and the transition in flight, if any.
+#[derive(Default)]
+pub(super) struct FollowRig {
+    last_command: Option<u32>,
+    arm: Option<FollowArm>,
+}
+
+impl FollowRig {
+    /// Run the auto-follow for a frame and return the camera yaw it wants, if it wants one.
+    ///
+    /// The shape is the reference's, and the shape is the point (wow-re `camera-smooth-style.md`
+    /// §6/§8): a transition is **armed on an input edge**, from a snapshot taken at that instant,
+    /// and then plays out unattended — it is *not* a per-frame chase of a moving target. That is
+    /// why "drag the camera aside, then press W" swings you back over one smooth arc, while
+    /// holding W changes nothing at all.
+    fn advance(
+        &mut self,
+        input: &FollowInput,
+        cam_yaw: f32,
+        dt: f32,
+        look_held: bool,
+    ) -> Option<f32> {
+        let word = input.command;
+        let previous = self.last_command.replace(word);
+        // A held drag owns the camera: the yaw channel is frozen (`0x50f623`), arming is gated
+        // (`0x510850`'s `!([cam+0x90] & 1)`), and **entering** mouse-look cancels whatever was in
+        // flight outright (`0x50fe30` zeroes the descriptors). So the return does not resume when
+        // the button comes up — it begins at the next input edge after the release, which is
+        // usually the release itself (the mouse bits are part of the word).
+        if look_held {
+            self.arm = None;
+            return None;
+        }
+        // The EDGE: any movement/camera binding changing state re-evaluates the transition. The
+        // reference re-evaluates on the binding call itself, not on a change of the classified
+        // state, which is why releasing the drag while standing still is an Idle *arming* under
+        // Always and an Idle *cancel* under Smart.
+        if let Some(p) = previous.filter(|p| *p != word) {
+            // `stopping` — the reference's second argument, set by the Stop half of a movement
+            // binding. Our equivalent is the edge itself: a movement bit went away.
+            let stopping = (p & !word)
+                & (follow_cmd::MOVE_BITS | follow_cmd::STRAFE_BITS | follow_cmd::TURN_BITS)
+                != 0;
+            self.arm(input, cam_yaw, stopping);
+        }
+        let arm = self.arm.as_mut()?;
+        arm.elapsed += dt;
+        let t = arm.elapsed - arm.delay;
+        if t < 0.0 {
+            return None; // still inside the delay window
+        }
+        let s = t / arm.dur;
+        let offset = if s >= 1.0 {
+            let to = arm.to;
+            self.arm = None;
+            to
+        } else {
+            // The reference's kernel `0x5b7bb0` — a **cosine** smoothstep, eased at both ends:
+            // `a + (b − a)·(1 − cos(πs))/2`.
+            let e = (1.0 - (std::f32::consts::PI * s).cos()) * 0.5;
+            arm.from + (arm.to - arm.from) * e
+        };
+        Some(wrap_pi(input.face_yaw + offset))
+    }
+
+    /// What the transition is doing, for `WOW_CAM_DUMP` — `None` when nothing is armed, else
+    /// `(elapsed, delay, duration)` in seconds. The auto-follow is the one camera behaviour with
+    /// no headless retest (nothing synthesizes a mouse drag), so the trace line is how a run says
+    /// what it armed and when.
+    fn probe(&self) -> Option<(f32, f32, f32)> {
+        self.arm.map(|a| (a.elapsed, a.delay, a.dur))
+    }
+
+    /// The arming half (`0x510960` → `0x512c70`): pick the row, then either cancel outright or
+    /// snapshot a transition to the target offset.
+    fn arm(&mut self, input: &FollowInput, cam_yaw: f32, stopping: bool) {
+        let (delay, factor) = input.style().row(input.state(stopping));
+        if factor == 0.0 {
+            // Cancel: the target becomes the live yaw and the channel disarms — the camera simply
+            // keeps the offset it has. This is Smart standing still, and it is all of Never.
+            self.arm = None;
+            return;
+        }
+        // The target: directly behind, at the shipped defaults (see [`FollowArm::to`]).
+        let to = 0.0;
+        let from = wrap_pi(cam_yaw - input.face_yaw);
+        let gap = (to - from).abs();
+        if gap < FOLLOW_EPS {
+            return; // already there — the reference returns without arming
+        }
+        // The re-arm memo: an edge asking for the transition already in flight is a no-op, so a
+        // second keypress mid-swing does not restart it from the current angle.
+        if self.arm.is_some_and(|a| {
+            a.to == to
+                && (a.armed_with.0 - delay).abs() < FOLLOW_EPS
+                && (a.armed_with.1 - factor).abs() < FOLLOW_EPS
+        }) {
+            return;
+        }
+        let rate = input.cfg.yaw_speed.to_radians().max(FOLLOW_EPS);
+        let dur = (gap / rate * factor).clamp(FOLLOW_TIME_MIN, FOLLOW_TIME_MAX);
+        self.arm = Some(FollowArm {
+            from,
+            to,
+            dur,
+            delay,
+            elapsed: 0.0,
+            armed_with: (delay, factor),
+        });
     }
 }
 
@@ -355,6 +622,10 @@ pub(crate) struct CameraControl {
     /// the camera zooms into the head (first-person). `control` computes it (it owns the pivot + camera
     /// pose); [`apply_self_model_fade`] applies it to the body parts. Starts opaque.
     pub(super) self_fade_alpha: f32,
+    /// The auto-follow's own state (decision 1502): the input word we last saw, and the armed
+    /// return in flight. It lives on the rig rather than beside the knob because it is *pose*, not
+    /// setting — a transition survives the frame, not the session.
+    pub(super) follow: FollowRig,
 }
 
 impl CameraControl {
@@ -646,14 +917,19 @@ pub(super) fn seat_camera(
     // — no INPUT-turn carry against the user's hand. (A transport deck's turn is not an input and
     // never arrives here — the ride block applies it to `cam.yaw` directly, drag or no drag.)
     //
-    // **The auto-follow** (decision 1493, 1.12's `cameraSmoothStyle`) rides the same gate for the
-    // same reason — a held drag owns the camera, hand on it: swing the camera back behind the
-    // character, along the shortest arc, at [`FOLLOW_RATE`]. Which frames it runs on is the
-    // player's setting — Always every frame, Smart only while the character is translating, Never
-    // not at all (the behaviour benilla shipped unconditionally until now).
-    if rig.look.is_none() {
+    // **The auto-follow** (1.12's `cameraSmoothStyle`, decisions 1493/1502) rides the same gate
+    // for the same reason — a held drag owns the camera, hand on it. It is NOT a per-frame chase:
+    // an input edge arms a cosine-smoothstep return to directly-behind and that transition then
+    // plays out unattended ([`FollowRig::advance`]). It writes an absolute yaw because our camera
+    // stores one; the reference stores the *offset* and re-adds the facing at render time, which
+    // is the same picture and a different mechanism (wow-re `camera-smooth-style.md` §10 — and
+    // the reason Never must not, and here does not, touch the rigid carry above).
+    let look_held = rig.look.is_some();
+    if !look_held {
         cam.yaw += turn_delta;
-        cam.yaw += follow.step(cam.yaw, dt);
+    }
+    if let Some(yaw) = rig.follow.advance(follow, cam.yaw, dt, look_held) {
+        cam.yaw = yaw;
     }
     // Orient the camera, then orbit it behind the avatar's torso. The framing **pivot** is
     // `feet + cam_pivot_height` (model-derived, ~neck height — [`CameraPivot`]); the camera looks at
@@ -722,9 +998,15 @@ pub(super) fn seat_camera(
     // measured. `open` is printed beside the eased arm so a hit/miss alternation in the CAST is
     // visible even on a frame where the ease has not yet moved the camera far enough to see.
     if std::env::var_os("WOW_CAM_DUMP").is_some() {
+        // `follow=` is the auto-follow's own reading (1502): the offset the return is animating,
+        // the state the input word classifies to, and — once armed — how far through the
+        // transition this frame is. `off` moving while `arm` reads `-` means something other than
+        // the follow moved the camera.
+        let (elapsed, delay, dur) = rig.follow.probe().unwrap_or((-1.0, -1.0, -1.0));
         eprintln!(
             "[cam] yaw {:.6} pitch {:.6} dist {:.6} open {:.6} coll {:.6} frac {:.6} \
-             pos [{:.6},{:.6},{:.6}] bits [{:08x},{:08x},{:08x}]",
+             pos [{:.6},{:.6},{:.6}] bits [{:08x},{:08x},{:08x}] \
+             follow off {:.6} state {:?} word {:06x} arm {:.3}/{:.3}+{:.3}",
             cam.yaw,
             cam.pitch,
             rig.distance,
@@ -737,6 +1019,12 @@ pub(super) fn seat_camera(
             translation.x.to_bits(),
             translation.y.to_bits(),
             translation.z.to_bits(),
+            wrap_pi(cam.yaw - follow.face_yaw),
+            follow.state(false),
+            follow.command,
+            elapsed,
+            dur,
+            delay,
         );
     }
 
@@ -1110,47 +1398,243 @@ mod tests {
         assert_eq!(slow.rate(), LOOK_SENSITIVITY * 0.5);
     }
 
-    /// **The auto-follow** (decision 1493) — 1.12's `cameraSmoothStyle`, the setting benilla spent
-    /// its whole life behaving as "Never". Four properties, and the last two are the ones a
-    /// re-derivation gets wrong: the style gate (Smart is *movement*-gated, Always is not, Never is
-    /// never), the rate cap, the fact that the chase takes the SHORT way round the ±π seam, and
-    /// that it stops exactly ON the facing rather than oscillating across it.
+    /// **The auto-follow** (decisions 1493/1502) — 1.12's `cameraSmoothStyle`, the setting benilla
+    /// spent its whole life behaving as "Never". The properties that a re-derivation gets wrong,
+    /// and that the byte-verified mechanism (wow-re `camera-smooth-style.md`) turns on:
+    /// it is armed by an input **edge** and then plays out unattended (not a per-frame chase of a
+    /// moving target), the profile is a **cosine** smoothstep, the duration is `|Δ| / rate ×
+    /// factor` **clamped to [0.1 s, 2.0 s]**, and Smart's `Idle`/`Stop` rows are a *cancel* — which
+    /// is what "stays where you put it, except while you're moving" actually is.
     #[test]
-    fn the_auto_follow_chases_on_the_styles_that_chase_and_never_overshoots() {
-        const DT: f32 = 1.0 / 60.0;
-        let step = |style, moving, face_yaw, cam_yaw| {
-            FollowInput {
+    fn the_auto_follow_is_armed_by_an_input_edge_and_eases_home() {
+        const DT: f32 = 1.0 / 120.0;
+        // A quarter turn of orbit offset, left there by a drag.
+        const OFFSET: f32 = std::f32::consts::FRAC_PI_2;
+
+        fn cfg(style: FollowStyle) -> FollowConfig {
+            FollowConfig {
                 style,
-                face_yaw,
-                moving,
+                tracking_style: style,
+                yaw_speed: FOLLOW_SPEED_DEFAULT,
             }
-            .step(cam_yaw, DT)
-        };
+        }
+        /// Run `secs` of frames at a fixed input word; returns the camera yaw it ends on.
+        fn run(rig: &mut FollowRig, cfg: FollowConfig, word: u32, cam_yaw: f32, secs: f32) -> f32 {
+            let mut yaw = cam_yaw;
+            for _ in 0..((secs / DT).round() as i32).max(0) {
+                let input = FollowInput {
+                    cfg,
+                    face_yaw: 0.0,
+                    command: word,
+                };
+                if let Some(y) = rig.advance(&input, yaw, DT, false) {
+                    yaw = y;
+                }
+            }
+            yaw
+        }
 
-        // Never is inert — the camera stays exactly where the hand left it, moving or not.
-        assert_eq!(step(FollowStyle::Never, true, 1.0, 0.0), 0.0);
-        // Smart is gated on the character actually translating ("except when your character is
-        // moving"); Always is not.
-        assert_eq!(step(FollowStyle::Smart, false, 1.0, 0.0), 0.0);
-        assert!(step(FollowStyle::Smart, true, 1.0, 0.0) > 0.0);
-        assert!(step(FollowStyle::Always, false, 1.0, 0.0) > 0.0);
-
-        // A big gap slews at the rate, not in one frame.
-        let capped = step(FollowStyle::Always, true, 3.0, 0.0);
-        assert!((capped - FOLLOW_RATE * DT).abs() < 1.0e-6, "{capped}");
-        // A gap smaller than one frame's slew lands ON the facing — no overshoot, and the next
-        // frame writes exactly nothing (which is what keeps the no-op transform gate quiet).
-        let small = 0.5 * FOLLOW_RATE * DT;
-        let landed = step(FollowStyle::Always, true, small, 0.0);
-        assert!((landed - small).abs() < 1.0e-6, "{landed} vs {small}");
-        assert_eq!(step(FollowStyle::Always, true, 0.0, 0.0), 0.0);
-
-        // Across the ±π seam the chase takes the short way: a facing at −3.1 from a camera at 3.1
-        // is 0.08 rad AHEAD, not 6.2 rad behind.
-        assert!(
-            step(FollowStyle::Always, true, -3.1, 3.1) > 0.0,
-            "the shortest arc, not the long way round"
+        // ── Smart: standing still with the camera dragged aside, nothing happens; the moment the
+        // W edge lands, one armed transition brings it home over |Δ|/180°/s = 0.5 s.
+        let mut rig = FollowRig::default();
+        let c = cfg(FollowStyle::Smart);
+        let parked = run(&mut rig, c, 0, OFFSET, 1.0);
+        assert_eq!(
+            parked, OFFSET,
+            "Smart standing still leaves the camera alone"
         );
+        let half = run(&mut rig, c, follow_cmd::FORWARD, parked, 0.25);
+        assert!(
+            half < OFFSET * 0.75 && half > OFFSET * 0.25,
+            "mid-swing, eased: {half}"
+        );
+        let home = run(&mut rig, c, follow_cmd::FORWARD, half, 0.3);
+        assert!(home.abs() < 1.0e-4, "arrived behind the character: {home}");
+        // And holding W changes nothing further — the transition is spent, not a standing chase.
+        let still_home = run(&mut rig, c, follow_cmd::FORWARD, home + 0.4, 1.0);
+        assert_eq!(
+            still_home,
+            home + 0.4,
+            "a HELD key re-arms nothing: only edges arm"
+        );
+
+        // ── Smart: releasing W (an edge into Stop) cancels rather than arming, so a camera nudged
+        // while stopping stays nudged.
+        let mut rig = FollowRig::default();
+        let held = run(&mut rig, c, follow_cmd::FORWARD, 0.0, 0.1);
+        let released = run(&mut rig, c, 0, held + OFFSET, 0.5);
+        assert_eq!(released, held + OFFSET, "Stop is a cancel under Smart");
+
+        // ── Always arms on that very same Idle edge — the one row where the two styles differ.
+        let mut rig = FollowRig::default();
+        let a = cfg(FollowStyle::Always);
+        let held = run(&mut rig, a, follow_cmd::FORWARD, 0.0, 0.1);
+        let returned = run(&mut rig, a, 0, held + OFFSET, 1.0);
+        assert!(
+            returned.abs() < 1.0e-4,
+            "Always returns even from a standstill: {returned}"
+        );
+
+        // ── Never is inert, edge or no edge.
+        let mut rig = FollowRig::default();
+        let n = cfg(FollowStyle::Never);
+        let _ = run(&mut rig, n, 0, OFFSET, 0.1);
+        assert_eq!(
+            run(&mut rig, n, follow_cmd::FORWARD, OFFSET, 2.0),
+            OFFSET,
+            "Never never arms"
+        );
+
+        // ── The duration floor: a 5° correction is 0.028 s of travel at 180 °/s, and the
+        // reference's 0.1 s minimum overrides it — so it is NOT finished after 0.05 s.
+        let mut rig = FollowRig::default();
+        let small = 5.0_f32.to_radians();
+        let _ = run(&mut rig, c, 0, small, DT);
+        let mid = run(&mut rig, c, follow_cmd::FORWARD, small, 0.05);
+        assert!(
+            mid.abs() > 1.0e-4,
+            "the 0.1 s floor is doing the work: {mid}"
+        );
+        assert!(run(&mut rig, c, follow_cmd::FORWARD, mid, 0.06).abs() < 1.0e-4);
+
+        // ── Track (a taxi, a spline): Smart takes it lazily — 0.4 s of dead time first, then a
+        // factor-10 return the 2 s ceiling caps.
+        let mut rig = FollowRig::default();
+        let _ = run(&mut rig, c, 0, OFFSET, DT);
+        let delayed = run(&mut rig, c, follow_cmd::TRACK, OFFSET, 0.3);
+        assert_eq!(delayed, OFFSET, "nothing moves inside the 0.4 s delay");
+        let crawling = run(&mut rig, c, follow_cmd::TRACK, delayed, 0.6);
+        assert!(
+            crawling > OFFSET * 0.5,
+            "a factor-10 return is a crawl, not a swing: {crawling}"
+        );
+        assert!(
+            run(&mut rig, c, follow_cmd::TRACK, crawling, 2.0).abs() < 1.0e-4,
+            "and it does arrive, inside the 2 s cap"
+        );
+
+        // ── A held drag freezes the channel outright: the hand owns the camera.
+        let mut rig = FollowRig::default();
+        let input = FollowInput {
+            cfg: c,
+            face_yaw: 0.0,
+            command: follow_cmd::FORWARD,
+        };
+        assert!(rig.advance(&input, OFFSET, DT, true).is_none());
+        assert!(rig.advance(&input, OFFSET, DT, true).is_none());
+
+        // ── …and entering the drag **cancels** what was in flight (`0x50fe30` zeroes the
+        // descriptors), so the return does not simply resume when the button comes up. Grab the
+        // camera mid-swing and it stays where the hand left it until the next input edge.
+        let mut rig = FollowRig::default();
+        let _ = run(&mut rig, c, 0, OFFSET, DT);
+        let mid = run(&mut rig, c, follow_cmd::FORWARD, OFFSET, 0.1);
+        assert!(mid < OFFSET && mid > 0.0, "mid-swing: {mid}");
+        let dragging = FollowInput {
+            cfg: c,
+            face_yaw: 0.0,
+            command: follow_cmd::FORWARD | follow_cmd::LEFT_MOUSE,
+        };
+        assert!(rig.advance(&dragging, mid, DT, true).is_none());
+        // The word is unchanged from the drag frame's, so nothing re-arms on its own…
+        let parked = {
+            let mut yaw = mid;
+            for _ in 0..120 {
+                let input = FollowInput {
+                    cfg: c,
+                    face_yaw: 0.0,
+                    command: follow_cmd::FORWARD | follow_cmd::LEFT_MOUSE,
+                };
+                if let Some(y) = rig.advance(&input, yaw, DT, false) {
+                    yaw = y;
+                }
+            }
+            yaw
+        };
+        assert_eq!(parked, mid, "the cancelled transition does not resume");
+        // …and the release's own edge (the mouse bit leaving the word) is what starts a new one.
+        assert!(
+            run(&mut rig, c, follow_cmd::FORWARD, parked, 1.0).abs() < 1.0e-4,
+            "the release edge arms a fresh return"
+        );
+    }
+
+    /// The state classifier's three vanilla input rules (wow-re `camera-smooth-style.md` §6.2) —
+    /// the ones a client that keys off character *velocity* cannot reproduce, because they are
+    /// read off the camera's own command word: right-mouse alone is a `Turn`, a turn key held
+    /// **under** right-mouse is a `Strafe`, and both mouse buttons together are a `Move`. Plus the
+    /// priority order, which is what decides the row when several are true at once.
+    #[test]
+    fn the_follow_state_reads_the_camera_input_word_not_the_character() {
+        let state = |command: u32, stopping: bool| {
+            FollowInput {
+                cfg: FollowConfig::default(),
+                face_yaw: 0.0,
+                command,
+            }
+            .state(stopping)
+        };
+        assert_eq!(state(0, false), FollowState::Idle);
+        assert_eq!(state(0, true), FollowState::Stop);
+        assert_eq!(state(follow_cmd::RIGHT_MOUSE, false), FollowState::Turn);
+        assert_eq!(
+            state(follow_cmd::RIGHT_MOUSE | follow_cmd::TURN_LEFT, false),
+            FollowState::Turn,
+            "Turn outranks the Strafe its own condition also satisfies"
+        );
+        assert_eq!(state(follow_cmd::STRAFE_LEFT, false), FollowState::Strafe);
+        assert_eq!(
+            state(follow_cmd::RIGHT_MOUSE | follow_cmd::LEFT_MOUSE, false),
+            FollowState::Turn,
+            "both buttons satisfy Move, but Turn outranks it"
+        );
+        assert_eq!(state(follow_cmd::LEFT_MOUSE, false), FollowState::Idle);
+        assert_eq!(state(follow_cmd::AUTORUN, false), FollowState::Move);
+        assert_eq!(state(follow_cmd::TRACK, false), FollowState::Track);
+        assert_eq!(
+            state(follow_cmd::TRACK | follow_cmd::FORWARD, false),
+            FollowState::Move,
+            "Move outranks Track"
+        );
+        assert_eq!(
+            state(follow_cmd::FEAR | follow_cmd::FORWARD, false),
+            FollowState::Fear,
+            "Fear outranks everything"
+        );
+        // …and the tracking style is the selector the moment Track or Fear is merely PRESENT,
+        // even when a higher-priority state supplies the row.
+        let mixed = FollowInput {
+            cfg: FollowConfig {
+                style: FollowStyle::Never,
+                tracking_style: FollowStyle::Always,
+                yaw_speed: FOLLOW_SPEED_DEFAULT,
+            },
+            face_yaw: 0.0,
+            command: follow_cmd::TRACK | follow_cmd::FORWARD,
+        };
+        assert_eq!(mixed.style(), FollowStyle::Always);
+        assert_eq!(mixed.state(false), FollowState::Move);
+    }
+
+    /// The enum is the ENGINE's (0/1/2), not the 1/2/3 the reference's own dropdown writes — and
+    /// that stray `3` still has to mean Never, because that is what whoever wrote it meant.
+    #[test]
+    fn the_follow_style_enum_is_the_engines_and_tolerates_the_dropdowns_stray() {
+        assert_eq!(FollowStyle::from_cvar(0.0), FollowStyle::Never);
+        assert_eq!(FollowStyle::from_cvar(1.0), FollowStyle::Smart);
+        assert_eq!(FollowStyle::from_cvar(2.0), FollowStyle::Always);
+        assert_eq!(FollowStyle::from_cvar(3.0), FollowStyle::Never);
+        // Off the ladder entirely: the registrar default, not a dead camera.
+        assert_eq!(FollowStyle::from_cvar(-1.0), FollowStyle::Smart);
+        assert_eq!(FollowStyle::from_cvar(9.0), FollowStyle::Smart);
+        for style in [FollowStyle::Never, FollowStyle::Smart, FollowStyle::Always] {
+            assert_eq!(
+                FollowStyle::from_cvar(style.cvar().parse::<f32>().unwrap()),
+                style,
+                "the string round-trips"
+            );
+        }
+        assert_eq!(FollowStyle::default(), FollowStyle::Smart);
     }
 
     /// The second arm: between 200 and 800 world the travel gate applies, per axis and independently

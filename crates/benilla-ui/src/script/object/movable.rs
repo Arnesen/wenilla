@@ -78,7 +78,7 @@
 //!   for both halves in the reference too — already covers the stop side of a resize that does
 //!   not exist yet.
 
-use mlua::{Lua, Table};
+use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::script::Model;
 use crate::widget::FrameHandle;
@@ -155,6 +155,93 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "IsResizable",
         lua.create_function(|lua, this: Table| get_flag(lua, &this, Flag::Resizable))?,
     )?;
+    // ── The resize-bounds quad — `Set/GetMinResize`, `Set/GetMaxResize` ────────────────────────
+    //
+    // Frame method table `0x878ec0`: `GetMinResize 0x775f20` · `SetMinResize 0x776020` ·
+    // `GetMaxResize 0x7761a0` · `SetMaxResize 0x7762a0`. The setters' `Usage:` strings are in the
+    // image verbatim — `0x8797b8 "Usage: %s:SetMinResize(minWidth, minHeight)"` and
+    // `0x8797e4 "Usage: %s:SetMaxResize(maxWidth, maxHeight)"` — so a bad argument RAISES, and
+    // that is what is reproduced here.
+    //
+    // **Who asks.** They are the second and third lines of every resizable-window kit, right after
+    // `SetResizable(true)`; Quiver's `SideEffectMakeMoveable` calls `SetMinResize` on every module
+    // frame it builds, and with the method nil its `OnEnable` died before the addon's
+    // `VARIABLES_LOADED` handler could publish anything (bug B267's third wall).
+    //
+    // **Two halves are out with wow-re and fold into ONE place** ([`clamp_resize`]): whether the
+    // client's "unbounded" is a `0` sentinel the getters hand back (ours answers `nil`), and
+    // whether the clamp binds only the drag pump (what we do) or every size write. Neither changes
+    // the surface below.
+    for (name, upper) in [("MinResize", false), ("MaxResize", true)] {
+        m.set(
+            format!("Set{name}"),
+            lua.create_function(move |lua, args: MultiValue| {
+                let mut it = args.into_iter();
+                let this = match it.next() {
+                    Some(Value::Table(t)) => t,
+                    _ => return Err(mlua::Error::runtime("expected a frame")),
+                };
+                let h = frame_handle_of(lua, &this)?;
+                // The pair is required. `lua_isnumber` accepts a numeric STRING too, which is why
+                // this reads the values through the same coercion the rest of the surface uses
+                // rather than demanding `Value::Number`.
+                let pair = (it.next(), it.next());
+                let num = |v: &Option<Value>| match v {
+                    Some(Value::Number(n)) => Some(*n as f32),
+                    Some(Value::Integer(i)) => Some(*i as f32),
+                    Some(Value::String(s)) => s.to_str().ok()?.parse::<f32>().ok(),
+                    _ => None,
+                };
+                let (Some(w), Some(hgt)) = (num(&pair.0), num(&pair.1)) else {
+                    let model = lua.app_data_ref::<Model>().expect("model");
+                    let who = model
+                        .arena
+                        .frame(h)
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    let verb = if upper {
+                        "SetMaxResize"
+                    } else {
+                        "SetMinResize"
+                    };
+                    let (a, b) = if upper {
+                        ("maxWidth", "maxHeight")
+                    } else {
+                        ("minWidth", "minHeight")
+                    };
+                    return Err(mlua::Error::runtime(format!(
+                        "Usage: {who}:{verb}({a}, {b})"
+                    )));
+                };
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                if let Some(f) = model.arena.frame_mut(h) {
+                    if upper {
+                        f.max_resize = Some((w, hgt));
+                    } else {
+                        f.min_resize = Some((w, hgt));
+                    }
+                }
+                Ok(())
+            })?,
+        )?;
+        m.set(
+            format!("Get{name}"),
+            lua.create_function(move |lua, this: Table| {
+                let h = frame_handle_of(lua, &this)?;
+                let model = lua.app_data_ref::<Model>().expect("model");
+                let bound =
+                    model
+                        .arena
+                        .frame(h)
+                        .and_then(|f| if upper { f.max_resize } else { f.min_resize });
+                Ok(match bound {
+                    Some((w, hgt)) => (Value::Number(f64::from(w)), Value::Number(f64::from(hgt))),
+                    None => (Value::Nil, Value::Nil),
+                })
+            })?,
+        )?;
+    }
+
     // SetUserPlaced(flag) / IsUserPlaced() — bit 0x1000 (`0x776a50`/`0x776b40`), the client's "the
     // user placed this frame; persist its position across sessions" bit, and the one setter of the
     // three that is GUARDED: `776adb: test ah,0x3` refuses unless the frame is movable OR
@@ -381,15 +468,31 @@ pub(crate) fn start_title_move(model: &mut Model, h: FrameHandle) -> bool {
     true
 }
 
-/// Pump an in-flight move to the cursor at `pos` — the engine half of `0x7655b0`, run from
-/// [`crate::script::UiScript::mouse_move`] beside [`crate::script::cursor::maybe_start_drag`] and,
-/// like it, BEFORE the hover-boundary early return (a frame dragged around underneath the cursor
-/// crosses no boundary at all, so a move parked behind that return would only advance when the
-/// cursor happened to leave the frame).
+/// Apply a frame's `SetMinResize`/`SetMaxResize` bounds to a proposed size.
 ///
-/// Applies `(pos − sample)` scaled into the frame's anchor offsets and re-centers the sample; a
-/// zero delta does nothing at all, and a frame that died mid-move ends the move rather than
-/// writing to a dead handle.
+/// **The one place the two open halves of the resize-bounds RE fold into.** Today: an unset bound
+/// is unbounded, the floor with no `SetMinResize` is the `1.0` this function inherited from the
+/// drag pump it was extracted from, and the *only* caller is [`advance_size`] — so a programmatic
+/// `SetWidth` past a bound is currently not clamped. wow-re is deriving whether the client clamps
+/// there too, and what its no-bound floor really is; both answers land here and nowhere else.
+///
+/// A `min` above a `max` resolves in `min`'s favour (the clamp order below), which is the only
+/// self-consistent reading of a contradiction and is also out with wow-re.
+fn clamp_resize(model: &Model, h: FrameHandle, w: f32, hgt: f32) -> (f32, f32) {
+    let (min, max) = model
+        .arena
+        .frame(h)
+        .map_or((None, None), |f| (f.min_resize, f.max_resize));
+    let mut w = w;
+    let mut hgt = hgt;
+    if let Some((mw, mh)) = max {
+        w = w.min(mw);
+        hgt = hgt.min(mh);
+    }
+    let (fw, fh) = min.unwrap_or((1.0, 1.0));
+    (w.max(fw), hgt.max(fh))
+}
+
 /// Pump an in-flight `StartSizing`: move the gripped edges to the cursor, leave the others.
 ///
 /// The mirror of [`advance_move`] — same sample-and-recentre, same dead-frame bail, same
@@ -409,9 +512,6 @@ pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
     }
     let inv = 1.0 / eff_scale(model, sz.frame);
     let (dx, dy) = (dx * inv, dy * inv);
-    let Some(input) = model.layout_inputs.get_mut(&sz.frame) else {
-        return;
-    };
     // Width grows when the RIGHT grip goes right, or the LEFT grip goes left. Height likewise with
     // y-up: the TOP grip going up grows it, the BOTTOM grip going down grows it.
     let dw = if sz.right {
@@ -428,9 +528,21 @@ pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
     } else {
         0.0
     };
-    let (w0, h0) = (input.width, input.height);
-    input.width = (input.width + dw).max(1.0);
-    input.height = (input.height + dh).max(1.0);
+    let Some((w0, h0)) = model
+        .layout_inputs
+        .get(&sz.frame)
+        .map(|i| (i.width, i.height))
+    else {
+        return;
+    };
+    // The frame's own `SetMinResize`/`SetMaxResize` bounds — read before the mutable borrow, and
+    // the only place they bind today (see `clamp_resize`).
+    let (new_w, new_h) = clamp_resize(model, sz.frame, w0 + dw, h0 + dh);
+    let Some(input) = model.layout_inputs.get_mut(&sz.frame) else {
+        return;
+    };
+    input.width = new_w;
+    input.height = new_h;
     let mut moved = input.width.to_bits() != w0.to_bits() || input.height.to_bits() != h0.to_bits();
     // The planted edge: a frame anchored by its LEFT that is gripped on the LEFT has to move too,
     // or the resize would push the right edge instead. Only the gripped axis shifts.
@@ -460,6 +572,15 @@ pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
     model.sizing = Some(FrameSizing { sample: pos, ..sz });
 }
 
+/// Pump an in-flight move to the cursor at `pos` — the engine half of `0x7655b0`, run from
+/// [`crate::script::UiScript::mouse_move`] beside [`crate::script::cursor::maybe_start_drag`] and,
+/// like it, BEFORE the hover-boundary early return (a frame dragged around underneath the cursor
+/// crosses no boundary at all, so a move parked behind that return would only advance when the
+/// cursor happened to leave the frame).
+///
+/// Applies `(pos − sample)` scaled into the frame's anchor offsets and re-centers the sample; a
+/// zero delta does nothing at all, and a frame that died mid-move ends the move rather than
+/// writing to a dead handle.
 pub(crate) fn advance_move(model: &mut Model, pos: (f32, f32)) {
     let Some(mv) = model.moving else { return };
     if model.arena.frame(mv.frame).is_none() {

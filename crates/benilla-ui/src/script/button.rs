@@ -296,6 +296,38 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| get_slot_texture(lua, &this, Slot::Text))?,
     )?;
 
+    // SetFontString(fontString) — ADOPT a caller-made FontString as this Button's label
+    // (`0x780a60`; the pointer it writes is the Button's `+0x338`, the field
+    // `GetFontString`/`SetText`/`GetTextWidth` all read — wow-re `widget-api-batch-benilla.md` Q8).
+    //
+    // The idiom it exists for: build the label yourself so you can style and place it, then hand it
+    // to the button so `SetText` and the per-state font machinery drive it.
+    //
+    //     local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    //     btn:SetFontString(fs)
+    //
+    // Quiver's `Component/Select.wow.lua` builds every dropdown option row that way, and with the
+    // method nil the row died on its first line — the second of B267's three walls.
+    //
+    // Adoption only: no region is created, and the argument keeps its own parent and its own
+    // anchors (callers anchor it after the call as often as before). A non-region argument leaves
+    // the button unchanged rather than raising — the reference marshals it and writes a pointer,
+    // and what it does with a bad one is not byte-read.
+    m.set(
+        "SetFontString",
+        lua.create_function(|lua, (this, fs): (Table, Value)| {
+            let Value::Table(fs) = fs else { return Ok(()) };
+            let Ok(rh) = super::region::region_handle_of(lua, &fs) else {
+                return Ok(());
+            };
+            with_button(lua, &this, |bs| bs.text = Some(rh))?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // The label is a measured region, and its new role feeds the button's text extents.
+            model.touch_measure(rh);
+            Ok(())
+        })?,
+    )?;
+
     // GetTextWidth / GetTextHeight — the Button's OWN text-extent readers (`0x782290` / `0x782390`,
     // wow-re `system/ui/scratch/item9-firing34-merge.md` l.36 and the Button method carve in
     // `widget-api-batch-benilla.md` Q8, which lists both present on Button and `GetStringWidth`

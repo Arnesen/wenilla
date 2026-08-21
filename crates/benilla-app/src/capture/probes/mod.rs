@@ -47,6 +47,11 @@ pub(crate) use visual_census::UnitVisualsPlugin;
 mod dress_census;
 pub(crate) use dress_census::DressCensusPlugin;
 
+/// The reveal audit — per-frame, from a snap: every term that decides whether the world about
+/// to be shown is actually drawable (decision 1498).
+mod reveal;
+pub(crate) use reveal::RevealAuditPlugin;
+
 /// The two exclusive-`World` reflection dumps: the bevy_ui node inventory and the archetype
 /// census — "what is resident right now, and what is it made of".
 mod world_census;

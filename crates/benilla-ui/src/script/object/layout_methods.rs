@@ -78,6 +78,21 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             ))
         })?,
     )?;
+    // GetNumPoints() → how many anchors this frame carries. On the Region map (`0x87c9b8`), so
+    // every widget answers it — the region twin shipped first and noted this side was missing;
+    // collapsing the map to one implementation each (decision 1501) is what made the gap fatal
+    // rather than merely absent, and this is the arm it was missing.
+    m.set(
+        "GetNumPoints",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(model
+                .layout_inputs
+                .get(&h)
+                .map_or(0, |i| i.anchors.len() as i64))
+        })?,
+    )?;
     // SetAllPoints([relativeTo]) — pin TOPLEFT+BOTTOMRIGHT to the target (default: the parent),
     // the XML `setAllPoints="true"` behavior as a method (rf24 `0x767800`'s SetAllPoints path).
     m.set(

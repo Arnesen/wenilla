@@ -256,7 +256,16 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// input, which is game-side; a one-field resource is the smallest honest expression of that. The
 /// alternative was ordering a game system against an engine system, which crosses this same line
 /// *and* publishes a schedule point to do it.
-const CEILING: usize = 159;
+/// And 159 → 160: `WorldLoadProgress::gx_pending`, a PUBLISH beside the two residency terms
+/// already through this door (`colliders_pending`, `merge_pending`). The retained pass (1429)
+/// moved the static world off the entity path, so a placement that has SPAWNED still draws
+/// nothing until its region bakes — and the game reads residency for two decisions the engine
+/// does not own: when the loading cover may lift, and when the post-snap physics hold may
+/// release (decision 0737's split). Both were answering "is the world there" with a fact that
+/// had stopped meaning it (decision 1498). The alternative was the game reaching into
+/// `StaticGx` itself, which is a whole engine subsystem through the door instead of one
+/// `usize` on the residency struct that exists to be read from outside.
+const CEILING: usize = 160;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

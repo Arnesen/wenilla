@@ -203,6 +203,13 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_DRESS_CENSUS").is_ok() {
                 app.add_plugins(crate::capture::DressCensusPlugin);
             }
+            // The reveal audit: `WOW_REVEAL=<frames>` prints one line per frame from a snap —
+            // the cover, every residency term behind `presentable()`, the settle hold and the
+            // retained pass's collected-vs-published regions. The instrument for "the teleport
+            // showed me a world with no buildings in it" (see `capture::RevealAuditPlugin`).
+            if std::env::var("WOW_REVEAL").is_ok() {
+                app.add_plugins(crate::capture::RevealAuditPlugin);
+            }
             // The entity census: `WOW_ENTITY_CENSUS=<secs>` prints per-archetype entity counts once —
             // what the resident entity count is made of (see `capture::EntityCensusPlugin`).
             if std::env::var("WOW_ENTITY_CENSUS").is_ok() {

@@ -189,7 +189,7 @@ impl Plugin for PlayerPlugin {
         );
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
-        app.init_resource::<camera::FollowStyle>();
+        app.init_resource::<camera::FollowConfig>();
         // Far sight: resolve `PLAYER_FARSIGHT` into a pose before `control` reads it to seat the
         // camera. A separate system rather than another query on `control` for a hard reason —
         // `control` already holds the self entity's `Transform` mutably, so it cannot also read an
@@ -351,7 +351,7 @@ fn control(
         Res<AccumulatedMouseMotion>,
         Res<camera::LookConfig>,
         Res<camera::ZoomLimit>,
-        Res<camera::FollowStyle>,
+        Res<camera::FollowConfig>,
     ),
     // The net bridge, bundled into one param (16-param limit): the outbound command channel + the
     // inbound teleport/worldport messages `apply_net_updates` wrote earlier this frame
@@ -493,15 +493,24 @@ fn control(
     let view_subject = &speed_capsule.8;
     let self_guid = speed_capsule.9 .0;
     let scoped = &speed_capsule.10;
-    // The auto-follow style (decision 1493), with far sight's one exception folded in here so both
-    // camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
-    // Totem), our own facing is not what "behind" means, so the chase is forced off rather than
+    // The auto-follow knobs (decisions 1493/1502), with far sight's one exception folded in here so
+    // both camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
+    // Totem), our own facing is not what "behind" means, so the return is forced off rather than
     // reeling that camera toward a heading with nothing to do with the view.
-    let follow_style = if view_subject.remote.is_some() {
-        camera::FollowStyle::Never
-    } else {
-        *pointer.3
+    let follow_cfg = camera::FollowConfig {
+        style: if view_subject.remote.is_some() {
+            camera::FollowStyle::Never
+        } else {
+            pointer.3.style
+        },
+        tracking_style: if view_subject.remote.is_some() {
+            camera::FollowStyle::Never
+        } else {
+            pointer.3.tracking_style
+        },
+        ..*pointer.3
     };
+
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
@@ -521,6 +530,61 @@ fn control(
     let steer_held = binds.pressed(crate::bindings::cmd::MOVE_AND_STEER);
     let both_buttons =
         (buttons.pressed(MouseButton::Left) && buttons.pressed(MouseButton::Right)) || steer_held;
+
+    // The camera's **input command word** (decision 1502) — 1.12's `[InputControl+0x4]`, bit for
+    // bit. The auto-follow is armed by *edges on this word* and its state is classified from it, so
+    // it is built once here, from the same binding state the movement code below reads, and handed
+    // to both camera seats. MOVEANDSTEER sets both mouse bits because that is what the reference's
+    // binding does — it runs the identical CameraOrSelectOrMove + TurnOrAction pair.
+    let follow_command = {
+        use camera::follow_cmd as bit;
+        let mut w = 0;
+        let mut set = |on: bool, b: u32| {
+            if on {
+                w |= b;
+            }
+        };
+        set(
+            buttons.pressed(MouseButton::Right) || steer_held,
+            bit::RIGHT_MOUSE,
+        );
+        set(
+            buttons.pressed(MouseButton::Left) || steer_held,
+            bit::LEFT_MOUSE,
+        );
+        // `/follow` is the forward bit in the reference too — the same setter the W key drives
+        // (decision 0890), so it arms the camera exactly like a held W.
+        set(
+            binds.pressed(crate::bindings::cmd::MOVE_FORWARD) || player.follow_forward,
+            bit::FORWARD,
+        );
+        set(
+            binds.pressed(crate::bindings::cmd::MOVE_BACKWARD),
+            bit::BACKWARD,
+        );
+        set(
+            binds.pressed(crate::bindings::cmd::STRAFE_LEFT),
+            bit::STRAFE_LEFT,
+        );
+        set(
+            binds.pressed(crate::bindings::cmd::STRAFE_RIGHT),
+            bit::STRAFE_RIGHT,
+        );
+        set(
+            binds.pressed(crate::bindings::cmd::TURN_LEFT),
+            bit::TURN_LEFT,
+        );
+        set(
+            binds.pressed(crate::bindings::cmd::TURN_RIGHT),
+            bit::TURN_RIGHT,
+        );
+        set(player.autorun, bit::AUTORUN);
+        // The two externally-driven flags, which the reference folds into the camera's own
+        // Track/Fear bits rather than the input word — carried here so one word carries every edge.
+        set(player.server_riding, bit::TRACK);
+        set(player.control_lost, bit::FEAR);
+        w
+    };
 
     // The look session gets a SHADOW copy of `CursorOptions`, written back only on a real change:
     // handing it the component's `Mut` directly reborrowed mutably every frame, which marks it
@@ -733,16 +797,9 @@ fn control(
             // `reseat` window is excluded — there the resource still describes the body we are
             // letting go of, and `apply_server_moves` owns the adoption.
             //
-            // The same sync answers the auto-follow's Smart gate (1493): is the body we are NOT
-            // driving nevertheless moving? A taxi, a Charge, a knockback or a fear all translate
-            // the avatar while the controller stands down, and a camera that ignored them would
-            // sit at the angle you left it while the body ran out from under it. A spline ride is
-            // translation by definition; a driven body is measured against the pose we held.
-            let mut driven_moving = player.server_riding;
             if player.control_lost && !player.reseat {
                 if let Ok((_, t, ..)) = body.single() {
                     let yaw = server_ride::yaw_of(t.rotation);
-                    driven_moving |= t.translation.distance_squared(player.pos) > 1.0e-6;
                     player.pos = t.translation;
                     player.face_yaw = yaw;
                     player.model_yaw = yaw;
@@ -772,10 +829,15 @@ fn control(
                 &mut cam_t,
                 &collide,
                 cam_probe,
+                // The auto-follow still runs here — a taxi, a Charge, a knockback or a fear
+                // all translate the avatar while the controller stands down, and the reference
+                // has states for exactly those (`Track`, `Fear`: a 0.4 s delay and a lazy 18 °/s
+                // return under Smart). The word carries both flags, so the edge into and out of
+                // one of them is what arms it.
                 &camera::FollowInput {
-                    style: follow_style,
+                    cfg: follow_cfg,
                     face_yaw: player.face_yaw,
-                    moving: driven_moving,
+                    command: follow_command,
                 },
             );
             // Flush a stale run once, so observers stop extrapolating it — but never under a ride,
@@ -1706,12 +1768,12 @@ fn control(
         // — the deck's yaw delta was already applied to `cam.yaw` at the ride block (frame motion
         // carries the camera unconditionally; only input turns respect `seat_camera`'s
         // look-session gate).
-        // The auto-follow's own three facts (decision 1493): the player's style, where "behind"
-        // is, and whether the character is translating — Smart's gate.
+        // The auto-follow's own three facts (decisions 1493/1502): the knobs, where "behind" is,
+        // and the input word whose edges arm a return.
         let follow = camera::FollowInput {
-            style: follow_style,
+            cfg: follow_cfg,
             face_yaw: player.face_yaw,
-            moving,
+            command: follow_command,
         };
         seat_camera(
             dt,

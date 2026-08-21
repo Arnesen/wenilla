@@ -79,7 +79,7 @@ use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
 use crate::target::{ring_reaction, Factions, Hovered, Selection, TargetUpdate};
-use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
+use crate::ui_pass::{overlay_z, UiQuad, UiQuadAppend, UiQuads, UvRect};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
 use benilla_assets::{AssetSet, WorldAssets};
 use benilla_world::view::WorldCamera;
@@ -172,13 +172,14 @@ const LIT_BOOST: f32 = 255.0 / 215.0;
 /// The plate quads' z keys — back→front: bar fill, then the border OVER it (the border art's
 /// rounded inner bevels cap the fill's square ends and crop the gradient's soft edges — the
 /// reference look, director-pinned from a ref crop 2026-07-07; corrects the §7 transcription's
-/// border-first order), then texts → skull; all above the floating combat text (z 0, a
-/// world-scene draw) and far below every scripted-UI packed key.
-const Z_FILL: u64 = 4;
-const Z_BORDER: u64 = 5;
-const Z_TEXT: u64 = 6;
-const Z_RAID: u64 = 7;
-const Z_SKULL: u64 = 8;
+/// border-first order), then texts → skull; all above the floating combat text and the chat
+/// bubbles (the append lane's lower bands, [`crate::ui_pass::overlay_z`]) and far below every
+/// scripted-UI packed key.
+const Z_FILL: u64 = overlay_z::VPLATE;
+const Z_BORDER: u64 = overlay_z::VPLATE + 1;
+const Z_TEXT: u64 = overlay_z::VPLATE + 2;
+const Z_RAID: u64 = overlay_z::VPLATE + 3;
+const Z_SKULL: u64 = overlay_z::VPLATE + 4;
 
 /// The bar-fill palette — the byte-confirmed dwords (`0xcf60d0/e8/c8/dc`): pure
 /// red/blue/yellow/green (NOT the ring's pale player-blue). Client-space sRGB, the [`UiQuads`]

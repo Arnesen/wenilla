@@ -55,10 +55,13 @@
 //! the aniso-8 samplers, and the two-sided normal law (the entity shader's `select` UNDOES a
 //! bevy negation this pipeline never had — copying it flipped every back-facing canopy card).
 //!
-//! **Known B1 gaps, deliberate** (B2+ owns them): no `presentable()` coupling — an unbaked
-//! cell can show a hole for a beat on a cold arrival where the merge publishes
-//! `merge_pending` into the reveal cover (1419); dev-instrument identity (inspector/WOW_PICK
-//! name nothing — the weld/merge trade, one side table if missed).
+//! **Known B1 gaps** (B2+ owns them): dev-instrument identity (inspector/WOW_PICK name nothing
+//! — the weld/merge trade, one side table if missed). The other one B1 left open — no
+//! `presentable()` coupling, so an unbaked region shows a hole for a beat on a cold arrival
+//! where the merge publishes `merge_pending` into the reveal cover (1419) — is **CLOSED by
+//! 1498**: [`StaticGx::undrawn_regions`] is that coupling, and [`StaticGx::flush_now`] is why
+//! it costs the load no extra frames. It was not a beat: it was the director's report of
+//! teleporting into a Stormwind with no Stormwind in it.
 //!
 //! **B3 (decision 1432): the churn 1431 priced is paid.** Texture arrays are ONE SHARED POOL
 //! across every cell and region (dedup by asset id; `pool.rs` owns the design note), layer
@@ -438,6 +441,9 @@ pub struct StaticGx {
     /// Lifetime exile-event counters (spawns, re-admits, gone-despawns) — the census line's
     /// churn instrument.
     fade_events: [u32; 3],
+    /// [`StaticGx::flush_now`]'s request: the next flush ignores every quiet window. Consumed
+    /// (cleared) by that flush.
+    flush_now: bool,
 }
 
 /// The divert hook's per-call facts (everything is in scope at `assemble.rs`'s gate).
@@ -544,6 +550,81 @@ pub struct GxWmoBatch {
 }
 
 impl StaticGx {
+    /// **Collected geometry that draws nothing yet** — regions holding items whose bake has not
+    /// published (a first bake still inside its quiet window, [`IDLE_FRAMES`]).
+    ///
+    /// A retained region is a *hole in the frame* between the divert and its first publish: the
+    /// entity path no longer draws that geometry (slice 2 moved WMO group geometry here
+    /// wholesale), so a spawned building whose region has not baked is a building that is not on
+    /// screen. The reveal gate ([`crate::terrain_stream::WorldLoadProgress`]) reads this, which
+    /// is why it is published as a fact rather than left an internal of the bake.
+    ///
+    /// A *re-bake* of an already-published region is deliberately NOT counted: that region keeps
+    /// drawing its previous bake meanwhile, so it is content on screen, not a hole.
+    pub(crate) fn undrawn_regions(&self) -> usize {
+        let world = &self.world;
+        let cells = self
+            .cells
+            .iter()
+            .filter(|(k, s)| s.dirty && !s.items.is_empty() && !world.cells.contains_key(*k))
+            .count();
+        let wmos = self
+            .wmos
+            .iter()
+            .filter(|(k, s)| s.dirty && !s.items.is_empty() && !world.wmos.contains_key(*k))
+            .count();
+        let props = self
+            .props
+            .iter()
+            .filter(|(k, s)| s.dirty && !s.items.is_empty() && !world.props.contains_key(*k))
+            .count();
+        cells + wmos + props
+    }
+
+    /// The WMO lane's headline numbers for an instrument: regions **collected**, regions
+    /// **published** (baked, so drawable at all), and regions the cull **selected** this frame.
+    /// Collected-but-unpublished is the reveal hole [`Self::undrawn_regions`] counts; published
+    /// minus selected is ordinary culling.
+    pub fn wmo_census(&self) -> (usize, usize, usize) {
+        (
+            self.wmos.len(),
+            self.world.wmos.len(),
+            self.world.visible_wmos.len(),
+        )
+    }
+
+    /// What this frame's scene walk actually **selected to draw** — doodad/prop draw entries,
+    /// WMO regions selected, and the admitted group bits summed across them. The companion to
+    /// [`Self::wmo_census`]: that one says what geometry EXISTS and is drawable, this one says
+    /// how much of it the cull let through. A frame where everything is published and almost
+    /// nothing is selected is a visibility fault, not a residency one — the distinction the
+    /// reveal audit could not make.
+    pub fn draw_census(&self) -> (usize, usize, usize) {
+        let groups = self
+            .world
+            .visible_wmos
+            .iter()
+            .map(|(_, bits)| bits.iter().filter(|b| **b).count())
+            .sum();
+        (
+            self.world.visible.len(),
+            self.world.visible_wmos.len(),
+            groups,
+        )
+    }
+
+    /// **Bake every dirty region on the next flush, quiet window or not** — what the reveal gate
+    /// asks for once nothing more is arriving.
+    ///
+    /// The quiet windows ([`IDLE_FRAMES`]/[`REBAKE_FRAMES`]) exist to batch an *arrival trickle*
+    /// during play. The end of a load is not a trickle: the streamer knows the burst is over
+    /// (every wanted tile spawned, every focus placement up, the collider queue quiet), and
+    /// waiting another 15 frames there is 15 frames of a city that has spawned and cannot draw.
+    /// So the end of the burst says "publish what you have" instead of arming another timer.
+    pub(crate) fn flush_now(&mut self) {
+        self.flush_now = true;
+    }
+
     /// Take one eligible batch instead of spawning it (or merging it). Returns `false` — and
     /// tallies why — when the batch's facts fall outside the prototype's lane; the caller then
     /// falls through to the ordinary path, exactly like a refused merge divert.
@@ -881,6 +962,27 @@ pub(crate) mod testkit {
 mod tests {
     use super::testkit::{batch, tri};
     use super::*;
+
+    /// A diverted batch is collected geometry that draws NOTHING until its region bakes — the
+    /// reveal hole [`StaticGx::undrawn_regions`] exists to publish, and the fact the reveal gate
+    /// keys on (decision 1498). Publishing the region clears it; a re-bake of a published region
+    /// is not a hole, because the previous bake is still on screen.
+    #[test]
+    fn a_collected_region_is_undrawn_until_it_publishes() {
+        let mut gx = StaticGx::default();
+        let g = tri([0.0; 3]);
+        assert_eq!(
+            gx.undrawn_regions(),
+            0,
+            "nothing collected, nothing pending"
+        );
+        assert!(gx.divert(batch(&g, Vec3::ZERO, None, ModelBlend::Opaque)));
+        assert_eq!(gx.undrawn_regions(), 1, "diverted, unbaked — a hole");
+        // What the bake does when it publishes a region: clears `dirty`.
+        let cell = *gx.cells.keys().next().unwrap();
+        gx.cells.get_mut(&cell).unwrap().dirty = false;
+        assert_eq!(gx.undrawn_regions(), 0, "baked — on screen");
+    }
 
     /// The collector refuses exactly the recorded exclusion families — and says so in the
     /// census — while an eligible batch diverts (1429's no-silent-caps note).

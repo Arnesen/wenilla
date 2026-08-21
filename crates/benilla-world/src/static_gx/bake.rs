@@ -34,6 +34,9 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             gx.declined_logged = d;
         }
     }
+    // The reveal gate's "publish what you have" (see [`StaticGx::flush_now`]): consumed here, so
+    // one request bakes one flush's worth of dirty regions and the windows resume next frame.
+    let now = std::mem::take(&mut gx.flush_now);
     let StaticGx {
         cells,
         wmos,
@@ -42,7 +45,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
         ..
     } = &mut *gx;
     for (&cell, state) in cells.iter_mut() {
-        if !bake_due(state, world.cells.contains_key(&cell), frame) {
+        if !bake_due(state, world.cells.contains_key(&cell), frame, now) {
             continue;
         }
         state.dirty = false;
@@ -68,7 +71,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
         world.cells.insert(cell, std::sync::Arc::new(baked));
     }
     for (&instance, state) in wmos.iter_mut() {
-        if !bake_due(state, world.wmos.contains_key(&instance), frame) {
+        if !bake_due(state, world.wmos.contains_key(&instance), frame, now) {
             continue;
         }
         state.dirty = false;
@@ -99,7 +102,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
     // grain — the sort keeps runs set-homogeneous, and the published draw carries the
     // region's set list beside the per-set bounds `bake_cell` accumulated into `groups`.
     for (&instance, state) in props.iter_mut() {
-        if !bake_due(state, world.props.contains_key(&instance), frame) {
+        if !bake_due(state, world.props.contains_key(&instance), frame, now) {
             continue;
         }
         state.dirty = false;
@@ -126,14 +129,20 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
     }
 }
 
-/// Is this region's bake due? A FIRST bake waits only the short window (fast appearance); a
+/// Is this region's bake due? `now` is the reveal gate's request ([`StaticGx::flush_now`]) and
+/// overrides every window — the arrival burst it batches is known to be over.
+///
+/// Otherwise: a FIRST bake waits only the short window (fast appearance); a
 /// re-bake of a published region waits for the LONG quiet window (B3, decision 1432 — the
 /// admission trickle arrives spaced wider than the short window, so B2 re-baked cells once
 /// per arrival for minutes; 1431's cost map priced it), with the age cap so a never-quiet
 /// region still consolidates.
-fn bake_due(state: &super::GxCell, published: bool, frame: u32) -> bool {
+fn bake_due(state: &super::GxCell, published: bool, frame: u32, now: bool) -> bool {
     if !state.dirty {
         return false;
+    }
+    if now {
+        return true;
     }
     let window = if published {
         REBAKE_FRAMES
@@ -349,27 +358,49 @@ mod tests {
     #[test]
     fn the_bake_waits_short_first_and_long_after() {
         let mut state = super::super::GxCell::default();
-        assert!(!bake_due(&state, false, 100), "clean cells are never due");
+        assert!(
+            !bake_due(&state, false, 100, false),
+            "clean cells are never due"
+        );
         state.dirty = true;
         state.dirty_since = 0;
         state.last_change = 0;
-        assert!(!bake_due(&state, false, IDLE_FRAMES - 1));
+        assert!(!bake_due(&state, false, IDLE_FRAMES - 1, false));
         assert!(
-            bake_due(&state, false, IDLE_FRAMES),
+            bake_due(&state, false, IDLE_FRAMES, false),
             "first bake: short window"
         );
         assert!(
-            !bake_due(&state, true, IDLE_FRAMES),
+            !bake_due(&state, true, IDLE_FRAMES, false),
             "published: short is not enough"
         );
-        assert!(!bake_due(&state, true, REBAKE_FRAMES - 1));
+        assert!(!bake_due(&state, true, REBAKE_FRAMES - 1, false));
         assert!(
-            bake_due(&state, true, REBAKE_FRAMES),
+            bake_due(&state, true, REBAKE_FRAMES, false),
             "published: long window"
         );
+        // The reveal gate's request overrides every window: a load that has finished arriving
+        // publishes what it holds instead of waiting out the quiet timer (decision 1498).
+        state.last_change = IDLE_FRAMES;
+        assert!(
+            !bake_due(&state, false, IDLE_FRAMES, false),
+            "still quiet-timing"
+        );
+        assert!(
+            bake_due(&state, false, IDLE_FRAMES, true),
+            "flush_now: due now"
+        );
+        assert!(bake_due(&state, true, IDLE_FRAMES, true), "…published too");
+        state.dirty = false;
+        assert!(
+            !bake_due(&state, false, IDLE_FRAMES, true),
+            "flush_now still bakes nothing that is not dirty"
+        );
+        state.dirty = true;
+        state.last_change = 0;
         // A cell that keeps changing (never quiet) still consolidates at the age cap.
         state.last_change = MAX_DIRTY_FRAMES;
-        assert!(bake_due(&state, true, MAX_DIRTY_FRAMES));
+        assert!(bake_due(&state, true, MAX_DIRTY_FRAMES, false));
     }
 
     /// A quiet cell bakes: one recentred mesh whose draws sort by (bucket, texture), each

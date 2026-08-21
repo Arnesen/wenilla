@@ -290,6 +290,16 @@ pub(crate) struct WarmPass {
     effect_tex: Option<Handle<Image>>,
     /// Consecutive covered+in-world frames seen while idle (see [`WARM_COVER_PRESENT_FRAMES`]).
     covered_frames: u32,
+    /// **The menagerie has drained cleanly once in this process.** The warm set is a fixed
+    /// variant cross built from `Startup`-populated stores (see `menagerie`) — not the resident
+    /// map's art — and `PipelineCache` is process-global and never evicts, so a second pass
+    /// compiles nothing. Re-running it under every later cover was pure cost, and *visible*
+    /// cost: it holds the cover (`satisfied`) for the whole paced reveal, which measured 3.8 s
+    /// on a mid-session teleport whose world was resident in 0.7 s. Later covers therefore skip
+    /// the pass. If that is ever wrong the tripwire says so out loud — `PipeWatch`'s "compiled
+    /// LIVE" warn is exactly the instrument for it — which is why this can be a latch and not a
+    /// guess. A timeout does NOT latch it: something was still pending.
+    warmed_once: bool,
     /// Pacing state (1116): rigs warmed so far, when the last slice went out, how many frames
     /// the reveal spanned, and the slice currently on screen (hidden again next frame).
     revealed: usize,
@@ -410,6 +420,11 @@ fn run_warm_pass(
         return;
     }
     let now = time.elapsed_secs();
+    // Already warmed in this process: nothing to compile, so nothing to hold the cover for.
+    if warm.warmed_once {
+        warm.done = true;
+        return;
+    }
     let Some(spawned) = warm.spawned_at else {
         // The cover just rose (or the world just became live under one): raise the gate and
         // spawn the menagerie once the camera + shared light exist (both are entry-frame-early;
@@ -507,6 +522,7 @@ fn run_warm_pass(
         .saturating_sub(watch.0.settled.load(Ordering::Relaxed));
     if all_revealed && pending == 0 && now - last_reveal >= WARM_SETTLE_SECS {
         warm.done = true;
+        warm.warmed_once = true;
         warm.effect_tex = None;
         despawn_rigs(&mut commands, &rigs);
         info!(

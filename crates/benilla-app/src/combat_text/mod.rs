@@ -113,7 +113,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
-use crate::ui_pass::{UiQuadAppend, UiQuads};
+use crate::ui_pass::{overlay_z, UiQuadAppend, UiQuads};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
 use benilla_world::view::WorldCamera;
 
@@ -158,8 +158,9 @@ pub(crate) struct WorldTexts(Vec<WorldText>);
 const MAX_PER_UNIT: usize = 4;
 
 /// World text draws beneath every scripted UI quad (the real client renders it in the world scene,
-/// under all UI): z 0 sorts first against the frame quads' packed strata keys.
-const Z_WORLD_TEXT: u64 = 0;
+/// under all UI) and beneath the other two append-lane systems: the append lane's bottom band
+/// ([`crate::ui_pass::overlay_z`]) sorts first against the frame quads' packed strata keys.
+const Z_WORLD_TEXT: u64 = overlay_z::WORLD_TEXT;
 
 /// Admit a spawn against the per-unit cap: the client scans the unit's 4 slots for the first
 /// NULL and **returns** when all are occupied — a hard drop, no eviction, no queue (`0x6c73f0`).

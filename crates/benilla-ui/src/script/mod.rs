@@ -99,6 +99,9 @@ mod pvp;
 mod quest;
 mod quest_log;
 mod region;
+/// The 19 Region-map methods, shared by frames and regions the way the reference shares them
+/// (decision 1501) — its header is the byte-verified chain and the bug that found the split.
+mod region_map;
 mod reputation;
 mod saved;
 mod scrollframe;

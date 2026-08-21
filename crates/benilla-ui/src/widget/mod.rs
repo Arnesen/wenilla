@@ -283,6 +283,21 @@ pub struct Frame {
     /// `StartSizing` half of the same family. Default false. benilla stores and reports the flag;
     /// no resize *drag* is built (`StopMovingOrSizing` already covers the stop side of both).
     pub resizable: bool,
+    /// `SetMinResize` / `SetMaxResize` — the interactive-resize bounds (`0x776020` / `0x7762a0`,
+    /// with `GetMinResize 0x775f20` / `GetMaxResize 0x7761a0`; all four on the Frame method table
+    /// `0x878ec0`). `None` = that bound was never set, i.e. unbounded on both axes.
+    ///
+    /// A window kit's opening lines are `SetResizable(true)` + these two, and without them a
+    /// `StartSizing` drag has nothing to stop it — Quiver's `SideEffectMakeMoveable` calls
+    /// `SetMinResize` on every module frame it builds and died on the nil method (part of B267).
+    ///
+    /// **The sentinel and the enforcement points are out with wow-re** (`0` may be the client's
+    /// "unbounded", and whether the clamp binds only the drag pump or every size write is the
+    /// load-bearing half). Until that lands, `None` is unbounded and only the drag pump clamps —
+    /// `script::object::movable::clamp_resize` is the single place either answer folds into.
+    pub min_resize: Option<(f32, f32)>,
+    /// The upper twin of [`Frame::min_resize`] — see its doc.
+    pub max_resize: Option<(f32, f32)>,
     /// `SetUserPlaced` — the client's "the user placed this frame; persist its position across
     /// sessions" bit. Default false. Stored and readable (`IsUserPlaced`); **nothing consumes it
     /// yet** — persisting a frame's position belongs with the layout cache, not with the drag that
@@ -578,6 +593,10 @@ impl WidgetArena {
             // it, at the level it was created with.
             movable: false,
             resizable: false,
+            // No frame is born with resize bounds: both are opt-in, and a frame nobody bounded
+            // resizes freely (see the field docs — the client's own sentinel is out with wow-re).
+            min_resize: None,
+            max_resize: None,
             user_placed: false,
             toplevel: false,
             scale,

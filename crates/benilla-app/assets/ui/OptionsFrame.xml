@@ -852,7 +852,12 @@
             local v = OptionsRow_Get(row)
             local match
             for _, e in ipairs(row.entries) do
-                if e.value == v then match = e end
+                -- `alt` is a second value the same entry ANSWERS to (1502): 1.12's own Camera
+                -- Following Style dropdown writes "3" for Never where the engine's tables are
+                -- indexed 0/1/2, so a config or addon carrying that value means Never — and the
+                -- nearest-stop fallback below, which assumes the values are ordinal, would show
+                -- "Always" for it. A categorical dropdown says which strays are its own.
+                if e.value == v or e.alt == v then match = e end
             end
             if not match and tonumber(v) then
                 local best
@@ -1989,14 +1994,22 @@
                                              "22" means the wheel stops at 22 yards, which is the
                                              thing being chosen. Our default is the factor fully
                                              raised (30 yd), where 1.12 ships 1.0. -->
-                                        <!-- Camera Following Style (decision 1493): 1.12's own
-                                             dropdown (UIOptionsFrameCameraDropDown), values and
-                                             order and all — Smart "1", Always "2", Never "3", with
-                                             each entry carrying the reference's own description key
-                                             so the row's plate changes with the selection, the way
-                                             that dropdown's does. Seated at the head of the camera
-                                             block because it decides whether the camera follows at
-                                             all; the distance slider under it decides how far. -->
+                                        <!-- Camera Following Style (1493, values re-pinned by
+                                             1502): 1.12's own dropdown
+                                             (UIOptionsFrameCameraDropDown) in its own order —
+                                             Smart, Always, Never — each entry carrying the
+                                             reference's own description key (keyed by POSITION,
+                                             OPTION_TOOLTIP_CAMERA1..3) so the row's plate changes
+                                             with the selection, the way that dropdown's does.
+                                             The VALUES are the ENGINE's, not that dropdown's: the
+                                             reference writes 1/2/3 and 3 is not a style at all —
+                                             its validator accepts it while the terrain-tilt
+                                             consumer indexes 360 bytes off the end of its table.
+                                             0/1/2 is what the client's own tables are indexed by
+                                             (wow-re camera-smooth-style.md §2/§4). Seated at the
+                                             head of the camera block because it decides whether
+                                             the camera follows at all; the distance slider under
+                                             it decides how far. -->
                                         <Frame name="$parentRowCameraFollowStyle" inherits="OptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
@@ -2008,7 +2021,7 @@
                                                 OptionsDropdownRow_Setup(self, {
                                                     { text = "Smart", value = "1", tip = "OPTION_TOOLTIP_CAMERA1" },
                                                     { text = "Always", value = "2", tip = "OPTION_TOOLTIP_CAMERA2" },
-                                                    { text = "Never", value = "3", tip = "OPTION_TOOLTIP_CAMERA3" },
+                                                    { text = "Never", value = "0", alt = "3", tip = "OPTION_TOOLTIP_CAMERA3" },
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>

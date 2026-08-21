@@ -274,6 +274,39 @@ pub(crate) struct UiQuads {
     pub dirty: bool,
 }
 
+/// The **append lane's own z bands** — the world-anchored overlays' slice of the same `z_key`
+/// total order the scripted UI packs its `(stratum, level, layer, …)` tuple into
+/// ([`benilla_ui::order::ZKey`]).
+///
+/// The lane's three producers are three *different* client systems that all draw over the world,
+/// and their relative order is a fidelity fact each one owns (the floating combat numbers are a
+/// world-scene draw under all UI; the plates and the bubbles are frames). What is NOT a fidelity
+/// fact is the arithmetic that keeps them apart — and while each producer picked its own small
+/// integer, that arithmetic was three private conventions with nothing naming the shared law:
+/// combat text at 0, the bubble's four pieces at 0..=3 *on top of it*, the plates at 4..=8. The
+/// bands below make the split explicit and, more to the point, give the middle band **room** —
+/// a chat bubble is one frame per speaker with its own frame level (decision 1504), which a
+/// four-key allocation cannot express. Everything here stays far below the scripted UI's keys
+/// (a `ZKey` region carries its is-region bit at `1 << 20`), so the whole lane still paints
+/// under the player UI.
+pub(crate) mod overlay_z {
+    /// Floating combat/XP/honor numbers — the client draws them in the world scene, beneath
+    /// every UI frame ([`crate::combat_text`]).
+    pub(crate) const WORLD_TEXT: u64 = 0;
+    /// The chat bubbles' band ([`crate::chat_bubble`]): one **frame level** per live bubble,
+    /// [`BUBBLE_STRIDE`] keys wide, ordered farthest-camera-distance first.
+    pub(crate) const BUBBLE: u64 = 1 << 8;
+    /// Keys per bubble level — the frame's own four pieces (bg, edge, tail, text).
+    pub(crate) const BUBBLE_STRIDE: u64 = 4;
+    /// The V-plates ([`crate::vplates`]), above every bubble. Same-unit overlap cannot happen
+    /// (the plate/bubble mutual exclusion), so this only orders cross-unit stacking.
+    pub(crate) const VPLATE: u64 = 1 << 16;
+    /// The highest bubble level the band holds before it would reach [`VPLATE`]. Far past any
+    /// real population (a bubble needs a speaker within 20 yd), so the clamp is a guard rail,
+    /// not a policy.
+    pub(crate) const BUBBLE_MAX_LEVEL: u64 = (VPLATE - BUBBLE) / BUBBLE_STRIDE - 1;
+}
+
 /// Clear the append lane at the top of the [`UiQuadAppend`] window — every appender re-emits its
 /// frame's quads after this; [`rebuild_ui_mesh`] then diffs the lane to decide if anything changed.
 fn clear_ui_overlays(mut quads: ResMut<UiQuads>) {

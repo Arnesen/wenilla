@@ -50,6 +50,8 @@ pub struct WorldCensus<'w, 's> {
     claim: Option<Res<'w, CameraInteriorClaim>>,
     windows: Option<Res<'w, ExteriorWindows>>,
     verdict: Option<Res<'w, ExteriorCullVerdict>>,
+    /// The visibility authority's own pose (see [`CensusReport::pvs_eye`]).
+    cull_probe: Option<Res<'w, crate::wmo_portal::WmoCullProbe>>,
     /// Which backdrop is drawing — the gradient dome, or a building's own MOSB sky
     /// ([`crate::wmo_sky`]). Optional for the same reason as the portal terms above.
     skybox: Option<Res<'w, crate::wmo_sky::CameraWmoSkybox>>,
@@ -103,6 +105,12 @@ pub struct CensusReport {
     pub room: Option<String>,
     /// `"unrestricted"`, or the number of window sub-frusta. `None` with [`CensusReport::room`].
     pub windows: Option<String>,
+    /// **The eye the portal authority computed [`Self::room`], [`Self::windows`] and every group's
+    /// PVS from.** Not necessarily the eye this frame draws from: the authority runs in `Update`
+    /// off the camera's propagated transform, so it is answering about wherever the camera was
+    /// when that transform was last written. Walking makes the difference a centimetre; a
+    /// teleport makes it the whole jump, and this is the column that says so.
+    pub pvs_eye: Option<Vec3>,
     /// The backdrop actually drawing: `"dome"` for the `Light.dbc` gradient, else the WMO skybox
     /// model a building's PVS asked for. `None` when the WMO-sky lane is not installed.
     ///
@@ -263,6 +271,7 @@ impl WorldCensus<'_, '_> {
             particles,
             room,
             windows,
+            pvs_eye: self.cull_probe.as_deref().map(|p| p.eye),
             sky,
             ribbons: self.ribbons.as_deref().map(|r| (r.trails, r.drawn)),
             cull: self.verdict.as_deref().map(|v| CullTerms {

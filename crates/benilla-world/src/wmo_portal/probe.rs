@@ -18,6 +18,11 @@ use super::{
 pub struct WmoCullProbe {
     /// Set by the panel's dump button; the next compute writes the trace file and clears it.
     pub dump_requested: bool,
+    /// **The eye the PVS, the interior claim and the exterior windows were computed from** —
+    /// the visibility authority's own pose, recorded so an instrument can compare it against the
+    /// pose the frame actually draws from. Ordinary movement makes the two identical to within a
+    /// centimetre; a snap is where they can disagree by the whole teleport.
+    pub eye: Vec3,
 }
 
 /// Where the dump button writes its trace — under `target/` so it never lands in the repo.

@@ -2803,16 +2803,16 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **Camera Following Style** (decision 1493) — 1.12's `cameraSmoothStyle`, worn as a Controls-page
-/// dropdown, and the setting that decides whether the camera swings back behind the character at
-/// all. Three things pinned: the reference's own values *and* their order (Smart `"1"`, Always
-/// `"2"`, Never `"3"` — Never is **3**, not 0, which is exactly what a tidy-up would get wrong);
-/// the registered default landing on Smart, where benilla behaved as Never for its whole life
-/// before this row; and the plate following the SELECTION rather than the row — the reference's own
-/// dropdown repaints its tooltip per entry (`OPTION_TOOLTIP_CAMERA1/2/3`) and this is the first row
-/// here whose description is not a property of the row alone.
+/// **Camera Following Style** (decisions 1493/1502) — 1.12's `cameraSmoothStyle`, worn as a
+/// Controls-page dropdown, and the setting that decides whether the camera returns to behind the
+/// character at all. What is pinned here is the trap: the reference's own dropdown writes `1/2/3`,
+/// but the ENGINE's tables are indexed `0 = Never · 1 = Smart · 2 = Always`, and `3` is not a style
+/// — the validator accepts it while the terrain-tilt consumer indexes off the end of its table
+/// (wow-re `camera-smooth-style.md` §2/§4). So our entries carry the engine's numbers in the
+/// reference's display order, a stray `3` still reads as Never rather than as the numerically
+/// nearest "Always", and the plate follows the SELECTION the way that dropdown's own does.
 #[test]
-fn the_camera_following_style_dropdown_carries_the_reference_values_and_plate() {
+fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowControls:Click()")
@@ -2843,8 +2843,7 @@ fn the_camera_following_style_dropdown_carries_the_reference_values_and_plate() 
         "reading the table on select must not write it back"
     );
 
-    // The list is the reference dropdown's, entry for entry: Smart, Always, Never — with the
-    // stored value checked.
+    // The list is the reference dropdown's, entry for entry and in its order.
     s.run("OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
         .unwrap();
     assert_eq!(
@@ -2863,12 +2862,12 @@ fn the_camera_following_style_dropdown_carries_the_reference_values_and_plate() 
         .eval::<bool>("return DropDownList1Button1Check:IsVisible()")
         .unwrap());
 
-    // Never stores "3" — the value the reference writes, not the 0 a fresh enum would invent —
+    // Never stores "0" — the engine's own index, not the "3" the reference's dropdown writes —
     // and the row's plate becomes Never's own description.
     s.run("DropDownList1Button3:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![("cameraSmoothStyle".to_string(), "3".to_string())]
+        vec![("cameraSmoothStyle".to_string(), "0".to_string())]
     );
     assert_eq!(
         s.eval::<String>(
@@ -2884,14 +2883,31 @@ fn the_camera_following_style_dropdown_carries_the_reference_values_and_plate() 
         "the plate follows the selection, like the reference dropdown's own"
     );
 
-    // Always is the middle entry and stores "2" (the pairing that goes wrong if the order is read
-    // off the alphabet instead of off the reference).
+    // Always is the middle entry and stores "2".
     s.run("OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()")
         .unwrap();
     s.run("DropDownList1Button2:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("cameraSmoothStyle".to_string(), "2".to_string())]
+    );
+
+    // A config written by a REAL 1.12 client says "3" for Never. It must not display as the
+    // numerically nearest stop — which is Always, the opposite of what it means.
+    s.set_cvar_host("cameraSmoothStyle", "3");
+    s.run("OptionsFrameCategoryListRowAudio:Click(); OptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Never",
+        "the reference dropdown's own stray value still means Never"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "displaying a stray value must not write it back"
     );
 
     // Defaults walks it back to Smart.

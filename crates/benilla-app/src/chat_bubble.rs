@@ -32,6 +32,14 @@
 //!   with no bone matrix anywhere in its call tree — and the scaled product is **latched** at
 //!   `bubble+0x354` behind a parity guard, so it is queried exactly **once per chat line**
 //!   ([`crate::entities::StandBoxHeight`], wow-re's anchor cross-check 2026-08-17; 1406).
+//! - **Stacking** (`0x4b1060`, the per-frame pass over ALL live bubbles — one caller, `0x4817a3`):
+//!   each bubble is its own frame and its frame LEVEL is restamped every frame from the CAMERA's
+//!   distance to the speaker. The list re-sorts farthest-first (`0x4b1360`, comparing
+//!   `[bubble+0x350]` = |cam − unit|², written at `0x4b12c0`), then a head→tail walk stamps
+//!   `SetFrameLevel(2), (3), (4)…` (`0x4b1309`). Level outranks draw layer in the client's total
+//!   order, so overlapping bubbles stack as WHOLE cards with the nearest speaker's on top —
+//!   nothing interleaves. ([`level_z`]; benilla read the bytes for this one, 1504 — wow-re's
+//!   `chat-bubble.md` covers the spawn/geometry/anchor and never reached the manager tick.)
 //!
 //! Named divergences (all deliberate, decisions 0598/0599):
 //! - **`ChatBubblesParty` defaults ON** (binary default "0") — the director asked for `/p`
@@ -71,7 +79,7 @@ use benilla_ui::script::{JustifyH, JustifyV, Outline};
 use crate::entities::StandBoxHeight;
 use crate::net::{Embodied, Guid, NetEntity, SelfGuid};
 use crate::ui_chat::{default_color, ChatEventKind};
-use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
+use crate::ui_pass::{overlay_z, UiQuad, UiQuadAppend, UiQuads, UvRect};
 use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, UiFontAtlas};
 use crate::vplates::{device_snap, gx_px, plate_basis, text_px, VPlateSet, VPlates};
 use benilla_assets::{AssetSet, WorldAssets};
@@ -121,14 +129,24 @@ const WRAP_W: f32 = 0.2;
 /// (`G44·16.0/(S·1024.0)` — G44/S nets the width in the diagonal gx basis).
 const BORDER_FRAC: f32 = 16.0 / 1024.0;
 
-/// Paint order inside the overlays lane: the whole bubble sits UNDER the V-plates' 4..8 band
-/// (same-unit overlap can't happen — the mutual exclusion — so this only orders cross-unit
-/// stacking). The tail draws over the frame's bottom edge piece: its art carries the border
-/// lines that make the seam read continuous.
+/// Paint order **inside one bubble's frame level** — the four pieces, back→front. The tail draws
+/// over the frame's bottom edge piece: its art carries the border lines that make the seam read
+/// continuous, and the reference gets the same result from its own layer key (the tail is an
+/// ARTWORK texture, the text an ARTWORK font string, and a batch drains every texture before
+/// every font string — wow-re `ui/scratch/draw-order-law.md` §4).
 const Z_BG: u64 = 0;
 const Z_EDGE: u64 = 1;
 const Z_TAIL: u64 = 2;
 const Z_TEXT: u64 = 3;
+
+/// The z base for the bubble at `rank` in this frame's farthest→nearest order — the port of the
+/// reference's per-frame `SetFrameLevel(2 + i)` walk (`0x4b12d5`–`0x4b1312`, decision 1504). One
+/// LEVEL per bubble, [`overlay_z::BUBBLE_STRIDE`] keys wide, so a whole bubble stacks over a whole
+/// bubble; the whole band stays under the V-plates ([`crate::ui_pass::overlay_z`]).
+fn level_z(rank: usize) -> u64 {
+    let level = (rank as u64).min(overlay_z::BUBBLE_MAX_LEVEL);
+    overlay_z::BUBBLE + level * overlay_z::BUBBLE_STRIDE
+}
 
 /// Which CVar gates this chat kind's bubble — `None` = the kind never bubbles in v1.
 /// PARTY selects `ChatBubblesParty`, every other bubbling kind `ChatBubbles` (`0x608b0d`).
@@ -455,6 +473,7 @@ fn drive_bubbles(
     let scale = window.single().map_or(1.0, Window::scale_factor);
     let trace = std::env::var("WOW_BUBBLE_TRACE").as_deref() == Ok("1");
     let mut dead = Vec::new();
+    let mut pending: Vec<Pending> = Vec::new();
     for (guid, b) in bubbles.0.iter_mut() {
         let Some((entity, _, tf)) = find(*guid) else {
             dead.push(*guid); // the speaker despawned — the unit teardown takes its bubble
@@ -485,9 +504,9 @@ fn drive_bubbles(
         if b.alpha <= 0.0 {
             continue;
         }
-        let (Some((cam, cam_pose)), Some(atlas), Some(art)) = (cam, atlas.as_deref_mut(), art)
-        else {
-            continue; // no camera/atlas/art — lifetimes still tick, nothing draws
+        // No camera/atlas/art — lifetimes still tick, nothing draws.
+        let (Some((cam, cam_pose)), true) = (cam, atlas.is_some() && art.is_some()) else {
+            continue;
         };
         // World anchor (`0x4b0c30`): the unit's position, Z lifted by the LATCHED Stand-box height
         // + 0.7 yd — seated BOTTOM at the projected point, growing upward. Every term is this
@@ -509,24 +528,80 @@ fn drive_bubbles(
             refuse("no-viewport", *guid);
             continue;
         };
+        // Seated and projected here, DRAWN below: the level a bubble draws at is a property of
+        // the whole live set, not of this bubble ([`level_z`]), so the draw waits for the sort.
+        pending.push(Pending {
+            guid: *guid,
+            entity,
+            seat,
+            viewport,
+            // The sort key (`0x4b1251`–`0x4b12c0`): |camera − speaker|², the CAMERA's distance,
+            // not the local player's (which is the eligibility gate's, above).
+            cam_dist_sq: cam_pose.translation.distance_squared(tf.translation),
+            anchor: seat_world,
+            unit_pos: tf.translation,
+        });
+    }
+    for g in dead {
+        bubbles.0.remove(&g);
+    }
+
+    // ── The frame-level pass (`0x4b12d5`–`0x4b1312`) ─────────────────────────────────────────
+    // The reference re-sorts its live-bubble list by camera distance, FARTHEST at the head, and
+    // then walks head→tail stamping `SetFrameLevel(2), (3), (4)…` — so every bubble owns a frame
+    // level of its own and the NEAREST speaker's bubble ends up on top. (It only re-sorts when
+    // the camera moved or a bubble is dirty; the stamping walk runs unconditionally. Sorting
+    // every frame is the same list with no state to keep.) Ties break on guid so an exact
+    // distance tie can't flip the stack frame to frame.
+    stack_sort(&mut pending);
+    let (Some((_, cam_pose)), Some(atlas), Some(art)) = (cam, atlas.as_deref_mut(), art) else {
+        return; // nothing reached `pending` either — the same gate refused it in the tick
+    };
+    for (rank, p) in pending.iter().enumerate() {
+        let Some(b) = bubbles.0.get(&p.guid) else {
+            continue; // despawned between the tick and the draw
+        };
         draw_bubble(
             atlas,
             &mut quads,
             art,
             b,
-            seat,
-            viewport,
+            p.seat,
+            p.viewport,
             scale,
             trace,
-            entity,
-            seat_world,
-            tf.translation,
+            p.entity,
+            p.anchor,
+            p.unit_pos,
             cam_pose,
+            level_z(rank),
         );
     }
-    for g in dead {
-        bubbles.0.remove(&g);
-    }
+}
+
+/// The stack order: **farthest camera distance first**, so the enumeration index that follows is
+/// the reference's frame level and the nearest speaker's bubble draws last (on top). Ties break on
+/// guid — the reference's list keeps its previous order across an exact tie because it re-inserts
+/// only ahead of a *strictly* closer node, and a `HashMap` walk has no such memory.
+fn stack_sort(pending: &mut [Pending]) {
+    pending.sort_by(|a, b| {
+        b.cam_dist_sq
+            .total_cmp(&a.cam_dist_sq)
+            .then(a.guid.cmp(&b.guid))
+    });
+}
+
+/// One bubble that passed the tick and projected on screen, waiting for the frame-level sort.
+struct Pending {
+    guid: u64,
+    entity: Entity,
+    seat: Vec2,
+    viewport: Vec2,
+    /// |camera − speaker|², the reference's own sort key (`[bubble+0x350]`).
+    cam_dist_sq: f32,
+    /// The world seat and the speaker's position — the `bub` jitter trace's decomposition.
+    anchor: Vec3,
+    unit_pos: Vec3,
 }
 
 /// Append one bubble's draw list: the Backdrop pieces (bg fill inset by the border-unit +
@@ -546,6 +621,8 @@ fn draw_bubble(
     anchor: Vec3,
     unit_pos: Vec3,
     cam_pose: &Transform,
+    // This bubble's frame level, flattened to a z base ([`level_z`]).
+    z: u64,
 ) {
     let basis = plate_basis(viewport);
     let border = border_px(viewport, basis);
@@ -628,7 +705,7 @@ fn draw_bubble(
         };
         quads.overlays.push(UiQuad {
             rect,
-            z_key: if p.is_bg { Z_BG } else { Z_EDGE },
+            z_key: z + if p.is_bg { Z_BG } else { Z_EDGE },
             texture: Some(if p.is_bg {
                 art.bg.clone()
             } else {
@@ -645,7 +722,7 @@ fn draw_bubble(
     let cx = (frame.min.x + frame.max.x) * 0.5;
     quads.overlays.push(UiQuad {
         rect: Rect::new(cx - border, tail_top, cx, tail_top + border),
-        z_key: Z_TAIL,
+        z_key: z + Z_TAIL,
         texture: Some(art.tail.clone()),
         uv: UvRect::FULL,
         color: [1.0, 1.0, 1.0, alpha],
@@ -663,7 +740,7 @@ fn draw_bubble(
             h: JustifyH::Center,
             v: JustifyV::Middle,
         },
-        Z_TEXT,
+        z + Z_TEXT,
         spec,
     );
     drop(e);
@@ -891,6 +968,57 @@ mod tests {
             worst <= 0.5 / scale + f32::EPSILON,
             "snap displacement {worst} exceeds half a device pixel"
         );
+    }
+
+    /// Every bubble owns a frame LEVEL: its four pieces are one contiguous band, bands ascend
+    /// with rank, and no two bubbles can interleave. This is the whole 1504 fix — with a flat
+    /// per-piece key, every bubble's background painted under every bubble's text, so a speaker's
+    /// line bled across a neighbour's card.
+    #[test]
+    fn each_bubble_gets_its_own_level_band() {
+        // The four pieces of one bubble, in paint order, all inside one level.
+        const { assert!(Z_BG < Z_EDGE && Z_EDGE < Z_TAIL && Z_TAIL < Z_TEXT) };
+        const { assert!(Z_TEXT < overlay_z::BUBBLE_STRIDE) };
+        for rank in 0..8usize {
+            // ...and every piece strictly below the NEXT bubble's background.
+            assert!(level_z(rank) + Z_TEXT < level_z(rank + 1) + Z_BG);
+        }
+        assert!(level_z(1) > level_z(0), "later rank draws later");
+    }
+
+    /// The band is bounded: however many bubbles are live, none of them can reach the V-plates'
+    /// band above ([`crate::ui_pass::overlay_z`]) or the floating combat text's below.
+    #[test]
+    fn the_bubble_band_stays_between_its_neighbours() {
+        for rank in [0, 1, 1_000, usize::MAX] {
+            let z = level_z(rank);
+            assert!(z >= overlay_z::BUBBLE, "over the floating numbers");
+            assert!(z + Z_TEXT < overlay_z::VPLATE, "under the V-plates");
+        }
+    }
+
+    /// The stack order is the reference's: farthest camera distance first (so the nearest
+    /// speaker's bubble ends up on top), guid breaking an exact tie deterministically.
+    #[test]
+    fn the_stack_is_sorted_farthest_first() {
+        let at = |guid: u64, d2: f32| Pending {
+            guid,
+            entity: Entity::PLACEHOLDER,
+            seat: Vec2::ZERO,
+            viewport: Vec2::ONE,
+            cam_dist_sq: d2,
+            anchor: Vec3::ZERO,
+            unit_pos: Vec3::ZERO,
+        };
+        let mut p = vec![at(7, 25.0), at(3, 400.0), at(9, 1.0), at(2, 400.0)];
+        stack_sort(&mut p);
+        assert_eq!(
+            p.iter().map(|q| q.guid).collect::<Vec<_>>(),
+            vec![2, 3, 7, 9],
+            "farthest first; the 400-yd² pair ordered by guid"
+        );
+        // The rank the draw uses IS the frame level: the nearest speaker draws last.
+        assert!(level_z(0) < level_z(p.len() - 1));
     }
 
     /// The border-unit lands the byte constants: 16 px at 1024-wide 4:3 (G44·16/(S·1024)

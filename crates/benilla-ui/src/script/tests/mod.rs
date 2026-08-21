@@ -25,6 +25,7 @@ mod minimap;
 mod movable;
 mod object_model;
 mod reference_surface;
+mod region_map;
 mod regions;
 mod scrollframe;
 mod setparent;

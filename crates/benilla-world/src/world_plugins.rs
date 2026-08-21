@@ -177,6 +177,10 @@ impl PluginGroup for WorldPlugins {
             // streamer fills its volume registry).
             .add(crate::interior::InteriorPlugin)
             .add(crate::entity_shade::EntityShadePlugin)
+            // The world camera's pose, published before the `Update`-stage viewer authorities
+            // below read it (decision 1503) — without it they answer about where the camera was
+            // last frame, which on a teleport frame is the place we just left.
+            .add(crate::view::ViewPlugin)
             // WMO portal visibility: per-frame, decides which of a building's groups are reachable
             // through portals from the camera's group, so the Stormwind cathedral culls from the
             // Trade District. Only computes the PVS; the `Visibility` authority

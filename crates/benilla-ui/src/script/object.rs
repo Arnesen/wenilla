@@ -224,6 +224,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     super::statusbar::install(lua)?;
     super::button::install(lua)?;
     super::editbox::install(lua)?;
+    // AFTER every table above exists: collapse the 19 Region-map names to one shared
+    // implementation each, so a method pulled off a frame works on a texture (decision 1501).
+    super::region_map::install(lua)?;
 
     // Shared frame metatable: __index is a Rust dispatcher over the frame method table (RF-0023),
     // checking the frame's *kind-specific* method table first. Per-kind resolution matters beyond

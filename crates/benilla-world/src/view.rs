@@ -182,10 +182,140 @@ pub const CAM_NEAR: f32 = 1.0 / 9.0;
 /// [`crate::sun`]'s projection note); naming it here just stops the consumers drifting apart.
 pub const CAM_FOVY: f32 = std::f32::consts::FRAC_PI_4;
 
+/// **The world camera's world pose, made current before anything in `Update` reads it** — the
+/// set every `Update`-stage viewer authority must order after.
+///
+/// Bevy propagates `GlobalTransform` in `PostUpdate`. For the whole of `Update`, therefore, a
+/// camera's `GlobalTransform` is the pose it had **last** frame, while its `Transform` — written
+/// by the controller in [`crate::schedule::WorldStage::Input`] — is this frame's. Walking, the two
+/// differ by centimetres and nothing shows. On the frame a teleport snaps they differ by the whole
+/// jump, and an authority that decides *what may draw* off the stale one gates a frame drawn from
+/// the new pose with a verdict about the old place (decision 1503).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CameraPoseSet;
+
+/// Copy the world camera's `Transform` into its `GlobalTransform` (see [`CameraPoseSet`]).
+///
+/// **Root cameras only.** The world camera is spawned unparented (both the fallback and the real
+/// one), and for a root the propagation Bevy will run in `PostUpdate` is exactly this copy — so
+/// this makes the same value available earlier and `PostUpdate` recomputes it identically. A
+/// camera that ever acquires a parent keeps Bevy's propagated value and its old one-frame lag,
+/// which is no worse than before and never silently wrong: the pose it reports is a real pose the
+/// camera had, just not this frame's.
+///
+/// Written through `set_if_neq` so a still camera does not flag `Changed<GlobalTransform>` every
+/// frame for the consumers that key on it.
+/// The root world cameras and their two transforms — see [`publish_camera_pose`].
+type RootCameraPose<'w, 's> =
+    Query<'w, 's, (&'static Transform, &'static mut GlobalTransform), RootCamera>;
+/// A world camera Bevy will propagate as a root (no parent to inherit from).
+type RootCamera = (With<WorldCamera>, Without<ChildOf>);
+
+pub(crate) fn publish_camera_pose(mut cam: RootCameraPose) {
+    for (t, mut g) in &mut cam {
+        g.set_if_neq(GlobalTransform::from(*t));
+    }
+}
+
+/// The view lane's plugin — today, [`publish_camera_pose`] and its ordering contract.
+pub(crate) struct ViewPlugin;
+
+impl Plugin for ViewPlugin {
+    fn build(&self, app: &mut App) {
+        plugin(app);
+    }
+}
+
+pub(crate) fn plugin(app: &mut App) {
+    app.add_systems(
+        Update,
+        publish_camera_pose
+            .in_set(CameraPoseSet)
+            // After the controller that writes the camera's `Transform`
+            // ([`crate::schedule::WorldStage::Input`]) — the point of the whole system is to
+            // publish the pose the controller just chose, not the one before it.
+            .after(crate::schedule::WorldStage::Input),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
 
+    /// The contract of [`CameraPoseSet`]: a system ordered after it, in the same `Update`, reads
+    /// the pose the controller wrote **this** frame — not the one Bevy will propagate at the end
+    /// of it. Written as the frame it fixes: move the camera the way a teleport snap does, and
+    /// assert the downstream authority sees the destination.
+    #[test]
+    fn a_reader_after_the_pose_set_sees_this_frames_camera() {
+        #[derive(Resource, Default)]
+        struct Seen(Vec3);
+
+        fn snap_the_camera(mut cam: Query<&mut Transform, With<WorldCamera>>) {
+            for mut t in &mut cam {
+                t.translation = Vec3::new(500.0, 0.0, 0.0);
+            }
+        }
+        fn read_the_pose(cam: Query<&GlobalTransform, With<WorldCamera>>, mut seen: ResMut<Seen>) {
+            for g in &cam {
+                seen.0 = g.translation();
+            }
+        }
+
+        let mut app = App::new();
+        app.init_resource::<Seen>();
+        app.configure_sets(Update, crate::schedule::WorldStage::Input);
+        app.add_systems(
+            Update,
+            snap_the_camera.in_set(crate::schedule::WorldStage::Input),
+        );
+        plugin(&mut app);
+        app.add_systems(Update, read_the_pose.after(CameraPoseSet));
+        app.world_mut().spawn((
+            WorldCamera,
+            Transform::default(),
+            GlobalTransform::default(),
+        ));
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<Seen>().0,
+            Vec3::new(500.0, 0.0, 0.0),
+            "an Update-stage viewer authority must see the snapped pose, not the frame-old one"
+        );
+    }
+
+    /// A **parented** camera is left to Bevy's propagation: a plain copy of a child's local
+    /// `Transform` would be a wrong pose, which is worse than a frame-old right one.
+    #[test]
+    fn a_parented_camera_is_left_alone() {
+        let mut app = App::new();
+        plugin(&mut app);
+        let parent = app.world_mut().spawn(Transform::default()).id();
+        let child = app
+            .world_mut()
+            .spawn((
+                WorldCamera,
+                Transform::from_xyz(7.0, 0.0, 0.0),
+                GlobalTransform::default(),
+            ))
+            .id();
+        app.world_mut().entity_mut(parent).add_child(child);
+
+        app.world_mut()
+            .run_system_once(publish_camera_pose)
+            .unwrap();
+        assert_eq!(
+            app.world()
+                .entity(child)
+                .get::<GlobalTransform>()
+                .unwrap()
+                .translation(),
+            Vec3::ZERO,
+            "the child's local transform is not a world pose"
+        );
+    }
     /// The wall is planar depth along camera-forward, measured to the sphere's nearest point.
     #[test]
     fn planar_depth_of_the_nearest_point() {
