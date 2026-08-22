@@ -873,6 +873,9 @@ fn writer_loop(
                     ClientCommand::QueryTime => w.query_time(),
                     // The inspect request (decision 0631) — no reply is awaited; see the writer.
                     ClientCommand::Inspect { target } => w.inspect(target),
+                    // The inspect-honor query (decision 1512) — this one IS answered; the reply
+                    // rides the same opcode back.
+                    ClientCommand::InspectHonorStats { target } => w.inspect_honor_stats(target),
                     // The player-trade arc (decision 0592) — the CMSG verbs onto the P0 writers.
                     ClientCommand::InitiateTrade { target } => w.initiate_trade(target),
                     ClientCommand::BeginTrade => w.begin_trade(),

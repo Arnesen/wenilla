@@ -31,7 +31,7 @@ use super::tooltip::{append_line, clear_content, fire_cleared, show_or_hide_empt
 // The grey band + trivial/GREY check (`0x5f0700`, the CIVILIAN line's last gate: a green-or-
 // better con never warns of a dishonorable kill) and the "??" gate live in one shared home
 // (`unit.rs`), alongside `UnitLevel`'s −1 return and the `GetQuestGreenRange` binding.
-use super::unit::{level_reads_unknown, unit_is_grey};
+use super::unit::{is_civilian_kill, level_reads_unknown};
 use super::{KindState, Model, UnitState};
 use crate::layout::{Anchor, Point};
 use crate::widget::FrameHandle;
@@ -168,13 +168,9 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
     }
     // CIVILIAN (green) — `0x612550`, whole: the unit's PvP bit + the query civilian flag + the
     // unit is HOSTILE to the player (UnitReaction ≤ 2 — internal reaction < 2) + the kill would
-    // be GREY/trivial. PVP_RANK_CIVILIAN = "Civilian" (extracted GlobalStrings).
-    if u.civilian
-        && u.pvp
-        && u.reaction != 0
-        && u.reaction <= 2
-        && unit_is_grey(player_level, u.level)
-    {
+    // be GREY/trivial. PVP_RANK_CIVILIAN = "Civilian" (extracted GlobalStrings). The predicate
+    // itself lives in `unit` because `UnitPVPName` gates its own civilian arm on the same call.
+    if is_civilian_kill(&u, player_level) {
         append_line(lua, this, ("Civilian".into(), GREEN), None, false)?;
     }
     // LEADER (white) — `0x6125c0`: the PvP bit + the query racial_leader flag, no other gate.

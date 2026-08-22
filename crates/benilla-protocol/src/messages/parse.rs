@@ -13,9 +13,9 @@ use crate::wire::{
 use super::{
     action_bar, area_trigger, attack, bank, binder, channel, chat, combat_log, death, duel,
     gameobject, gossip, group, guild, items, loot, mail, mirror_timer, monster_move, movement,
-    opcode, page_text, pet, progression, quest, social, spellbook, spells, taxi, trade, trainer,
-    update_object, vendor, world_state, Character, CreatureQueryInfo, MoveMode, ServerPacket,
-    SpeedKind,
+    opcode, page_text, pet, progression, pvp, quest, social, spellbook, spells, taxi, trade,
+    trainer, update_object, vendor, world_state, Character, CreatureQueryInfo, MoveMode,
+    ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -964,6 +964,16 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_DUEL_COUNTDOWN => ServerPacket::DuelCountdown {
             seconds: duel::read_duel_countdown(&mut r)?,
         },
+        // The honor pair (decision 1512; bodies in `pvp`). MSG_INSPECT_HONOR_STATS is an `MSG_`:
+        // opcode 0x2D6 carries our 8-byte request AND the server's 50-byte reply. There is no
+        // ambiguity to resolve here — `parse_server` is fed only by the world *reader*, so an
+        // 0x2D6 body arriving at this function is always the reply. The request shape is built by
+        // `pvp::inspect_honor_stats` and goes straight out through `world::writer::pvp`; it never
+        // reaches this match.
+        opcode::MSG_INSPECT_HONOR_STATS => {
+            ServerPacket::InspectHonorStats(pvp::read_inspect_honor_stats(&mut r)?)
+        }
+        opcode::SMSG_PVP_CREDIT => ServerPacket::PvpCredit(pvp::read_pvp_credit(&mut r)?),
         // The mirror timers (decision 0874; bodies in `mirror_timer`). START carries the timer's
         // whole state and is re-sent on every change — there is no update opcode in the family.
         opcode::SMSG_START_MIRROR_TIMER => {

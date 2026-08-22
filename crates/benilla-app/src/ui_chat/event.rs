@@ -55,6 +55,12 @@ pub(crate) enum ChatEventKind {
     /// The client-composed XP line (`SMSG_LOG_XPGAIN`, decision 0304) — the one `COMBAT_*`
     /// family member modeled (0288 §3 keeps the rest for the combat-log content arc).
     CombatXpGain,
+    /// The client-composed honor line (`SMSG_PVP_CREDIT`, decision 1512) — the XP line's twin,
+    /// and the second `COMBAT_*` family member modeled. Composed here rather than fired from the
+    /// wire because the packet carries a guid and a rank *number*: the sentence needs the
+    /// victim's NAME and their rank TITLE, so it is built after the name resolve exactly as
+    /// [`Self::CombatXpGain`] is.
+    CombatHonorGain,
     RaidLeader,
     RaidWarning,
     RaidBossEmote,
@@ -105,6 +111,7 @@ impl ChatEventKind {
             K::Loot,
             K::Money,
             K::CombatXpGain,
+            K::CombatHonorGain,
             K::RaidLeader,
             K::RaidWarning,
             K::RaidBossEmote,
@@ -279,6 +286,7 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
         K::Loot => "CHAT_MSG_LOOT",
         K::Money => "CHAT_MSG_MONEY",
         K::CombatXpGain => "CHAT_MSG_COMBAT_XP_GAIN",
+        K::CombatHonorGain => "CHAT_MSG_COMBAT_HONOR_GAIN",
         K::RaidLeader => "CHAT_MSG_RAID_LEADER",
         K::RaidWarning => "CHAT_MSG_RAID_WARNING",
         K::RaidBossEmote => "CHAT_MSG_RAID_BOSS_EMOTE",
@@ -370,6 +378,8 @@ pub(crate) enum ChatGroup {
     Money,
     /// `COMBAT_XP_GAIN` — one kind, its own group (ref ChatFrame.lua l.235-237).
     CombatXpGain,
+    /// `COMBAT_HONOR_GAIN` — one kind, its own group (ref ChatFrame.lua l.238-240).
+    CombatHonorGain,
 }
 
 /// `ChatTypeGroup` transcribed (ref ChatFrame.lua l.116-174): which kinds a group registration
@@ -417,6 +427,7 @@ pub(crate) fn group_kinds(group: ChatGroup) -> &'static [ChatEventKind] {
         ChatGroup::Loot => &[K::Loot, K::Money],
         ChatGroup::Money => &[K::Money],
         ChatGroup::CombatXpGain => &[K::CombatXpGain],
+        ChatGroup::CombatHonorGain => &[K::CombatHonorGain],
     }
 }
 
@@ -449,6 +460,7 @@ pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
         K::Loot => [0, 170, 0],
         K::Money => [255, 255, 0],
         K::CombatXpGain => [111, 111, 255],
+        K::CombatHonorGain => [224, 202, 10],
         K::RaidLeader | K::RaidWarning | K::RaidBossEmote | K::BattlegroundLeader => {
             [255, 219, 183]
         }

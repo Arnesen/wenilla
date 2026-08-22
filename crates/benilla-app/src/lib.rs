@@ -111,6 +111,7 @@ mod ui_gamma;
 mod ui_gossip;
 mod ui_guild;
 mod ui_hide;
+mod ui_honor;
 mod ui_inspect;
 mod ui_item_text;
 mod ui_items;
@@ -580,6 +581,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The inspect feed (decision 0631): another player's equipment off their PUBLIC visible-item
     // entries, plus the "inspect" booth's unit + yaw. Right after the character feed it mirrors.
     .add_plugins(ui_inspect::InspectUiPlugin)
+    // The honor feed (decision 1512): the PRIVATE honor descriptor block as the snapshot both
+    // Honor tabs read, plus the inspect-honor round trip. After the inspect feed because it
+    // resolves that feed's target to address its request at.
+    .add_plugins(ui_honor::UiHonorPlugin)
     // The dressing-room feed (decision 1060): the window's try-on intents → the player's own look
     // with the tried-on items substituted in, plus the "dressup" booth's yaw. Beside the inspect
     // feed, whose shape it shares (intents in, a booth look out).

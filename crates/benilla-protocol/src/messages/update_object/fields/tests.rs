@@ -96,6 +96,40 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
         FIELD_PLAYER_CHARACTER_POINTS2 + 1
     );
     assert_eq!(FIELD_PLAYER_TRACK_RESOURCES, UNIT_END + 0x395);
+    // The honor block (decision 1512) is eleven contiguous fields filling EXACTLY the gap between
+    // two already-anchored neighbours — the 12-slot buyback-timestamp array below it and the
+    // watched-faction slot above it — so it needs no anchor of its own. If any of the three ever
+    // drifts, one of these two closures breaks.
+    assert_eq!(
+        FIELD_PLAYER_BUYBACK_TIMESTAMP_1 + 12,
+        FIELD_PLAYER_FIELD_SESSION_KILLS,
+        "the honor block opens where the 12-slot buyback-timestamp array ends"
+    );
+    assert_eq!(
+        FIELD_PLAYER_FIELD_BYTES2 + 1,
+        FIELD_PLAYER_WATCHED_FACTION_INDEX,
+        "and closes one below the watched-faction slot"
+    );
+    assert_eq!(FIELD_PLAYER_FIELD_SESSION_KILLS, UNIT_END + 0x426);
+    assert_eq!(FIELD_PLAYER_FIELD_YESTERDAY_KILLS, UNIT_END + 0x427);
+    assert_eq!(FIELD_PLAYER_FIELD_LAST_WEEK_KILLS, UNIT_END + 0x428);
+    assert_eq!(FIELD_PLAYER_FIELD_THIS_WEEK_KILLS, UNIT_END + 0x429);
+    assert_eq!(FIELD_PLAYER_FIELD_THIS_WEEK_CONTRIBUTION, UNIT_END + 0x42A);
+    assert_eq!(
+        FIELD_PLAYER_FIELD_LIFETIME_HONORABLE_KILLS,
+        UNIT_END + 0x42B
+    );
+    assert_eq!(
+        FIELD_PLAYER_FIELD_LIFETIME_DISHONORABLE_KILLS,
+        UNIT_END + 0x42C
+    );
+    assert_eq!(FIELD_PLAYER_FIELD_YESTERDAY_CONTRIBUTION, UNIT_END + 0x42D);
+    assert_eq!(FIELD_PLAYER_FIELD_LAST_WEEK_CONTRIBUTION, UNIT_END + 0x42E);
+    assert_eq!(FIELD_PLAYER_FIELD_LAST_WEEK_RANK, UNIT_END + 0x42F);
+    assert_eq!(FIELD_PLAYER_FIELD_BYTES2, UNIT_END + 0x430);
+    // The CURRENT rank rides the appearance dword instead, nowhere near that block — which is the
+    // whole point: PLAYER_BYTES_3 is PUBLIC, so it is the one honor value a foreign player streams.
+    assert_eq!(FIELD_PLAYER_BYTES_3, UNIT_END + 0x7);
 }
 
 #[test]
@@ -270,6 +304,103 @@ fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     assert_eq!(ObjectFields::default().player_honor_rank(), None);
     assert_eq!(ObjectFields::default().player_action_bar_toggles(), None);
     assert_eq!(ObjectFields::default().player_combo_points(), None);
+}
+
+/// `PLAYER_BYTES_3` byte 3 is the **current** honor rank, and it shares its dword with the
+/// gender+inebriation low u16 — so the fixture carries a non-zero drunk byte on purpose: a wrong
+/// shift would read `0xA0` (160) as the rank and pass a byte-3-is-zero test.
+///
+/// The pairing with `PLAYER_FIELD_BYTES`' byte 3 is the confusable one and the reason both are
+/// asserted here: current rank (PUBLIC, field 195) vs highest lifetime rank (PRIVATE, field 1222).
+/// A fixture carrying only 195 must answer `None` for the highest rank, not `0`.
+#[test]
+fn player_bytes_3_byte_3_is_the_current_pvp_rank_not_the_highest() {
+    // byte 0 = 0x01 gender, byte 1 = 0xA0 drunk, byte 2 = 0x04 city-protector title,
+    // byte 3 = 0x0B = internal rank 11 (visual 7).
+    let f = ObjectFields::from_pairs(&[(195, 0x0B_04_A0_01)]);
+    assert_eq!(f.player_pvp_rank(), Some(11));
+    assert_eq!(f.player_drunk_byte(), Some(0xA0), "the neighbouring byte");
+    assert_eq!(
+        f.player_honor_rank(),
+        None,
+        "the HIGHEST rank is a different field (1222) — absent means absent"
+    );
+    // The two really do diverge: a demoted player keeps the higher lifetime rank.
+    let demoted = ObjectFields::from_pairs(&[(195, 0x03_00_00_00), (1222, 0x0B_00_00_00)]);
+    assert_eq!(demoted.player_pvp_rank(), Some(3));
+    assert_eq!(demoted.player_honor_rank(), Some(11));
+    assert_eq!(ObjectFields::default().player_pvp_rank(), None);
+}
+
+/// The four TWO_SHORT kill counters split low = honorable / high = dishonorable
+/// (`MAKE_PAIR32`; vmangos writes SESSION_KILLS as two `SetUInt16Value` halves). The other three
+/// come off vmangos as a whole dword, so their high half is 0 — asserted, because "DK reads 0" is
+/// a property of *this server*, not of the field, and a future capture that shows otherwise is a
+/// finding rather than a regression.
+#[test]
+fn honor_kill_counters_split_into_honorable_and_dishonorable_halves() {
+    let f = ObjectFields::from_pairs(&[
+        (1250, 0x0003_0011), // SESSION: 17 HK, 3 DK — both halves live
+        (1251, 0x0000_0029), // YESTERDAY: 41 HK, whole-dword write ⇒ DK half 0
+        (1252, 0x0000_01A4), // LAST_WEEK: 420 HK
+        (1253, 0x0000_007B), // THIS_WEEK: 123 HK
+    ]);
+    assert_eq!(f.player_session_kills(), Some((17, 3)));
+    assert_eq!(f.player_yesterday_kills(), Some((41, 0)));
+    assert_eq!(f.player_last_week_kills(), Some((420, 0)));
+    assert_eq!(f.player_this_week_kills(), Some((123, 0)));
+    // A value that fills the high half of one of the dword-written fields still decodes as a
+    // pair — we carry the descriptor's shape, not vmangos's habit.
+    let both = ObjectFields::from_pairs(&[(1251, 0x0007_0029)]);
+    assert_eq!(both.player_yesterday_kills(), Some((41, 7)));
+    // Absent stays absent for every one of the four.
+    let empty = ObjectFields::default();
+    assert_eq!(empty.player_session_kills(), None);
+    assert_eq!(empty.player_yesterday_kills(), None);
+    assert_eq!(empty.player_last_week_kills(), None);
+    assert_eq!(empty.player_this_week_kills(), None);
+}
+
+/// The INT half of the honor block — three contribution totals, the weekly standing, and the two
+/// lifetime counters — each reading its own index (a swapped constant shows up here).
+#[test]
+fn honor_contributions_standing_and_lifetime_read_their_own_fields() {
+    let f = ObjectFields::from_pairs(&[
+        (1254, 1_250), // THIS_WEEK_CONTRIBUTION
+        (1255, 3_907), // LIFETIME_HONORABLE_KILLS
+        (1256, 12),    // LIFETIME_DISHONORABLE_KILLS
+        (1257, 640),   // YESTERDAY_CONTRIBUTION
+        (1258, 8_431), // LAST_WEEK_CONTRIBUTION
+        (1259, 57),    // LAST_WEEK_RANK — the STANDING, not an honor rank
+    ]);
+    assert_eq!(f.player_this_week_contribution(), Some(1_250));
+    assert_eq!(f.player_lifetime_honorable_kills(), Some(3_907));
+    assert_eq!(f.player_lifetime_dishonorable_kills(), Some(12));
+    assert_eq!(f.player_yesterday_contribution(), Some(640));
+    assert_eq!(f.player_last_week_contribution(), Some(8_431));
+    assert_eq!(f.player_last_week_rank(), Some(57));
+    let empty = ObjectFields::default();
+    assert_eq!(empty.player_this_week_contribution(), None);
+    assert_eq!(empty.player_yesterday_contribution(), None);
+    assert_eq!(empty.player_last_week_contribution(), None);
+    assert_eq!(empty.player_last_week_rank(), None);
+    assert_eq!(empty.player_lifetime_honorable_kills(), None);
+    assert_eq!(empty.player_lifetime_dishonorable_kills(), None);
+}
+
+/// `PLAYER_FIELD_BYTES2` byte 0 is the rank progress bar; bytes 1..3 are a flags byte and two
+/// unknowns, so the fixture sets them to catch a wrong shift.
+#[test]
+fn player_honor_rank_bar_is_byte_zero_of_player_field_bytes2() {
+    let f = ObjectFields::from_pairs(&[(1260, 0xDE_AD_BE_7F)]);
+    assert_eq!(f.player_honor_rank_bar(), Some(0x7F));
+    // A negative rank's `uint8(fraction * -255)` wraps rather than clamping — we carry the byte
+    // the wire sent and leave the interpretation to the display edge.
+    assert_eq!(
+        ObjectFields::from_pairs(&[(1260, 0x0000_009C)]).player_honor_rank_bar(),
+        Some(0x9C)
+    );
+    assert_eq!(ObjectFields::default().player_honor_rank_bar(), None);
 }
 
 /// `PLAYER_FIELD_COMBO_TARGET` reads as one GUID out of its two dwords — the unit the points are

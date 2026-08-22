@@ -5,7 +5,7 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, guild,
-    inspect, item_text, loot, loot_roll, macros, mail, merchant, party, quest, quest_log,
+    inspect, item_text, loot, loot_roll, macros, mail, merchant, party, pvp, quest, quest_log,
     reputation, session, simplehtml, skills, slider, social, spellbook, taxi, trade, tradeskill,
     trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
     RegionData, ScriptValue, SoundRequest, UnitState,
@@ -453,6 +453,27 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_pvp_toggles`] drain — the outbound seam ([`pvp`]). A count, not a
     /// payload: `CMSG_TOGGLE_PVP` carries no body.
     pub(crate) pvp_toggles: u32,
+    /// The local player's honor snapshot ([`pvp::HonorState`], decision 1512) — the PRIVATE honor
+    /// descriptor fields the app decodes and pushes ([`super::UiScript::set_honor`]). `None`
+    /// before the first push, which the six self getters read as a zeroed snapshot (see
+    /// [`pvp`]'s module doc for why they never return short).
+    pub(crate) honor: Option<pvp::HonorState>,
+    /// The last `MSG_INSPECT_HONOR_STATS` reply the app pushed ([`pvp::InspectHonorData`]). Its
+    /// PRESENCE is `HasInspectHonorData`'s answer — the latch the reference's inspect pane gates
+    /// its request on — so `None` is a state, not a gap.
+    pub(crate) inspect_honor: Option<pvp::InspectHonorData>,
+    /// `RequestInspectHonorData` calls since the app's last
+    /// [`super::UiScript::take_inspect_honor_requests`] drain. A count for [`Self::pvp_toggles`]'s
+    /// reason: the binding takes no argument, and the guid the send needs is the app's own inspect
+    /// target. With [`Self::inspect_honor_pending`] gating the binding it can only ever drain `0`
+    /// or `1` — the engine has at most one query outstanding.
+    pub(crate) inspect_honor_requests: u32,
+    /// The engine's `pending` flag (`0xb71fcc`): a `MSG_INSPECT_HONOR_STATS` query is queued and
+    /// no reply has landed. `RequestInspectHonorData` (`0x4c80a0`) refuses while it is set, which
+    /// is what stops a pane shown/hidden/shown in quick succession sending duplicate queries.
+    /// Cleared by **either** arm of [`super::UiScript::set_inspect_honor`] — a reply landed
+    /// (`0x4c6f4c`), or the app invalidated the slot (`0x4c6f9d`).
+    pub(crate) inspect_honor_pending: bool,
     /// The two **equipment-display** preferences as the VM currently believes them —
     /// `ShowingHelm()` / `ShowingCloak()` ([`worn_display`], decision 1472). Not a setting: the
     /// truth is `PLAYER_FLAGS`' `HIDE_HELM`/`HIDE_CLOAK` bits, pushed here on the descriptor edge
@@ -1311,6 +1332,10 @@ impl Model {
             follow_requests: Vec::new(),
             session_requests: Vec::new(),
             pvp_toggles: 0,
+            honor: None,
+            inspect_honor: None,
+            inspect_honor_requests: 0,
+            inspect_honor_pending: false,
             helm_shown: true,
             cloak_shown: true,
             worn_display_toggles: Vec::new(),

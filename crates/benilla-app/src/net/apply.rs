@@ -212,6 +212,10 @@ pub(super) fn apply_net_updates(
                 // the guard told you" is the client's to remember (`crate::poi_marker`).
                 ResMut<crate::poi_marker::PoiMarker>,
                 Option<Res<benilla_world::world_map::CurrentMap>>,
+                // The inspect-honor reply (decision 1512) — `MSG_INSPECT_HONOR_STATS` is the only
+                // source of another player's honor numbers, so the reply parks here and
+                // `crate::ui_honor` pushes it into the pane and fires `INSPECT_HONOR_UPDATE`.
+                ResMut<crate::ui_honor::InspectHonor>,
             ),
         ),
     ),
@@ -368,6 +372,7 @@ pub(super) fn apply_net_updates(
                 mut binder,
                 mut poi_marker,
                 current_map,
+                mut inspect_honor,
             ),
         ),
     ) = caches;
@@ -646,6 +651,29 @@ pub(super) fn apply_net_updates(
                 session::reputation_visible(list_id, &mut reputations)
             }
             SessionEvent::BindPoint { area } => home_bind.0 = Some(area),
+            // The honor arc's two inbound messages (decision 1512).
+            //
+            // The inspect reply REPLACES whatever is held, including for a different player: the
+            // reference's latch is a single slot, and a pane still showing the last target's
+            // kills is the failure keeping the old one produces.
+            SessionEvent::InspectHonorStats(stats) => inspect_honor.0 = Some(stats),
+            // An honor award: the combat-log line (name-resolved, so it queues) and the floating
+            // number, which are two different surfaces of one packet and are both the reference's.
+            // A DISHONORABLE kill arrives here too, carrying NEGATIVE honor — the floating text
+            // takes it signed, because the shipped `COMBAT_TEXT_HONOR_GAINED` handler prefixes a
+            // "+" only when the number is positive and therefore already expects the other case.
+            SessionEvent::PvpCredit(credit) => {
+                chat_log.push_pvp_credit(
+                    credit.honor,
+                    credit.victim_guid,
+                    u8::try_from(credit.victim_rank).unwrap_or(0),
+                );
+                audio.15 .1.write(crate::ui_unit::CombatTextEvent {
+                    message_type: "HONOR_GAINED",
+                    data: Some(credit.honor.to_string()),
+                    extra: None,
+                });
+            }
             SessionEvent::BinderConfirm { binder: npc } => binder.ask(npc),
             SessionEvent::PlayerBound { binder: npc, area } => {
                 debug!("net: bound to area {area} by {npc:#x}");

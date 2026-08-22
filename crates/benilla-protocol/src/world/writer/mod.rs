@@ -15,6 +15,7 @@
 //! | [`self_movement`] | our own mover: the `MSG_MOVE_*` stream + every mover ack |
 //! | [`lifecycle`] | being logged in: ping, logout, the cinematic ack |
 //! | [`selection`] | the two sends that set our target: select, inspect |
+//! | [`pvp`] | the honor system's one ask: another player's honor stats |
 //! | [`names`] | the ask-once name lookups: player, creature, pet |
 //! | [`chat`] | the chat frame's wire: every `MESSAGECHAT` flavour + `/played`, `/random`, `/wave` |
 //! | [`channel`] | channel administration: join/leave/list/moderation |
@@ -73,6 +74,7 @@ mod pet;
 mod player_flags;
 mod pose;
 mod progression;
+mod pvp;
 mod quest;
 mod reputation;
 mod selection;

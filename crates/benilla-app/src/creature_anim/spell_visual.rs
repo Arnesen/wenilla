@@ -1334,3 +1334,138 @@ pub(super) fn arm_mount_poof_fx(
     // Streamed units despawn on range-out — drop their mount memory with them.
     displays.retain(|e, _| units.contains(*e));
 }
+
+/// The one-slot **pending-morph latch** — the reference's `[unit+0xd54]`, a `SpellRec*` (wow-re
+/// `shapeshift-morph-cloud.md`, §5 trio 2026-08-21): armed by `0x5ff0c0` on every aura **add
+/// AND remove** whose spell passes [`is_morph_spell`]; consumed and cleared by the DISPLAYID
+/// rebuild `0x60abe0`, which — after draining every attached effect and rebuilding the model —
+/// **replays the latched spell's IMPACT kit** (stage 1, `0x6ec1e0` → `[SpellVisual+0xc]` →
+/// `0x60edf0` at `0x60ad67`, cleared at `0x60ad6c`). That replay IS the druid-morph cloud the
+/// player sees, both directions: shift-in's SPELL_GO impact instance dies in the drain and the
+/// replay restores it in sync with the swap; shift-out has no GO at all (the cancel is
+/// client-side, `shapeshift-plaincast-toggle.md`) — the aura-REMOVE handler's last call
+/// (`0x6123ad`) re-arms the latch, and the aura fields precede DISPLAYID in the applier's
+/// ascending field order, so the demorph revert replays the same kit. A swap with no latch — a
+/// GM morph, a revive — plays nothing. One entry per unit (a one-slot field); entries die with
+/// the unit ([`arm_morph_latch`]'s sweep).
+#[derive(Resource, Default)]
+pub(crate) struct MorphLatch(EntityHashMap<u32>);
+
+/// The latch-arm predicate `0x5ff100`: any effect slot with `Effect == 6` (APPLY_AURA) whose
+/// `EffectApplyAuraName` is 36 (MOD_SHAPESHIFT) or 56 (TRANSFORM) — slot-paired, and NO other
+/// gate (no class/positive/unit-type test anywhere in `0x5ff0c0`).
+fn is_morph_spell(spells: &crate::ui_action::Spells, spell_id: u32) -> bool {
+    const SPELL_EFFECT_APPLY_AURA: u32 = 6;
+    const SPELL_AURA_MOD_SHAPESHIFT: u32 = 36;
+    const SPELL_AURA_TRANSFORM: u32 = 56;
+    spells.catalog.get(spell_id).is_some_and(|d| {
+        d.effects.iter().zip(&d.effect_apply_aura).any(|(&e, &a)| {
+            e == SPELL_EFFECT_APPLY_AURA
+                && (a == SPELL_AURA_MOD_SHAPESHIFT || a == SPELL_AURA_TRANSFORM)
+        })
+    })
+}
+
+/// Arm [`MorphLatch`] from the aura-slot diff — the reference's TWO arm sites folded into the
+/// one place benilla sees both edges: the aura-add watcher and the aura-remove handler's tail
+/// (`0x6123ad`) both call `0x5ff0c0(spellId)`, and a later arm overwrites an earlier one (one
+/// slot). First sight of a unit seeds the diff baseline silently — the reference's watchers
+/// fire on VALUES deltas, never on create, so a druid streaming in mid-form must not latch.
+/// Keyed to its own full-slot diff rather than [`arm_aura_state_fx`]'s `armed` map, which
+/// tracks only state-kit spells — the form spells carry none.
+pub(super) fn arm_morph_latch(
+    units: Query<(Entity, &ObjectStore)>,
+    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
+    spells: Option<Res<crate::ui_action::Spells>>,
+    mut latch: ResMut<MorphLatch>,
+    mut seen: Local<EntityHashMap<Vec<u32>>>,
+) {
+    for (entity, store) in &changed {
+        let mut cur: Vec<u32> = store.0.unit_auras().map(|a| a.spell_id).collect();
+        cur.sort_unstable();
+        cur.dedup();
+        match seen.entry(entity) {
+            bevy::platform::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(cur); // first sight arms silently
+            }
+            bevy::platform::collections::hash_map::Entry::Occupied(mut e) => {
+                let prev = e.get_mut();
+                if *prev == cur {
+                    continue; // some other field moved
+                }
+                if let Some(spells) = spells.as_deref() {
+                    // Remove edges first, add edges second: a form→form swap latches the form
+                    // being ENTERED (both resolve to the same cloud family regardless).
+                    let removed = prev.iter().filter(|s| cur.binary_search(s).is_err());
+                    let added = cur.iter().filter(|s| prev.binary_search(s).is_err());
+                    for &spell_id in removed.chain(added) {
+                        if is_morph_spell(spells, spell_id) {
+                            debug!("anim: morph latch armed ({entity}, spell {spell_id})");
+                            latch.0.insert(entity, spell_id);
+                        }
+                    }
+                }
+                *prev = cur;
+            }
+        }
+    }
+    // Streamed units despawn on range-out — the latch and the baseline die with them.
+    latch.0.retain(|e, _| units.contains(*e));
+    seen.retain(|e, _| units.contains(*e));
+}
+
+/// The rebuild's **impact-kit replay** — the tail of the reference's `0x60abe0` (wow-re
+/// `shapeshift-morph-cloud.md`): a display swap that finds the latch armed plays the latched
+/// spell's impact kit as an ordinary discrete kit play ([`KitPlay::DISCRETE`] — full
+/// `PlaySpellVisualKit`: effects, sound, anim, CharProcs) and clears the latch; a swap with no
+/// latch plays nothing. Runs off [`crate::entities::DisplaySwapped`], which the swap writes as
+/// it tears the visual down — the message crosses to the next frame, so the replay's instance
+/// spawns onto (or pends for) the rebuilt body, never the corpse of the old one. Named
+/// approximation: the reference's same-record+same-tag dedup `0x6208e0` is not modelled, so a
+/// cold-cache shift-in — whose SPELL_GO impact instance was still PENDING at the drain and thus
+/// survived — briefly runs that instance and the replay's twin together (one denser cloud, once
+/// per session per model; the warm-cache GO instance dies in the drain like the reference's).
+#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
+pub(super) fn replay_morph_kit(
+    mut swaps: MessageReader<crate::entities::DisplaySwapped>,
+    visuals: Option<Res<SpellVisuals>>,
+    spells: Option<Res<crate::ui_action::Spells>>,
+    mut latch: ResMut<MorphLatch>,
+    mut play_seq: ResMut<super::PlaySeq>,
+    mut oneshots: MessageWriter<EmoteAnim>,
+    mut wounds: MessageWriter<WoundAnim>,
+    mut sounds: MessageWriter<SpellKitSound>,
+    mut fx: MessageWriter<SpellKitFx>,
+    mut chain: MessageWriter<ChainProcPlay>,
+) {
+    for swap in swaps.read() {
+        // Consume-and-clear even when the kit resolves to nothing — the reference clears
+        // unconditionally at `0x60ad6c`.
+        let Some(spell_id) = latch.0.remove(&swap.entity) else {
+            continue; // no latch — a GM morph / revive swap plays nothing
+        };
+        let (Some(visuals), Some(spells)) = (visuals.as_deref(), spells.as_deref()) else {
+            continue; // no client data — no spell visuals (the DBC-resource degrade shape)
+        };
+        let Some(kit) = resolve_kit(spells, &visuals.0, spell_id, |s| s.impact, || None) else {
+            continue; // a morph spell with no impact kit — a silent swap
+        };
+        debug!("anim: morph replay ({}, spell {spell_id})", swap.entity);
+        let mut out = KitOut {
+            oneshots: &mut oneshots,
+            wounds: &mut wounds,
+            sounds: &mut sounds,
+            fx: &mut fx,
+            chain: &mut chain,
+        };
+        play_kit(
+            swap.entity,
+            spell_id,
+            &kit,
+            KitPlay::DISCRETE,
+            play_seq.next(),
+            &visuals.0,
+            &mut out,
+        );
+    }
+}

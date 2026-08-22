@@ -561,6 +561,17 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
         // 0633's byte-level `[+0xe68]+8` bit-7). Zero on creatures, which have no PLAYER_FLAGS —
         // and `UnitIsPVPFreeForAll` is false for them in the reference too.
         is_pvp_ffa: store.0.player_flags() & 0x80 != 0,
+        // The unit's CURRENT honor rank (decision 1512): `PLAYER_BYTES_3` byte 3, on the internal
+        // 0..=18 scale. It sits in `snapshot` — not in the caller's guid-keyed enrichment like
+        // `faction_group` — because it needs nothing but the descriptor, and because it is PUBLIC:
+        // the server streams it for every player in view, which is the only reason the inspect
+        // pane's `UnitPVPRank("target")` can answer at all. A creature has no PLAYER block and
+        // reads 0, the reference's own answer for one.
+        pvp_rank: store.0.player_pvp_rank().unwrap_or(0),
+        // `PLAYER_BYTES_3` byte 2 — the city-protector title, the same PUBLIC dword as the rank
+        // byte above. `UnitPVPName` appends a `PVP_MEDAL<n>` line for a non-zero one; 0 is "no
+        // medal", which is every character on this server (vmangos never writes the byte).
+        pvp_medal: store.0.player_pvp_medal().unwrap_or(0),
         // is_player + the creature-record extras (subtitle/type/rank/civilian) are the caller's
         // guid-keyed enrichment — [`enrich_unit`].
         ..Default::default()
@@ -918,13 +929,21 @@ fn feed_units(
     // art that ships is Alliance/Horde/FFA), and it is indistinguishable on screen from the icon
     // being broken, which has now cost two separate sessions an investigation. So it is a BENCH
     // diagnostic, not UI: nothing appears on screen, exactly as in the reference.
+    //
+    // The honor arc (1512) put a SECOND surface behind this same side: a rank's title is the
+    // GlobalString `PVP_RANK_<rank>_<team>`, and with no side there is no team digit, so
+    // `GetPVPRankInfo` answers nil and the Honor tab renders `NONE` at every rank — for a Grand
+    // Marshal. That reads exactly like an unbuilt pane, which is why it is named in the warning
+    // rather than left for the next investigation to rediscover.
     if let Some(p) = &player {
         let sideless = p.faction_group.is_none();
         if sideless && !feed.warned_sideless {
             warn!(
                 "faction: our own template names no side (usually GM mode — vmangos forces \
                  template 35, group mask 0). Faction-derived UI cannot resolve a side while this \
-                 holds: the PvP flag icon stays hidden however flagged you are. `.gm off` restores it."
+                 holds: the PvP flag icon stays hidden however flagged you are, and the Honor tab's rank \
+                 title reads NONE at every rank (PVP_RANK_<rank>_<team> has no team digit). \
+                 `.gm off` restores both."
             );
         }
         feed.warned_sideless = sideless;

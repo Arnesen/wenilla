@@ -694,8 +694,8 @@ use blood::{blood_spurts, load_blood_tables};
 use env_damage::{hard_landing_dust, load_env_damage_table};
 pub(crate) use env_damage::{EnvDamageTable, HardLanding, HARD_LANDING_DESCENT};
 use spell_visual::{
-    arm_aura_state_fx, arm_level_up_fx, arm_loot_fx, arm_mount_poof_fx, load_spell_visuals,
-    route_cast_visuals,
+    arm_aura_state_fx, arm_level_up_fx, arm_loot_fx, arm_morph_latch, arm_mount_poof_fx,
+    load_spell_visuals, replay_morph_kit, route_cast_visuals, MorphLatch,
 };
 // The aura-slot watcher is the shared trigger for BOTH halves of a state kit, so the CharProc half's
 // own tests (`crate::aura_visual`) drive it directly rather than re-deriving the slot diff.
@@ -1008,6 +1008,8 @@ impl Plugin for CreatureAnimPlugin {
             // drained by `crate::aura_visual`, which owns the body's alpha/tint for an aura's life.
             .add_message::<crate::aura_visual::AuraProc>()
             .add_message::<HardLanding>()
+            // The pending-morph latch — the reference's per-unit `[+0xd54]` SpellRec slot.
+            .init_resource::<MorphLatch>()
             .add_systems(
                 Startup,
                 (
@@ -1032,6 +1034,12 @@ impl Plugin for CreatureAnimPlugin {
                     arm_mount_poof_fx,
                     // The aura-slot watcher: state kits persist for the aura's life (the bread).
                     arm_aura_state_fx,
+                    // The pending-morph latch (wow-re `shapeshift-morph-cloud.md`): the aura
+                    // add/remove edges arm it, and a display swap's rebuild replays the latched
+                    // spell's impact kit — the shapeshift cloud, both directions. Arm before
+                    // replay: the swap message crosses from last frame's teardown, and its
+                    // latch was armed by the same wire burst.
+                    (arm_morph_latch, replay_morph_kit).chain(),
                     blood_spurts,
                     // The landing predictor's dust leg (the vocal leg lives in `sound`).
                     hard_landing_dust,

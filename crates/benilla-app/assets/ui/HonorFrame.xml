@@ -1,0 +1,645 @@
+<Ui>
+    <!--
+        benilla's Honor tab: our own build of the 1.12 `HonorFrame`, the fifth and last page of the
+        character window. The reference FrameXML `HonorFrame.{xml,lua}` + `HonorFrameTemplates.xml`
+        are the SPECIFICATION throughout (cites read `ref l.N` into `HonorFrame.xml`, `ref-lua l.N`
+        into `HonorFrame.lua`, `ref-tpl l.N` into `HonorFrameTemplates.xml`); every geometry number
+        and art path below is QUOTED from them, because those are the client's facts and there is no
+        other value they could take. The Lua is OURS, written against that specification and onto
+        the PvP/honor Era API (`benilla-ui/src/script/pvp.rs` and its honor siblings). Frame names
+        are the reference's, because a frame name is the addon-visible contract and not ours to
+        vary.
+
+        WHAT THE PAGE IS. A rank block at the top (badge, rank title, "(Rank N)", and the progress
+        bar that says how far through the rank you are), then five labelled sections of counters:
+        Today, Yesterday, This Week, Last Week, Lifetime.
+
+        A CHILD PAGE of `CharacterFrame` (ref l.5: `parent="CharacterFrame"`, `id="5"`), shown and
+        hidden by `CharacterFrame_ShowSubFrame` — but a SEPARATE top-level file, the
+        SkillFrame.xml / PetPaperDollFrame.xml / ReputationFrame.xml shape: this engine reads no XML
+        `parent=` attribute (only physical `<Frames>` nesting creates a real parent), so the page is
+        pinned to `CharacterFrame`'s own TOPLEFT by NAME and loaded right after its siblings so it
+        paints on top (later file = higher z). Joining `BENILLA_CHARACTERFRAME_SUBFRAMES` as entry 5
+        is all it has to do to be closed by `CharacterFrame_OnHide`'s hide-loop.
+
+        THE TAB ROW IS NOW WHOLE. Four of the reference's five tabs shipped before this page and
+        each sat at the reference's own number; this is the fifth, so the row and
+        `BENILLA_CHARACTERFRAME_SUBFRAMES` are the real client's, entire, with nothing left past
+        the end. The invariant CharacterFrame.xml states — a page's `id=` IS its slot in the tab
+        row, and the roster is the same 1:1 mapping written the other way round — is pinned by
+        `character_tests.rs`, whose loop now runs the full five.
+
+        NO OWN PORTRAIT: the "General" quadrant art below carries the portrait-ring cutout every
+        PaperDollInfoFrame page shares, so `CharacterFrame`'s portrait/name/level (drawn underneath)
+        shows through. ReputationFrame.xml's and SkillFrame.xml's note, unchanged.
+
+        THE TWO SHARED PAINTERS. `BenillaHonorPane_SetRows` and `BenillaHonorPane_SetRank` are
+        written unit-first and pane-first because the INSPECT window's honor page (InspectFrame.xml)
+        paints the identical twelve rows and the identical rank block from a foreign player's
+        numbers. The reference keeps two full copies of both, one per pane, differing only in the
+        frame prefix and the unit token; we keep one. The row templates below are shared the same
+        way — the reference shares those too (its `HonorFrameTemplates.xml` is `<Include>`d by
+        `HonorFrame.xml` and inherited by `Blizzard_InspectUI`), which is why this file must load
+        BEFORE `InspectFrame.xml` in `benilla.toc`.
+
+        DEVIATIONS (each re-cited at its own site below):
+          1. THE GLOBALSTRINGS ARE NAMED, NEVER COPIED. Older windows here carry an
+             `X = X or "<the enUS text>"` fallback so a chainless harness still paints words; this
+             page ships no such copy for its own labels, because three of them are the
+             `NEWBIE_TOOLTIP_*` paragraphs and shipping Blizzard's prose is exactly what decision
+             1234 forbids. The section labels reach the player's own strings through the loader's
+             `text=` resolution (a `text=` attribute is a GlobalStrings LOOKUP, `loader::resolve_text`);
+             the row labels and tooltip bodies reach them as plain globals. A harness with no
+             install behind it therefore paints a key where a label goes and raises if you hover a
+             row — the honest face of "these words live in the install, not in our tree". The ONE
+             exception is `PLAYER_LEVEL`, a format template rather than prose, declared here with
+             the same guarded fallback CharacterFrame.xml and InspectFrame.xml already carry and
+             for their stated reason: load order must not be a hidden dependency between windows.
+          2. THE NEWBIE TIPS GO THROUGH THE HOUSE HELPER. All five hover sites call
+             `BenillaTooltip_AddNewbieTipFor` (GameTooltip.xml), so they obey `SHOW_NEWBIE_TIPS` —
+             the "Show Detailed Tooltips" box our own OptionsFrame ships — like every other newbie
+             tip in this UI. The reference's row template does the same thing by hand (ref-tpl
+             l.8-16) but ignores the CVar, and its rank/bar pair (ref l.324-333, l.352-361) ignores
+             it AND anchors beside the widget instead of at the screen corner. Detailed tips are ON
+             by default (1.12's own default, GameTooltip.xml), so the default look is the
+             reference's; the difference is that a player who turned them off is obeyed here.
+          3. THE ROW TEMPLATES ARE THE REFERENCE'S FIVE, under the reference's five names, but the
+             base carries everything that can be shared — the strip's size and the whole hover —
+             and the leaves carry only the two FontStrings. They cannot carry less: this engine's
+             `inherits=` concatenates children instead of merging them by name
+             (`framexml::merge`), so a leaf that re-declared an inherited region would end up with
+             two of it. That constraint is stated at the template rather than discovered later.
+          4. THE LEVEL LINE PAINTS ITSELF. `HonorLevelText` is the reference's own FontString, and
+             the reference fills it from the PAPER DOLL's setter — `PaperDollFrame_SetLevel` writes
+             `CharacterLevelText` and then, in its own words, sets it "for the honor frame while we
+             at it" (ref PaperDollFrame.lua:100-104). That is a hidden page reaching across a file
+             boundary into another hidden page. The string belongs to THIS page, so the write does
+             too: this file registers `UNIT_LEVEL` itself and paints its own line.
+          5. `HonorGuildText` (ref l.68-76) IS DROPPED, with its `CharacterGuildText` twin — decision
+             0208's own named deferral, restated in CharacterFrame.xml: the guild line needs a guild
+             query this window has never made, and the honor page's copy is the same line.
+          6. THE RANK TITLE'S XML `y` IS THE ONE THE PAGE ACTUALLY WEARS. The reference anchors
+             `HonorFrameCurrentPVPTitle` at TOP (0,-87) and then re-points it every repaint at
+             (…,-83) (ref l.127-134 vs ref-lua l.76); its inspect twin anchors at -81 and re-points
+             at -83 the same way. The XML value is unobservable — nothing paints before the first
+             repaint — so the two contradictory numbers are collapsed to the one that survives.
+          7. `enableMouse="true"` on the StatusBar and on the two hover frames. In this engine only
+             Button/CheckButton/EditBox/ScrollingMessageFrame are mouse-enabled by construction
+             (`widget/mod.rs`; UnitFrames.xml, CharacterFrame.xml and ReputationFrame.xml all carry
+             the same note), so a Frame with an `<OnEnter>` needs the attribute or the handler
+             silently never fires. This REPRODUCES the reference's behaviour rather than departing
+             from it.
+    -->
+    <Script><![CDATA[
+        -- ── The one string this file spells out ─────────────────────────────────────────────────
+        -- A format TEMPLATE, not prose, and declared here rather than borrowed from
+        -- CharacterFrame.xml's identical line for that file's own stated reason: load order must
+        -- not be a hidden dependency between two windows. Everything else this page says comes out
+        -- of the player's own GlobalStrings.lua (this file's header, deviation 1).
+        PLAYER_LEVEL = PLAYER_LEVEL or "Level %d %s %s"
+
+        -- ── The row: two strings and a hover ────────────────────────────────────────────────────
+
+        -- A row remembers the pair its hover shows: its own label as the tip's title, and the
+        -- matching detailed explanation as the body. Both are the player's strings, passed in by
+        -- the instance below rather than baked into a template, so the five leaf templates differ
+        -- only in what they LOOK like.
+        function BenillaHonorRow_OnLoad(row, title, detail)
+            row.title = title
+            row.detail = detail
+        end
+
+        -- The house newbie tip (this file's header, deviation 2): label in highlight white, the
+        -- explanation wrapped under it in NORMAL_FONT_COLOR, both only when the player has detailed
+        -- tips on.
+        function BenillaHonorRow_OnEnter(row)
+            BenillaTooltip_AddNewbieTipFor(row, row.title,
+                HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b, row.detail)
+        end
+
+        -- ── The two painters both honor panes share (ref-lua l.19-77 and its inspect twin) ───────
+
+        -- Paint a set of counters. `pane` is the owning frame's name, `values` a
+        -- `{ [rowSuffix] = number }` table: each row frame is `<pane><suffix>` and its figure lives
+        -- in that frame's own `$parentValue` string, so a repaint is a table walk rather than
+        -- twelve hand-written assignments. Rows are looked up by name and skipped when absent,
+        -- which is what lets a caller paint a SUBSET (the character pane repaints its weekly
+        -- sections on a different trigger from its session ones — see HonorFrame_Update).
+        --
+        -- A nil figure is likewise not painted, and that falls out of Lua rather than being coded:
+        -- a nil value never enters the table at all, so `pairs` cannot reach it. That is the
+        -- behaviour we want on the inspect side, where the whole twelve-wide read answers with
+        -- NOTHING until the server's reply lands — better a row that has not been filled in yet
+        -- than a row confidently showing a zero nobody sent.
+        function BenillaHonorPane_SetRows(pane, values)
+            for suffix, value in pairs(values) do
+                local figure = getglobal(pane .. suffix .. "Value")
+                if figure then
+                    figure:SetText(value)
+                end
+            end
+        end
+
+        -- Paint the rank block: the badge, the rank's title, the "(Rank N)" that trails it, and the
+        -- progress bar under both. `rank` is the unit's rank as the engine reports it, `progress`
+        -- the 0..1 position within that rank, `unit` the token whose faction colours the bar.
+        --
+        -- Called with ("HonorFrame", …, "player") by the page below and with
+        -- ("BenillaInspectHonorFrame", …, the inspected token) by InspectFrame.xml.
+        function BenillaHonorPane_SetRank(pane, rank, progress, unit)
+            local rankName, rankNumber = GetPVPRankInfo(rank)
+            local title = getglobal(pane .. "CurrentPVPTitle")
+            local ordinal = getglobal(pane .. "CurrentPVPRank")
+
+            -- THE NIL IS THE MECHANISM, not an edge case. The rank names are GlobalStrings keyed
+            -- `PVP_RANK_<rank>_<team>` and there is no `PVP_RANK_0_*`: rank 0 means "no rank at
+            -- all", which is every character who has never taken an honorable kill. So the name
+            -- comes back nil there and the pane says NONE. The NUMBER is not guarded, and that is
+            -- deliberate too: it is a rank arithmetic result, never absent, and swallowing a nil
+            -- would hide a broken binding instead of reporting it.
+            title:SetText(rankName or NONE)
+            -- `RANK or ""` rather than a bare concat: a harness with no install behind it has no
+            -- GlobalStrings, and taking the pane down over a missing label helps nobody.
+            ordinal:SetText("(" .. (RANK or "") .. " " .. rankNumber .. ")")
+
+            -- The badge is built HERE, not by the engine: the file name is the rank number padded
+            -- to two digits, and it is shown only above zero. Verified against the patch chain this
+            -- session: `PvPRank01`..`PvPRank15` exist and `PvPRank00`/`16`/`17`/`18`/`19` do not,
+            -- which is exactly the range the arithmetic can produce (the fourteen player ranks plus
+            -- the PvP-leader one); zero and the four negative ranks have no badge to show.
+            local badge = getglobal(pane .. "PvPIcon")
+            if rankNumber > 0 then
+                badge:SetTexture(format("Interface\\PvPRankBadges\\PvPRank%02d", rankNumber))
+                badge:Show()
+            else
+                badge:Hide()
+            end
+
+            -- The bar wears the unit's own faction: Alliance navy, everything else Horde red. The
+            -- fork is a positive test for Alliance with an `else`, not a two-sided test, so a unit
+            -- whose faction group reads nil (a race the app has no snapshot for yet — ui_unit.rs's
+            -- own note) still gets a painted bar rather than a bare trough.
+            local bar = getglobal(pane .. "ProgressBar")
+            if UnitFactionGroup(unit) == "Alliance" then
+                bar:SetStatusBarColor(0.05, 0.15, 0.36)
+            else
+                bar:SetStatusBarColor(0.63, 0.09, 0.09)
+            end
+            bar:SetValue(progress)
+
+            -- Re-centre the PAIR, not the title. The title is centred on the pane and then shifted
+            -- left by half the width of the "(Rank N)" that trails it, so title and ordinal read as
+            -- one centred phrase. It has to be redone on every repaint because that width moves
+            -- with the number and with the locale.
+            title:SetPoint("TOP", pane, "TOP", -ordinal:GetWidth() / 2, -83)
+        end
+
+        -- ── The character window's honor page (ref-lua l.1-13) ───────────────────────────────────
+
+        -- The two PvP events plus world entry, and one of our own. The SPLIT between them is the
+        -- reference's and it is deliberate: the weekly sections (yesterday, this week, last week)
+        -- only move at the server's weekly maintenance, so nothing carries them mid-session and
+        -- re-reading them per kill would be waste. World entry is the flag that says "repaint those
+        -- too". `UNIT_LEVEL` is ours (this file's header, deviation 4).
+        function HonorFrame_OnLoad(frame)
+            frame:RegisterEvent("PLAYER_PVP_KILLS_CHANGED")
+            frame:RegisterEvent("PLAYER_PVP_RANK_CHANGED")
+            frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+            frame:RegisterEvent("UNIT_LEVEL")
+        end
+
+        function HonorFrame_OnEvent(event)
+            if event == "UNIT_LEVEL" then
+                if arg1 == "player" then
+                    HonorFrame_SetLevel()
+                end
+                return
+            end
+            HonorFrame_Update(event == "PLAYER_ENTERING_WORLD")
+        end
+
+        -- The level/race/class line under the window's name (this file's header, deviation 4). The
+        -- "?" placeholders match CharacterFrame.xml's and exist for its reason: UnitRace/UnitClass
+        -- read nil for the one tick before the app's first player snapshot lands, and an unguarded
+        -- format() errors on that nil.
+        function HonorFrame_SetLevel()
+            getglobal("HonorLevelText"):SetText(
+                format(PLAYER_LEVEL, UnitLevel("player"), UnitRace("player") or "?", UnitClass("player") or "?"))
+        end
+
+        -- `weekly` repaints the three sections that only move at the weekly reset; everything else
+        -- is repainted on every call. Note which return each figure comes from — the four stat
+        -- readers do NOT have the same shape, and that is the server's doing, not a slip:
+        -- yesterday and last week report dishonorable kills the pane does not show, and only last
+        -- week carries a standing.
+        function HonorFrame_Update(weekly)
+            if weekly then
+                local yesterdayHK, _, yesterdayHonor = GetPVPYesterdayStats()
+                local thisWeekHK, thisWeekHonor = GetPVPThisWeekStats()
+                local lastWeekHK, _, lastWeekHonor, standing = GetPVPLastWeekStats()
+                BenillaHonorPane_SetRows("HonorFrame", {
+                    YesterdayHK = yesterdayHK,
+                    YesterdayContribution = yesterdayHonor,
+                    ThisWeekHK = thisWeekHK,
+                    ThisWeekContribution = thisWeekHonor,
+                    LastWeekHK = lastWeekHK,
+                    LastWeekContribution = lastWeekHonor,
+                    LastWeekStanding = standing,
+                })
+            end
+
+            local sessionHK, sessionDK = GetPVPSessionStats()
+            local lifetimeHK, lifetimeDK, highestRank = GetPVPLifetimeStats()
+            -- The highest rank EVER held, which is a different field from the current one and moves
+            -- only upward; its name falls back to NONE on the same nil as the live rank's.
+            local highestName = GetPVPRankInfo(highestRank)
+            BenillaHonorPane_SetRows("HonorFrame", {
+                CurrentHK = sessionHK,
+                CurrentDK = sessionDK,
+                LifeTimeHK = lifetimeHK,
+                LifeTimeDK = lifetimeDK,
+                LifeTimeRank = highestName or NONE,
+            })
+
+            BenillaHonorPane_SetRank("HonorFrame", UnitPVPRank("player"), GetPVPRankProgress(), "player")
+            HonorFrame_SetLevel()
+        end
+    ]]></Script>
+
+    <!--
+        The row's SHARED half (ref-tpl l.3-18): a 278x12 strip and the hover that explains it. The
+        five leaves below add the two FontStrings, because this engine's `inherits=` CONCATENATES a
+        template's children onto the inheriting node's rather than merging them by name
+        (`framexml::merge`) — so a leaf that re-declared `$parentText` would get TWO of them, both
+        drawn, sharing one name. Everything that can be hoisted is hoisted; the regions cannot be.
+
+        `enableMouse` is required for the hover to fire at all (this file's header, deviation 7).
+    -->
+    <Frame name="HonorFrameTextButtonTemplate" virtual="true" enableMouse="true">
+        <Size><AbsDimension x="278" y="12"/></Size>
+        <Scripts>
+            <OnEnter>BenillaHonorRow_OnEnter(self)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Frame>
+
+    <!--
+        The five leaves (ref-tpl l.19-148). Each is the same pair of strings in the same two places
+        and differs in exactly two things: WHICH label it carries, and what colour its figure is.
+        The label is the player's own GlobalStrings key, resolved by the loader (a `text=` attribute
+        is a lookup, not a literal); the figure's colour rides a font object rather than a colour
+        call, which is how every other coloured string in this UI is painted.
+
+        The value's `RIGHT` anchored to the row's own `LEFT` plus 278 is the reference's spelling of
+        "right-aligned at the row's right edge", quoted rather than restated as an anchor to RIGHT.
+
+        Honorable kills: GREEN.
+    -->
+    <Frame name="HonorFrameHKButtonTemplate" inherits="HonorFrameTextButtonTemplate" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentText" inherits="GameFontHighlightSmall" text="HONORABLE_KILLS" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </FontString>
+                <FontString name="$parentValue" inherits="GameFontGreenSmall">
+                    <Anchors>
+                        <Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="278" y="1"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaHonorRow_OnLoad(self, HONORABLE_KILLS, NEWBIE_TOOLTIP_HONORABLE_KILLS)</OnLoad>
+        </Scripts>
+    </Frame>
+
+    <!-- Dishonorable kills: RED (ref-tpl l.45-70), because a dishonorable kill costs you rank —
+         the colour is the pane telling you which way the number moves you. -->
+    <Frame name="HonorFrameDKButtonTemplate" inherits="HonorFrameTextButtonTemplate" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentText" inherits="GameFontHighlightSmall" text="DISHONORABLE_KILLS" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </FontString>
+                <FontString name="$parentValue" inherits="GameFontRedSmall">
+                    <Anchors>
+                        <Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="278" y="1"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaHonorRow_OnLoad(self, DISHONORABLE_KILLS, NEWBIE_TOOLTIP_DISHONORABLE_KILLS)</OnLoad>
+        </Scripts>
+    </Frame>
+
+    <!-- Honor earned in the period (ref-tpl l.71-96). The key is HONOR_CONTRIBUTION_POINTS and the
+         string it holds in 1.12 is the single word "Honor" — the key is the older name for the same
+         figure, kept because it is the key the player's own string table actually has. -->
+    <Frame name="HonorFrameContributionButtonTemplate" inherits="HonorFrameTextButtonTemplate" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentText" inherits="GameFontHighlightSmall" text="HONOR_CONTRIBUTION_POINTS" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </FontString>
+                <FontString name="$parentValue" inherits="GameFontNormalSmall">
+                    <Anchors>
+                        <Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="278" y="1"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaHonorRow_OnLoad(self, HONOR_CONTRIBUTION_POINTS, NEWBIE_TOOLTIP_HONOR_CONTRIBUTION_POINTS)</OnLoad>
+        </Scripts>
+    </Frame>
+
+    <!-- Last week's standing (ref-tpl l.97-122): where you placed against everyone on your own
+         side. Only the Last Week section has one — it is a ranking of a finished week. -->
+    <Frame name="HonorFrameStandingButtonTemplate" inherits="HonorFrameTextButtonTemplate" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentText" inherits="GameFontHighlightSmall" text="HONOR_STANDING" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </FontString>
+                <FontString name="$parentValue" inherits="GameFontNormalSmall">
+                    <Anchors>
+                        <Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="278" y="1"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaHonorRow_OnLoad(self, HONOR_STANDING, NEWBIE_TOOLTIP_HONOR_STANDING)</OnLoad>
+        </Scripts>
+    </Frame>
+
+    <!-- The highest rank ever held (ref-tpl l.123-148). Its label and its TIP TITLE deliberately
+         differ, and that is the reference's own choice, not a slip: the row is labelled "Highest
+         Rank" because that is what the figure is, while the hover is titled "Rank" because the
+         paragraph under it explains ranking in general. -->
+    <Frame name="HonorFrameRankButtonTemplate" inherits="HonorFrameTextButtonTemplate" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentText" inherits="GameFontHighlightSmall" text="HONOR_HIGHEST_RANK" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </FontString>
+                <FontString name="$parentValue" inherits="GameFontNormalSmall">
+                    <Anchors>
+                        <Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="278" y="1"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaHonorRow_OnLoad(self, RANK, NEWBIE_TOOLTIP_RANK)</OnLoad>
+        </Scripts>
+    </Frame>
+
+    <!-- id=5, the reference's own (ref l.5): a page's id is the slot it occupies in the WINDOW'S
+         OWN tab row, and ToggleCharacter selects the tab from it. `character_tests.rs` pins every
+         page's id against its slot in BENILLA_CHARACTERFRAME_SUBFRAMES, and with this page the two
+         cover the real client's whole row. -->
+    <Frame name="HonorFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="5">
+        <!-- The real 384x512 page. The reference's `setAllPoints="true"` needs the true parenting
+             this engine's cross-file `parent=` does not give (this file's header comment), so the
+             page is sized and pinned to CharacterFrame's TOPLEFT by name — ReputationFrame.xml,
+             SkillFrame.xml and PetPaperDollFrame.xml all ship the identical substitute. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterFrame" relativePoint="TOPLEFT"/></Anchors>
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="75"/></HitRectInsets>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- The four quadrant slabs (ref l.10-58), at the reference's own four TOPLEFT
+                     offsets. The "General" set is the variant every PaperDollInfoFrame page shares
+                     and carries the portrait-ring cutout (this file's header comment). -->
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="258" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-BottomLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="2" y="-257"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-BottomRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="258" y="-257"/></Offset></Anchor></Anchors>
+                </Texture>
+                <!-- The level/race/class line, under the window's own name (ref l.59-67). This page
+                     is the only sibling of the paper doll that carries one; the guild line beside
+                     it in the reference is dropped with its twin (header deviation 5). The
+                     reference ships a "Level level race class" placeholder in the attribute, which
+                     only shows on a page that has not been painted — and this one is painted before
+                     it can be seen, so the placeholder is dropped (the ReputationFrame.xml
+                     precedent for the reference's own dead placeholders). -->
+                <FontString name="HonorLevelText" inherits="GameFontNormalSmall">
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="CharacterNameText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- The pane's OWN art, over the shared background: the rank plaque and the five
+                     section plates (ref l.79-126). Four slabs again, but not the same four sizes —
+                     the bottom pair is 128 tall, not 256. -->
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-Honor-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="22" y="-69"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-Honor-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="275" y="-69"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-Honor-BottomLeft">
+                    <Size><AbsDimension x="256" y="128"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="22" y="-325"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-Honor-BottomRight">
+                    <Size><AbsDimension x="128" y="128"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="275" y="-325"/></Offset></Anchor></Anchors>
+                </Texture>
+                <!-- The rank title and the "(Rank N)" beside it (ref l.127-144). The title's y is
+                     the repaint's, not the XML's (header deviation 6); the pair is re-centred
+                     together on every repaint by BenillaHonorPane_SetRank. -->
+                <FontString name="HonorFrameCurrentPVPTitle" inherits="GameFontNormal">
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-83"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="HonorFrameCurrentPVPRank" inherits="GameFontNormalSmall">
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="HonorFrameCurrentPVPTitle" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="-1"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <!-- The five section headings (ref l.145-189), each chained off the last. The gaps
+                     are NOT uniform (41/43/42/64) because each section holds a different number of
+                     rows; the 64 before Lifetime is the three-row Last Week section above it. Each
+                     `text=` is the player's own GlobalStrings key, resolved by the loader — note
+                     the first one reads "Today" in 1.12, not "This Session". -->
+                <FontString name="HonorFrameCurrentSessionTitle" inherits="GameFontNormal" text="HONOR_THIS_SESSION">
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="36" y="-112"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="HonorFrameYesterdayTitle" inherits="GameFontNormal" text="HONOR_YESTERDAY">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="HonorFrameCurrentSessionTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-41"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="HonorFrameThisWeekTitle" inherits="GameFontNormal" text="HONOR_THISWEEK">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="HonorFrameYesterdayTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-43"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="HonorFrameLastWeekTitle" inherits="GameFontNormal" text="HONOR_LASTWEEK">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="HonorFrameThisWeekTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-42"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="HonorFrameLifeTimeTitle" inherits="GameFontNormal" text="HONOR_LIFETIME">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="HonorFrameLastWeekTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-64"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="OVERLAY">
+                <!-- The rank badge, left of the title (ref l.191-204). No `file=` here: the path is
+                     built per rank at repaint time (BenillaHonorPane_SetRank), and there is no
+                     badge at all below rank 1 — an unpainted texture is an empty one. -->
+                <Texture name="HonorFramePvPIcon">
+                    <Size><AbsDimension x="24" y="24"/></Size>
+                    <Anchors>
+                        <Anchor point="RIGHT" relativeTo="HonorFrameCurrentPVPTitle" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- THE TWELVE ROWS (ref l.207-314), section by section. Each section's first row
+                 hangs off its heading's BOTTOMLEFT indented 10, and each following row chains off
+                 the one above it. The row SET per section is the shape of the data, not a layout
+                 choice: Today is the only section that shows dishonorable kills beside honorable
+                 ones without an honor figure (honor for today is not banked yet), the two middle
+                 sections trade the dishonorable count for the honor earned, Last Week adds the
+                 standing that closed it, and Lifetime trades honor for the highest rank ever held.
+
+                 Today. -->
+            <Frame name="HonorFrameCurrentHK" inherits="HonorFrameHKButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameCurrentSessionTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="10" y="-3"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="HonorFrameCurrentDK" inherits="HonorFrameDKButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameCurrentHK" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+
+            <!-- Yesterday. -->
+            <Frame name="HonorFrameYesterdayHK" inherits="HonorFrameHKButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameYesterdayTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="10" y="-3"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="HonorFrameYesterdayContribution" inherits="HonorFrameContributionButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameYesterdayHK" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+
+            <!-- This Week. -->
+            <Frame name="HonorFrameThisWeekHK" inherits="HonorFrameHKButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameThisWeekTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="10" y="-3"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="HonorFrameThisWeekContribution" inherits="HonorFrameContributionButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameThisWeekHK" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+
+            <!-- Last Week: the only section with three rows, and the only one with a standing. -->
+            <Frame name="HonorFrameLastWeekHK" inherits="HonorFrameHKButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameLastWeekTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="10" y="-3"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="HonorFrameLastWeekContribution" inherits="HonorFrameContributionButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameLastWeekHK" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="HonorFrameLastWeekStanding" inherits="HonorFrameStandingButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameLastWeekContribution" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+
+            <!-- Lifetime. -->
+            <Frame name="HonorFrameLifeTimeHK" inherits="HonorFrameHKButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameLifeTimeTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="10" y="-4"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="HonorFrameLifeTimeDK" inherits="HonorFrameDKButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameLifeTimeHK" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="HonorFrameLifeTimeRank" inherits="HonorFrameRankButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="HonorFrameLifeTimeDK" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+
+            <!-- The rank hover (ref l.315-334): an invisible strip spanning badge to ordinal, so
+                 the whole "badge Marshal (Rank 10)" phrase explains itself. Two anchors and no
+                 width of its own — the LEFT edge is the badge's, the RIGHT edge the ordinal's, so
+                 the strip re-fits itself when either moves. -->
+            <Frame name="HonorFrameRankButton" enableMouse="true">
+                <Size><AbsDimension x="10" y="24"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="HonorFramePvPIcon"/>
+                    <Anchor point="RIGHT" relativeTo="HonorFrameCurrentPVPRank"/>
+                </Anchors>
+                <Scripts>
+                    <OnEnter>BenillaTooltip_AddNewbieTipFor(self, RANK, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b, NEWBIE_TOOLTIP_RANK)</OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Frame>
+
+            <!-- The progress bar (ref l.335-370): how far through the current rank you are, 0..1.
+                 It reuses the skills bar's own fill art, which is the reference's choice.
+
+                 The two frame-level drops are the reference's and they are the mechanism, not
+                 decoration. The bar's fill is a BORDER-layer texture on a child frame, and the
+                 pane's plaque art is ARTWORK on the pane itself: at the child's natural level the
+                 fill would sort above the plaque and paint over the socket cut for it. Dropping the
+                 bar to the pane's own level puts the two in one bucket, where the draw layer
+                 decides and ARTWORK wins. The hover frame inside it drops again for the same
+                 reason, and because it carries no art its level only decides where a mouse lands. -->
+            <StatusBar name="HonorFrameProgressBar" enableMouse="true" drawLayer="BORDER" minValue="0" maxValue="1" defaultValue="0">
+                <Size><AbsDimension x="315" y="29"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="22" y="-77"/></Offset></Anchor></Anchors>
+                <Frames>
+                    <Frame name="HonorFrameProgressButton" enableMouse="true" setAllPoints="true">
+                        <Scripts>
+                            <OnLoad>self:SetFrameLevel(self:GetFrameLevel() - 1)</OnLoad>
+                            <OnEnter>BenillaTooltip_AddNewbieTipFor(self, RANK_POSITION, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b, NEWBIE_TOOLTIP_RANK_POSITION)</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                    </Frame>
+                </Frames>
+                <Scripts>
+                    <OnLoad>self:SetFrameLevel(self:GetFrameLevel() - 1)</OnLoad>
+                </Scripts>
+                <BarTexture name="$parentBar" file="Interface\PaperDollInfoFrame\UI-Character-Skills-Bar"/>
+            </StatusBar>
+        </Frames>
+        <Scripts>
+            <OnLoad>HonorFrame_OnLoad(self)</OnLoad>
+            <OnEvent>HonorFrame_OnEvent(event)</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

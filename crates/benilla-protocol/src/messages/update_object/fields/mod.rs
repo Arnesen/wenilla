@@ -261,6 +261,14 @@ const FIELD_PLAYER_BYTES_2: u16 = 194;
 // PLAYER_BYTES_3 = UNIT_END(188) + 0x7: the low u16 packs `gender | (drunk & 0xFFFE)` (vmangos
 // `Player::SetDrunkValue`), so byte 1 is the drunk value's high byte — exactly the byte the
 // reference client reads at `[[unit+0xe68]+0x1d]` (wow-re `drunk_fraction_5e2a90`).
+// Byte 2 = the city-protector title (a race id), byte 3 = the **current** honor rank
+// (`PLAYER_BYTES_3_OFFSET_HONOR_RANK`, vmangos `Player.h:351-356`).
+//
+// **PUBLIC** (VERIFIED vmangos `UpdateFields_1_12_1.h:125`) — and that flag is the whole reason a
+// foreign player's rank is knowable: this is the ONE honor value that streams for every visible
+// player. The rest of the honor block (1250..1260 below, plus `PLAYER_FIELD_BYTES`' highest-rank
+// byte) is PRIVATE, which is why anyone else's honor stats have to be *asked* for over the wire
+// (`MSG_INSPECT_HONOR_STATS`, [`crate::messages::InspectHonorStats`]).
 const FIELD_PLAYER_BYTES_3: u16 = 195;
 // PLAYER_QUEST_LOG_1_1 = UNIT_END(188) + 0xA = 198 (vmangos `UpdateFields_1_12_1.h:128`; this block
 // precedes the CONTAINER-onward hex-comment drift — enum arithmetic and hex comment agree here, and
@@ -475,6 +483,50 @@ const FIELD_PLAYER_FIELD_BYTES: u16 = 1222; // UNIT_END+0x40A, BYTES — vmangos
                                             // (distinct from the appearance `PLAYER_BYTES`(193)):
                                             // flags / comboPoints / actionBars / HIGHEST_HONOR_RANK
                                             // (`Player.h` PLAYER_FIELD_BYTES_OFFSET_*).
+
+// The **honor block** — the eleven fields the two PvP/honor panes read, a contiguous run
+// UNIT_END(188) + 0x426..0x430 (VERIFIED vmangos `UpdateFields_1_12_1.h:288-298` **enum
+// arithmetic**; its inline `// 0x4DC`-style comments carry the usual 6-low drift and are not
+// copied). The run needs no fresh anchor of its own: it closes against already-tested neighbours
+// at BOTH ends — the 12-slot `BUYBACK_TIMESTAMP_1` array ends exactly where it begins
+// (1238 + 12 = 1250) and `WATCHED_FACTION_INDEX`, itself chain-locked to the tested COINAGE, sits
+// exactly one past its end (1260 + 1 = 1261). Eleven fields is precisely the size of that gap.
+//
+// **Every one of them is PRIVATE** — the server sends them only on our OWN descriptor — and that
+// is the mechanical reason the character window's Honor tab works for the local player and for
+// nobody else. A foreign player's honor stats are not on the wire at all until we ask for them
+// with `MSG_INSPECT_HONOR_STATS` ([`crate::messages::InspectHonorStats`]); the sole honor value
+// that *does* stream for every visible player is the current rank in the PUBLIC
+// `PLAYER_BYTES_3`(195) byte 3 above.
+//
+// Types, in run order — `+0x426..0x429` TWO_SHORT, `+0x42A..0x42F` INT, `+0x430` BYTES:
+//
+// The four kill counters are TWO_SHORT, `(honorable, dishonorable)` in the low/high halves. Only
+// SESSION_KILLS is genuinely written as two halves (vmangos `HonorMgr.cpp:913-914`,
+// `SetUInt16Value(…, 0, todayHK)` / `(…, 1, todayDK)`); the other three go out as a whole dword
+// (`SetUInt32Value(PLAYER_FIELD_YESTERDAY_KILLS, yesterdayKills)`, `HonorMgr.cpp:917/924/929`), so
+// their high half is always 0 from this server. The descriptor type is TWO_SHORT regardless and
+// the real client reads halves, so we decode halves — see the accessors in `player.rs`.
+//
+// The six INT fields are the three honor-point "contribution" totals, the two lifetime kill
+// counts, and LAST_WEEK_RANK — which is the weekly **standing** (our ladder position), not a rank.
+// All six are `SetUInt32Value` writes from `HonorMgr::Update` (`HonorMgr.cpp:917-935`). Our two
+// lifetime names fix vmangos's own typo: the header spells them
+// `PLAYER_FIELD_LIFETIME_HONORBALE_KILLS` / `…DISHONORBALE…`.
+//
+// BYTES2's byte 0 is `HONOR_RANK_BAR` (`PLAYER_FIELD_BYTES_2_OFFSET_HONOR_RANK_BAR`, vmangos
+// `Player.h:366-372`); its bytes 1..3 are a flags byte and two unknowns this server never writes.
+const FIELD_PLAYER_FIELD_SESSION_KILLS: u16 = 1250;
+const FIELD_PLAYER_FIELD_YESTERDAY_KILLS: u16 = 1251;
+const FIELD_PLAYER_FIELD_LAST_WEEK_KILLS: u16 = 1252;
+const FIELD_PLAYER_FIELD_THIS_WEEK_KILLS: u16 = 1253;
+const FIELD_PLAYER_FIELD_THIS_WEEK_CONTRIBUTION: u16 = 1254;
+const FIELD_PLAYER_FIELD_LIFETIME_HONORABLE_KILLS: u16 = 1255;
+const FIELD_PLAYER_FIELD_LIFETIME_DISHONORABLE_KILLS: u16 = 1256;
+const FIELD_PLAYER_FIELD_YESTERDAY_CONTRIBUTION: u16 = 1257;
+const FIELD_PLAYER_FIELD_LAST_WEEK_CONTRIBUTION: u16 = 1258;
+const FIELD_PLAYER_FIELD_LAST_WEEK_RANK: u16 = 1259;
+const FIELD_PLAYER_FIELD_BYTES2: u16 = 1260;
 
 /// The number of `PLAYER_SKILL_INFO` slots the descriptor reserves (384 fields ÷ 3 per slot;
 /// vmangos `UpdateFields_1_12_1.h`). vmangos itself only ever *populates* `PLAYER_MAX_SKILLS` (127,

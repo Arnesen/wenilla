@@ -828,18 +828,39 @@ pub(super) fn attach_spell_fx(
             // teardown of the unit's visual (a live display swap, `live_display`; before 0835 a
             // gear change; before B199's fix a mount transition) leaves the instance holding a
             // dangling entity, and this gate's `root.is_some()` then means it is never rebuilt.
-            // The aura watcher cannot notice either: it is edge-driven off the slot set, and the
-            // aura never left it. 0835 named this open; here it closes. A **persistent** instance
-            // re-spawns onto the rebuilt body (its aura is still live, so its visual must be);
-            // a self-terminating flash or one already playing its `Decay` out simply goes.
+            // The reference's rebuild `0x60abe0` DRAINS the whole `+0xb4` list unconditionally
+            // and then RE-CREATES what must persist — the aura-state re-arm `0x5ff130`, the
+            // channel re-arm `0x612a30` (wow-re `shapeshift-morph-cloud.md`, which REFUTED the
+            // earlier survives-the-rebuild reading). Our edge-driven aura watcher cannot notice
+            // (the aura never left the slots), so re-arming the PERSISTENT instance here IS that
+            // re-create leg, in the one place that sees the drain. A one-shot goes, exactly as
+            // the reference's drained Mount Poof does — the shapeshift cloud is NOT survival:
+            // it is the pending-morph latch's impact-kit REPLAY after the rebuild
+            // (`creature_anim::spell_visual::replay_morph_kit`), and a decaying instance was
+            // ending anyway.
             if let Some(root) = inst.root {
                 if commands.get_entity(root).is_ok() {
                     return true;
                 }
                 if !inst.persistent || inst.decaying {
+                    if benilla_assets::trace::enabled() {
+                        benilla_assets::trace::line(
+                            "fx",
+                            &format!(
+                                "kit collateral drain unit={unit} path={} decaying={}",
+                                inst.path, inst.decaying
+                            ),
+                        );
+                    }
                     return false;
                 }
                 inst.root = None;
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
+                        "fx",
+                        &format!("kit collateral re-create unit={unit} path={}", inst.path),
+                    );
+                }
             }
             // Still pending: a self-terminating instance gets a generous deadline so a unit whose
             // model never materialises (the cube fallback) can't accumulate unspawnable flashes —
@@ -1073,12 +1094,14 @@ mod tests {
             .collect()
     }
 
-    /// **0835's named-open item, closed.** `FxAttached` lives on the unit and outlives its model —
-    /// exactly as the reference's per-CGUnit `+0xb4` effect list does — so a teardown of the unit's
-    /// visual (a live display swap) leaves each instance holding a dangling root, and the spawn
-    /// gate's `root.is_some()` then means it is never rebuilt. The aura watcher cannot notice: it
-    /// is edge-driven off the slot set, and the aura never left it. A **persistent** instance must
-    /// come back; a self-terminating flash must not.
+    /// **The drain-then-recreate law** (0835's named-open item closed; the reference byte-read
+    /// in wow-re `shapeshift-morph-cloud.md`): the rebuild drains EVERY effect node and then
+    /// re-creates what must persist. A teardown of the unit's visual leaves each instance
+    /// holding a dangling root; the persistent instance re-arms (our re-create leg — the
+    /// edge-driven aura watcher cannot notice, the aura never left the slots), the one-shot
+    /// flash goes exactly as the reference's drained Mount Poof does. The shapeshift cloud is
+    /// deliberately NOT this path's business — it is the morph latch's post-rebuild replay
+    /// (`creature_anim::spell_visual::replay_morph_kit`).
     #[test]
     fn a_persistent_instance_whose_root_died_as_collateral_is_re_armed() {
         let (mut app, unit, roots) = standing(&[true, false]);
@@ -1090,8 +1113,24 @@ mod tests {
         assert_eq!(
             instances_of(&app, unit),
             vec![(true, None)],
-            "the aura's instance is re-armed for the spawn pass; the flash is dropped",
+            "the aura's instance re-arms for the spawn pass; the one-shot drains",
         );
+    }
+
+    /// A decaying persistent instance was already ending — the drain takes it too (a re-spawn
+    /// would replay its death rattle from nothing on the new body).
+    #[test]
+    fn a_decaying_instance_whose_root_died_as_collateral_is_dropped() {
+        let (mut app, unit, roots) = standing(&[true]);
+        app.world_mut()
+            .entity_mut(unit)
+            .get_mut::<FxAttached>()
+            .unwrap()
+            .instances[0]
+            .decaying = true;
+        app.world_mut().entity_mut(roots[0]).despawn();
+        app.update();
+        assert_eq!(instances_of(&app, unit), vec![]);
     }
 
     /// A live root is left strictly alone — the gate is "is it still there?", not "re-spawn me".

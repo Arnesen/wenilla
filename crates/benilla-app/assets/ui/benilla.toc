@@ -251,14 +251,31 @@ ReputationFrame.xml
 # `parent=` attachment, so it's positioned by name via `<Anchors relativeTo=
 # "CharacterFrame">` instead). Loaded after CharacterFrame.xml so it paints ON TOP of
 # it (later file = higher z) and so `CharacterFrame` already exists for that anchor to
-# resolve against — and last of the three sibling pages, because it is the last of the
-# three tabs (the real client's 4).
+# resolve against — seated at the real client's own tab 4, between Reputation above and
+# Honor below.
 SkillFrame.xml
+# The Honor tab: the same separate-top-level-file shape as the three pages above it, and LAST of
+# them because it is the last of the tabs (the real client's 5, ref HonorFrame.xml:5) — which
+# CLOSES the row: the character window's five tabs are now the reference's five, in its order, at
+# its numbers, with nothing left past the end. Its hard dependencies are all far above:
+# CharacterFrame.xml (the anchor target it is pinned to by name, the tab row it raises tab 5 of,
+# and the `CharacterNameText` its level line hangs under), GameTooltip.xml
+# (`BenillaTooltip_AddNewbieTipFor`, which all five of its hovers go through) and Fonts.xml
+# (GameFontGreenSmall/GameFontRedSmall carry the honorable/dishonorable colouring, and
+# HIGHLIGHT_FONT_COLOR the tip titles).
+# It must come BEFORE InspectFrame.xml, and that order is a REQUIREMENT rather than tidiness: the
+# inspect window's own honor page inherits the five `HonorFrame*ButtonTemplate` row templates
+# declared here, and `inherits=` resolves at LOAD. The reference has the identical edge — its
+# `HonorFrameTemplates.xml` is `<Include>`d by `HonorFrame.xml` and inherited by the LoadOnDemand
+# `Blizzard_InspectUI`, which loads later still.
+HonorFrame.xml
 # The inspect window (decision 0631): another player's paper doll. Beside the character
 # window it mirrors — it needs the same three (Fonts/UiPanels/GameTooltip) plus
 # `CharacterFrameTabButtonTemplate` from UiPanels.xml, and nothing from CharacterFrame.xml
 # itself (its slot template, handlers, and booth slot are all its own — the two windows
-# share only the reference's art).
+# share only the reference's art). ONE cross-window dependency does bind, and it is on the
+# entry directly above: this window's honor page inherits HonorFrame.xml's five row templates
+# and calls its two shared painters, the same sharing the reference does.
 InspectFrame.xml
 # The dressing room (decision 1060): the ctrl-click item preview. Loaded right after the
 # windows whose slots feed it (the character window above, the bags before that) and before

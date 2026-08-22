@@ -9,13 +9,14 @@ use super::{
     CorpseLocation, DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
     FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GossipPoi, GroupLootInfo,
     GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse,
-    GuildRoster, InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed,
-    LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode,
-    Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, QuestComplete, QuestDetails,
-    QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
-    ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog,
-    SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask, TradeStatus,
-    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    GuildRoster, InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
+    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
+    MirrorTimerStart, MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
+    PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption,
+    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
+    SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss,
+    SpellStart, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
+    VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -983,6 +984,14 @@ pub enum ServerPacket {
     DuelCountdown {
         seconds: u32,
     },
+    /// The `MSG_INSPECT_HONOR_STATS` **reply** — another player's honor stats (decision 1512).
+    /// The opcode is an `MSG_`, so the same number carries our request; direction disambiguates
+    /// (see [`super::opcode::MSG_INSPECT_HONOR_STATS`]). Unsolicited replies do not happen: this
+    /// only ever arrives because we asked, and a refused ask is answered with silence.
+    InspectHonorStats(InspectHonorStats),
+    /// `SMSG_PVP_CREDIT` — an honor payout, the only *attributed* notice of one. Also sent for
+    /// dishonorable kills, with negative honor.
+    PvpCredit(PvpCredit),
     /// `SMSG_START_MIRROR_TIMER` — start or wholly re-state one mirror timer (the breath /
     /// fatigue bars, decision 0874). The family has no update opcode: every change re-sends this.
     MirrorTimerStart(MirrorTimerStart),
@@ -1351,6 +1360,8 @@ impl ServerPacket {
             ServerPacket::DuelComplete { .. } => "SMSG_DUEL_COMPLETE".into(),
             ServerPacket::DuelWinner { .. } => "SMSG_DUEL_WINNER".into(),
             ServerPacket::DuelCountdown { .. } => "SMSG_DUEL_COUNTDOWN".into(),
+            ServerPacket::InspectHonorStats(..) => "MSG_INSPECT_HONOR_STATS".into(),
+            ServerPacket::PvpCredit(..) => "SMSG_PVP_CREDIT".into(),
             ServerPacket::MirrorTimerStart(..) => "SMSG_START_MIRROR_TIMER".into(),
             ServerPacket::MirrorTimerPause { .. } => "SMSG_PAUSE_MIRROR_TIMER".into(),
             ServerPacket::MirrorTimerStop { .. } => "SMSG_STOP_MIRROR_TIMER".into(),

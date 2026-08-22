@@ -269,6 +269,42 @@ fn level_up_lines_follow_the_reference_order_and_forms() {
     );
 }
 
+/// The three honor forms (COMBATLOG_HONORAWARD / COMBATLOG_HONORGAIN / COMBATLOG_DISHONORGAIN,
+/// GlobalStrings :786/:787/:785) and the fork between them, decision 1512.
+///
+/// The empty-rank case is asserted deliberately: it is what the server's floor-at-5 exists to
+/// prevent, so a change that silently starts hiding the clause instead would pass unnoticed here
+/// without it.
+#[test]
+fn honor_gain_lines_pick_the_reference_form() {
+    assert_eq!(
+        super::feed::honor_gain_line(None, None, 42),
+        "You have been awarded 42 honor points."
+    );
+    assert_eq!(
+        super::feed::honor_gain_line(Some("Grimtusk"), Some("Sergeant"), 137),
+        "Grimtusk dies, honorable kill Rank: Sergeant (Estimated Honor Points: 137)"
+    );
+    // A dishonorable kill: vmangos sends the same packet with a negative honor
+    // (`HonorMgr.cpp:807`), and the client's fork is on the sign.
+    assert_eq!(
+        super::feed::honor_gain_line(Some("Innkeeper Renee"), None, -37),
+        "Innkeeper Renee dies, dishonorable kill."
+    );
+    // The BOUNDARY, byte-verified at `0x625270`: the test is `honor <= 0`, so a zero-honor kill
+    // takes the dishonorable arm. The pre-verdict reading had `< 0` and put this one on the
+    // honorable side, where it would have printed "Rank:  (Estimated Honor Points: 0)".
+    assert_eq!(
+        super::feed::honor_gain_line(Some("Grimtusk"), Some("Sergeant"), 0),
+        "Grimtusk dies, dishonorable kill."
+    );
+    // No rank title: the clause stays, empty — the reference's own shape.
+    assert_eq!(
+        super::feed::honor_gain_line(Some("Grimtusk"), None, 5),
+        "Grimtusk dies, honorable kill Rank:  (Estimated Honor Points: 5)"
+    );
+}
+
 #[test]
 fn xp_gain_lines_pick_the_reference_form() {
     // COMBATLOG_XPGAIN_FIRSTPERSON / its EXHAUSTION1 rested form / _UNNAMED (GlobalStrings
@@ -895,7 +931,7 @@ fn every_kind_is_in_all() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), before, "a kind is listed twice in ALL");
-    assert_eq!(before, 36, "36 kinds — update this when the kind set grows");
+    assert_eq!(before, 37, "37 kinds — update this when the kind set grows");
 }
 
 #[test]

@@ -91,6 +91,22 @@ enum Pending {
         bonus: u32,
         tries: u16,
     },
+    /// An honor award awaiting the victim's name (`SMSG_PVP_CREDIT`; decision 1512) — the XP
+    /// node's twin, parked for the identical reason: the sentence's first `%s` is a NAME and the
+    /// packet carries a guid.
+    ///
+    /// `rank` is the victim's **internal** rank as the packet sent it (0 = none), turned into a
+    /// title by the drain — which is the right place for it, because the title's GlobalString key
+    /// needs the victim's own **side and sex**, and those come out of the very `NameCache` record
+    /// the name resolve below is already waiting on (`SMSG_NAME_QUERY_RESPONSE` carries
+    /// race/class/gender beside the name). Resolving it at push time would have needed the
+    /// victim's descriptor, which is gone the moment their body despawns.
+    HonorGain {
+        victim: u64,
+        honor: i32,
+        rank: u8,
+        tries: u16,
+    },
     /// A text emote (`SMSG_TEXT_EMOTE`) awaiting the PERFORMER's name — decision 1274.
     ///
     /// Parked here for the reference's own reason, not merely for convenience: `0x49dbe0` composes
@@ -296,6 +312,25 @@ impl ChatLog {
         }
     }
 
+    /// Queue an honor award's chat line (`SMSG_PVP_CREDIT` → CHAT_MSG_COMBAT_HONOR_GAIN;
+    /// decision 1512). A credit with **no victim guid** is the bonus/objective form and needs no
+    /// resolve at all, so it composes here and now — the same fork [`Self::push_xp_gain`] takes.
+    pub(crate) fn push_pvp_credit(&mut self, honor: i32, victim: u64, rank: u8) {
+        if victim != 0 {
+            self.pending.push(Pending::HonorGain {
+                victim,
+                honor,
+                rank,
+                tries: 0,
+            });
+        } else {
+            self.pending.push(Pending::Event(ChatEvent::text_only(
+                ChatEventKind::CombatHonorGain,
+                honor_gain_line(None, None, honor),
+            )));
+        }
+    }
+
     /// Queue a text emote's chat line (`SMSG_TEXT_EMOTE` → CHAT_MSG_TEXT_EMOTE; decision 1274) for
     /// the performer-name resolve, then the `EmotesText`/`EmotesTextData` composition.
     pub(crate) fn push_text_emote(&mut self, performer: u64, text_id: u32, target: String) {
@@ -416,6 +451,33 @@ pub(super) fn xp_gain_line(victim: Option<&str>, total: u32, bonus: u32) -> Stri
         }
         Some(name) => format!("{name} dies, you gain {total} experience."),
         None => format!("You gain {total} experience."),
+    }
+}
+
+/// The honor line an `SMSG_PVP_CREDIT` becomes — the three GlobalStrings forms (COMBATLOG_HONORAWARD
+/// :786, COMBATLOG_HONORGAIN :787, COMBATLOG_DISHONORGAIN :785), decision 1512.
+///
+/// **The fork is byte-VERIFIED** (wow-re `system/ui/scratch/honor-panel-law.md`, formatter
+/// `0x625270`), and it is three-way, not two: no victim guid → AWARD; victim and `honor > 0` →
+/// GAIN; victim and **`honor <= 0`** → DISHONOR. The boundary is `<=`, not `<` — a zero-honor kill
+/// takes the dishonorable arm, which the pre-verdict reading had on the honorable side.
+///
+/// An absent `rank_title` formats an EMPTY rank slot rather than dropping the clause. That is the
+/// reference's own shape — it is precisely the emptiness vmangos floors a rankless victim's rank at
+/// 5 to avoid showing (1512), and compensating for it a second time on our side would hide what the
+/// server is actually sending.
+pub(super) fn honor_gain_line(
+    victim: Option<&str>,
+    rank_title: Option<&str>,
+    honor: i32,
+) -> String {
+    match victim {
+        None => format!("You have been awarded {honor} honor points."),
+        Some(name) if honor <= 0 => format!("{name} dies, dishonorable kill."),
+        Some(name) => format!(
+            "{name} dies, honorable kill Rank: {} (Estimated Honor Points: {honor})",
+            rank_title.unwrap_or_default()
+        ),
     }
 }
 
@@ -863,6 +925,51 @@ pub(super) fn feed_chat(
                     &ChatEvent::text_only(
                         ChatEventKind::CombatXpGain,
                         xp_gain_line(Some(&name), total, bonus),
+                    ),
+                );
+            }
+            Pending::HonorGain {
+                victim,
+                honor,
+                rank,
+                tries,
+            } => {
+                let name = names.resolve(victim, &commands).map(str::to_string);
+                if name.is_none() && tries < NAME_MAX_TRIES {
+                    still.push(Pending::HonorGain {
+                        victim,
+                        honor,
+                        rank,
+                        tries: tries + 1,
+                    });
+                    continue;
+                }
+                // **The side is the VICTIM's and the gender is OURS**, and that asymmetry is the
+                // reference's own (`0x625270`): the team digit is computed inline over the victim's
+                // faction template, while the gendered GlobalString resolve runs against the local
+                // player. It reads like a bug in the real client and it is what the bytes do; both
+                // halves are wow-re-VERIFIED. The victim's side rides the same name-query record we
+                // just resolved the name from; ours rides our own.
+                //
+                // A victim with no record is a creature — a racial leader is the only one the
+                // server ranks, at 19, and "Leader" is the same word on both sides — or an
+                // unanswered guid, so the side digit cannot change the answer there.
+                let team = names
+                    .player_traits(victim)
+                    .and_then(|(race, _, _)| crate::ui_unit::race_faction_group(race))
+                    .map_or(0, |group| u8::from(group == "Alliance"));
+                let female = self_guid
+                    .0
+                    .and_then(|g| names.player_traits(g))
+                    .is_some_and(|(_, _, gender)| gender == 1);
+                let title = script.pvp_rank_title(rank, team, female);
+                let name = name.unwrap_or_else(|| "Unknown".into());
+                route(
+                    &mut script,
+                    &mut windows,
+                    &ChatEvent::text_only(
+                        ChatEventKind::CombatHonorGain,
+                        honor_gain_line(Some(&name), title.as_deref(), honor),
                     ),
                 );
             }

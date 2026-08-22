@@ -486,6 +486,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             loser,
         }],
         ServerPacket::DuelCountdown { seconds } => vec![SessionEvent::DuelCountdown { seconds }],
+        ServerPacket::InspectHonorStats(stats) => vec![SessionEvent::InspectHonorStats(stats)],
+        ServerPacket::PvpCredit(credit) => vec![SessionEvent::PvpCredit(credit)],
         ServerPacket::MirrorTimerStart(start) => vec![SessionEvent::MirrorTimerStart(start)],
         ServerPacket::MirrorTimerPause { kind, paused } => {
             vec![SessionEvent::MirrorTimerPause { kind, paused }]

@@ -13,12 +13,13 @@ use crate::messages::{
     ActionButton, AttackerState, ChannelNoticeTail, Character, CreateSpline, DamageShield,
     EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
     GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
-    GuildQueryResponse, GuildRoster, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
-    LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
-    MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
-    QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems,
-    QuestTemplate, SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss, TaxiMask,
-    TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    GuildQueryResponse, GuildRoster, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
+    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
+    MirrorTimerStart, MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog,
+    PetMode, PetSpells, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
+    QuestRequestItems, QuestTemplate, SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss,
+    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
+    WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -1028,6 +1029,14 @@ pub enum SessionEvent {
     },
     /// Start the duel countdown (`SMSG_DUEL_COUNTDOWN`) — already in whole seconds.
     DuelCountdown { seconds: u32 },
+    /// Another player's honor stats came back (`MSG_INSPECT_HONOR_STATS` reply, decision 1512) —
+    /// the inspect window's Honor tab. Arrives only in answer to our own ask, and a *refused* ask
+    /// is answered with silence (the server returns without sending), so a consumer must not
+    /// treat "no event yet" as "the data is coming".
+    InspectHonorStats(InspectHonorStats),
+    /// A kill paid out honor (`SMSG_PVP_CREDIT`) — the honor-gain chat line and floating combat
+    /// text. Also fires for a **dishonorable** kill, where `honor` is negative.
+    PvpCredit(PvpCredit),
     /// One mirror timer started, or was wholly re-stated (`SMSG_START_MIRROR_TIMER`, decision
     /// 0874) — the breath / fatigue bars. There is no separate update opcode: the server re-sends
     /// this whole packet whenever direction, remaining time or frozen state changes, so a

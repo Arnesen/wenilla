@@ -45,6 +45,16 @@ const SCALE_EASE_SECS: f32 = 2.0;
 #[derive(Component)]
 pub(super) struct AppliedDisplay(pub(super) Option<u32>);
 
+/// A live display-id swap happened on this entity — the visual was torn down and will rebuild.
+/// The reference's rebuild `0x60abe0` ends by REPLAYING the pending-morph latch's impact kit
+/// (wow-re `shapeshift-morph-cloud.md`); this edge is what carries "the rebuild ran" to that
+/// replay (`crate::creature_anim`'s morph-latch watcher), which owns the latch and the kit
+/// resolve. Written only when the rebuild actually fires (the diff branch — our `0x60ae10`).
+#[derive(Message, Clone, Copy)]
+pub(crate) struct DisplaySwapped {
+    pub(crate) entity: Entity,
+}
+
 /// A live render-scale ease toward [`NetEntity::scale`]: the reference's 2 s cosine smoothstep
 /// (`0x614bbf`), ticked by [`tick_scale_ease`] as absolute writes (a mid-ease visual rebuild's
 /// snap is simply overwritten next frame, so the ease survives it).
@@ -94,6 +104,7 @@ pub(super) fn refresh_live_display(
         ),
         With<VisualAttached>,
     >,
+    mut swapped: MessageWriter<DisplaySwapped>,
 ) {
     for (entity, guid, mut net, store, applied, height, tf) in &mut entities {
         let mut restamp = false;
@@ -108,6 +119,7 @@ pub(super) fn refresh_live_display(
                 );
                 net.display_id = Some(live);
                 restamp = true;
+                swapped.write(DisplaySwapped { entity });
                 // The full visual teardown set + our own diff key: children (parts, anchors,
                 // held roots, mount child) despawn, the per-instance visual components strip, and
                 // `attach_entity_visuals` rebuilds next frame(s) with the new display —

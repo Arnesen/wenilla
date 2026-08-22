@@ -58,10 +58,16 @@ impl Default for ChatWindows {
                     ChatGroup::Skill,
                     ChatGroup::Loot,
                 ],
-                // WINDOW 2 "Combat Log": of its chat-cache list, MONEY and COMBAT_XP_GAIN are
-                // the groups the current kind set carries (the rest of the combat/spell block is
-                // the combat-log arc; XP joined with the ding arc, 0304).
-                vec![ChatGroup::Money, ChatGroup::CombatXpGain],
+                // WINDOW 2 "Combat Log": of its chat-cache list, MONEY, COMBAT_XP_GAIN and
+                // COMBAT_HONOR_GAIN are the groups the current kind set carries (the rest of the
+                // combat/spell block is the combat-log arc; XP joined with the ding arc, 0304,
+                // and honour with the honor arc, 1512 — the reference registers the two on the
+                // same frame one line apart, ChatFrame.lua l.2428-2429).
+                vec![
+                    ChatGroup::Money,
+                    ChatGroup::CombatXpGain,
+                    ChatGroup::CombatHonorGain,
+                ],
             ],
             tell_alert_left: 0.0,
             default_language: String::new(),
@@ -176,6 +182,7 @@ pub(crate) fn compose(
         | K::Loot
         | K::Money
         | K::CombatXpGain
+        | K::CombatHonorGain
         | K::BgSystemNeutral
         | K::BgSystemAlliance
         | K::BgSystemHorde => event.text.clone(),

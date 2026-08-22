@@ -945,15 +945,17 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     load_xml(&s, "PetPaperDollFrame.xml");
     load_xml(&s, "ReputationFrame.xml");
     load_xml(&s, "SkillFrame.xml");
+    load_xml(&s, "HonorFrame.xml");
     s.set_unit("player", Some(player_unit()));
 
     // THE INVARIANT the fix rests on: a page's `id=` is its slot in this window's own tab row, and
     // `BENILLA_CHARACTERFRAME_SUBFRAMES` is the same 1:1 mapping written the other way round. It
     // did its job: this loop is what made the Reputation page's arrival LOUD, since Skills had to
-    // move from 3 to 4 in the same breath. The four slots are the reference's own now
-    // (Character/Pet/Reputation/Skills, ref `CharacterFrame.xml:79-168`); only Honor, its tab 5, is
-    // still out, and it sits past the end where its absence shifts nothing.
-    for i in 1..=4 {
+    // move from 3 to 4 in the same breath. All five slots are the reference's own now
+    // (Character/Pet/Reputation/Skills/Honor, ref `CharacterFrame.xml:79-168`), so the loop covers
+    // the whole row rather than a prefix of it — there is nothing left past the end for a page to
+    // arrive into unnoticed.
+    for i in 1..=5 {
         let id: i64 = s
             .eval(&format!(
                 "return getglobal(BENILLA_CHARACTERFRAME_SUBFRAMES[{i}]):GetID()"

@@ -45,6 +45,7 @@ mod parse;
 mod pet;
 mod pose;
 mod progression;
+mod pvp;
 mod quest;
 mod reputation;
 mod roster;
@@ -159,6 +160,7 @@ pub use pet::{
 };
 pub use pose::{set_sheathed, stand_state_change};
 pub use progression::{learn_talent, ExplorationXp, LevelUpInfo, XpGain};
+pub use pvp::{inspect_honor_stats, InspectHonorStats, PvpCredit};
 pub use quest::{
     dialog_status, quest_query, questgiver_accept_quest, questgiver_choose_reward,
     questgiver_complete_quest, questgiver_hello, questgiver_query_quest, questgiver_request_reward,

@@ -1273,6 +1273,12 @@ pub(crate) enum ClientCommand {
     /// paints from the already-streamed PUBLIC `PLAYER_VISIBLE_ITEM_*` fields. Sent anyway because
     /// server-side it also sets our selection (`MiscHandler.cpp:945`), as the real client's does.
     Inspect { target: u64 },
+    /// Ask for a player's honor stats (`MSG_INSPECT_HONOR_STATS`, `u64 target`) — the inspect
+    /// window's Honor tab (decision 1512). Unlike [`Self::Inspect`] this one is a **real** round
+    /// trip: the reply rides the same opcode and is the only source of another player's honor
+    /// numbers, since every field of the honor block is PRIVATE. A refusal is silence — the server
+    /// applies the same three gates as `CMSG_INSPECT` and simply does not answer.
+    InspectHonorStats { target: u64 },
     // ── The player-trade arc (decision 0592; writer bodies in benilla-protocol
     //    `world/writer/trade.rs`). ─────────────────────────────────────────────────────────────
     /// Offer to trade with a player (`CMSG_INITIATE_TRADE`, `u64 target`) — the UnitPopup TRADE row.

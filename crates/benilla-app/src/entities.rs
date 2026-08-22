@@ -70,6 +70,7 @@ use mount::reseat_mounts;
 /// model in place (druid forms, GM morphs — ledger B69/F04) and one moving `SCALE_X` eases the
 /// render scale (the reference's 2 s cosine smoothstep); both restamp the collision height.
 mod live_display;
+pub(crate) use live_display::DisplaySwapped;
 use live_display::{refresh_live_display, tick_scale_ease};
 
 /// Terrain conform (decisions 0482/0486): every flagged model (`GlobalModelFlags & 3 ∈ {1,3}` —
@@ -598,6 +599,9 @@ impl Plugin for EntitiesPlugin {
         .add_message::<MissileSound>()
         // The cast router's dest one-shot orders (`dest_fx`, decision 0797).
         .add_message::<dest_fx::GroundBurst>()
+        // A live display-id swap's rebuild edge — consumed by the morph-latch replay
+        // (`crate::creature_anim`), the reference's `0x60abe0` impact-kit replay tail.
+        .add_message::<live_display::DisplaySwapped>()
         .add_systems(Startup, setup_entities.after(AssetSet::Open))
         // The map-scope teardown (`world_map::MapChange`): drop every display/material dedup
         // so a map's assets actually die with it — the #bugs teleport leak.

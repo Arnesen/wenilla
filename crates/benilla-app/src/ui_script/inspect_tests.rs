@@ -117,6 +117,10 @@ fn armed() -> UiScript {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
+    // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
+    // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
+    // twelve honor rows materialize bare (decision 1512; the manifest states the same order).
+    load_xml(&s, "HonorFrame.xml");
     load_xml(&s, "InspectFrame.xml");
     s.set_unit("target", Some(target_unit()));
     s.set_inspect(Some(inspect_view("target")));
@@ -132,6 +136,10 @@ fn shipped_inspect_frame_loads_clean() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
+    // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
+    // HonorFrame.xml's five row templates and `inherits=` resolves at LOAD, so without it the
+    // twelve honor rows materialize bare (decision 1512; the manifest states the same order).
+    load_xml(&s, "HonorFrame.xml");
     load_xml(&s, "InspectFrame.xml");
     // All 19 slots exist and carry their GetInventorySlotInfo id (1..=19, no ammo slot).
     for (name, id) in [
@@ -396,7 +404,7 @@ fn shipped_inspect_frame_drives_end_to_end() {
 /// The tab chrome, and where the ref's "toggle the showing page shut" branch actually lives.
 ///
 /// `PanelTemplates_SelectTab` **disables** the selected tab button (`UiPanels.xml`, the ref's own
-/// UIPanelTemplates), so on a one-tab window the tab is inert from the moment it opens — clicking it
+/// UIPanelTemplates), so the SELECTED tab is inert from the moment it opens — clicking it
 /// cannot close anything. `ToggleInspect`'s close-when-already-showing branch
 /// (`Blizzard_InspectUI.lua:67-83`) is therefore reachable only by calling `ToggleInspect` directly,
 /// which is how a keybinding would. Both halves asserted, because the first one is what makes the

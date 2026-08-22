@@ -146,6 +146,27 @@ pub struct UnitState {
     /// bit) — distinct from [`Self::pvp`]'s ordinary faction PvP flag; a unit can carry either, both,
     /// or neither independently (an FFA zone flags this without the ordinary flag ever setting).
     pub is_pvp_ffa: bool,
+    /// The unit's **current** PvP rank on the internal `0..=18` scale, `0` = no rank
+    /// (`UnitPVPRank`; decision 1512). `PLAYER_BYTES_3` **byte 3** — a **PUBLIC** descriptor field,
+    /// which is the whole reason a foreign player's rank is knowable and why the reference's
+    /// inspect pane can call `UnitPVPRank("target")`. Not to be confused with the HIGHEST LIFETIME
+    /// rank (`PLAYER_FIELD_BYTES` byte 3), which is private, rides
+    /// [`HonorState`](super::HonorState) instead, and is what `GetPVPLifetimeStats` reports.
+    ///
+    /// Internal, not visual: the badge texture and `GetPVPRankInfo`'s second return are the
+    /// `-4..=14` visual scale, converted in [`super::pvp`] and nowhere else.
+    pub pvp_rank: u8,
+    /// The unit's **city-protector title** index — `PLAYER_BYTES_3` **byte 2**, the byte next door
+    /// to [`Self::pvp_rank`] (vmangos `PLAYER_BYTES_3_OFFSET_CITY_PROTECTOR_TITLE`), PUBLIC like
+    /// it. `0` = none. Read by exactly one thing: `UnitPVPName`'s medal line, which appends
+    /// `"\n"` + the `PVP_MEDAL<n>` GlobalString when it is non-zero (`0x6093ef`).
+    ///
+    /// **v1 feed gap, stated not hidden:** no app-side feed fills this yet — it rides the same
+    /// dword the rank byte is decoded from, so wiring it is one line there, and until that line
+    /// exists every unit reads `0` and `UnitPVPName` renders no medal. The binding leg is built
+    /// against the field rather than left out, so the seam is a feed line rather than a missing
+    /// arm (same shape as [`Self::is_connected`]'s stated gap).
+    pub pvp_medal: u8,
     /// The unit's PvP faction group — `"Alliance"` or `"Horde"`, else `None` (`UnitFactionGroup`;
     /// decision 0646 §1). App-resolved from `UNIT_FIELD_FACTIONTEMPLATE` → `FactionTemplate.dbc`'s
     /// group mask, with the Player bit skipped: every playable race's template carries
@@ -215,6 +236,25 @@ pub fn grey_band(player_level: u32) -> u32 {
 /// predicate also requires not-player-controlled; every consumer here applies this to creatures.
 pub fn unit_is_grey(player_level: u32, unit_level: u32) -> bool {
     player_level > unit_level && player_level - unit_level > grey_band(player_level)
+}
+
+/// The **CIVILIAN predicate `0x612550`** — "killing this would be a dishonorable kill": the unit's
+/// PvP bit **and** the creature-query civilian flag **and** the unit is HOSTILE to the player
+/// (`UnitReaction` ≤ 2) **and** the kill would be GREY/trivial ([`unit_is_grey`]). A friendly
+/// civilian, or one that still cons, is not one.
+///
+/// **ONE home, two callers**, which is the whole reason it is a function: the unit tooltip's green
+/// CIVILIAN line ([`super::tooltip_unit`], decision 0276) and `UnitPVPName`'s civilian arm
+/// ([`super::pvp`] — `0x609370` leg B, which prefixes `PVP_RANK_CIVILIAN` onto a non-player's
+/// name). The engine gates both on the same call; a second copy here would let the tooltip and the
+/// name disagree about whether the same mob is a civilian.
+///
+/// **Scope of the verification.** wow-re's honor carve leaves `0x612550` itself uncarved (its §12,
+/// "named by its use here"); the four terms are decision 0276's tooltip-line law, which is where
+/// this composition was verified. So this is the tooltip's gate reused at the second call site the
+/// carve proves shares it — not an independently byte-checked predicate.
+pub fn is_civilian_kill(u: &UnitState, player_level: u32) -> bool {
+    u.civilian && u.pvp && u.reaction != 0 && u.reaction <= 2 && unit_is_grey(player_level, u.level)
 }
 
 /// The "level reads ??" gate — the engine tooltip's byte-pinned leg set (`0x529fe0` §2-LEVEL):

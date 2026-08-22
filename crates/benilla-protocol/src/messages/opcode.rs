@@ -254,6 +254,11 @@ pub const SMSG_LEVELUP_INFO: u16 = 0x01D4; // 468
 /// A newly explored area — area id + the XP it granted (0 at max level). Body
 /// in [`super::progression::read_exploration_xp`] — decision 0828.
 pub const SMSG_EXPLORATION_EXPERIENCE: u16 = 0x01F8; // 504 (VERIFIED vmangos `Opcodes_1_12_1.h:505`)
+/// The honor payout (VERIFIED vmangos `Opcodes_1_12_1.h`: 652) — the XP-gain line's PvP twin, and
+/// the only attributed notice of an honor award: the descriptor's contribution fields move too,
+/// but they are running totals. Sent for **dishonorable** kills as well, carrying negative honor.
+/// Body in [`super::pvp::read_pvp_credit`] ([`super::PvpCredit`]) — decision 1512.
+pub const SMSG_PVP_CREDIT: u16 = 0x028C; // 652
 
 // The combat-log wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 464/587/590/591/592) — decision 0137
 // phase 2's floating-combat-text data feed. Bodies in [`super::spells`].
@@ -471,6 +476,16 @@ pub const CMSG_CANCEL_CHANNELLING: u16 = 0x013B; // 315
 /// streamed PUBLIC `PLAYER_VISIBLE_ITEM_*` fields without waiting on it, and no FrameXML handler
 /// registers an inspect event. Decision 0631.
 pub const CMSG_INSPECT: u16 = 0x0114; // 276
+/// 726 (VERIFIED vmangos `Opcodes_1_12_1.h`) — the inspect window's **Honor tab**, and an `MSG_`:
+/// the one opcode number carries both directions. Our request is a raw 8-byte guid
+/// ([`super::inspect_honor_stats`]); the server's reply, on the same number, is the 50-byte
+/// [`super::InspectHonorStats`] body. Nothing needs to disambiguate the two shapes — direction
+/// does: [`super::parse_server`] only ever sees inbound bodies, so a 0x2D6 there is always the
+/// reply, and our outbound body never passes through it.
+///
+/// Same three silent refusals as [`CMSG_INSPECT`] (`MiscHandler.cpp:962-972`), but *unlike* it
+/// this handler does not set our selection. Decision 1512.
+pub const MSG_INSPECT_HONOR_STATS: u16 = 0x02D6; // 726
 pub const CMSG_SET_SELECTION: u16 = 0x013D; // 317
 pub const CMSG_ATTACKSWING: u16 = 0x0141; // 321
 pub const CMSG_ATTACKSTOP: u16 = 0x0142; // 322
