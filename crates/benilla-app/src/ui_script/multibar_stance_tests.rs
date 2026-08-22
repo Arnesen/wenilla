@@ -177,6 +177,10 @@ fn shipped_multibars_drive_end_to_end() {
     );
     s.set_bonus_bar_offset(0);
     s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    // The offset edges above showed the bonus overlay (1524) and its descent takes 0.15s of
+    // frame time this event-only test never used to pass; without it the 12 overlay wells are
+    // still on screen and correctly answer the SHOWGRID below as 12 extra drop targets.
+    s.tick(0.2);
 
     // While a payload is held (SHOWGRID), the hidden empty wells appear as drop-target rings
     // (UI-Quickslot, the "no action" ring): 11 empty main wells swap texture + 22 multibar wells
@@ -1046,5 +1050,100 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
             .unwrap(),
         0.0
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The shelf's LENGTH is the form count** — the half of the ref's `ShapeshiftBar_Update`
+/// (l.161-175) that decides where the right end cap lands.
+///
+/// The three strips are DECLARED as the >2-form chain (Left → Middle → Right), and hiding the
+/// middle strip does not close its 38px hole: a hidden region still resolves its rect, here and in
+/// the reference. So a one-form class — a rogue, whose only "form" is Stealth — drew its Stealth
+/// button with the 42x50 end cap stranded a slot's width to its right: a second, permanently empty
+/// recess beside the icon (director, 2026-08-22). The shipped test beside this one only ever
+/// exercised 2 and 3 forms and only ever read `IsShown()`, which is exactly why it shipped.
+#[test]
+fn the_stance_shelf_is_as_long_as_the_form_count() {
+    use benilla_ui::script::ShapeshiftFormView;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+    load_xml(&s, "StanceBar.xml");
+    show_bars(&s, &[]); // unraised: the shelf art is the state under test
+
+    let form = |id: u32| ShapeshiftFormView {
+        spell_id: id,
+        texture: Some(format!("Interface\\Icons\\Stance_{id}")),
+        name: format!("Form {id}"),
+        active: false,
+        castable: true,
+        cooldown: None,
+    };
+    let set_forms = |s: &mut UiScript, n: u32| {
+        s.set_shapeshift_forms((0..n).map(|i| form(2450 + i)).collect());
+        s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+        s.resolve();
+    };
+    // The cap's left edge relative to the LEFT cap's — the whole shelf in one number, independent
+    // of where the managed pass seats the bar.
+    let cap = |s: &UiScript| {
+        s.eval::<f64>("return ShapeshiftBarRight:GetLeft() - ShapeshiftBarLeft:GetLeft()")
+            .unwrap()
+    };
+    // Button 1 sits at +11 and is 30 wide, so its own span is 11..41 in the same space.
+    const BUTTON1_RIGHT: f64 = 41.0;
+
+    // ONE form (the rogue): the cap is pulled back INSIDE the left cap (+12) — a 54px shelf that
+    // wraps the single button and stops there. The regression put it at 83.
+    set_forms(&mut s, 1);
+    assert_eq!(
+        cap(&s),
+        12.0,
+        "one form: the cap sits 12px into the left cap"
+    );
+    assert!(
+        cap(&s) + 42.0 > BUTTON1_RIGHT,
+        "the one-form shelf still covers its button"
+    );
+    assert!(
+        !s.eval::<bool>("return ShapeshiftBarMiddle:IsShown()")
+            .unwrap(),
+        "one form: no middle strip"
+    );
+
+    // TWO forms: the caps butt together, 45 + 42 = 87px of shelf, still no middle strip.
+    set_forms(&mut s, 2);
+    assert_eq!(cap(&s), 45.0, "two forms: cap on the left cap's RIGHT edge");
+
+    // PAST two, the middle strip carries one 38px slot per extra form and the cap chains off it.
+    set_forms(&mut s, 3);
+    assert_eq!(
+        s.eval::<f64>("return ShapeshiftBarMiddle:GetWidth()")
+            .unwrap(),
+        38.0,
+        "3 forms: one slot of middle"
+    );
+    assert_eq!(cap(&s), 83.0);
+
+    set_forms(&mut s, 5);
+    assert_eq!(
+        s.eval::<f64>("return ShapeshiftBarMiddle:GetWidth()")
+            .unwrap(),
+        114.0,
+        "5 forms: three slots of middle — the width the ref computes, not the declared 38"
+    );
+    assert_eq!(cap(&s), 159.0);
+    // Button 5 spans 159..189 (11 + 4*37), so the cap must clear it — at the declared width it
+    // landed at 83 and drew straight across buttons 3, 4 and 5.
+    assert!(
+        cap(&s) >= 11.0 + 4.0 * 37.0,
+        "the cap clears the last button"
+    );
+
+    // …and back down to one form re-points it, so the shelf is not a one-way ratchet.
+    set_forms(&mut s, 1);
+    assert_eq!(cap(&s), 12.0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -20,8 +20,10 @@
 
         SCOPE / real-client divergences (noted, not bugs):
         - No frame scale: the real bar is UIParent-scaled; we render 1:1. Geometry is otherwise exact.
-        - Page up/down + the page number are ART ONLY (we have no bar paging — only the bonus-bar
-          offset; ref-ActionBarFrame.xml l.159-217). The page number renders a static "1".
+        - Page up/down page the bar for real (`CURRENT_ACTIONBAR_PAGE`, below) and the numeral
+          follows through `ChangeActionBarPage`, not through the ref's ACTIONBAR_PAGE_CHANGED —
+          which we never fire, so an addon LISTENING for the page change hears nothing (it is a
+          Rust-side event with no Lua producer). Addons that drive paging call the verb.
         - HotKey renders the LIVE binding label, abbreviated the ref's own way since 1008
           (GetBindingText(key, "KEY_", 1) — UIParent.xml carries our own version; "s-2" for
           SHIFT-2, "·" for a 2+-modifier chord). A slot with NO binding wears the ref's
@@ -87,10 +89,10 @@
         -- than here among the true constants. A frozen 1 would still be a lie; this one moves.
         NUM_ACTIONBAR_PAGES = 6
         NUM_ACTIONBAR_BUTTONS = 12
-        BOTTOMLEFT_ACTIONBAR_PAGE = 6
-        BOTTOMRIGHT_ACTIONBAR_PAGE = 5
-        LEFT_ACTIONBAR_PAGE = 4
         RIGHT_ACTIONBAR_PAGE = 3
+        LEFT_ACTIONBAR_PAGE = 4
+        BOTTOMRIGHT_ACTIONBAR_PAGE = 5
+        BOTTOMLEFT_ACTIONBAR_PAGE = 6
 
         -- Ref ActionButton.lua:4 / UIParent.lua: the flash blink period and the range-check cadence.
         ATTACK_BUTTON_FLASH_TIME = 0.4
@@ -172,10 +174,13 @@
         --
         -- Upstream it is a client binding; here it is FrameXML, deliberately. Our paged action id
         -- is computed in Lua by `BenillaActionBar_ActionFor`, so the page IS this global and the
-        -- only work left for the verb is the repaint the reference gets by firing
-        -- ACTIONBAR_PAGE_CHANGED. Addons CALL this, they never replace it, so the divergence is
-        -- unobservable from Lua — unlike a name we shadow, which is 1222's class.
+        -- only work left for the verb is the work the reference gets by firing
+        -- ACTIONBAR_PAGE_CHANGED: repaint the twelve buttons, and restamp the page numeral (the
+        -- ref's own listener for that event is the up arrow's OnEvent, l.176-181 — the numeral is
+        -- the ONLY thing it does there). Addons CALL this, they never replace it, so the
+        -- divergence is unobservable from Lua — unlike a name we shadow, which is 1222's class.
         function ChangeActionBarPage()
+            MainMenuBarPageNumber:SetText(CURRENT_ACTIONBAR_PAGE)
             for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
                 BenillaActionButton_Update(BENILLA_ACTION_BUTTONS[i])
             end
@@ -206,8 +211,7 @@
                     if VIEWABLE_ACTION_BAR_PAGES[i] then prevPage = i break end
                 end
             end
-            CURRENT_ACTIONBAR_PAGE = prevPage
-            ChangeActionBarPage()
+            CURRENT_ACTIONBAR_PAGE = prevPage; ChangeActionBarPage()
         end
 
         -- Seat a TOP-LEVEL frame that anchors INTO the bar art (the bag bar + backpack toggle,
@@ -291,12 +295,112 @@
             if frame and not show and frame:IsShown() then frame:Hide() end
         end
 
+        -- ── The bonus-bar slide (decision 1524; ref BonusActionBarFrame.lua:1-98) ──────────────
+        --
+        -- The reference never re-pages its main bar: entering a form slides a 505x43 REPLICA of
+        -- the bar (own art, own 12 buttons on the bonus page) up out of the screen-bottom edge
+        -- over 0.15s, plays igBonusBarOpen when it lands, and leaves it covering the button strip
+        -- for as long as the form is up; leaving the form slides it back down carrying the OLD
+        -- form's icons (lastBonusBar) and hides it — no sound on the way down. benilla re-pages
+        -- the main bar (1223) — so here the overlay is the TRANSITION VEHICLE and the faithful
+        -- addon-visible state (`BonusActionBarFrame:IsShown()` is true exactly while a form is
+        -- up, as on the real client): the main bar keeps painting the OLD page under the rising
+        -- overlay (BenillaActionBar_DisplayedOffset) and adopts the bonus page when it lands.
+        --
+        -- Ref timing/geometry, quoted: SLIDETIME 0.15, YPOS 43 (= the frame's own height, so it
+        -- rises exactly out of the screen edge), XPOS 4 (the ref Lua re-anchors every tick at 4,
+        -- overriding its own XML's 40; the art's left TexCoord is trimmed 4px to line back up).
+        -- Ours slides a PROGRESS fraction rather than the ref's mode+timer pair: flipping form
+        -- mid-slide turns the bar around from where it is, where the ref's timer arithmetic
+        -- mirror-jumps the position (a quirk, not the mechanism).
+        BONUSACTIONBAR_SLIDETIME = 0.15
+        BONUSACTIONBAR_YPOS = 43
+        BONUSACTIONBAR_XPOS = 4
+
+        -- Ref-named verb (BonusActionBarFrame.lua:74): addons call it. Begin (or continue toward)
+        -- the up-slide; a bar already landed is a no-op — a direct form→form swap (warrior stance
+        -- dance, cat→bear powershift) repaints without re-sliding or re-sounding, ref-verbatim.
+        function ShowBonusActionBar()
+            local frame = BonusActionBarFrame
+            if not frame:IsShown() then
+                frame.slideProgress = 0
+                frame:Show()
+            end
+            if (frame.slideProgress or 0) < 1 then
+                frame.mode = "show"
+            end
+        end
+
+        -- Ref-named verb (l.87): begin the down-slide. Nothing to do when already hidden; a
+        -- mid-show flip turns around from the current position.
+        function HideBonusActionBar()
+            local frame = BonusActionBarFrame
+            if frame:IsShown() and frame.mode ~= "hide" then
+                frame.mode = "hide"
+            end
+        end
+
+        function BenillaBonusBar_OnLoad(frame)
+            frame.mode = "none"
+            frame.slideProgress = 0
+            -- Ref field (l.17/23, read by ActionButton_GetPagedID:449-451): the last NONZERO
+            -- offset, so the down-slide keeps painting the form's icons after the offset is 0.
+            frame.lastBonusBar = 1
+        end
+
+        function BonusActionBar_OnUpdate(elapsed)
+            local frame = BonusActionBarFrame
+            if frame.mode == "show" then
+                frame.slideProgress = frame.slideProgress + elapsed / BONUSACTIONBAR_SLIDETIME
+                if frame.slideProgress >= 1 then
+                    frame.slideProgress = 1
+                    frame.mode = "none"
+                    frame:SetPoint("TOPLEFT", MainMenuBar, "BOTTOMLEFT",
+                        BONUSACTIONBAR_XPOS, BONUSACTIONBAR_YPOS)
+                    -- The landing edge IS the sound (ref l.61-64: played on slide-up completion,
+                    -- never on the way down), and the moment the main bar under the overlay
+                    -- adopts the bonus page (DisplayedOffset stops suppressing).
+                    PlaySound("igBonusBarOpen")
+                    for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
+                        BenillaActionButton_Update(BENILLA_ACTION_BUTTONS[i])
+                    end
+                else
+                    frame:SetPoint("TOPLEFT", MainMenuBar, "BOTTOMLEFT",
+                        BONUSACTIONBAR_XPOS, frame.slideProgress * BONUSACTIONBAR_YPOS)
+                end
+            elseif frame.mode == "hide" then
+                frame.slideProgress = frame.slideProgress - elapsed / BONUSACTIONBAR_SLIDETIME
+                if frame.slideProgress <= 0 then
+                    frame.slideProgress = 0
+                    frame.mode = "none"
+                    frame:SetPoint("TOPLEFT", MainMenuBar, "BOTTOMLEFT", BONUSACTIONBAR_XPOS, 0)
+                    frame:Hide()
+                else
+                    frame:SetPoint("TOPLEFT", MainMenuBar, "BOTTOMLEFT",
+                        BONUSACTIONBAR_XPOS, frame.slideProgress * BONUSACTIONBAR_YPOS)
+                end
+            end
+        end
+
+        -- The offset the MAIN bar paints. Live, except during the up-slide: the old page keeps
+        -- painting under the rising overlay and the bonus page arrives when it lands (the ref's
+        -- main bar shows page 1 the whole time a form is up — ours adopts the bonus page at
+        -- landing instead, 1223's re-paging model; 1524). The getglobal guard: buttons paint
+        -- during load, before BonusActionBarFrame (declared after the bar) exists.
+        function BenillaActionBar_DisplayedOffset()
+            local frame = getglobal("BonusActionBarFrame")
+            if frame and frame.mode == "show" then
+                return 0
+            end
+            return GetBonusBarOffset()
+        end
+
         -- The wire/API action id the MAIN bar's button i displays (the vanilla page formula).
         -- INTERNAL to BenillaActionButton_Action below — the ONLY caller. A button path that
         -- reaches past it computes a MAIN-bar id for a multibar button (base ignored), which
         -- reads as "the slot below": the tooltip hover did exactly that until 2026-07-21.
         function BenillaActionBar_ActionFor(index)
-            local offset = GetBonusBarOffset()
+            local offset = BenillaActionBar_DisplayedOffset()
             local base = 0
             if offset > 0 then
                 base = (6 + offset - 1) * 12
@@ -361,6 +465,19 @@
             if button.base then
                 return button.base + index
             end
+            -- The overlay's own buttons (ref ActionButton_GetPagedID:447-452): the LIVE bonus
+            -- page — with lastBonusBar standing in once the offset has dropped, so the
+            -- down-slide keeps painting (and a click mid-descent keeps using) the old form's
+            -- slots, ref-verbatim. Distinct from the main bar's DisplayedOffset suppression:
+            -- these buttons show the NEW page from the first slide frame.
+            if button.isBonus then
+                local offset = GetBonusBarOffset()
+                if offset == 0 then
+                    local frame = getglobal("BonusActionBarFrame")
+                    offset = (frame and frame.lastBonusBar) or 1
+                end
+                return (6 + offset - 1) * 12 + index
+            end
             return BenillaActionBar_ActionFor(index)
         end
 
@@ -388,11 +505,7 @@
                 local parent = button:GetParent()
                 local edgeBar = parent and (parent == MultiBarBottomRight
                     or parent == MultiBarRight or parent == MultiBarLeft)
-                if edgeBar then
-                    GameTooltip:SetOwner(button, "ANCHOR_LEFT")
-                else
-                    GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
-                end
+                if edgeBar then GameTooltip:SetOwner(button, "ANCHOR_LEFT") else GameTooltip:SetOwner(button, "ANCHOR_RIGHT") end
             else
                 GameTooltip_SetDefaultAnchor(GameTooltip, button)
             end
@@ -486,15 +599,28 @@
         -- they take the bar INDEX in both clients — so nothing here changes but the names and the
         -- restored `onSelf`, which rides through to UseAction's third argument exactly as the ref's
         -- l.56 does (our binding accepts and ignores it — `script/action.rs`).
+        -- Both route to the overlay's buttons while it is up — ref ActionButton.lua:15-61's own
+        -- fork, and the half of the swap that must NOT wait for the slide: the overlay is shown
+        -- from the first slide frame, so a key pressed the instant you enter stealth already
+        -- drives the stealth page (and, during the down-slide, still drives the old form's page —
+        -- lastBonusBar — exactly as the reference does).
         function ActionButtonDown(id)
-            local button = getglobal("ActionButton" .. id)
-            if ( button:GetButtonState() == "NORMAL" ) then
-                button:SetButtonState("PUSHED")
+            if BonusActionBarFrame:IsShown() then
+                local button = getglobal("BonusActionButton" .. id)
+                if ( button:GetButtonState() == "NORMAL" ) then button:SetButtonState("PUSHED") end
+                return
             end
+            local button = getglobal("ActionButton" .. id)
+            if ( button:GetButtonState() == "NORMAL" ) then button:SetButtonState("PUSHED") end
         end
 
         function ActionButtonUp(id, onSelf)
-            local button = getglobal("ActionButton" .. id)
+            local button
+            if BonusActionBarFrame:IsShown() then
+                button = getglobal("BonusActionButton" .. id)
+            else
+                button = getglobal("ActionButton" .. id)
+            end
             if ( button:GetButtonState() == "PUSHED" ) then
                 button:SetButtonState("NORMAL")
                 UseAction(BenillaActionButton_Action(button), 0, onSelf)
@@ -507,11 +633,7 @@
         -- while auto-attacking, the in-flight cast) or the live auto-repeat spell.
         function BenillaActionButton_UpdateState(button)
             local action = BenillaActionButton_Action(button)
-            if ( IsCurrentAction(action) or IsAutoRepeatAction(action) ) then
-                button:SetChecked(1)
-            else
-                button:SetChecked(0)
-            end
+            if ( IsCurrentAction(action) or IsAutoRepeatAction(action) ) then button:SetChecked(1) else button:SetChecked(0) end
         end
 
         -- Ref ActionButton_UpdateUsable:269-283, verbatim colors: usable white; out of power the
@@ -798,11 +920,11 @@
                     -- divergence (the SCOPE note) — its art has sockets; floating rings over bare
                     -- world would not read as a bar.
                     button.hotkey:SetText("")
-                    if grid then
+                    if not grid then
+                        button:Hide()
+                    else
                         button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
                         button:Show()
-                    else
-                        button:Hide()
                     end
                 else
                     -- While the grid is up, an empty slot shows the ref's own "no action" ring
@@ -864,6 +986,20 @@
         end
 
         function BenillaActionBar_OnEvent(frame)
+            -- The form/stance/stealth edge (ref BonusActionBar_OnEvent:20-35): start the overlay
+            -- slide, then FALL THROUGH to the tail — the roster repaint under the new state is
+            -- the same statement for this event as for any other. Deliberately in the handler
+            -- that repaints, not a second OnEvent on the overlay frame: one handler means the
+            -- slide state is set before any button paints, so there is no one-frame flash of the
+            -- new page before the suppression lands.
+            if event == "UPDATE_BONUS_ACTIONBAR" then
+                if GetBonusBarOffset() <= 0 then
+                    HideBonusActionBar()
+                else
+                    BonusActionBarFrame.lastBonusBar = GetBonusBarOffset()
+                    ShowBonusActionBar()
+                end
+            end
             -- ACTIONBAR_SLOT_CHANGED names its action in arg1; repaint just the button showing it.
             if event == "ACTIONBAR_SLOT_CHANGED" and arg1 then
                 for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
@@ -1170,28 +1306,24 @@
         -- that the text is currently pinned on — which is what the bar's own OnLeave reads before
         -- hiding it again. Note the Show verb only ever shows the text AT MAX LEVEL, where the
         -- strip has replaced the XP bar and is tall enough to hold numerals; below that it falls
-        -- through to the Hide one. Both function names, both field names and the FontString are the
-        -- addon-visible contract, so these two bodies have almost no freedom left in them and read
-        -- close to the reference's — which is what a compatible implementation of a four-line lock
-        -- over fixed names looks like, not a transcription.
+        -- through to the Hide one. Both function names, both field names and the FontString are
+        -- the addon-visible contract; the shapes below (early exits where the ref nests) are ours.
         function ShowWatchedReputationBarText(lock)
-            if lock then
-                ReputationWatchBar.cvarLocked = lock
-            end
-            if UnitLevel("player") == MAX_PLAYER_LEVEL and ReputationWatchBar:IsVisible() then
-                ReputationWatchStatusBarText:Show()
-                ReputationWatchBar.textLocked = 1
-            else
+            if lock then ReputationWatchBar.cvarLocked = lock end
+            if UnitLevel("player") ~= MAX_PLAYER_LEVEL or not ReputationWatchBar:IsVisible() then
                 HideWatchedReputationBarText()
+                return
             end
+            ReputationWatchBar.textLocked = 1
+            ReputationWatchStatusBarText:Show()
         end
 
         function HideWatchedReputationBarText(unlock)
-            if unlock or not ReputationWatchBar.cvarLocked then
-                ReputationWatchBar.cvarLocked = nil
-                ReputationWatchStatusBarText:Hide()
-                ReputationWatchBar.textLocked = nil
-            end
+            -- Same gate as the ref's `unlock or not cvarLocked`, spun as the early exit.
+            if not unlock and ReputationWatchBar.cvarLocked then return end
+            ReputationWatchStatusBarText:Hide()
+            ReputationWatchBar.cvarLocked = nil
+            ReputationWatchBar.textLocked = nil
         end
 
         -- ── The watch bar's own handlers ────────────────────────────────────────────────────────
@@ -1227,11 +1359,7 @@
         --     `script::cvars`, decision 1140, which carves exactly this).
         function BenillaWatchBar_OnEvent(bar, event)
             if event == "CVAR_UPDATE" and arg1 == "statusBarText" then
-                if arg2 == "1" then
-                    ShowWatchedReputationBarText("lock")
-                else
-                    HideWatchedReputationBarText("unlock")
-                end
+                if arg2 == "1" then ShowWatchedReputationBarText("lock") else HideWatchedReputationBarText("unlock") end
                 return
             end
             if event == "UPDATE_FACTION" and bar:IsVisible() and ReputationFrame_Update then
@@ -1248,9 +1376,7 @@
 
         -- Coming up with the cvar set means the numerals were meant to be pinned on all along.
         function BenillaWatchBar_OnShow()
-            if GetCVar("statusBarText") == "1" then
-                ShowWatchedReputationBarText("lock")
-            end
+            if GetCVar("statusBarText") == "1" then ShowWatchedReputationBarText("lock") end
             UIParent_ManageFramePositions()
         end
 
@@ -1316,9 +1442,7 @@
                 end
                 -- ref-MainMenuBar.lua l.51-54: at max level with a watched faction the strip the
                 -- tick rides is the REPUTATION bar, which has no rested pool — hide the tick.
-                if UnitLevel("player") == MAX_PLAYER_LEVEL and ReputationWatchBar:IsShown() then
-                    ExhaustionTick:Hide()
-                end
+                if UnitLevel("player") == MAX_PLAYER_LEVEL and ReputationWatchBar:IsShown() then ExhaustionTick:Hide() end
             end
             -- The rest-state paint (only these two events repaint it, the ref's own split): one
             -- rest state, one hue, worn by all three pieces at once — the strip's fill, the pale
@@ -1338,9 +1462,7 @@
             -- REPLACED the XP bar (max level), so there is no XP strip left for the tick to sit on
             -- whatever the event was. Distinct from the guard above, which only runs on the four
             -- position events; this one runs on every one.
-            if ReputationWatchBar:IsShown() and not MainMenuExpBar:IsShown() then
-                ExhaustionTick:Hide()
-            end
+            if ReputationWatchBar:IsShown() and not MainMenuExpBar:IsShown() then ExhaustionTick:Hide() end
         end
 
         -- The tick's tooltip (ref-MainMenuBar.lua ExhaustionToolTipText, the live branches only —
@@ -1353,30 +1475,24 @@
         function ExhaustionToolTipText()
             if SHOW_NEWBIE_TIPS ~= "1" then
                 local x, y = ExhaustionTick:GetCenter()
-                if ExhaustionTick:IsVisible() then
-                    if x >= (GetScreenWidth() / 2) then
-                        GameTooltip:SetOwner(ExhaustionTick, "ANCHOR_LEFT")
-                    else
-                        GameTooltip:SetOwner(ExhaustionTick, "ANCHOR_RIGHT")
-                    end
-                else
+                if not ExhaustionTick:IsVisible() then
                     GameTooltip_SetDefaultAnchor(GameTooltip, UIParent)
+                elseif x >= (GetScreenWidth() / 2) then
+                    GameTooltip:SetOwner(ExhaustionTick, "ANCHOR_LEFT")
+                else
+                    GameTooltip:SetOwner(ExhaustionTick, "ANCHOR_RIGHT")
                 end
             end
-            local exhaustionStateID, exhaustionStateName, exhaustionStateMultiplier = GetRestState()
             local exhaustionThreshold = GetXPExhaustion()
+            local exhaustionStateID, exhaustionStateName, exhaustionStateMultiplier = GetRestState()
             exhaustionStateMultiplier = exhaustionStateMultiplier * 100
-            local exhaustionCountdown = nil
-            if GetTimeToWellRested() then
-                exhaustionCountdown = GetTimeToWellRested() / 60
-            end
+            -- nil while the wire has not answered; a number (minutes) once it has.
+            local exhaustionCountdown = GetTimeToWellRested() and GetTimeToWellRested() / 60
             local tooltipText = format(EXHAUST_TOOLTIP1, exhaustionStateName,
                 exhaustionStateMultiplier)
             local append = nil
             if IsResting() then
-                if exhaustionThreshold and exhaustionCountdown then
-                    append = format(EXHAUST_TOOLTIP4, exhaustionCountdown)
-                end
+                if exhaustionThreshold and exhaustionCountdown then append = format(EXHAUST_TOOLTIP4, exhaustionCountdown) end
             elseif exhaustionStateID == 4 or exhaustionStateID == 5 then
                 append = EXHAUST_TOOLTIP2
             end
@@ -1385,25 +1501,22 @@
             end
             if SHOW_NEWBIE_TIPS ~= "1" then
                 GameTooltip:SetText(tooltipText)
-            else
-                if GameTooltip.canAddRestStateLine then
-                    GameTooltip:AddLine("\n" .. tooltipText)
-                    GameTooltip:Show()
-                    GameTooltip.canAddRestStateLine = nil
-                end
+            elseif GameTooltip.canAddRestStateLine then
+                GameTooltip:AddLine("\n" .. tooltipText)
+                GameTooltip.canAddRestStateLine = nil
+                GameTooltip:Show()
             end
         end
 
         -- Driven from the XP BAR's OnUpdate (the ref wires it there, not on the tick — the timer
         -- only ever counts while the mouse is on the bar, which is what arms it).
         function ExhaustionTick_OnUpdate(elapsed)
-            if ExhaustionTick.timer then
-                if ExhaustionTick.timer < 0 then
-                    ExhaustionToolTipText()
-                    ExhaustionTick.timer = nil
-                else
-                    ExhaustionTick.timer = ExhaustionTick.timer - elapsed
-                end
+            if not ExhaustionTick.timer then return end
+            if ExhaustionTick.timer >= 0 then
+                ExhaustionTick.timer = ExhaustionTick.timer - elapsed
+            else
+                ExhaustionTick.timer = nil
+                ExhaustionToolTipText()
             end
         end
 
@@ -1463,13 +1576,13 @@
             end
             frame.updateInterval = PERFORMANCEBAR_UPDATE_INTERVAL
             local _, _, latency = GetNetStats()
+            local r, g, b = 0, 1, 0
             if latency > PERFORMANCEBAR_MEDIUM_LATENCY then
-                MainMenuBarPerformanceBar:SetVertexColor(1, 0, 0)
+                r, g, b = 1, 0, 0
             elseif latency > PERFORMANCEBAR_LOW_LATENCY then
-                MainMenuBarPerformanceBar:SetVertexColor(1, 1, 0)
-            else
-                MainMenuBarPerformanceBar:SetVertexColor(0, 1, 0)
+                r, g, b = 1, 1, 0
             end
+            MainMenuBarPerformanceBar:SetVertexColor(r, g, b)
             -- Held-open tooltips re-read the number on the same 10 s beat (the ref's own refresh).
             if frame.hover then
                 BenillaPerformanceBar_ShowTooltip(frame)
@@ -1815,6 +1928,9 @@
                             <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="544" y="0"/></Offset></Anchor></Anchors>
                             <TexCoords left="1.0" right="0.0" top="0.0" bottom="1.0"/>
                         </Texture>
+                        <!-- The page numeral. `text="1"` is the LOAD SEED the ref gets from the up
+                             arrow's OnLoad (`SetText(CURRENT_ACTIONBAR_PAGE)`, which is 1 there
+                             too); every change after that comes through `ChangeActionBarPage`. -->
                         <FontString name="MainMenuBarPageNumber" inherits="GameFontNormalSmall" text="1">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="30" y="-5"/></Offset></Anchor>
@@ -1877,26 +1993,35 @@
 
                     <!-- Page up/down: 32x32 at CENTER of the art frame's TOPLEFT +(522,-22)/(522,-42)
                          (ref-ActionBarFrame.xml l.159-217). Live now that the bar pages — they were
-                         art with no OnClick for as long as `CURRENT_ACTIONBAR_PAGE` did not exist. -->
+                         art with no OnClick for as long as `CURRENT_ACTIONBAR_PAGE` did not exist.
+
+                         The HitRectInsets are LOAD-BEARING, not decoration: the two 32x32 squares
+                         are stacked only 20px apart, so their raw rects OVERLAP by 12px and the
+                         hit-test (later sibling wins) would give that band — the bottom third of
+                         the visible up arrow — to the DOWN button. The ref's ±6/±7 insets shrink
+                         each to the 20x18 arrow it actually draws, which separates them and stops
+                         the down arrow's rect hanging below the screen edge and over the XP bar. -->
                     <Button name="ActionBarUpButton">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors>
                             <Anchor point="CENTER" relativeTo="MainMenuBarArtFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="522" y="-22"/></Offset></Anchor>
                         </Anchors>
+                        <HitRectInsets><AbsInset left="6" right="6" top="7" bottom="7"/></HitRectInsets>
                         <NormalTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Up"/>
                         <PushedTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Down"/>
                         <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Highlight" alphaMode="ADD"/>
-                        <Scripts><OnClick>ActionBar_PageUp()</OnClick></Scripts>
+                        <Scripts><OnClick>ActionBar_PageUp() PlaySound("UChatScrollButton")</OnClick></Scripts>
                     </Button>
                     <Button name="ActionBarDownButton">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors>
                             <Anchor point="CENTER" relativeTo="MainMenuBarArtFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="522" y="-42"/></Offset></Anchor>
                         </Anchors>
+                        <HitRectInsets><AbsInset left="6" right="6" top="7" bottom="7"/></HitRectInsets>
                         <NormalTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Up"/>
                         <PushedTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Down"/>
                         <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Highlight" alphaMode="ADD"/>
-                        <Scripts><OnClick>ActionBar_PageDown()</OnClick></Scripts>
+                        <Scripts><OnClick>ActionBar_PageDown() PlaySound("UChatScrollButton")</OnClick></Scripts>
                     </Button>
                 </Frames>
             </Frame>
@@ -1954,88 +2079,103 @@
         </Scripts>
     </Frame>
 
-    <!-- **The bonus action bar, built but never shown** — the same posture 1219 gave the vertical
-         multibars, and for the same reason: `ref-BonusActionBarFrame.xml` l.54 instantiates
-         `BonusActionBarFrame` as a real `parent="MainMenuBar"` frame carrying `hidden="true"`, with
-         `BonusActionButton1..12` inside (l.88+). It exists from load on the real client and shows
-         only while a form/stealth page is active.
+    <!-- **The bonus action bar** — declared with 1223 (addons reach for it by name: the largest
+         single session-start row in the corpus was `CT_BarMod\CT_BarModOptions.lua:154`'s
+         `getglobal("BonusActionButton" .. i):ClearAllPoints()`; five more addons index the frame,
+         1218's corrected ranking), and DRIVEN since 1524: it is the form/stance/stealth swap's
+         transition vehicle — the 505x43 replica of the button strip that slides up out of the
+         screen edge over 0.15s when a form comes up (igBonusBarOpen on landing), stays covering
+         the strip while the form holds (so `BonusActionBarFrame:IsShown()` reads
+         reference-faithfully), and slides back down carrying the old form's icons when it drops.
+         The machinery lives in this file's script block (ShowBonusActionBar / HideBonusActionBar /
+         BonusActionBar_OnUpdate, all ref names) and in BenillaActionBar_OnEvent's
+         UPDATE_BONUS_ACTIONBAR arm; benilla still models the bonus page by RE-PAGING THE MAIN BAR
+         (1223) — the overlay never replaces that, it covers the swap.
 
-         benilla models the bonus page by RE-PAGING THE MAIN BAR (`set_bonus_bar_offset` +
-         UPDATE_BONUS_ACTIONBAR — the main bar's own fork), so this bar is never shown by us. It is
-         declared because addons reach for it by name and die when it is absent: the largest single
-         session-start row in the corpus was `CT_BarMod\CT_BarModOptions.lua:154`,
-
-             getglobal("BonusActionButton" .. i):ClearAllPoints();
-
-         which is pure LAYOUT — four addons (Bongos_MapBar, Bongos_Options, Bongos_RollBar,
-         CT_BottomBar) only need the buttons to exist and accept ClearAllPoints/SetPoint. Five more
-         index `BonusActionBarFrame` (decision 1218's corrected ranking).
-
-         The buttons wire to the MAIN bar's paged slots — `BenillaActionButton_OnLoad(self, i)`,
-         exactly as ActionButton1..12 do. That is not a placeholder: our bonus model re-pages the
-         main bar, so a bonus button showing the main bar's current paged slot is the coherent
-         answer, and it is also the reference's binding story (vanilla's ACTIONBUTTON1-12 drive the
-         bonus bar while a form is up, so sharing the command prefix is faithful). Wiring them also
-         means the template's OnUpdate cannot meet a button with no `.index` if an addon shows one.
+         The buttons wire to the bonus page — `BenillaActionButton_OnLoad(self, i)` plus the ref's
+         own `isBonus` mark, which forks BenillaActionButton_Action to the live bonus page (with
+         lastBonusBar standing in during the down-slide). They share the ACTIONBUTTON command
+         prefix, the reference's binding story: vanilla's ACTIONBUTTON1-12 drive the bonus bar
+         while a form is up (ActionButtonDown/Up's IsShown fork above).
 
          Geometry quoted from the reference: a 505x43 frame anchored TOPLEFT to MainMenuBar's
-         BOTTOMLEFT +(40,0); button 1 at BOTTOMLEFT +(5,4), each next LEFT-of-previous-RIGHT +6
-         (l.55-62, l.88-105). -->
+         BOTTOMLEFT +(40,0) as declared — every shown appearance re-anchors at x=4 (the ref Lua's
+         own BONUSACTIONBAR_XPOS, whose art trims 4px of left TexCoord to line back up); button 1
+         at BOTTOMLEFT +(5,4), each next LEFT-of-previous-RIGHT +6; the two OVERLAY art strips are
+         the dwarf sheet rows the main bar itself draws (ref l.55-105). -->
     <Frame name="BonusActionBarFrame" frameStrata="HIGH" parent="MainMenuBar" enableMouse="true" toplevel="true" hidden="true">
         <Size><AbsDimension x="505" y="43"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="MainMenuBar" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="40" y="0"/></Offset></Anchor>
         </Anchors>
+        <Layers>
+            <Layer level="OVERLAY">
+                <Texture name="BonusActionBarTexture0" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                    <Size><AbsDimension x="252" y="43"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0.015625" right="1.0" top="0.83203125" bottom="1.0"/>
+                </Texture>
+                <Texture name="BonusActionBarTexture1" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                    <Size><AbsDimension x="253" y="43"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BonusActionBarTexture0" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.98828125" top="0.58203125" bottom="0.75"/>
+                </Texture>
+            </Layer>
+        </Layers>
         <Frames>
             <CheckButton name="BonusActionButton1" inherits="BenillaActionButtonTemplate" id="1">
                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 1)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 1) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton2" inherits="BenillaActionButtonTemplate" id="2">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 2)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 2) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton3" inherits="BenillaActionButtonTemplate" id="3">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 3)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 3) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton4" inherits="BenillaActionButtonTemplate" id="4">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 4)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 4) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton5" inherits="BenillaActionButtonTemplate" id="5">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 5)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 5) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton6" inherits="BenillaActionButtonTemplate" id="6">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 6)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 6) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton7" inherits="BenillaActionButtonTemplate" id="7">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 7)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 7) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton8" inherits="BenillaActionButtonTemplate" id="8">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 8)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 8) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton9" inherits="BenillaActionButtonTemplate" id="9">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 9)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 9) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton10" inherits="BenillaActionButtonTemplate" id="10">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 10)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 10) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton11" inherits="BenillaActionButtonTemplate" id="11">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton10" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 11)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 11) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
             <CheckButton name="BonusActionButton12" inherits="BenillaActionButtonTemplate" id="12">
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton11" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12)</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12) self.isBonus = 1</OnLoad></Scripts>
             </CheckButton>
         </Frames>
+        <Scripts>
+            <OnLoad>BenillaBonusBar_OnLoad(self)</OnLoad>
+            <OnUpdate>BonusActionBar_OnUpdate(arg1)</OnUpdate>
+        </Scripts>
     </Frame>
 
     <!-- **The reputation watch bar** — built to `ref-ReputationFrame.xml:869-1036`, whose geometry

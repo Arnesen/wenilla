@@ -56,6 +56,19 @@ fn view_of(lua: &Lua, item_id: u32) -> Option<ItemTemplateView> {
     v
 }
 
+/// The enchant lines a **random-suffix roll** contributes, out of the pushed roll table — the
+/// reference's §E5 copy of the suffix row's five ids into enchant slots 2..6, which every
+/// block-supplying source with no item object relies on (loot, links, auction rows, the roll
+/// window). `0`, or an id the table doesn't name, contributes nothing.
+fn roll_enchants(lua: &Lua, random_property_id: u32) -> Vec<crate::script::EnchantView> {
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    model
+        .random_properties
+        .get(&random_property_id)
+        .map(|v| v.enchants.clone())
+        .unwrap_or_default()
+}
+
 /// The bracketed name out of an `|Hitem:…|h[Name]|h` link (the container slot's own display
 /// name — the miss-path fallback line's source).
 fn link_name(link: &str) -> Option<&str> {
@@ -84,15 +97,25 @@ fn fire_add_money(lua: &Lua, h: crate::widget::FrameHandle, copper: u64) {
     }
 }
 
-/// The item id inside a hyperlink — the full escaped shape (`|cff…|Hitem:2947:0:0:0|h[Name]|h|r`)
-/// or a bare `item:2947`.
-fn hyperlink_item_id(link: &str) -> Option<u32> {
+/// The `|Hitem:` payload's numeric fields — the full escaped shape
+/// (`|cff…|Hitem:2947:0:584:0|h[Name]|h|r`) or a bare `item:2947`.
+///
+/// The four are `(item id, enchant id, randomPropertyId, uniqueId)` — the reference's own link
+/// format `"%s|Hitem:%d:%d:%d:%d|h[%s]|h%s"` (`0x8549c8`), and `SetHyperlink 0x532181` parses them
+/// straight into the tooltip's instance block: token 1 → enchant slot 0 (`+0x3d0`), **token 2 →
+/// `+0x424`, the roll** (which §E5 then expands into slots 2..6), token 3 → `+0x420`, which
+/// nothing reads. Missing fields read `0`, like the bare `item:id` shape an addon may pass.
+fn hyperlink_item_fields(link: &str) -> Option<(u32, u32, u32)> {
     let at = link.find("item:")? + 5;
-    let digits: String = link[at..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().ok().filter(|&id| id != 0)
+    let tail = &link[at..];
+    let end = tail.find("|h").unwrap_or(tail.len());
+    let mut fields = tail[..end]
+        .split(':')
+        .map(|f| f.trim().parse().unwrap_or(0));
+    let item_id: u32 = fields.next()?;
+    let enchant_id = fields.next().unwrap_or(0);
+    let random_property_id = fields.next().unwrap_or(0);
+    (item_id != 0).then_some((item_id, enchant_id, random_property_id))
 }
 
 /// The shared id-keyed render (`SetItemById`/`SetHyperlink`): template hit → the full line law
@@ -269,10 +292,51 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetHyperlink",
         lua.create_function(|lua, (this, link): (Table, String)| {
-            let Some(id) = hyperlink_item_id(&link) else {
+            let Some((id, _enchant_id, roll)) = hyperlink_item_fields(&link) else {
                 return Ok(());
             };
-            render_by_id(lua, &this, id, link_name(&link).map(str::to_string), None)
+            let h = frame_handle_of(lua, &this)?;
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                clear_content(&mut model, h);
+            }
+            fire_cleared(lua, h);
+            // A link is a **block source** (`SetHyperlink 0x532181` passes p6=1), so it never
+            // reaches the `<Random enchantment>` arm and it does show the roll's own lines — the
+            // half of §E5 decision 0920's prose had backwards. The NAME comes off the link's own
+            // brackets: the sender's client built that text with the suffix already joined
+            // (`0x5d8b00` feeds the link builder), so re-deriving it would only invite the two to
+            // disagree.
+            //
+            // The link's ENCHANT field (slot 0, a permanent enchant like "Crusader") is parsed but
+            // not yet rendered: naming it needs the `SpellItemEnchantment` row, and no benilla
+            // surface writes that field into a link it composes today. A stated gap, not drift.
+            let inst = render::ItemInstance {
+                name: link_name(&link).map(str::to_string),
+                enchants: roll_enchants(lua, roll),
+                ..Default::default()
+            };
+            match view_of(lua, id) {
+                Some(v) => {
+                    render_view(lua, &this, &v, false, Some(&inst))?;
+                    // Unchanged from the `render_by_id` this leg used to share: a link dropped on
+                    // the MAIN tooltip still arms the shopping compare (`arm_compare`'s own gate).
+                    arm_compare(lua, h, &v);
+                }
+                None => {
+                    if let Some(name) = link_name(&link) {
+                        append_line(
+                            lua,
+                            &this,
+                            (name.to_string(), quality_color(1)),
+                            None,
+                            false,
+                        )?;
+                    }
+                }
+            }
+            show_or_hide_empty(lua, h);
+            Ok(())
         })?,
     )?;
 
@@ -305,6 +369,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             s.name.clone(),
                             s.quality,
                             render::ItemInstance {
+                                // The slot's own name — app-composed, so it carries the
+                                // random-suffix roll off `ITEM_FIELD_RANDOM_PROPERTIES_ID`.
+                                name: s.name.clone(),
                                 durability: s.durability,
                                 creator: s.creator.clone(),
                                 has_text: false,
@@ -387,6 +454,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             s.link.clone(),
                             s.quality.unwrap_or(1),
                             render::ItemInstance {
+                                // The bag slot's display name rides its LINK (the reference
+                                // builds that link out of `0x5d8b00`'s output, so the two are the
+                                // same string by construction — the roll's suffix included).
+                                name: s.link.as_deref().and_then(link_name).map(str::to_string),
                                 durability: s.durability,
                                 creator: s.creator.clone(),
                                 has_text: s.readable,
@@ -445,6 +516,119 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 Value::Boolean(has_cd),
                 Value::Integer(0),
             ]))
+        })?,
+    )?;
+
+    // GameTooltip:SetLootItem(slot) — the loot-row hover (the reference's own binding,
+    // `0x533470`, which its `LootButtonTemplate` <OnEnter> runs behind `LootSlotIsItem`).
+    // **A block source, not a template one** (§1-SESSION's writer table: the leg at `0x533564`
+    // supplies the instance block, p6=1), and that is the whole point of it existing here: a loot
+    // slot is no item object, so its rolled random-suffix enchants reach the builder through the
+    // block — never through `ITEM_FIELD_ENCHANTMENT`, which the wire does not carry for loot.
+    // Hovering a "… of the Monkey" drop through the template path `SetItemById` instead printed
+    // the `<Random enchantment>` placeholder until the item was in the bag (decision 1547).
+    //
+    // `slot` is the 1-based display row, like every other loot getter; the coin pile and a
+    // cleared row have no tooltip.
+    m.set(
+        "SetLootItem",
+        lua.create_function(|lua, (this, slot): (Table, usize)| {
+            let h = frame_handle_of(lua, &this)?;
+            let row = {
+                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                model
+                    .loot
+                    .as_ref()
+                    .and_then(|l| slot.checked_sub(1).and_then(|n| l.rows.get(n)))
+                    .and_then(|r| r.clone())
+                    .filter(|r| !r.is_coin && r.item_id != 0)
+            };
+            let Some(row) = row else {
+                return Ok(());
+            };
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                clear_content(&mut model, h);
+            }
+            fire_cleared(lua, h);
+            // The row's own name is the app-composed one — the roll's suffix already joined, so
+            // the plate reads "Chipped Claw of the Bear" like the reference's `0x5d8b00` output.
+            // The lines come from the roll id through the pushed table, which is where the
+            // reference reads them too (its `+0x424` against the DBC store, §E5).
+            let inst = render::ItemInstance {
+                name: row.name.clone(),
+                enchants: roll_enchants(lua, row.random_property_id),
+                ..Default::default()
+            };
+            match view_of(lua, row.item_id) {
+                Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                // Template in flight — the row's name holds the plate (SetBagItem's 0138 posture;
+                // the re-enter loop repaints when the push lands).
+                None => {
+                    if let Some(name) = row.name.clone() {
+                        append_line(
+                            lua,
+                            &this,
+                            (name, quality_color(row.quality.unwrap_or(1))),
+                            None,
+                            false,
+                        )?;
+                    }
+                }
+            }
+            show_or_hide_empty(lua, h);
+            Ok(())
+        })?,
+    )?;
+
+    // GameTooltip:SetLootRollItem(rollId) — the group-loot roll window's hover (the reference's
+    // own `0x5364a0`). The same shape as SetLootItem beside it, byte-verified on the same
+    // dispatch: p6=1 with `+0x424 ← [roll+0x20]` (the roll's randomPropertyId), all 7 enchant
+    // slots zero, and BOTH guid args `&{0,0}` — no item object, so §E5's suffix-row copy is the
+    // only enchant source and the placeholder arm is unreachable.
+    m.set(
+        "SetLootRollItem",
+        lua.create_function(|lua, (this, roll_id): (Table, u32)| {
+            let h = frame_handle_of(lua, &this)?;
+            let entry = {
+                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                model
+                    .loot_rolls
+                    .rolls
+                    .iter()
+                    .find(|r| r.roll_id == roll_id)
+                    .cloned()
+                    .filter(|r| r.item_id != 0)
+            };
+            let Some(entry) = entry else {
+                return Ok(());
+            };
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                clear_content(&mut model, h);
+            }
+            fire_cleared(lua, h);
+            let inst = render::ItemInstance {
+                name: entry.name.clone(),
+                enchants: roll_enchants(lua, entry.random_property_id),
+                ..Default::default()
+            };
+            match view_of(lua, entry.item_id) {
+                Some(v) => render_view(lua, &this, &v, false, Some(&inst))?,
+                None => {
+                    if let Some(name) = entry.name.clone() {
+                        append_line(
+                            lua,
+                            &this,
+                            (name, quality_color(entry.quality.unwrap_or(1))),
+                            None,
+                            false,
+                        )?;
+                    }
+                }
+            }
+            show_or_hide_empty(lua, h);
+            Ok(())
         })?,
     )?;
 
@@ -515,14 +699,109 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetInboxItem",
         lua.create_function(|lua, (this, index): (Table, usize)| {
             let h = frame_handle_of(lua, &this)?;
-            let item_id = {
+            let (item_id, roll, name) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let Some(mail) = &model.mail else {
                     return Ok(());
                 };
-                mail.inbox
-                    .get(index.saturating_sub(1))
-                    .map(|r| r.item_id)
+                match mail.inbox.get(index.saturating_sub(1)) {
+                    Some(r) => (r.item_id, r.item_random_property_id, r.item_name.clone()),
+                    None => (0, 0, None),
+                }
+            };
+            if item_id == 0 {
+                return Ok(());
+            }
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                clear_content(&mut model, h);
+            }
+            fire_cleared(lua, h);
+            // A block source (`SetInboxItem 0x5355fa`, p6=1) carrying the attachment's roll — so
+            // an "… of the Monkey" in the mail reads like the same drop in the loot window, and
+            // the placeholder arm is unreachable here too (decision 1547).
+            let inst = render::ItemInstance {
+                name,
+                enchants: roll_enchants(lua, roll),
+                ..Default::default()
+            };
+            if let Some(v) = view_of(lua, item_id) {
+                render_view(lua, &this, &v, false, Some(&inst))?;
+                arm_compare(lua, h, &v);
+            }
+            show_or_hide_empty(lua, h);
+            Ok(())
+        })?,
+    )?;
+
+    // GameTooltip:SetAuctionItem(type, index) — an auction ROW's hover (decision 1511). The row's
+    // item entry through the same id-keyed store, keyed by list type ("list"/"bidder"/"owner").
+    //
+    // An auction row's tooltip deliberately emits **no** "Made by", "Gift from" or openable lines,
+    // and the reason is structural rather than a rule anyone applies: the reference's binding
+    // zeroes the GUID arguments before it resolves anything, so the gate those lines hang off
+    // fails outright (wow-re §5, claim 6). Our id-keyed store has no instance to report either,
+    // so we land on the same output by the same shape of reasoning.
+    m.set(
+        "SetAuctionItem",
+        lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
+            let h = frame_handle_of(lua, &this)?;
+            let (item_id, roll, name) = {
+                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let Some(auction) = &model.auction else {
+                    return Ok(());
+                };
+                let Some(list) = super::auction::list_index_of(&kind) else {
+                    return Ok(());
+                };
+                match auction.lists[list].rows.get(index.saturating_sub(1)) {
+                    Some(r) => (r.item_id, r.random_property_id, r.name.clone()),
+                    None => (0, 0, None),
+                }
+            };
+            if item_id == 0 {
+                return Ok(());
+            }
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                clear_content(&mut model, h);
+            }
+            fire_cleared(lua, h);
+            // A block source (`SetAuctionItem 0x5359d9`, p6=1) carrying the listing's roll: a
+            // rolled auction shows its real lines, never the placeholder (decision 1547). The
+            // zeroed GUIDs the note above describes are unaffected — a roll is not an instance.
+            let inst = render::ItemInstance {
+                name,
+                enchants: roll_enchants(lua, roll),
+                ..Default::default()
+            };
+            if let Some(v) = view_of(lua, item_id) {
+                render_view(lua, &this, &v, false, Some(&inst))?;
+                arm_compare(lua, h, &v);
+            }
+            show_or_hide_empty(lua, h);
+            Ok(())
+        })?,
+    )?;
+
+    // GameTooltip:SetAuctionSellItem() — the create-auction slot's hover (decision 1511). The item
+    // staged in the sell slot, through the same id-keyed store. A no-op when the slot is empty
+    // (the reference gates the call on GetAuctionSellItemInfo()).
+    //
+    // Unlike an auction ROW, this one names a real item the player owns — the reference passes the
+    // live sell-slot GUID here and resolves an actual object, so its creator line is structurally
+    // reachable (wow-re §5, claim 6, REFINED). Ours is still the id-keyed template view, so we do
+    // not print one; that is a known narrowing, not a claim about the reference.
+    m.set(
+        "SetAuctionSellItem",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let item_id = {
+                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                model
+                    .auction_sell_item
+                    .as_ref()
+                    .map(|it| it.item_id)
                     .unwrap_or(0)
             };
             if item_id == 0 {

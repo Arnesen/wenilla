@@ -81,7 +81,13 @@ pub(super) fn publish_view_subject(
     mut subject: ResMut<ViewSubject>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     index: Res<GuidIndex>,
-    poses: Query<(&Transform, Option<&CameraPivot>)>,
+    // The subject's pose, its model-derived pivot, and its **raw** scale — the pivot height takes
+    // the raw `OBJECT_FIELD_SCALE_X`, not the eased render scale ([`head_height`]).
+    poses: Query<(
+        &Transform,
+        Option<&CameraPivot>,
+        Option<&crate::net::NetEntity>,
+    )>,
     net: Res<NetCommands>,
     mut engaged: Local<Option<u64>>,
 ) {
@@ -92,9 +98,9 @@ pub(super) fn publish_view_subject(
     subject.remote = anchor
         .and_then(|guid| index.0.get(&guid).copied())
         .and_then(|entity| poses.get(entity).ok())
-        .map(|(t, pivot)| RemoteView {
+        .map(|(t, pivot, net)| RemoteView {
             feet: t.translation,
-            pivot_height: head_height(pivot, t.scale.x),
+            pivot_height: head_height(pivot, net.map_or(1.0, |n| n.scale)),
         });
 
     // The toggle vote, on the edge — the reference sends it from exactly two sites, `1` as the view

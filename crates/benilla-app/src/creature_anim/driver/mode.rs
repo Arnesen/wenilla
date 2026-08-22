@@ -283,21 +283,23 @@ pub(super) fn run(
                     );
                     drv.mode = Mode::Looping(sp);
                 }
-            } else if (oneshot_finished(player, anims, id, catalog)
-                && !(select::is_ranged_fire(id) && auto_repeat))
-                || mv.flags != drv.gait_flags
-            {
-                // The ranged fire clip is the ONE one-shot whose completion does not recompute
-                // the base (wow-re `shooter-stop-law.md` §J4, four converging lines): the
-                // completion dispatcher `0x5fc3f0` is never reached for a bow id, so AttackBow
-                // clamps and holds its authored tail — the quick re-draw — until a real
-                // recompute. Recomputing here instead re-picked the gait, which for an armed
-                // shooter is the Load clip, so **every shot replayed the full pull**. The
-                // hold-out is scoped to `auto_repeat` because that is the state the reference
-                // recomputes out of: the cancel `0x6ea080` ends with `RecomputeBaseAnim(-1)`,
-                // and dropping the arm re-opens this branch on the very next frame — the same
-                // observable, with no extra latch to own. A movement-flag change still
-                // recomputes through the second leg (opcode arms 0 and 1 both recompute).
+            } else if oneshot_finished(player, anims, id, catalog) || mv.flags != drv.gait_flags {
+                // A finished one-shot recomputes the base — the ranged FIRE clips included
+                // (decision 1544, superseding 0994 §1). 0994 held them out on
+                // `shooter-stop-law.md` §J4's claim that the completion dispatcher `0x5fc3f0`
+                // is never reached for a bow id; wow-re's §5 refuted that as an absence proof
+                // whose census could not see its second fire site — the natural-completion path
+                // enqueues the callback as a plain ARGUMENT (`0x7194f5` pushes mode 0) and
+                // `0x7074b0` invokes it later as `call [esi+4]`, so a scan for
+                // `call dword ptr [reg+0x70]` misses it by construction. 46/49/107 land on the
+                // dispatcher's slot 22: a bare `RecomputeBaseAnim(-1)`.
+                //
+                // That recompute is the whole mid-volley cycle: for an armed shooter the base
+                // re-picks the Load clip, whose own completion promotes to the Hold. Fire →
+                // re-pull → hold, once per shot — and the re-pull's `$BWP` is what puts the
+                // arrow back on the string, since it is the only clip that authors the tag.
+                // Holding it out left every shot after the first firing from an empty hand
+                // (bug B307).
                 // Finished — or a movement-flag change: the client's base re-arm lands on the
                 // change and blindly overwrites bone 0, one-shot or not (the same re-arm
                 // decision 0280 named for the un-finishable looping kit clip, and
@@ -378,17 +380,33 @@ pub(super) fn run(
                 let ready = (engaged && !moving).then(|| ready_anim(wielded.and_then(|w| w.main)));
                 // The ranged standing idle (0099 phase 5): the byte-verified entry gate
                 // ([`select::ranged_idle_gate`]) → the ranged weapon's Load clip, played
-                // ONCE and frozen at full draw. ENTRY is the local `0x200` ([`auto_repeat`])
-                // alone — `0x5fd460`'s own and only claim test besides the sheath. There is
-                // no HOLD twin and no promotion: the completion dispatcher that would play
-                // 109 is never reached for a bow id (wow-re `shooter-stop-law.md` §J4.1),
-                // and mid-volley the base is not re-picked at all — the fire clip clamps on
-                // its own authored tail (the `is_ranged_fire` hold-out in `Mode::Swing`).
-                // The pull replays only on a real recompute: movement start/stop, a sheath
-                // change, the auto-repeat cancel.
-                let ranged_load = (!moving
-                    && select::ranged_idle_gate(auto_repeat, drv.sheath_cur))
-                .then(|| select::ranged_load_anim(wielded.and_then(|w| w.ranged)));
+                // ONCE, then promoted to the Hold by its own completion. ENTRY is the local
+                // `0x200` ([`auto_repeat`]) alone — `0x5fd460`'s own and only claim test
+                // besides the sheath. The HOLD twin is real and this is where it comes back
+                // (decision 1544, superseding 0994 §2, which deleted it on a refuted absence
+                // proof): 105 → 109, 106 → 110, 112 → 111, unconditionally at the Load's
+                // completion. Mid-volley the base IS re-picked — every fire clip's completion
+                // recomputes — so the cycle is fire → re-pull → hold, per shot.
+                let ranged_load =
+                    (!moving && select::ranged_idle_gate(auto_repeat, drv.sheath_cur)).then(|| {
+                        let load = select::ranged_load_anim(wielded.and_then(|w| w.ranged));
+                        let hold = select::ranged_hold_anim(load);
+                        // The pull's own completion promotes it to the Hold — the dispatcher's
+                        // slot 11/12/15 arm, UNCONDITIONAL ([`select::ranged_hold_anim`] carries
+                        // which gate belongs to whom). Expressed as a CANDIDATE rather than a
+                        // latch: once armed, the Hold re-selects itself every frame, and the
+                        // volley's end drops `ranged_idle_gate` and recomputes straight out of it
+                        // — so there is no second piece of state to keep in step, which is what
+                        // 0409's re-latch was and why 0994 was right to delete that much.
+                        let holding = drv.gait == Some(hold)
+                            || (drv.gait == Some(load)
+                                && oneshot_finished(player, anims, load, catalog));
+                        if holding {
+                            hold
+                        } else {
+                            load
+                        }
+                    });
                 let cands = gait_candidates(&mv, walk, ready, ranged_load);
                 // The stationary cast/channel hold pins its pose **full-body in the gait slot**
                 // (decision 0107 — the client's `[CGUnit+0xb4]` stationary-cast gate),

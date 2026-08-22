@@ -1006,10 +1006,36 @@ fn convert_entry(
             //
             // `assets` missing ENTIRELY is a data-less run (the headless UI tests), not a bad
             // path — those keep the old behaviour rather than blanking every textured quad.
+            //
+            // `<TexCoords>`/`SetTexCoord` slices the sampled sub-rect. The 4-edge form
+            // `[left,right,top,bottom]` maps to raw UV corners (`left→u0, right→u1, top→v0,
+            // bottom→v1`) — carried through [`UvRect`] rather than a normalized `Rect` so a
+            // mirrored slice (`left>right`, e.g. PlayerFrameTexture) keeps its flip to the
+            // vertex buffer. The 8-arg affine form is already per-corner in the `push_quad`
+            // winding (the route-line quads). Absent = the full texture. Resolved BEFORE the
+            // handle because the wrap mode follows it:
+            let uv = match tex_coords {
+                Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
+                Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
+                None => UvRect::FULL,
+            };
+            // A slice that runs PAST the texture is the reference's tiling idiom, not a crop:
+            // `SetTexCoord(0, n, 0, 1)` on an n-slots-wide strip repeats the art n times — the
+            // stance shelf's middle carries one slot per extra form exactly that way
+            // (`StanceBar.xml`, `ShapeshiftBar_Update`). Clamp-sampled it smears the last column
+            // across the extra width instead. Clamp/repeat bake into the `Image`, so this picks
+            // the tiled GPU image + cache entry, as the `Backdrop` arm's `tile` does below.
+            let tiled = uv
+                .corners
+                .iter()
+                .flatten()
+                .any(|c| !(-0.001..=1.001).contains(c));
             let handle = match (path.as_deref(), assets.as_mut()) {
                 (Some(p), Some(a)) => {
                     let resolved = if circular {
                         a.portrait_texture(p, images)
+                    } else if tiled {
+                        a.sprite_texture_tiled(p, images)
                     } else {
                         a.sprite_texture(p, images)
                     };
@@ -1023,17 +1049,6 @@ fn convert_entry(
             // A pathless Texture region is a solid color; a textured one tints by it.
             let mut color = color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
             color[3] *= eq.alpha;
-            // `<TexCoords>`/`SetTexCoord` slices the sampled sub-rect. The 4-edge form
-            // `[left,right,top,bottom]` maps to raw UV corners (`left→u0, right→u1, top→v0,
-            // bottom→v1`) — carried through [`UvRect`] rather than a normalized `Rect` so a
-            // mirrored slice (`left>right`, e.g. PlayerFrameTexture) keeps its flip to the
-            // vertex buffer. The 8-arg affine form is already per-corner in the `push_quad`
-            // winding (the route-line quads). Absent = the full texture.
-            let uv = match tex_coords {
-                Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
-                Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
-                None => UvRect::FULL,
-            };
             out.push(UiQuad {
                 rect,
                 z_key: eq.z,

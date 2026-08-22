@@ -127,6 +127,13 @@ struct ModelRow {
     footprint_width: f32,
     /// `collisionHeight` (field 15), raw model units — see [`CreatureCatalog::collision_height`].
     collision_height: f32,
+    /// `FootstepShakeSize` (field 11) and `DeathThudShakeSize` (field 12) — **`CameraShakes.dbc`
+    /// row ids**, 0 on a model that shakes nothing. Only 25 of the 430 shipped rows carry a
+    /// footstep shake, and the set is exactly the thumping-giant list (Ancients, kodos, sea and
+    /// mountain giants, titans, dragons, Anubisath, stone keeper, fel beast, Nian, Lord Kezzak,
+    /// bear) — see [`crate::CameraShakeCatalog`] and decision 1540.
+    footstep_shake: u32,
+    death_thud_shake: u32,
 }
 
 /// A display's footprint-decal parameters (see [`CreatureCatalog::footprint`]): the
@@ -161,6 +168,53 @@ impl CreatureCatalog {
     /// id misses.
     pub fn display_scale(&self, display_id: u32) -> Option<f32> {
         self.display.get(&display_id).map(|r| r.scale)
+    }
+
+    /// A display's **footstep camera-shake preset** — `CreatureModelData.FootstepShakeSize`, a
+    /// `CameraShakes.dbc` row id fired on each footfall of a heavy enough creature. `None` when
+    /// the display id misses or the model shakes nothing (405 of the 430 shipped models).
+    ///
+    /// The trigger, the evaluator and the distance falloff are decision 1540's; this is the
+    /// authored id and nothing more.
+    pub fn footstep_shake(&self, display_id: u32) -> Option<u32> {
+        let row = self.display.get(&display_id)?;
+        let id = self.models.get(&row.model_id)?.footstep_shake;
+        (id != 0).then_some(id)
+    }
+
+    /// A display's **death-thud camera-shake preset** — `CreatureModelData.DeathThudShakeSize`,
+    /// the one-off shake as the body lands. Same conventions as [`Self::footstep_shake`].
+    pub fn death_thud_shake(&self, display_id: u32) -> Option<u32> {
+        let row = self.display.get(&display_id)?;
+        let id = self.models.get(&row.model_id)?.death_thud_shake;
+        (id != 0).then_some(id)
+    }
+
+    /// Every `CreatureModelData` row that names a camera-shake preset: `(model id, path,
+    /// footstep id, death-thud id)`. The **census** view — the runtime reads
+    /// [`Self::footstep_shake`] by display id instead, because that is what a unit carries.
+    pub fn shaking_models(&self) -> impl Iterator<Item = (u32, &str, u32, u32)> + '_ {
+        self.models
+            .iter()
+            .filter(|(_, m)| m.footstep_shake != 0 || m.death_thud_shake != 0)
+            .map(|(id, m)| (*id, m.path.as_str(), m.footstep_shake, m.death_thud_shake))
+    }
+
+    /// A display's **spawned-creature render scale** — the product
+    /// `CreatureModelData.modelScale × CreatureDisplayInfo.creatureModelScale`, the same number
+    /// [`CreatureModel::scale`] carries, without the row's string clones.
+    ///
+    /// Almost nothing in the world reads this: the server folds it into `OBJECT_FIELD_SCALE_X` and
+    /// the client renders a unit at that field alone, so multiplying it again would square it
+    /// (`crate::entities::attach`'s note, wow-re `world_model_scale` `0x613ef0`). The **glue
+    /// screens are the exception** — the character-select pet has no wire object and therefore no
+    /// server scale, and the reference sizes it with exactly this product (`0x472dc6`
+    /// `fld [x+0x10]; fmul [y+0x10]` → a uniform `diag(S,S,S,1)`, wow-re `glue-select-model.md`
+    /// §A4). `None` when either DBC lookup misses.
+    pub fn model_scale(&self, display_id: u32) -> Option<f32> {
+        let row = self.display.get(&display_id)?;
+        let model = self.models.get(&row.model_id)?;
+        Some(model.scale * row.scale)
     }
 
     /// A display's **base render alpha** in `0.0..=1.0` — `CreatureDisplayInfo.CreatureModelAlpha`
@@ -362,6 +416,8 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                         footprint_length: f32_at(r, 7).unwrap_or(0.0),
                         footprint_width: f32_at(r, 8).unwrap_or(0.0),
                         collision_height: f32_at(r, 15).unwrap_or(0.0),
+                        footstep_shake: u32_at(r, 11).unwrap_or(0),
+                        death_thud_shake: u32_at(r, 12).unwrap_or(0),
                     },
                 );
             }
@@ -541,6 +597,60 @@ mod tests {
     /// pauldron pair (slot 1), and boot/glove/tabard geosets (slots 6/8/9), with empty chest/wrist
     /// (slots 3/7). These ids are the real `CreatureDisplayInfoExtra` values read off the build-5875
     /// DBC; a shifted column or a wrong field offset would misread them. Skips without the client data.
+    /// **The shake columns, pinned against the shipped client** (B298, decision 1540). Fields 11
+    /// and 12 are `CameraShakes.dbc` row ids, and the evidence that the map is right is not that
+    /// the names look plausible — it is that the census is *semantic*: 25 of 430 rows carry a
+    /// footstep shake and every one of them is a creature heavy enough to shake a camera, the
+    /// amplitude ranks by mass, and nothing dangles.
+    ///
+    /// The Ancient Protector is the reported row (Dolanaar's tree guardians, B298); the human male
+    /// is the control that must stay zero, since a schema shift would smear a neighbouring column
+    /// into these and give *everything* a shake.
+    #[test]
+    fn the_footstep_shake_columns_are_the_thumping_giants() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        // Display 1921 is the plain Ancient Protector (model 67): footstep row 1, thud row 11.
+        assert_eq!(
+            cat.footstep_shake(1921),
+            Some(1),
+            "Ancient Protector footstep"
+        );
+        assert_eq!(
+            cat.death_thud_shake(1921),
+            Some(11),
+            "Ancient Protector thud"
+        );
+        // Display 1460 is Onu's Ancient of Lore (model 187) — the heavier row 2.
+        assert_eq!(
+            cat.footstep_shake(1460),
+            Some(2),
+            "Ancient of Lore footstep"
+        );
+
+        // The control: a player body shakes nothing, at either column. If a schema shift walked
+        // these indices onto a neighbour, this is the assert that catches it.
+        assert_eq!(cat.footstep_shake(49), None, "HumanMale leaves no thump");
+        assert_eq!(cat.death_thud_shake(49), None, "nor a thud");
+
+        // The census, and the property that licenses the whole column map: every id a creature
+        // names must land on a real row of the 24-row table.
+        let shakes = crate::load_camera_shakes(&mut chain).expect("load CameraShakes.dbc");
+        let mut footstep = 0;
+        for (_, path, foot, thud) in cat.shaking_models() {
+            if foot != 0 {
+                footstep += 1;
+                assert!(shakes.get(foot).is_some(), "{path} footstep {foot} dangles");
+            }
+            if thud != 0 {
+                assert!(shakes.get(thud).is_some(), "{path} thud {thud} dangles");
+            }
+        }
+        assert_eq!(footstep, 25, "the shipped footstep-shake census");
+    }
+
     #[test]
     fn stormwind_guard_equipment_columns_decode_in_bodyslot_order() {
         let data = crate::wow_data_or_skip!();

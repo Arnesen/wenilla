@@ -4,11 +4,16 @@
 //! decision 0857), because the render meshes are `RENDER_WORLD`-only (0834) and a physics ray
 //! misses colliderless props. Pick geometry is **declared, never inferred** (decision 0929).
 
+use std::sync::Arc;
+
 use benilla_assets::coords::wow_to_bevy;
+use benilla_formats::RenderSubmesh;
 use bevy::camera::primitives::Aabb;
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
+
+use super::WorldObject;
 
 /// The resident **pick geometry** of one drawn batch: the model's decoded `RenderSubmesh`, `Arc`-shared
 /// with the model asset itself (decision 0857). The render forms are `RENDER_WORLD`-only since 0834 —
@@ -20,7 +25,7 @@ use bevy::prelude::*;
 /// ([`super::WorldObject`] / `ModelPart`). A keyed entity carrying neither this nor [`PickBox`] is
 /// **not pickable** — pick geometry is declared, never inferred from a bound (decision 0929).
 #[derive(Component, Clone)]
-pub struct PickMesh(pub std::sync::Arc<benilla_formats::RenderSubmesh>);
+pub struct PickMesh(pub Arc<RenderSubmesh>);
 
 /// "My `Aabb` **is** my pick geometry" — the model-less cube fallback ([`crate::entities::attach`]),
 /// whose cuboid is exactly its bound, so a slab test is the exact answer and 12 triangles would only
@@ -37,6 +42,71 @@ pub struct PickMesh(pub std::sync::Arc<benilla_formats::RenderSubmesh>);
 #[derive(Component, Clone, Copy)]
 pub struct PickBox;
 
+/// One placement's batch inside a **consolidated draw** — its identity, its resident geometry and
+/// the world pose that geometry draws at.
+///
+/// The consolidating render lanes (the static merge's blobs, 1417/1418; the retained static pass's
+/// cell/region bakes, 1429–1434) draw many placements as one thing. They win their draw calls by
+/// *removing* the per-placement entity — and the pick declaration ([`PickMesh`] + [`super::WorldObject`])
+/// used to ride that entity, so consolidating a placement silently un-named it: the inspector, the GO
+/// hover and `WOW_PICK` all went quiet over most of the static world, and 0929's "declared, never
+/// inferred" rule made the loss indistinguishable from correct transparency (decision 1534).
+///
+/// This is the declaration that survives the consolidation: identity + geometry + pose, per member,
+/// held by whoever owns the consolidated draw. The pick walks members exactly as it walks parts, so
+/// a blob or a retained cell answers with the *placement* under the cursor, never with the draw that
+/// happens to contain it.
+#[derive(Clone)]
+pub struct PickMember {
+    /// Shared per placement — one allocation per placement, not per batch.
+    pub object: Arc<WorldObject>,
+    pub geometry: Arc<RenderSubmesh>,
+    /// The member's own WORLD pose (the placement transform its geometry was baked with), not a
+    /// pose relative to the consolidated draw's entity.
+    pub transform: Transform,
+}
+
+/// The members of a **blob** — a consolidated draw that is still one entity (the static merge's
+/// lane, `terrain_stream::merge`). The entity keeps the broad phase and the drawn test it always
+/// had (its union `Aabb`, its own `ViewVisibility`); this component is the narrow phase, and the
+/// identity that comes back.
+///
+/// A blob carries no [`PickMesh`]: its baked mesh is the union of its members and would answer with
+/// the blob, not with what the cursor is on.
+#[derive(Component, Clone)]
+pub struct PickBlob(pub Arc<[PickMember]>);
+
+/// One hit from the **identified** cast ([`cast_object_ray`]): what was hit, and where.
+///
+/// The identity is *resolved here*, not left as an entity for the caller to look up, because most
+/// of the static world has no entity to look anything up on — it draws from a consolidated lane
+/// (decision 1534). `entity` is `Some` only when one owns the geometry, which is exactly when the
+/// per-entity readouts (a unit's descriptor store, a GameObject's collision, a part's material)
+/// exist to be read.
+pub struct ObjectHit {
+    /// What was hit. `None` only for an entity a caller made pickable WITHOUT a world identity —
+    /// an equipped item's part or its billboard card, which `WOW_PICK` admits on `ModelPart` so a
+    /// "my pauldron looks wrong" report has something to name (decision 0836). Consolidated
+    /// content is always identified: identity is what its lane carries it by.
+    pub object: Option<WorldObject>,
+    pub entity: Option<Entity>,
+    pub hit: RayHit,
+}
+
+/// Geometry that draws with **no entity to hang a [`PickMesh`] on** — today the retained static
+/// pass ([`crate::static_gx`]), whose cell and region bakes replaced their placements' entities
+/// outright.
+///
+/// A source answers the ray itself rather than publishing a side table, because **only the lane
+/// knows what it actually drew this frame**: its selection is a CPU scene walk at cell/group/set
+/// granularity, not a `ViewVisibility` bit an outside walker could read. Implementors must report
+/// only selected content — that is the entity path's own rule (`ViewVisibility`), kept.
+pub trait PickSource {
+    /// Append every hit along `ray`, nearest triangle per member. `all_hits` asks for the whole
+    /// ray (the `WOW_PICK` reading) rather than just this source's nearest.
+    fn cast_objects(&self, ray: Ray3d, all_hits: bool, out: &mut Vec<(Arc<WorldObject>, RayHit)>);
+}
+
 /// One triangle-accurate hit from [`cast_pick_ray`]: the world-space point, the hit triangle's
 /// geometric normal (two-sided — the orientation is the authored winding's), and the distance along
 /// the ray.
@@ -48,8 +118,8 @@ pub struct RayHit {
 
 /// The one query every mesh picker casts against: a part's resident geometry, its world pose, the
 /// render world's own visibility verdict (the cast honours it, as `RayCastVisibility::VisibleInView`
-/// did), its bound for the broad phase, and whether that bound is itself the pick shape
-/// ([`PickBox`]).
+/// did), its bound for the broad phase, whether that bound is itself the pick shape ([`PickBox`]),
+/// and — for a consolidated blob — the members its baked mesh stands in for ([`PickBlob`]).
 pub type PickParts<'w, 's> = Query<
     'w,
     's,
@@ -59,6 +129,7 @@ pub type PickParts<'w, 's> = Query<
         &'static ViewVisibility,
         Option<&'static Aabb>,
         Has<PickBox>,
+        Option<&'static PickBlob>,
     ),
 >;
 
@@ -80,6 +151,69 @@ pub fn pick_at_cursor(
         .into_iter()
         .next()
         .map(|(e, hit)| (e, hit.point, hit.distance))
+}
+
+/// The **identified** cast: the ECS pick set (parts, boxes and blob members) *plus* every
+/// entity-less [`PickSource`], nearest-first — what a "name what I am pointing at" instrument
+/// wants, where the plain entity cast answers "which entity".
+///
+/// The two populations are cast independently and merged by distance, because they are culled by
+/// different machinery: an entity by its `ViewVisibility`, a source by its lane's own scene walk.
+pub fn cast_object_ray(
+    ray: Ray3d,
+    pickable: &HashSet<Entity>,
+    parts: &PickParts,
+    objects: &Query<&WorldObject>,
+    sources: &[&dyn PickSource],
+    all_hits: bool,
+) -> Vec<ObjectHit> {
+    let mut out: Vec<ObjectHit> = cast_pick_ray_impl(ray, pickable, parts, all_hits, false)
+        .into_iter()
+        .map(|(entity, member, hit)| match member {
+            // A consolidated member's identity travels with the hit; the entity is the DRAW's
+            // (a blob), which is never what the cursor is on.
+            Some(object) => ObjectHit {
+                object: Some((*object).clone()),
+                entity: None,
+                hit,
+            },
+            None => ObjectHit {
+                object: objects.get(entity).ok().cloned(),
+                entity: Some(entity),
+                hit,
+            },
+        })
+        .collect();
+    let mut lane: Vec<(Arc<WorldObject>, RayHit)> = Vec::new();
+    for source in sources {
+        source.cast_objects(ray, all_hits, &mut lane);
+    }
+    out.extend(lane.into_iter().map(|(object, hit)| ObjectHit {
+        object: Some((*object).clone()),
+        entity: None,
+        hit,
+    }));
+    out.sort_unstable_by(|a, b| a.hit.distance.total_cmp(&b.hit.distance));
+    if !all_hits {
+        out.truncate(1);
+    }
+    out
+}
+
+/// [`cast_object_ray`] through a screen pixel — the mouseover's whole job.
+pub fn pick_object_at_cursor(
+    cursor: Vec2,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+    pickable: &HashSet<Entity>,
+    parts: &PickParts,
+    objects: &Query<&WorldObject>,
+    sources: &[&dyn PickSource],
+) -> Option<ObjectHit> {
+    let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
+    cast_object_ray(ray, pickable, parts, objects, sources, false)
+        .into_iter()
+        .next()
 }
 
 /// Cast `ray` against `pickable`'s **resident geometry** ([`PickMesh`] — decision 0857: the render
@@ -106,6 +240,9 @@ pub fn cast_pick_ray(
     all_hits: bool,
 ) -> Vec<(Entity, RayHit)> {
     cast_pick_ray_impl(ray, pickable, parts, all_hits, false)
+        .into_iter()
+        .map(|(e, _, hit)| (e, hit))
+        .collect()
 }
 
 /// [`cast_pick_ray`]'s **generous second pass** (decision 1071 — wow-re object-layer mouse-pick,
@@ -124,26 +261,51 @@ pub fn cast_pick_ray_inflated(
     parts: &PickParts,
 ) -> Vec<(Entity, RayHit)> {
     cast_pick_ray_impl(ray, pickable, parts, true, true)
+        .into_iter()
+        .map(|(e, _, hit)| (e, hit))
+        .collect()
 }
 
+/// The entity walk, with each hit's optional **member identity** (a blob hit names the placement
+/// under the cursor, not the blob — [`PickBlob`]). [`cast_pick_ray`] drops that half; the identified
+/// cast ([`cast_object_ray`]) is the reason it exists.
 fn cast_pick_ray_impl(
     ray: Ray3d,
     pickable: &HashSet<Entity>,
     parts: &PickParts,
     all_hits: bool,
     inflate: bool,
-) -> Vec<(Entity, RayHit)> {
+) -> Vec<(Entity, Option<Arc<WorldObject>>, RayHit)> {
     let (origin, dir) = (ray.origin, *ray.direction);
     let mut candidates: Vec<(f32, Entity)> = Vec::new();
     for &entity in pickable {
-        let Ok((mesh, gt, vis, aabb, is_box)) = parts.get(entity) else {
+        let Ok((mesh, gt, vis, aabb, is_box, blob)) = parts.get(entity) else {
             continue;
         };
         if !vis.get() {
             continue; // not drawn in any view this frame — the old cast's VisibleInView rule
         }
-        let entry = match (aabb, mesh, is_box) {
-            (Some(aabb), Some(_), _) | (Some(aabb), None, true) => {
+        // A blob's bound is the union of its members and is authored (`NoAutoAabb`), so it is
+        // both the broad phase and the only thing the ray can be rejected on before the members
+        // are walked. A blob with no bound is narrow-tested unconditionally, like a bound-less part.
+        let entry = match (aabb, mesh, is_box, blob) {
+            (Some(aabb), _, _, Some(_)) => {
+                let bound = if inflate {
+                    Aabb {
+                        center: aabb.center,
+                        half_extents: aabb.half_extents + bevy::math::Vec3A::ONE,
+                    }
+                } else {
+                    *aabb
+                };
+                let (min, max) = world_aabb(&bound, gt);
+                match ray_aabb(origin, dir, min, max) {
+                    Some(t) => t,
+                    None => continue,
+                }
+            }
+            (None, _, _, Some(_)) => 0.0,
+            (Some(aabb), Some(_), _, None) | (Some(aabb), None, true, None) => {
                 // Inflated cast: the halo displaces at most 1 model-unit (local space), so the
                 // local bound grown by exactly that can never clip it.
                 let bound = if inflate {
@@ -160,25 +322,38 @@ fn cast_pick_ray_impl(
                     None => continue,
                 }
             }
-            (None, Some(_), _) => 0.0,
+            (None, Some(_), _, None) => 0.0,
             // No pick geometry — a drawn mesh nobody armed for the ray (a liquid surface), or a
             // `PickBox` with no bound to be. Not pickable, rather than pickable as its bound.
-            (_, None, _) => continue,
+            (_, None, _, None) => continue,
         };
         candidates.push((entry, entity));
     }
     candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let mut hits: Vec<(Entity, RayHit)> = Vec::new();
+    let mut hits: Vec<(Entity, Option<Arc<WorldObject>>, RayHit)> = Vec::new();
     let mut best = f32::INFINITY;
     for (entry, entity) in candidates {
         if !all_hits && best < entry {
             break; // every remaining box starts beyond the confirmed nearest hit
         }
-        let Ok((mesh, gt, _, _, _)) = parts.get(entity) else {
+        let Ok((mesh, gt, _, _, _, blob)) = parts.get(entity) else {
             continue;
         };
+        if let Some(blob) = blob {
+            // A blob stands in for many placements: the hit is the MEMBER under the cursor, cast
+            // at the member's own world pose (its geometry is baked into the blob's mesh, but the
+            // resident submesh + placement transform is what it draws).
+            for m in blob.0.iter() {
+                let gt = GlobalTransform::from(m.transform);
+                if let Some(h) = ray_submesh(&m.geometry, &gt, origin, dir, inflate) {
+                    best = best.min(h.distance);
+                    hits.push((entity, Some(m.object.clone()), h));
+                }
+            }
+            continue;
+        }
         let hit = match mesh {
-            Some(m) => ray_pick_mesh(m, gt, origin, dir, inflate),
+            Some(m) => ray_submesh(&m.0, gt, origin, dir, inflate),
             // A `PickBox` (the broad phase admitted no other mesh-less candidate): its box entry is
             // exactly its surface, the cuboid BEING its Aabb (grown by the halo when inflated).
             None => Some(RayHit {
@@ -189,11 +364,13 @@ fn cast_pick_ray_impl(
         };
         if let Some(h) = hit {
             best = best.min(h.distance);
-            hits.push((entity, h));
+            hits.push((entity, None, h));
         }
     }
-    hits.sort_unstable_by(|a, b| a.1.distance.total_cmp(&b.1.distance));
+    hits.sort_unstable_by(|a, b| a.2.distance.total_cmp(&b.2.distance));
     if !all_hits {
+        // One hit for the whole cast — but a blob contributes one per member, so the truncation
+        // has to come after the sort (it does) and cannot be a per-entity dedup.
         hits.truncate(1);
     }
     hits
@@ -211,14 +388,13 @@ fn cast_pick_ray_impl(
 /// pure axis permutation with sign flips (orthonormal), so applying it to the normal is exact. A
 /// submesh authored without normals can't build the halo and reports a miss (the exact pass
 /// already had its say).
-fn ray_pick_mesh(
-    mesh: &PickMesh,
+fn ray_submesh(
+    geo: &RenderSubmesh,
     gt: &GlobalTransform,
     origin: Vec3,
     dir: Vec3,
     inflate: bool,
 ) -> Option<RayHit> {
-    let geo = &*mesh.0;
     if inflate && geo.normals.len() != geo.positions.len() {
         return None; // no authored normals — no halo to build
     }
@@ -405,6 +581,20 @@ pub(crate) fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<
     (tmax >= tmin.max(0.0)).then_some(tmin.max(0.0))
 }
 
+/// The narrow phase one [`PickSource`] member needs: a resident submesh at a world pose, cast
+/// exactly the way a drawn part's own geometry is ([`ray_submesh`] — the render form's `wow_to_bevy`
+/// bake, billboard cards centred at their pivot). Exposed so a lane answering the ray never
+/// re-derives that bake and drifts from what it draws.
+pub fn ray_member(geometry: &RenderSubmesh, transform: Transform, ray: Ray3d) -> Option<RayHit> {
+    ray_submesh(
+        geometry,
+        &GlobalTransform::from(transform),
+        ray.origin,
+        *ray.direction,
+        false,
+    )
+}
+
 /// Ray against a drawn entity's **world-space bound** — its `Aabb` taken through its
 /// `GlobalTransform`, corner by corner, so a rotated model's box is the box of its rotated
 /// corners and not its rotated box. The broad phase, and the whole test for a part whose exact
@@ -506,7 +696,7 @@ mod tests {
         }
     }
 
-    /// The picker ↔ render-form bake contract (decision 0857): [`ray_pick_mesh`] must test the
+    /// The picker ↔ render-form bake contract (decision 0857): [`ray_submesh`] must test the
     /// resident WoW-axes geometry through the SAME `wow_to_bevy` bake `submesh_to_static_mesh`
     /// builds the drawn mesh with, under the part's world transform — the render mesh itself is
     /// `RENDER_WORLD`-only (0834), so this path is the only thing keeping static models pickable.
@@ -516,13 +706,13 @@ mod tests {
         // A translated + uniformly scaled part: the triangle spans x∈[8,12], z∈[-2,2] at y=1.
         let gt =
             GlobalTransform::from(Transform::from_xyz(10.0, 1.0, 0.0).with_scale(Vec3::splat(2.0)));
-        let hit = ray_pick_mesh(&mesh, &gt, Vec3::new(10.0, 6.0, 0.0), Vec3::NEG_Y, false)
+        let hit = ray_submesh(&mesh.0, &gt, Vec3::new(10.0, 6.0, 0.0), Vec3::NEG_Y, false)
             .expect("the baked triangle must be hit under its world transform");
         assert!((hit.distance - 5.0).abs() < 1e-4);
         assert!(hit.point.abs_diff_eq(Vec3::new(10.0, 1.0, 0.0), 1e-4));
         assert!(hit.normal.abs_diff_eq(Vec3::Y, 1e-4) || hit.normal.abs_diff_eq(-Vec3::Y, 1e-4));
         // …and a miss stays a miss.
-        assert!(ray_pick_mesh(&mesh, &gt, Vec3::new(20.0, 6.0, 0.0), Vec3::NEG_Y, false).is_none());
+        assert!(ray_submesh(&mesh.0, &gt, Vec3::new(20.0, 6.0, 0.0), Vec3::NEG_Y, false).is_none());
     }
 
     /// [`wow_tri`] with every vertex normal authored as model-local Bevy `+X` (WoW pre-image
@@ -546,12 +736,12 @@ mod tests {
         let gt =
             GlobalTransform::from(Transform::from_xyz(10.0, 1.0, 0.0).with_scale(Vec3::splat(2.0)));
         // x=13: 1 world-unit past the exact edge (12), inside the ×2-scaled halo (14).
-        assert!(ray_pick_mesh(&mesh, &gt, Vec3::new(13.0, 6.0, 0.0), Vec3::NEG_Y, false).is_none());
-        let hit = ray_pick_mesh(&mesh, &gt, Vec3::new(13.0, 6.0, 0.0), Vec3::NEG_Y, true)
+        assert!(ray_submesh(&mesh.0, &gt, Vec3::new(13.0, 6.0, 0.0), Vec3::NEG_Y, false).is_none());
+        let hit = ray_submesh(&mesh.0, &gt, Vec3::new(13.0, 6.0, 0.0), Vec3::NEG_Y, true)
             .expect("the halo must catch a ray 1 world-unit past the silhouette");
         assert!((hit.distance - 5.0).abs() < 1e-4);
         // …and the halo has its own edge: 2 world-units past the ×2 halo is still a miss.
-        assert!(ray_pick_mesh(&mesh, &gt, Vec3::new(16.0, 6.0, 0.0), Vec3::NEG_Y, true).is_none());
+        assert!(ray_submesh(&mesh.0, &gt, Vec3::new(16.0, 6.0, 0.0), Vec3::NEG_Y, true).is_none());
     }
 
     /// A submesh authored without normals cannot build the halo: the inflated pass reports a miss
@@ -560,7 +750,7 @@ mod tests {
     fn no_authored_normals_means_no_halo() {
         let mesh = PickMesh(std::sync::Arc::new(wow_tri()));
         let gt = GlobalTransform::from(Transform::from_xyz(10.0, 1.0, 0.0));
-        assert!(ray_pick_mesh(&mesh, &gt, Vec3::new(10.0, 6.0, 0.0), Vec3::NEG_Y, true).is_none());
+        assert!(ray_submesh(&mesh.0, &gt, Vec3::new(10.0, 6.0, 0.0), Vec3::NEG_Y, true).is_none());
     }
 
     /// Cast a ray at a hand-built world and report `(entity, distance)` for every hit, nearest
@@ -577,7 +767,7 @@ mod tests {
             let ray = Ray3d::new(origin, Dir3::new(dir).expect("a non-zero ray"));
             cast_pick_ray_impl(ray, &all, &parts, true, inflate)
                 .into_iter()
-                .map(|(e, h)| (e, h.distance))
+                .map(|(e, _, h)| (e, h.distance))
                 .collect()
         }
         world
@@ -665,6 +855,105 @@ mod tests {
         assert!((hits[0].1 - 7.0).abs() < 1e-4, "{hits:?}");
     }
 
+    /// A test placement identity.
+    fn object(uid: u32, label: &str) -> Arc<WorldObject> {
+        Arc::new(WorldObject {
+            kind: crate::model_render::ModelKind::Doodad,
+            label: label.into(),
+            id: uid,
+            detail: String::new(),
+        })
+    }
+
+    /// The identified cast at a hand-built world, nearest-first: `(label, uid, distance)` per hit.
+    fn names_in(world: &mut World, origin: Vec3, dir: Vec3) -> Vec<(String, u32, f32)> {
+        use bevy::ecs::system::RunSystemOnce;
+        fn cast(
+            In((origin, dir)): In<(Vec3, Vec3)>,
+            ids: Query<Entity, With<ViewVisibility>>,
+            objects: Query<&WorldObject>,
+            parts: PickParts,
+        ) -> Vec<(String, u32, f32)> {
+            let all: HashSet<Entity> = ids.iter().collect();
+            let ray = Ray3d::new(origin, Dir3::new(dir).expect("a non-zero ray"));
+            cast_object_ray(ray, &all, &parts, &objects, &[], true)
+                .into_iter()
+                .map(|h| {
+                    let o = h.object.expect("every fixture part is identified");
+                    (o.label, o.id, h.hit.distance)
+                })
+                .collect()
+        }
+        world
+            .run_system_once_with(cast, (origin, dir))
+            .expect("cast")
+    }
+
+    /// **Decision 1534.** A consolidated blob draws many placements as one entity, and its baked
+    /// mesh is their union — so casting against the blob could only ever answer with the blob
+    /// ("static-merge", which is what its own `WorldObject` says). A [`PickBlob`] declares the
+    /// members instead: the cast names the PLACEMENT under the cursor, at that placement's own
+    /// pose, and the members are depth-ordered among themselves like separate parts would be.
+    #[test]
+    fn a_blob_names_the_member_under_the_cursor() {
+        let mut world = World::new();
+        // Two members of one blob, 10 yd apart down the ray; the blob's own bound covers both.
+        let near = object(11, "elwynntreecanopy02.m2");
+        let far = object(22, "elwynnbush09.m2");
+        drawn(&mut world, Vec3::ZERO, Vec3::new(4.0, 20.0, 4.0))
+            .insert(WorldObject {
+                kind: crate::model_render::ModelKind::Doodad,
+                label: "static-merge".into(),
+                id: 0,
+                detail: "2 batches merged".into(),
+            })
+            .insert(PickBlob(Arc::from(
+                [
+                    PickMember {
+                        object: near.clone(),
+                        geometry: Arc::new(wow_tri()),
+                        transform: Transform::from_xyz(0.0, -5.0, 0.0),
+                    },
+                    PickMember {
+                        object: far.clone(),
+                        geometry: Arc::new(wow_tri()),
+                        transform: Transform::from_xyz(0.0, -15.0, 0.0),
+                    },
+                ]
+                .as_slice(),
+            )));
+        let hits = names_in(&mut world, Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y);
+        assert_eq!(
+            hits.iter()
+                .map(|(l, id, d)| (l.as_str(), *id, *d))
+                .collect::<Vec<_>>(),
+            vec![
+                ("elwynntreecanopy02.m2", 11, 15.0),
+                ("elwynnbush09.m2", 22, 25.0),
+            ],
+            "the members answer, in depth order — never the blob",
+        );
+    }
+
+    /// The blob's drawn test is still the ENTITY's: a blob the render world culled must be as
+    /// transparent to the ray as any other undrawn part (the `ViewVisibility` rule the entity
+    /// path has always had).
+    #[test]
+    fn an_undrawn_blob_is_transparent() {
+        let mut world = World::new();
+        let mut e = drawn(&mut world, Vec3::ZERO, Vec3::new(4.0, 20.0, 4.0));
+        e.insert(PickBlob(Arc::from(
+            [PickMember {
+                object: object(11, "tree.m2"),
+                geometry: Arc::new(wow_tri()),
+                transform: Transform::from_xyz(0.0, -5.0, 0.0),
+            }]
+            .as_slice(),
+        )));
+        *e.get_mut::<ViewVisibility>().expect("spawned visible") = ViewVisibility::HIDDEN;
+        assert!(names_in(&mut world, Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y).is_empty());
+    }
+
     /// A billboard card's render form is centred at its pivot (`build_submesh_mesh`); the pick must
     /// subtract the same pivot or it tests the card a whole pivot-offset away from where it draws.
     #[test]
@@ -684,7 +973,7 @@ mod tests {
         // pivot in model-local Bevy y — draws at world y = 0: a straight-down ray from y = 8 hits
         // at distance 8. Without the pivot subtraction it would (wrongly) hit at y = 3.
         let gt = GlobalTransform::from(Transform::from_xyz(0.0, 3.0, 0.0));
-        let hit = ray_pick_mesh(&mesh, &gt, Vec3::new(0.0, 8.0, 0.0), Vec3::NEG_Y, false)
+        let hit = ray_submesh(&mesh.0, &gt, Vec3::new(0.0, 8.0, 0.0), Vec3::NEG_Y, false)
             .expect("the pivot-centred card must be hit where it draws");
         assert!((hit.distance - 8.0).abs() < 1e-4);
         assert!(hit.point.abs_diff_eq(Vec3::ZERO, 1e-4));

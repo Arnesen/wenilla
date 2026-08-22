@@ -870,6 +870,57 @@ fn writer_loop(
                         w.item_text_query(text_id, mail_id)
                     }
                     ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
+                    // The auction house arc (decision 1511 P0) — the CMSG verbs onto the
+                    // P0 writers; the auctioneer guid rides on every one.
+                    ClientCommand::AuctionHello { auctioneer } => w.auction_hello(auctioneer),
+                    ClientCommand::AuctionListItems {
+                        auctioneer,
+                        list_from,
+                        searched_name,
+                        level_min,
+                        level_max,
+                        slot_id,
+                        main_category,
+                        sub_category,
+                        quality,
+                        usable,
+                    } => w.auction_list_items(
+                        auctioneer,
+                        list_from,
+                        &searched_name,
+                        level_min,
+                        level_max,
+                        slot_id,
+                        main_category,
+                        sub_category,
+                        quality,
+                        usable,
+                    ),
+                    ClientCommand::AuctionListOwnerItems {
+                        auctioneer,
+                        list_from,
+                    } => w.auction_list_owner_items(auctioneer, list_from),
+                    ClientCommand::AuctionListBidderItems {
+                        auctioneer,
+                        list_from,
+                        auction_ids,
+                    } => w.auction_list_bidder_items(auctioneer, list_from, &auction_ids),
+                    ClientCommand::AuctionSellItem {
+                        auctioneer,
+                        item_guid,
+                        bid,
+                        buyout,
+                        etime_minutes,
+                    } => w.auction_sell_item(auctioneer, item_guid, bid, buyout, etime_minutes),
+                    ClientCommand::AuctionPlaceBid {
+                        auctioneer,
+                        auction_id,
+                        price,
+                    } => w.auction_place_bid(auctioneer, auction_id, price),
+                    ClientCommand::AuctionRemoveItem {
+                        auctioneer,
+                        auction_id,
+                    } => w.auction_remove_item(auctioneer, auction_id),
                     ClientCommand::QueryTime => w.query_time(),
                     // The inspect request (decision 0631) — no reply is awaited; see the writer.
                     ClientCommand::Inspect { target } => w.inspect(target),
@@ -914,6 +965,7 @@ fn writer_loop(
                     ClientCommand::GroupUninvite { name } => w.group_uninvite(&name),
                     ClientCommand::GroupSetLeader { guid } => w.group_set_leader(guid),
                     ClientCommand::GroupLeave => w.group_disband(),
+                    ClientCommand::GroupRaidConvert => w.group_raid_convert(),
                     ClientCommand::LootMethod {
                         method,
                         master,

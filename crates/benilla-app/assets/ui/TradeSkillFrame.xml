@@ -28,10 +28,11 @@
             UIPanelButtonTemplate/close-button/item-button idioms (no such templates ship in this house
             dialect — TalentFrame.xml's own ENGINE API note), the persistent selection-highlight Frame.
 
-        FLAT layout (TrainerFrame.xml's own house constraint, restated here): a child <Frame> shown at
-        runtime does not render its own <Layers> FontStrings in this engine, so the detail-pane
-        FontStrings + the title live on BenillaTradeSkillFrame's OWN <Layers> (OVERLAY, above the
-        window's own BACKGROUND/BORDER/ARTWORK art groups), never on a nested sub-frame. The ref's
+        FLAT layout — a CHOICE inherited from TrainerFrame.xml, which stated it as a house constraint
+        it never was. A runtime-shown child <Frame> DOES render its own <Layers> FontStrings in this
+        engine (probed; decision 1517). The detail-pane FontStrings + the title live on
+        BenillaTradeSkillFrame's OWN <Layers> (OVERLAY, above the window's own BACKGROUND/BORDER/
+        ARTWORK art groups) because that is how this window was built, not because nesting fails. The ref's
         `TradeSkillDetailScrollFrame`/`TradeSkillDetailScrollChildFrame` therefore don't exist here —
         the detail is a FIXED (non-scrolling) pane, computed once from the flattened ScrollFrame+
         ScrollChild offsets (TOPLEFT 20,-234 + each child's own ref-quoted offset). Per-region regions

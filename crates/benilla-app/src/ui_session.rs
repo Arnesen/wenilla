@@ -40,10 +40,11 @@ impl Plugin for UiSessionPlugin {
 /// guard closes through. Implemented by [`crate::ui_merchant::MerchantOpen`],
 /// [`crate::ui_gossip::GossipState`], [`crate::ui_quest::QuestGiver`],
 /// [`crate::ui_trainer::TrainerOpen`], [`crate::ui_taxi::TaxiState`],
-/// [`crate::ui_mail::MailOpen`], and [`crate::ui_trade::TradeSession`]; each *NPC* window registers
+/// [`crate::ui_mail::MailOpen`], [`crate::ui_trade::TradeSession`], [`crate::ui_bank::BankOpen`]
+/// and [`crate::ui_auction::AuctionOpen`]; each *NPC* window registers
 /// [`close_npc_session_out_of_range::<T>`] ahead of its feed so the clear turns into the window's
 /// `*_CLOSED` event the same frame — trade does **not** (its cancel is server-driven, decision 0592).
-/// [`feed_interact_npc`] collapses the six portrait-bound sessions into the [`InteractNpc`] the
+/// [`feed_interact_npc`] collapses the portrait-bound sessions into the [`InteractNpc`] the
 /// portrait booth reads for its `"npc"` slot; the mailbox is deliberately excluded from that
 /// collapse (its window icon is art, not a unit-model bake — decision 0544). Trade's "npc" is a
 /// live *player* (the partner), baked exactly like a vendor (decision 0592).
@@ -87,7 +88,8 @@ pub(crate) fn close_npc_session_out_of_range<T: NpcSession>(
 }
 
 /// The one unit an NPC-interaction window points its portrait at: whichever [`NpcSession`] is
-/// currently open (gossip / quest / merchant / trainer / taxi — only one is ever open in play),
+/// currently open (gossip / quest / merchant / trainer / taxi / trade / bank / auction — only one is
+/// ever open in play),
 /// resolved through the [`GuidIndex`] to its live world entity. The portrait booth reads this for
 /// the `"npc"` token exactly as it reads [`crate::target::Selection`] for `"target"` — the
 /// decision-0105 face bake, wired to the interaction arc's NPC (decision 0081). `None` = no NPC
@@ -96,7 +98,7 @@ pub(crate) fn close_npc_session_out_of_range<T: NpcSession>(
 #[derive(Resource, Default)]
 pub(crate) struct InteractNpc(pub(crate) Option<Entity>);
 
-/// Collapse the six portrait-bound sessions into [`InteractNpc`] each frame: the open one's guid,
+/// Collapse the portrait-bound sessions into [`InteractNpc`] each frame: the open one's guid,
 /// resolved to its entity. One deterministic writer (not one publish-system per session), so there is
 /// no cross-system race over who owns the `"npc"` token — the sessions are mutually exclusive, and a
 /// bare `.or` chain is the whole rule. `Option<Res<_>>` keeps it safe in a headless test that mounts
@@ -113,6 +115,10 @@ pub(crate) fn feed_interact_npc(
     trade: Option<Res<crate::ui_trade::TradeSession>>,
     // The banker's portrait while the vault is open (decision 0604) — same booth path.
     bank: Option<Res<crate::ui_bank::BankOpen>>,
+    // The auctioneer's, while the auction house is open — the same booth path again. Its absence
+    // here is what left `AuctionPortraitTexture` a black disc: the window asks for `"npc"` in its
+    // OnShow like every other NPC window, and nothing was answering.
+    auction: Option<Res<crate::ui_auction::AuctionOpen>>,
     index: Option<Res<GuidIndex>>,
     mut out: ResMut<InteractNpc>,
 ) {
@@ -123,7 +129,8 @@ pub(crate) fn feed_interact_npc(
         .or_else(|| trainer.and_then(|s| s.npc()))
         .or_else(|| taxi.and_then(|s| s.npc()))
         .or_else(|| trade.and_then(|s| s.npc()))
-        .or_else(|| bank.and_then(|s| s.npc()));
+        .or_else(|| bank.and_then(|s| s.npc()))
+        .or_else(|| auction.and_then(|s| s.npc()));
     out.0 = guid.and_then(|g| index.and_then(|i| i.0.get(&g).copied()));
 }
 
@@ -219,9 +226,30 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<InteractNpc>().0, None);
 
-        // Both sessions close → None again.
+        // Every window that draws a portrait must be IN this chain — a session missing from it
+        // does not fail loudly, it just renders a black disc where the NPC's face goes, which is
+        // exactly how the auction house shipped (director's report, 2026-08-22). Asserted per
+        // session rather than in the abstract, because the omission is a missing `.or_else` and
+        // nothing but a test can notice one.
+        app.world_mut().resource_mut::<GossipState>().npc = None;
+        app.world_mut().resource_mut::<MerchantOpen>().close();
+        app.init_resource::<crate::ui_auction::AuctionOpen>();
+        app.world_mut()
+            .resource_mut::<crate::ui_auction::AuctionOpen>()
+            .open(0x42, 1);
+        app.update();
+        assert_eq!(
+            app.world().resource::<InteractNpc>().0,
+            Some(npc),
+            "the auctioneer's own portrait"
+        );
+
+        // Every session closes → None again.
         app.world_mut().resource_mut::<GossipState>().close();
         app.world_mut().resource_mut::<MerchantOpen>().close();
+        app.world_mut()
+            .resource_mut::<crate::ui_auction::AuctionOpen>()
+            .clear();
         app.update();
         assert_eq!(app.world().resource::<InteractNpc>().0, None);
     }

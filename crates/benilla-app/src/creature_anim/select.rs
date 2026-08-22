@@ -185,6 +185,24 @@ pub(crate) mod move_flags {
     /// Any horizontal-movement direction bit (forward/back/strafe) — the client's `[9e8] & 0xf` gate.
     pub const ANY_MOVE: u32 = FORWARD | BACKWARD | STRAFE_LEFT | STRAFE_RIGHT;
 
+    /// **Whether this mover is integrated at all** — the client's `0x20ff`, and the gate a mover
+    /// must pass before any physics runs on it. `CMovement::Update 0x616de0` opens its substep loop
+    /// with `0x616e20 test dword [esi+0x40],0x20ff; je 0x616f49` (none set ⇒ finalize, having
+    /// integrated nothing), and the movement manager tests the same mask before it ever calls the
+    /// integrator (`0x6166f5`) — the "idle gate" decision 0059 named by address. wow-re states the
+    /// consequence for a watched player outright: *"for a **STANDING remote** the integrator does
+    /// NOT run … a flag-less unit is not even in the mover list"*
+    /// (`collision/scratch/remote-air-facing.md` §A4; the loop gate is in `collision/collision.md`
+    /// and `scratch/spec-driver-A.md`/`-B.md`).
+    ///
+    /// So a mover with none of these bits keeps the pose its last packet wrote, verbatim, until a
+    /// packet or a flag moves it — which is what decision 1545 makes benilla do. The bits: the four
+    /// direction bits, the two keyboard turn bits, and the two pitch bits benilla does not model
+    /// (together `0xff`), plus [`FALLING`] (`0x2000`). Note what is **absent**: [`SWIMMING`]
+    /// (`0x200000`) and every mode bit — a floating swimmer holding no direction is not integrated
+    /// either.
+    pub const INTEGRATED: u32 = 0xff | FALLING;
+
     /// The **committed-lower-body** move mask that routes a one-shot to the masked overlay (decision
     /// 0087): the client's `[9e8] & 0x20003f` test at `0x5fe6dc` — every direction bit (`0x3f`,
     /// which folds in the keyboard turn keys) plus swim (`0x200000`). Any of these set ⇒ the legs are
@@ -519,13 +537,18 @@ pub(super) fn gait_candidates(
     // (they can't co-occur — auto-shot never sets the engaged GUID) and before the chair loops
     // (OUR ordering; the client's call-site order vs the chair resolver isn't pinned).
     if let Some(l) = ranged_load {
-        // 109/110 (the Hold twins) are deliberately absent: `0x5fd460`'s jump table writes only
-        // 105/106/111/112, and the completion dispatcher that would promote a Load to its Hold is
-        // never reached for a bow id (wow-re `shooter-stop-law.md` §J4.1) — the reference plays
-        // no HoldBow, ever.
+        // The Hold twins 109/110 ARE reachable (decision 1544): `0x5fd460`'s own jump table writes
+        // only 105/106/111/112, but a finished Load is promoted to its Hold by the completion
+        // dispatch (`0x5fc3f0` slot 11/12/15), and the caller passes whichever of the pair
+        // currently owns the pose. 0994 left them out on §J4.1's absence proof — that the
+        // dispatcher is never reached for a bow id — which wow-re's §5 has since refuted.
+        // Each Hold falls back to its own Load first: a model that authors the pull but not the
+        // hold should freeze at full draw, not drop to ReadyUnarmed.
         return match l {
             105 => &[105, 25, 0],
             106 => &[106, 25, 0],
+            109 => &[109, 105, 25, 0],
+            110 => &[110, 106, 25, 0],
             111 => &[111, 25, 0],
             112 => &[112, 25, 0],
             _ => &[25, 0],
@@ -551,9 +574,14 @@ pub(super) fn gait_candidates(
 /// (byte-verified, wow-re `ranged-shot-anim.md`): the RANGED-slot item's subclass picks a held
 /// Load/Hold clip — Bow → LoadBow 105 · Gun/Crossbow → LoadRifle 106 · Thrown → LoadThrown 112 ·
 /// Wand → HoldThrown 111 · anything else → ReadyUnarmed 25. **Not** ReadyBow/AttackBow: no code
-/// in the client plays those rows, and the per-shot caster fire animation is a verified NEGATIVE
-/// (an exhaustive `PlayAnimation` caller sweep) — the shot itself shows only the missile (and the
-/// bow-prop string flex, a deferred polish).
+/// in the client plays those rows.
+///
+/// (This doc used to carry `ranged-shot-anim.md` §(a)'s "the per-shot caster fire animation is a
+/// verified NEGATIVE — the shot shows only the missile". That was REFUTED twice over: by the
+/// weapon-visual merge, which plays the fire clip off the weapon's own substitute visual
+/// (decision 0370/0986), and by the completion dispatch below (decision 1544). It is gone rather
+/// than hedged — a stale negative in a doc is how a session concludes the missing animation is
+/// correct, which is exactly what happened to bug B307.)
 pub(super) fn ranged_load_anim(ranged: Option<(u8, u8)>) -> u16 {
     match ranged {
         Some((2, 2)) => 105,           // Bow → LoadBow
@@ -571,17 +599,26 @@ pub(super) fn is_ranged_load(id: u16) -> bool {
     matches!(id, 105 | 106 | 112)
 }
 
-/// Whether `id` is a ranged **fire** clip — AttackBow(46) · AttackRifle(49) · AttackThrown(107).
+/// The **Hold** clip a finished ranged Load promotes to — the completion dispatch `0x5fc3f0`'s
+/// slot 11/12/15 arms: LoadBow 105 → HoldBow 109 · LoadRifle 106 → HoldRifle 110 · LoadThrown 112
+/// → HoldThrown 111. The wand's HoldThrown 111 is already the hold and re-arms itself, and
+/// anything else (ReadyUnarmed 25) holds nothing and stays put.
 ///
-/// These are the one-shots whose completion must **not** recompute the base (wow-re
-/// `shooter-stop-law.md` §J4): the anim-completion dispatcher `0x5fc3f0` is never reached for a
-/// bow id — its sole fire site `0x7122c1` pushes a literal completion-mode `1`, routing every bow
-/// id to a bare epilogue — so `AttackBow`'s finish triggers no `RecomputeBaseAnim(-1)` and the
-/// clip clamps on its last frame. Between shots the reference therefore stands in the fire clip's
-/// **authored tail** (the quick re-draw), not in a re-pulled Load and not in a hold twin. Letting
-/// the finish recompute is what replayed the full pull on every shot.
-pub(super) fn is_ranged_fire(id: u16) -> bool {
-    matches!(id, 46 | 49 | 107)
+/// **The promotion is UNCONDITIONAL** (wow-re §5, decision 1544): the `[+0xd24]` ranged-prop and
+/// `[+0xd58] & 0x600` test at `0x5fc5bc` belongs to slot **13** — the Hold's own re-arm — not to
+/// the Load's slot 11, which is the bare `mov eax,0x6d ; push eax ; call 0x5fe2f0` at `0x5fc5e9`.
+/// Reading that gate onto the Load is the mistake that would leave a shooter frozen at full draw.
+///
+/// The Hold is the only clip in the ranged cycle authored as a **loop** (asset flag, verified on
+/// five shipped character models); the fire and Load clips are clamp. That is why it can sit
+/// between shots at all, and why nothing needs to re-arm it per frame.
+pub(super) fn ranged_hold_anim(load: u16) -> u16 {
+    match load {
+        105 => 109,       // LoadBow → HoldBow
+        106 => 110,       // LoadRifle → HoldRifle
+        112 | 111 => 111, // LoadThrown → HoldThrown; the wand's hold re-arms itself
+        other => other,
+    }
 }
 
 /// Does the drawn ranged Load idle own this unit's standing pose? Byte-verified, wow-re

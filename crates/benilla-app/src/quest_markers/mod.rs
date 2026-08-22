@@ -16,8 +16,42 @@
 //!   yet; add that branch with the mount arc). No slot ⇒ the marker is created but never parented
 //!   — invisible; we render nothing.
 //! - **Scale** (`0x607570`): `1 / |attach-bone basis|`, computed once at attach and baked into the
-//!   marker's base matrix — the marker renders at a constant world size regardless of the NPC's
-//!   model scale (a gnome and an ogre get the same-sized `!`). Not distance-based, not unit scale.
+//!   marker's base matrix (`marker+0xbc`). Not distance-based, not unit scale, no clamp or floor.
+//!
+//!   **The `1/L` is a SNAPSHOT, not an invariant** (wow-re AMENDED §Q3/§Q3c, 2026-08-22, four-worker
+//!   §5 + oracle execution of `0x607570` under the difftest harness). The arithmetic is confirmed —
+//!   `L = ‖row0‖` of the attach point's WORLD matrix, so the compensation cancels the whole attach
+//!   basis (`s` and any bone-chain scale alike). What was wrong is the *published consequence*: the
+//!   old sentence here — "a constant world size regardless of the NPC's model scale, a gnome and an
+//!   ogre get the same-sized `!`" — was unconditional and **is not**. `0x607570` reads the parent's
+//!   `model+0xbc` **as it stands at attach**, and the reference has legs where it has not been
+//!   stamped yet, each leaving the ctor identity ⇒ **no counter-scale at all**:
+//!
+//!   | ordering at attach | `L` | `marker+0xbc` | final world scale at `s = 3` |
+//!   |---|---|---|---|
+//!   | parent already placed (**case B**) | `3.0` | `diag(1/3)` | **1.0 — constant** |
+//!   | parent still ctor identity (**case A**) | `≈1.0` | identity (skip) | **3.0 — proportional** |
+//!
+//!   Case A fires when `SMSG_QUESTGIVER_STATUS` lands while the body model is still streaming (the
+//!   query goes out at object-create, in the same breath as the load starts, so it is a race), and
+//!   *structurally* for a mounted questgiver whose mount M2 is still resident-pending (`0x6075ac`
+//!   tests the MOUNT model too, which `0x6074c0` does not). Nothing re-runs the bake afterwards, so
+//!   case A is permanent for that unit. Both are invisible at `s = 1`, which is why this went
+//!   unnoticed — it is visible only on a scaled creature, which is exactly where B301 came from.
+//!
+//!   **benilla is case B by construction**: [`bake_seat_scale`] deliberately waits for propagation
+//!   to produce a settled joint matrix. **That is the right leg, and it is settled by observation,
+//!   not by argument** — the director ran the A/B against the reference and 1.12's `?` looks the
+//!   same as ours (decision 1548, closing 1541's open question). B301 is `not-a-bug`: a
+//!   gnome-sized `?` over a building-sized NPC is what the real client shows too.
+//!
+//!   So do **not** "fix" this by dropping the counter-scale. The report is real, the case-A leg is
+//!   real, and the change is one line — which is exactly why this paragraph exists.
+//!
+//!   One correction worth carrying: the post-multiply operand is `CM2Scene+0xdc` = **inverse(view)**,
+//!   not "the model's world transform" (`CM2Shared+0xdc`) as the note used to say. The bone matrices
+//!   live in VIEW space and already carry `model+0xbc`; the final compose is
+//!   `marker+0xfc = marker+0xbc × parentAttachMatrix` at `0x71439b`.
 //! - **Animation** (`0x6076c0`): the marker's own M2 animation is armed looping — anim **0**
 //!   normally, anim **190** while the unit has a live overhead-name object (`unit+0xc7c` via
 //!   `0x6c7950`). The two bands hold the same 3-key bob SHAPE at different heights: anim 0 at the
@@ -508,10 +542,18 @@ fn pose_markers(
 }
 
 /// Bake each new seat's one-time counter-scale — the client's `0x607570` computes
-/// `L = |attach-bone basis|` once at attach and writes `diag(1/L)` into the marker's base matrix,
-/// so the marker's world size is constant across NPC model scales (the exact-`1.0` skip is the
-/// client's own identity guard). One-time per seat (latched), so the joint global it reads being
-/// a frame old is immaterial — bone basis length doesn't animate.
+/// `L = |attach-bone basis|` once at attach and writes `diag(1/L)` into the marker's base matrix
+/// (the exact-`1.0` skip is the client's own identity guard). One-time per seat (latched).
+///
+/// **This is the module doc's "case B" leg, and choosing it is a decision, not a transcription.**
+/// We retry until propagation yields a real joint matrix, so our `L` is always the *settled* world
+/// basis and the marker is always constant-size. The reference reads whatever `model+0xbc` happens
+/// to hold at attach, and on a still-streaming parent that is the ctor identity — no counter-scale,
+/// a marker proportional to the NPC, permanently. So the old note here ("the joint global being a
+/// frame old is immaterial — bone basis length doesn't animate") was true about the *bone* and
+/// wrong about the *risk*: what varies between the two legs is not the bone, it is whether the
+/// parent's world matrix exists yet. We keep the settled read — it is the reference's intent, the
+/// only leg that is deterministic, and (decision 1548) the leg the reference was observed on.
 fn bake_seat_scale(
     mut seats: Query<(&mut MarkerSeat, &ChildOf, &mut Transform)>,
     joints: Query<&GlobalTransform, Without<MarkerSeat>>,

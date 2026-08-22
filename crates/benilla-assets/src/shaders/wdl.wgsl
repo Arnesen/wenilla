@@ -1,12 +1,26 @@
 // WDL distant-terrain shader — the coarse horizon hills the reference draws beyond the streamed
 // detailed tiles (docs/knowledge/terrain.md "WDL"). Both stages custom.
 //
-// The reference draws WDL UNLIT + UNTEXTURED with white vertex diffuse, then fogs it with the SAME
-// scene fog as terrain/M2/WMO (VERIFIED apitrace WoW.8: prog 96 vertex-white, fog.color matching the
-// zone haze). So the colour is entirely the fog: past `fog_end` it's pure haze, and the visible result
-// is fog-coloured hill silhouettes occluding the (un-fogged) sky. Fog math + gamma handling mirror
-// terrain.wgsl exactly: planar eye-Z, GL_LINEAR, gamma space; the output is raw gamma — the buffer
-// holds bytes and the frame's one decode lives in the FFXGlow combine (GAMMA LANE, 0161).
+// The reference draws WDL UNLIT + UNTEXTURED with white vertex diffuse under the scene's fog COLOUR
+// (VERIFIED apitrace WoW.8: prog 96 vertex-white, fog.color matching the zone haze) — but NOT under
+// the scene's fog DISTANCES. The hull emitter `0x6bd780` submits its own pair right before the draw
+// (byte-read at `0x6bd7ae`–`0x6bd7c8`: `push 0; mov ecx,0xA; call 0x589e30` = fog start 0, then
+// `push 1.0f; mov ecx,0xB; call 0x589e30` = fog end 1.0; wow-re `fog-env-state.md` §5's submit
+// census, decision 1521). Linear fog `f = (end − z)/(end − start) = 1 − z` is zero for every fragment
+// beyond one yard, so the hull is the fog colour, FLAT, at every distance — a "fog hull", which is
+// what the binary calls it. What the band contributes is therefore pure silhouette: fog-coloured
+// hills occluding the (un-fogged) sky. Gamma handling mirrors terrain.wgsl: the output is raw gamma
+// — the buffer holds bytes and the frame's one decode lives in the FFXGlow combine (GAMMA LANE, 0161).
+//
+// It used to read the scene distances (`fog_params.xy`, start = frac × end, end = min(zone end, farclip))
+// and fog the white hull with them like a surface. Past the wall that is the same pure haze — but the
+// 33 yd overlap below (`WDL_OVERLAP`) then sat INSIDE the fog ramp, mixed toward WHITE by up to
+// `33 / (end − start)` = `44 / farclip` at the usual 0.25 start fraction: 25% at 177, 15% at 297, 13% at
+// 350 — and 0 whenever the zone's own fog ends nearer than `farclip`, which is why the default 777 never
+// showed it. Wherever the coarse hull rides above the fine mesh along a grazing ray — a crater rim, a
+// dip the 33-yd sampling bridges — that pale hull showed above the fine terrain's fogged-out silhouette
+// as a band brightest at its lower edge and fading upward, growing as the view distance dropped (the
+// director's "white from beyond the cutoff showing through the fog", decision 1521).
 //
 // ## The far band is a BACKDROP, not the far half of a plane partition (decision 0684)
 //
@@ -66,7 +80,7 @@ struct WowLight {
     _light_sun: vec4<f32>,     // 2
     _light_spec: vec4<f32>,    // 3
     fog_color: vec4<f32>,      // 4 rgb = Light.dbc row 7 (gamma 0..1); w = enable (>0.5 ⇒ blend)
-    fog_params: vec4<f32>,     // 5 x = fog_start yd; y = fog_end yd; z unused; w = farclip wall (0 ⇒ off)
+    fog_params: vec4<f32>,     // 5 x/y = the SCENE fog start/end yd (unread here — the hull has its own pair); z unused; w = farclip wall (0 ⇒ off)
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> w: WowLight;
 
@@ -93,7 +107,7 @@ fn vertex(in: Vertex) -> WdlVsOut {
 @fragment
 fn fragment(in: WdlVsOut) -> WdlFsOut {
     // PLANAR eye-Z (view-space depth), NOT radial — same as terrain.wgsl (apitrace-verified). Used for
-    // the band's near plane (below) and the fog.
+    // the band's near plane (below); the hull's own fog is saturated everywhere, so it needs no distance.
     let eye_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
     let farclip = w.fog_params.w;
 
@@ -103,13 +117,13 @@ fn fragment(in: WdlVsOut) -> WdlFsOut {
         discard;
     }
 
-    // White vertex diffuse (the reference's WDL colour); fog does all the colouring. Past `fog_end`
-    // — and `fog_end = min(zone end, farclip)`, so that is the whole band — this is pure fog colour.
+    // White vertex diffuse under the hull pass's OWN fog pair — start 0, end 1.0 (the header; decision
+    // 1521): saturated for every fragment beyond one yard, so the hull is the fog colour, flat. The
+    // scene fog DISTANCES (`fog_params.xy`) are deliberately not read here — only its colour and the
+    // enable (with fog off, the reference shows the bare white hull, and so do we).
     var rgb = vec3<f32>(1.0);
     if (w.fog_color.w > 0.5) {
-        let denom = max(w.fog_params.y - w.fog_params.x, 0.001);
-        let factor = clamp((w.fog_params.y - eye_z) / denom, 0.0, 1.0);
-        rgb = mix(w.fog_color.xyz, rgb, factor);
+        rgb = w.fog_color.xyz;
     }
 
     var out: WdlFsOut;

@@ -65,7 +65,7 @@ fn coin_and_two_items() -> LootState {
     LootState {
         fishing: false,
         rows: vec![
-            LootRow {
+            Some(LootRow {
                 item_id: 0,
                 name: Some("1g 23s 45c".into()),
                 texture: Some("Interface\\Icons\\INV_Misc_Coin_01".into()),
@@ -73,8 +73,9 @@ fn coin_and_two_items() -> LootState {
                 quality: Some(1),
                 is_coin: true,
                 link: None,
-            },
-            LootRow {
+                random_property_id: 0,
+            }),
+            Some(LootRow {
                 item_id: 0,
                 name: Some("Wool Cloth".into()),
                 texture: Some("Interface\\Icons\\INV_Fabric_Wool_01".into()),
@@ -82,8 +83,9 @@ fn coin_and_two_items() -> LootState {
                 quality: Some(2), // uncommon → green text
                 is_coin: false,
                 link: None,
-            },
-            LootRow {
+                random_property_id: 0,
+            }),
+            Some(LootRow {
                 item_id: 0,
                 name: Some("Linen Cloth".into()),
                 texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".into()),
@@ -91,15 +93,17 @@ fn coin_and_two_items() -> LootState {
                 quality: Some(1), // common → white text
                 is_coin: false,
                 link: None,
-            },
+                random_property_id: 0,
+            }),
         ],
     }
 }
 
 /// The whole loot chain minus Bevy (decision 0084): LOOT_OPENED lands the window at the left slot,
 /// the coin row (first) + two item rows render with quality-coloured text + a stack count, a coin
-/// click and an item click each queue the right 1-based row pick, a LOOT_UPDATE with a row removed
-/// repaints to two rows, and the close button releases through OnHide → CloseLoot.
+/// click and an item click each queue the right 1-based row pick, a LOOT_UPDATE with the coin row
+/// looted hides ITS button in place (the items keep their rows — the fixed slot layout), and the
+/// close button releases through OnHide → CloseLoot.
 #[test]
 fn shipped_loot_frame_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
@@ -197,8 +201,36 @@ fn shipped_loot_frame_drives_end_to_end() {
             && (white[2] - 1.0).abs() < 0.02,
         "common item text is white, got {white:?}"
     );
-    // The stack count "3" overlays the Wool Cloth row.
-    assert!(has_text("3"), "the x3 stack count renders");
+    // The stack count "3" sits INSIDE the Wool Cloth row's icon, at the reference
+    // ItemButtonTemplate inset (BOTTOMRIGHT -5,+2 of the 37px icon) — the director's report was
+    // this count overshooting the icon's right border onto the name plate.
+    let count_rect = quads
+        .iter()
+        .find_map(|q| match &q.content {
+            QuadContent::Text { text: Some(x), .. } if x == "3" => q.rect,
+            _ => None,
+        })
+        .expect("the x3 stack count renders");
+    let icon_rect = quads
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                if p.contains("INV_Fabric_Wool_01"))
+        })
+        .and_then(|q| q.rect)
+        .expect("Wool Cloth icon quad");
+    assert!(
+        (count_rect.right - (icon_rect.right - 5.0)).abs() < 0.6,
+        "count right edge pinned 5px inside the icon (ref ItemButtonTemplate), got {} vs icon right {}",
+        count_rect.right,
+        icon_rect.right
+    );
+    assert!(
+        (count_rect.bottom - (icon_rect.bottom + 2.0)).abs() < 0.6,
+        "count bottom pinned 2px above the icon bottom, got {} vs icon bottom {}",
+        count_rect.bottom,
+        icon_rect.bottom
+    );
 
     // Click the coin row's icon → LootSlot(1); click the Wool Cloth row's icon → LootSlot(2).
     let (cx, cy) = icon_center(&quads, "INV_Misc_Coin_01");
@@ -214,11 +246,12 @@ fn shipped_loot_frame_drives_end_to_end() {
     );
     assert!(!s.take_loot_close());
 
-    // LOOT_UPDATE with the coin row gone (looted) repaints to two rows, keeping the window open.
-    s.set_loot(Some(LootState {
-        fishing: false,
-        rows: coin_and_two_items().rows[1..].to_vec(),
-    }));
+    // LOOT_UPDATE with the coin row LOOTED: its slot becomes a gap (`None`) — its button hides in
+    // place and the two items KEEP their rows (the reference's fixed slot layout; the director's
+    // report was these rows sliding up to fill the coin's spot).
+    let mut coin_looted = coin_and_two_items();
+    coin_looted.rows[0] = None;
+    s.set_loot(Some(coin_looted));
     s.fire_event("LOOT_UPDATE", vec![]);
     let vis2: (bool, bool, bool) = s
         .eval(
@@ -226,7 +259,11 @@ fn shipped_loot_frame_drives_end_to_end() {
                     LootButton3:IsVisible()",
         )
         .unwrap();
-    assert_eq!(vis2, (true, true, false), "the coin row cleared → two rows");
+    assert_eq!(
+        vis2,
+        (false, true, true),
+        "the looted coin row hides in place — the items do not shift up"
+    );
 
     // The close button hides the window → OnHide → CloseLoot() queues the release intent.
     s.run("BenillaLootCloseButton_OnClick()").unwrap();
@@ -343,20 +380,23 @@ fn shipped_loot_frame_pages_five_items() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "LootFrame.xml");
 
-    let rows: Vec<LootRow> = (0..5)
-        .map(|i| LootRow {
-            item_id: 0,
-            name: Some(format!("Item {i}")),
-            texture: Some(format!("Interface\\Icons\\Item_{i}")),
-            quantity: 1,
-            quality: Some(1),
-            is_coin: false,
-            link: None,
+    let rows: Vec<Option<LootRow>> = (0..5)
+        .map(|i| {
+            Some(LootRow {
+                item_id: 0,
+                name: Some(format!("Item {i}")),
+                texture: Some(format!("Interface\\Icons\\Item_{i}")),
+                quantity: 1,
+                quality: Some(1),
+                is_coin: false,
+                link: None,
+                random_property_id: 0,
+            })
         })
         .collect();
     s.set_loot(Some(LootState {
         fishing: false,
-        rows,
+        rows: rows.clone(),
     }));
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -387,6 +427,29 @@ fn shipped_loot_frame_pages_five_items() {
         .eval("return LootUpButton:IsVisible(), LootDownButton:IsVisible()")
         .unwrap();
     assert_eq!(pager2, (true, false), "page 2: Up shown, Down hidden");
+
+    // Back on page 1, loot all three of its rows: their buttons hide in place, and the emptied
+    // page advances to page 2 on its own — the ref's LOOT_SLOT_CLEARED tail (LootFrame.lua
+    // l.38-50: every button hidden + Down visible → PageDown).
+    s.run("LootFrame_PageUp()").unwrap();
+    let mut cleared = rows;
+    cleared[0] = None;
+    cleared[1] = None;
+    cleared[2] = None;
+    s.set_loot(Some(LootState {
+        fishing: false,
+        rows: cleared,
+    }));
+    s.fire_event("LOOT_UPDATE", vec![]);
+    assert_eq!(
+        s.eval::<i64>("return LootFrame.page").unwrap(),
+        2,
+        "an emptied page auto-advances to the next"
+    );
+    let auto: (bool, bool) = s
+        .eval("return LootButton1:IsVisible(), LootButton2:IsVisible()")
+        .unwrap();
+    assert_eq!(auto, (true, true), "…showing the two remaining rows");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -544,7 +607,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     s.set_loot(Some(LootState {
         fishing: false,
         rows: vec![
-            LootRow {
+            Some(LootRow {
                 item_id: 0,
                 name: Some("1g 23s 45c".into()),
                 texture: Some("Interface\\Icons\\INV_Misc_Coin_01".into()),
@@ -552,8 +615,9 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
                 quality: Some(1),
                 is_coin: true,
                 link: None, // synthesized row, no item behind it
-            },
-            LootRow {
+                random_property_id: 0,
+            }),
+            Some(LootRow {
                 item_id: 2589,
                 name: Some("Wool Cloth".into()),
                 texture: Some("Interface\\Icons\\INV_Fabric_Wool_01".into()),
@@ -561,7 +625,8 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
                 quality: Some(1),
                 is_coin: false,
                 link: Some(WOOL_LINK.into()),
-            },
+                random_property_id: 0,
+            }),
         ],
     }));
     s.fire_event("LOOT_OPENED", vec![]);

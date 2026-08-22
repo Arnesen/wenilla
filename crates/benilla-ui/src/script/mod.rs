@@ -39,6 +39,7 @@
 mod action;
 mod action_bar_toggles;
 mod addon_message;
+mod auction;
 mod aura;
 mod backdrop;
 mod bank;
@@ -138,6 +139,10 @@ mod worn_display;
 pub use action::{ActionSlot, ActionState};
 pub use addon::AddOnInfo;
 pub use addon_message::{AddonDistribution, AddonSend};
+pub use auction::{
+    AuctionBid, AuctionCategory, AuctionItemRow, AuctionListState, AuctionQuery,
+    AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
+};
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
@@ -146,7 +151,9 @@ pub use char_stats::{
     SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_send::ChatSend;
-pub use container::{ContainerMove, ContainerSlot, ContainerState, EnchantView, UiCursorMode};
+pub use container::{
+    ContainerMove, ContainerSlot, ContainerState, EnchantView, RandomPropertyView, UiCursorMode,
+};
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
@@ -167,7 +174,7 @@ pub use item_text::ItemTextState;
 pub use loot::{LootRow, LootState};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
-pub use mail::{MailInboxRow, MailSendRequest, MailState};
+pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
@@ -555,6 +562,7 @@ impl UiScript {
         bank::install(&lua)?;
         item_text::install(&lua)?;
         mail::install(&lua)?;
+        auction::install(&lua)?;
         trainer::install(&lua)?;
         taxi::install(&lua)?;
         trade::install(&lua)?;

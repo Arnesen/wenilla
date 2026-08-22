@@ -145,6 +145,10 @@ pub mod interact;
 pub mod interior;
 pub mod lighting;
 pub mod liquid;
+
+/// macOS `Cmd+Q`, re-pointed at the window close so the gesture goes through an exit the client
+/// can actually observe (decision 1528).
+pub mod mac_quit;
 pub mod map_proj;
 pub mod mat_anim_table;
 pub mod mesh_tag;

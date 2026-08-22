@@ -32,9 +32,9 @@
 //! The framing is the model's **authored portrait camera** — the MD20 camera `cameraLookup[0]`
 //! selects (VERIFIED, wow-re `system/ui/scratch/portrait-render.md` §4 + corrected verdict
 //! `aa186e79`): the real bake builds `lookAt(eye, target, up-from-roll)` + the gxumath
-//! *diagonal-FOV* perspective at the portrait path's fixed **4/3 aspect** — net vertical
-//! half-angle `0.3·fov`, with a 3:4 anamorphic squeeze (`framing::WowPortraitProjection`) —
-//! and **no** engine-side yaw or normalization on top. Every artist calibrated camera 0 to their
+//! *diagonal-FOV* perspective at the portrait path's aspect, which is **1.0 on every screen** —
+//! net vertical half-angle `fov/(2√2)`, isotropic (`framing::WowPortraitProjection`, decision
+//! 1543) — and **no** engine-side yaw or normalization on top. Every artist calibrated camera 0 to their
 //! own model — that is the whole mechanism behind the ref's uniformly tight, consistently-angled
 //! face crops across humans, wolves, and rabbits. It supersedes the first RE verdict's C4 ("framing
 //! is not model data"), corrected on the wow-re record. A camera-less model (a few creatures,
@@ -82,15 +82,15 @@ pub(crate) use framing::{attachment_point, head_anchor, PortraitAnchors};
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
 use booth::{
-    clear_booth_rig, spawn_booth_effects, spawn_booth_model, BoothBillboardSpec, BoothEffects,
-    BoothMotion, BoothPart, BoothRider,
+    clear_booth_rig, spawn_booth_effects, spawn_booth_model, spawn_booth_own_emitters,
+    BoothBillboardSpec, BoothEffects, BoothMotion, BoothPart, BoothRider,
 };
 mod dressup;
 pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
 pub(crate) use glue_booth::{
-    CreateLook, GlueLook, GluePreview, GluePreviewBake, GlueScene, PreviewBillboard,
-    PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
+    CreateLook, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
+    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
 use light::{material_variant, model_pane_light, studio_light, BoothLight};
@@ -712,6 +712,7 @@ impl Plugin for PortraitPlugin {
             .init_resource::<PetDollBooth>()
             .init_resource::<glue_booth::GluePreview>()
             .init_resource::<glue_booth::GluePreviewBake>()
+            .init_resource::<glue_booth::GluePetBake>()
             .init_resource::<dressup::DressUpPreview>()
             .init_resource::<dressup::DressUpBake>()
             .init_resource::<Booths>()
@@ -736,6 +737,8 @@ impl Plugin for PortraitPlugin {
                     sync_petdoll_booth,
                     glue_booth::sync_glue_booth,
                     glue_booth::sync_glue_scene,
+                    // After the scene: the pet's seat and its light are the scene's to publish.
+                    glue_booth::sync_glue_pet,
                     dressup::sync_dressup_booth,
                     // Last: it reads the wake/pending state every sync above may have armed.
                     gate_booth_cameras,
@@ -843,9 +846,8 @@ pub(crate) fn spawn_warm_booth(
                 fov: framing::PANE_FIXED_FOV,
                 near: 0.02,
                 far: 100.0,
-                // The warm pass compiles PIPELINES, which neither aspect keys.
+                // The warm pass compiles PIPELINES, which the aspect does not key.
                 aspect: 1.0,
-                crop_aspect: 1.0,
             }),
             layer.clone(),
         ))

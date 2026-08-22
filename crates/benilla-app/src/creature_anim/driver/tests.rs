@@ -2871,28 +2871,82 @@ fn the_weapon_visual_hold_alone_never_puts_a_shooter_in_the_drawn_idle() {
 }
 
 /// The mid-volley half of the same report ("when it's on and I'm running it keeps repeating the
-/// aim animation weirdly") — and the deeper cause of the aiming look the screenshot caught.
+/// aim animation weirdly") — **re-derived, and inverted, by decision 1544.**
 ///
-/// wow-re `shooter-stop-law.md` §J4: the anim-completion dispatcher `0x5fc3f0` is **never reached
-/// for a bow id** (its sole fire site pushes a literal completion-mode `1`), so a finished
-/// AttackBow triggers no `RecomputeBaseAnim(-1)`. It clamps on its own authored tail — the quick
-/// re-draw — and stays there. Our machine instead recomputed on every one-shot completion, and
-/// for an armed shooter the recompute re-picks the Load clip: **a full re-pull on every shot**,
-/// with the arrow re-attached each time by 0409's re-latch. Four independent lines settle it
-/// (the byte mechanism, vmangos sending `SMSG_SPELL_START` once per volley so shots 2..N carry no
-/// PrecastKit, the asset census showing `$BWP` only in the Load clips, and the director's screen).
+/// 0994 read `shooter-stop-law.md` §J4 as: the completion dispatcher `0x5fc3f0` is never reached
+/// for a bow id, so a finished AttackBow recomputes nothing and clamps on its tail. wow-re's §5
+/// refuted that absence proof — the dispatcher has a SECOND, deferred fire site (`0x719370`
+/// enqueues the callback as a plain argument with mode 0; `0x7074b0` invokes it later as
+/// `call [esi+4]`, which an instruction-encoding census cannot see) — and decoded its jump table:
+/// 46/49/107 land on slot 22, a bare `RecomputeBaseAnim(-1)`, and a finished Load lands on slot
+/// 11/12/15, which arms the Hold **unconditionally**.
 ///
-/// The cancel is what recomputes out of it (`0x6ea080` ends with `RecomputeBaseAnim(-1)`), which
-/// here is the arm simply dropping.
+/// So the mid-volley cycle is **fire → re-pull → hold**, once per shot. That re-pull is the
+/// "reload" of bug B307: `$BWP` lives only in the Load clips (verified on five shipped character
+/// models), so it is the only thing that can put the arrow back on the string — and holding it
+/// out left every shot after the first firing from an empty hand.
+///
+/// What 0994 got right and this keeps: the director's original complaint was about a *moving*
+/// shooter, and locomotion still outranks the drawn idle, so nothing here re-pulls mid-run.
 #[test]
-fn a_mid_volley_fire_clip_does_not_replay_the_pull_and_the_cancel_recomputes() {
+fn a_mid_volley_fire_clip_re_pulls_and_the_pull_promotes_to_the_hold() {
+    use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+    use bevy::animation::AnimationClip;
+
+    // Stand-in spans; only the ORDER of completions is load-bearing, not the numbers.
+    const PULL: f32 = 0.7;
+    const FIRE: f32 = 0.5;
+
     let mut app = app();
+    let asset = |app: &mut App, secs: f32| {
+        let mut c = AnimationClip::default();
+        c.set_duration(secs);
+        app.world_mut()
+            .resource_mut::<Assets<AnimationClip>>()
+            .add(c)
+    };
+    let (stand, pull, fire, hold) = (
+        asset(&mut app, 1.0),
+        asset(&mut app, PULL),
+        asset(&mut app, FIRE),
+        asset(&mut app, 1.0),
+    );
+    let (graph, nodes) = AnimationGraph::from_clips([stand, pull, fire, hold]);
+    let graph_handle = app
+        .world_mut()
+        .resource_mut::<Assets<AnimationGraph>>()
+        .add(graph);
+
+    // A real shooter's model authors all four (HumanMale: 0, 105, 46, 109 — `benilla-extract
+    // … m2seq`), and 109 is the only one of them authored as a LOOP.
+    let mut stand_clip = clip(0, 0, true);
+    stand_clip.node = nodes[0];
+    let mut pull_clip = clip(105, 0, false);
+    pull_clip.node = nodes[1];
+    pull_clip.duration = PULL;
+    let mut fire_clip = clip(46, 0, false);
+    fire_clip.node = nodes[2];
+    fire_clip.duration = FIRE;
+    let mut hold_clip = clip(109, 0, true);
+    hold_clip.node = nodes[3];
+    hold_clip.duration = 1.0;
+
     let unit = app
         .world_mut()
         .spawn((
-            archer_model(),
+            ModelAnimations {
+                graph: graph_handle.clone(),
+                clips: vec![stand_clip, pull_clip, fire_clip, hold_clip],
+                hand_close: [None, None],
+                playable_animation_lookup: Vec::new(),
+                animation_lookup: Vec::new(),
+                global_bones: Vec::new(),
+                first_seq: None,
+                pose: Default::default(),
+            },
             AnimationPlayer::default(),
             AnimationTransitions::new(),
+            AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             crate::net::SelfPlayer,
             Wielded {
@@ -2911,18 +2965,27 @@ fn a_mid_volley_fire_clip_does_not_replay_the_pull_and_the_cancel_recomputes() {
     app.update();
     let gait = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
     let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+
     assert_eq!(gait(&app), Some(105), "the volley opens with the pull");
 
-    // Shot 1 fires. AttackBow(46) takes the body as a one-shot; this model authors no 46, so it
-    // reads as finished the moment the machine looks at it — the state right after any fire clip.
-    {
-        let mut e = app.world_mut().entity_mut(unit);
-        let mut d = e.get_mut::<AnimDriver>().unwrap();
-        d.mode = super::super::select::Mode::Swing {
-            id: 46,
-            under: None,
-        };
-    }
+    // …which promotes to the HOLD on its own completion — slot 11, unconditional. The extra
+    // frame is the schedule, not a fudge: the driver runs in `Update` and Bevy advances the
+    // clips in `PostUpdate`, so a completion is visible to the machine on the frame AFTER the
+    // one that finished it.
+    advance(&mut app, 1000);
+    app.update();
+    assert_eq!(
+        gait(&app),
+        Some(109),
+        "a finished LoadBow yields HoldBow — the drawn pose the shooter sits in between shots"
+    );
+
+    // Shot 1: the fire clip takes the body as a one-shot, through the real message lane.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 46,
+        seq: 1,
+    });
     app.update();
     assert_eq!(
         mode(&app),
@@ -2930,14 +2993,33 @@ fn a_mid_volley_fire_clip_does_not_replay_the_pull_and_the_cancel_recomputes() {
             id: 46,
             under: None,
         },
-        "the fire clip's completion must NOT recompute the base — the reference has no completion \
-         dispatch for a bow id, so it clamps on its tail"
+        "AttackBow takes bone 0"
     );
+
+    // Its completion recomputes — and for an armed shooter the base re-picks the pull. THIS is
+    // the reload the report was missing.
+    advance(&mut app, 1000);
+    app.update();
+    assert_eq!(
+        mode(&app),
+        super::super::select::Mode::Gait,
+        "the fire clip's completion recomputes the base (slot 22's bare RecomputeBaseAnim(-1))"
+    );
+    // The recompute clears the gait and re-picks it on the following frame (`drv.gait = None`).
+    app.update();
     assert_eq!(
         gait(&app),
         Some(105),
-        "…and nothing re-armed the gait: no second pull, and never the HoldBow twin (109), which \
-         the reference never plays at all"
+        "…and the shooter RE-PULLS: the per-shot reload, whose $BWP re-nocks the arrow"
+    );
+
+    // …and settles back into the hold, closing the cycle.
+    advance(&mut app, 1000);
+    app.update();
+    assert_eq!(
+        gait(&app),
+        Some(109),
+        "fire → re-pull → hold, once per shot"
     );
 
     // The volley ends — the cancel's `RecomputeBaseAnim(-1)`.
@@ -2949,6 +3031,183 @@ fn a_mid_volley_fire_clip_does_not_replay_the_pull_and_the_cancel_recomputes() {
     assert_eq!(
         gait(&app),
         Some(0),
-        "dropping the arm recomputes out of the fire clip and the shooter stands up"
+        "dropping the arm recomputes out of the hold and the shooter stands up"
+    );
+}
+
+/// **B307's driver half** — the link after the router: does an `EmoteAnim { anim_id: 46 }`
+/// arriving on a self-player who is [`crate::creature_anim::AutoRepeatArmed`], drawn
+/// (`sheath_cur == 2`) and standing in the pull (gait 105) actually ARM clip 46 on the body,
+/// **shot after shot**?
+///
+/// Two guards sit on that path and each could silently eat shots 2 and 3 of a volley — leaving
+/// exactly the reported symptom, a shooter that fires from a still pose:
+///
+/// 1. the **combat fast-path** (`0x5fe43c`): a combat clip requested while another combat clip
+///    plays is not armed at all — the live clip doubles rate and the request parks. AttackBow is
+///    NOT in the client's combat set (`0x5fcc10`: `10 | 16..=24 | 30 | 36 | 57..=59 | 85..=88 |
+///    95 | 117 | 118`), so it must never take this road;
+/// 2. the **arm-level same-id dedup** (`0x5fdba0`): a requested id already occupying its slot
+///    *and still playing* is not re-armed. Written when 0994's law held the base out of the
+///    recompute, so shot 2 would find `Mode::Swing { id: 46 }` still set; decision 1544 restored
+///    the recompute, so the mode is back in `Gait` by then. The dedup is checked here either way
+///    — it is the guard that would swallow a shot if a fire clip ever were still live.
+///
+/// Driven through the real `EmoteAnim` lane (no poking `drv.mode`), with real clip assets so
+/// Bevy completes them, and 3 s of clock between shots — a bow's cadence.
+#[test]
+fn every_shot_of_a_volley_re_arms_the_fire_clip_through_the_emote_lane() {
+    use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+    use bevy::animation::AnimationClip;
+
+    /// Stand-in spans for LoadBow and AttackBow. The exact numbers are not load-bearing and
+    /// are not claimed to be the real M2's; what matters is only that a fire clip is far
+    /// shorter than the ~3 s a bow puts between Auto Shots, so the dedup's "still playing"
+    /// test must read false by the next shot.
+    const PULL: f32 = 0.7;
+    const FIRE: f32 = 0.5;
+
+    let mut app = app();
+    let asset = |app: &mut App, secs: f32| {
+        let mut c = AnimationClip::default();
+        c.set_duration(secs);
+        app.world_mut()
+            .resource_mut::<Assets<AnimationClip>>()
+            .add(c)
+    };
+    let (stand, pull, fire) = (
+        asset(&mut app, 1.0),
+        asset(&mut app, PULL),
+        asset(&mut app, FIRE),
+    );
+    let (graph, nodes) = AnimationGraph::from_clips([stand, pull, fire]);
+    let graph_handle = app
+        .world_mut()
+        .resource_mut::<Assets<AnimationGraph>>()
+        .add(graph);
+
+    // The shooter's model. `archer_model` deliberately authors no 46; a real HumanMale.m2 does
+    // (sequences 46/49/105/106, `benilla-extract … m2seq`), and 46 has to exist for "was it
+    // armed?" to be an observable question at all.
+    let mut stand_clip = clip(0, 0, true);
+    stand_clip.node = nodes[0];
+    let mut pull_clip = clip(105, 0, false);
+    pull_clip.node = nodes[1];
+    pull_clip.duration = PULL;
+    let mut fire_clip = clip(46, 0, false);
+    fire_clip.node = nodes[2];
+    fire_clip.duration = FIRE;
+
+    let unit = app
+        .world_mut()
+        .spawn((
+            ModelAnimations {
+                graph: graph_handle.clone(),
+                clips: vec![stand_clip, pull_clip, fire_clip],
+                hand_close: [None, None],
+                playable_animation_lookup: Vec::new(),
+                animation_lookup: Vec::new(),
+                global_bones: Vec::new(),
+                first_seq: None,
+                pose: Default::default(),
+            },
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimationGraphHandle(graph_handle),
+            AnimDriver::default(),
+            crate::net::SelfPlayer,
+            Wielded {
+                ranged: Some((2, 0x2)), // bow
+                ..Default::default()
+            },
+            crate::creature_anim::AutoRepeatArmed,
+        ))
+        .id();
+
+    // The volley opens: the stance snaps drawn (`SMSG_SPELL_START`'s ranged snap) and the
+    // shooter pulls.
+    app.world_mut().write_message(SheathRequest {
+        entity: unit,
+        state: 2,
+        ceremony: false,
+    });
+    app.update();
+    app.update();
+    let gait = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
+    let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    let deferred = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .deferred
+    };
+    let fire_running = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimationPlayer>()
+            .unwrap()
+            .animation(nodes[2])
+            .map(|a| !a.is_finished())
+    };
+    assert_eq!(gait(&app), Some(105), "the volley opens with the pull");
+
+    const FIRING: super::super::select::Mode = super::super::select::Mode::Swing {
+        id: 46,
+        under: None,
+    };
+    for shot in 1..=3u64 {
+        // `SMSG_SPELL_GO` → the router's cast kit → this message. Nothing else changes.
+        app.world_mut().write_message(EmoteAnim {
+            entity: unit,
+            anim_id: 46,
+            seq: shot,
+        });
+        app.update();
+        assert_eq!(mode(&app), FIRING, "shot {shot} takes bone 0");
+        assert_eq!(
+            fire_running(&app),
+            Some(true),
+            "shot {shot}'s release clip is armed and RUNNING — neither the combat fast-path nor \
+             the same-id dedup swallowed it"
+        );
+        assert_eq!(
+            deferred(&app),
+            None,
+            "shot {shot} was a normal arm, not a fast-path park"
+        );
+
+        // The ~3 s to the next shot. The clip plays out and CLAMPS on its authored tail: no
+        // recompute for a bow id under auto-repeat, so no second pull is armed between shots.
+        advance(&mut app, 3000);
+        assert_eq!(
+            fire_running(&app),
+            Some(false),
+            "shot {shot}'s clip finished long before the next — which is exactly what keeps the \
+             same-id dedup from eating shot {}",
+            shot + 1
+        );
+        assert_eq!(
+            mode(&app),
+            FIRING,
+            "…and the base never recomputed out of it"
+        );
+        assert_eq!(
+            gait(&app),
+            None,
+            "…so the pull was not replayed between shots"
+        );
+    }
+
+    // The volley ends — the cancel's `RecomputeBaseAnim(-1)`: the shooter stands up.
+    app.world_mut()
+        .entity_mut(unit)
+        .remove::<crate::creature_anim::AutoRepeatArmed>();
+    app.update();
+    app.update();
+    assert_eq!(
+        gait(&app),
+        Some(0),
+        "dropping the arm stands the shooter up"
     );
 }

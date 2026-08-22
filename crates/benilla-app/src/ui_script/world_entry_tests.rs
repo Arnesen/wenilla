@@ -69,6 +69,9 @@ fn roster_named(name: &str, guid: u64) -> Roster {
         },
         flags: 0,
         equipment: [benilla_protocol::CharEnumItem::default(); 19],
+        pet_display_id: 0,
+        pet_level: 0,
+        pet_family: 0,
     };
     Roster::with_pending_pick(vec![row], guid)
 }

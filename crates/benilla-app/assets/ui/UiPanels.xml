@@ -11,12 +11,13 @@
         reference's window arbitration (a different number is a different window order), and the
         `UISpecialFrames` seeds. The code around that data is ours.
 
-        Scope: `left`, `center` and `full` are all live, and so is `UIChildWindows` (decision 1507
-        — all four of the reference's child windows ship now). `doublewide` is not — its one 1.12
-        tenant is the auction house, which benilla doesn't ship — but the registration table keeps
-        its exact shape so a later row drops in unchanged. **`UISpecialFrames` is not ours to write
-        into** (decision 1206): it is the table an ADDON puts its own window in, and 34 corpus call
-        sites do.
+        Scope: all four areas are live — `left`, `center`, `full` and `doublewide` — and so is
+        `UIChildWindows` (decision 1507: all four of the reference's child windows ship now).
+        `doublewide` was the last one out, on the honest grounds that its one 1.12 tenant is the
+        auction house and benilla didn't ship one; decision 1511 is the arc that does, so the slice
+        came with it rather than the window working around it. **`UISpecialFrames` is not ours to
+        write into** (decision 1206): it is the table an ADDON puts its own window in, and 34 corpus
+        call sites do.
 
         Rows are keyed by the frame names we actually ship. Most of those ARE the reference's own
         (`GossipFrame`, `MerchantFrame`, `LootFrame`); where ours differs, the row is `Benilla*` and
@@ -74,6 +75,13 @@
         -- registration line (`UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }`),
         -- quoted verbatim — same left-slot competition as Gossip/Merchant/Trainer above.
         UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }
+        -- The auction house (decision 1511, AuctionFrame.xml): the reference's own registration,
+        -- quoted verbatim from `Blizzard_AuctionUI.lua` l.13 rather than UIParent.lua — the window
+        -- ships as a loadable addon there, so it registers its own row. **The one and only
+        -- `doublewide` row in all of 1.12**: an 832-wide window takes the left AND centre seats at
+        -- once, which is why the slice above exists at all. Its `pushable = 0` is quoted and inert
+        -- — ShowUIPanel's doublewide arm never consults it (l.392-397).
+        UIPanelWindows["AuctionFrame"] = { area = "doublewide", pushable = 0 }
         -- The dressing room (decision 1060, DressUpFrame.xml): the ref's own UIParent.lua l.41
         -- registration (`UIPanelWindows["DressUpFrame"] = { area = "left", pushable = 2 }`), quoted
         -- verbatim — pushable=2 lets the NPC-session windows (pushable=0) shove it aside, which is
@@ -168,7 +176,7 @@
         -- table instead of squatting the `UIParent` global name; a future `CreateFrame("Frame",
         -- "UIParent")` then lands cleanly on an empty global rather than silently coexisting with our
         -- state. Every function below is defined in this same chunk, so they all close over it.
-        local slots = { left = nil, center = nil, fullscreen = nil }
+        local slots = { left = nil, center = nil, fullscreen = nil, doublewide = nil }
 
         -- SetLeftFrame(frame) — UIParent.lua l.809-824. Hides the old left occupant, SetPoints +
         -- Shows the new one at the left slot's screen anchor (verified: TOPLEFT UIParent, 0, -104).
@@ -268,6 +276,41 @@
             return slots.fullscreen
         end
 
+        -- SetDoublewideFrame(frame) — UIParent.lua l.788-808. One frame takes the left AND center
+        -- seats at once: both incumbents are dropped (nil'd first, then hidden — the order matters,
+        -- since an OnHide that re-enters this manager must not find itself still seated), and the
+        -- new frame lands at the left slot's own screen anchor, because a doublewide window simply
+        -- starts where left starts and is wide enough to cover both.
+        --
+        -- Note what the reference does NOT do: `HideUIPanel` has no doublewide branch (l.754-786),
+        -- so nothing ever clears this seat — `UIParent.doublewide` keeps pointing at the auction
+        -- window forever once it has been opened, and every later ShowUIPanel re-hides an
+        -- already-hidden frame. We reproduce that rather than inventing a clear: `Hide()` on a
+        -- hidden frame fires nothing, so the difference is unobservable, and a "fix" here would be
+        -- a silent divergence in the one function every window's placement runs through.
+        function SetDoublewideFrame(frame)
+            local oldLeft = slots.left
+            local oldCenter = slots.center
+            slots.doublewide = frame
+            slots.left = nil
+            slots.center = nil
+            if oldLeft then
+                oldLeft:Hide()
+            end
+            if oldCenter then
+                oldCenter:Hide()
+            end
+            if frame then
+                frame:SetPoint("TOPLEFT", "UIParent", "TOPLEFT", 0, -104)
+                frame:Show()
+            end
+        end
+
+        -- GetDoublewideFrame — UIParent.lua l.924-926.
+        function GetDoublewideFrame()
+            return slots.doublewide
+        end
+
         -- The area a frame is REGISTERED for — or nil, which is equally the answer for no frame at
         -- all and for a frame this manager has never heard of. Four rules below turn on exactly
         -- that question ("is a native-center window holding the screen?", "is the frame parked at
@@ -365,10 +408,11 @@
             end
         end
 
-        -- ShowUIPanel(frame) — UIParent.lua l.649-751, the left+center+full slice (pin §3 steps
-        -- 1,3-5, plus the native-center mode decision 0674 needed and the `full` slot the world
-        -- map took in 0203/0674). Still skipped by scope: `doublewide` (l.707-710 — no such row is
-        -- registered), which is why the last arm below is a bare Show.
+        -- ShowUIPanel(frame) — UIParent.lua l.649-751, now the WHOLE slice: left, center, full
+        -- and doublewide (pin §3 steps 1,3-5, plus the native-center mode decision 0674 needed and
+        -- the `full` slot the world map took in 0203/0674). `doublewide` (l.706-716) arrived with
+        -- the auction house, decision 1511 — the last arm below is now genuinely unreachable for a
+        -- registered row and stays only as the defensive fallback its comment says it is.
         --
         -- Two questions, in order: may it open at all, and where does it sit.
         function ShowUIPanel(frame, force)
@@ -404,10 +448,25 @@
                 CloseWindows()
                 CloseAllBags()
                 SetCenterFrame(frame, 1)
+            elseif info.area == "doublewide" then
+                -- l.706-710: it wants both seats, so it takes both and nothing else is consulted
+                -- — including its own `pushable`, which is why the auction house's registered 0
+                -- never means anything.
+                SetDoublewideFrame(frame)
             elseif info.area == "left" then
+                -- l.712-716: a doublewide incumbent is squatting the seat we are about to use, so
+                -- it goes first. In the reference this is a bare statement between the branches
+                -- rather than part of one, but every earlier arm has already returned by then, so
+                -- the LEFT path is the only one that reaches it — which is why it lives here. And
+                -- since `HideUIPanel` never clears the slot, this is a plain Hide of a frame that
+                -- may well already be hidden — see SetDoublewideFrame's note.
+                local doublewide = GetDoublewideFrame()
+                if doublewide then
+                    doublewide:Hide()
+                end
                 SeatLeftAreaPanel(frame, info)
             else
-                -- No `doublewide` row is registered — defensive fallback only.
+                -- An area string this manager does not know: defensive fallback only.
                 frame:Show()
             end
         end
@@ -464,16 +523,24 @@
         -- behaviour on that path, cancel-less Hide and all.
         UISpecialFrames = { "ItemRefTooltip", "ColorPickerFrame" }
 
-        -- CloseWindows(ignoreCenter) — UIParent.lua l.928-957. The doublewide slice stays dropped
-        -- (we have none); the UISpecialFrames loop at l.947-954 is now carried.
+        -- CloseWindows(ignoreCenter) — UIParent.lua l.928-957. Both once-dropped slices are now
+        -- carried: the UISpecialFrames loop at l.947-954, and the doublewide seat (decision 1511).
         function CloseWindows(ignoreCenter)
-            local leftFrame = GetLeftFrame()
-            local centerFrame = GetCenterFrame()
             local fullScreenFrame = GetFullScreenFrame()
-            local found = leftFrame or centerFrame or fullScreenFrame
+            local doublewideFrame = GetDoublewideFrame()
+            local centerFrame = GetCenterFrame()
+            local leftFrame = GetLeftFrame()
 
             HideUIPanel(leftFrame)
             HideUIPanel(fullScreenFrame)
+            -- l.938. HideUIPanel has no doublewide branch, so this lands on its "seated nowhere"
+            -- arm and is a plain Hide; the seat itself is never vacated (SetDoublewideFrame's note).
+            HideUIPanel(doublewideFrame)
+            -- l.934, quoted as-is: `found` deliberately does NOT consider the doublewide frame,
+            -- even though the line above closes it. Reproduced rather than corrected — ESC's "did
+            -- I close anything?" answer is this value, and changing it would change which key
+            -- press opens the game menu. (Computed off the locals read before any Hide landed.)
+            local found = leftFrame or centerFrame or fullScreenFrame
             -- `ignoreCenter` spares a NATIVE-center frame and nothing else: a left-area panel
             -- merely parked at the center seat closes with the rest of them.
             if centerFrame and not (ignoreCenter and AreaOf(centerFrame) == "center") then

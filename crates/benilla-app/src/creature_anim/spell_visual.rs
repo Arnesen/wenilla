@@ -8,6 +8,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::cell::Cell;
+
 use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy::prelude::*;
 
@@ -349,6 +351,67 @@ fn resolve_kit(
         .flatten()
 }
 
+/// [`resolve_kit`] plus this lane's **one trace line** (`WOW_MOVE_TRACE`, tag `fx`) — the
+/// instrument the cast-edge router went without until bug B307, where "does the shooter's body
+/// kit resolve at all?" cost a day and three agents to answer and this line answers in one live
+/// run.
+///
+/// It earns its place because of *how* this chain fails. A basic ranged shot — Auto Shot 75, wand
+/// Shoot 5019, Throw 2764 — carries `SpellVisual = 0`, so its **entire** body animation comes from
+/// the equipped ranged weapon's `ItemDisplayInfo` col-10 substitute visual ([`resolve_stages`]'s
+/// merge). Every link in that chain degrades **silently** to "no kit": an empty ranged slot, an
+/// item template the ask-once layer has not answered yet, a display id naming no visual. The
+/// observable of each is identical, and identical to a shooter that simply never animates — so
+/// the symptom names nothing and the code must. The line separates them:
+/// `weapon=not-consulted` (a non-ranged spell — the fallback is not supposed to run),
+/// `weapon=none` (it ran and found nothing — the shot IS silent, the B307 shape), or the
+/// resolved visual id, followed by the kit and the anim id actually requested of the body. Pair
+/// it with the driver's `fct: anim play unit=… id=…` to see whether that request reached bone 0.
+///
+/// Free when the trace is off: the caller's lookup still runs exactly once (the [`Cell`] only
+/// records what it returned), and the diagnosis re-derives only inside the `enabled()` guard —
+/// re-using the recorded value rather than re-running the lookup.
+fn resolve_kit_traced(
+    stage_name: &str,
+    entity: Entity,
+    spells: &crate::ui_action::Spells,
+    visuals: &SpellVisualCatalog,
+    spell_id: u32,
+    stage: impl Fn(&VisualStages) -> u32,
+    weapon_visual: impl FnOnce() -> Option<u32>,
+) -> Option<VisualKit> {
+    // `None` = the closure never ran (`resolve_stages` short-circuits before the fallback for a
+    // non-ranged spell); `Some(v)` = it ran and returned `v`. The two are different diagnoses.
+    let consulted: Cell<Option<Option<u32>>> = Cell::new(None);
+    let kit = resolve_kit(spells, visuals, spell_id, &stage, || {
+        let visual = weapon_visual();
+        consulted.set(Some(visual));
+        visual
+    });
+    if benilla_assets::trace::enabled() {
+        let def = spells.catalog.get(spell_id);
+        let weapon = match consulted.get() {
+            None => "not-consulted".to_string(),
+            Some(None) => "none".to_string(),
+            Some(Some(visual)) => visual.to_string(),
+        };
+        // Re-derived from the RECORDED weapon visual — never a second lookup.
+        let kit_id = resolve_stages(spells, visuals, spell_id, || consulted.get().flatten())
+            .map_or(0, |s| stage(&s));
+        benilla_assets::trace::line(
+            "fx",
+            &format!(
+                "kit {stage_name} unit={entity} spell={spell_id} own_visual={} ranged_slot={} \
+                 weapon={weapon} kit={kit_id} anim={:?}",
+                def.map_or(0, |d| d.visual),
+                def.is_some_and(|d| d.ranged_slot()),
+                kit.and_then(|k| k.anim_id),
+            ),
+        );
+    }
+    kit
+}
+
 /// The in-flight cast's **strike sound** for the `$TRD` anim event (`0x62faa0`): the handler
 /// resolves the spell's visual to its 16-dword `SpellVisual.dbc` row (`0x60d450` →
 /// `DAT_00c0d738[visualId]`) and plays that row's **dword 14** (`[row+0x38]`) positioned at the
@@ -654,7 +717,9 @@ pub(super) fn route_cast_visuals(
                         ceremony: false,
                     });
                 }
-                if let Some(kit) = resolve_kit(
+                if let Some(kit) = resolve_kit_traced(
+                    "precast",
+                    ev.entity,
                     spells,
                     &visuals.0,
                     ev.spell_id,
@@ -751,7 +816,9 @@ pub(super) fn route_cast_visuals(
                 // after their model's own clip span (the client's stage-0/1 completion callback).
                 // For a basic shot this is the fire clip itself (the ranged fallback: Throw's
                 // AttackThrown, Auto Shot's AttackBow — wow-re `throw-ranged-attack-anim.md`).
-                if let Some(kit) = resolve_kit(
+                if let Some(kit) = resolve_kit_traced(
+                    "cast",
+                    ev.entity,
                     spells,
                     &visuals.0,
                     ev.spell_id,

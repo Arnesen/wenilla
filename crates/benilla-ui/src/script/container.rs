@@ -94,6 +94,23 @@ pub struct EnchantView {
     pub remaining_ms: Option<u64>,
 }
 
+/// One `ItemRandomProperties` row as the engine renders it — the **random-suffix roll** a dropped,
+/// linked, auctioned or mailed item carries (decision 1547). The app resolves the DBC (both of
+/// them: the roll's table and the `SpellItemEnchantment` names its five ids land on) and pushes the
+/// whole table once at load; a tooltip source supplies only the id, exactly as in the reference.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RandomPropertyView {
+    /// The roll's suffix — `"of the Monkey"`. The reference joins it onto the item name through
+    /// `ITEM_SUFFIX_TEMPLATE` (`"%s %s"`) in its one name formatter `0x5d8b00`; benilla does that
+    /// join app-side, where every display name is composed, so this is carried for reference and
+    /// for the surfaces that name an item the app never composed.
+    pub suffix: String,
+    /// The enchant lines the roll grants, already named and seated in enchant slots **2..6** —
+    /// the five dwords the builder copies out of the suffix row (`0x52b7e0–0x52b7fb`). Slots 2..6
+    /// are always white, whatever the sign.
+    pub enchants: Vec<EnchantView>,
+}
+
 /// One bag's snapshot: its name, capacity, and occupied slots (1-based).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ContainerState {

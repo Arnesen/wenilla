@@ -11,9 +11,10 @@
 //!   data that is exactly the 32 world-PvP tower rows, e.g. the EPL towers). An ordinary
 //!   in-range landmark (town/city, `Flags & 2` clear) draws nothing.
 //! - **Out-of-range**, `d ≤ 694.444`: the nearest **3**, ranked by (`Importance` **signed**
-//!   asc, dist asc) — the rank key is Importance, NOT AreaID (the fold-back's C2 correction —
-//!   draw as `Rotating-MinimapArrow` instances ON the 0.8 rim, each **rotated to point at its
-//!   POI** (the client bakes direction + `0.8·radius` into the arrow frame's matrix).
+//!   asc, dist asc) — the rank key is Importance, NOT AreaID (the fold-back's C2 correction) —
+//!   drawn ON the 0.8 rim, each **rotated to point at its POI** (the client bakes direction +
+//!   `0.8·radius` into the arrow frame's matrix), in the art its **source** calls for: see
+//!   [`RimArrow`], the four-way table 1519 pinned.
 //!
 //! **Quest dots** — the ObjectIcons classifier `0x4eaa90`: reads the SAME per-guid
 //! DIALOG_STATUS cache the overhead `!`/`?` markers mirror (one `SMSG_QUESTGIVER_STATUS`, two
@@ -40,19 +41,35 @@
 //! dot 8 px, POI icon 16 px, orbit 0.8 × the 70.4-px half-disc; the arrows render their M2
 //! models at 768 px/unit (rim, modelScale 0.6) and 1280 px/unit (player). Both arrow models
 //! are plain textured quads (measured from the real M2s), so the flat-sprite stand-in is
-//! geometry-exact at the model's own quad size — no uv crop, the padding is authored.
+//! geometry-exact at the model's own quad size — no uv crop, the padding is authored. The rim
+//! model stacks six of them, but only ever shows one at a time ([`RimArrow`]).
 //!
 //! **The guard's directions marker** ([`crate::poi_marker`], decisions 1514/1516) is a landmark
 //! candidate like any other, appended after the DBC filter the way the reference appends its
-//! static blip slot — everything above applies to it unchanged.
+//! static blip slot — everything above applies to it unchanged, except the one thing that is
+//! *about* being a different kind of thing: its rim arrow is the gold guide arrow ([`RimArrow`]).
 //!
-//! Remaining residue: two gates the landmark selection here does NOT yet implement, both found by
-//! the 1516 §5 and both belonging to the DBC rows rather than the marker — a `WorldStateID` gate
-//! at `0x6d9b27`, and a different rim-arrow model id per source (`0xa6` landmark, `0xa7` corpse,
-//! `0xa8` the guard marker, `0x4ed349`-`0x4ed37b`) where we draw one arrow for all three. Also:
-//! the rim arrow model stacks SIX copies of its quad (an alpha-layering
-//! trick that solidifies the soft texture edges) — we draw one, a brightness nuance for the
-//! director's eye; dots re-project every frame where the reference draws ~1 Hz-stale
+//! Remaining residue: one gate the landmark selection here does NOT implement, found by the 1516
+//! §5 and belonging to the DBC rows rather than the marker — a `WorldStateID` gate at `0x6d9b27`.
+//!
+//! Three more from the 1525 §5, all recorded rather than built (each is a visible change to a
+//! feature that is not the arrow art, and one is contested):
+//! - **The corpse is in the wrong array and the pet blip is missing** — see [`emit_party_arrows`].
+//! - **Rim arrows have a per-source z-order we flatten.** `+0x48` doubles as a frame-level offset
+//!   (`[minimap+0xc4]+3+kind`, POI frames re-levelled every draw at `0x4ed344`; party frames once
+//!   at creation), giving bottom→top: landmark, party/pet, quest, gossip, corpse. We paint every
+//!   arrow at one `z_key` in emission order, which happens to agree on landmark-under-party and
+//!   disagrees above that. **NOT built because wow-re's two findings conflict**: `0x4ed7b7` has the
+//!   object dots drawing LAST, above every arrow, while this table puts gossip and corpse above the
+//!   quest dot. Frame level vs. the parent's own draw order is a compositing question neither note
+//!   settles, and guessing would move a look on a coin flip. Needs its own scoped pin.
+//! - **Static blip slot 0 is `SelectQuestLogEntry()`'s marker** (`0x4def70`, cleared by
+//!   `0x4df0e0`): selecting a quest in the log drops a gold guide arrow at that quest's POI —
+//!   `flags = 0`, so it is **arrow-only**, showing nothing once you are inside the 0.8 rim. Live
+//!   code, not a dead hook, and a feature we do not have. (Its `PointX/PointY` source is INFERRED
+//!   from use, not byte-derived.)
+//!
+//! Also: dots re-project every frame where the reference draws ~1 Hz-stale
 //! snapshot coords verbatim (a throttle quirk, deliberately not aped — positions agree for
 //! standing NPCs); the subzone grey tint (`0xffb0b0b0`) on dots and their tooltip is drawn
 //! from the indoor-containment MISMATCH — the exact `0x670540` compare is INTERIM pending its
@@ -102,12 +119,116 @@ pub(super) const BLIP_BASIS_PX: f32 = 140.8;
 pub(super) const PLAYER_ARROW_QUAD_PX: f32 = 33.6;
 pub(super) const PLAYER_ARROW_OFFSET_PX: bevy::math::Vec2 = bevy::math::Vec2::new(0.51, -1.73);
 /// The rim arrow's on-screen quad: the `Rotating-MinimapArrow.m2` geometry is a stack of six
-/// identical full-texture 0.0500-unit quads (measured from the real M2's 24 vertices — the
-/// stack is an alpha-layering trick, z 0/0.0145/0.0291), and the frame renders at 768 px per
-/// model unit (modelScale 0.6 × 1280 px/unit): 0.0500 · 768 = 38.4 px. The full 32² texture
-/// maps onto it (uv 0..1 on every layer), so the flat-sprite stand-in needs NO uv crop — the
-/// art's transparent padding is authored into the model's own quad.
+/// full-texture 0.0500-unit quads (measured from the real M2's 24 vertices, z 0/0.0145/0.0291),
+/// and the frame renders at 768 px per model unit (modelScale 0.6 × 1280 px/unit):
+/// 0.0500 · 768 = 38.4 px. The full 32² texture maps onto it (uv 0..1 on every layer), so the
+/// flat-sprite stand-in needs NO uv crop — the art's transparent padding is authored into the
+/// model's own quad.
+///
+/// The six quads are **not** an alpha-layering trick on one texture, as this note used to say
+/// (1519): they carry six *different* textures, four of which are the four arrow arts, and the
+/// sequence played picks which one is opaque. See [`RimArrow`] — that is why only one of the six
+/// ever draws, and why the stand-in is a single sprite rather than a stack.
 const ARROW_QUAD_PX: f32 = 38.4;
+
+/// **Which rim-arrow art a blip source draws** — the reference's four, and why they look like one.
+///
+/// `Rotating-MinimapArrow.mdx` is the *only* arrow model the minimap owns (`0x4ee2b0` binds it to
+/// `minimapArrowModel` for both the party frames and the POI frames), so a reader naturally
+/// concludes there is one arrow art. There are four, and the model picks between them **by
+/// animation**: `0x4ed349`–`0x4ed37b` hands `0x76cf50` — the SetSequence arm, `0x76cf50(this, seq)`
+/// → `0x7121a0(model, -1, seq, -1, 0, 1.0, 0, 1)` (wow-re `modelframe-animation-clock.md`) — an
+/// `AnimationData.dbc` id chosen off the output record's `+0x48`, and `0x4ee170` arms the 5 party
+/// frames with `0xa5`. Both wow-re notes that carry those ids call the argument a "model id" and
+/// gloss it as four `.mdx` variants; it is a sequence id, and there is one model.
+///
+/// The model is what proves the mapping, and it is measured, not inferred: the install's own
+/// `Rotating-MinimapArrow.m2` authors **six** textured quads — the four arrow arts below, plus a
+/// glow and `Spells\Star4` — and exactly eight sequences, `0xa5`/`0xa6`/`0xa7`/`0xa8` (1 s, looping)
+/// and `0xcc`–`0xcf` (2 s, one-shot arrival flashes). Every layer's M2Color **alpha** track is
+/// `interp = 0` (step), and in each looping band exactly one arrow layer steps to 1.0 while the
+/// other three sit at 0.0 — so "play sequence `0xa8`" *is* "draw the guide arrow". The four arrow
+/// layers' RGB tracks are a single `[1,1,1]` key (untinted: the art's own colour), and the glow and
+/// star layers hold alpha 0 through all four loops — they light only in the one-shot flashes, which
+/// this call site never plays. So one flat sprite per source is colour- and geometry-exact.
+/// [`tests::each_rim_arrow_sequence_lights_exactly_its_own_layer`] re-measures all of that against
+/// the real file.
+///
+/// `AnimationData.dbc` names the four rows outright — 165 `GroupArrow`, 166 `Arrow`, 167
+/// `CorpseArrow`, 168 `GuideArrow` (1525's §5, which derived the whole table independently and
+/// agreed). Four arbitrary-looking ids landing on four names that describe their callers exactly is
+/// why this is settled rather than merely likely.
+///
+/// **The selector is a default, not an enumeration** (1525): `0xa7` if `+0x48 == 2`, else
+/// `0xa6 + 2·(v != -2)`. Only a DBC landmark and the corpse are special-cased; **everything else
+/// draws the gold guide arrow**, including static slot 0. So [`Self::Guide`] is the right art for
+/// any future non-DBC candidate we append, and the two named rows are the exceptions to it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RimArrow {
+    /// An `AreaPOI.dbc` landmark — sequence `0xa6`, output record `+0x48 == -2`. The white one.
+    Landmark,
+    /// A party/raid member **or your pet** — sequence `0xa5`, armed once at `0x4ee1e3` and never
+    /// re-armed: neither draw loop touches it, and a dead/offline/zoned-out member is hidden
+    /// upstream rather than re-skinned (1525). Permanently the group arrow.
+    Group,
+    /// Your own corpse — sequence `0xa7`, output record `+0x48 == 2`.
+    Corpse,
+    /// The guard's directions ([`crate::poi_marker`]) — sequence `0xa8`, the default arm. The gold
+    /// one: the guard is your *guide*, and the art is named for it.
+    Guide,
+}
+
+impl RimArrow {
+    /// The `AnimationData.dbc` sequence the reference plays to select this art.
+    ///
+    /// Nothing in our draw path needs it — we resolve to a flat sprite and never play a sequence —
+    /// so it exists for the one job only the id can do: asking the real model what that sequence
+    /// shows, which is what pins [`Self::texture`] to something better than a guess. Test-only for
+    /// the same reason `poi_marker`'s `ICON_POI_REDFLAG` is.
+    #[cfg(test)]
+    pub(crate) const fn anim_id(self) -> u16 {
+        match self {
+            Self::Group => 0xa5,
+            Self::Landmark => 0xa6,
+            Self::Corpse => 0xa7,
+            Self::Guide => 0xa8,
+        }
+    }
+
+    /// The `.blp` that sequence lights — the layer whose M2Color alpha steps to 1.0 in its band.
+    pub(crate) const fn texture(self) -> &'static str {
+        match self {
+            Self::Landmark => "Interface\\Minimap\\Rotating-MinimapArrow",
+            Self::Group => "Interface\\Minimap\\Rotating-MinimapGroupArrow",
+            Self::Corpse => "Interface\\Minimap\\Rotating-MinimapCorpseArrow",
+            Self::Guide => "Interface\\Minimap\\Rotating-MinimapGuideArrow",
+        }
+    }
+
+    /// The four, in [`RimArrowArt`]'s slot order.
+    pub(crate) const ALL: [Self; 4] = [Self::Landmark, Self::Group, Self::Corpse, Self::Guide];
+}
+
+/// The four rim-arrow textures, loaded once — the flat-sprite stand-in for the one model the
+/// reference re-animates. A missing slot draws no arrow for that source rather than the wrong one.
+#[derive(Default)]
+pub(crate) struct RimArrowArt([Option<Handle<Image>>; 4]);
+
+impl RimArrowArt {
+    pub(crate) fn set(&mut self, kind: RimArrow, tex: Option<Handle<Image>>) {
+        self.0[kind as usize] = tex;
+    }
+
+    pub(super) fn get(&self, kind: RimArrow) -> Option<&Handle<Image>> {
+        self.0[kind as usize].as_ref()
+    }
+
+    /// Any art at all — the landmark pass runs on the arrow art alone (it draws the guard marker
+    /// even with no `AreaPOI.dbc`), so it needs to know whether the load found anything.
+    pub(super) fn any(&self) -> bool {
+        self.0.iter().any(Option::is_some)
+    }
+}
 /// An in-range POI icon's quad: 16 × 16 px (`bc7658 = base·0.0125` × 1280, ctor-frozen).
 const POI_ICON_PX: f32 = 16.0;
 // The dot-layer constants (cell coords, dot sizes, the tracking-predicate constants) live
@@ -204,8 +325,10 @@ impl BlipCtx {
 pub(super) struct LandmarkSelection<'a> {
     /// In-range rows with [`FLAG_IN_RANGE_ICON`]: the `Icon` POIIcons cell at true position.
     pub(super) icons: Vec<&'a AreaPoi>,
-    /// The out-of-range nearest-3 `(dist, poi)` in rank order: rim arrows.
-    pub(super) arrows: Vec<(f32, &'a AreaPoi)>,
+    /// The out-of-range nearest-3 `(dist, poi, art)` in rank order: rim arrows. The art is the
+    /// reference's `+0x48` read ([`RimArrow`]) — a DBC row draws the white landmark arrow, the
+    /// appended guard marker the gold guide arrow.
+    pub(super) arrows: Vec<(f32, &'a AreaPoi, RimArrow)>,
 }
 
 /// The byte-verified landmark selection: candidacy (`ContinentID` + `Flags&1`), the 0.8
@@ -226,18 +349,19 @@ pub(super) fn select_landmarks<'a>(
     radius_yd: f32,
 ) -> LandmarkSelection<'a> {
     let mut icons = Vec::new();
-    let mut arrows: Vec<(f32, &AreaPoi)> = Vec::new();
+    let mut arrows: Vec<(f32, &AreaPoi, RimArrow)> = Vec::new();
     let candidates = pois
         .filter(|p| p.continent_id == map_id && p.flags & FLAG_CANDIDATE != 0)
-        .chain(marker);
-    for p in candidates {
+        .map(|p| (p, RimArrow::Landmark))
+        .chain(marker.map(|m| (m, RimArrow::Guide)));
+    for (p, art) in candidates {
         let d = ((p.pos[0] - wx).powi(2) + (p.pos[1] - wy).powi(2)).sqrt();
         if d / radius_yd <= BLIP_EDGE_RATIO {
             if p.flags & FLAG_IN_RANGE_ICON != 0 {
                 icons.push(p);
             }
         } else if d <= LANDMARK_RANK_YD {
-            arrows.push((d, p));
+            arrows.push((d, p, art));
         }
     }
     arrows.sort_by(|a, b| {
@@ -268,7 +392,7 @@ pub(super) fn emit_landmarks(
     cat: Option<&AreaPoiCatalog>,
     marker: Option<&AreaPoi>,
     map_id: u32,
-    arrow_tex: &Handle<Image>,
+    arrows: &RimArrowArt,
     poi_icons: Option<&Handle<Image>>,
     quads: &mut UiQuads,
     hover: &mut MinimapBlipHover,
@@ -305,32 +429,49 @@ pub(super) fn emit_landmarks(
             }
         }
     }
-    for (_d, poi) in &sel.arrows {
-        let dir = ctx.offset(poi.pos).normalize_or_zero();
-        let pos = ctx.center + dir * (ctx.side * 0.5 * BLIP_EDGE_RATIO);
-        // Point the arrow at its POI: quad rotation is clockwise on a y-down screen, and
-        // the authored art reads screen-up at zero, so up→dir is atan2(x, -y).
-        let rotation = dir.x.atan2(-dir.y);
-        let rect =
-            Rect::from_center_size(pos, Vec2::splat(ctx.side * (ARROW_QUAD_PX / BLIP_BASIS_PX)));
-        // ONE pass of the texture. The model authors a six-quad alpha stack, but replaying it
-        // as flat UI quads read as solid blobs (director, 2026-07-13 — the reference runs it
-        // through the model material pipeline, whose blend mode is unread); the single soft
-        // pass is the approved look.
-        quads.overlays.push(UiQuad {
-            rect,
-            z_key: ctx.z,
-            texture: Some(arrow_tex.clone()),
-            color: [1.0, 1.0, 1.0, ctx.alpha],
-            rotation,
-            ..default()
-        });
+    for (_d, poi, art) in &sel.arrows {
+        // No art for this source ⇒ no arrow. Drawing another source's would be a lie about
+        // which kind of thing is out there, which is the whole job of the four arts.
+        let Some(tex) = arrows.get(*art) else {
+            continue;
+        };
+        let rect = push_rim_arrow(ctx, poi.pos, tex, quads);
         if let (Some(c), Some(ui)) = (ctx.cursor, ctx.cursor_ui) {
             if rect.contains(c) {
                 *hover = MinimapBlipHover::Landmark(poi.name.clone(), ui);
             }
         }
     }
+}
+
+/// One rim arrow: parked on the 0.8 rim in the target's direction and spun to point at it.
+/// Returns its screen rect, for the hover hit-test.
+///
+/// ONE pass of the texture. The model authors six quads, but replaying a stack as flat UI quads
+/// read as solid blobs (director, 2026-07-13 — the reference runs it through the model material
+/// pipeline, whose blend mode is unread); the single soft pass is the approved look, and 1519's
+/// measurement says it is also the exact one — only a single layer is ever opaque.
+fn push_rim_arrow(
+    ctx: &BlipCtx,
+    target: [f32; 3],
+    tex: &Handle<Image>,
+    quads: &mut UiQuads,
+) -> Rect {
+    let dir = ctx.offset(target).normalize_or_zero();
+    let pos = ctx.center + dir * (ctx.side * 0.5 * BLIP_EDGE_RATIO);
+    // Point the arrow at its target: quad rotation is clockwise on a y-down screen, and the
+    // authored art reads screen-up at zero, so up→dir is atan2(x, -y).
+    let rotation = dir.x.atan2(-dir.y);
+    let rect = Rect::from_center_size(pos, Vec2::splat(ctx.side * (ARROW_QUAD_PX / BLIP_BASIS_PX)));
+    quads.overlays.push(UiQuad {
+        rect,
+        z_key: ctx.z,
+        texture: Some(tex.clone()),
+        color: [1.0, 1.0, 1.0, ctx.alpha],
+        rotation,
+        ..default()
+    });
+    rect
 }
 
 /// A party member's blip position: the live streamed transform wins; out of visibility range the
@@ -354,42 +495,52 @@ fn party_member_pos(
 }
 
 /// The party/corpse **rim arrows** — the out-of-range half of `place_party_raid_blips`
-/// (`0x6dad10`, VERIFIED): `d = √(dx²+dy²)`; over `0.8·radius` the member renders as the same
-/// `Rotating-MinimapArrow` the POI edge arrows use (the 5-slot sibling array `this+0x320`,
-/// 4 members + own corpse), on the 0.8 rim, rotated to the atan2 bearing. Drawn with the POI
-/// arrows — before the player arrow; the in-range members become dots in [`emit_party_dots`],
-/// drawn last with the object dots.
+/// (`0x6dad10`, VERIFIED): `d = √(dx²+dy²)`; over `0.8·radius` the member rides the 0.8 rim,
+/// rotated to the atan2 bearing (the 5-slot sibling array `this+0x320`). Drawn with the POI arrows
+/// — before the player arrow; the in-range members become dots in [`emit_party_dots`], drawn last
+/// with the object dots.
+///
+/// **The two sources draw different art** (1519), which this pass used to get wrong twice over: it
+/// drew both with `MinimapArrow` — the *player* arrow, not a rim arrow at all. A member is the
+/// party frames' `0xa5` ⇒ [`RimArrow::Group`]; your corpse is the corpse blip's `0xa7` ⇒
+/// [`RimArrow::Corpse`], the art named for it. Both confirmed at the bytes by 1525's §5.
+///
+/// **But the corpse does not belong in this array, and the slot it occupies belongs to your PET**
+/// (1525, VERIFIED — recorded here, not yet built, because it is a visible change to the corpse
+/// blip 0308 rather than to this session's arrow art). `0x6dad10`'s loop splits at
+/// `0x6dad60 cmp edi,4`: slots 0–3 are the party GUIDs via `0x4e81a0`, and slot **4** reads
+/// `UNIT_FIELD_CHARM` else `UNIT_FIELD_SUMMON` off the descriptor base — the pet. Both legs fetch
+/// with typemask UNIT (`mov ecx,8`), and a `CGCorpse` is typemask `0x80`, so a corpse could never
+/// resolve there; the older wow-re note's "4 members + own corpse" is wrong the same way its "3
+/// static slots" account was. The corpse reaches the minimap **only** as static blip slot 2 on the
+/// POI path, which is a materially different producer: `Importance = -1` (so it outranks every
+/// landmark and *takes* one of the three rim slots rather than adding a fourth), and the sole
+/// exemption from the 694.444-yd cut at `0x6d9cc2`. Two consequences we currently get wrong — we
+/// can draw four rim arrows where the reference draws three — and one feature we are missing
+/// outright: the **pet blip**.
 pub(super) fn emit_party_arrows(
     ctx: &BlipCtx,
     group: &crate::ui_party::GroupState,
     guids: &GuidIndex,
     unit_pos: &Query<&GlobalTransform, With<NetEntity>>,
     corpse: Option<[f32; 3]>,
-    arrow_tex: &Handle<Image>,
+    arrows: &RimArrowArt,
     quads: &mut UiQuads,
 ) {
     let members = group
         .party_slots()
-        .filter_map(|m| party_member_pos(m, group, guids, unit_pos));
-    for (x, y) in members.chain(corpse.map(|c| (c[0], c[1]))) {
+        .filter_map(|m| party_member_pos(m, group, guids, unit_pos))
+        .map(|p| (p, RimArrow::Group));
+    let corpse = corpse.map(|c| ((c[0], c[1]), RimArrow::Corpse));
+    for ((x, y), art) in members.chain(corpse) {
         let d = ((x - ctx.wx).powi(2) + (y - ctx.wy).powi(2)).sqrt();
         if d / ctx.radius_yd <= BLIP_EDGE_RATIO {
             continue; // in range — the dot pass draws it
         }
-        let dir = ctx.offset([x, y, 0.0]).normalize_or_zero();
-        let pos = ctx.center + dir * (ctx.side * 0.5 * BLIP_EDGE_RATIO);
-        let rotation = dir.x.atan2(-dir.y);
-        quads.overlays.push(UiQuad {
-            rect: Rect::from_center_size(
-                pos,
-                Vec2::splat(ctx.side * (ARROW_QUAD_PX / BLIP_BASIS_PX)),
-            ),
-            z_key: ctx.z,
-            texture: Some(arrow_tex.clone()),
-            color: [1.0, 1.0, 1.0, ctx.alpha],
-            rotation,
-            ..default()
-        });
+        let Some(tex) = arrows.get(art) else {
+            continue;
+        };
+        push_rim_arrow(ctx, [x, y, 0.0], tex, quads);
     }
 }
 
@@ -444,6 +595,43 @@ pub(super) fn drive_blip_tooltip(
 mod tests {
     use super::*;
 
+    /// **The whole [`RimArrow`] table, re-measured against the install's own model.**
+    ///
+    /// This is the fact the feature rests on, and it is not one you can read off the reference's
+    /// call site: `0x4ed349`–`0x4ed37b` only proves *which id* each blip source plays. What that id
+    /// draws lives in `Rotating-MinimapArrow.m2`, so the model is the authority, and asserting
+    /// against it means a wrong row here fails rather than shipping the wrong arrow.
+    ///
+    /// It checks both directions on purpose: each sequence lights **exactly one** layer (a table
+    /// that merely named a texture the sequence happens to show would pass a one-sided check while
+    /// three other arrows drew on top of it), and that layer is the one this table claims.
+    #[test]
+    fn each_rim_arrow_sequence_lights_exactly_its_own_layer() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::Chain::open(&data).expect("the patch chain");
+        let bytes = chain
+            .read_file("Interface\\Minimap\\Rotating-MinimapArrow.m2")
+            .expect("the one rim-arrow model");
+
+        for kind in RimArrow::ALL {
+            let shown = benilla_formats::m2_sequence_visible_textures(&bytes, kind.anim_id())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{kind:?}: the model authors no sequence {:#x} — the id \
+                    is wrong, or this is not the model the reference animates",
+                        kind.anim_id()
+                    )
+                });
+            let want = format!("{}.BLP", kind.texture().to_uppercase());
+            assert_eq!(
+                shown,
+                vec![want],
+                "{kind:?} (sequence {:#x}) must light its layer and ONLY its layer",
+                kind.anim_id()
+            );
+        }
+    }
+
     fn poi(importance: u32, flags: u32, x: f32, name: &str) -> AreaPoi {
         AreaPoi {
             importance,
@@ -474,7 +662,7 @@ mod tests {
         ];
         let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 133.0);
         assert!(sel.icons.is_empty(), "no Flags&2 row is in range");
-        let names: Vec<&str> = sel.arrows.iter().map(|(_, p)| p.name.as_str()).collect();
+        let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
         assert_eq!(names, ["Stormwind", "Goldshire"]);
     }
 
@@ -491,7 +679,7 @@ mod tests {
             poi(0, 1, 695.0, "beyond-rank"),
         ];
         let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 100.0);
-        let names: Vec<&str> = sel.arrows.iter().map(|(_, p)| p.name.as_str()).collect();
+        let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
         assert_eq!(names, ["minor-near", "minor-far", "city-near"]);
     }
 
@@ -508,11 +696,19 @@ mod tests {
         ];
         let marker = poi(0, 0x63, 500.0, "Stormwind Warrior Trainer");
         let sel = select_landmarks(cities.iter(), Some(&marker), 0, 0.0, 0.0, 133.0);
-        let names: Vec<&str> = sel.arrows.iter().map(|(_, p)| p.name.as_str()).collect();
+        let names: Vec<&str> = sel.arrows.iter().map(|(_, p, _)| p.name.as_str()).collect();
         assert_eq!(
             names,
             ["Stormwind Warrior Trainer", "Stormwind", "Goldshire"],
             "Importance 0 ranks the marker first; the third city is crowded out"
+        );
+        // …and it is drawn in gold, not in the cities' white: the reference's `+0x48` read
+        // (1519). A rim slot won with the wrong art would look like just another town.
+        let arts: Vec<RimArrow> = sel.arrows.iter().map(|&(_, _, a)| a).collect();
+        assert_eq!(
+            arts,
+            [RimArrow::Guide, RimArrow::Landmark, RimArrow::Landmark],
+            "the guard's directions draw the guide arrow; DBC rows draw the landmark arrow"
         );
     }
 

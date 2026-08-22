@@ -1019,6 +1019,116 @@ mod tests {
         );
     }
 
+    /// **The glue stage carries a whole bone matrix, not just a point** — a rotation on one shipped
+    /// scene and a scale on two.
+    ///
+    /// A `UI_*` background scene stands the character on its attachment 0, and five of the six
+    /// leave that bone unrotated because the scene's camera is authored looking straight down the
+    /// stage's +X, which a WoW model's default facing already faces. `UI_Human` is the exception:
+    /// its scene is a lifted chunk of Elwynn whose camera sits ~18° off that axis, and the author
+    /// aimed the character at it by parking a **constant −16.5° yaw** on the stage bone — two
+    /// identical quaternion keys on a global sequence, which is where a *constant* rotation lives
+    /// in vanilla M2 (the rest pose is identity rotations).
+    ///
+    /// Reading only the attachment point dropped that, and every Human on the character-select
+    /// screen stood angled away from the camera while every other race looked straight out (1533).
+    /// The same bone matrix also carries a **scale** on two scenes — 0.97 on both of UI_Human's
+    /// attachment bones, and on UI_Tauren 1.04 for the character with **0.7324** for the pet — so
+    /// dropping it drew the Tauren scene's pet a third too large. This pins both data the fix rests
+    /// on: skips without the client data.
+    #[test]
+    fn the_glue_stage_bones_carry_the_scenes_authored_rotation_and_scale() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        // (scene token, stage yaw °, character-stage scale, pet-stage scale)
+        let scenes = [
+            ("Human", -16.5_f32, 0.97_f32, 0.97_f32),
+            ("Orc", 0.0, 1.0, 1.0),
+            ("Dwarf", 0.0, 1.0, 1.0),
+            ("NightElf", 0.0, 1.0, 1.0),
+            ("Scourge", 0.0, 1.0, 1.0),
+            ("Tauren", 0.0, 1.04, 0.7324),
+        ];
+        for (token, want_deg, want_scale, want_pet_scale) in scenes {
+            let bytes = chain
+                .read_file(&format!(
+                    "Interface\\Glues\\Models\\UI_{token}\\UI_{token}.m2"
+                ))
+                .unwrap_or_else(|e| panic!("read UI_{token}.m2: {e}"));
+            let parsed = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes[..]))
+                .unwrap_or_else(|e| panic!("parse UI_{token}.m2: {e:?}"));
+            let model = parsed.model();
+            let bone_of = |id: u16| {
+                model
+                    .attachments
+                    .iter()
+                    .find(|a| a.id == id)
+                    .unwrap_or_else(|| panic!("UI_{token} has attachment {id}"))
+                    .bone
+            };
+            let gs_all = parse_m2_global_sequence_bones(&bytes);
+            // The **scale** half of the same bone matrix: the reference composes the whole thing
+            // (`T(att.pos) · parentBone[att.bone]`), so a stage that parks a scale resizes what
+            // stands on it. Two scenes do — and 1536 read them as unkeyed pivots.
+            let scale_of = |bone: u16| -> f32 {
+                gs_all
+                    .iter()
+                    .find(|g| g.bone == bone)
+                    .and_then(|g| g.scale.as_ref())
+                    .map_or(1.0, |c| c.keys[0].1[0])
+            };
+            assert!(
+                (scale_of(bone_of(0)) - want_scale).abs() < 5e-4,
+                "UI_{token} character-stage scale: want {want_scale}, got {}",
+                scale_of(bone_of(0))
+            );
+            assert!(
+                (scale_of(bone_of(1)) - want_pet_scale).abs() < 5e-4,
+                "UI_{token} pet-stage scale: want {want_pet_scale}, got {}",
+                scale_of(bone_of(1))
+            );
+
+            let stage = model
+                .attachments
+                .iter()
+                .find(|a| a.id == 0)
+                .unwrap_or_else(|| panic!("UI_{token} has a stage attachment"));
+
+            // The stage bones are roots on every shipped scene, so the chain is one link; walking
+            // it anyway keeps the assertion honest if a scene ever nests one.
+            let gs = parse_m2_global_sequence_bones(&bytes);
+            let mut yaw = 0.0_f32;
+            let mut bone = stage.bone as i16;
+            while bone >= 0 {
+                if let Some(rot) = gs
+                    .iter()
+                    .find(|g| g.bone as i16 == bone)
+                    .and_then(|g| g.rotation.as_ref())
+                {
+                    let first = rot.keys[0].1;
+                    assert!(
+                        rot.keys.iter().all(|(_, q)| q
+                            .iter()
+                            .zip(first)
+                            .all(|(a, b)| (a - b).abs() < 1e-6)),
+                        "UI_{token}'s stage rotation is a PARKED key, not an animation — a moving                          stage would have to be read off the live joint instead"
+                    );
+                    let [x, y, z, w] = first;
+                    assert!(
+                        x.abs() < 1e-3 && y.abs() < 1e-3,
+                        "UI_{token}'s stage rotation is a pure YAW about +Z — a stage tipped in                          pitch or roll would need composing, not summing (got {first:?})"
+                    );
+                    yaw += 2.0 * f32::atan2(z, w).to_degrees();
+                }
+                bone = model.bones[bone as usize].parent;
+            }
+            assert!(
+                (yaw - want_deg).abs() < 0.1,
+                "UI_{token} stage yaw: want {want_deg}°, got {yaw}°"
+            );
+        }
+    }
+
     /// An empty band still poses the bone instead of dropping the track (decision 0133's tilt):
     /// HumanMale bone 27 (waist) rot has 4 keys, all outside Run's band, and `ranges[Run] = (2, 3)`
     /// brackets it — so the clip must carry the bracketed value as a constant, or a Stand-variation

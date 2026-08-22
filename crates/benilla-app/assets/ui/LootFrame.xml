@@ -41,9 +41,13 @@
         Paging (LootFrame.lua l.27-31,70-73,105-118): 4 rows/page; > 4 items spends one slot on the
         pager, showing 3 rows + Up/Down. We keep the current page across content-change repaints
         (LOOT_UPDATE) and reset it to 1 only on a fresh open (LOOT_OPENED) — the merchant SHOW/UPDATE
-        split. (This replaces Blizzard's per-button LOOT_SLOT_CLEARED collapse with a full
-        re-snapshot; the app fires LOOT_UPDATE on any content change, incl. an async item name/quality
-        landing and a looted/coin-cleared row.)
+        split. (The per-button LOOT_SLOT_CLEARED event is replaced by a full re-snapshot repaint; the
+        app fires LOOT_UPDATE on any content change, incl. an async item name/quality landing and a
+        looted/coin-cleared row. The OBSERVABLE matches the ref exactly: the slot list is fixed while
+        the window is open — GetNumLootItems counts cleared slots, which answer neither IsItem nor
+        IsCoin, so a looted row's button hides IN PLACE and the rows below never shift up — and a
+        page left with every button hidden advances to the next page when one exists, the ref's
+        LOOT_SLOT_CLEARED tail, l.38-50.)
 
         UIPanel slot system (decision 0084 §2): registered in UiPanels.xml as area="left",
         pushable=7 — so it carries NO hardcoded <Anchors>; ShowUIPanel SetPoints it (and, when a
@@ -133,11 +137,14 @@
             LootSlot(button.slot)
         end
 
-        -- Hover: the item name coloured by quality (loot rows carry it — GetLootSlotInfo's 4th
-        -- return), reusing loot_color. The coin pile has no item quality; its formatted text (already
-        -- the row name) shows white.
+        -- Hover: the plain engine item tooltip, ITEM rows only — the ref's own gate (its
+        -- LootButtonTemplate <OnEnter> runs SetLootItem only `if LootSlotIsItem(slot)`, so the
+        -- coin pile shows no tooltip at all). No hand-added lines: the real tooltip never shows a
+        -- stack size (the 0274 P1 'Stack Size' drop retired the same line from the bag hovers;
+        -- this file's copy predated it and survived).
         function BenillaLootItem_OnEnter(button)
             if not button.slot then return end
+            if not LootSlotIsItem(button.slot) then return end
             local texture, item, quantity, quality, itemId = GetLootSlotInfo(button.slot)
             button.itemId = itemId
             if not item then return end
@@ -145,16 +152,11 @@
             -- MerchantFrame.xml walks ANCHOR_RIGHT back by a negative x): 37px icon on a 160 row
             -- → -123 lands the tip at the icon's right edge.
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT", -123, 0)
-            -- The shared item tooltip when the row is an ITEM (coin rows have no item id/stats).
-            local color = loot_color(quality)
-            if button.itemId and button.itemId ~= 0 then
-                GameTooltip:SetItemById(button.itemId, item, quality)
-            else
-                GameTooltip:SetText(item, color.r, color.g, color.b)
-            end
-            if (quantity or 1) > 1 then
-                GameTooltip:AddLine("Stack Size: " .. quantity, 1, 1, 1)
-            end
+            -- SetLootItem, like the ref's own LootButtonTemplate: the loot ROW is the source, not
+            -- just its item id, so the tooltip sees the drop's random-suffix roll. Through
+            -- SetItemById (a template source) a "… of the Monkey" showed `<Random enchantment>`
+            -- until the item reached a bag — decision 1547.
+            GameTooltip:SetLootItem(button.slot)
             GameTooltip:Show()
         end
 
@@ -171,8 +173,8 @@
             if numItems > BENILLA_LOOT_NUMBUTTONS then
                 perPage = perPage - 1
             end
-            -- Clamp the page (a shrunk loot can leave us past the end — benilla's replacement for
-            -- Blizzard's per-button collapse, l.38-50).
+            -- Clamp the page. numItems is constant while a window is open (cleared slots stay in
+            -- the count — the fixed slot layout), so this only guards a stray page value.
             local maxPage = 1
             if numItems > 0 then
                 maxPage = math.ceil(numItems / perPage)
@@ -250,8 +252,20 @@
                 ShowUIPanel(frame)
             elseif event == "LOOT_UPDATE" then
                 -- A content change while open (name/quality landed, a row/coin removed): repaint,
-                -- keeping the current page.
+                -- keeping the current page. A looted slot's button hides IN PLACE (the slot stays
+                -- in the layout as a gap — the ref's LOOT_SLOT_CLEARED, l.22-37).
                 LootFrame_Update()
+                -- The ref's LOOT_SLOT_CLEARED tail (l.38-50): a page left with every button hidden
+                -- moves down to the next page when one exists.
+                local allHidden = true
+                for index = 1, BENILLA_LOOT_NUMBUTTONS do
+                    if getglobal("LootButton" .. index):IsVisible() then
+                        allHidden = false
+                    end
+                end
+                if allHidden and getglobal("LootDownButton"):IsVisible() then
+                    LootFrame_PageDown()
+                end
             elseif event == "LOOT_CLOSED" then
                 HideUIPanel(frame)
             end
@@ -331,12 +345,13 @@
                 </FontString>
             </Layer>
             <Layer level="OVERLAY">
-                <!-- "xN" stack count on the icon's bottom-right (ItemButtonTemplate $parentCount; only
-                     shown when N > 1). -->
-                <FontString name="$parentCount" justifyH="RIGHT">
-                    <Size><AbsDimension x="34" y="12"/></Size>
+                <!-- "xN" stack count INSIDE the icon's bottom-right (ItemButtonTemplate
+                     $parentCount: NumberFontNormal, BOTTOMRIGHT -5,2 — the ref's button IS the
+                     37px icon, ours spans the whole row, so the same inset re-bases off the
+                     button's BOTTOMLEFT: 37-5=32. The bag slots' count is this exact shape). -->
+                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
                     <Anchors>
-                        <Anchor point="BOTTOMLEFT" relativePoint="LEFT"><Offset><AbsDimension x="4" y="-16"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="32" y="2"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
             </Layer>

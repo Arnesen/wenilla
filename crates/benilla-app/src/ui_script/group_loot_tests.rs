@@ -111,6 +111,7 @@ fn rolls() -> LootRollsState {
                 item_id: 17182,
                 // The link lands with the name — one template answer fills both (decision 1059).
                 link: Some(STAFF_LINK.into()),
+                random_property_id: 0,
             },
             LootRollEntry {
                 roll_id: 8,
@@ -122,6 +123,7 @@ fn rolls() -> LootRollsState {
                 time_left_ms: 60_000,
                 item_id: 25,
                 link: Some(SWORD_LINK.into()),
+                random_property_id: 0,
             },
             // The item-template query hasn't landed: name/texture/quality all nil (loot_roll.rs) —
             // and no link either: it embeds the name, so it cannot exist before the name does.
@@ -135,6 +137,7 @@ fn rolls() -> LootRollsState {
                 time_left_ms: 55_000,
                 item_id: 4306,
                 link: None,
+                random_property_id: 0,
             },
         ],
     }

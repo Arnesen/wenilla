@@ -70,7 +70,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     s.run("BenillaBagToggle_OnClick()").unwrap();
     s.set_loot(Some(LootState {
         fishing: false,
-        rows: vec![LootRow {
+        rows: vec![Some(LootRow {
             item_id: 0,
             name: Some("Wool Cloth".into()),
             texture: Some("Interface\\Icons\\INV_Fabric_Wool_01".into()),
@@ -78,7 +78,8 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
             quality: Some(1),
             is_coin: false,
             link: None,
-        }],
+            random_property_id: 0,
+        })],
     }));
     s.fire_event("LOOT_OPENED", vec![]);
     let _ = s.take_sounds();

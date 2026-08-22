@@ -169,11 +169,12 @@ UIPanelTemplates.xml
 # (OptionsFrame.xml, far below): these are the shared names addons build panels out of.
 OptionsFrameTemplates.xml
 # The reference's money-frame kit: MoneyFrameTemplate/SmallMoneyFrameTemplate + MoneyTypeInfo
-# + the MoneyFrame_* API. Needs only Fonts (NumberFontNormal/NumberFontNormalLarge), and
-# nothing benilla ships consumes it yet — our own eight coin displays run on MerchantFrame.xml's
-# BenillaMoney_* slot kit, and MoneyFrame.xml's header is where the two are reconciled. Seated
-# beside the scroll kit (the other shared widget kit) and ahead of every window that shows
-# coins, which is where the reference's own TOC puts it too.
+# + the MoneyFrame_* API. Needs only Fonts (NumberFontNormal/NumberFontNormalLarge). AuctionFrame
+# below is laid out on it (its price columns need a money TYPE, which the other kit has no notion
+# of); our other eight coin displays still run on MerchantFrame.xml's BenillaMoney_* slot kit, and
+# MoneyFrame.xml's header is where the two are reconciled. Seated beside the scroll kit (the other
+# shared widget kit) and ahead of every window that shows coins, which is where the reference's own
+# TOC puts it too.
 MoneyFrame.xml
 # The shared colour dialog + its opacity slider (`ColorPickerFrame`, `OpacitySliderFrame`,
 # `ColorPickerOkayButton`, `ColorPickerCancelButton`). Last of the "shared FrameXML surface with no
@@ -339,6 +340,17 @@ BankFrame.xml
 # Loaded right after TrainerFrame per the same "NPC session windows grouped" posture — it
 # needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney), both already loaded above.
 TaxiFrame.xml
+# The auction house (decision 1511): the three-tab doublewide window over the auction API
+# (`benilla-ui/src/script/auction.rs`) + the app's feed/drain. Kept in the "NPC session
+# windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight
+# money displays are SmallMoneyFrameTemplate, and it registers the AUCTION_DEPOSIT money type
+# into that file's MoneyTypeInfo), after MerchantFrame (it reuses that file's global
+# BenillaMoneyInput_* helpers for its four money inputs), after ScrollTemplates (four faux lists), after
+# UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton / InputBoxTemplate /
+# UICheckButtonTemplate), after UIDropDownMenu (the rarity capsule) and after UiPanels (the
+# panel manager's `doublewide` seat, `CharacterFrameTabButtonTemplate`, the PanelTemplates
+# tab kit and the StaticPopup engine its two confirmations register into) — all above.
+AuctionFrame.xml
 # The crafting window (decision 0437 phase 2): NOT an NPC session (opens off your own cast of
 # an effect-47 opener spell, TradeSkillFrame.xml's own header comment) — loaded right after
 # TrainerFrame per the same "player-state/profession window" grouping and because it depends

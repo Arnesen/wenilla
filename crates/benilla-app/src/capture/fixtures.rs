@@ -885,6 +885,14 @@ pub(super) fn seed_ui_fixture(
                     (34, 2),      // UNIT_FIELD_LEVEL
                     (35, 1),      // UNIT_FIELD_FACTIONTEMPLATE — human
                     (36, 0x0101), // UNIT_FIELD_BYTES_0 — race human, class warrior
+                    // UNIT_FIELD_FLAGS bit 3 (`PLAYER_CONTROLLED`) — which every real player unit
+                    // carries and this hand-built snapshot did not. `CanAttack` picks its terminal
+                    // arm on this bit (1530): without it the observer reads as a creature, the pair
+                    // takes the both-uncontrolled arm — which needs a HOSTILE reaction in one
+                    // direction, and a wolf's is neutral — and the scenario's plate stopped being
+                    // drawn at all. A fixture is a snapshot of the live component set; this field
+                    // was simply missing from it.
+                    (46, 0x8),
                 ])),
                 crate::net::SelfPlayer,
                 crate::net::Guid(PLAYER_GUID),

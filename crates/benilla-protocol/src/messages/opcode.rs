@@ -989,6 +989,43 @@ pub const MSG_QUERY_NEXT_MAIL_TIME: u16 = 0x0284; // 644
 /// timer's expiry otherwise).
 pub const SMSG_RECEIVED_MAIL: u16 = 0x0285; // 645
 
+// The auction house arc (decision 1511 P0; VERIFIED vmangos `Opcodes_1_12_1.h`: 597-607, 612-613,
+// 653 — every value re-read against that table). Bodies in [`super::auction`]. Two family facts
+// belong here: **there is no `*_LIST_PENDING_SALES` on 5875** — the symbol exists in no vmangos
+// opcode table at all, so the pending-sales pane is a later client's and has no wire to build —
+// and every CMSG below carries the auctioneer guid at its head because the server re-validates
+// the 5 yd interact distance on each one independently; the hello is not a session token.
+/// Same opcode both directions (597): our request is one auctioneer guid; the reply echoes it and
+/// adds `u32 houseId` (`AuctionHouse.dbc`, rows 1..7, which carries the deposit/cut rates). It is
+/// the **reply** that opens the window, not our send.
+pub const MSG_AUCTION_HELLO: u16 = 0x0255; // 597
+pub const CMSG_AUCTION_SELL_ITEM: u16 = 0x0256; // 598
+pub const CMSG_AUCTION_REMOVE_ITEM: u16 = 0x0257; // 599
+/// The Browse search — ten fields and **no sort bytes** on 5875: filtering is server-side,
+/// sorting entirely client-side ([`super::auction::auction_list_items`]).
+pub const CMSG_AUCTION_LIST_ITEMS: u16 = 0x0258; // 600
+pub const CMSG_AUCTION_LIST_OWNER_ITEMS: u16 = 0x0259; // 601
+/// Bid *and* buy out: buyout is inferred from the price (`price >= buyout && buyout != 0`), never
+/// flagged, and there is no separate opcode for it.
+pub const CMSG_AUCTION_PLACE_BID: u16 = 0x025A; // 602
+/// The one verdict opcode for sell/cancel/bid, with a conditional tail keyed on its error
+/// ([`super::auction::AuctionCommandTail`]). Several refusals send **nothing at all** instead.
+pub const SMSG_AUCTION_COMMAND_RESULT: u16 = 0x025B; // 603
+/// This and the two list results below share ONE frame and ONE 64-byte record layout
+/// ([`super::auction::read_auction_list_result`]): `u32 count`, the records, then `u32 totalCount`
+/// at the very end — the match count *before* the 50-row page cap.
+pub const SMSG_AUCTION_LIST_RESULT: u16 = 0x025C; // 604
+pub const SMSG_AUCTION_OWNER_LIST_RESULT: u16 = 0x025D; // 605
+/// Pushed to the bidder: won, or outbid — `bidOrZero == 0` means **won**, not "no bid".
+pub const SMSG_AUCTION_BIDDER_NOTIFICATION: u16 = 0x025E; // 606
+/// Pushed to the seller. A **different field order** from the bidder notification, and no
+/// `houseId`; the two never share a struct or a reader.
+pub const SMSG_AUCTION_OWNER_NOTIFICATION: u16 = 0x025F; // 607
+pub const CMSG_AUCTION_LIST_BIDDER_ITEMS: u16 = 0x0264; // 612
+pub const SMSG_AUCTION_BIDDER_LIST_RESULT: u16 = 0x0265; // 613
+/// Pushed to a bidder whose auction the seller cancelled.
+pub const SMSG_AUCTION_REMOVED_NOTIFICATION: u16 = 0x028D; // 653
+
 // The world-state table (VERIFIED both ways: vmangos `Opcodes_1_12_1.h` 706-707, and wow-re's read
 // of the reference's own handler `0x48f690`, whose registration at `0x48f515-0x48f52f` selects these
 // two arms as the ONLY writers of the table setter `0x4c5870`). Bodies in

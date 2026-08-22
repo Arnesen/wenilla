@@ -5,18 +5,18 @@
 use crate::wire::Vector3d;
 
 use super::{
-    ActionButton, AttackerState, CastOutcome, ChannelNotify, Character, ChatMessage,
-    CorpseLocation, DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
-    FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GossipPoi, GroupLootInfo,
-    GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse,
-    GuildRoster, InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
-    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
-    MirrorTimerStart, MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
-    PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption,
-    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
-    SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss,
-    SpellStart, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
-    VendorItem, WhoResults, XpGain,
+    ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
+    AuctionOwnerNotification, CastOutcome, ChannelNotify, Character, ChatMessage, CorpseLocation,
+    DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate,
+    GameObjectQueryInfo, GossipOption, GossipPoi, GroupLootInfo, GroupMemberEntry,
+    GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
+    InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
+    LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
+    MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, PvpCredit,
+    QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems,
+    QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown,
+    SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask,
+    TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -1155,6 +1155,56 @@ pub enum ServerPacket {
     NextMailTime {
         seconds: f32,
     },
+    /// `MSG_AUCTION_HELLO`'s **reply** (same opcode as our one-guid request, decision 1511 P0):
+    /// the auctioneer we greeted plus the `AuctionHouse.dbc` row (1..7) that names its deposit and
+    /// cut rates. It is this packet, not our send, that opens the window.
+    AuctionHello {
+        auctioneer: u64,
+        house_id: u32,
+    },
+    /// `SMSG_AUCTION_COMMAND_RESULT` — the verdict on a sell/cancel/bid, keyed by `action`
+    /// ([`super::auction::auction_action`]) and `error` ([`super::auction::auction_error`]);
+    /// `tail` is the conditional payload the error selects (layout in
+    /// [`super::auction::read_auction_command_result`]). `auction_id` is `0` on most failures.
+    AuctionCommandResult {
+        auction_id: u32,
+        action: u32,
+        error: u32,
+        tail: AuctionCommandTail,
+    },
+    /// `SMSG_AUCTION_LIST_RESULT` — a Browse page, answering `CMSG_AUCTION_LIST_ITEMS`.
+    /// `total_count` is the match count *before* the 50-row cap (the pager's "of N"), and rides
+    /// at the END of the body (layout in [`super::auction::read_auction_list_result`]).
+    AuctionListResult {
+        auctions: Vec<AuctionListEntry>,
+        total_count: u32,
+    },
+    /// `SMSG_AUCTION_OWNER_LIST_RESULT` — the Auctions tab page (your own listings), answering
+    /// `CMSG_AUCTION_LIST_OWNER_ITEMS`. Same frame and record as [`Self::AuctionListResult`].
+    AuctionOwnerListResult {
+        auctions: Vec<AuctionListEntry>,
+        total_count: u32,
+    },
+    /// `SMSG_AUCTION_BIDDER_LIST_RESULT` — the Bid tab page, answering
+    /// `CMSG_AUCTION_LIST_BIDDER_ITEMS`. Same frame and record as [`Self::AuctionListResult`];
+    /// the server emits the explicitly-refreshed ids first and then our own live bids, so a row
+    /// can legitimately appear twice in one page.
+    AuctionBidderListResult {
+        auctions: Vec<AuctionListEntry>,
+        total_count: u32,
+    },
+    /// `SMSG_AUCTION_BIDDER_NOTIFICATION` — we won, or we were outbid (`bid_or_zero == 0` means
+    /// **won**). A different shape from [`Self::AuctionOwnerNotification`], deliberately.
+    AuctionBidderNotification(AuctionBidderNotification),
+    /// `SMSG_AUCTION_OWNER_NOTIFICATION` — our own auction sold or took a bid. No house id, and
+    /// the bidder guid sits fourth rather than third; an all-zero guid is the "sold" signal.
+    AuctionOwnerNotification(AuctionOwnerNotification),
+    /// `SMSG_AUCTION_REMOVED_NOTIFICATION` — an auction we had bid on was cancelled by its seller.
+    AuctionRemovedNotification {
+        auction_id: u32,
+        item_entry: u32,
+        random_property_id: i32,
+    },
     /// `SMSG_TRADE_STATUS` — one pulse of the trade state machine (open/accept/cancel/complete/
     /// the refusal reasons); the tail-carrying statuses hold their payload in [`TradeStatus`]
     /// (layout in [`super::trade::read_trade_status`], decision 0592 P0).
@@ -1393,6 +1443,18 @@ impl ServerPacket {
             ServerPacket::ItemTextQueryResponse { .. } => "SMSG_ITEM_TEXT_QUERY_RESPONSE".into(),
             ServerPacket::ReceivedMail { .. } => "SMSG_RECEIVED_MAIL".into(),
             ServerPacket::NextMailTime { .. } => "MSG_QUERY_NEXT_MAIL_TIME".into(),
+            ServerPacket::AuctionHello { .. } => "MSG_AUCTION_HELLO".into(),
+            ServerPacket::AuctionCommandResult { .. } => "SMSG_AUCTION_COMMAND_RESULT".into(),
+            ServerPacket::AuctionListResult { .. } => "SMSG_AUCTION_LIST_RESULT".into(),
+            ServerPacket::AuctionOwnerListResult { .. } => "SMSG_AUCTION_OWNER_LIST_RESULT".into(),
+            ServerPacket::AuctionBidderListResult { .. } => {
+                "SMSG_AUCTION_BIDDER_LIST_RESULT".into()
+            }
+            ServerPacket::AuctionBidderNotification(_) => "SMSG_AUCTION_BIDDER_NOTIFICATION".into(),
+            ServerPacket::AuctionOwnerNotification(_) => "SMSG_AUCTION_OWNER_NOTIFICATION".into(),
+            ServerPacket::AuctionRemovedNotification { .. } => {
+                "SMSG_AUCTION_REMOVED_NOTIFICATION".into()
+            }
             ServerPacket::TradeStatus { .. } => "SMSG_TRADE_STATUS".into(),
             ServerPacket::TradeStatusExtended { .. } => "SMSG_TRADE_STATUS_EXTENDED".into(),
             ServerPacket::InitWorldStates(_) => "SMSG_INIT_WORLD_STATES".into(),

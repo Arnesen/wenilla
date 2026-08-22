@@ -152,7 +152,17 @@ pub(crate) struct Roster {
     pub(super) chars: Vec<Character>,
     /// The selected row (the ref's `CharacterSelect.selectedIndex`, 0-based; `None` = empty list).
     /// A fresh roster clamps it into range and defaults to the first row (the ref's law).
-    pub(super) selected: Option<usize>,
+    /// **Write it through [`Roster::select`]**, never directly — see [`Roster::select_seq`].
+    selected: Option<usize>,
+    /// Bumped by every [`Roster::select`], whether or not the row changed.
+    ///
+    /// The ref's `SelectCharacter` zeroes the select facing **unconditionally**: `0x472950`'s
+    /// `mov ds:0xb4217c, 0` sits one instruction *above* the already-built discriminator, so it
+    /// dominates both legs, and the merged tail re-applies it geometrically — so re-clicking the
+    /// row you are already on snaps the character square again (wow-re
+    /// `glue/scratch/glue-preview-facing-law.md`, 1533). A counter rather than change-detection on
+    /// `selected`, because "the same index again" is a selection.
+    pub(super) select_seq: u64,
     /// The guid we answered the IO thread with; `Some` = a login is requested/live.
     pub(super) pending_pick: Option<u64>,
     /// `WOW_CHAR`, when explicitly set: auto-pick this name on the FIRST roster (the dev fast
@@ -214,9 +224,21 @@ impl Roster {
             .iter()
             .position(|c| c.name.eq_ignore_ascii_case(name))
         {
-            self.selected = Some(row);
+            self.select(Some(row));
             self.just_created = None;
         }
+    }
+
+    /// Select a row — the ref's `SelectCharacter`. Every selection goes through here so the facing
+    /// reset it owes cannot be forgotten at one of the seven call sites (see [`Self::select_seq`]).
+    pub(super) fn select(&mut self, row: Option<usize>) {
+        self.selected = row;
+        self.select_seq = self.select_seq.wrapping_add(1);
+    }
+
+    /// The selected row, if any.
+    pub(super) fn selected(&self) -> Option<usize> {
+        self.selected
     }
 
     /// The selected character, if any.
@@ -316,14 +338,15 @@ fn apply_roster_policy(
                 warn!(
                     "char select: created {name:?} is not on the fresh roster — selecting the last row"
                 );
-                roster.selected = roster.chars.len().checked_sub(1);
+                let last = roster.chars.len().checked_sub(1);
+                roster.select(last);
             }
         }
         if roster.chars.is_empty() {
-            roster.selected = None;
+            roster.select(None);
         } else {
-            let sel = roster.selected.unwrap_or(0).min(roster.chars.len() - 1);
-            roster.selected = Some(sel);
+            let sel = roster.selected().unwrap_or(0).min(roster.chars.len() - 1);
+            roster.select(Some(sel));
         }
         // `WOW_CHARSELECT_PICK=<name>` — **select** that row and stay on the screen, the
         // deliberate opposite of `WOW_CHAR`'s enter-the-world fast path. Without it the screen is
@@ -338,7 +361,7 @@ fn apply_roster_policy(
             {
                 Some(row) => {
                     info!("char select: WOW_CHARSELECT_PICK={name} — selecting row {row}");
-                    roster.selected = Some(row);
+                    roster.select(Some(row));
                 }
                 None => warn!("char select: WOW_CHARSELECT_PICK={name} not on this account"),
             }
@@ -493,6 +516,14 @@ fn debug_glue_roundtrip(
 /// the first — it streams a map the streamer has already torn down once — and a teardown that
 /// forgets to reset its own bookkeeping fails exactly here and nowhere else. The world-audio
 /// boundary this smoke was written for is still checked on the way through.
+///
+/// **It ends the way a player ends a session** — by closing the window, not by writing an
+/// `AppExit` of its own (decision 1528). That is not cosmetic: the close is the *latest*
+/// announcement Bevy makes (`exit_on_all_closed` in `PostUpdate`, a frame after the request), so
+/// it is the only exit that actually tests whether the shutdown tail is reachable. Exiting by a
+/// hand-written `AppExit` from `Update` skipped that question for this smoke's whole life, and the
+/// bug it would have caught — every saved variable, every addon file and the camera pose lost on
+/// every window close — shipped underneath it.
 #[allow(clippy::too_many_arguments)] // a smoke test that drives the whole round trip
 fn debug_logout_smoke(
     state: Res<State<ClientState>>,
@@ -503,6 +534,8 @@ fn debug_logout_smoke(
     streamer: Res<benilla_world::terrain_stream::TerrainStreamer>,
     time: Res<Time>,
     mut exit: MessageWriter<AppExit>,
+    mut close: MessageWriter<bevy::window::WindowCloseRequested>,
+    windows: Query<Entity, With<bevy::window::PrimaryWindow>>,
     mut phase: Local<u8>,
     mut mark: Local<f32>,
 ) {
@@ -551,15 +584,34 @@ fn debug_logout_smoke(
             }
         },
         4 if *state.get() == ClientState::InWorld && player.active && now - *mark > 3.0 => {
+            // **The suppressor reading is the point of the second entry, not a decoration on it**
+            // (B306, decision 1542). This leg has crossed the boundary on every run since 1291 and
+            // could only ever report that it *happened* — tiles, UI rebuilds, error counts — none
+            // of which a character who re-entered unable to move would disturb. `scripts/smoke.sh`
+            // fails on anything but `none`, and separately reports whether the run's logout was
+            // the rooted kind at all: a GM probe gets vmangos's instant path, which is B306's
+            // precondition missing, so a green here is not a B306 regression on its own.
             info!(
-                "logout-smoke: re-entered — {} tiles resident, done",
-                streamer.residency().1
+                "logout-smoke: re-entered — {} tiles resident, suppressors: {}, done",
+                streamer.residency().1,
+                player.movement_suppressors()
             );
             *phase = 5;
         }
         5 => {
             info!("logout-smoke: done");
-            exit.write(AppExit::Success);
+            // The player's exit: request the window close and let `bevy_window` take it from
+            // there. A run with no window (there is none in the headless harness) has no such
+            // path, so it says so and falls back rather than hanging until the timeout.
+            match windows.single() {
+                Ok(window) => {
+                    close.write(bevy::window::WindowCloseRequested { window });
+                }
+                Err(_) => {
+                    warn!("logout-smoke: no primary window — exiting by AppExit instead");
+                    exit.write(AppExit::Success);
+                }
+            }
             *phase = 6;
         }
         _ => {}
@@ -741,6 +793,9 @@ mod tests {
             },
             flags: 0,
             equipment: [benilla_protocol::CharEnumItem::default(); 19],
+            pet_display_id: 0,
+            pet_level: 0,
+            pet_family: 0,
         }
     }
 

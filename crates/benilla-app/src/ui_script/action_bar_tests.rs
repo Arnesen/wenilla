@@ -1222,6 +1222,15 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         .unwrap(),
         "all six pages are viewable at rest — every extra bar ships off (1500)"
     );
+    // The NUMERAL is the only output of paging the player can actually see on the bar itself, and
+    // it went unwritten for as long as paging existed: the arrows worked, the twelve buttons
+    // repainted, and the "1" beside them was a declared literal nothing ever touched — so clicking
+    // them read as doing nothing at all (director, 2026-08-22). It seeds at the page's own value.
+    let page_text = |s: &UiScript| {
+        s.eval::<String>("return MainMenuBarPageNumber:GetText()")
+            .unwrap()
+    };
+    assert_eq!(page_text(&s), "1", "the load seed is the current page");
 
     // Raise the two bottom bars the way the client does, which is what takes pages 6 and 5 out of
     // the cycle from here on.
@@ -1231,6 +1240,7 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
     // Page up walks to 2, so button 1 shows action 13.
     s.run("ActionBar_PageUp()").unwrap();
     assert_eq!(s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(), 2);
+    assert_eq!(page_text(&s), "2", "the numeral follows the page up");
     assert_eq!(
         s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
             .unwrap(),
@@ -1256,6 +1266,11 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
             .unwrap(),
         37
+    );
+    assert_eq!(
+        page_text(&s),
+        "4",
+        "the numeral follows a wrap, not just a step"
     );
     // The pages the bottom bars already display are unreachable from the main bar — which is
     // exactly what MultiActionBar_Update did above. Without it, paging up lands on a duplicate of
@@ -1290,4 +1305,293 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         25,
         "and the page comes back when the form drops"
     );
+}
+
+/// The form/stance/stealth swap transition (decision 1524; ref BonusActionBarFrame.lua:1-98).
+/// Entering a form slides the BonusActionBarFrame replica up over 0.15s — the main bar keeps
+/// painting the OLD page underneath until the landing, which is also the one moment the sound
+/// (igBonusBarOpen) plays. The overlay then STAYS shown while the form holds (the ref-visible
+/// state addons read), a direct form→form swap repaints without re-sliding or re-sounding, and
+/// dropping the form slides it back down carrying the old form's page (lastBonusBar), silently.
+/// Keys route to the overlay's buttons from the FIRST slide frame — the swap's feel half: a key
+/// pressed the instant you enter stealth already drives the stealth page.
+#[test]
+fn bonus_bar_slides_up_with_sound_and_down_without() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in ["Cooldown.xml", "ActionBar.xml"] {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(file),
+        )
+        .unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+    }
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.tick(10.0); // a nonzero clock epoch
+    let _ = s.take_sounds();
+    assert!(
+        !s.eval::<bool>("return BonusActionBarFrame:IsShown()")
+            .unwrap(),
+        "no form, no overlay"
+    );
+
+    // ── Enter cat form: offset 0→1, the app's edge (ui_action/feed.rs) fires the event ─────────
+    s.set_bonus_bar_offset(1);
+    s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(s
+        .eval::<bool>("return BonusActionBarFrame:IsShown()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return BonusActionBarFrame.mode").unwrap(),
+        "show"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        1,
+        "the main bar holds the OLD page under the rising overlay"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(BonusActionButton1)")
+            .unwrap(),
+        73,
+        "the overlay paints the bonus page from the first slide frame"
+    );
+    assert!(s.take_sounds().is_empty(), "no sound until the bar lands");
+
+    // Keys route to the overlay immediately (ref ActionButton.lua:15-45's IsShown fork).
+    s.run("ActionButtonDown(1) ActionButtonUp(1)").unwrap();
+    assert_eq!(
+        s.take_action_uses(),
+        vec![73],
+        "a key pressed mid-slide already drives the bonus page"
+    );
+
+    // Half the slide: the replica is half-risen (top = 0.5 * 43 over the bar's bottom edge at
+    // y=0), the paint suppression still holds, still silent.
+    s.tick(0.075);
+    let top = s
+        .eval::<f64>("return BonusActionBarFrame:GetTop()")
+        .unwrap();
+    assert!(
+        (top - 21.5).abs() < 0.6,
+        "half-slide top = {top}, want ~21.5"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        1
+    );
+    assert!(s.take_sounds().is_empty());
+
+    // The landing edge: snap to 43, THE sound, and the main bar adopts the bonus page.
+    s.tick(0.08);
+    assert_eq!(
+        s.take_sounds(),
+        vec![benilla_ui::script::SoundRequest::KitName(
+            "igBonusBarOpen".into()
+        )]
+    );
+    let top = s
+        .eval::<f64>("return BonusActionBarFrame:GetTop()")
+        .unwrap();
+    assert!((top - 43.0).abs() < 0.01, "landed top = {top}, want 43");
+    assert_eq!(
+        s.eval::<String>("return BonusActionBarFrame.mode").unwrap(),
+        "none"
+    );
+    assert!(
+        s.eval::<bool>("return BonusActionBarFrame:IsShown()")
+            .unwrap(),
+        "the overlay stays up while the form holds — the ref-visible state"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        73,
+        "the main bar adopts the bonus page at landing"
+    );
+    s.tick(0.5);
+    assert!(s.take_sounds().is_empty(), "a landed bar never re-sounds");
+
+    // ── A direct form→form swap (stance dance, powershift): repaint, no slide, no sound ────────
+    s.set_bonus_bar_offset(3);
+    s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    assert_eq!(
+        s.eval::<String>("return BonusActionBarFrame.mode").unwrap(),
+        "none"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(BonusActionButton1)")
+            .unwrap(),
+        97
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        97
+    );
+    s.tick(0.2);
+    assert!(
+        s.take_sounds().is_empty(),
+        "form→form never re-slides or re-sounds"
+    );
+
+    // ── Drop the form: the overlay descends carrying the OLD form's page, silently ─────────────
+    s.set_bonus_bar_offset(0);
+    s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    assert_eq!(
+        s.eval::<String>("return BonusActionBarFrame.mode").unwrap(),
+        "hide"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        1,
+        "the main bar returns to the page immediately — it is being revealed"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(BonusActionButton1)")
+            .unwrap(),
+        97,
+        "the descending overlay carries the OLD form's page (lastBonusBar)"
+    );
+    // A key mid-descent still drives the old form's page — ref GetPagedID's lastBonusBar
+    // stand-in while the frame is still shown.
+    s.run("ActionButtonDown(1) ActionButtonUp(1)").unwrap();
+    assert_eq!(s.take_action_uses(), vec![97]);
+    s.tick(0.2);
+    assert!(
+        !s.eval::<bool>("return BonusActionBarFrame:IsShown()")
+            .unwrap(),
+        "the descent ends hidden"
+    );
+    assert!(
+        s.take_sounds().is_empty(),
+        "the down-slide is silent — the ref plays only on open"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// A form flip mid-slide turns the bar around from where it is (our progress fraction), rather
+/// than the ref's timer arithmetic, which mirror-jumps the position — the mechanism, not the
+/// quirk (1524).
+#[test]
+fn bonus_bar_turnaround_continues_from_position() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in ["Cooldown.xml", "ActionBar.xml"] {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(file),
+        )
+        .unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+    }
+    s.tick(10.0);
+    let _ = s.take_sounds();
+
+    // Up to half height, then the form drops mid-slide.
+    s.set_bonus_bar_offset(1);
+    s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    s.tick(0.075);
+    s.set_bonus_bar_offset(0);
+    s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    assert_eq!(
+        s.eval::<String>("return BonusActionBarFrame.mode").unwrap(),
+        "hide"
+    );
+    // A third of the way back down from the turnaround point: 43 * (0.5 - 0.03/0.15).
+    s.tick(0.03);
+    let top = s
+        .eval::<f64>("return BonusActionBarFrame:GetTop()")
+        .unwrap();
+    assert!(
+        (top - 12.9).abs() < 0.6,
+        "turnaround descends from 21.5, top = {top}"
+    );
+    s.tick(0.2);
+    assert!(!s
+        .eval::<bool>("return BonusActionBarFrame:IsShown()")
+        .unwrap());
+    assert!(
+        s.take_sounds().is_empty(),
+        "an aborted rise never lands, so it never sounds"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The two page arrows must not sit on top of each other.**
+///
+/// They are 32x32 squares stacked only 20 px apart, so their raw frame rects overlap by 12 px —
+/// and the hit-test walks the draw order in reverse, so the later-declared DOWN button owned that
+/// band: the bottom third of the visible UP arrow paged the bar the wrong way. The reference's
+/// `<HitRectInsets>` (±6 horizontal, ±7 vertical) shrink each square to the 20x18 arrow it
+/// actually draws, which separates them — the insets are behaviour here, not decoration.
+#[test]
+fn the_page_arrows_do_not_steal_each_other_s_clicks() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in ["Cooldown.xml", "ActionBar.xml"] {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(file),
+        )
+        .unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+    }
+    // The post-login state, which is what a player clicks into. Without it `ExhaustionTick_Update`
+    // never runs, and the rested marker — DIALOG strata, declared CENTER on the XP strip, which is
+    // exactly where the arrows are — sits unhidden over both and eats every click. That is the
+    // reference's own declaration (`hidden="false"`, ref-MainMenuBar.xml l.415), hidden at runtime
+    // when `GetXPExhaustion()` is nil, so firing the event is the harness's job, not a fix.
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.resolve();
+
+    let centre = |s: &UiScript, name: &str| {
+        s.eval::<(f64, f64)>(&format!(
+            "return ({name}:GetLeft() + {name}:GetRight()) / 2, \
+                    ({name}:GetBottom() + {name}:GetTop()) / 2"
+        ))
+        .unwrap()
+    };
+    for name in ["ActionBarUpButton", "ActionBarDownButton"] {
+        let (x, y) = centre(&s, name);
+        assert_eq!(
+            s.hit_test_name(x as f32, y as f32).as_deref(),
+            Some(name),
+            "{name} must eat the click at its own centre"
+        );
+    }
+
+    // The contested band, measured rather than assumed: the two 32x32 squares are 20 px apart, so
+    // raw they share the 12 px above the UP button's bottom edge. 8 px up from that edge is inside
+    // the up arrow's own drawn art AND inside the down button's raw square — the exact pixel the
+    // player aims at and the exact pixel the later-declared down button used to win.
+    //
+    // With the ref's ±7 vertical insets the two hit rects become disjoint (up keeps its top 18 px,
+    // down its own), so this point resolves UP, which is what the arrow under the cursor says.
+    let (x, up_bottom) = s
+        .eval::<(f64, f64)>(
+            "return (ActionBarUpButton:GetLeft() + ActionBarUpButton:GetRight()) / 2, \
+                    ActionBarUpButton:GetBottom()",
+        )
+        .unwrap();
+    assert_eq!(
+        s.hit_test_name(x as f32, up_bottom as f32 + 8.0).as_deref(),
+        Some("ActionBarUpButton"),
+        "the lower third of the visible UP arrow must page up, not down"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

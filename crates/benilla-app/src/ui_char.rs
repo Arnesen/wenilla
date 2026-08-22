@@ -546,7 +546,7 @@ fn slot_view(
     store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
-    enchant_rows: Option<&crate::items::Enchants>,
+    rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
@@ -591,19 +591,27 @@ fn slot_view(
                 enchant_ms[usize::from(s)],
             )
         }),
-        enchant_rows,
+        rolls.enchants,
     );
+    // `ITEM_FIELD_RANDOM_PROPERTIES_ID` — the roll behind the NAME's "of the Bear" (1547); the
+    // roll's enchants are already in the slots read just above.
+    let roll = obj.item_random_properties_id();
     let t = items.template(entry, guid, commands);
     let (name, quality, display, link, equip_slots, class, bar_placeable) = match t {
-        Some(t) => (
-            Some(t.name.clone()),
-            t.quality as i32,
-            t.display_info_id,
-            Some(item_link(entry, &t.name, t.quality)),
-            find_equip_slot(t.inventory_type),
-            t.class,
-            t.placeable_on_action_bar(),
-        ),
+        Some(t) => {
+            let name = rolls.name(&t.name, roll);
+            (
+                Some(name.clone()),
+                t.quality as i32,
+                t.display_info_id,
+                Some(crate::ui_items::item_link_full(
+                    entry, 0, roll, 0, &name, t.quality,
+                )),
+                find_equip_slot(t.inventory_type),
+                t.class,
+                t.placeable_on_action_bar(),
+            )
+        }
         None => (None, 0, 0, None, Vec::new(), 0, false),
     };
     // The quiver's bag-bar count is what's INSIDE it: the ref's `GetInventoryItemCount("player",
@@ -679,7 +687,7 @@ fn inventory_slots(
     store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
-    enchant_rows: Option<&crate::items::Enchants>,
+    rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
@@ -727,7 +735,7 @@ fn inventory_slots(
             store,
             items,
             icons,
-            enchant_rows,
+            rolls,
             commands,
             pending,
             names,
@@ -742,7 +750,7 @@ fn inventory_slots(
             store,
             items,
             icons,
-            enchant_rows,
+            rolls,
             commands,
             pending,
             names,
@@ -864,6 +872,8 @@ fn feed_char(
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment`'s name column — the equipped tooltip's enchant lines (decision 0915).
     enchants: Option<Res<crate::items::Enchants>>,
+    // `ItemRandomProperties` — the roll behind an equipped item's "of the Monkey" name (1547).
+    props: Option<Res<crate::items::RandomProperties>>,
     commands: Res<NetCommands>,
     mut feed: ResMut<CharFeedState>,
     mut booth: ResMut<PaperDollBooth>,
@@ -927,7 +937,9 @@ fn feed_char(
     // `is_added` for the icon catalog: the feeds read only its load-once icon column;
     // its model-cache half churns every frame (the containers gate's own note).
     let icons_added = icons.as_ref().is_some_and(|r| r.is_added());
-    let enchants_changed = enchants.as_ref().is_some_and(|r| r.is_changed());
+    // Both DBC catalogs load once, at startup — one input covers the pair.
+    let enchants_changed = enchants.as_ref().is_some_and(|r| r.is_changed())
+        || props.as_ref().is_some_and(|r| r.is_changed());
     let pending_held = !pending.is_empty();
     gate::trace(
         "feed_char",
@@ -974,7 +986,10 @@ fn feed_char(
         store,
         &mut items,
         icons.as_deref(),
-        enchants.as_deref(),
+        crate::items::RollCatalogs {
+            enchants: enchants.as_deref(),
+            props: props.as_deref(),
+        },
         &commands,
         &pending,
         &mut names,

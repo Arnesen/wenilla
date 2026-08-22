@@ -174,9 +174,15 @@ pub(super) fn spawn_loaded_placements(
                         };
                     let (radius, center) = m2_fade(&m.bounds, p.transform.scale.x);
                     let anim_bound = m2_anim_bound(&m.bounds);
-                    // Built here (not at the tag site below) so the gx fader seed can carry
-                    // the placement identity (B2, 1431); moved into `tag_world_object` after.
-                    let label = handle_label(h);
+                    // The placement's identity, built BEFORE the spawn: every lane that takes
+                    // a batch — entity, merge blob, retained cell — carries this same Arc, so
+                    // whichever one draws it, the pick names the placement (decision 1534).
+                    let object = Arc::new(WorldObject {
+                        kind: ModelKind::Doodad,
+                        label: handle_label(h),
+                        id: unique_id,
+                        detail: format!("emitters: {}", m.emitters.len()),
+                    });
                     let SpawnedModel {
                         entities: mut ents,
                         by_batch,
@@ -192,7 +198,7 @@ pub(super) fn spawn_loaded_placements(
                             skin: forms.skinned_meshes(key),
                         },
                         p.transform,
-                        false,
+                        &object,
                         shade,
                         None, // map doodad: exterior sky lighting (no interior probe)
                         radius,
@@ -204,18 +210,10 @@ pub(super) fn spawn_loaded_placements(
                         &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
                         Some((&mut *merge, MergeSite::Doodad { owner: p.owner })),
-                        // The retained-pass collector (1429/1431) — ADT doodads are its
-                        // lane; uid + label seed the fader exile identity (B2).
-                        staticgx.as_deref_mut().map(|gx| {
-                            (
-                                gx,
-                                crate::static_gx::GxSite::Doodad {
-                                    owner: p.owner,
-                                    uid: unique_id,
-                                    label: &label,
-                                },
-                            )
-                        }),
+                        // The retained-pass collector (1429/1431) — ADT doodads are its lane.
+                        staticgx
+                            .as_deref_mut()
+                            .map(|gx| (gx, crate::static_gx::GxSite::Doodad { owner: p.owner })),
                     );
                     // ADT doodads are exterior scene: from inside a WMO they draw only through a
                     // portal window (`0x683700`, fed solely by the per-window walk `0x682fa0` — see
@@ -285,14 +283,7 @@ pub(super) fn spawn_loaded_placements(
                         &fade,
                     );
                     spawn_lights_for(&mut commands, &m.lights, p.transform, None, &mut ents);
-                    tag_world_object(
-                        &mut commands,
-                        &ents,
-                        ModelKind::Doodad,
-                        label,
-                        unique_id,
-                        format!("emitters: {}", m.emitters.len()),
-                    );
+                    tag_world_object(&mut commands, &ents, &object);
                     if let Some((target, r)) = fade_near_target() {
                         let pos = p.transform.translation;
                         let d = bevy::math::Vec2::new(pos.x, pos.z).distance(target);
@@ -327,6 +318,14 @@ pub(super) fn spawn_loaded_placements(
                     // Hoisted above the spawn: the merge site needs it (a portal-gated building's
                     // blobs take `WmoGroupVis`), and the instance logic below reuses it.
                     let has_portals = !m.portal_refs.is_empty() && !m.portal_infos.is_empty();
+                    // The building's identity, shared by every lane that takes one of its batches
+                    // (decision 1534) — see the doodad site above.
+                    let object = Arc::new(WorldObject {
+                        kind: ModelKind::Wmo,
+                        label: handle_label(h),
+                        id: unique_id,
+                        detail: String::new(),
+                    });
                     // The per-placement portal-cull instance, spawned BEFORE the batches so the
                     // static-gx divert can key its retained region on it (slice 2 of 1429 — the
                     // region's lifecycle IS this entity's). The group-vis tagging still runs
@@ -376,7 +375,7 @@ pub(super) fn spawn_loaded_placements(
                             skin: None,
                         },
                         p.transform,
-                        true,
+                        &object,
                         ShadeSel::Matte, // WMO lights on the FFP N·L path — the selector is unread
                         None, // WMO groups carry their own per-submesh interior flag + batch class
                         f32::INFINITY,
@@ -577,14 +576,7 @@ pub(super) fn spawn_loaded_placements(
                         p.transform,
                         &mut ents,
                     );
-                    tag_world_object(
-                        &mut commands,
-                        &ents,
-                        ModelKind::Wmo,
-                        handle_label(h),
-                        unique_id,
-                        String::new(),
-                    );
+                    tag_world_object(&mut commands, &ents, &object);
                     // Resolve the interior props for this instance's doodad set (set 0 + the selected
                     // set), each composed onto the WMO's world transform; their M2s load async.
                     p.doodads = resolve_wmo_doodads(m, p.doodad_set, p.transform, &asset_server);
@@ -673,6 +665,17 @@ pub(super) fn spawn_loaded_placements(
                     slot
                 }
             };
+            // The prop's identity, shared with whichever lane takes its batches (1534).
+            let object = Arc::new(WorldObject {
+                kind: ModelKind::Doodad,
+                label: handle_label(&d.handle),
+                id: unique_id,
+                detail: format!(
+                    "emitters: {} · WMO prop · {}",
+                    m.emitters.len(),
+                    d.light.inspector_label()
+                ),
+            });
             let SpawnedModel {
                 entities: mut ents,
                 host,
@@ -688,7 +691,7 @@ pub(super) fn spawn_loaded_placements(
                     skin: forms.skinned_meshes(key),
                 },
                 d.transform,
-                false,
+                &object,
                 shade,
                 interior_slot, // interior props light off their folded probe, not the sky
                 radius,
@@ -834,18 +837,7 @@ pub(super) fn spawn_loaded_placements(
                 fade.room.as_ref(), // the prop's glow rides its rooms like its mesh (0689)
                 &mut ents,
             );
-            tag_world_object(
-                &mut commands,
-                &ents,
-                ModelKind::Doodad,
-                handle_label(&d.handle),
-                unique_id,
-                format!(
-                    "emitters: {} · WMO prop · {}",
-                    m.emitters.len(),
-                    d.light.inspector_label()
-                ),
-            );
+            tag_world_object(&mut commands, &ents, &object);
             p.entities.extend(ents);
             d.spawned = true;
             *pending_spawns -= 1;
@@ -993,24 +985,17 @@ fn handle_label<A: Asset>(handle: &Handle<A>) -> String {
         .unwrap_or_default()
 }
 
-/// Tag every spawned entity of a placement with its [`WorldObject`] identity (so the mouseover inspector
-/// can name it). Harmless on the non-mesh entities (colliders) — only mesh entities are ray-picked.
-fn tag_world_object(
-    commands: &mut Commands,
-    ents: &[Entity],
-    kind: ModelKind,
-    label: String,
-    id: u32,
-    detail: String,
-) {
-    let object = WorldObject {
-        kind,
-        label,
-        id,
-        detail,
-    };
+/// Tag every spawned entity of a placement with its [`WorldObject`] identity (so the mouseover
+/// inspector can name it). Harmless on the non-mesh entities (colliders) — only mesh entities are
+/// ray-picked.
+///
+/// The identity is built by the caller and passed IN, because a batch that diverts into a
+/// consolidating lane spawns no entity for this to reach: the same Arc rides the divert as the
+/// lane's pick-member identity (decision 1534). This tag covers what the entity path did spawn —
+/// including the fx entities (emitters, ribbons, lights) that no lane ever takes.
+fn tag_world_object(commands: &mut Commands, ents: &[Entity], object: &Arc<WorldObject>) {
     for &e in ents {
-        commands.entity(e).insert(object.clone());
+        commands.entity(e).insert((**object).clone());
     }
 }
 

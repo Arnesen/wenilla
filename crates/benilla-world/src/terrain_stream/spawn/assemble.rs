@@ -4,6 +4,8 @@
 //! ([`super::spawn_loaded_placements`]) and the WMO-display gameobject's doodad props
 //! (`crate::entities`' `wmo_props`).
 
+use std::sync::Arc;
+
 use benilla_assets::{M2Model, ModelSubmesh};
 use benilla_formats::ModelBlend;
 use bevy::camera::primitives::Aabb;
@@ -93,7 +95,13 @@ pub fn spawn_model_entities(
     // placement spawns these are complete.
     forms: crate::model_forms::FormSlices<'_>,
     transform: Transform,
-    is_wmo: bool,
+    // This placement's dev-instrument identity — model path, placement uniqueId, kind — shared
+    // by every batch it spawns. It is an INPUT rather than the blanket tag it used to be
+    // (`tag_world_object`, still applied to the returned entities) because a batch that DIVERTS
+    // spawns no entity to tag: the consolidating lanes carry this Arc into their own pick
+    // members instead, which is what keeps a merged or retained placement nameable (1534).
+    // `kind` also stands in for the old `is_wmo` flag — one source, so they cannot disagree.
+    object: &Arc<crate::interact::WorldObject>,
     // The static terrain-shade selector for every batch (the MCSH sample at this placement's base →
     // `ShadeSel::Lit`/`Matte`/`Shaded`; see `model_render::ShadeSel`). Ignored by WMO group geometry
     // and interior props (their lighting lanes don't read it).
@@ -156,11 +164,8 @@ pub fn spawn_model_entities(
     // its host bone off (0130 phase 4), and the FILE sequence slot its variation roll landed
     // on, which the emitters' rate/gate tracks must be sampled against (decision 0760).
 ) -> SpawnedModel {
-    let kind = if is_wmo {
-        ModelKind::Wmo
-    } else {
-        ModelKind::Doodad
-    };
+    let kind = object.kind;
+    let is_wmo = kind == ModelKind::Wmo;
     let mut out = Vec::with_capacity(submeshes.len());
     // The doodad-animation host (decision 0130 phase 1): an animated model — most placed instances
     // aren't, and stay on the static path below untouched — gets an anim-root + joint hierarchy +
@@ -377,13 +382,11 @@ pub fn spawn_model_entities(
                 None
             } else {
                 match site {
-                    crate::static_gx::GxSite::Doodad { owner, uid, label }
+                    crate::static_gx::GxSite::Doodad { owner }
                         if !is_wmo && class.merges() && !class.interior_prop =>
                     {
                         let fade = (!class.never_fade && !crate::static_gx::fade_lane_disabled())
                             .then(|| crate::static_gx::GxFadeSeed {
-                                uid: *uid,
-                                label,
                                 radius,
                                 local_center,
                                 stat_mesh: stat_mesh.clone(),
@@ -444,6 +447,8 @@ pub fn spawn_model_entities(
                 if gx.divert(crate::static_gx::GxBatch {
                     geometry: &sub.geometry,
                     transform,
+                    object,
+                    aabb: *stat_aabb,
                     owner,
                     texture: sub.texture.clone(),
                     blend: sub.blend,
@@ -486,6 +491,7 @@ pub fn spawn_model_entities(
                     merge_sphere,
                     sub.blend,
                     kind,
+                    object,
                 )
             {
                 continue;

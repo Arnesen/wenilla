@@ -16,23 +16,32 @@
         by 9, and 13 declare a frame `inherits="SmallMoneyFrameTemplate"`. `MoneyTypeInfo` was one of
         the top runtime walls the frame rename left standing.
 
-        ── THE OTHER COIN KIT, and why there are two ────────────────────────────────────────────────
-        benilla's own eight windows (merchant, bank, trade, mail, quest, quest log, taxi, trainer) do
-        NOT use this file. They render coins through `BenillaMoney_Set`/`_Clear`/`_SetColor` in
+        ── THE OTHER COIN KIT, and why there are still two ──────────────────────────────────────────
+        Eight of our windows (merchant, bank, trade, mail, quest, quest log, taxi, trainer) do NOT use
+        this file. They render coins through `BenillaMoney_Set`/`_Clear`/`_SetColor` in
         MerchantFrame.xml: a three-SLOT chain (`<prefix>Coin1..3`) that fills only the non-zero
         denominations in display order and re-flows, rather than three fixed GoldButton/SilverButton/
         CopperButton frames that hide themselves. That kit takes its coin TexCoords, its collapse and
         its shrink from the same specification as this one, and its layout is the one the director has
         signed off across those eight windows.
 
-        So the two coexist deliberately, and the split is by AUDIENCE, not by accident:
-          · `BenillaMoney_*` + `<prefix>Coin1..3`  — what our own windows are laid out on.
+        The auction house is the exception, and the reason the reconciliation started there rather
+        than anywhere else: the three-slot kit has no notion of a money TYPE, so it cannot express
+        `showSmallerCoins` or `fixedWidth` — and those two flags ARE the auction house's price column
+        (`MoneyTypeInfo["AUCTION"]`, declared below and, until AuctionFrame.xml moved, used by
+        nothing). On the three-slot kit "1g" showed as one lone gold coin where the reference shows
+        `1g 0s 0c`, and a column of prices packed tight instead of lining up. That is not a layout
+        preference to re-approve, it is the kit being the wrong kit. See decision 1522.
+
+        So the two still coexist, and the split is now by KIT CAPABILITY as much as by audience:
+          · `BenillaMoney_*` + `<prefix>Coin1..3`  — the eight windows whose look is signed off and
+            whose money is all plain collapsing STATIC amounts, which that kit renders correctly.
           · `MoneyFrame_*` + `MoneyTypeInfo` here  — the names and structure an addon writes against,
-            and what an addon's `inherits="SmallMoneyFrameTemplate"` resolves to.
-        The reconciliation — migrating those eight windows onto `SmallMoneyFrameTemplate` +
-        `MoneyFrame_Update` and retiring `BenillaMoney_*` — is what the specification itself does and
-        is the right end state; it is a re-layout of hand-authored art in eight files (an approved
-        look), so it is named here rather than done in passing.
+            what an addon's `inherits="SmallMoneyFrameTemplate"` resolves to, and what the auction
+            house is laid out on.
+        Finishing the migration — moving those eight onto `SmallMoneyFrameTemplate` and retiring
+        `BenillaMoney_*` — is still the right end state; it is a re-layout of hand-authored art in
+        eight files (an approved look), so it stays named here rather than done in passing.
 
         ── WHAT IS NOT CARRIED, and why (each is guarded at its own site below) ─────────────────────
         · THE COIN PICKUP. `OpenCoinPickupFrame`/`UpdateCoinPickupFrame`/`CoinPickupFrame` belong to
@@ -341,6 +350,12 @@
             -- `math.mod`, which truncates towards zero, so `mod(-1, 100)` is -1 and not 99 — the two
             -- forms part company the moment `money` goes negative (which `GetMoney()` minus a trade
             -- offer can), and this one is the specified answer.
+            -- A STATIC/AUCTION frame's amount is whatever its owner last parked on it, and on the
+            -- very first paint — `MoneyFrame_SetType`'s own repaint, in OnLoad, before any owner has
+            -- filled it — that is nil. The specification divides straight into it and throws there;
+            -- we answer 0, because the throw would take the whole `<OnLoad>`/`<OnShow>` chain down
+            -- with it and an empty price column is the honest reading of "nothing set yet".
+            money = money or 0
             local gold = floor(money / COPPER_PER_GOLD)
             local silver = floor((money - gold * COPPER_PER_GOLD) / COPPER_PER_SILVER)
             local copper = mod(money, COPPER_PER_SILVER)

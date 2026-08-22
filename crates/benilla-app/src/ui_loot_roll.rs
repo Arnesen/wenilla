@@ -64,7 +64,6 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, SelfGuid};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_items::item_link;
 use crate::ui_script::UiInput;
 
 /// Give up re-checking a pending announcement's names after this many frames — the same budget and
@@ -84,6 +83,11 @@ struct ActiveRoll {
     looted_target: u64,
     item_slot: u32,
     item_id: u32,
+    /// `SMSG_LOOT_START_ROLL`'s `randomPropertyId` — the drop's random-suffix roll (decision
+    /// 1547). The reference's own `SetLootRollItem 0x5364a0` copies exactly this into the
+    /// tooltip's `+0x424` and passes no item object, so — like a loot slot — the roll is the only
+    /// enchant source the roll window's hover can have.
+    random_property_id: u32,
     /// Milliseconds left; ticked down by [`feed_loot_rolls`], saturating at `0`. The roll is *not*
     /// dropped at zero — the server closes it with `SMSG_LOOT_ROLL_WON`/`SMSG_LOOT_ALL_PASSED` when
     /// its own timer fires, and the frame stays up (bar empty) until that lands.
@@ -149,6 +153,7 @@ impl LootRolls {
             looted_target: p.looted_target,
             item_slot: p.item_slot,
             item_id: p.item_id,
+            random_property_id: p.random_property_id,
             remaining_ms: p.countdown_ms,
         });
         self.opened.push((roll_id, p.countdown_ms));
@@ -313,15 +318,25 @@ fn render(
     items: &mut Items,
     names: &mut NameCache,
     commands: &NetCommands,
+    rolls: crate::items::RollCatalogs,
 ) -> Option<String> {
     // Every line embeds the item link, so the template must be in hand before any of them render.
-    let (looted_item, roller) = match line {
-        RollLine::Announce(p) => (p.item_id, Some(p.roller)),
-        RollLine::Won(p) => (p.item_id, Some(p.winner)),
-        RollLine::AllPassed(p) => (p.item_id, None),
+    let (looted_item, roll, roller) = match line {
+        RollLine::Announce(p) => (p.item_id, p.random_property_id, Some(p.roller)),
+        RollLine::Won(p) => (p.item_id, p.random_property_id, Some(p.winner)),
+        RollLine::AllPassed(p) => (p.item_id, p.random_property_id, None),
     };
     let t = items.template(looted_item, 0, commands)?;
-    let link = item_link(looted_item, &t.name.clone(), t.quality);
+    // The link's name is the ROLLED one (1547) — every announcement names the same drop the roll
+    // window does, so "[Bloodrazor of the Monkey] won by …" has to agree with the frame.
+    let link = crate::ui_items::item_link_full(
+        looted_item,
+        0,
+        roll,
+        0,
+        &rolls.name(&t.name.clone(), roll),
+        t.quality,
+    );
 
     let is_self = roller.is_some() && roller == self_guid;
 
@@ -347,6 +362,7 @@ fn render(
 /// Surface the queued announcement lines in the chat window once their names resolve, colored
 /// `LOOT` green (the roll lines ride `CHAT_MSG_LOOT` in the real client, like the receive lines).
 /// Unresolved lines retry up to [`LINE_MAX_TRIES`] frames, then drop.
+#[allow(clippy::too_many_arguments)] // the line resolve's full read set
 fn drain_lines(
     rolls: &mut LootRolls,
     self_guid: Option<u64>,
@@ -354,11 +370,12 @@ fn drain_lines(
     names: &mut NameCache,
     commands: &NetCommands,
     chat: &mut ChatLog,
+    catalogs: crate::items::RollCatalogs,
 ) {
     let pending = std::mem::take(&mut rolls.pending);
     let mut still = Vec::new();
     for mut p in pending {
-        match render(&p.line, self_guid, items, names, commands) {
+        match render(&p.line, self_guid, items, names, commands, catalogs) {
             Some(text) => chat.push_event(ChatEvent::text_only(ChatEventKind::Loot, text)),
             None => {
                 p.tries += 1;
@@ -379,6 +396,7 @@ fn snapshot(
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
+    catalogs: crate::items::RollCatalogs,
 ) -> LootRollsState {
     let entries = rolls
         .active
@@ -390,7 +408,7 @@ fn snapshot(
                 .and_then(|d| d.icon.clone());
             LootRollEntry {
                 roll_id: r.roll_id,
-                name: t.map(|t| t.name.clone()),
+                name: t.map(|t| catalogs.name(&t.name, r.random_property_id)),
                 texture,
                 // The roll is always for the whole stack the drop rolled; the wire carries no
                 // count on SMSG_LOOT_START_ROLL, so the frame shows the single-item case (the
@@ -401,11 +419,23 @@ fn snapshot(
                 bind_on_pickup: t.is_some_and(|t| t.bonding == BIND_WHEN_PICKED_UP),
                 time_left_ms: r.remaining_ms,
                 item_id: r.item_id,
+                // The roll the hover resolves its enchant lines from — `SetLootRollItem`'s own
+                // `+0x424` (1547).
+                random_property_id: r.random_property_id,
                 // The icon button's ctrl/shift arms read this (`GetLootRollItemLink`, decision
                 // 1059). Same builder and same arguments as the announcement lines' own link a few
                 // functions up ([`render`]) — one `item_link` call site per resolved roll, `None`
                 // until the template answers, exactly like `name`/`quality` beside it.
-                link: t.map(|t| item_link(r.item_id, &t.name, t.quality)),
+                link: t.map(|t| {
+                    crate::ui_items::item_link_full(
+                        r.item_id,
+                        0,
+                        r.random_property_id,
+                        0,
+                        &catalogs.name(&t.name, r.random_property_id),
+                        t.quality,
+                    )
+                }),
             }
         })
         .collect();
@@ -449,6 +479,9 @@ fn feed_loot_rolls(
     mut chat: ResMut<ChatLog>,
     time: Res<Time>,
     mut last: Local<crate::ui_script::VmMemo<LootRollsState>>,
+    // The random-suffix roll's catalogs (1547): the rolled name the frame and its chat lines show.
+    props: Option<Res<crate::items::RandomProperties>>,
+    enchants: Option<Res<crate::items::Enchants>>,
 ) {
     rolls.tick(time.delta().as_millis() as u32);
 
@@ -456,6 +489,10 @@ fn feed_loot_rolls(
         return;
     };
     let last = last.get(&script);
+    let catalogs = crate::items::RollCatalogs {
+        props: props.as_deref(),
+        enchants: enchants.as_deref(),
+    };
     drain_lines(
         &mut rolls,
         self_guid.0,
@@ -463,13 +500,14 @@ fn feed_loot_rolls(
         &mut names,
         &commands,
         &mut chat,
+        catalogs,
     );
 
     // The snapshot goes in FIRST — a GroupLootFrame claimed by the START_LOOT_ROLL below reads its
     // item out of the model in its OnShow, and the roll it is about was added to `active` in the
     // same `start()` call that queued `opened`, so pushing after would hand every fresh roll an
     // empty lookup. Same order as ui_loot's window feed, for the same reason.
-    let fresh = snapshot(&rolls, &mut items, icons.as_deref(), &commands);
+    let fresh = snapshot(&rolls, &mut items, icons.as_deref(), &commands, catalogs);
     let changed = repainted(last, &fresh);
     if fresh != *last {
         script.set_loot_rolls(fresh.clone());
@@ -839,7 +877,8 @@ mod tests {
             time_left_ms,
             item_id: 17182,
             // Lands with the name — one template answer fills both (decision 1059).
-            link: name.map(|n| item_link(17182, n, 4)),
+            link: name.map(|n| crate::ui_items::item_link(17182, n, 4)),
+            random_property_id: 0,
         }
     }
 

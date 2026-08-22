@@ -1395,6 +1395,7 @@ fn real_alias_table_resolves_the_shipped_commands() {
         );
     }
     assert_eq!(parse_line("/macrohelp"), ParsedChat::MacroHelp);
+    assert_eq!(parse_line("/convertraid"), ParsedChat::ConvertRaid);
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
     // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **68 distinct
@@ -1404,8 +1405,9 @@ fn real_alias_table_resolves_the_shipped_commands() {
     // 1291 added CONSOLE's `/console` — one distinct alias, SLASH_CONSOLE1 and 2 are both the
     // same string).
     //
-    // The third number is benilla's own player-facing additions: `/reload` (1291) and
-    // `/errors` `/err` (1495, the script error log) — 3 aliases over 2 commands. Present in
+    // The third number is benilla's own player-facing additions: `/reload` (1291), `/errors`
+    // `/err` (1495, the script error log) and `/convertraid` (the raid conversion trigger the
+    // unbuilt RaidFrame tab would otherwise carry) — 4 aliases over 3 commands. Present in
     // every build, deliberately counted apart from the shipped surface so the seam stays visible.
     // The error log is player-facing on purpose and NOT an instrument: gating it on
     // `dev_affordances()` would leave exactly the reporters who asked for it unable to type it.
@@ -1422,7 +1424,7 @@ fn real_alias_table_resolves_the_shipped_commands() {
     };
     assert_eq!(
         table.counts(),
-        (68, 225, 3, instruments),
+        (68, 225, 4, instruments),
         "(slash, emote, benilla addition, instrument) aliases"
     );
 }

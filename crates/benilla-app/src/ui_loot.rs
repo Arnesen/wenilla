@@ -2,8 +2,9 @@
 //! [`benilla_ui::script`]'s `loot` module, the twin of [`crate::ui_merchant`]'s merchant seam.
 //!
 //! The net bridge ([`crate::net::apply`]) fills [`LootState`] from the wire: `SMSG_LOOT_RESPONSE` →
-//! the rows + coin pile ([`LootState::open`]); `SMSG_LOOT_REMOVED` → a row drops
-//! ([`LootState::remove_slot`]); `SMSG_LOOT_CLEAR_MONEY` → the coin row drops
+//! the rows + coin pile ([`LootState::open`]); `SMSG_LOOT_REMOVED` → that row becomes an empty gap
+//! at its fixed position ([`LootState::remove_slot`] — the layout never compacts while open);
+//! `SMSG_LOOT_CLEAR_MONEY` → the coin row becomes the same kind of gap
 //! ([`LootState::clear_money`]); `SMSG_LOOT_RELEASE_RESPONSE` → the window closes
 //! ([`LootState::clear`]); the error shape → [`LootErrors`]; `SMSG_ITEM_PUSH_RESULT` → a queued
 //! "You receive loot" line ([`LootState::receives`]). A removal that empties the window arms the
@@ -27,7 +28,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{LootRow, LootState as LootSnapshot, ScriptValue, UiScript};
 
 use crate::entities::ItemDisplays;
-use crate::items::Items;
+use crate::items::{Items, RollCatalogs};
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_items::KEYRING_CONTAINER;
 use crate::ui_script::UiInput;
@@ -130,14 +131,30 @@ fn push_container(bag: u8, slot: u32) -> i64 {
 /// each to a display row and the drain maps a clicked 1-based row to its wire loot slot. Cleared on
 /// release and on disconnect. `receives` outlives the window (a vendor buy pushes one with no loot
 /// open) and is cleared only on disconnect.
+///
+/// **The slot layout is FIXED at open** (the reference's own slot array): a looted row — item or
+/// coin — becomes an empty *gap* at its position, never a compaction. The real client's
+/// `LOOT_SLOT_CLEARED` hides one button in place (`LootFrame.lua:22-37`), `numLootItems` is read
+/// once at OnShow (l.132), and a cleared slot answers neither `LootSlotIsItem` nor `LootSlotIsCoin`
+/// (l.80) — so the rows below a looted one keep their positions until the window closes. Modelled
+/// here as `coin_slot` (does position 1 belong to the coin pile, looted or not) + `taken` (which
+/// wire slots are already gone); [`snapshot`] emits `None` rows for the gaps.
 #[derive(Resource, Default)]
 pub(crate) struct LootState {
     /// The lootable unit whose window is open; `None` = no loot open.
     source: Option<u64>,
-    /// The coin pile in copper; `0` = no coin row.
+    /// The coin pile in copper; `0` = no coin left to loot.
     gold: u32,
+    /// Whether the layout's position 1 is the coin pile — fixed at open (`gold > 0` then), and it
+    /// stays `true` after the coin is looted: the slot becomes a gap, not a vacancy the items
+    /// below shift into.
+    coin_slot: bool,
     /// The item rows (wire order); each carries its own **wire** loot slot (`LootItem::slot`).
+    /// Never shrinks while the window is open — a looted row's wire slot lands in `taken` instead.
     items: Vec<LootItem>,
+    /// Wire slots already looted by anyone (`SMSG_LOOT_REMOVED`) — their rows stay in the layout
+    /// as empty gaps.
+    taken: Vec<u8>,
     /// Deferred "You receive …" lines awaiting their item name.
     receives: Vec<PendingReceive>,
     /// A wire removal just emptied the open window (last item taken / coin line cleared with no
@@ -170,30 +187,39 @@ impl LootState {
     pub(crate) fn open(&mut self, source: u64, loot_type: u8, gold: u32, items: Vec<LootItem>) {
         self.source = Some(source);
         self.gold = gold;
+        self.coin_slot = gold > 0; // the layout is fixed here, for the window's lifetime
         self.items = items;
+        self.taken.clear();
         self.auto_release = false; // empty-at-open stays open — only a removal auto-closes
         self.fishing = loot_type == benilla_protocol::messages::loot_type::FISHING;
     }
 
-    /// A row was taken by anyone (`SMSG_LOOT_REMOVED`, keyed by the **wire** slot): drop it. The
-    /// remaining rows keep their own wire slots, so autostore stays correct even as display indices
-    /// shift. Emptying the window arms the auto-close ([`LootState::auto_release`]).
+    /// A row was taken by anyone (`SMSG_LOOT_REMOVED`, keyed by the **wire** slot): its position
+    /// becomes an empty gap — the layout never compacts (the reference hides that one button in
+    /// place, `LootFrame.lua:22-37`). Emptying the window arms the auto-close
+    /// ([`LootState::auto_release`]).
     pub(crate) fn remove_slot(&mut self, wire_slot: u8) {
-        self.items.retain(|it| it.slot != wire_slot);
+        if self.items.iter().any(|it| it.slot == wire_slot) && !self.taken.contains(&wire_slot) {
+            self.taken.push(wire_slot);
+        }
         self.arm_auto_release();
     }
 
-    /// The coin line disappears for everyone (`SMSG_LOOT_CLEAR_MONEY`). Emptying the window arms
-    /// the auto-close ([`LootState::auto_release`]).
+    /// The coin line disappears for everyone (`SMSG_LOOT_CLEAR_MONEY`) — its slot stays in the
+    /// layout as a gap (`coin_slot` holds). Emptying the window arms the auto-close
+    /// ([`LootState::auto_release`]).
     pub(crate) fn clear_money(&mut self) {
         self.gold = 0;
         self.arm_auto_release();
     }
 
     /// Arm the client-authoritative auto-close when a removal just left the open window with
-    /// nothing in it — no item rows and no coin line (see [`LootState::auto_release`]).
+    /// nothing lootable — every item taken and no coin left (see [`LootState::auto_release`]).
     fn arm_auto_release(&mut self) {
-        if self.source.is_some() && self.items.is_empty() && !self.has_coin() {
+        if self.source.is_some()
+            && !self.has_coin()
+            && self.items.iter().all(|it| self.taken.contains(&it.slot))
+        {
             self.auto_release = true;
         }
     }
@@ -227,7 +253,9 @@ impl LootState {
     pub(crate) fn clear(&mut self) {
         self.source = None;
         self.gold = 0;
+        self.coin_slot = false;
         self.items.clear();
+        self.taken.clear();
         self.auto_release = false;
         self.fishing = false;
     }
@@ -260,21 +288,23 @@ impl LootState {
         self.source
     }
 
-    /// Resolve a clicked 1-based display row to its action: the coin pile (row 1 when gold > 0) or the
-    /// item at the corresponding **wire** loot slot.
+    /// Resolve a clicked 1-based display row to its action: the coin pile (position 1 when the
+    /// layout has a coin slot) or the item at the corresponding **wire** loot slot. Positions are
+    /// the FIXED open-time layout; a slot already looted (the coin gone, an item in `taken`)
+    /// answers `None` — a click on the gap does nothing, like the reference's hidden button.
     fn action_at(&self, index_1based: u32) -> Option<LootAction> {
-        let index = index_1based.checked_sub(1)?; // 0-based display position
-        let as_item = |it: &LootItem| LootAction::Item {
+        let mut index = index_1based.checked_sub(1)? as usize; // 0-based layout position
+        if self.coin_slot {
+            if index == 0 {
+                return self.has_coin().then_some(LootAction::Money);
+            }
+            index -= 1;
+        }
+        let it = self.items.get(index)?;
+        (!self.taken.contains(&it.slot)).then_some(LootAction::Item {
             wire_slot: it.slot,
             display_id: it.display_info_id,
-        };
-        if self.has_coin() {
-            if index == 0 {
-                return Some(LootAction::Money);
-            }
-            return self.items.get((index - 1) as usize).map(as_item);
-        }
-        self.items.get(index as usize).map(as_item)
+        })
     }
 }
 
@@ -303,18 +333,22 @@ pub(crate) struct LootConfig {
 /// **Whether we kneel at it is a separate question** — [`LootKneel`], the client's predicate B
 /// `0x612710`. Arming the latch is not arming the pose; conflating the two is what 1471 got wrong.
 ///
-/// **The arms** (the real client has five; we model the three our wire can produce):
+/// **The arms** — the real client has five, and we model all five (1477 shipped four; the fifth is
+/// decision 1531):
 /// - the `CMSG_LOOT` send (`0x5df253`/`0x5df40d`) — a **corpse** or player bones, armed at the
 ///   click, so the kneel is client-predicted with no round-trip;
 /// - **`SMSG_SPELL_GO`** for an `OPEN_LOCK` cast that lands on a **chest**
 ///   (`0x6e831b → SetLootTarget 0x5ed5f0`) — this, not the loot response, is a chest's real arm,
 ///   and it is why the reference is already kneeling by the time the window opens;
+/// - the **`CMSG_OPEN_ITEM` send** (`0x5edcc0`, in emitter `0x5edc80`) — a clam, lockbox or loot
+///   bag in the bags, latched on the **item's own guid**
+///   ([`crate::ui_items::drain::drain_container_uses`]'s open arm). It changes no pose — predicate
+///   B refuses an ITEM — but it is exactly what makes the response's gate admit the answer:
+///   vmangos replies `SendLoot(item guid, LOOT_CORPSE)`, i.e. wire type **1**, which a cold latch
+///   refuses. 1477 read this arm as pose-only and left it out; the window stopped opening;
 /// - `CGPlayer_C::OnLootResponse 0x5eb900`, through its **admission gate** — see
 ///   [`crate::net::apply::loot::loot_response`]. Not unconditional: a `loot_type == 1` response
 ///   against a cold latch is *refused and bounced*.
-///
-/// Not modelled: the `CMSG_OPEN_ITEM` arm (`0x5edcc0`, a lockbox). It would change no pose —
-/// predicate B refuses an ITEM — only the cursor and the re-loot lock-out; named in 1477 as a gap.
 ///
 /// Cleared on release/close (`0x48f2c9`/`0x5ec0d4`). Ours clears **guid-matched** (release
 /// response / refusal / our own release sends) — the safe generalization of the client's clears
@@ -494,20 +528,27 @@ fn resolve_item(
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
+    rolls: RollCatalogs,
 ) -> LootRow {
     let (name, quality, link) = match items.template(item.item_id, 0, commands) {
-        Some(t) => (
-            Some(t.name.clone()),
-            Some(t.quality),
-            Some(crate::ui_items::item_link_full(
-                item.item_id,
-                0,
-                item.random_property_id,
-                0,
-                &t.name,
-                t.quality,
-            )),
-        ),
+        Some(t) => {
+            // The rolled name IS the name here — the reference composes every display of an item's
+            // name through `0x5d8b00`, link text included, so the row, the tooltip plate and the
+            // shift-click link all read "Chipped Claw of the Bear" off this one string.
+            let name = rolls.name(&t.name, item.random_property_id);
+            (
+                Some(name.clone()),
+                Some(t.quality),
+                Some(crate::ui_items::item_link_full(
+                    item.item_id,
+                    0,
+                    item.random_property_id,
+                    0,
+                    &name,
+                    t.quality,
+                )),
+            )
+        }
         None => (None, None, None),
     };
     let texture = icons
@@ -521,21 +562,28 @@ fn resolve_item(
         is_coin: false,
         item_id: item.item_id,
         link,
+        // The roll rides as the raw id, exactly as the client's own loot record keeps it: the
+        // tooltip resolves it against the pushed roll table (§E5). Decision 1547.
+        random_property_id: item.random_property_id,
     }
 }
 
-/// Build the Lua-facing snapshot from [`LootState`] — `None` when no loot is open. The coin pile is
-/// prepended (row 1) when the loot carries gold.
+/// Build the Lua-facing snapshot from [`LootState`] — `None` when no loot is open. One entry per
+/// slot of the **fixed** open-time layout: the coin pile first when the loot opened with gold, then
+/// the items in wire order. A slot already looted stays in the list as `None` — the gap the
+/// reference's hidden button leaves (`LOOT_SLOT_CLEARED` hides in place; the rows below never
+/// shift up).
 fn snapshot(
     loot: &LootState,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
+    rolls: RollCatalogs,
 ) -> Option<LootSnapshot> {
     loot.source?;
     let mut rows = Vec::with_capacity(loot.items.len() + 1);
-    if loot.has_coin() {
-        rows.push(LootRow {
+    if loot.coin_slot {
+        rows.push(loot.has_coin().then(|| LootRow {
             name: Some(format_money(loot.gold)),
             texture: Some(coin_icon(loot.gold).into()),
             quantity: 1,
@@ -545,10 +593,14 @@ fn snapshot(
             // No link: the coin pile is a synthesized row with no item behind it, so a modified
             // click on it finds nil and does nothing (decision 1059).
             link: None,
-        });
+            random_property_id: 0,
+        }));
     }
     for it in &loot.items {
-        rows.push(resolve_item(it, items, icons, commands));
+        rows.push(
+            (!loot.taken.contains(&it.slot))
+                .then(|| resolve_item(it, items, icons, commands, rolls)),
+        );
     }
     Some(LootSnapshot {
         rows,
@@ -611,6 +663,7 @@ fn drain_receives(
     commands: &NetCommands,
     chat: &mut crate::ui_chat::ChatLog,
     script: &mut UiScript,
+    rolls: RollCatalogs,
 ) {
     let pending = std::mem::take(&mut loot.receives);
     let mut still = Vec::new();
@@ -644,7 +697,7 @@ fn drain_receives(
                 if r.in_chat {
                     chat.push_event(crate::ui_chat::ChatEvent::text_only(
                         crate::ui_chat::ChatEventKind::Loot,
-                        receive_line(&r, &name, quality),
+                        receive_line(&r, &rolls.name(&name, r.random_property_id), quality),
                     ));
                 }
             }
@@ -675,11 +728,20 @@ fn feed_loot(
     cfg: Res<LootConfig>,
     keys: Res<ButtonInput<KeyCode>>,
     mut pickup: MessageWriter<crate::sound::LootPickupSound>,
+    // The random-suffix roll's two catalogs (decision 1547) — the drop's "of the Monkey" name and
+    // the enchant slots 2..6 its tooltip shows. A loot slot carries no item object, so this is the
+    // only source either can come from.
+    props: Option<Res<crate::items::RandomProperties>>,
+    enchants: Option<Res<crate::items::Enchants>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let last = last.get(&script);
+    let rolls = RollCatalogs {
+        props: props.as_deref(),
+        enchants: enchants.as_deref(),
+    };
     // Loot refusals + "You receive …" lines migrate to the chat window (decision 0084's chat arc):
     // refusals as informational SYSTEM-yellow lines, receive lines as LOOT-green. The ErrorsFrame
     // keeps only the cast/equip red toasts.
@@ -696,9 +758,10 @@ fn feed_loot(
         &commands,
         &mut chat,
         &mut script,
+        rolls,
     );
 
-    let fresh = snapshot(&loot, &mut items, icons.as_deref(), &commands);
+    let fresh = snapshot(&loot, &mut items, icons.as_deref(), &commands, rolls);
     if fresh == *last {
         return;
     }
@@ -976,8 +1039,11 @@ mod tests {
         assert!(loot.action_at(3).is_none());
     }
 
+    /// A looted row becomes a GAP at its fixed position — the layout never compacts while the
+    /// window is open (the reference hides that one button in place, `LootFrame.lua:22-37`; the
+    /// director's report: on ref, looting the gold does NOT pull the items up).
     #[test]
-    fn remove_slot_keeps_the_remaining_wire_slots() {
+    fn remove_slot_leaves_a_gap_at_the_fixed_position() {
         let mut loot = LootState::default();
         loot.open(
             0x42,
@@ -985,30 +1051,32 @@ mod tests {
             0,
             vec![item(0, 117, 1), item(1, 2589, 5), item(2, 4306, 2)],
         );
-        loot.remove_slot(1); // take the middle wire slot
-        assert_eq!(loot.items.len(), 2);
-        // The display shifts (row 2 is now wire slot 2), but the wire slots themselves are intact.
+        // Take the middle wire slot: row 2 is now a dead gap; rows 1 and 3 keep their positions
+        // AND their wire slots.
+        loot.remove_slot(1);
         assert!(matches!(
             loot.action_at(1),
             Some(LootAction::Item { wire_slot: 0, .. })
         ));
+        assert!(loot.action_at(2).is_none(), "the looted row is a gap");
         assert!(matches!(
-            loot.action_at(2),
+            loot.action_at(3),
             Some(LootAction::Item { wire_slot: 2, .. })
         ));
     }
 
     #[test]
-    fn clear_money_drops_the_coin_row() {
+    fn clear_money_leaves_the_coin_slot_as_a_gap() {
         let mut loot = LootState::default();
         loot.open(0x42, loot_type::CORPSE, 500, vec![item(0, 117, 1)]);
         assert!(loot.has_coin());
         assert!(matches!(loot.action_at(1), Some(LootAction::Money)));
         loot.clear_money();
         assert!(!loot.has_coin());
-        // The coin row is gone; row 1 is now the item.
+        // The coin slot stays in the layout as a gap; the item does NOT shift up into it.
+        assert!(loot.action_at(1).is_none(), "the looted coin slot is a gap");
         assert!(matches!(
-            loot.action_at(1),
+            loot.action_at(2),
             Some(LootAction::Item { wire_slot: 0, .. })
         ));
     }
@@ -1145,6 +1213,57 @@ mod tests {
         );
     }
 
+    /// The **rolled name** — the reference composes every display of an item's name through
+    /// `0x5d8b00(entry, randomPropertyId)`, which joins `ItemRandomProperties`' suffix with
+    /// `ITEM_SUFFIX_TEMPLATE` ("%s %s"). Byte-verified for the loot row itself (`GetLootSlotInfo`'s
+    /// `item` producer `0x4c2550` ends in that call, wow-re `loot-slot-record.md` §3), and the
+    /// tooltip's own title line makes the same call — so row text, tooltip plate and link agree by
+    /// construction. Decision 1547.
+    #[test]
+    fn a_rolled_drop_reads_its_suffix_in_the_row_the_link_and_the_lines() {
+        use benilla_formats::{RandomProperty, RandomPropertyCatalog};
+        // "of the Monkey" (row 584 of the shipped table) — Agility +7, Stamina +7.
+        let props = crate::items::RandomProperties(RandomPropertyCatalog::from_rows(
+            [(
+                584,
+                RandomProperty {
+                    suffix: "of the Monkey".into(),
+                    enchants: [74, 71, 0, 0, 0],
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        let enchants = crate::items::Enchants(benilla_formats::EnchantCatalog::from_rows(
+            std::collections::HashMap::new(),
+            [
+                (74, "Agility +7".to_string()),
+                (71, "Stamina +7".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            [(74, 0), (71, 0)].into_iter().collect(),
+        ));
+        let rolls = RollCatalogs {
+            props: Some(&props),
+            enchants: Some(&enchants),
+        };
+        assert_eq!(rolls.name("Bloodrazor", 584), "Bloodrazor of the Monkey");
+        // An unrolled drop keeps the plain name — the formatter's other exit.
+        assert_eq!(rolls.name("Bloodrazor", 0), "Bloodrazor");
+        // The roll's enchant lines land in slots 2..6 (the suffix band), which is what makes them
+        // white at the renderer.
+        let lines = rolls.lines(584);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|l| (l.slot, l.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(2, "Agility +7"), (3, "Stamina +7")],
+        );
+        assert!(rolls.lines(0).is_empty(), "no roll, no lines");
+    }
+
     /// The client clamps a quality outside the table to index 1 (white) — `0x52ad90`'s
     /// `cmpl $0x7 / jb` arm.
     #[test]
@@ -1206,11 +1325,12 @@ mod tests {
         let mut loot = LootState::default();
         // A pure-copper drop: name reads "4 Copper", icon is the copper coin pile (_05).
         loot.open(0x42, loot_type::CORPSE, 4, vec![]);
-        let snap = snapshot(&loot, &mut items, None, &commands).expect("open");
+        let snap = snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("open");
         assert_eq!(snap.rows.len(), 1, "coin row only");
-        assert!(snap.rows[0].is_coin);
-        assert_eq!(snap.rows[0].name.as_deref(), Some("4 Copper"));
-        assert_eq!(snap.rows[0].texture.as_deref(), Some(COIN_ICON_COPPER));
+        let coin = snap.rows[0].as_ref().expect("coin row present");
+        assert!(coin.is_coin);
+        assert_eq!(coin.name.as_deref(), Some("4 Copper"));
+        assert_eq!(coin.texture.as_deref(), Some(COIN_ICON_COPPER));
     }
 
     #[test]
@@ -1220,20 +1340,35 @@ mod tests {
         let commands = NetCommands(tx);
         let mut loot = LootState::default();
         // Closed → no snapshot.
-        assert!(snapshot(&loot, &mut items, None, &commands).is_none());
+        assert!(snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).is_none());
         loot.open(0x42, loot_type::CORPSE, 12_345, vec![item(0, 117, 3)]);
-        let snap = snapshot(&loot, &mut items, None, &commands).expect("open");
+        let snap = snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("open");
         assert_eq!(snap.rows.len(), 2, "coin + one item");
-        assert!(snap.rows[0].is_coin);
-        assert_eq!(
-            snap.rows[0].name.as_deref(),
-            Some("1 Gold 23 Silver 45 Copper")
-        );
-        assert_eq!(snap.rows[0].texture.as_deref(), Some(COIN_ICON_GOLD));
+        let coin = snap.rows[0].as_ref().expect("coin row present");
+        assert!(coin.is_coin);
+        assert_eq!(coin.name.as_deref(), Some("1 Gold 23 Silver 45 Copper"));
+        assert_eq!(coin.texture.as_deref(), Some(COIN_ICON_GOLD));
         // The item's name is nil while its template is in flight; its quantity is present.
-        assert!(!snap.rows[1].is_coin);
-        assert!(snap.rows[1].name.is_none());
-        assert_eq!(snap.rows[1].quantity, 3);
+        let row = snap.rows[1].as_ref().expect("item row present");
+        assert!(!row.is_coin);
+        assert!(row.name.is_none());
+        assert_eq!(row.quantity, 3);
+
+        // Looting the coin turns row 1 into a gap — the item KEEPS its position (the reference's
+        // fixed slot array; the director's report was exactly this row sliding up).
+        loot.clear_money();
+        let snap =
+            snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("still open");
+        assert_eq!(snap.rows.len(), 2, "the layout keeps both slots");
+        assert!(snap.rows[0].is_none(), "the looted coin slot is a gap");
+        assert!(snap.rows[1].is_some(), "the item stays at position 2");
+
+        // Looting the item empties the layout entirely (both gaps) — and arms the auto-close.
+        loot.remove_slot(0);
+        let snap =
+            snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("still open");
+        assert_eq!(snap.rows, vec![None, None]);
+        assert!(loot.take_auto_release(), "nothing lootable left");
     }
 
     #[test]

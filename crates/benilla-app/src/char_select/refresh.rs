@@ -142,7 +142,7 @@ pub(super) fn refresh_banner_and_buttons(
         let SelectAction::Row(i) = action else {
             continue;
         };
-        let lit = roster.selected == Some(*i) || *interaction != Interaction::None;
+        let lit = roster.selected() == Some(*i) || *interaction != Interaction::None;
         for child in children {
             if let Ok(mut vis) = hilights.get_mut(*child) {
                 *vis = if lit {
@@ -182,7 +182,23 @@ pub(super) fn refresh_banner_and_buttons(
 /// race's (the ref's `SetBackgroundModel` on the enum fileString — Orc before a list arrives or
 /// with an empty account, the ref's OnLoad default), the look its geared enum record. Runs every
 /// frame (cheap compares inside `GluePreview` writers — the builder keys on value change).
-pub(super) fn feed_glue_preview(roster: Res<Roster>, mut preview: ResMut<GluePreview>) {
+pub(super) fn feed_glue_preview(
+    roster: Res<Roster>,
+    mut preview: ResMut<GluePreview>,
+    mut showing: Local<Option<u64>>,
+) {
+    // **The facing belongs to the displayed character, not to the screen** (1533): turning one
+    // character must not hand its angle to the next one you click, and a fresh character faces the
+    // stage's own forward until you turn it. `GluePreview::yaw` is one resource shared by all three
+    // glue screens, so the reset lives at the selection edge rather than in the resource.
+    //
+    // Keyed on the selection **counter**, not on who is shown: the ref's `SelectCharacter` zeroes
+    // the facing unconditionally (`0x472950`, above the already-built discriminator), so clicking
+    // the row you are already on re-squares the character too. See `Roster::select_seq`.
+    if *showing != Some(roster.select_seq) {
+        *showing = Some(roster.select_seq);
+        preview.yaw = 0.0;
+    }
     let (race, look) = match roster.selected_char() {
         Some(c) => (c.race, Some(GlueLook::Select(SelectLook::from(c)))),
         None => (2, None), // UI_Orc — the ref's initial/empty-account scene

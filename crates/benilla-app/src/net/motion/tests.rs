@@ -62,7 +62,6 @@ fn motion(flags: u32, orientation: f32) -> RemoteMotion {
         relay: Default::default(),
         last_apply_ms: 0.0,
         last_apply_pos: [0.0, 0.0, 0.0],
-        settled_at: None,
     }
 }
 
@@ -884,12 +883,15 @@ fn a_gameobject_without_a_usable_quaternion_falls_back_to_its_facing() {
     }
 }
 
-/// **The settled memo** ([`RemoteMotion::settled_at`], 1490 item 2): an idle grounded remote
-/// arms it once its resolve reaches the fixed point, holds bitwise still while armed, keeps
-/// resolving where no ground exists, and disarms the moment a direction flag moves it — so the
-/// per-frame depenetration + down-cast run only for movers that can actually change.
+/// **A flag-still remote is not integrated at all** (decision 1545) — the reference's own gate,
+/// `0x20ff` ([`move_flags::INTEGRATED`]): `CMovement::Update`'s substep loop (`0x616e20`) and the
+/// manager's per-mover tick (`0x6166f5`) both bail on a mover with no move/jump/fall bit, and
+/// wow-re records that such a unit "is not even in the mover list". So its pose is the last
+/// packet's, verbatim — and the per-frame depenetration + down-cast the settled memo used to claw
+/// back (1490 item 2 / 1473 §3) does not run at all, for a stated reason rather than a proof that
+/// its answer was identical.
 #[test]
-fn an_idle_remote_settles_and_stops_sweeping() {
+fn a_flag_still_remote_is_left_where_the_wire_put_it() {
     use avian3d::prelude::{Collider, RigidBody};
     use bevy::prelude::*;
     use bevy::transform::TransformPlugin;
@@ -928,43 +930,45 @@ fn an_idle_remote_settles_and_stops_sweeping() {
         .spawn((
             Transform::default(),
             motion(0, 0.0),
-            // Real speeds, so the FORWARD leg below actually translates — a flag with no speed
-            // moves nothing and would (correctly) stay settled.
+            // Real speeds, so the FORWARD leg below actually translates.
             crate::net::UnitSpeeds(speeds()),
         ))
         .id();
+    // The one that used to sink: standing where no collider exists at all — a mover inside a
+    // building whose floor has not attached (B197's player site), or over a tile still streaming.
     let mut over_nothing = motion(0, 0.0);
     over_nothing.wow_pos = [50.0, 50.0, 10.0];
     let stranded = app
         .world_mut()
         .spawn((Transform::default(), over_nothing))
         .id();
-    // Seed the idle mover a hair above the floor — inside the standing snap reach (at zero
-    // speed the whole reach IS `STEP_SNAP_SLACK` ≈ 0.028), like a wire Z, which always arrives
-    // on the ground. The first resolve snaps it on, the second arms the memo.
+    // Seed the idle mover a hair above the floor, the way a wire Z arrives: its own client's
+    // resting clearance against the same geometry. The reference leaves that hair alone.
+    let seated = [0.0, 0.0, 0.01];
     app.world_mut()
         .entity_mut(idle)
         .get_mut::<RemoteMotion>()
         .unwrap()
-        .wow_pos = [0.0, 0.0, 0.01];
+        .wow_pos = seated;
 
-    for _ in 0..4 {
+    for _ in 0..8 {
         app.update();
     }
     let rm = app.world().entity(idle).get::<RemoteMotion>().unwrap();
-    let armed_at = rm.settled_at.expect("an idle grounded mover arms the memo");
-    assert_eq!(armed_at, rm.wow_pos, "the memo is the pose it stands at");
-    let parked = rm.wow_pos;
-    for _ in 0..3 {
-        app.update();
-    }
-    let rm = app.world().entity(idle).get::<RemoteMotion>().unwrap();
-    assert_eq!(rm.wow_pos, parked, "armed ⇒ bitwise still");
-    assert_eq!(rm.settled_at, Some(parked), "…and still armed");
-    // No ground in reach ⇒ never arms; it keeps asking until the world exists under it.
+    assert_eq!(
+        rm.wow_pos, seated,
+        "flag-still ⇒ not integrated: the wire's Z stands, hair and all"
+    );
+    // Before 1545 this one was descending STEP_SNAP_SLACK (1/36 yd) EVERY FRAME with nothing to
+    // end it — the whole defect, in one assertion.
     let rm = app.world().entity(stranded).get::<RemoteMotion>().unwrap();
-    assert_eq!(rm.settled_at, None, "no support ⇒ no memo");
-    // A direction flag moves the mover and the memo falls with it.
+    assert_eq!(
+        rm.wow_pos,
+        [50.0, 50.0, 10.0],
+        "no ground under a standing mover is OUR world being incomplete, not a drop to take"
+    );
+    // A direction flag puts it back in the mover list, and 0626's resolve runs: the floor is 0.01
+    // below, well inside the standing reach, so the resolve settles it onto the surface.
     app.world_mut()
         .entity_mut(idle)
         .get_mut::<RemoteMotion>()
@@ -972,5 +976,8 @@ fn an_idle_remote_settles_and_stops_sweeping() {
         .flags = move_flags::FORWARD;
     app.update();
     let rm = app.world().entity(idle).get::<RemoteMotion>().unwrap();
-    assert_eq!(rm.settled_at, None, "a moving mover resolves every frame");
+    assert!(
+        rm.wow_pos[2] < seated[2],
+        "a mover carrying a direction bit is integrated and resolved against the world"
+    );
 }

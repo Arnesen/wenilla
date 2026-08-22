@@ -17,8 +17,8 @@ use crate::ui_script::gate;
 
 use super::equip_error::equip_error_key;
 use super::{
-    find_equip_slot, has_key, item_link, keyring_size, slot_guid_count, EquipErrors, BAGS,
-    BAG_SLOT_FIRST, BANK_BAGS, BANK_BAG_ID_FIRST, BANK_BAG_SLOT_FIRST, BANK_CONTAINER, BANK_SLOTS,
+    find_equip_slot, has_key, keyring_size, slot_guid_count, EquipErrors, BAGS, BAG_SLOT_FIRST,
+    BANK_BAGS, BANK_BAG_ID_FIRST, BANK_BAG_SLOT_FIRST, BANK_CONTAINER, BANK_SLOTS,
     KEYRING_CONTAINER, KEYRING_SLOTS, PACK_SLOTS,
 };
 
@@ -300,6 +300,39 @@ pub(super) fn feed_item_sets(
 /// the "hover twice" flake this replaces). **Ask**: a renderer read of an id the app never
 /// resolved still records a miss, which triggers the `CMSG_ITEM_QUERY` here and lands via the
 /// same push when the answer arrives.
+/// Push the **whole** random-suffix table into the engine, once per VM (decision 1547).
+///
+/// Not an ask-once feed like the templates beside it: the roll table is a static DBC the app holds
+/// from load, and its consumers are click-driven — a chat-link tooltip has no hover re-enter loop
+/// to repaint on a late answer. One push per VM (a `/reload` mints a new one), and it waits for
+/// both catalogs, so a session that starts before the DBC load simply pushes on the next frame.
+pub(super) fn feed_random_properties(
+    script: Option<NonSendMut<UiScript>>,
+    props: Option<Res<crate::items::RandomProperties>>,
+    enchants: Option<Res<crate::items::Enchants>>,
+    mut pushed: Local<crate::ui_script::VmMemo<bool>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    if *pushed.get(&script) {
+        return;
+    }
+    // The enchant catalog is what turns the roll's five ids into lines; without it every row would
+    // push empty and the push would never be retried. Both, or neither.
+    let (Some(props), Some(enchants)) = (props, enchants) else {
+        return;
+    };
+    let rows = crate::items::random_property_views(&props, Some(&enchants));
+    let with_lines = rows.values().filter(|v| !v.enchants.is_empty()).count();
+    info!(
+        "random-property table: {} rows pushed, {with_lines} with enchant lines",
+        rows.len()
+    );
+    script.set_random_properties(rows);
+    *pushed.get(&script) = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn feed_item_stats(
     script: Option<NonSendMut<UiScript>>,
@@ -500,7 +533,7 @@ fn resolve_slot(
     guid: u64,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
-    enchants: Option<&crate::items::Enchants>,
+    rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     cooldowns: &crate::cooldowns::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
@@ -515,7 +548,7 @@ fn resolve_slot(
     // (both live on `Items`): one `Option<ms>` per enchant slot.
     let enchant_ms: [Option<u64>; 7] =
         std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
-    let (entry, count, durability, readable, creator, flags, enchant_lines) =
+    let (entry, count, durability, readable, creator, flags, roll, enchant_lines) =
         match items.object(guid) {
             Some(fields) => (
                 fields.object_entry().unwrap_or(0),
@@ -539,6 +572,10 @@ fn resolve_slot(
                     .and_then(|g| names.resolve(g, commands).map(str::to_string)),
                 // `ITEM_FIELD_FLAGS` — the tooltip's UNLOCKED (0x4) / WRAPPED (0x8) sub-gates.
                 fields.item_flags().unwrap_or(0),
+                // `ITEM_FIELD_RANDOM_PROPERTIES_ID` — the roll behind the NAME's "of the Bear"
+                // (decision 1547). Only the name: the roll's own enchants are already in the
+                // instance's slots 2..6 below, written there by the server.
+                fields.item_random_properties_id(),
                 // The instance's own 7 enchant slots — the tooltip's enchant lines (0915/0920). An
                 // item we hold streams as an OBJECT, so all seven are here, with their charges and
                 // their `SMSG_ITEM_ENCHANT_TIME_UPDATE` countdowns; the wire's 2-slot broadcast is
@@ -552,7 +589,7 @@ fn resolve_slot(
                             enchant_ms[usize::from(s)],
                         )
                     }),
-                    enchants,
+                    rolls.enchants,
                 ),
             ),
             // The player descriptor references a guid whose create hasn't landed (yet) —
@@ -584,7 +621,17 @@ fn resolve_slot(
         durability,
         quality: Some(t.quality),
         item_id: entry,
-        link: Some(item_link(entry, &t.name, t.quality)),
+        // The link carries the roll — both in its `randomPropertyId` field and in the bracketed
+        // NAME, which the reference builds out of the suffix-joining formatter `0x5d8b00`. The
+        // slot's tooltip plate reads its name back off this string.
+        link: Some(crate::ui_items::item_link_full(
+            entry,
+            0,
+            roll,
+            0,
+            &rolls.name(&t.name, roll),
+            t.quality,
+        )),
         locked: false,
         readable,
         creator,
@@ -651,8 +698,13 @@ pub(crate) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
-    // `SpellItemEnchantment`'s name column — the tooltip's enchant lines (decision 0915).
-    enchants: Option<Res<crate::items::Enchants>>,
+    // The two item-DBC catalogs, as one param (the 16-SystemParam ceiling): `SpellItemEnchantment`'s
+    // name column — the tooltip's enchant lines (decision 0915) — and `ItemRandomProperties`, the
+    // roll behind a slot's "of the Monkey" name (decision 1547).
+    catalogs: (
+        Option<Res<crate::items::Enchants>>,
+        Option<Res<crate::items::RandomProperties>>,
+    ),
     // The two self-descriptor legs in one param (the 16-SystemParam ceiling): the store the
     // slot arrays read, and its change tick — the gate's cheapest input (1439).
     self_q: (
@@ -702,7 +754,9 @@ pub(crate) fn feed_containers(
     // get-or-insert every frame, so `is_changed` reads true forever — 1439's gate-trace found
     // the containers gate held open by exactly this.
     let icons_changed = icons.as_ref().is_some_and(|r| r.is_added());
-    let enchants_changed = enchants.as_ref().is_some_and(|r| r.is_changed());
+    // Both DBC catalogs load once, at startup — one input covers the pair.
+    let enchants_changed = catalogs.0.as_ref().is_some_and(|r| r.is_changed())
+        || catalogs.1.as_ref().is_some_and(|r| r.is_changed());
     let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
     let families_changed = bag_families.as_ref().is_some_and(|r| r.is_changed());
     let errors_held = !equip_errors.0.is_empty() || !error_lines.0.is_empty();
@@ -759,7 +813,10 @@ pub(crate) fn feed_containers(
     // pushed start is frame-stable (the resource's own doc).
     let (now, ui_now) = (clock.anchor, clock.ui_now);
     let spell_catalog = spells.as_deref().map(|s| &s.catalog);
-    let enchant_rows = enchants.as_deref();
+    let rolls = crate::items::RollCatalogs {
+        enchants: catalogs.0.as_deref(),
+        props: catalogs.1.as_deref(),
+    };
     // Inventory refusals surface as the client's red error line (the cast path's exact shape):
     // the wire code keys into the VM's own GlobalStrings ([`equip_error_key`], total), reason 1
     // filling its `%d` with the packet's required level.
@@ -843,7 +900,7 @@ pub(crate) fn feed_containers(
                 guid,
                 &mut items,
                 icons.as_deref(),
-                enchant_rows,
+                rolls,
                 &commands,
                 &cooldowns,
                 spell_catalog,
@@ -896,7 +953,7 @@ pub(crate) fn feed_containers(
                     guid,
                     &mut items,
                     icons.as_deref(),
-                    enchant_rows,
+                    rolls,
                     &commands,
                     &cooldowns,
                     spell_catalog,
@@ -929,7 +986,7 @@ pub(crate) fn feed_containers(
                 guid,
                 &mut items,
                 icons.as_deref(),
-                enchant_rows,
+                rolls,
                 &commands,
                 &cooldowns,
                 spell_catalog,
@@ -978,7 +1035,7 @@ pub(crate) fn feed_containers(
                     guid,
                     &mut items,
                     icons.as_deref(),
-                    enchant_rows,
+                    rolls,
                     &commands,
                     &cooldowns,
                     spell_catalog,
@@ -1015,7 +1072,7 @@ pub(crate) fn feed_containers(
                 guid,
                 &mut items,
                 icons.as_deref(),
-                enchant_rows,
+                rolls,
                 &commands,
                 &cooldowns,
                 spell_catalog,

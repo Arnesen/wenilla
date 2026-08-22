@@ -382,7 +382,6 @@ pub(super) fn unit_move(
                 relay: Default::default(),
                 last_apply_ms: now_ms,
                 last_apply_pos: mv.position,
-                settled_at: None,
             };
             let fire_ms = rm.relay.schedule(mv.wire_ms, now_ms, 0, true);
             debug_assert_eq!(fire_ms, now_ms, "a seeding packet fires at arrival");

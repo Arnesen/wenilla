@@ -129,7 +129,13 @@ pub fn run(build: BuildId) -> AppExit {
         ..default()
     }))
     .add_plugins(thread_qos::ThreadQosPlugin)
-    .add_plugins(crate::bgwin::BgWinPlugin);
+    .add_plugins(crate::bgwin::BgWinPlugin)
+    // The third launch-time platform correction, and the client's own (decision 1528): macOS's
+    // `Cmd+Q` is wired to `terminate:`, which leaves the event loop without ever running another
+    // frame. Here that costs the check its verdict — `report_check` turns the `AppExit` into the
+    // process exit code, and there is no `AppExit` — so the viewer wants it for the same reason
+    // the client does, one layer of consequence down.
+    .add_plugins(crate::mac_quit::MacQuitPlugin);
 
     // **The cut line**, and the whole of it: everything `benilla-world` will own, in one name
     // (decision 1164, `crate::world_plugins`). This binary and the client add the identical group,

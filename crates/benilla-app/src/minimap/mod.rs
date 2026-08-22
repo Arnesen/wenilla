@@ -243,10 +243,10 @@ struct MinimapAssets {
     /// The shared POI atlas (`Interface\Minimap\POIIcons`) — the corpse blip's skull cell
     /// (decision 0308 §5) and any later POI rides it.
     poi: Option<Handle<Image>>,
-    /// The landmark-arrow art — the flat `.blp` of the reference's `minimapArrowModel`
-    /// (`Rotating-MinimapArrow.mdl`); a stand-in like the player arrow's (0203's flagged
-    /// simplification, pending the dispatched §5 draw-law verdict).
-    landmark: Option<Handle<Image>>,
+    /// The **four** rim-arrow arts — the flat `.blp` stand-ins for the one `minimapArrowModel`
+    /// (`Rotating-MinimapArrow.mdx`) the reference re-animates per blip source. See
+    /// [`blips::RimArrow`] for the sequence→layer table and why there are four of them.
+    rim_arrows: blips::RimArrowArt,
     /// The unit-blip atlas (`Interface\Minimap\ObjectIcons`, five 32-px dot cells) — the
     /// quest-giver dots.
     object_icons: Option<Handle<Image>>,
@@ -289,8 +289,10 @@ fn setup_minimap(
             let mask = assets.mask_texture("Textures\\MinimapMask", &mut images);
             let arrow = assets.sprite_texture("Interface\\Minimap\\MinimapArrow", &mut images);
             let poi = assets.sprite_texture("Interface\\Minimap\\POIIcons", &mut images);
-            let landmark =
-                assets.sprite_texture("Interface\\Minimap\\ROTATING-MINIMAPARROW", &mut images);
+            let mut rim_arrows = blips::RimArrowArt::default();
+            for kind in blips::RimArrow::ALL {
+                rim_arrows.set(kind, assets.sprite_texture(kind.texture(), &mut images));
+            }
             let object_icons =
                 assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
             let pois = {
@@ -321,7 +323,7 @@ fn setup_minimap(
                 mask,
                 arrow,
                 poi,
-                landmark,
+                rim_arrows,
                 object_icons,
                 pois,
                 forms,
@@ -710,8 +712,11 @@ fn emit_minimap(
     let blip_ctx = (blip_px_per_yd > 0.0).then(|| {
         if std::env::var("WOW_MM_BLIP_PROBE").is_ok() {
             eprintln!(
-                "BLIP-PROBE: landmark_tex={} pois={} map={} wx={wx:.0} wy={wy:.0} px_per_yd={blip_px_per_yd:.3} track_c={:#x} track_r={:#x} track_s={}",
-                assets.landmark.is_some(),
+                "BLIP-PROBE: arrow_art={} pois={} map={} wx={wx:.0} wy={wy:.0} px_per_yd={blip_px_per_yd:.3} track_c={:#x} track_r={:#x} track_s={}",
+                blips::RimArrow::ALL
+                    .iter()
+                    .filter(|k| assets.rim_arrows.get(**k).is_some())
+                    .count(),
                 assets.pois.as_ref().map(|c| c.len()).unwrap_or(0),
                 map.0,
                 tracking.creatures,
@@ -753,26 +758,32 @@ fn emit_minimap(
         // The guard-directions marker rides this pass as a landmark candidate, the way the
         // reference appends its static blip slot after the DBC scan — so it draws even when
         // `AreaPOI.dbc` failed to load, and the pass runs on the arrow art alone.
-        if let Some(tex) = &assets.landmark {
+        if assets.rim_arrows.any() {
             blips::emit_landmarks(
                 ctx,
                 assets.pois.as_ref(),
                 poi_marker.on_map(map.0),
                 map.0,
-                tex,
+                &assets.rim_arrows,
                 assets.poi.as_ref(),
                 &mut quads,
                 &mut hover,
             );
-        }
-        // The party/corpse rim arrows (0434 phase 6b, `place_party_raid_blips`' out-of-range
-        // half) draw with the POI arrows — before the player arrow, per the client's order.
-        if let Some(arrow) = &assets.arrow {
+            // The party/corpse rim arrows (0434 phase 6b, `place_party_raid_blips`' out-of-range
+            // half) draw with the POI arrows — before the player arrow, per the client's order.
             let corpse = death_net
                 .corpse
                 .filter(|cp| cp.display_map == map.0 as i32)
                 .map(|cp| cp.position);
-            blips::emit_party_arrows(ctx, &group, &guids, &unit_pos, corpse, arrow, &mut quads);
+            blips::emit_party_arrows(
+                ctx,
+                &group,
+                &guids,
+                &unit_pos,
+                corpse,
+                &assets.rim_arrows,
+                &mut quads,
+            );
         }
     }
 

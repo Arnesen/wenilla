@@ -41,6 +41,7 @@
 //! | [`trade`] | the player-trade dance |
 //! | [`duel`] | accept and cancel |
 //! | [`mail`] | the mailbox |
+//! | [`auction`] | the auction house: the hello, the three list pages, sell/bid/cancel |
 //! | [`player_flags`] | the empty-bodied `PLAYER_FLAGS` toggles: PvP, show-helm, show-cloak |
 //! | [`social`] | friends, ignores, and `/who` |
 //! | [`area_trigger`] | the one "I walked into trigger N" report |
@@ -55,6 +56,7 @@ use super::send_packet;
 mod action_bar;
 mod area_trigger;
 mod attack;
+mod auction;
 mod bank;
 mod binder;
 mod channel;

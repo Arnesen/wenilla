@@ -55,12 +55,13 @@
         wire) that this button has never had. LootFrame.xml's own row template
         (`BenillaLootButtonTemplate`) carries the same hover-cursor omission.
 
-        THE ITEM TOOLTIP uses `GameTooltip:SetItemById(itemId, name, quality)` (LootFrame.xml's own
-        `BenillaLootItem_OnEnter` idiom), not the reference's `SetLootRollItem` (no such tooltip
-        method here) — `itemId` is the benilla-extension 6th return of `GetLootRollItemInfo`
-        (see `loot_roll.rs`), always populated once a roll is known (unlike name/texture/quality, which
-        may be `nil` while the item template is still in flight). `GetLootRollItemLink` DOES exist now
-        (decision 1059) but is the click's, not the hover's: the tooltip wants the id, not the markup.
+        THE ITEM TOOLTIP uses `GameTooltip:SetLootRollItem(rollID)` — the reference's own binding
+        (decision 1547; it replaced a `SetItemById` that could not see the drop's random-suffix
+        roll and so printed `<Random enchantment>` on every rolled item). The `itemId` guard stays:
+        it is the benilla-extension 6th return of `GetLootRollItemInfo` (see `loot_roll.rs`),
+        always populated once a roll is known — unlike name/texture/quality, which may be `nil`
+        while the item template is still in flight. `GetLootRollItemLink` (decision 1059) is the
+        click's, not the hover's: the tooltip wants the roll, not the markup.
 
         `toplevel="true"` (ref l.243) IS STILL OMITTED, but for a NEW reason — the old one ("`SetToplevel`
         isn't in the v1 object model yet ... trivially re-added the day `SetToplevel` lands") has expired.
@@ -258,15 +259,16 @@
         end
 
         -- The item icon's hover tooltip (ref $parentIconFrame OnEnter/OnLeave, l.341-349, minus the
-        -- CursorUpdate/ResetCursor calls this engine has no counterpart for — see the header). Uses
-        -- the LootFrame.xml row idiom (SetItemById + the benilla itemId extension) rather than the
-        -- reference's SetLootRollItem, which doesn't exist here.
+        -- CursorUpdate/ResetCursor calls this engine has no counterpart for — see the header).
+        -- SetLootRollItem, the reference's own binding: the ROLL is the source, so the hover sees
+        -- the drop's random-suffix roll (through SetItemById it showed `<Random enchantment>` —
+        -- decision 1547).
         function BenillaGroupLootFrame_Icon_OnEnter(button)
             local frame = button:GetParent()
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
             local _, name, _, quality, _, itemId = GetLootRollItemInfo(frame.rollID)
             if itemId then
-                GameTooltip:SetItemById(itemId, name, quality)
+                GameTooltip:SetLootRollItem(frame.rollID)
             end
         end
 

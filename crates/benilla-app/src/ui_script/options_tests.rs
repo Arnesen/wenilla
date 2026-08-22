@@ -1074,7 +1074,23 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     assert!(s
         .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
         .unwrap());
-    // All three ride their registered "1" defaults.
+    // The plate pair leads the page and rides `VPlateMode::default()`: enemy on (the 0167 boot
+    // divergence), friendly off (faithful, 0599).
+    assert!(
+        s.eval::<bool>(
+            "return OptionsFrameContainerBodyNameplatesRowEnemyPlatesCheck:GetChecked()"
+        )
+        .unwrap(),
+        "Enemy Name Plates defaults checked"
+    );
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:GetChecked()"
+        )
+        .unwrap(),
+        "Friendly Name Plates defaults unchecked"
+    );
+    // All three name rows ride their registered "1" defaults.
     for row in ["RowPlayerNames", "RowNpcNames", "RowOwnName"] {
         assert!(
             s.eval::<bool>(&format!(
@@ -1084,6 +1100,22 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
             "{row} defaults checked"
         );
     }
+    let _ = s.take_sounds();
+
+    // The friendly plates row writes the bit the V/Shift-V pair writes — the same CVar, so the
+    // window and the keys can never disagree about what is on.
+    s.run("OptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![(crate::vplates::CVAR_FRIENDS.to_string(), "1".to_string())]
+    );
+    s.run("OptionsFrameContainerBodyNameplatesRowEnemyPlatesCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![(crate::vplates::CVAR_ENEMIES.to_string(), "0".to_string())]
+    );
     let _ = s.take_sounds();
 
     // Unchecking NPC Names queues the flag off and plays the OFF kit (no quirk here — the
@@ -1865,11 +1897,18 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // per page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1); the other two ride the same census as the selection moves.
-    assert_eq!(checked, 48, "every row but one carries a live 1.12 key");
+    assert_eq!(checked, 48, "every tipped row carries a live 1.12 key");
     assert_eq!(
         untipped,
-        vec!["ControlsRowAutoLoot".to_string()],
-        "Auto Loot is the only row 1.12 never had"
+        vec![
+            "ControlsRowAutoLoot".to_string(),
+            "NameplatesRowEnemyPlates".to_string(),
+            "NameplatesRowFriendlyPlates".to_string(),
+        ],
+        "the rows with no 1.12 option-tooltip string: Auto Loot (no 1.12 setting at all) and \
+         the two V-plate toggles (1.12 HAS the setting, as the V/Shift-V keybinding over a \
+         RegisterForSave'd global, but its options UI never carried a row for it — its own \
+         UIOptionsFrame comment says so — so there is no OPTION_TOOLTIP_ key to resolve)"
     );
 
     // The reporter's row, byte for byte off the MPQ chain.

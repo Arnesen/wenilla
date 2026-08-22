@@ -85,6 +85,19 @@ impl ObjectFields {
             .flatten()
             .unwrap_or(0)
     }
+    /// `ITEM_FIELD_RANDOM_PROPERTIES_ID` (field 44 — vmangos `UpdateFields_1_12_1.h`
+    /// `OBJECT_END + 0x26`, chain-locked here by the tested `ITEM_TEXT_ID` 45 / `DURABILITY` 46
+    /// anchors on either side): the **random-suffix roll** this item instance carries, an
+    /// `ItemRandomProperties.dbc` id. `0` = unrolled.
+    ///
+    /// Its one consumer is the NAME: the client joins the row's suffix through
+    /// `ITEM_SUFFIX_TEMPLATE` in its single name formatter `0x5d8b00`, so the item reads "Chipped
+    /// Claw of the Bear" everywhere it is named. The roll's **enchants** never come from here on
+    /// an owned item — the server writes them into `ITEM_FIELD_ENCHANTMENT` slots 2..6, which
+    /// [`Self::item_enchant`] already reads.
+    pub fn item_random_properties_id(&self) -> u32 {
+        self.get_u32(44).unwrap_or(0)
+    }
     /// `ITEM_FIELD_DURABILITY` — an item's current durability (field 46: chain-locked between the
     /// tested STACK_COUNT 14 and CONTAINER_NUM_SLOTS 48 = ITEM_END anchors).
     pub fn item_durability(&self) -> Option<u32> {
@@ -131,6 +144,22 @@ impl ObjectFields {
                 .filter(|&e| e != 0)
             })
             .flatten()
+    }
+    /// `PLAYER_VISIBLE_ITEM_<slot>_PROPERTIES` — the **broadcast random-suffix roll** of the item
+    /// worn in equipment slot `i`. The 12-dword per-slot record is `creator(2) · entry ·
+    /// enchant[7] · PROPERTIES · PAD`, and PROPERTIES is a `TWO_SHORT` whose **low half** is the
+    /// `ItemRandomProperties` id — the reference reads it with a `movzx WORD` (`0x53339f`, the
+    /// inspect leg's `+0x424` source; wow-re `tooltip-content-law.md` §E7).
+    ///
+    /// This is the only roll feed a client has for anybody else's gear, and its one consumer is
+    /// the NAME: vmangos fills only the PERM/TEMP enchant slots, so an inspected item's suffix
+    /// *lines* stay empty on both sides of the wire — the same thing the reference shows.
+    pub fn player_visible_item_properties(&self, i: u8) -> u32 {
+        (i < 19)
+            .then(|| self.get_u32(FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 10 + 12 * u16::from(i)))
+            .flatten()
+            .unwrap_or(0)
+            & 0xffff
     }
     /// `PLAYER_FIELD_INV_SLOT_HEAD + 2i` — our equipment (0–18) and equipped-bag (19–22) guids.
     pub fn player_inv_slot(&self, i: u8) -> Option<u64> {

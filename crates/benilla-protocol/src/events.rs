@@ -10,7 +10,8 @@
 //! Coordinates stay **raw WoW** (the `benilla` boundary applies `bevy = (-y, z, -x)`).
 
 use crate::messages::{
-    ActionButton, AttackerState, ChannelNoticeTail, Character, CreateSpline, DamageShield,
+    ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
+    AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline, DamageShield,
     EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
     GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
     GuildQueryResponse, GuildRoster, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
@@ -1142,6 +1143,52 @@ pub enum SessionEvent {
     /// mail waiting, `-86400.0` = none. Drives `HasNewMail()`/`UPDATE_PENDING_MAIL` (decision 0544
     /// P3).
     NextMailTime { seconds: f32 },
+    /// `MSG_AUCTION_HELLO`'s reply — the auctioneer we greeted plus its `AuctionHouse.dbc` row
+    /// (1..7, the deposit/cut rates). This packet, not our send, is what opens the auction window
+    /// (decision 1511 P0's wire layer; the window itself is a later phase).
+    AuctionHello { auctioneer: u64, house_id: u32 },
+    /// `SMSG_AUCTION_COMMAND_RESULT` — the verdict on a sell/cancel/bid, keyed by `action`
+    /// ([`crate::messages::auction_action`]) and `error` ([`crate::messages::auction_error`]);
+    /// `tail` is the conditional payload the error selects. `auction_id` is `0` on most failures,
+    /// and several refusals send no packet at all (decision 1511).
+    AuctionCommandResult {
+        auction_id: u32,
+        action: u32,
+        error: u32,
+        tail: AuctionCommandTail,
+    },
+    /// `SMSG_AUCTION_LIST_RESULT` — a Browse page (max 50 rows). `total_count` is the pre-cap
+    /// match count the pager needs, and it rides at the END of the wire body.
+    AuctionListResult {
+        auctions: Vec<AuctionListEntry>,
+        total_count: u32,
+    },
+    /// `SMSG_AUCTION_OWNER_LIST_RESULT` — the Auctions tab page (our own listings). Same frame
+    /// and record as [`Self::AuctionListResult`].
+    AuctionOwnerListResult {
+        auctions: Vec<AuctionListEntry>,
+        total_count: u32,
+    },
+    /// `SMSG_AUCTION_BIDDER_LIST_RESULT` — the Bid tab page. Same frame and record as
+    /// [`Self::AuctionListResult`]; the server emits the explicitly-refreshed ids first and then
+    /// our live bids, so one row can appear twice in a page.
+    AuctionBidderListResult {
+        auctions: Vec<AuctionListEntry>,
+        total_count: u32,
+    },
+    /// `SMSG_AUCTION_BIDDER_NOTIFICATION` — we won, or we were outbid (`bid_or_zero == 0` means
+    /// **won**, not "no bid").
+    AuctionBidderNotification(AuctionBidderNotification),
+    /// `SMSG_AUCTION_OWNER_NOTIFICATION` — our own auction sold or took a bid. A deliberately
+    /// different shape from the bidder notice: no house id, guid fourth, and an all-zero
+    /// `bidder_guid` is the "sold" signal.
+    AuctionOwnerNotification(AuctionOwnerNotification),
+    /// `SMSG_AUCTION_REMOVED_NOTIFICATION` — an auction we had bid on was cancelled by its seller.
+    AuctionRemovedNotification {
+        auction_id: u32,
+        item_entry: u32,
+        random_property_id: i32,
+    },
     /// `SMSG_TRADE_STATUS` — one pulse of the player-trade state machine (open/accept/cancel/
     /// complete + the refusal reasons). The app drives the trade window and the auto-`BEGIN_TRADE`
     /// reply off this (decision 0592; the window itself is P1).

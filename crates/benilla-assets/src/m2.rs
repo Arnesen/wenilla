@@ -137,11 +137,29 @@ pub struct PortraitCamera {
     /// camera audited (kept for fidelity, not observed nonzero).
     pub roll: f32,
     /// The record's FOV (radians), verbatim — a **diagonal** angle in the client's convention;
-    /// the consumer builds the client's diagonal-FOV projection at the portrait's fixed 4/3
-    /// aspect from it (`benilla`'s `WowPortraitProjection`; wow-re portrait-render §4 corrected).
+    /// the consumer builds the client's diagonal-FOV projection from it at whichever aspect its
+    /// path uses (`benilla`'s `WowPortraitProjection`) — `1.0` for the round portrait bake, so
+    /// `fovy = fov/√2` (decision 1543), the pane's own rect for a `<PlayerModel>` (1089).
     pub fov: f32,
     pub near: f32,
     pub far: f32,
+}
+
+/// The **billboard frame** an emitter's bone chain reaches — the host bone's arm, its pivot in raw
+/// WoW model space, and **which bone it is**. See [`ModelEmitter::billboard`] for when it is `Some`
+/// and why the emitter's live origin is then `pivot + camBasis·(def.position − pivot)`.
+///
+/// The bone index is what lets a **rigged** consumer be exactly right rather than approximately:
+/// seating the replacement frame on that bone's own joint puts it at the composed pivot with the
+/// chain above it already folded in, where placing it at `pivot` under the model root silently
+/// assumes every ancestor is at rest.
+#[derive(Clone, Copy, Debug)]
+pub struct EmitterBillboard {
+    pub kind: benilla_formats::BillboardKind,
+    /// The host bone's pivot, **raw WoW model space**.
+    pub pivot: [f32; 3],
+    /// The host bone's index — its seat in the skeleton, for a consumer that has a rig.
+    pub bone: u16,
 }
 
 /// One particle emitter of an [`M2Model`]: the parsed [`ParticleEmitterDef`] plus its resolved
@@ -164,13 +182,16 @@ pub struct ModelEmitter {
     /// through the *replaced* palette matrix (wow-re `part-anchoring-live-bone.md` §1 row 3,
     /// `billboard-bone-law.md`'s "children multiply onto this").
     ///
-    /// A RIGGED host needs nothing from this: its joint palette already carries the replacement
-    /// (`billboard::billboard_joint_palette`) and the emitter rides the joint. It exists for the
-    /// spawn paths with no rig — an equipped item's model (helm/shoulders/held), where the whole
-    /// affected population's chains are otherwise rest-pose (corpus-verified: 95 item models / 197
-    /// emitters ride a billboard chain, **zero** with an animating one — `benilla-extract bbscan`).
-    /// `None` for the ordinary case.
-    pub billboard: Option<(benilla_formats::BillboardKind, [f32; 3])>,
+    /// A rigged host in the WORLD needs nothing from this: its joint palette already carries the
+    /// replacement (`billboard::billboard_joint_palette`) and the emitter rides the joint. Two
+    /// lanes still do: the spawn paths with **no rig** — an equipped item's model
+    /// (helm/shoulders/held), where the whole affected population's chains are otherwise rest-pose
+    /// (corpus-verified: 95 item models / 197 emitters ride a billboard chain, **zero** with an
+    /// animating one — `benilla-extract bbscan`) — and every **booth** bake, rigged or not, whose
+    /// pose deliberately drops the camera arms (`RigPose::without_camera_billboards`: the world
+    /// pass would face them at the *world* camera, which is not the one drawing a booth). `None`
+    /// for the ordinary case.
+    pub billboard: Option<EmitterBillboard>,
     /// The **recursion model** (`def.recursion_model`) as a loaded dependency: its own emitters
     /// become this emitter's CHILD emitters (wow-re `part-child-recursion.md`), wired by the
     /// app's particle system once the asset resolves. `None` when unauthored.
@@ -399,7 +420,11 @@ impl AssetLoader for M2ModelLoader {
                 // The billboard frame the emitter's bone chain inherits, if any (see the field).
                 let billboard = skeleton_raw.billboard_host(def.bone).and_then(|h| {
                     let b = skeleton_raw.bones.get(h)?;
-                    Some((b.billboard?, b.pivot))
+                    Some(EmitterBillboard {
+                        kind: b.billboard?,
+                        pivot: b.pivot,
+                        bone: u16::try_from(h).ok()?,
+                    })
                 });
                 ModelEmitter {
                     def,

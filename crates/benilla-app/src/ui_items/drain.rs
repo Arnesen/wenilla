@@ -142,6 +142,9 @@ pub(super) fn drain_container_uses(
     targeting: crate::ui_action::cast_target::CastTargeting,
     // The client-side pending ("gray") lock — the right-click-open arm arms it (decision 0916).
     mut pending_items: ResMut<PendingItemOps>,
+    // The loot-target latch — the right-click-open arm is one of its five arm sites, and the one
+    // that lets `SMSG_LOOT_RESPONSE`'s admission gate recognise an item loot (decision 1531).
+    mut loot_latch: ResMut<crate::ui_loot::LootLatch>,
     mut ladder: crate::ui_action::CastLadder,
 ) {
     let Some(mut script) = script else {
@@ -386,6 +389,19 @@ pub(super) fn drain_container_uses(
                 "ui_items: open item {:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})",
                 c.guid
             );
+            // **The loot latch, armed before the send** — arm site four of five (`0x5edcc0`, in
+            // this same emitter `0x5edc80`, immediately ahead of the lock setter and the
+            // `0x5edce5 push 0xac`; wow-re `loot-anim-leg.md` §5, byte-verified). The latch is
+            // the **item's own guid** (`[[edi+8]+0]`) because that is what the answer names:
+            // vmangos' `HandleOpenItemOpcode` ends in `SendLoot(pItem->GetObjectGuid(),
+            // LOOT_CORPSE)`, so `SMSG_LOOT_RESPONSE` comes back on the item guid with wire type
+            // **1** — and 1477's admission gate refuses a type-1 answer against a *cold* latch.
+            // Without this arm the window never opens (decision 1531).
+            //
+            // It arms no pose: predicate B `0x612710` answers false for an ITEM, and
+            // [`crate::ui_loot::resolve_loot_kneel`] reaches the same false through a guid the
+            // object manager cannot resolve — we stream no item entities.
+            loot_latch.0 = Some(c.guid);
             // **The gray lock, armed before the send** — the reference's emitter `0x5edc80` calls
             // the lock setter `0x4953e0` at `0x5edcd9` and only then ships `CMSG_OPEN_ITEM`
             // (wow-re `inventory-change-failure-display.md` §8, decision 0916). So a clam,
@@ -395,8 +411,8 @@ pub(super) fn drain_container_uses(
             // `PendingItemOps` already clears on.
             //
             // Deliberately NOT armed on the gift-unwrap arm above, which sends the same opcode:
-            // its emitter `0x5edd60` contains no setter call. That asymmetry is the reference's,
-            // verified, and copying it is the point.
+            // its emitter `0x5edd60` contains neither call — no lock setter and no latch write.
+            // That asymmetry is the reference's, verified, and copying it is the point.
             let (guid, count) = self_q
                 .iter()
                 .next()
@@ -596,6 +612,112 @@ pub(super) fn drain_container_destroys(
         script.fire_event(
             "ITEM_LOCK_CHANGED",
             vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_protocol::messages::{ItemInfo, ObjectFields, ITEM_FLAG_LOOTABLE};
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// "Small Barnacled Clam", entry 7973 — the director's own case, and the `--open-item` probe's.
+    const CLAM_ENTRY: u32 = 7973;
+    /// The clam's item guid (`HIGHGUID_ITEM` 0x4000…, as the live probe read it back).
+    const CLAM: u64 = 0x4000_0000_0000_1939;
+    /// `PLAYER_FIELD_PACK_SLOT_1` — backpack slot 1's guid pair, so `slot_guid(0, 0)` resolves.
+    const F_PACK_SLOT_1: u16 = 532;
+    /// `OBJECT_FIELD_ENTRY` on the item object — what `Items::object(…).object_entry()` reads.
+    const F_OBJECT_ENTRY: u16 = 3;
+
+    /// Right-click backpack slot 1 (holding a LOOTABLE template) and run the click dispatcher.
+    fn open_the_clam() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_message::<crate::sound::AutoEquipSound>()
+            .add_message::<crate::creature_anim::SheathRequest>()
+            .init_resource::<crate::ui_merchant::MerchantOpen>()
+            .init_resource::<crate::ui_bank::BankOpen>()
+            .init_resource::<crate::ui_item_text::ItemTextOpen>()
+            .init_resource::<PendingItemOps>()
+            .init_resource::<crate::ui_loot::LootLatch>()
+            .init_resource::<crate::target::Selection>()
+            .init_resource::<crate::net::SelfGuid>()
+            .init_resource::<crate::ui_action::cast_target::AutoSelfCast>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::player::Player>()
+            .init_resource::<crate::ui_cast::PendingCast>()
+            .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
+            .init_resource::<crate::cooldowns::Cooldowns>()
+            .init_resource::<crate::ui_action::CastErrors>()
+            .init_resource::<crate::ui_action::AutoRepeatActive>()
+            .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
+            .init_resource::<crate::ui_action::targeting::SpellTargeting>()
+            .init_resource::<Items>()
+            .insert_resource(NetCommands(tx));
+
+        // The player, holding the clam in backpack slot 1.
+        app.world_mut().spawn((
+            SelfPlayer,
+            ObjectStore(ObjectFields::from_pairs(&[
+                (F_PACK_SLOT_1, CLAM as u32),
+                (F_PACK_SLOT_1 + 1, (CLAM >> 32) as u32),
+            ])),
+        ));
+        // The item object and its landed template — LOOTABLE, so the dispatcher's open arm claims
+        // the click (`ItemInfo::opens_loot`).
+        let mut items = app.world_mut().resource_mut::<Items>();
+        items.insert_object(
+            CLAM,
+            ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, CLAM_ENTRY)]),
+        );
+        items.insert_template(
+            CLAM_ENTRY,
+            Some(ItemInfo {
+                flags: ITEM_FLAG_LOOTABLE,
+                ..crate::items::test_template("Small Barnacled Clam")
+            }),
+        );
+
+        let script = UiScript::new().unwrap();
+        script.run("UseContainerItem(0, 1)").unwrap();
+        app.insert_non_send_resource(script);
+        app.world_mut()
+            .run_system_once(drain_container_uses)
+            .unwrap();
+        (app, rx)
+    }
+
+    /// **The clam regression (decision 1531).** Arm site four of five: the `CMSG_OPEN_ITEM` send
+    /// latches the ITEM's own guid (`0x5edcc0`, wow-re `loot-anim-leg.md` §5). It is not cosmetic
+    /// and it is not about the pose — vmangos answers this opcode with `SendLoot(item guid,
+    /// LOOT_CORPSE)`, i.e. `SMSG_LOOT_RESPONSE` type **1** on that same guid (live-verified by
+    /// `benilla-world --open-item`), and 1477's admission gate *refuses* a type-1 answer against a
+    /// cold latch. Without the arm the clam greys and no window ever opens, which is exactly what
+    /// the director saw.
+    #[test]
+    fn the_open_item_send_arms_the_loot_latch_on_the_items_own_guid() {
+        let (app, rx) = open_the_clam();
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(ClientCommand::OpenItem {
+                    bag_index: 255,
+                    slot: 23
+                })
+            ),
+            "the open arm ships CMSG_OPEN_ITEM for backpack slot 1"
+        );
+        assert_eq!(
+            app.world().resource::<crate::ui_loot::LootLatch>().0,
+            Some(CLAM),
+            "…having first latched the item's own guid, or the type-1 answer is refused"
+        );
+        // The grey lock is the reference's other pre-send write, and still there (decision 0916).
+        assert!(
+            app.world().resource::<PendingItemOps>().contains(0, 1),
+            "the slot greys at the click"
         );
     }
 }

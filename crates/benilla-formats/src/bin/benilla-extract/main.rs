@@ -19,6 +19,7 @@ mod chaincensus;
 mod charprocs;
 mod m2dump;
 mod scan;
+mod shakecensus;
 mod spellvis;
 
 /// Read WoW 1.12.1 asset archives (MPQ).
@@ -73,6 +74,12 @@ enum Command {
     /// for B161 ("Chain Lightning has no chain effect"), and the check that the `CharParamZero`
     /// small-int decode is the real mechanism: every live slot must land on a real row.
     Chaincensus,
+    /// Census the **camera-shake** system (decision 1540): the 24 shipped `CameraShakes.dbc`
+    /// presets and every `CreatureModelData` row that names one, through the footstep column or
+    /// the death-thud column. The scope instrument for B298 ("walking past an Ancient Protector
+    /// shakes no screen"), and the check that fields 11/12 really are `CameraShakes` keys — every
+    /// live value must land on a real row.
+    Shakecensus,
     /// Census the `SpellVisualKit` **CharProc** columns (a kit's effect on the BODY — its alpha,
     /// its tint): which proc types the shipped table carries, which lifecycle stage reaches each
     /// from a live spell, and every state-stage (aura-lifetime) proc in full. The scope instrument
@@ -798,6 +805,7 @@ fn main() -> Result<()> {
         Command::Shadeat { map, x, y } => scan::shadeat(&mut chain, &map, x, y)?,
         Command::Spellvis { spell_id } => spellvis::run(&mut chain, spell_id)?,
         Command::Chaincensus => chaincensus::run(&mut chain)?,
+        Command::Shakecensus => shakecensus::shakecensus(&mut chain)?,
         Command::Charprocs => charprocs::run(&mut chain)?,
     }
 

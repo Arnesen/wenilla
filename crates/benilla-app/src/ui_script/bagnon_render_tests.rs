@@ -170,6 +170,9 @@ fn roster() -> crate::char_select::Roster {
         },
         flags: 0,
         equipment: [benilla_protocol::CharEnumItem::default(); 19],
+        pet_display_id: 0,
+        pet_level: 0,
+        pet_family: 0,
     };
     crate::char_select::Roster::with_pending_pick(vec![row], 7)
 }

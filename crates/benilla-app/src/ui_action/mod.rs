@@ -66,7 +66,7 @@ pub(crate) struct CooldownEvents;
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use errors::{
     attack_actor_refusal, reagent_totem_refusal, ui_error_text, CastErrors, CastFail, MountErrors,
-    UiError, UiErrorKeys,
+    MsgSurface, UiError, UiErrorKeys,
 };
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
 // spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).

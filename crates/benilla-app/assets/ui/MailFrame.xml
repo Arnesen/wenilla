@@ -86,9 +86,7 @@
                 -- reset side effect — wow-re §5); either way reset the form + play the page turn.
                 SendMailFrame_Reset()
                 PlaySound("igAbiliityPageTurn")
-                if SendMailFrame.sendMode == "reply" then
-                    MailFrameTab_OnClick(1)
-                end
+                if SendMailFrame.sendMode == "reply" then MailFrameTab_OnClick(1) end
             elseif event == "MAIL_FAILED" then
                 -- Fires on EVERY SMSG_SEND_MAIL_RESULT for a send (success included, wow-re §5): its
                 -- only job is to re-enable the button so the UI never stays blocked.
@@ -148,9 +146,10 @@
             MailFrameTopLeft:SetPoint("TOPLEFT", "MailFrame", "TOPLEFT", skin.x, skin.y)
 
             if not reading then
-                -- Arriving at the form repaints it and clears the mode a Reply had set.
-                SendMailFrame_Update()
+                -- Arriving at the form repaints it and clears the mode a Reply had set
+                -- (SendMailFrame_Update never reads the mode, so the order is free).
                 SendMailFrame.sendMode = "send"
+                SendMailFrame_Update()
             end
             PlaySound("igSpellBookOpen")
         end
@@ -208,11 +207,11 @@
                     expireTime:Show()
                     -- COD tag (ref l.157-164) + money field.
                     if CODAmount > 0 then
-                        getglobal("MailItem"..i.."ButtonCOD"):Show()
                         button.cod = CODAmount
+                        getglobal("MailItem"..i.."ButtonCOD"):Show()
                     else
-                        getglobal("MailItem"..i.."ButtonCOD"):Hide()
                         button.cod = nil
+                        getglobal("MailItem"..i.."ButtonCOD"):Hide()
                     end
                     if money > 0 then button.money = money else button.money = nil end
                     if InboxFrame.openMailID == index then
@@ -221,10 +220,10 @@
                         button:SetChecked(nil)
                     end
                 else
-                    getglobal("MailItem"..i.."Button"):Hide()
-                    getglobal("MailItem"..i.."Sender"):SetText("")
-                    getglobal("MailItem"..i.."Subject"):SetText("")
                     getglobal("MailItem"..i.."ExpireTime"):Hide()
+                    getglobal("MailItem"..i.."Button"):Hide()
+                    getglobal("MailItem"..i.."Subject"):SetText("")
+                    getglobal("MailItem"..i.."Sender"):SetText("")
                 end
                 index = index + 1
             end
@@ -240,14 +239,14 @@
 
         -- Row click: open / close the letter (ref InboxFrame_OnClick l.201-213; this = the button).
         function InboxFrame_OnClick(index)
-            if this:GetChecked() then
-                InboxFrame.openMailID = index
-                OpenMail_Update()
-                ShowUIPanel(OpenMailFrame)
-                PlaySound("igSpellBookOpen")
-            else
+            if not this:GetChecked() then
                 InboxFrame.openMailID = 0
                 HideUIPanel(OpenMailFrame)
+            else
+                InboxFrame.openMailID = index
+                OpenMail_Update()
+                PlaySound("igSpellBookOpen")
+                ShowUIPanel(OpenMailFrame)
             end
             InboxFrame_Update()
         end
@@ -292,12 +291,81 @@
                 return
             end
             local pkg, sta, sender, subject, money, cod, days, itemID, wasRead, wasReturned, textCreated = GetInboxHeaderInfo(InboxFrame.openMailID)
-            if money == 0 and not itemID and textCreated then
-                DeleteInboxItem(InboxFrame.openMailID)
-            end
+            if money == 0 and not itemID and textCreated then DeleteInboxItem(InboxFrame.openMailID) end
             InboxFrame.openMailID = 0
-            InboxFrame_Update()
             PlaySound("igSpellBookClose")
+            InboxFrame_Update()
+        end
+
+        -- One GlobalString read — the player's own table, executed off their chain at boot and
+        -- absent in a bare-XML harness. (AuctionFrame.xml carries the twin of this; the static
+        -- labels below take theirs through `text=` instead, which the loader resolves the same way.)
+        local function gs(key, fallback)
+            local value = getglobal(key)
+            if value and value ~= "" then
+                return value
+            end
+            return fallback or ""
+        end
+
+        -- The auction house's RECEIPT (ref l.300-362). An auction mail's body is machine-written
+        -- bookkeeping, not prose — the engine parses it (`ui_mail::invoice`) and hands back seven
+        -- values; this lays them out. The guard is on `playerName`, the THIRD value, because that
+        -- is the one the miss tail nils: an invoice whose counterparty has not been named yet is
+        -- not renderable, and the row re-resolves when the name query lands.
+        --
+        -- Two shapes off one pane. A SELLER's is the full sum — sale price, plus what the deposit
+        -- refunds, minus the house's cut, ruled off and totalled. A BUYER's is a single line: what
+        -- you paid. The difference is not just which lines show, it is where the total and the
+        -- rule sit, so both get re-anchored every time.
+        local function OpenMail_UpdateInvoice(isInvoice, id)
+            local invoiceType, itemName, playerName, bid, buyout, deposit, consignment
+            if isInvoice then
+                invoiceType, itemName, playerName, bid, buyout, deposit, consignment =
+                    GetInboxInvoiceInfo(id)
+            end
+            if not playerName then
+                OpenMailInvoiceFrame:Hide()
+                return
+            end
+            -- Paid the asking price, or won it on a bid? `bid == buyout` is the whole test.
+            local buyMode = "(" .. gs(bid == buyout and "BUYOUT" or "HIGH_BIDDER") .. ")"
+            if invoiceType == "buyer" then
+                OpenMailInvoiceItemLabel:SetText(gs("ITEM_PURCHASED_COLON") .. " " .. itemName .. "  " .. buyMode)
+                OpenMailInvoicePurchaser:SetText(gs("SOLD_BY_COLON") .. " " .. playerName)
+                OpenMailInvoiceBuyMode:SetText("")
+                OpenMailInvoiceAmountReceived:SetText(gs("AMOUNT_PAID_COLON"))
+                -- One line, so the total rides up to where the sale price would have been.
+                OpenMailInvoiceAmountReceived:SetPoint("TOPRIGHT", "OpenMailInvoiceSalePrice", "TOPRIGHT", 0, 0)
+                OpenMailArithmeticLine:SetPoint("TOP", "OpenMailInvoicePurchaser", "BOTTOMLEFT", 125, 0)
+                MoneyFrame_Update("OpenMailTransactionAmountMoneyFrame", bid)
+                OpenMailInvoiceSalePrice:Hide()
+                OpenMailInvoiceDeposit:Hide()
+                OpenMailInvoiceHouseCut:Hide()
+                OpenMailSalePriceMoneyFrame:Hide()
+                OpenMailDepositMoneyFrame:Hide()
+                OpenMailHouseCutMoneyFrame:Hide()
+            else
+                OpenMailInvoiceItemLabel:SetText(gs("ITEM_SOLD_COLON") .. " " .. itemName)
+                OpenMailInvoicePurchaser:SetText(gs("PURCHASED_BY_COLON") .. " " .. playerName)
+                OpenMailInvoiceBuyMode:SetText(buyMode)
+                OpenMailInvoiceAmountReceived:SetText(gs("AMOUNT_RECEIVED_COLON"))
+                OpenMailArithmeticLine:SetPoint("TOP", "OpenMailInvoiceHouseCut", "BOTTOMRIGHT", 0, 9)
+                OpenMailInvoiceAmountReceived:SetPoint("TOPRIGHT", "OpenMailInvoiceHouseCut", "BOTTOMRIGHT", 0, -18)
+                MoneyFrame_Update("OpenMailDepositMoneyFrame", deposit)
+                MoneyFrame_Update("OpenMailSalePriceMoneyFrame", bid)
+                MoneyFrame_Update("OpenMailHouseCutMoneyFrame", consignment)
+                -- The cut is the one number that leaves — red, and the only recoloured line.
+                SetMoneyFrameColor("OpenMailHouseCutMoneyFrame", 1.0, 0, 0)
+                MoneyFrame_Update("OpenMailTransactionAmountMoneyFrame", bid + deposit - consignment)
+                OpenMailInvoiceSalePrice:Show()
+                OpenMailInvoiceDeposit:Show()
+                OpenMailInvoiceHouseCut:Show()
+                OpenMailSalePriceMoneyFrame:Show()
+                OpenMailDepositMoneyFrame:Show()
+                OpenMailHouseCutMoneyFrame:Show()
+            end
+            OpenMailInvoiceFrame:Show()
         end
 
         function OpenMail_Update()
@@ -312,8 +380,20 @@
             if not sender then sender = "Unknown" end
             OpenMailSender:SetText(sender)
             OpenMailSubject:SetText(subject)
-            OpenMailFrameIcon:SetTexture(stationeryIcon)   -- ref SetPortraitToTexture l.174
+            -- SetPortraitToTexture, not SetTexture (ref l.174). The stationery icon is an ordinary
+            -- square ITEM icon (`INV_Misc_Note_01`), and the portrait ring is a thin band with
+            -- transparent corners — set raw, the icon's dark border shows through them as four
+            -- little squares around the circle (director's report, 2026-08-22). The reference
+            -- reaches for the portrait verb here and nowhere else in this file for exactly that
+            -- reason: the INBOX window's ring holds `Mail-Icon`, purpose-drawn art that needs no
+            -- crop, and the reference leaves that one raw too (ref l.258, and so do we).
+            SetPortraitToTexture("OpenMailFrameIcon", stationeryIcon)
             local bodyText, texture, isTakeable, isInvoice = GetInboxText(id)
+            OpenMail_UpdateInvoice(isInvoice, id)
+            -- Unconditional, exactly as the reference writes it (ref l.293) — and it is safe to be
+            -- unconditional because `bodyText` is **nil** for an invoice: the engine's own
+            -- `GetInboxText` carve-out, not this file's (decision 1527). The receipt therefore has
+            -- nothing to sit on top of.
             OpenMailBodyText:SetText(bodyText)
             if texture then
                 OpenStationeryBackgroundLeft:SetTexture(BENILLA_STATIONERY_PATH..texture.."1")
@@ -347,13 +427,13 @@
                 else
                     getglobal("OpenMailPackageButtonIcon"):SetVertexColor(1.0, 0.1, 0.1)
                 end
-                OpenMailPackageButton:Enable()
                 OpenMailPackageButton:Show()
+                OpenMailPackageButton:Enable()
                 OpenMailMoneyButton:SetPoint("LEFT", "OpenMailPackageButton", "RIGHT", 10, 0)
                 hasAttachments = 1
             else
-                OpenMailFrame.itemName = nil
                 OpenMailPackageButton:Hide()
+                OpenMailFrame.itemName = nil
                 OpenMailMoneyButton:SetPoint("LEFT", "OpenMailPackageButton", "LEFT", 0, 0)
             end
             if CODAmount > 0 then OpenMailFrame.cod = CODAmount else OpenMailFrame.cod = nil end
@@ -491,11 +571,9 @@
                     SendMailFrame.previousItem = itemName
                 end
             else
-                if SendMailSubjectEditBox:GetText() == SendMailFrame.previousItem then
-                    SendMailSubjectEditBox:SetText("")
-                end
-                SendMailFrame.previousItem = ""
+                if SendMailSubjectEditBox:GetText() == SendMailFrame.previousItem then SendMailSubjectEditBox:SetText("") end
                 SendMailRadioButton_OnClick(1)
+                SendMailFrame.previousItem = ""
                 SendMailCODButton:Disable()
                 SendMailCODButtonText:SetTextColor(0.5, 0.5, 0.5)
             end
@@ -541,21 +619,17 @@
                 SendMailErrorText:Hide()
                 SendMailErrorCoin:Hide()
             end
-            if checks == checksRequired then
-                SendMailMailButton:Enable()
-            else
-                SendMailMailButton:Disable()
-            end
+            if checks == checksRequired then SendMailMailButton:Enable() else SendMailMailButton:Disable() end
         end
 
         function SendMailRadioButton_OnClick(index)
             if index == 1 then
-                SendMailSendMoneyButton:SetChecked(1)
                 SendMailCODButton:SetChecked(nil)
+                SendMailSendMoneyButton:SetChecked(1)
                 SendMailMoneyText:SetText("Amount to send:")   -- AMOUNT_TO_SEND
             else
-                SendMailSendMoneyButton:SetChecked(nil)
                 SendMailCODButton:SetChecked(1)
+                SendMailSendMoneyButton:SetChecked(nil)
                 SendMailMoneyText:SetText("Cash on Delivery Amount:")   -- COD_AMOUNT
             end
             PlaySound("igMainMenuOptionCheckBoxOn")
@@ -1468,6 +1542,78 @@
                         </FontString>
                     </Layer>
                 </Layers>
+                <Frames>
+                    <!-- ref OpenMailInvoiceFrame l.1556-1727 — the auction house's RECEIPT, laid
+                         over the letter page instead of it. A won/sold auction mail's body is not
+                         prose, it is the auction house's colon-separated bookkeeping
+                         (`6C:10000:10000:25:500`); the engine parses it (`ui_mail::invoice`) and
+                         this pane is what the numbers are FOR. The seller's four lines add up —
+                         sale price + deposit − house cut, over the arithmetic rule — while a
+                         buyer's invoice hides all but the total. -->
+                    <Frame name="OpenMailInvoiceFrame" setAllPoints="true" hidden="true">
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <FontString name="OpenMailInvoiceItemLabel" inherits="InvoiceTextFontNormal" justifyH="LEFT" text="ITEM_SOLD_COLON">
+                                    <Size><AbsDimension x="240" y="0"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="30" y="-35"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="OpenMailInvoicePurchaser" inherits="InvoiceTextFontNormal" justifyH="LEFT" text="PURCHASED_BY_COLON">
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="OpenMailInvoiceItemLabel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="OpenMailInvoiceBuyMode" inherits="InvoiceTextFontSmall" justifyH="LEFT">
+                                    <Anchors><Anchor point="LEFT" relativeTo="OpenMailInvoicePurchaser" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="OpenMailInvoiceSalePrice" inherits="InvoiceTextFontNormal" justifyH="LEFT" text="SALE_PRICE_COLON">
+                                    <Anchors><Anchor point="TOPRIGHT" relativeTo="OpenMailInvoicePurchaser" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="125" y="-26"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="OpenMailInvoiceDeposit" inherits="InvoiceTextFontNormal" justifyH="LEFT" text="DEPOSIT_COLON">
+                                    <Anchors><Anchor point="TOPRIGHT" relativeTo="OpenMailInvoiceSalePrice" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-13"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="OpenMailInvoiceHouseCut" inherits="InvoiceTextFontNormal" justifyH="LEFT" text="AUCTION_HOUSE_CUT_COLON">
+                                    <Anchors><Anchor point="TOPRIGHT" relativeTo="OpenMailInvoiceDeposit" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-13"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="OpenMailInvoiceAmountReceived" inherits="InvoiceTextFontNormal" justifyH="LEFT" text="AMOUNT_RECEIVED_COLON">
+                                    <Anchors><Anchor point="TOPRIGHT" relativeTo="OpenMailInvoiceHouseCut" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-13"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <!-- The rule the sum sits under (ref l.1625-1638). -->
+                                <Texture name="OpenMailArithmeticLine" file="Interface\MailFrame\UI-MailFrame-InvoiceLine">
+                                    <Size><AbsDimension x="256" y="32"/></Size>
+                                    <Anchors><Anchor point="TOP" relativeTo="OpenMailInvoiceHouseCut" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="9"/></Offset></Anchor></Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <!-- All four are AUCTION money: the price columns of a receipt line up
+                                 for the same reason the auction house's do. -->
+                            <Frame name="OpenMailTransactionAmountMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                                <Anchors><Anchor point="RIGHT" relativeTo="OpenMailInvoiceAmountReceived" relativePoint="RIGHT"><Offset><AbsDimension x="130" y="0"/></Offset></Anchor></Anchors>
+                                <Scripts><OnLoad>SmallMoneyFrame_OnLoad() MoneyFrame_SetType("AUCTION")</OnLoad></Scripts>
+                            </Frame>
+                            <Frame name="OpenMailSalePriceMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                                <Anchors><Anchor point="RIGHT" relativeTo="OpenMailInvoiceSalePrice" relativePoint="RIGHT"><Offset><AbsDimension x="130" y="0"/></Offset></Anchor></Anchors>
+                                <Scripts><OnLoad>SmallMoneyFrame_OnLoad() MoneyFrame_SetType("AUCTION")</OnLoad></Scripts>
+                            </Frame>
+                            <Frame name="OpenMailDepositMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                                <Anchors><Anchor point="RIGHT" relativeTo="OpenMailInvoiceDeposit" relativePoint="RIGHT"><Offset><AbsDimension x="130" y="0"/></Offset></Anchor></Anchors>
+                                <Layers><Layer level="BACKGROUND">
+                                    <FontString inherits="InvoiceTextFontNormal" text="+">
+                                        <Anchors><Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                                    </FontString>
+                                </Layer></Layers>
+                                <Scripts><OnLoad>SmallMoneyFrame_OnLoad() MoneyFrame_SetType("AUCTION")</OnLoad></Scripts>
+                            </Frame>
+                            <Frame name="OpenMailHouseCutMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                                <Anchors><Anchor point="RIGHT" relativeTo="OpenMailInvoiceHouseCut" relativePoint="RIGHT"><Offset><AbsDimension x="130" y="0"/></Offset></Anchor></Anchors>
+                                <Layers><Layer level="BACKGROUND">
+                                    <FontString inherits="InvoiceTextFontNormal" text="-">
+                                        <Anchors><Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                                    </FontString>
+                                </Layer></Layers>
+                                <Scripts><OnLoad>SmallMoneyFrame_OnLoad() MoneyFrame_SetType("AUCTION")</OnLoad></Scripts>
+                            </Frame>
+                        </Frames>
+                    </Frame>
+                </Frames>
             </Frame>
             <!-- ref OpenMailLetterButton l.1732-1757 / OpenMailPackageButton l.1758-1796 /
                  OpenMailMoneyButton l.1797-1835 (ItemButtonTemplate; inlined 37px icon + slot +
@@ -1564,6 +1710,22 @@
             </Button>
         </Frames>
         <Scripts>
+            <!-- The letter EVICTS whatever holds the centre seat as it opens — the ref's own
+                 OnShow (ref MailFrame.xml l.1903-1907), and the missing half of the
+                 letter/centre-seat exclusion (decision 1520): the child-window loop (1507) hides
+                 the letter when a frame ARRIVES at centre, and this hides the centre occupant
+                 when the LETTER arrives — whichever comes second wins the space. Without it, a
+                 character sheet pushed to centre (pushable 2, beside the open mailbox) sat ON TOP
+                 of a freshly opened letter (director-reported, ref-checked). HideUIPanel of the
+                 centre is a plain vacate — the evicted sheet closes outright, no slide — and only
+                 this window and GuildControlPopupFrame do this in the whole 1.12 FrameXML (the
+                 other two guild satellites deliberately don't). -->
+            <OnShow>
+                local centre = GetCenterFrame()
+                if centre then
+                    HideUIPanel(centre)
+                end
+            </OnShow>
             <OnHide>OpenMailFrame_OnHide()</OnHide>
         </Scripts>
     </Frame>

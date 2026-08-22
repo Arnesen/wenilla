@@ -75,6 +75,30 @@ pub(crate) fn enchant_lines(
     slots: impl IntoIterator<Item = EnchantSlot>,
     enchants: Option<&Enchants>,
 ) -> Vec<benilla_ui::script::EnchantView> {
+    let lines = enchant_lines_quiet(slots, enchants);
+    // One breadcrumb per session the first time any surface resolves an enchant — the
+    // machine-readable "this lane is live" signal for a feature whose whole symptom is ABSENCE
+    // (`entities::item_glow`'s idiom, and the reason this one exists: the enchant ids reaching the
+    // tooltip travel a DIFFERENT wire field from the ones the weapon glow reads, so a silent miss
+    // here would look exactly like an unenchanted item).
+    if !lines.is_empty() {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        // The whole view, not just the name: the countdown and the charges each ride a different
+        // wire lane from the id, so "which of the three arrived" is exactly what this must answer.
+        FIRST.call_once(|| info!("item enchant: {lines:?} (the first resolved this session)"));
+    }
+    lines
+}
+
+/// [`enchant_lines`] without the breadcrumb — the same gate and the same naming, for the one
+/// caller that is not a live item: the startup resolve of the whole `ItemRandomProperties` table
+/// ([`random_property_views`]). Routing that through the loud one would fire "the first enchant
+/// resolved this session" at load, every session, which is exactly the signal the breadcrumb
+/// exists to distinguish from silence.
+fn enchant_lines_quiet(
+    slots: impl IntoIterator<Item = EnchantSlot>,
+    enchants: Option<&Enchants>,
+) -> Vec<benilla_ui::script::EnchantView> {
     let Some(enchants) = enchants else {
         return Vec::new();
     };
@@ -100,18 +124,128 @@ pub(crate) fn enchant_lines(
             })
         })
         .collect();
-    // One breadcrumb per session the first time any surface resolves an enchant — the
-    // machine-readable "this lane is live" signal for a feature whose whole symptom is ABSENCE
-    // (`entities::item_glow`'s idiom, and the reason this one exists: the enchant ids reaching the
-    // tooltip travel a DIFFERENT wire field from the ones the weapon glow reads, so a silent miss
-    // here would look exactly like an unenchanted item).
-    if !lines.is_empty() {
-        static FIRST: std::sync::Once = std::sync::Once::new();
-        // The whole view, not just the name: the countdown and the charges each ride a different
-        // wire lane from the id, so "which of the three arrived" is exactly what this must answer.
-        FIRST.call_once(|| info!("item enchant: {lines:?} (the first resolved this session)"));
-    }
     lines
+}
+
+/// `ItemRandomProperties.dbc` — the **random-suffix roll**: the "of the Monkey" a drop rolled, and
+/// the enchants that roll grants (decision 1547). One table, two consumers, exactly as in the
+/// reference: the display NAME ([`item_display_name`], its `0x5d8b00`) and the tooltip's enchant
+/// slots 2..6 ([`random_property_lines`], its §E5 suffix-row copy).
+///
+/// Optional like every DBC-backed resource: absent, names stay unsuffixed and a rolled item shows
+/// no suffix lines — the behaviour benilla had before this arc.
+#[derive(Resource)]
+pub(crate) struct RandomProperties(pub(crate) benilla_formats::RandomPropertyCatalog);
+
+/// The item's display NAME — the reference's one name formatter `0x5d8b00(entry, randomPropertyId)`,
+/// whose whole law is its two exits: `ITEM_SUFFIX_TEMPLATE` (`"%s %s"`) joined with the roll's
+/// suffix, or the plain template name when the id is 0, negative, past the table, or names a row
+/// with no suffix string.
+///
+/// **Every** display of an item's name goes through here, because in the reference every one of
+/// them goes through that function: the tooltip plate, the `|Hitem:…|h[Name]|h` link (the link is
+/// built FROM this string), the loot row, the chat "You receive loot" line, the auction and mail
+/// rows. A surface that composed the name itself would print "Chipped Claw" where the client prints
+/// "Chipped Claw of the Bear" — which is exactly the drift decision 0888 recorded and this closes.
+pub(crate) fn item_display_name(
+    base: &str,
+    random_property_id: i32,
+    props: Option<&RandomProperties>,
+) -> String {
+    match props.and_then(|p| p.0.get(random_property_id)) {
+        Some(row) => format!("{base} {}", row.suffix),
+        None => base.to_string(),
+    }
+}
+
+/// The tooltip lines a random-property **roll** contributes, for a source that has no item object
+/// to read `ITEM_FIELD_ENCHANTMENT` from — a loot slot, a chat link, an auction or mail row.
+///
+/// This is the reference's §E5 mechanism, one for one: the tooltip resolves its `+0x424`
+/// randomPropertyId against `ItemRandomProperties.dbc` and copies the row's five enchant ids into
+/// session slots **2..6**, which the enchant family then prints exactly like an object's own slots
+/// (white, since only slots 0/1 ever colour). So the same [`enchant_lines`] gate runs over them —
+/// one law for both id sources, which is the point of routing them through it.
+///
+/// An item OBJECT needs none of this: the server writes the rolled ids into its own enchant slots,
+/// and the object path already reads them.
+pub(crate) fn random_property_lines(
+    row: &benilla_formats::RandomProperty,
+    enchants: Option<&Enchants>,
+) -> Vec<benilla_ui::script::EnchantView> {
+    let slots = row.enchants.iter().enumerate().map(|(i, &id)| {
+        (
+            benilla_formats::RANDOM_PROPERTY_FIRST_SLOT + i as u8,
+            id as i32,
+            0,
+            None,
+        )
+    });
+    enchant_lines_quiet(slots, enchants)
+}
+
+/// The whole roll table, resolved for the engine — every `ItemRandomProperties` row as the
+/// suffix plus its named enchant lines, ready to push once ([`benilla_ui::script::UiScript::
+/// set_random_properties`]).
+///
+/// Pushed whole rather than asked for per id, because it is a static table the app already holds
+/// and its consumers are click-driven: a chat-link tooltip has no hover re-enter loop, so a late
+/// answer would leave the first click showing an item with no lines. The reference reads its own
+/// loaded DBC store the same way, at draw time, from the id the source supplied.
+pub(crate) fn random_property_views(
+    props: &RandomProperties,
+    enchants: Option<&Enchants>,
+) -> std::collections::HashMap<u32, benilla_ui::script::RandomPropertyView> {
+    props
+        .0
+        .iter()
+        .map(|(id, row)| {
+            (
+                id,
+                benilla_ui::script::RandomPropertyView {
+                    suffix: row.suffix.clone(),
+                    enchants: random_property_lines(row, enchants),
+                },
+            )
+        })
+        .collect()
+}
+
+/// The two catalogs a random-suffix **roll** resolves through, as one value: the roll's own table
+/// and the enchant names its five ids land on. They are never useful apart — a roll is a name plus
+/// a set of enchant ids, and both halves come from a DBC the app owns — and every surface that
+/// shows a rolled item needs the pair, so it travels as a pair rather than as two `Option` params
+/// threaded through every loot/link/auction/mail feed.
+#[derive(Clone, Copy)]
+pub(crate) struct RollCatalogs<'a> {
+    pub(crate) props: Option<&'a RandomProperties>,
+    pub(crate) enchants: Option<&'a Enchants>,
+}
+
+impl RollCatalogs<'_> {
+    /// No DBC catalogs — what the unit tests run with (no install), and what a shipping session
+    /// falls back to when the tables are missing: the plain name, and no suffix lines.
+    #[cfg(test)]
+    pub(crate) const NONE: RollCatalogs<'static> = RollCatalogs {
+        props: None,
+        enchants: None,
+    };
+
+    /// [`item_display_name`] — the item's name with this roll's suffix joined on.
+    pub(crate) fn name(&self, base: &str, random_property_id: u32) -> String {
+        item_display_name(base, random_property_id as i32, self.props)
+    }
+
+    /// [`random_property_lines`] for one id — the roll's enchant slots 2..6, resolved and named.
+    /// The live surfaces do NOT call this (the engine resolves the lines itself, off the pushed
+    /// table); it is the app-side check that the id → row → slot mapping is what the law says.
+    #[cfg(test)]
+    pub(crate) fn lines(&self, random_property_id: u32) -> Vec<benilla_ui::script::EnchantView> {
+        match self.props.and_then(|p| p.0.get(random_property_id as i32)) {
+            Some(row) => random_property_lines(row, self.enchants),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// The item stores: instances by guid, templates by entry (+ the in-flight ask-once set).

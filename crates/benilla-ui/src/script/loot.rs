@@ -58,13 +58,29 @@ pub struct LootRow {
     /// `DressUpFrame.lua:10-16`) and the shift arm goes through `BenillaChatEdit_InsertLink`, which
     /// drops it — our `EditBox:Insert` binding is typed `String` and would raise.
     pub link: Option<String>,
+    /// The wire's `randomPropertyId` — the drop's **random-suffix roll**, the id the tooltip
+    /// resolves against [`super::Model::random_properties`] for its enchant lines (decision 1547).
+    /// `0` = unrolled.
+    ///
+    /// The client keeps exactly this, at `+0x14` of its own 0x1c-byte loot record, and
+    /// `SetLootItem 0x533470` copies it into the tooltip's `+0x424` — a loot slot is **not** an
+    /// item object (that leg passes an all-zero item guid), so the roll is the only enchant source
+    /// a loot hover can have (wow-re `loot-slot-record.md`, `tooltip-content-law.md` §E6-LOOT).
+    /// [`Self::name`] already carries the suffix the same id joins on.
+    pub random_property_id: u32,
 }
 
 /// One open loot window: its rows (coin first when present). Pushed whole by the app; `None` means no
 /// loot is open (the window is closed).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LootState {
-    pub rows: Vec<LootRow>,
+    /// The window's **fixed** slot list: positions never shift while the window is open. A looted
+    /// slot becomes `None` — still counted by `GetNumLootItems` (the reference's slot array keeps
+    /// cleared slots; `LootFrame.numLootItems` is captured once at `OnShow`, l.132) but neither
+    /// `LootSlotIsItem` nor `LootSlotIsCoin`, which is exactly how the reference's
+    /// `LootFrame_Update` leaves a cleared slot's button hidden in place (`LootFrame.lua:80`)
+    /// instead of collapsing the rows below it upward.
+    pub rows: Vec<Option<LootRow>>,
     /// Whether this loot came from fishing (`IsFishingLoot()` — the wire `SMSG_LOOT_RESPONSE`
     /// `loot_type == 3`, decision 1086). `LootFrame_OnShow` keys the "FISHING REEL IN" sound and
     /// the FishingLoot portrait overlay on it (`LootFrame.lua:137-140`).
@@ -94,7 +110,9 @@ impl super::UiScript {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // GetNumLootItems() → the number of rows the open loot has (0 when none is open).
+    // GetNumLootItems() → the number of slots the open loot has, cleared ones included (0 when none
+    // is open). Constant while a window is open — the reference reads it once at OnShow (l.132) and
+    // never again; ours is invariant by construction, so the live read is the same value.
     g.set(
         "GetNumLootItems",
         lua.create_function(|lua, ()| {
@@ -104,8 +122,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetLootSlotInfo(slot) → texture, item, quantity, quality (the Era flat-tuple shape,
-    // `LootFrame.lua:81`). `slot` is 1-based; out of range → nil. `item`/`quality` are nil while the
-    // item-template query is in flight; `texture` rides the wire display id, so it's there at once.
+    // `LootFrame.lua:81`). `slot` is 1-based; out of range → nil, and so is a cleared (already
+    // looted) slot. `item`/`quality` are nil while the item-template query is in flight; `texture`
+    // rides the wire display id, so it's there at once.
     g.set(
         "GetLootSlotInfo",
         lua.create_function(|lua, slot: usize| {
@@ -115,7 +134,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .loot
                     .as_ref()
                     .and_then(|l| slot.checked_sub(1).and_then(|n| l.rows.get(n)))
-                    .cloned()
+                    .and_then(|r| r.clone())
             };
             let Some(row) = row else {
                 return Ok(MultiValue::from_vec(vec![Value::Nil]));
@@ -159,7 +178,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .loot
                     .as_ref()
                     .and_then(|l| slot.checked_sub(1).and_then(|n| l.rows.get(n)))
-                    .and_then(|r| r.link.clone())
+                    .and_then(|r| r.as_ref()?.link.clone())
             };
             match link {
                 Some(link) => Ok(Value::String(lua.create_string(&link)?)),
@@ -168,26 +187,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // LootSlotIsItem(slot) → true for a real item row (in range, not the coin pile).
+    // LootSlotIsItem(slot) → true for a real item row (in range, not the coin pile, not cleared).
     g.set(
         "LootSlotIsItem",
         lua.create_function(|lua, slot: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(slot
                 .checked_sub(1)
-                .and_then(|n| model.loot.as_ref()?.rows.get(n))
+                .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
                 .is_some_and(|r| !r.is_coin))
         })?,
     )?;
 
-    // LootSlotIsCoin(slot) → true for the synthesized coin pile row.
+    // LootSlotIsCoin(slot) → true for the synthesized coin pile row (false once it's been looted —
+    // the cleared slot stays in the count but answers neither predicate, `LootFrame.lua:80`).
     g.set(
         "LootSlotIsCoin",
         lua.create_function(|lua, slot: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(slot
                 .checked_sub(1)
-                .and_then(|n| model.loot.as_ref()?.rows.get(n))
+                .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
                 .is_some_and(|r| r.is_coin))
         })?,
     )?;
@@ -237,7 +257,7 @@ mod tests {
         LootState {
             rows: vec![
                 // The coin pile, always first. No link: there is no item to link (decision 1059).
-                LootRow {
+                Some(LootRow {
                     item_id: 0,
                     name: Some("1g 23s 45c".into()),
                     texture: Some("Interface\\Icons\\INV_Misc_Coin_01".into()),
@@ -245,9 +265,10 @@ mod tests {
                     quality: Some(1),
                     is_coin: true,
                     link: None,
-                },
+                    random_property_id: 0,
+                }),
                 // A resolved item — name, quality AND link all landed together (one template answer).
-                LootRow {
+                Some(LootRow {
                     item_id: 0,
                     name: Some("Wool Cloth".into()),
                     texture: Some("Interface\\Icons\\INV_Fabric_Wool_01".into()),
@@ -255,9 +276,10 @@ mod tests {
                     quality: Some(1),
                     is_coin: false,
                     link: Some("|cffffffff|Hitem:2589:0:0:0|h[Wool Cloth]|h|r".into()),
-                },
+                    random_property_id: 0,
+                }),
                 // An in-flight item: the loot arrived, the item-template answer hasn't.
-                LootRow {
+                Some(LootRow {
                     item_id: 0,
                     name: None,
                     texture: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
@@ -265,7 +287,8 @@ mod tests {
                     quality: None,
                     is_coin: false,
                     link: None,
-                },
+                    random_property_id: 0,
+                }),
             ],
             fishing: false,
         }
@@ -330,6 +353,21 @@ mod tests {
         assert!(s.eval::<bool>("return GetLootSlotLink(9) == nil").unwrap());
         assert!(s.eval::<bool>("return not LootSlotIsItem(9)").unwrap());
         assert!(s.eval::<bool>("return not LootSlotIsCoin(9)").unwrap());
+
+        // A CLEARED slot (looted): still counted — the slot list is fixed while the window is open,
+        // the reference's own shape (`LootFrame.numLootItems` is read once at OnShow) — but it
+        // answers neither predicate and nil info/link, so the frame hides that button in place
+        // instead of collapsing the rows below it.
+        let mut cleared = loot();
+        cleared.rows[0] = None;
+        s.set_loot(Some(cleared));
+        assert_eq!(s.eval::<i64>("return GetNumLootItems()").unwrap(), 3);
+        assert!(s.eval::<bool>("return GetLootSlotInfo(1) == nil").unwrap());
+        assert!(s.eval::<bool>("return GetLootSlotLink(1) == nil").unwrap());
+        assert!(s.eval::<bool>("return not LootSlotIsItem(1)").unwrap());
+        assert!(s.eval::<bool>("return not LootSlotIsCoin(1)").unwrap());
+        // …and the rows below keep their own slots.
+        assert!(s.eval::<bool>("return LootSlotIsItem(2)").unwrap());
     }
 
     #[test]

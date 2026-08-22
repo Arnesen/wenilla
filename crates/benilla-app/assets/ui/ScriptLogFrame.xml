@@ -173,6 +173,10 @@
 
         function BenillaScriptLogFrame_OnLoad(self)
             getglobal("BenillaScriptLogListScrollFrame").updateFunc = BenillaScriptLog_Update
+            -- The ring's icon, through the portrait verb rather than left at its `file=` — see the
+            -- texture's own note. MailFrame.xml's open-letter icon is the same fix.
+            SetPortraitToTexture("BenillaScriptLogFramePortrait",
+                "Interface\\Icons\\INV_Misc_Note_01")
         end
 
         -- The shared helper steps the faux frame's bar, whose OnValueChanged runs the kit's
@@ -239,6 +243,10 @@
         <Size><AbsDimension x="384" y="512"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
+                <!-- The same square ITEM icon the mail window's ring holds, and it needs the same
+                     portrait verb for the same reason (`SetPortraitToTexture` in OnLoad below):
+                     `file=` alone draws it unmasked and its corners show through the ring's
+                     transparent ones. -->
                 <Texture name="BenillaScriptLogFramePortrait" file="Interface\Icons\INV_Misc_Note_01">
                     <Size><AbsDimension x="60" y="60"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>

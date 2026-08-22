@@ -828,6 +828,9 @@ mod tests {
             },
             flags: 0,
             equipment: [Default::default(); 19],
+            pet_display_id: 0,
+            pet_level: 0,
+            pet_family: 0,
         }
     }
 

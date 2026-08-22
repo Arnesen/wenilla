@@ -345,7 +345,7 @@ fn bake_cell(items: &[GxItem], meshes: &mut Assets<Mesh>) -> render::GxCellDraw 
 
 #[cfg(test)]
 mod tests {
-    use super::super::testkit::{batch, tri};
+    use super::super::testkit::{batch, batch_of, object, tri};
     use super::super::GxWmoBatch;
     use super::*;
     use crate::model_render::ShadeSel;
@@ -465,9 +465,7 @@ mod tests {
     fn the_remap_names_each_faders_post_sort_items() {
         let mut gx = StaticGx::default();
         let g = tri([0.0; 3]);
-        let seed = |uid: u32| super::super::GxFadeSeed {
-            uid,
-            label: "x",
+        let seed = || super::super::GxFadeSeed {
             radius: 0.4,
             local_center: Vec3::ZERO,
             stat_mesh: Handle::default(),
@@ -475,12 +473,20 @@ mod tests {
             cutout: Handle::default(),
             blend: Handle::default(),
         };
+        // The exile unit is the PLACEMENT — its identity, shared by every batch (1534).
+        let (p1, p2) = (object(1), object(2));
         // Placement 1: a cutout batch (sorts LAST) + an opaque batch (sorts first)…
-        let mut b = batch(&g, Vec3::new(1.0, 0.0, 1.0), None, ModelBlend::AlphaTest);
-        b.fade = Some(seed(1));
+        let mut b = batch_of(
+            &p1,
+            &g,
+            Vec3::new(1.0, 0.0, 1.0),
+            None,
+            ModelBlend::AlphaTest,
+        );
+        b.fade = Some(seed());
         assert!(gx.divert(b));
-        let mut b = batch(&g, Vec3::new(1.0, 0.0, 1.0), None, ModelBlend::Opaque);
-        b.fade = Some(seed(1));
+        let mut b = batch_of(&p1, &g, Vec3::new(1.0, 0.0, 1.0), None, ModelBlend::Opaque);
+        b.fade = Some(seed());
         assert!(gx.divert(b));
         // …a never-fade opaque batch between them, and placement 2's opaque batch.
         assert!(gx.divert(batch(
@@ -489,8 +495,8 @@ mod tests {
             None,
             ModelBlend::Opaque
         )));
-        let mut b = batch(&g, Vec3::new(3.0, 0.0, 3.0), None, ModelBlend::Opaque);
-        b.fade = Some(seed(2));
+        let mut b = batch_of(&p2, &g, Vec3::new(3.0, 0.0, 3.0), None, ModelBlend::Opaque);
+        b.fade = Some(seed());
         assert!(gx.divert(b));
         let state = gx.cells.get_mut(&(0, 0)).unwrap();
         state

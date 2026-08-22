@@ -1094,3 +1094,298 @@ fn a_kit_with_a_chain_char_proc_asks_for_a_beam_from_both_dispatcher_sites() {
         "the channel kit's type-0 proc asks for a persistent beam"
     );
 }
+
+// ── The real-chain shooter pin (bug B307) ────────────────────────────────────────────────────
+//
+// Reported 2026-08-22: "characters don't use reload anim when using autoshot with any ranged
+// weapons (bows/crossbows/guns)" — the shooter fires from a still pose. Every link above this
+// point is tested on SYNTHETIC tables, and every router test spawns a bare unit with no
+// `NetEntity`/`ObjectStore` — so [`super::WeaponVisualSrc::caster`], the one lookup that turns a
+// PLAYER's equipped ranged weapon into the substitute visual the whole merge hangs on, returns
+// `None` in all of them and nothing notices (their ranged spell carries its own cast kit).
+// These tests close that hole: the real 5875 DBCs, a real self-player, a real `item_template`
+// row, one `CastEvent` in, the body's clip out.
+
+/// Auto Shot — the one spell every ranged auto-attack fires (one `SMSG_SPELL_GO` per shot).
+/// Its real 5875 row: `Attributes = 0x50012` (so `& 0x2`, USES_RANGED_SLOT, IS set),
+/// `AttributesEx2 = 0x20` (auto-repeat), Speed 40 — and **`SpellVisual1 = 0`**. It authors no
+/// visual whatsoever, so every clip it plays comes from the equipped weapon's substitute visual
+/// through [`super::resolve_stages`]'s merge. If that lookup fails, the shooter is silent.
+const AUTO_SHOT: u32 = 75;
+
+/// One real `item_template` row — what the wire hands the client for an equipped ranged weapon.
+/// Entry/display/class/subclass read from the live vmangos `mangos.item_template`; the
+/// display → `ItemDisplayInfo` col 10 → `SpellVisual` → kit → `AnimationData` tail is the real
+/// 5875 DBCs' and is re-derived by the test, never assumed.
+struct RealRanged {
+    name: &'static str,
+    entry: u32,
+    display_id: u32,
+    /// `ItemClass` 2 (weapon) and its subclass: 2 bow, 3 gun, 18 crossbow.
+    class: u32,
+    subclass: u32,
+    /// The pull, from the weapon visual's PRECAST kit: LoadBow 105 / LoadRifle 106.
+    load_anim: u16,
+    /// The release, from its CAST kit: AttackBow 46 / AttackRifle 49.
+    fire_anim: u16,
+}
+
+/// A bow (`item_template` 2504, display 8106 → visual 5 → kits 7/164 → 105/46).
+const WORN_SHORTBOW: RealRanged = RealRanged {
+    name: "Worn Shortbow",
+    entry: 2504,
+    display_id: 8106,
+    class: 2,
+    subclass: 2,
+    load_anim: 105,
+    fire_anim: 46,
+};
+
+/// A gun (`item_template` 2508, display 6606 → visual 224 → kits 161/167 → 106/49).
+const OLD_BLUNDERBUSS: RealRanged = RealRanged {
+    name: "Old Blunderbuss",
+    entry: 2508,
+    display_id: 6606,
+    class: 2,
+    subclass: 3,
+    load_anim: 106,
+    fire_anim: 49,
+};
+
+/// A crossbow (`item_template` 12651, display 22929 → visual 743 → kits 803/804 → 106/49 —
+/// crossbows share the rifle clips, they do not have their own).
+const BLACKCROW: RealRanged = RealRanged {
+    name: "Blackcrow",
+    entry: 12651,
+    display_id: 22929,
+    class: 2,
+    subclass: 18,
+    load_anim: 106,
+    fire_anim: 49,
+};
+
+/// `PLAYER_VISIBLE_ITEM_18_0` — the public item ENTRY worn in equipment slot 17 (vmangos
+/// `EQUIPMENT_SLOT_RANGED`), i.e. `PLAYER_VISIBLE_ITEM_1_CREATOR (258) + 2 + 12 × 17`. Spelled
+/// out because that base index is private to `benilla-protocol`; `player_visible_item_entry(17)`
+/// is the accessor it feeds, and this test would fail loudly if the two ever disagreed.
+const VISIBLE_RANGED_ENTRY_FIELD: u16 = 258 + 2 + 12 * 17;
+
+/// Keeps the item layer's ask-once channel ALIVE for the app's life, so an unexpected
+/// `ItemQuery` send (the "template not landed" path — the failure mode that would silently
+/// starve the weapon lookup) is observable rather than swallowed by a dropped receiver.
+#[derive(Resource)]
+struct AskLog(crossbeam_channel::Receiver<crate::net::ClientCommand>);
+
+/// The cast router wired over the **real 5875 tables**, with a self-player wearing `weapon` in
+/// the ranged slot and its template already landed in the item cache — which is the live state
+/// by the time anything shoots (the equipped weapon rendered through the same ask-once layer
+/// long before). `None`, with the skip note printed, when there is no WoW install to read.
+fn real_shooter(weapon: &RealRanged) -> Option<(App, Entity)> {
+    let data = benilla_formats::wow_data_or_skip!(None);
+    let mut chain = benilla_formats::open_chain(&data).expect("open the install's MPQ chain");
+    let visuals =
+        benilla_formats::load_spell_visual_catalog(&mut chain).expect("SpellVisual/SpellVisualKit");
+    let spells = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
+    let displays =
+        benilla_formats::load_item_display_catalog(&mut chain).expect("ItemDisplayInfo.dbc");
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<CastEvent>()
+        .add_message::<SpellGoTargets>()
+        .add_message::<KitPush>()
+        .add_message::<EmoteAnim>()
+        .add_message::<WoundAnim>()
+        .add_message::<SpellKitSound>()
+        .add_message::<SpellKitFx>()
+        .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
+        .add_message::<SheathRequest>();
+    app.insert_resource(SpellVisuals(visuals));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: spells,
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.insert_resource(crate::entities::ItemDisplays::icons_for_tests(displays));
+
+    let mut items = crate::items::Items::default();
+    let mut template = crate::items::test_template(weapon.name);
+    template.class = weapon.class;
+    template.subclass = weapon.subclass;
+    template.display_info_id = weapon.display_id;
+    template.inventory_type = 15; // INVTYPE_RANGED — the real row's; unread by this chain
+    items.insert_template(weapon.entry, Some(template));
+    app.insert_resource(items);
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::NetCommands(tx));
+    app.insert_resource(AskLog(rx));
+
+    // The shooter: our own body, a PLAYER on the wire, with the weapon's ENTRY in the public
+    // visible-item field — exactly what `SMSG_UPDATE_OBJECT` carries for equipment.
+    let unit = app
+        .world_mut()
+        .spawn((
+            crate::net::SelfPlayer,
+            crate::net::NetEntity {
+                kind: benilla_protocol::EntityKind::Player,
+                display_id: Some(49), // HumanMale — authors 46/49/105/106 internally
+                scale: 1.0,
+            },
+            crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                VISIBLE_RANGED_ENTRY_FIELD,
+                weapon.entry,
+            )])),
+        ))
+        .id();
+    app.add_systems(Update, route_cast_visuals);
+    Some((app, unit))
+}
+
+/// The one-shot clips this frame asked of `unit`'s body.
+fn emote_anims(app: &mut App, unit: Entity) -> Vec<u16> {
+    app.world_mut()
+        .resource_mut::<Messages<EmoteAnim>>()
+        .drain()
+        .filter(|e| e.entity == unit)
+        .map(|e| e.anim_id)
+        .collect()
+}
+
+/// The entries the item layer had to ask the server for — empty is the expected reading (the
+/// template is pre-landed); anything here means the weapon lookup starved on a cold cache.
+fn asked_entries(app: &App) -> Vec<u32> {
+    app.world()
+        .resource::<AskLog>()
+        .0
+        .try_iter()
+        .filter_map(|c| match c {
+            crate::net::ClientCommand::ItemQuery { entry, .. } => Some(entry),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **B307's pin, bow half.** One `SMSG_SPELL_GO` for Auto Shot on a self-player with a real bow
+/// equipped must reach the body as `EmoteAnim { anim_id: 46 }` (AttackBow) — through the live
+/// chain end to end: `Spell.dbc` 75 (`Attributes & 0x2`, no visual of its own) →
+/// [`super::WeaponVisualSrc::caster`] (`PLAYER_VISIBLE_ITEM` slot 17 → the item template →
+/// display 8106) → `ItemDisplayInfo` col 10 (visual 5) → the merge → `SpellVisual` 5's cast kit
+/// 164 → its anim 46.
+#[test]
+fn a_real_bow_shooters_auto_shot_go_plays_attackbow() {
+    let Some((mut app, unit)) = real_shooter(&WORN_SHORTBOW) else {
+        return;
+    };
+    app.world_mut()
+        .write_message(cast_event(unit, AUTO_SHOT, CastEventKind::Go));
+    app.update();
+    assert_eq!(
+        emote_anims(&mut app, unit),
+        vec![WORN_SHORTBOW.fire_anim],
+        "Auto Shot's GO plays the bow's release clip (asked the server for {:?})",
+        asked_entries(&app)
+    );
+    assert!(
+        asked_entries(&app).is_empty(),
+        "the weapon template was already landed — no ask-once miss starved the lookup"
+    );
+}
+
+/// **B307's pin, "any ranged weapon" half.** A gun and a crossbow take the SAME road to a
+/// different pair of clips (visual 224 / 743 → AttackRifle 49) — so a fix that only ever saw a
+/// bow, or a schema that only decodes one display row, is caught here.
+#[test]
+fn a_real_gun_or_crossbow_shooters_auto_shot_go_plays_attackrifle() {
+    for weapon in [&OLD_BLUNDERBUSS, &BLACKCROW] {
+        let Some((mut app, unit)) = real_shooter(weapon) else {
+            return;
+        };
+        app.world_mut()
+            .write_message(cast_event(unit, AUTO_SHOT, CastEventKind::Go));
+        app.update();
+        assert_eq!(
+            emote_anims(&mut app, unit),
+            vec![weapon.fire_anim],
+            "{}'s Auto Shot GO plays its release clip",
+            weapon.name
+        );
+    }
+}
+
+/// The START arm of the same chain — the **pull**, which is what the report calls the "reload
+/// anim": `SMSG_SPELL_START` for Auto Shot arms `CastHold { anim_id: 105 }` (LoadBow) on a bow
+/// shooter, plus the ranged-slot marks the driver reads ([`RangedHold`], the sheath snap). One
+/// START per auto-repeat activation, so this is the clip that opens a volley.
+#[test]
+fn a_real_bow_shooters_auto_shot_start_arms_the_loadbow_hold() {
+    let Some((mut app, unit)) = real_shooter(&WORN_SHORTBOW) else {
+        return;
+    };
+    app.world_mut()
+        .write_message(cast_event(unit, AUTO_SHOT, CastEventKind::Start));
+    app.update();
+    let held = app.world().entity(unit).get::<CastHold>();
+    assert_eq!(
+        held.map(|h| (h.anim_id, h.spell_id, h.ranged)),
+        Some((WORN_SHORTBOW.load_anim, AUTO_SHOT, true)),
+        "START arms the bow's pull as the cast hold"
+    );
+    assert!(
+        app.world().entity(unit).get::<RangedHold>().is_some(),
+        "…and the any-caster `0x400` weapon-visual hold"
+    );
+    let sheaths: Vec<_> = app
+        .world_mut()
+        .resource_mut::<Messages<SheathRequest>>()
+        .drain()
+        .filter(|s| s.entity == unit)
+        .map(|s| s.state)
+        .collect();
+    assert_eq!(sheaths, vec![2], "…and the ranged stance snaps drawn");
+
+    // The GO releases it and fires — the shot's own clip, on the same body.
+    app.world_mut()
+        .write_message(cast_event(unit, AUTO_SHOT, CastEventKind::Go));
+    app.update();
+    assert!(
+        app.world().entity(unit).get::<CastHold>().is_none(),
+        "the GO releases the pull"
+    );
+    assert_eq!(
+        emote_anims(&mut app, unit),
+        vec![WORN_SHORTBOW.fire_anim],
+        "…and plays the release"
+    );
+}
+
+/// The control that proves the tests above are actually exercising
+/// [`super::WeaponVisualSrc::caster`] and not passing for some other reason: the SAME shooter
+/// with an EMPTY ranged slot resolves nothing at all — Auto Shot has no visual of its own to
+/// fall back on.
+#[test]
+fn a_shooter_with_no_ranged_weapon_resolves_no_clip_at_all() {
+    let Some((mut app, unit)) = real_shooter(&WORN_SHORTBOW) else {
+        return;
+    };
+    // Strip the equipment field — the wire's "nothing in slot 17".
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(crate::net::ObjectStore(
+            benilla_protocol::ObjectFields::from_pairs(&[(VISIBLE_RANGED_ENTRY_FIELD, 0)]),
+        ));
+    app.world_mut()
+        .write_message(cast_event(unit, AUTO_SHOT, CastEventKind::Start));
+    app.world_mut()
+        .write_message(cast_event(unit, AUTO_SHOT, CastEventKind::Go));
+    app.update();
+    assert!(
+        emote_anims(&mut app, unit).is_empty(),
+        "no weapon, no substitute visual, no clip"
+    );
+    assert!(
+        app.world().entity(unit).get::<CastHold>().is_none(),
+        "and no pull to hold"
+    );
+}

@@ -174,6 +174,23 @@ pub struct PlayerReqState {
     pub honor_rank: u8,
 }
 
+/// [`item_usable`] for an item the caller knows only by **entry** — the shape every window seam
+/// wants, since a row carries an id and the engine holds the templates.
+///
+/// Two conventions are folded in here rather than re-derived per caller: entry `0` (a row with no
+/// item at all) is usable, and a template the app has not answered for yet is usable, which is the
+/// getter's own null-record skip. It was four identical private copies across the merchant, mail,
+/// trade and auction seams before it was one — three had the `item_id == 0` leg and the fourth
+/// reached the same answer through `is_none_or`, which is exactly the kind of agreement that stops
+/// being reliable the moment someone edits one of them.
+pub(super) fn item_usable_by_id(model: &super::Model, item_id: u32) -> bool {
+    item_id == 0
+        || model.item_templates.get(&item_id).is_none_or(|v| {
+            item_usable(v, &model.player_req, |id| {
+                model.spellbook.slots.iter().any(|s| s.spell_id == id)
+            })
+        })
+}
 /// The client's item-usable predicate `0x5ea930(player; itemCacheRecord, &err)` — byte-read from
 /// wow-re's `ui/scratch/disasm-full.txt`. Both merchant getters call it (`GetMerchantItemInfo`
 /// `0x4fb2a3`, `GetBuybackItemInfo` `0x4fb4f7`) and push `1`/`nil` as `isUsable`; the FrameXML
@@ -297,6 +314,16 @@ impl super::UiScript {
     /// Drain the set ids the renderer asked for that the store didn't have.
     pub fn take_item_set_asks(&mut self) -> Vec<u32> {
         self.model_mut().item_set_asks.drain().collect()
+    }
+
+    /// Push the **whole** random-suffix table (`ItemRandomProperties` id → its resolved view) —
+    /// once, at load. Not an ask-once store: see [`super::Model::random_properties`] for why the
+    /// roll table is pushed whole where the template store is asked for.
+    pub fn set_random_properties(
+        &mut self,
+        rows: std::collections::HashMap<u32, super::RandomPropertyView>,
+    ) {
+        self.model_mut().random_properties = rows;
     }
 
     /// Push the red-line law's player state (level/class/race/skills). Cheap to call on change.

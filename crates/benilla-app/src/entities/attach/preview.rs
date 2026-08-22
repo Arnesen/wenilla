@@ -34,8 +34,8 @@ use benilla_protocol::{CharEnumItem, CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_H
 use bevy::prelude::*;
 
 use crate::portrait::{
-    DressUpBake, DressUpLook, DressUpPreview, GlueLook, GluePreview, GluePreviewBake,
-    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider,
+    DressUpBake, DressUpLook, DressUpPreview, GlueLook, GluePetBake, GluePreview, GluePreviewBake,
+    PetLook, PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider,
 };
 use benilla_assets::materials::WowModelMaterial;
 use benilla_assets::WorldAssets;
@@ -531,6 +531,10 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
             static_mesh: p.mesh.clone(),
             skinned_mesh: p.skinned_mesh.clone(),
             material: steady_material(p, &char_mats).unwrap_or_else(|| p.material.clone()),
+            // `None` — decision 0807's named gap, deliberately still open: a character batch with
+            // an authored dimming constant previews at 1.0. The select body's look is signed off
+            // as it stands, so closing it is its own change, not a rider on the pet's.
+            alpha_anim: None,
         })
         .collect();
 
@@ -799,6 +803,135 @@ fn steady_material(
     Some(quint.0.clone())
 }
 
+/// Assemble the select screen's **pet** — the hunter/warlock companion the enum's pet triple names
+/// (`SMSG_CHAR_ENUM`'s `petDisplayId`, the reference's secondary model `record+0x114`).
+///
+/// Its own system beside [`build_glue_preview`], not a limb of it, for the reason
+/// [`GluePetBake`] is its own resource: a pet is an ordinary creature display with no compositor,
+/// no equipment and no geoset selection between the display cache and the booth, and its model
+/// lands on its own schedule. Folding it into the character's assembly would gate the *character*
+/// on the pet's asset — a body that waits for a wolf to load is a worse screen than a body that is
+/// joined by one a frame later.
+///
+/// Runs after `update_display_models`, whose want-list asked for this display; retries (leaving
+/// `built` false) until its parts build.
+pub(in crate::entities) fn build_glue_pet(
+    preview: Res<GluePreview>,
+    mut bake: ResMut<GluePetBake>,
+    creatures: Option<Res<Creatures>>,
+    // The `CreatureFamily` size ramp (decision 1538) — the pet's scale is its family's, read at its
+    // level. Absent (the DBC failed to load) ⇒ every pet falls back to its display's own scale
+    // product, which is the reference's own family-miss fallthrough.
+    families: Option<Res<crate::ui_pet_stats::PetFamilyTables>>,
+    mut state: Local<PetState>,
+) {
+    let want = preview.look.and_then(|l| l.pet());
+    if state.last != want {
+        state.last = want;
+        state.built = false;
+    }
+    if state.built {
+        return;
+    }
+    // No pet (every class but a living hunter's or warlock's — the server suppresses the triple
+    // for the rest) → clear the bake once and stop.
+    let Some(want) = want else {
+        if bake.display_id != 0 {
+            *bake = GluePetBake {
+                revision: bake.revision + 1,
+                ..default()
+            };
+        }
+        state.built = true;
+        return;
+    };
+    let Some(creatures) = creatures.as_deref() else {
+        return;
+    };
+    let Some(pet) = assemble_pet(creatures, families.as_deref(), want) else {
+        return; // the model is still loading — retry next frame
+    };
+    debug!(
+        "glue pet: display {} (family {} level {}) → {} parts, {} camera-facing, scale {:.3}",
+        want.display_id,
+        want.family,
+        want.level,
+        pet.parts.len(),
+        pet.billboards.len(),
+        pet.scale,
+    );
+    *bake = GluePetBake {
+        revision: bake.revision + 1,
+        ..pet
+    };
+    state.built = true;
+}
+
+/// The pet's parts, straight off the shared display cache: every batch of the creature model, split
+/// into plain meshes and the camera-facing ones (a voidwalker's eyes are the latter). `None` while
+/// the display's model is still building.
+///
+/// No geoset filter: only the character compositor selects among a model's geosets, and a pet is
+/// not a character model — the world's creature path draws every batch of a beast the same way.
+fn assemble_pet(
+    creatures: &Creatures,
+    families: Option<&crate::ui_pet_stats::PetFamilyTables>,
+    want: PetLook,
+) -> Option<GluePetBake> {
+    let display_id = want.display_id;
+    let model = creatures.models.get(&display_id)?;
+    let parts = model.parts.as_deref()?;
+    let (billboard_parts, mesh_parts): (Vec<&EntityPart>, Vec<&EntityPart>) =
+        parts.iter().partition(|p| p.billboard.is_some());
+    Some(GluePetBake {
+        display_id,
+        parts: mesh_parts
+            .iter()
+            .map(|p| PreviewPart {
+                static_mesh: p.mesh.clone(),
+                skinned_mesh: p.skinned_mesh.clone(),
+                material: p.material.clone(),
+                alpha_anim: p.alpha_anim.clone(),
+            })
+            .collect(),
+        billboards: billboard_parts
+            .iter()
+            .filter_map(|p| {
+                let info = p.billboard.as_ref()?;
+                Some(PreviewBillboard {
+                    mesh: p.mesh.clone(),
+                    material: p.material.clone(),
+                    bone: info.bone,
+                    // `ZERO`: the pet is rigged, so its billboard bone's booth joint already bakes
+                    // the pivot (the 0130 rig identity) — the same seat the body's eye-glow takes.
+                    offset: Vec3::ZERO,
+                    kind: info.kind,
+                })
+            })
+            .collect(),
+        // The model's own emitters, carried whole: an imp without its flames is the same kind of
+        // wrong as an imp without its wings. `parts` and `emitters` are captured together when the
+        // asset lands, so the `parts` gate above already answers for both.
+        emitters: model.emitters.clone(),
+        // The size: the family's level ramp, and the display's scale product only where the family
+        // table can't answer — which is the reference's own order (it computes the product, then
+        // overwrites it with the ramp, `0x472e87`). A display neither can size renders at 1.0.
+        scale: families
+            .and_then(|f| f.families.pet_scale(want.family, want.level))
+            .or_else(|| creatures.model_scale(display_id))
+            .unwrap_or(1.0),
+        revision: 0, // the caller stamps it
+    })
+}
+
+/// [`build_glue_pet`]'s per-run memory — the pet display it last emitted a bake for, and whether
+/// that bake succeeded (a display whose model wasn't ready keeps retrying).
+#[derive(Default)]
+pub(in crate::entities) struct PetState {
+    last: Option<PetLook>,
+    built: bool,
+}
+
 /// [`build_glue_preview`]'s per-run memory.
 #[derive(Default)]
 pub(in crate::entities) struct PreviewState {
@@ -816,6 +949,93 @@ pub(in crate::entities) struct DressUpState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The bug the imp filed** (decision 1539): a pet is a *creature* display, and creature models
+    /// routinely author their own particle emitters — the Imp's three flame jets, the Voidwalker's
+    /// four smoke plumes. `assemble_pet` read `parts` and nothing else, so they never reached the
+    /// booth and the select screen stood a grey imp beside the warlock.
+    ///
+    /// Asserted as "everything the display cache holds arrives", not "three emitters arrive": the
+    /// failure mode was a *dropped field*, and a count pinned to one model would pass just as
+    /// silently the next time one is added. The billboard-chain emitter is in the fixture because
+    /// it is the branch that survives a booth's `without_camera_billboards` only through the frame
+    /// [`crate::portrait::spawn_booth_own_emitters`] spawns for it.
+    #[test]
+    fn a_pet_carries_every_emitter_its_display_authored() {
+        let emitter = |bone: u16, billboard: Option<u16>| benilla_assets::ModelEmitter {
+            def: benilla_formats::ParticleEmitterDef {
+                bone,
+                ..benilla_world::testing::plain_particle_def()
+            },
+            texture: None,
+            bone_pivot: [0.0; 3],
+            billboard: billboard.map(|b| benilla_assets::EmitterBillboard {
+                kind: benilla_formats::BillboardKind::Spherical,
+                pivot: [0.0, 0.0, 1.0],
+                bone: b,
+            }),
+            recursion: None,
+            geometry: None,
+            owner_reach: 0.0,
+            water_bound: (Vec3::ZERO, 0.0),
+            idle_seq: usize::from(bone),
+        };
+        let mut dm = crate::entities::display::empty_shell();
+        // Built, and it drew nothing of its own — the emitters are the whole model here. An empty
+        // `parts` list is still `Some`, which is what "the asset landed" means to the gate.
+        dm.parts = Some(Vec::new());
+        dm.emitters = vec![emitter(17, None), emitter(45, None), emitter(51, Some(42))];
+        let mut creatures = Creatures {
+            catalog: Default::default(),
+            models: std::collections::HashMap::new(),
+        };
+        creatures.models.insert(4449, dm);
+
+        let bake = assemble_pet(
+            &creatures,
+            None,
+            PetLook {
+                display_id: 4449,
+                level: 60,
+                family: 0,
+            },
+        )
+        .expect("a display whose parts have landed assembles");
+        assert_eq!(
+            bake.emitters.len(),
+            3,
+            "every emitter the display holds must reach the bake, not a subset"
+        );
+        assert_eq!(
+            bake.emitters.iter().map(|e| e.def.bone).collect::<Vec<_>>(),
+            [17, 45, 51],
+            "and in file order, on their own bones"
+        );
+        assert_eq!(
+            bake.emitters[2].billboard.map(|b| b.bone),
+            Some(42),
+            "the billboard host bone rides along — a booth needs it to seat the frame"
+        );
+
+        // A display still loading (`parts: None`) yields nothing at all rather than a pet with
+        // emitters and no body: the retry latch is what stands it up a frame later.
+        let mut loading = crate::entities::display::empty_shell();
+        loading.emitters = vec![emitter(17, None)];
+        creatures.models.insert(4450, loading);
+        assert!(
+            assemble_pet(
+                &creatures,
+                None,
+                PetLook {
+                    display_id: 4450,
+                    level: 60,
+                    family: 0
+                }
+            )
+            .is_none(),
+            "emitters alone are not a pet"
+        );
+    }
 
     /// The InventoryType → equipment-slot map lands each worn kind where the Select pipeline reads
     /// it, and drops the non-rendered kinds. Pinned against the real Human Warrior recruit set

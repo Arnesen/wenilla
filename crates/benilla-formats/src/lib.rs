@@ -27,9 +27,11 @@ mod characters;
 pub use characters::{
     CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EquipGeosets, StartOutfitItem,
 };
+mod camera_shakes;
 mod creatures;
 mod dbc;
 mod unit_blood;
+pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog};
 pub use creatures::{
     load_creature_catalog, CreatureCatalog, CreatureModel, FootprintParams, NpcAppearance,
 };
@@ -42,6 +44,8 @@ mod itembagfamily;
 pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
 mod itemclass;
 pub use itemclass::{load_item_classes, ItemClassCatalog};
+mod auction_house;
+pub use auction_house::{load_auction_houses, AuctionHouseCatalog, AuctionHouseInfo};
 mod itemsubclass;
 pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
 mod factions;
@@ -99,6 +103,11 @@ mod item_visuals;
 pub use item_visuals::{
     load_enchant_catalog, load_item_visual_catalog, EnchantCatalog, ItemVisualCatalog,
     ITEM_VISUAL_SLOTS,
+};
+mod item_random_properties;
+pub use item_random_properties::{
+    load_random_property_catalog, RandomProperty, RandomPropertyCatalog,
+    RANDOM_PROPERTY_FIRST_SLOT, RANDOM_PROPERTY_SLOTS,
 };
 mod ground_effects;
 pub use ground_effects::{
@@ -194,19 +203,20 @@ pub use models::{
     accumulate_wmo_group_collision, hand_grip_finger_poses, load_m2_animation_summary,
     load_m2_bone_spins, load_m2_bounds, load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned,
     load_object_model, load_wmo, load_wmo_collision_tris, m2_bone_spins, m2_owner_reach,
-    m2_ribbon_emitter_count, m2_texture_transform_count, non_separable_billboard_bones,
-    owner_last_rung, owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
-    parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
-    parse_m2_cch_marker, parse_m2_collision_hull, parse_m2_event_markers,
-    parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_playable_animation_lookup,
-    parse_m2_portrait_camera, parse_m2_render_submeshes, parse_m2_skeleton,
-    parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights, parse_wmo_portals, parse_wmo_root,
-    wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
-    wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
-    wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
-    BoneSpin, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
-    GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds,
-    M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim,
+    m2_ribbon_emitter_count, m2_sequence_visible_textures, m2_texture_transform_count,
+    non_separable_billboard_bones, owner_last_rung, owner_last_rung_bucket,
+    parse_m2_animation_lookup, parse_m2_animation_summary, parse_m2_animations,
+    parse_m2_attachments, parse_m2_bounds, parse_m2_camera, parse_m2_cch_marker,
+    parse_m2_collision_hull, parse_m2_event_markers, parse_m2_global_sequence_bones,
+    parse_m2_lights, parse_m2_playable_animation_lookup, parse_m2_portrait_camera,
+    parse_m2_render_submeshes, parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs,
+    parse_wmo_lights, parse_wmo_portals, parse_wmo_root, wmo_group_doodad_refs,
+    wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs,
+    wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim,
+    AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot,
+    CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
+    GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds, M2Light,
+    M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim,
     RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton, SkeletonBone, StringAnchors, UvAnim,
     WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight,
     WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
@@ -453,6 +463,10 @@ fn schema_for(dbc_name: &str) -> Option<Schema> {
         (
             "SpellItemEnchantment.dbc",
             item_visuals::spell_item_enchantment_schema,
+        ),
+        (
+            "ItemRandomProperties.dbc",
+            item_random_properties::item_random_properties_schema,
         ),
         ("AreaTrigger.dbc", area_trigger::area_trigger_schema),
     ] {
@@ -701,6 +715,7 @@ mod tests {
             "ItemVisuals",
             "ItemVisualEffects",
             "SpellItemEnchantment",
+            "ItemRandomProperties",
             "TaxiNodes",
             "AreaTable",
             "GameObjectDisplayInfo",

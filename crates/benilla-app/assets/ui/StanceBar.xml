@@ -102,6 +102,25 @@
         function ShapeshiftBar_Update()
             local numForms = GetNumShapeshiftForms()
             if numForms > 0 then
+                -- ── The shelf's LENGTH is the form count (ref l.161-175) ─────────────────────
+                -- The three strips are DECLARED as the >2-form chain (Left → Middle → Right), so
+                -- the one- and two-form shelves have to re-point the end cap. Hiding the middle
+                -- strip does NOT close its gap — a hidden region still resolves its rect, here
+                -- and in the reference — so without this the 42x50 right cap sits 38px past the
+                -- last button as a stray empty recess: a rogue's Stealth with a second, always-
+                -- empty slot beside it. One form pulls the cap back INSIDE the left cap (+12, a
+                -- 54px shelf around the single button); two butt the caps together; past two the
+                -- middle strip carries one slot per extra form and the cap chains off it.
+                if numForms == 1 then
+                    ShapeshiftBarRight:SetPoint("LEFT", ShapeshiftBarLeft, "LEFT", 12, 0)
+                elseif numForms == 2 then
+                    ShapeshiftBarRight:SetPoint("LEFT", ShapeshiftBarLeft, "RIGHT", 0, 0)
+                else
+                    ShapeshiftBarMiddle:SetPoint("LEFT", ShapeshiftBarLeft, "RIGHT", 0, 0)
+                    ShapeshiftBarMiddle:SetWidth(38 * (numForms - 2))
+                    ShapeshiftBarMiddle:SetTexCoord(0, numForms - 2, 0, 1)
+                    ShapeshiftBarRight:SetPoint("LEFT", ShapeshiftBarMiddle, "RIGHT", 0, 0)
+                end
                 ShapeshiftBarFrame:Show()
             else
                 ShapeshiftBarFrame:Hide()
@@ -272,8 +291,10 @@
 
              Geometry, anchor chain and TexCoords quoted whole: Left and Right are two crops of ONE
              `ShapeshiftBarEnds` file (0..0.453125 and 0.453125..0.875), Middle its own, and Right
-             hangs off Middle's RIGHT exactly as the ref chains them — which is why hiding the
-             middle strip leaves its gap rather than closing it, the reference's own result.
+             hangs off Middle's RIGHT — the >2-form chain, which is the DECLARED state only. The
+             cap is re-pointed per form count by `ShapeshiftBar_Update` above (the ref's l.161-175):
+             hiding the middle strip leaves its 38px rect behind, so the declared chain alone
+             strands the cap past the last button.
 
              `hidden="true"` is the RAISED state, and it is only the pre-pass value now:
              `ShapeshiftBar_UpdatePosition` (above) shows and hides all three from the bottom-left

@@ -19,83 +19,88 @@ use bevy::prelude::*;
 /// camera brings its own FOV (see [`frame`]).
 pub(super) const PORTRAIT_FOV: f32 = 0.5;
 
-/// The aspect the **portrait bake's** own diagonal→vertical crop is computed at: the client feeds
-/// its portrait projection a fixed `4/3` (wow-re portrait-render §4), which makes the crop factor
-/// `1/√((4/3)²+1)` = `3/5` exactly — the community's "fov × 0.6" legend, emergent, not prescaled.
+/// The aspect the client's portrait bake feeds `0x5c3cc0` — **exactly `1.0`, on every screen**
+/// (decision 1543).
 ///
-/// It is a *separate number* from the projection's `aspect` (see [`WowPortraitProjection::aspect`]):
-/// this one is the client's own, fixed by its bake; that one is our destination pane's, and exists
-/// purely to cancel the UI's stretch (1069). They coincide on the **model-pane** path, where the
-/// client renders straight into the pane and its crop aspect IS the pane's.
-pub(super) const PORTRAIT_CROP_ASPECT: f32 = 4.0 / 3.0;
+/// `0x524f60` builds it as `(G44·64/W)/(G48·64/H)` = `(G44/G48)·(H/W)`, and `G44`/`G48`
+/// (`[0x832a44]`/`[0x832a48]`) are the *live* normalized screen-aspect direction cosines
+/// (`s/√(1+s²)` and `1/√(1+s²)`), so their ratio IS the screen aspect `s` and the `H/W` cancels it
+/// exactly. The same pair divides back out of the viewport locals (`0x41ade0`), which is why the
+/// bake's viewport is a square `64×64` px box on any target — both observed in the real client's
+/// own GL stream at two different screen aspects (1543).
+///
+/// So the crop is `1/√(1²+1)` and **`fovy = fov/√2 = 0.7071·fov`**.
+///
+/// **The "fov × 0.6" legend is `1/√((4/3)²+1)`** — what this quantity would be if the aspect were
+/// `4/3`, which it never is. Carrying it here after 0163 had already corrected the matrix to
+/// isotropic is what left benilla's portraits 18.7% too tight (director report, 2026-08-22).
+pub(super) const PORTRAIT_ASPECT: f32 = 1.0;
 
-/// A camera record's *diagonal* fov → the **vertical** opening angle, at a given crop aspect:
+/// A camera record's *diagonal* fov → the **vertical** opening angle at a given aspect:
 /// `fov/√(a²+1)`, the client's own `0x5c3cc0` relation (`t = tan((fov/2)/√(a²+1))`, `m11 = 1/t`, so
 /// `tan(fovy/2) = t` exactly). The one place a plain Bevy `PerspectiveProjection` needs it.
-pub(super) fn diag_to_vert(fov: f32, crop_aspect: f32) -> f32 {
-    fov / (crop_aspect * crop_aspect + 1.0).sqrt()
+///
+/// `a` is `0x5c3cc0`'s single `aspect` — the same one that sets the squeeze, never a second number
+/// (1543). [`PORTRAIT_ASPECT`] for the round bake; the pane's own rect for a `<PlayerModel>`.
+pub(super) fn diag_to_vert(fov: f32, aspect: f32) -> f32 {
+    fov / (aspect * aspect + 1.0).sqrt()
 }
 
-/// The real client's portrait **projection** (wow-re portrait-render §4, corrected `aa186e79`):
-/// gxumath `0x5c3cc0` is a *diagonal-FOV* perspective — half-angle `θ = (fov/2)/√(aspect²+1)`,
-/// `m11 = 1/tan θ`, `m00 = m11/aspect` — and the portrait bake feeds it `aspect = 4/3`
-/// ([`PORTRAIT_CROP_ASPECT`]). Net: vertical half-angle **`0.3·fov`** (the refs' tight crop; 1.72–1.75×
-/// tighter than a naive `tan(fov/2)` read) plus a deliberate **3:4 anamorphic squeeze** (spheres
-/// render as 4:3-tall ellipses in every real portrait).
+/// The real client's portrait/model **projection**: gxumath `0x5c3cc0`, a *diagonal-FOV*
+/// perspective — half-angle `θ = (fov/2)/√(aspect²+1)`, `m11 = 1/tan θ`, `m00 = m11/aspect`.
+///
+/// **One `aspect`, two jobs — because `0x5c3cc0` has exactly one.** The same variable sets the
+/// horizontal squeeze *and* the diagonal→vertical crop, so a rig that used different numbers for
+/// the two builds a matrix the client cannot produce. benilla carried precisely that split for six
+/// weeks (0163 corrected the matrix to isotropic and left the crop on `4/3`), and decision 1543
+/// closed it: the field below is singular on purpose, and must stay that way.
+///
+/// - **Round portrait:** `1.0` ([`PORTRAIT_ASPECT`]) — the client's own value, and our sampling
+///   region is square by construction, so it is also the number that leaves the UI's stretch
+///   nothing to cancel.
+/// - **Model pane:** the pane's own width÷height — the client renders straight into the pane rect
+///   (`318×224 → 0.576·fov`), and our booth's square target is stretched onto that rect by the UI,
+///   so the one number does both jobs there too (decision 1069).
 ///
 /// Carried as a custom [`CameraProjection`] rather than a `PerspectiveProjection` because the
 /// camera system re-derives `aspect_ratio` from the (square) render target on every projection
-/// write — it would stomp ours. `update` is a deliberate no-op: the ref mapping is
-/// target-size-independent too (its 64×64 surface is forced by a hardcoded scissor).
+/// write — it would stomp ours. `update` is a deliberate no-op, and that is faithful: the client's
+/// bake emits the *same* matrix at 1152×648 and at 1280×800 (1543).
 #[derive(Debug, Clone)]
 pub(super) struct WowPortraitProjection {
     /// The M2 record's fov (radians) — a *diagonal* angle in the client's convention, NOT fovy.
     pub(super) fov: f32,
     pub(super) near: f32,
     pub(super) far: f32,
-    /// The **destination pane's** width ÷ height.
+    /// `0x5c3cc0`'s one `aspect` — it drives BOTH the horizontal squeeze (`m00 = m11/aspect`) and
+    /// the diagonal→vertical crop (`fovy = fov/√(aspect²+1)`). See the type docs for which value
+    /// each path takes and why they are the same number.
     ///
-    /// A booth renders into a *square* target that the UI then stretches to fill whatever rect the
-    /// sampling region resolves to (`extract`'s `UvRect::FULL`). So the on-screen proportions are
-    /// only true when the projection runs at the **pane's** aspect: the projection squeezes by
-    /// `1/aspect` horizontally, the stretch undoes it exactly, and a sphere lands round. Rendering
-    /// at 1.0 into a 316×351 pane is what made every dressing-room character 11% too tall
-    /// (director report, 2026-08-06 — decision 1069).
-    ///
-    /// 1.0 for a round portrait: its region is square by construction (the circular mask is
-    /// inscribed in it), so there is nothing to cancel.
+    /// It also happens to be the term that cancels the UI's stretch: a booth renders into a
+    /// *square* target that the UI stretches to fill whatever rect the sampling region resolves to
+    /// (`extract`'s `UvRect::FULL`), so on-screen proportions are only true when the projection
+    /// runs at the destination's aspect. Rendering at 1.0 into a 316×351 pane is what made every
+    /// dressing-room character 11% too tall (director report, 2026-08-06 — decision 1069). That the
+    /// client's own aspect and our destination's agree on both paths is not luck: the round
+    /// portrait's region is square *because* the client baked it square.
     pub(super) aspect: f32,
-    /// The aspect the **client** computes its diagonal→vertical crop at — `fovy = fov/√(a²+1)`.
-    ///
-    /// Not the same question as [`Self::aspect`], and the two genuinely differ by path. The portrait
-    /// bake hardcodes `4/3` ([`PORTRAIT_CROP_ASPECT`]) while our destination region is square, so
-    /// there it is `4/3` against an `aspect` of `1.0`. A `<PlayerModel>` body pane renders *straight
-    /// into the pane* in the real client (`0x5c3cc0` with the frame's plain pixel width/height), so
-    /// there the two are the same number — and the crop genuinely moves with the pane: `318×224`
-    /// crops to `0.576·fov`, `233×224` to `0.693·fov`. Hardcoding `0.6` was only ever right at 4/3.
-    pub(super) crop_aspect: f32,
 }
 
 impl WowPortraitProjection {
-    /// Full vertical opening angle — `2θ` where `θ = (fov/2)/√(crop_aspect²+1)` is the client's own
+    /// Full vertical opening angle — `2θ` where `θ = (fov/2)/√(aspect²+1)` is the client's own
     /// half-angle (`0x5c3cc0`: `t = tan θ`, `m11 = 1/t`, so `tan(fovy/2) = tan θ` exactly, no
     /// small-angle step anywhere).
     fn fovy(&self) -> f32 {
-        diag_to_vert(self.fov, self.crop_aspect)
+        diag_to_vert(self.fov, self.aspect)
     }
 }
 
 impl CameraProjection for WowPortraitProjection {
     fn get_clip_from_view(&self) -> Mat4 {
-        // No anamorphic squeeze — square-true proportions ON SCREEN, which is what `aspect` (the
-        // destination pane's, not the render target's) buys: it cancels the UI's stretch rather
-        // than adding a distortion of its own. The 4/3 squeeze wow-re's §4 verdict prescribed
-        // rendered visibly TALLER faces than the reference's on-screen portrait (the director's
-        // A/B, 2026-07-06) — the director's capture is ground truth, so the squeeze is out pending
-        // wow-re's reconciliation (their first reading WAS aspect ≈ 1; the display path may also
-        // compensate). The 0.6 diag→vert factor stays: the crop tightness matched refs and is
-        // aspect-derivation-independent on screen. Bevy-native reverse-z infinite depth (the
-        // record far — 27.8 — never clips a model-local portrait).
+        // The client's matrix, with Bevy-native reverse-z infinite depth (the record far — 27.8 on
+        // HumanMale — never clips a model-local portrait). The round portrait's `aspect` is 1.0, so
+        // there is no anamorphic squeeze: the director's 2026-07-06 A/B said so before the bytes
+        // did, and 1543 measured `m00 == m11` in the client's own GL stream.
         Mat4::perspective_infinite_reverse_rh(self.fovy(), self.aspect, self.near)
     }
 
@@ -216,8 +221,8 @@ const WINDOW_MAX: f32 = 1.1;
 /// **Authored path** (the mechanism, module docs): the model's own portrait camera, verbatim —
 /// `lookAt(eye, target, up)` with up = +Y rolled about the view axis (roll is `0.0` on every
 /// portrait camera audited), and the client's exact projection of the record's fov/near/far
-/// ([`WowPortraitProjection`] — diagonal-FOV at the fixed 4/3 aspect). No yaw, no window math —
-/// the artist already framed it.
+/// ([`WowPortraitProjection`] at [`PORTRAIT_ASPECT`] — diagonal-FOV, isotropic, `fovy = fov/√2`).
+/// No yaw, no window math — the artist already framed it.
 ///
 /// **Fallback path** (camera-less models): a heuristic face closeup aimed at the head anchor (else
 /// just above the neck pivot) from a slight three-quarter angle, sized by the model's own height
@@ -232,12 +237,11 @@ pub(super) fn frame(a: &PortraitAnchors) -> (Transform, Projection) {
                 fov: cam.fov,
                 near: cam.near,
                 far: cam.far,
-                // A round portrait's sampling region is square by construction (the mask is the
-                // inscribed circle) — nothing to cancel.
-                aspect: 1.0,
-                // …but the CROP is the client's own, and its portrait bake computes it at a fixed
-                // 4/3. Two different aspects, two different jobs.
-                crop_aspect: PORTRAIT_CROP_ASPECT,
+                // The client's own bake aspect, which is also ours: its `(G44/G48)·(H/W)` cancels
+                // to 1.0 on any screen, and our sampling region is square by construction (the
+                // circular mask is inscribed in it), so there is nothing to cancel either. One
+                // number, both jobs — `fovy = fov/√2`.
+                aspect: PORTRAIT_ASPECT,
             }),
         );
     }
@@ -370,9 +374,25 @@ pub(super) fn pane_camera(a: &PortraitAnchors) -> benilla_assets::PortraitCamera
     })
 }
 
-/// A pane camera's projection: the record's scalars, with the pane's aspect in BOTH roles (the
-/// client renders straight into the pane rect, so its matrix aspect and its diagonal→vertical crop
-/// aspect are the same number). See [`WowPortraitProjection::crop_aspect`].
+/// A pane camera's projection: the record's scalars at the pane's aspect — which does both the
+/// squeeze and the diagonal→vertical crop, because the client renders straight into the pane rect.
+/// See [`WowPortraitProjection::aspect`].
+///
+/// **1543's cancellation does NOT reach here, and this was checked, not assumed** (wow-re
+/// `bcd1f2c2`, a §5 round run blind to decision 1089). Both paths build through the same
+/// `0x7ada40`/`0x7ac640`, so the question is only what each caller puts in the aspect rect: the
+/// *bake* constructs `{0, 0, 1.0, D}` whose only size terms are its fixed 64/64, which is why its
+/// screen terms cancel to `1.0`; the *widget* (`0x76d42d`) hands over the frame's **raw cached
+/// layout rect** verbatim (`0x768320`, a 4-dword copy of `[layoutFrame+0x40]`), so the same
+/// cancellation removes only the screen terms and the pane's own shape survives —
+/// `aspect = (W/H)·(a/a_screen)` = `W/H` whenever the configured and actual display aspects agree,
+/// which 1543's `widescreen` census showed is every state the client can reach. The `0x41ade0`
+/// unscales on this path (`0x76d45b`/`0x76d46e`) run *after* the camera build and serve the
+/// viewport only.
+///
+/// The falsifier, if anyone is tempted to propagate the portrait's `1.0` here anyway: the viewport
+/// comes from that same rect, so projection and viewport aspects agree by construction, and a
+/// transplanted `1.0` would render a sphere **1.42× wider than tall** in the 318×224 pet pane.
 pub(super) fn pane_projection(
     cam: &benilla_assets::PortraitCamera,
     aspect: f32,
@@ -382,7 +402,6 @@ pub(super) fn pane_projection(
         near: cam.near,
         far: cam.far,
         aspect,
-        crop_aspect: aspect,
     }
 }
 
@@ -466,7 +485,7 @@ mod tests {
                 (want.fov, want.near, want.far),
                 (human.fov, human.near, human.far)
             );
-            assert_eq!((want.aspect, want.crop_aspect), (aspect, aspect));
+            assert_eq!(want.aspect, aspect);
             assert_eq!(
                 projection.get_clip_from_view(),
                 want.get_clip_from_view(),
@@ -500,7 +519,6 @@ mod tests {
                 near: c.near,
                 far: c.far,
                 aspect,
-                crop_aspect: aspect,
             };
             // One yard of height at the subject's own standing point.
             let base = Vec3::new(0.0, c.target.y, 0.0);
@@ -596,19 +614,63 @@ mod tests {
         }
     }
 
-    /// The client's diagonal→vertical crop is **aspect-dependent**, and hardcoding the 4/3 value
-    /// (0.6) was only right at 4/3. `fovy = fov/√(a²+1)` — so the pet pane's 318×224 crops to
-    /// 0.576·fov and the character pane's 233×224 to 0.693·fov.
+    /// The client's diagonal→vertical crop is **aspect-dependent**: `fovy = fov/√(a²+1)`. The pet
+    /// pane's 318×224 crops to 0.576·fov and the character pane's 233×224 to 0.693·fov — and the
+    /// round portrait, whose aspect is 1, to `1/√2`. The famous `0.6` is the value at 4/3 and
+    /// nothing in the portrait path is ever at 4/3 (1543).
     #[test]
-    fn the_diagonal_crop_follows_the_pane_aspect() {
+    fn the_diagonal_crop_follows_the_aspect() {
         let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
         assert!(close(diag_to_vert(1.0, 4.0 / 3.0), 0.6), "the 4/3 legend");
         assert!(close(diag_to_vert(1.0, 318.0 / 224.0), 0.575_86));
         assert!(close(diag_to_vert(1.0, 233.0 / 224.0), 0.693_05));
         assert!(close(
-            diag_to_vert(1.0, 1.0),
+            diag_to_vert(1.0, PORTRAIT_ASPECT),
             std::f32::consts::FRAC_1_SQRT_2
         ));
+    }
+
+    /// **The portrait bake's projection, pinned against the real client's own GL stream**
+    /// (decision 1543). Two apitrace captures of 1.12.1 — `WoW-wade-northshire-20260708.trace` at
+    /// 1152×648 (calls 1073945–1075996) and `WoW.trace` at 1280×800 (calls 5592698–5594820) — both
+    /// upload the SAME bake matrix for HumanMale's `cameraLookup[0]` (`fov = π/4`, `far = 27.78`):
+    ///
+    /// ```text
+    /// m00 = 3.508226   m11 = 3.508225   (m00 == m11 → isotropic, aspect = 1)
+    /// ```
+    ///
+    /// This is the ground truth that refutes BOTH recorded readings of the bake aspect (4/3, and
+    /// `a²`), and the number benilla was missing: `1/3.508226 = tan((fov/2)/√2)`. If a future
+    /// "correction" moves the portrait crop off `1/√2`, this test is what should stop it.
+    #[test]
+    fn the_portrait_bake_matches_the_clients_own_matrix() {
+        const OBSERVED_M11: f32 = 3.508_226;
+        let proj = WowPortraitProjection {
+            fov: std::f32::consts::FRAC_PI_4,
+            near: 0.111_57,
+            far: 27.778,
+            aspect: PORTRAIT_ASPECT,
+        };
+        let m = proj.get_clip_from_view();
+        assert!(
+            (m.x_axis.x - OBSERVED_M11).abs() < 1e-4,
+            "m00 {} is not the client's {OBSERVED_M11}",
+            m.x_axis.x
+        );
+        assert!(
+            (m.y_axis.y - OBSERVED_M11).abs() < 1e-4,
+            "m11 {} is not the client's {OBSERVED_M11}",
+            m.y_axis.y
+        );
+        // The old 4/3 crop — what made the portraits 18.7% too tight — must not come back.
+        let tight = WowPortraitProjection {
+            aspect: 4.0 / 3.0,
+            ..proj
+        };
+        assert!(
+            tight.get_clip_from_view().y_axis.y > OBSERVED_M11 * 1.15,
+            "the 4/3 crop should be visibly tighter than the client's"
+        );
     }
 
     /// **The 1069 defect, pinned.** A booth bakes into a *square* target that the UI stretches into
@@ -627,7 +689,6 @@ mod tests {
                 near: c.near,
                 far: c.far,
                 aspect,
-                crop_aspect: aspect,
             };
             // A small cross at the framing centre — the on-screen size of each arm, in pane pixels.
             let mid = Vec3::new(0.0, transform.translation.y, 0.0);

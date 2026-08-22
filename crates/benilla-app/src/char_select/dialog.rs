@@ -99,7 +99,8 @@ pub(super) fn drive_delete_dialog(
     keys: Res<ButtonInput<KeyCode>>,
     mut keyboard: MessageReader<KeyboardInput>,
     mut sounds: MessageWriter<GlueSound>,
-    presses: Query<(&DialogAction, &Interaction), Changed<Interaction>>,
+    buttons: Query<(Entity, &DialogAction)>,
+    clicks: Res<crate::glue::GlueClicks>,
     mut okay: Query<(&DialogAction, &mut GlueDisabled)>,
     // The five row items of the confirm box (segments + carets), painted by the shared
     // `paint_glue_field`; plus the host pasteboard and the window handle its Wayland backend needs.
@@ -178,8 +179,9 @@ pub(super) fn drive_delete_dialog(
     // The flows.
     let mut do_delete = false;
     let mut do_cancel = false;
-    for (action, interaction) in &presses {
-        if *interaction != Interaction::Pressed {
+    // Both buttons fire on the RELEASE (1533) — a confirm you can slide off and cancel.
+    for (entity, action) in &buttons {
+        if !clicks.hit(entity) {
             continue;
         }
         match action {

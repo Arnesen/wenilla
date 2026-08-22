@@ -321,12 +321,15 @@ fn max_scroll(node: &ComputedNode) -> f32 {
 /// `SetValue(GetValue() ± GetHeight()/2)`), the knob drags.
 pub(super) fn scroll_drive(
     motion: Res<AccumulatedMouseMotion>,
-    arrows: Query<(&ScrollArrow, &Interaction), Changed<Interaction>>,
+    arrows: Query<(Entity, &ScrollArrow)>,
+    clicks: Res<crate::glue::GlueClicks>,
     thumbs: Query<(&ScrollThumb, &Interaction)>,
     mut scrolls: Query<(&ComputedNode, &mut ScrollPosition), With<InfoScroll>>,
 ) {
-    for (arrow, interaction) in &arrows {
-        if *interaction != Interaction::Pressed {
+    // The arrow steps on the RELEASE — it is a `<Button>` with an `<OnClick>`, not a slider (1533).
+    // The knob below is the slider half, and a drag is a held press by definition.
+    for (entity, arrow) in &arrows {
+        if !clicks.hit(entity) {
             continue;
         }
         let Ok((node, mut pos)) = scrolls.get_mut(arrow.scroll) else {

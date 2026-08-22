@@ -1,0 +1,2492 @@
+<Ui>
+    <!--
+        benilla's auction house (decision 1511) — the doublewide three-tab window over the Era
+        auction API (`benilla-ui/src/script/auction.rs`) plus the app's feed/drain.
+
+        The house convention, exactly as MailFrame.xml states it: the geometry, art paths, sizes,
+        offsets, anchors and texcoords below are QUOTED from the reference
+        `Interface\AddOns\Blizzard_AuctionUI\Blizzard_AuctionUI.xml` +
+        `Blizzard_AuctionUITemplates.xml` (line cites inline, `ref-xml l.N` / `ref-tmpl l.N`) —
+        they are measurements, not expression. **THE LUA IS OURS.** The reference's
+        `Blizzard_AuctionUI.lua` is the SPECIFICATION — which functions an addon can call, the
+        event vocabulary, and every branch's observable effect are read off it (`ref-lua l.N`) —
+        and how any of it is spelled here is this file's own business. Several pieces are
+        deliberately not spelled its way, and each of those says so where it stands.
+
+        DO NOT read `Interface\FrameXML\AuctionFrame.xml` for this: that is the obsolete pre-1.10
+        window and it is delete-marked in the patch chain.
+
+        ── CORRECTED MEASUREMENTS (the brief's numbers disagreed with the reference file; the
+           reference wins, and these are what is written below) ──────────────────────────────────
+        · The filter row's branch-line texture (`ref-tmpl l.36`) is **7x20 at LEFT (13,0)**, not
+          16x32. The two texcoord pairs (mid `0,0.4375,0,0.625` / last `0.4375,0.875,0,0.625`) are
+          right, and `ref-lua`'s FilterButton_SetType is what swaps them.
+        · The BID pane's next-page button sits at **RIGHT -> BidButton9 (-13,0)** (`ref-xml
+          l.1264`), not (2,0) — Browse and Auctions really are (2,0), the Bid pane really is not.
+        · The Auctions row's current-bid money frame moves to **RIGHT (0,10)** when a buyout shows
+          (`ref-lua l.914`), from its declared RIGHT (0,3).
+        · The Bid pane carries its own money-input kit, `BidBidPrice` at BOTTOM (-15,18)
+          (`ref-xml l.1297`) — the pane's Bid button reads it exactly as Browse's does.
+
+        ── ENGINE FACT, CHECKED RATHER THAN ASSUMED ─────────────────────────────────────────────
+        A child `<Frame>` shown at runtime **does** render its own `<Layers>` FontStrings in this
+        engine, so the three tab panes carry their own labels exactly as the reference (and
+        MailFrame's own SendMailFrame) do. Verified by probe: hiding one FontString in a
+        runtime-shown child frame's Layers drops that frame's extracted quad count by exactly one.
+        Nothing here is flattened onto the window's own Layers.
+
+        ── THE MONEY (decision 1522) ────────────────────────────────────────────────────────────
+        Every coin in this window is a `SmallMoneyFrameTemplate` on the shipped MoneyFrame.xml kit,
+        typed as the reference types it: **AUCTION** for the six row price columns and the deposit's
+        sibling frames, **PLAYER** for the purse (which then repaints itself off PLAYER_MONEY, so
+        nothing here paints it), and **AUCTION_DEPOSIT** — declared below, because the reference
+        declares it in its own addon and not in FrameXML — for the sell pane's quote.
+
+        This file shipped with three hand-rolled coin slots instead, and it was wrong in three ways
+        at once, all of them the same missing idea: that kit has no money TYPE. `showSmallerCoins`
+        (drop only the LEADING zeros, so a 1g buyout reads `1g 0s 0c`) and `fixedWidth` (pad the
+        small coins to a 32px slot so a column of prices lines up) have nowhere to live in it, and
+        its slots chained flush to the frame's right edge where the reference's reserve 13px — so
+        every right-flush price in the window drew one coin-width too far right. MoneyFrame.xml's
+        header carries the other half of this: the eight windows still on the three-slot kit, and
+        why they are fine there.
+
+        ── NAMED OMISSIONS (each a follow-up, none silently stubbed) ────────────────────────────
+        · The **Display-on-Character** checkbox and the CTRL-click dress-up preview
+          (`ref-xml l.918-941`, `ref-tmpl l.280`). Both route to `DressUpItemLink`, and benilla's
+          DressUpFrame is a `UIPanelWindows` **left**-area panel: ShowUIPanel's left branch hides
+          the doublewide incumbent (UiPanels.xml l.397-412), so previewing an auction would CLOSE
+          the auction house. The reference dodges that with its own `AuctionDressUpFrame`, a
+          separate non-panel toplevel we do not ship. Until we do, the feature is absent rather
+          than self-closing. SHIFT-click's chat link is unaffected and is wired.
+        · The **comparison tooltips** (`ShoppingTooltip1/2:SetAuctionCompareItem`, `ref-lua
+          l.1081-1094`) — no such binding here.
+        · The row `$parentItem`'s every-frame tooltip re-render (`ref-tmpl l.294`) drove the
+          commented-out live countdown; our time-left is a bucket that only moves when a fresh
+          list lands (auction.rs), so there is nothing to re-render.
+        · `DropCursorMoney()` ahead of `StartAuction` (`ref-xml l.1945`) — the cursor-money verbs
+          are not built (MoneyFrame.xml's own note).
+        · The popups' embedded money frames: our shared StaticPopup engine's money variant is
+          v1-inert, so the amount goes in the popup TEXT (MailFrame/BankFrame's precedent).
+
+        ── DELIBERATE DIVERGENCES ───────────────────────────────────────────────────────────────
+        1 · The window's `<OnMouseWheel>` is the reference's camera-zoom sink AND the lists' wheel.
+            The ref's body is a bare `return;` because its FauxScrollFrames carry their own wheel;
+            benilla's faux kit has none (TrainerFrame.xml's own note — the owner window wheels the
+            list), so a bare sink here would leave three lists unwheelable. It dispatches to the
+            selected tab's results list; the filter column scrolls by its own bar.
+        2 · The filter selection is keyed by **index**, not by the row's displayed text. The ref
+            compares `selectedClass == this:GetText()` against a colour-coded string; the index is
+            what `QueryAuctionItems` actually wants, and two classes sharing a name cannot collide.
+        3 · The seller column's sort arrow reads the **"seller"** key. The reference asks
+            `IsAuctionSortReversed("list", "status")` for that column (`ref-lua l.426`) while its
+            OnClick sorts by `"seller"` (`ref-xml l.545`) — a reference bug: the arrow reports a
+            key that list never sorts by. Ours asks about the key it sorts.
+        4 · (RESOLVED) The row and sell-slot hovers went through `SetHyperlink` while
+            `GameTooltip:SetAuctionItem` / `SetAuctionSellItem` had no bindings. Both now exist
+            (tooltip_item/mod.rs) and both hovers call the reference's own verb, so an addon
+            hooking either sees the call it expects. Neither prints a "Made by" line, which is
+            the reference's behaviour for a row and a known narrowing for the sell slot — the
+            reasoning is at the bindings.
+        5 · The sell slot's icon/name/count repaint is a helper both `NEW_AUCTION_UPDATE` and the
+            slot's own click call; only the EVENT resets the suggested price, the deposit and the
+            buyout. The reference paints only from the event because its C client fires one on
+            every slot change; ours queues cursor/lock updates (auction.rs
+            `click_auction_sell_item`) and the repaint must not wait on a round trip. Idempotent,
+            so the event still lands on the same pixels.
+        6 · The quality dropdown starts on ALL (value -1) rather than on no selection at all, so
+            the capsule reads the filter that is actually in force instead of reading blank.
+
+        ── THE STRING TABLE ─────────────────────────────────────────────────────────────────────
+        We ship none of Blizzard's text (decisions 1234/1260): `GlobalStrings.lua` is EXECUTED off
+        the player's own patch chain at boot. A harness that loads only this XML therefore has no
+        string table, and a nil global there would take a whole repaint down — so every read goes
+        through `gs(key[, fallback])` below. A fallback is a SHAPE ("%s"), never a translation.
+    -->
+    <Script><![CDATA[
+        -- ── Constants (ref-lua l.1-11) ──────────────────────────────────────────────────────────
+        BENILLA_BROWSE_ROWS        = 8           -- NUM_BROWSE_TO_DISPLAY
+        BENILLA_BID_ROWS           = 9           -- NUM_BIDS_TO_DISPLAY
+        BENILLA_AUCTIONS_ROWS      = 9           -- NUM_AUCTIONS_TO_DISPLAY
+        BENILLA_AUCTION_PAGE_SIZE  = 50          -- NUM_AUCTION_ITEMS_PER_PAGE (the server's cap)
+        BENILLA_AUCTION_ROW_HEIGHT = 37          -- AUCTIONS_BUTTON_HEIGHT
+        BENILLA_FILTER_ROWS        = 15          -- NUM_FILTERS_TO_DISPLAY
+        BENILLA_FILTER_ROW_HEIGHT  = 20          -- BROWSE_FILTER_HEIGHT
+        BENILLA_MAX_BID            = 2000000000  -- MAXIMUM_BID_PRICE
+        -- The three legal run times, in minutes (auction.rs: StartAuction refuses anything else).
+        BENILLA_AUCTION_DURATIONS  = { 120, 480, 1440 }
+
+        -- One GlobalString read. See this file's header: the table is the player's own, executed
+        -- off their chain at boot, and absent in a bare-XML harness.
+        local function gs(key, fallback)
+            local value = getglobal(key)
+            if value and value ~= "" then
+                return value
+            end
+            return fallback or ""
+        end
+
+        -- The plural-aware lookup the reference spells `GetText(TOKEN, nil, n)`. That function
+        -- lives in LocaleProperties.lua, which this house does not transcribe; its enUS rule is
+        -- the bare token for exactly 1 and the `_P1` twin otherwise (FriendsFrame.xml's own note,
+        -- the same collapse).
+        local function gsPlural(key, n)
+            if n ~= 1 then
+                local plural = getglobal(key .. "_P1")
+                if plural and plural ~= "" then
+                    return plural
+                end
+            end
+            return gs(key)
+        end
+
+        -- A copper amount as words, for the two confirmation popups. The shared StaticPopup
+        -- engine's money frame is v1-inert, so the amount has to be IN the text; 1.12 ships no
+        -- "%d Gold" template (grepped), only the three bare denomination nouns, so the amount is
+        -- composed from those. Zero denominations drop, and a free/zero total reads as copper.
+        local function auctionMoneyText(copper)
+            copper = copper or 0
+            local parts = {}
+            local gold = floor(copper / 10000)
+            local silver = floor((copper % 10000) / 100)
+            local bronze = copper % 100
+            if gold > 0 then tinsert(parts, gold .. " " .. gs("GOLD", "Gold")) end
+            if silver > 0 then tinsert(parts, silver .. " " .. gs("SILVER", "Silver")) end
+            if bronze > 0 or getn(parts) == 0 then
+                tinsert(parts, bronze .. " " .. gs("COPPER", "Copper"))
+            end
+            local out = parts[1]
+            for i = 2, getn(parts) do out = out .. " " .. parts[i] end
+            return out
+        end
+
+        -- The time-left bucket's row text and its hover detail (ref-lua l.1070-1076). Bucket 0 is
+        -- "no answer yet" on our side (auction.rs), and neither global exists for it, so both
+        -- collapse to blank rather than printing a key name.
+        function AuctionFrame_GetTimeLeftText(bucket)
+            if not bucket or bucket < 1 then return "" end
+            return gs("AUCTION_TIME_LEFT" .. bucket)
+        end
+
+        function AuctionFrame_GetTimeLeftTooltipText(bucket)
+            if not bucket or bucket < 1 then return "" end
+            return gs("AUCTION_TIME_LEFT" .. bucket .. "_DETAIL")
+        end
+
+        -- ── The sell pane's deposit money type ──────────────────────────────────────────────────
+        -- Registered into the shared MoneyTypeInfo table (MoneyFrame.xml), which is where the
+        -- auction house's OTHER two types already live: "AUCTION" for the row price columns and
+        -- "PLAYER" for the purse. This one is the auction house's own — the reference declares it in
+        -- the auction addon and not in FrameXML, because only this window can answer it: the amount
+        -- is not stored anywhere, it is RECOMPUTED from the currently-checked duration radio every
+        -- time the frame repaints.
+        MoneyTypeInfo["AUCTION_DEPOSIT"] = {
+            UpdateFunc = function()
+                AuctionFrameAuctions.duration = AuctionFrameAuctions.duration or 0
+                return CalculateAuctionDeposit(AuctionFrameAuctions.duration)
+            end,
+            collapse = 1,
+        }
+
+        -- ── The money-entry kit (ref MoneyInputFrame.lua) ───────────────────────────────────────
+        -- The three boxes ride the shared BenillaMoneyInput_* helpers (MerchantFrame.xml), which
+        -- own the gold/silver/copper fold and the SetCopper suppression bracket. All this adds is
+        -- the per-instance value-changed callback the reference sets with
+        -- `MoneyInputFrame_SetOnvalueChangedFunc`: the create-auction pane re-validates on every
+        -- keystroke, the two bid boxes do not.
+        function BenillaAuctionMoneyInput_OnChanged(box)
+            local frame = box:GetParent()
+            -- False while a programmatic SetCopper is in flight — the reference's `expectChanges`
+            -- counter, as MerchantFrame.xml's bracket flag.
+            if not BenillaMoneyInput_Consume(frame:GetName()) then return end
+            if frame.onValueChanged then
+                frame.onValueChanged()
+            end
+        end
+
+        -- ── Load / show / hide / events (ref-lua l.65-125) ──────────────────────────────────────
+        function AuctionFrame_OnLoad(frame)
+            PanelTemplates_SetNumTabs(frame, 3)
+            PanelTemplates_SetTab(frame, 1)
+            frame:RegisterEvent("AUCTION_HOUSE_SHOW")
+            frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
+            -- The purse repaints itself, and both action gates are affordability tests.
+            frame:RegisterEvent("PLAYER_MONEY")
+            -- The buyout label is a composition, not a string (ref-lua l.72).
+            AuctionsBuyoutText:SetText(gs("BUYOUT_PRICE") .. " |cff808080(" .. gs("OPTIONAL") .. ")|r")
+            -- The create pane's two inputs re-validate on every keystroke (ref-xml l.1811/1877);
+            -- the gold box is capped at six digits there, which is the price ceiling in practice.
+            StartPrice.onValueChanged = AuctionsFrameAuctions_ValidateAuction
+            BuyoutPrice.onValueChanged = AuctionsFrameAuctions_ValidateAuction
+            StartPriceGold:SetMaxLetters(6)
+            -- Each faux list repaints through its own tab's Update.
+            BrowseScrollFrame.updateFunc = AuctionFrameBrowse_Update
+            BrowseFilterScrollFrame.updateFunc = AuctionFrameFilters_Update
+            BidScrollFrame.updateFunc = AuctionFrameBid_Update
+            AuctionsScrollFrame.updateFunc = AuctionFrameAuctions_Update
+        end
+
+        function AuctionFrame_OnShow()
+            -- Each list is fetched ONCE per window session; the flags are cleared here, and the
+            -- two panes' OnShow set them (ref-lua l.110-111).
+            AuctionFrame.gotAuctions = nil
+            AuctionFrame.gotBids = nil
+            AuctionFrameTab_OnClick(1)
+            SetPortraitTexture(AuctionPortraitTexture, "npc")
+            BrowseNoResultsText:SetText(gs("BROWSE_SEARCH_TEXT"))
+            -- Last, so the tab click's own note lands under the window's (ref-lua l.115).
+            PlaySound("AuctionWindowOpen")
+        end
+
+        function AuctionFrame_OnHide()
+            PlaySound("AuctionWindowClose")
+            CloseAuctionStaticPopups()
+            CloseAuctionHouse()
+        end
+
+        function AuctionFrame_OnEvent(frame)
+            if event == "AUCTION_HOUSE_SHOW" then
+                AuctionFrame_Show()
+            elseif event == "AUCTION_HOUSE_CLOSED" then
+                HideUIPanel(frame)
+            elseif event == "PLAYER_MONEY" then
+                -- The purse repaints itself (a PLAYER money frame listens for this event on its
+                -- own); what the WINDOW owes the event is the affordability recolour — the Bid and
+                -- Buyout buttons that go dark the moment you can no longer pay.
+                if frame:IsVisible() then
+                    AuctionFrame_RepaintSelectedTab()
+                end
+            end
+        end
+
+        -- ref-lua l.92-103. An already-open window just repaints; a closed one is opened, and if
+        -- the panel manager REFUSED it (something is holding the screen) the session is ended
+        -- immediately rather than left open server-side with no window to drive it.
+        function AuctionFrame_Show()
+            if AuctionFrame:IsVisible() then
+                AuctionFrameBrowse_Update()
+                AuctionFrameBid_Update()
+                AuctionFrameAuctions_Update()
+                return
+            end
+            ShowUIPanel(AuctionFrame)
+            if not AuctionFrame:IsVisible() then CloseAuctionHouse() end
+        end
+
+        function AuctionFrame_Hide()
+            HideUIPanel(AuctionFrame)
+        end
+
+        local function selectedAuctionTab()
+            return PanelTemplates_GetSelectedTab(AuctionFrame) or 1
+        end
+
+        function AuctionFrame_RepaintSelectedTab()
+            local tab = selectedAuctionTab()
+            if tab == 1 then
+                AuctionFrameBrowse_Update()
+            elseif tab == 2 then
+                AuctionFrameBid_Update()
+            else
+                AuctionFrameAuctions_Update()
+            end
+        end
+
+        -- The wheel (this file's header, divergence 1): the reference's camera-zoom sink, plus the
+        -- selected tab's list, because benilla's faux kit has no wheel of its own.
+        function AuctionFrame_OnMouseWheel(delta)
+            local tab = selectedAuctionTab()
+            if tab == 1 then
+                BenillaFauxScrollFrame_OnMouseWheel(BrowseScrollFrame, delta)
+            elseif tab == 2 then
+                BenillaFauxScrollFrame_OnMouseWheel(BidScrollFrame, delta)
+            else
+                BenillaFauxScrollFrame_OnMouseWheel(AuctionsScrollFrame, delta)
+            end
+        end
+
+        -- THE THREE SKINS the window wears (ref-lua l.127-166). Six background slabs are the whole
+        -- of the difference between the tabs, so they are a table here rather than three copies of
+        -- the same six calls. `$parentTopLeft` and its siblings publish as AuctionFrameTopLeft...,
+        -- which is what the piece keys compose.
+        local auctionSkinPieces = { "TopLeft", "Top", "TopRight", "BotLeft", "Bot", "BotRight" }
+        local auctionSkins = { "Browse", "Bid", "Auction" }
+
+        function AuctionFrameTab_OnClick(index)
+            if not index then index = this:GetID() end
+            PanelTemplates_SetTab(AuctionFrame, index)
+            AuctionFrameBrowse:Hide()
+            AuctionFrameBid:Hide()
+            AuctionFrameAuctions:Hide()
+            PlaySound("igCharacterInfoTab")
+
+            local skin = auctionSkins[index]
+            for i = 1, getn(auctionSkinPieces) do
+                local piece = auctionSkinPieces[i]
+                getglobal("AuctionFrame" .. piece):SetTexture(
+                    "Interface\\AuctionFrame\\UI-AuctionFrame-" .. skin .. "-" .. piece)
+            end
+
+            -- `AuctionFrame.type` is the list key the buyout popup addresses; the Auctions tab
+            -- sells rather than bids, so the reference leaves it on whatever it was and the popup
+            -- is never reachable from there.
+            if index == 1 then
+                AuctionFrame.type = "list"
+                AuctionFrameBrowse:Show()
+            elseif index == 2 then
+                AuctionFrame.type = "bidder"
+                AuctionFrameBid:Show()
+            else
+                AuctionFrameAuctions:Show()
+            end
+        end
+
+        -- The header arrow: UP for a forward sort, flipped VERTICALLY for a reversed one — the
+        -- same crop with its v coordinates swapped (ref-lua l.1104-1110). Answers for any key the
+        -- list's stack remembers, primary or not (auction.rs's own note).
+        function SortButton_UpdateArrow(button, kind, key)
+            local arrow = button:GetNormalTexture()
+            if not arrow then return end
+            if IsAuctionSortReversed(kind, key) then
+                arrow:SetTexCoord(0, 0.5625, 1.0, 0)
+            else
+                arrow:SetTexCoord(0, 0.5625, 0, 1.0)
+            end
+        end
+
+        -- Each pane's headers, as `<button name, sort key>` — the same pairing the buttons' own
+        -- OnClick carries, in one place so a repaint is a loop rather than four to six near-copies
+        -- of one call. The Browse seller column asks about "seller" here; see this file's header,
+        -- divergence 3, for the reference's own mismatch.
+        local auctionSortColumns = {
+            list = {
+                { "BrowseQualitySort", "quality" },
+                { "BrowseLevelSort", "level" },
+                { "BrowseDurationSort", "duration" },
+                { "BrowseHighBidderSort", "seller" },
+                { "BrowseCurrentBidSort", "bid" },
+            },
+            bidder = {
+                { "BidQualitySort", "quality" },
+                { "BidLevelSort", "level" },
+                { "BidDurationSort", "duration" },
+                { "BidBuyoutSort", "buyout" },
+                { "BidStatusSort", "status" },
+                { "BidBidSort", "bid" },
+            },
+            owner = {
+                { "AuctionsQualitySort", "quality" },
+                { "AuctionsDurationSort", "duration" },
+                { "AuctionsHighBidderSort", "status" },
+                { "AuctionsBidSort", "bid" },
+            },
+        }
+
+        local function auctionUpdateArrows(kind)
+            local columns = auctionSortColumns[kind]
+            for i = 1, getn(columns) do
+                SortButton_UpdateArrow(getglobal(columns[i][1]), kind, columns[i][2])
+            end
+        end
+
+        -- ── The two window-owned StaticPopups (ref-lua l.26-63) ─────────────────────────────────
+        -- Both carry the amount in their TEXT (the engine's money variant is inert), which is why
+        -- `text` is "%s" and the composed line arrives as StaticPopup_Show's first argument: a
+        -- format string is scanned for specs, its arguments are not, so nothing in a localized
+        -- denomination noun can be mistaken for one.
+        StaticPopupDialogs["BUYOUT_AUCTION"] = {
+            text = "%s",
+            button1 = gs("ACCEPT", "Accept"),
+            button2 = gs("CANCEL", "Cancel"),
+            OnAccept = function()
+                PlaceAuctionBid(AuctionFrame.type, GetSelectedAuctionItem(AuctionFrame.type), AuctionFrame.buyoutPrice)
+            end,
+            hideOnEscape = 1,
+            showAlert = 1,
+            exclusive = 1,
+            timeout = 0,
+        }
+        StaticPopupDialogs["CANCEL_AUCTION"] = {
+            text = "%s",
+            button1 = gs("ACCEPT", "Accept"),
+            button2 = gs("CANCEL", "Cancel"),
+            OnAccept = function()
+                CancelAuction(GetSelectedAuctionItem("owner"))
+            end,
+            exclusive = 1,
+            hideOnEscape = 1,
+            timeout = 0,
+            showAlert = 1,
+        }
+
+        function AuctionFrame_ShowBuyoutPopup()
+            StaticPopup_Show("BUYOUT_AUCTION",
+                gs("BUYOUT_AUCTION_CONFIRMATION") .. "\n" .. auctionMoneyText(AuctionFrame.buyoutPrice))
+        end
+
+        -- The cancel popup swaps its body: a cancelled auction that HAS bids costs the seller a
+        -- cut on top of the lost deposit, and only then is there an amount to show (ref-lua
+        -- l.49-57).
+        function AuctionFrame_ShowCancelPopup()
+            local price = AuctionFrameAuctions.cancelPrice or 0
+            if price > 0 then
+                StaticPopup_Show("CANCEL_AUCTION",
+                    gs("CANCEL_AUCTION_CONFIRMATION_MONEY") .. "\n" .. auctionMoneyText(price))
+            else
+                StaticPopup_Show("CANCEL_AUCTION", gs("CANCEL_AUCTION_CONFIRMATION"))
+            end
+        end
+
+        -- Any change of selection invalidates whatever a popup was about (ref-lua l.1113-1116).
+        function CloseAuctionStaticPopups()
+            StaticPopup_Hide("CANCEL_AUCTION")
+            StaticPopup_Hide("BUYOUT_AUCTION")
+        end
+
+        -- ── Shared row painting ─────────────────────────────────────────────────────────────────
+        -- The item hover (ref-lua l.1078-1101), through the reference's own binding. The
+        -- hyperlink path this used before the binding existed rendered the same item; the
+        -- difference is that addons hooking SetAuctionItem now see the call they expect.
+        -- The cursor magnifier is the reference's own CTRL affordance.
+        function AuctionFrameItem_OnEnter(kind, index)
+            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+            GameTooltip:SetAuctionItem(kind, index)
+            GameTooltip:Show()
+            if IsControlKeyDown() then ShowInspectCursor() else ResetCursor() end
+        end
+
+        function AuctionFrameItem_OnLeave()
+            GameTooltip:Hide()
+            ResetCursor()
+        end
+
+        -- A row's SHIFT-click posts its link into an open chat edit box (ref-tmpl l.280's shift
+        -- arm, through the shared helper in UIParent.xml, which carries both the ref's own
+        -- edit-box-visible guard and our nil-link one). Returns true when it consumed the click,
+        -- so the caller does not also select the row. Global because the row templates' OnClick
+        -- is where it is spent.
+        function AuctionRow_ModifierClick(kind, index)
+            if not IsShiftKeyDown() then
+                return false
+            end
+            BenillaChatEdit_InsertLink(GetAuctionItemLink(kind, index))
+            return true
+        end
+
+        -- Icon, stack count and the red unusable tint (ref-lua l.481-495) — identical in all three
+        -- lists, so it is written once.
+        local function auctionRowIcon(buttonName, texture, count, canUse)
+            local icon = getglobal(buttonName .. "ItemIconTexture")
+            icon:SetTexture(texture)
+            if canUse then
+                icon:SetVertexColor(1.0, 1.0, 1.0)
+            else
+                icon:SetVertexColor(1.0, 0.1, 0.1)
+            end
+            local stack = getglobal(buttonName .. "ItemCount")
+            if count and count > 1 then
+                stack:SetText(count)
+                stack:Show()
+            else
+                stack:Hide()
+            end
+        end
+
+        -- The item name in its quality colour. A row whose template answer is still in flight has
+        -- no name and no quality (auction.rs) — it paints blank and Common rather than raising.
+        local function auctionRowName(buttonName, name, quality)
+            local color = ITEM_QUALITY_COLORS[quality] or ITEM_QUALITY_COLORS[1]
+            local label = getglobal(buttonName .. "Name")
+            label:SetText(name or "")
+            label:SetVertexColor(color.r, color.g, color.b)
+        end
+
+        -- Red above the player's own level (ref-lua l.472-477).
+        local function auctionRowLevel(buttonName, level)
+            local label = getglobal(buttonName .. "Level")
+            if not label then return end
+            if level and level > UnitLevel("player") then
+                label:SetText(RED_FONT_COLOR_CODE .. level .. FONT_COLOR_CODE_CLOSE)
+            else
+                label:SetText(level or "")
+            end
+        end
+
+        local function auctionRowClosingTime(buttonName, bucket)
+            getglobal(buttonName .. "ClosingTimeText"):SetText(AuctionFrame_GetTimeLeftText(bucket))
+            getglobal(buttonName .. "ClosingTime").tooltip = AuctionFrame_GetTimeLeftTooltipText(bucket)
+        end
+
+        -- The buyout gate, shared by Browse and Bids (ref-lua l.540-553 / l.720-733): a buyout
+        -- worth having, and either the purse covers it or — because your own standing high bid is
+        -- refunded into the buyout — the purse plus that bid does.
+        local function canBuyout(buyoutPrice, floorPrice, bidAmount, highBidder)
+            if not (buyoutPrice > 0 and buyoutPrice >= floorPrice) then return nil end
+            if GetMoney() >= buyoutPrice then return 1 end
+            if highBidder and GetMoney() + bidAmount >= buyoutPrice then return 1 end
+            return nil
+        end
+
+        -- The pager, shared by all three lists (ref-lua l.566-599 and its two twins). Two things
+        -- happen here and only one of them is obvious:
+        --
+        --  · the turners appear ONLY when the list overflows the server's 50-row page AND the
+        --    scrollbar is at the very bottom (the last visible row slot is empty), so they sit
+        --    under the end of the list rather than floating over it;
+        --  · the row count handed to the scroll frame is inflated by ONE while paging is live, so
+        --    the bar can travel one row PAST the end and reveal them. That is what makes paging
+        --    reachable at all — it is not an off-by-one, and it must not be "fixed".
+        --
+        -- Returns the (possibly inflated) row count for FauxScrollFrame_Update.
+        local function auctionPagerUpdate(prefix, page, numBatch, total, lastSlotEmpty)
+            local prev = getglobal(prefix .. "PrevPageButton")
+            local next = getglobal(prefix .. "NextPageButton")
+            local count = getglobal(prefix .. "SearchCountText")
+            if total <= BENILLA_AUCTION_PAGE_SIZE then
+                prev:Hide()
+                next:Hide()
+                count:Hide()
+                return numBatch
+            end
+            if lastSlotEmpty then
+                prev:Show()
+                next:Show()
+                count:Show()
+                local first = page * BENILLA_AUCTION_PAGE_SIZE + 1
+                count:SetText(format(gs("NUMBER_OF_RESULTS_TEMPLATE", "%d - %d / %d"),
+                    first, first + numBatch - 1, total))
+                local lastPage = ceil(total / BENILLA_AUCTION_PAGE_SIZE) - 1
+                -- Browse arms its turners through a field rather than Enable/Disable, because its
+                -- Search button's OnUpdate re-derives both from the query throttle every frame and
+                -- would otherwise undo this the moment it ran (ref-lua l.244-253).
+                if prefix == "Browse" then
+                    if page == 0 then prev.isEnabled = nil else prev.isEnabled = 1 end
+                    if page == lastPage then next.isEnabled = nil else next.isEnabled = 1 end
+                else
+                    if page == 0 then prev:Disable() else prev:Enable() end
+                    if page == lastPage then next:Disable() else next:Enable() end
+                end
+            else
+                prev:Hide()
+                next:Hide()
+                count:Hide()
+            end
+            return numBatch + 1
+        end
+
+        -- ── Browse tab (ref-lua l.170-600) ──────────────────────────────────────────────────────
+        -- The class tree, as pushed by the app (auction.rs: the set and order are structural, and
+        -- every string is the player's own ItemClass.dbc row).
+        local browseClasses = {}
+        -- The FLAT display list the 15 filter buttons page over: class rows always, the selected
+        -- class's subclasses expanded in place beneath it, and that subclass's inventory slots
+        -- beneath that.
+        local browseFilterRows = {}
+
+        function AuctionFrameBrowse_OnLoad(frame)
+            frame:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+            frame.page = 0
+            browseClasses = { GetAuctionItemClasses() }
+        end
+
+        function AuctionFrameBrowse_OnShow()
+            AuctionFrameBrowse.page = 0
+            -- The class list can only arrive with the session, which is after this frame's OnLoad.
+            if getn(browseClasses) == 0 then
+                browseClasses = { GetAuctionItemClasses() }
+            end
+            AuctionFrameBrowse_Update()
+            AuctionFrameFilters_Update()
+        end
+
+        function AuctionFrameBrowse_OnEvent()
+            if event == "AUCTION_ITEM_LIST_UPDATE" then
+                AuctionFrameBrowse_Update()
+                -- The answer landed, so the search animation stops and the empty-list line stops
+                -- inviting a search and starts reporting one (ref-lua l.186-188).
+                AuctionFrameBrowse.isSearching = nil
+                BrowseNoResultsText:SetText(gs("BROWSE_NO_RESULTS"))
+            end
+        end
+
+        -- Every filter the player has set, read at SEARCH time and not before — clicking a filter
+        -- row queries nothing (ref-lua l.231-239).
+        function AuctionFrameBrowse_Search(page)
+            if not page then
+                AuctionFrameBrowse.page = 0
+            end
+            QueryAuctionItems(
+                BrowseName:GetText(),
+                BrowseMinLevel:GetText(),
+                BrowseMaxLevel:GetText(),
+                AuctionFrameBrowse.selectedInvtypeIndex,
+                AuctionFrameBrowse.selectedClassIndex,
+                AuctionFrameBrowse.selectedSubclassIndex,
+                AuctionFrameBrowse.page,
+                IsUsableCheckButton:GetChecked(),
+                UIDropDownMenu_GetSelectedValue(BrowseDropDown))
+            AuctionFrameBrowse.isSearching = 1
+        end
+
+        -- The Search button polls the app's query throttle every frame, because a throttled query
+        -- is dropped silently and there is no failure event to react to (auction.rs). The page
+        -- turners ride the same gate — they re-query too. The trailing dots are the reference's
+        -- own "still searching" animation, throttled to ~3/second (ref-lua l.241-279).
+        function BrowseSearchButton_OnUpdate(elapsed)
+            if CanSendAuctionQuery() then
+                this:Enable()
+                if BrowsePrevPageButton.isEnabled then BrowsePrevPageButton:Enable() else BrowsePrevPageButton:Disable() end
+                if BrowseNextPageButton.isEnabled then BrowseNextPageButton:Enable() else BrowseNextPageButton:Disable() end
+            else
+                this:Disable()
+                BrowsePrevPageButton:Disable()
+                BrowseNextPageButton:Disable()
+            end
+
+            if not AuctionFrameBrowse.isSearching then
+                BrowseSearchDotsText:Hide()
+                return
+            end
+            local wait = (AuctionFrameBrowse.dotThrottle or 0) - (elapsed or 0)
+            if wait > 0 then
+                AuctionFrameBrowse.dotThrottle = wait
+                return
+            end
+            local dots = ((AuctionFrameBrowse.dotCount or 0) + 1) % 4
+            AuctionFrameBrowse.dotCount = dots
+            BrowseSearchDotsText:SetText(strrep(".", dots))
+            BrowseSearchDotsText:Show()
+            BrowseNoResultsText:SetText(gs("SEARCHING_FOR_ITEMS"))
+            AuctionFrameBrowse.dotThrottle = 0.3
+        end
+
+        -- The rarity dropdown: ALL, then qualities 0..4. Legendary and Artifact are deliberately
+        -- not offered — the reference stops two short of the palette's end (ref-lua l.212), and
+        -- neither ever reaches an auction house.
+        function BrowseDropDown_OnLoad()
+            UIDropDownMenu_Initialize(this, BrowseDropDown_Initialize)
+            UIDropDownMenu_SetWidth(90, this)
+            -- Divergence 6 (header): seat the capsule on the filter that is actually in force —
+            -- but ONLY when nothing has been chosen. This runs on every OnShow (the reference's
+            -- own wiring), and re-seating unconditionally would throw away the player's rarity
+            -- every time they left the tab and came back.
+            if not UIDropDownMenu_GetSelectedValue(this) then
+                UIDropDownMenu_SetSelectedValue(this, -1)
+            end
+        end
+
+        function BrowseDropDown_Initialize()
+            local info = {}
+            info.text = gs("ALL")
+            info.value = -1
+            info.func = BrowseDropDown_OnClick
+            UIDropDownMenu_AddButton(info)
+            for quality = 0, 4 do
+                info = {}
+                info.text = gs("ITEM_QUALITY" .. quality .. "_DESC")
+                info.value = quality
+                info.func = BrowseDropDown_OnClick
+                UIDropDownMenu_AddButton(info)
+            end
+        end
+
+        function BrowseDropDown_OnClick()
+            UIDropDownMenu_SetSelectedValue(BrowseDropDown, this.value)
+        end
+
+        -- Build the flat filter list, then page the 15 buttons over it (ref-lua l.281-352). The
+        -- three levels are the same button at three indents; only the selected branch expands.
+        local function browseBuildFilterRows()
+            browseFilterRows = {}
+            for i = 1, getn(browseClasses) do
+                local classOpen = (AuctionFrameBrowse.selectedClassIndex == i)
+                tinsert(browseFilterRows, { text = browseClasses[i], kind = "class", index = i, selected = classOpen })
+                if classOpen then
+                    local subs = { GetAuctionItemSubClasses(i) }
+                    for j = 1, getn(subs) do
+                        local subOpen = (AuctionFrameBrowse.selectedSubclassIndex == j)
+                        tinsert(browseFilterRows, { text = subs[j], kind = "subclass", index = j, selected = subOpen })
+                        if subOpen then
+                            -- GetAuctionInvTypes hands back GlobalString KEYS, not words
+                            -- (auction.rs), so each one is resolved through the player's table.
+                            local slots = { GetAuctionInvTypes(i, j) }
+                            local last = getn(slots)
+                            for k = 1, last do
+                                tinsert(browseFilterRows, {
+                                    text = gs(slots[k]),
+                                    kind = "invtype",
+                                    index = k,
+                                    selected = (AuctionFrameBrowse.selectedInvtypeIndex == k),
+                                    isLast = (k == last) })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- One filter row's dress: indent, plate alpha, and — for a slot row — the branch line that
+        -- joins it to its subclass (ref-lua l.354-380).
+        function FilterButton_SetType(button, kind, text, isLast)
+            local line = getglobal(button:GetName() .. "Lines")
+            local plate = button:GetNormalTexture()
+            if kind == "class" then
+                button:SetText(text)
+                button:GetFontString():SetPoint("LEFT", button, "LEFT", 4, 0)
+                plate:SetAlpha(1.0)
+                line:Hide()
+            elseif kind == "subclass" then
+                button:SetText(HIGHLIGHT_FONT_COLOR_CODE .. text .. FONT_COLOR_CODE_CLOSE)
+                button:GetFontString():SetPoint("LEFT", button, "LEFT", 12, 0)
+                plate:SetAlpha(0.4)
+                line:Hide()
+            else
+                button:SetText(HIGHLIGHT_FONT_COLOR_CODE .. text .. FONT_COLOR_CODE_CLOSE)
+                button:GetFontString():SetPoint("LEFT", button, "LEFT", 20, 0)
+                plate:SetAlpha(0.0)
+                -- The tee that continues the branch, or the elbow that ends it.
+                if isLast then line:SetTexCoord(0.4375, 0.875, 0, 0.625) else line:SetTexCoord(0, 0.4375, 0, 0.625) end
+                line:Show()
+            end
+            button.kind = kind
+        end
+
+        function AuctionFrameFilters_Update()
+            browseBuildFilterRows()
+            local total = getn(browseFilterRows)
+            local offset = FauxScrollFrame_GetOffset(BrowseFilterScrollFrame)
+            -- The column takes the scrollbar's gutter back when it does not need it.
+            local width = 156
+            if total > BENILLA_FILTER_ROWS then width = 136 end
+            for i = 1, BENILLA_FILTER_ROWS do
+                local button = getglobal("AuctionFilterButton" .. i)
+                button:SetWidth(width)
+                local row = browseFilterRows[offset + i]
+                if not row then
+                    button:Hide()
+                else
+                    FilterButton_SetType(button, row.kind, row.text, row.isLast)
+                    button.filterIndex = row.index
+                    if row.selected then button:LockHighlight() else button:UnlockHighlight() end
+                    button:Show()
+                end
+            end
+            FauxScrollFrame_Update(BrowseFilterScrollFrame, total, BENILLA_FILTER_ROWS, BENILLA_FILTER_ROW_HEIGHT)
+        end
+
+        -- Clicking a filter row NEVER queries — it only moves the selection, which the next Search
+        -- reads (ref-lua l.382-410). Opening a class clears the subclass and slot beneath it;
+        -- opening a subclass clears the slot. Divergence 2 (header): keyed by index, not by text.
+        function AuctionFrameFilter_OnClick()
+            local index = this.filterIndex
+            if this.kind == "class" then
+                if AuctionFrameBrowse.selectedClassIndex == index then
+                    AuctionFrameBrowse.selectedClassIndex = nil
+                else
+                    AuctionFrameBrowse.selectedClassIndex = index
+                end
+                AuctionFrameBrowse.selectedSubclassIndex = nil
+                AuctionFrameBrowse.selectedInvtypeIndex = nil
+            elseif this.kind == "subclass" then
+                if AuctionFrameBrowse.selectedSubclassIndex == index then
+                    AuctionFrameBrowse.selectedSubclassIndex = nil
+                else
+                    AuctionFrameBrowse.selectedSubclassIndex = index
+                end
+                AuctionFrameBrowse.selectedInvtypeIndex = nil
+            else
+                AuctionFrameBrowse.selectedInvtypeIndex = index
+            end
+            AuctionFrameFilters_Update()
+        end
+
+        function BrowseButton_OnClick(button)
+            if not button then button = this end
+            local index = button:GetID() + FauxScrollFrame_GetOffset(BrowseScrollFrame)
+            SetSelectedAuctionItem("list", index)
+            CloseAuctionStaticPopups()
+            AuctionFrameBrowse_Update()
+        end
+
+        function AuctionFrameBrowse_Update()
+            local numBatch, total = GetNumAuctionItems("list")
+            local offset = FauxScrollFrame_GetOffset(BrowseScrollFrame)
+            local selected = GetSelectedAuctionItem("list")
+            local lastSlotEmpty
+
+            -- Both gates start shut on every repaint and are re-opened only for the SELECTED row.
+            BrowseBidButton:Disable()
+            BrowseBuyoutButton:Disable()
+
+            auctionUpdateArrows("list")
+
+            if numBatch == 0 then BrowseNoResultsText:Show() else BrowseNoResultsText:Hide() end
+
+            -- The scrollbar's gutter: with no bar the rows and the current-bid header take it back
+            -- (ref-lua l.452-466). The middle leg is the ref's own: a batch that exactly fills the
+            -- window and is the WHOLE result still needs no bar.
+            local rowWidth, highlightWidth, bidHeaderWidth = 600, 562, 184
+            if numBatch < BENILLA_BROWSE_ROWS
+                or (numBatch == BENILLA_BROWSE_ROWS and total <= BENILLA_BROWSE_ROWS) then
+                rowWidth, highlightWidth, bidHeaderWidth = 625, 589, 207
+            end
+            BrowseCurrentBidSort:SetWidth(bidHeaderWidth)
+
+            for i = 1, BENILLA_BROWSE_ROWS do
+                local index = offset + i
+                local button = getglobal("BrowseButton" .. i)
+                local name, texture, count, quality, canUse, level,
+                      minBid, minIncrement, buyoutPrice, bidAmount, highBidder, owner
+                if index <= numBatch then
+                    name, texture, count, quality, canUse, level,
+                        minBid, minIncrement, buyoutPrice, bidAmount, highBidder, owner =
+                        GetAuctionItemInfo("list", index)
+                end
+                -- The API is only ASKED in range, so out of range the locals stay nil and `minBid`
+                -- is the shape test. It is a test rather than a plain `index > numBatch` because
+                -- the null tail is the one thing about this API that has moved under us: it is
+                -- twelve values with a zero minBid today, and was a lone nil before that. Written
+                -- this way, both shapes hide the row instead of one of them painting zeros.
+                if not minBid then
+                    button:Hide()
+                    if i == BENILLA_BROWSE_ROWS then lastSlotEmpty = 1 end
+                else
+                    button:Show()
+                    local buttonName = "BrowseButton" .. i
+                    button:SetWidth(rowWidth)
+                    button:GetHighlightTexture():SetWidth(highlightWidth)
+
+                    auctionRowName(buttonName, name, quality)
+                    auctionRowLevel(buttonName, level)
+                    auctionRowClosingTime(buttonName, GetAuctionItemTimeLeft("list", index))
+                    auctionRowIcon(buttonName, texture, count, canUse)
+                    -- The SELLER column. The region keeps the reference's `HighBidder` name (an
+                    -- addon addresses it by that), but what it shows is the owner (ref-lua l.535,
+                    -- whose own high-bidder legs are commented out right above it).
+                    getglobal(buttonName .. "HighBidder"):SetText(owner or "")
+
+                    -- Nobody has bid yet: the row shows the seller's opening price, and that same
+                    -- price is what a bid must meet. Once there is a bid, the row shows it and the
+                    -- next bid must clear it by the increment.
+                    local displayedPrice = bidAmount
+                    local requiredBid = bidAmount + minIncrement
+                    if bidAmount == 0 then
+                        displayedPrice = minBid
+                        requiredBid = minBid
+                    end
+                    MoneyFrame_Update(buttonName .. "MoneyFrame", displayedPrice)
+
+                    if highBidder then
+                        getglobal(buttonName .. "YourBidText"):Show()
+                    else
+                        getglobal(buttonName .. "YourBidText"):Hide()
+                    end
+
+                    -- ref-lua l.517-520: past the bid ceiling the row stops advertising a buyout
+                    -- cheaper than the bid it would take to reach it.
+                    if requiredBid >= BENILLA_MAX_BID then
+                        buyoutPrice = requiredBid
+                    end
+                    local buyoutMoney = getglobal(buttonName .. "BuyoutMoneyFrame")
+                    local buyoutText = getglobal(buttonName .. "BuyoutText")
+                    if buyoutPrice > 0 then
+                        -- Two money lines share the row's right edge, so the bid lifts to make
+                        -- room for the buyout beneath it.
+                        getglobal(buttonName .. "MoneyFrame"):SetPoint("RIGHT", buttonName, "RIGHT", 10, 10)
+                        MoneyFrame_Update(buttonName .. "BuyoutMoneyFrame", buyoutPrice)
+                        SetMoneyFrameColor(buttonName .. "BuyoutMoneyFrame",
+                            NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+                        buyoutMoney:Show()
+                        buyoutText:Show()
+                    else
+                        getglobal(buttonName .. "MoneyFrame"):SetPoint("RIGHT", buttonName, "RIGHT", 10, 3)
+                        buyoutMoney:Hide()
+                        buyoutText:Hide()
+                    end
+
+                    if selected ~= index then
+                        button:UnlockHighlight()
+                    else
+                        button:LockHighlight()
+                        if canBuyout(buyoutPrice, minBid, bidAmount, highBidder) then
+                            BrowseBuyoutButton:Enable()
+                            AuctionFrame.buyoutPrice = buyoutPrice
+                        elseif not (buyoutPrice > 0 and buyoutPrice >= minBid) then
+                            AuctionFrame.buyoutPrice = nil
+                        end
+                        -- The bid box is SEATED at the required bid, and the gate is read back off
+                        -- the box rather than off the number — so a player who types a different
+                        -- amount is gated on what they typed (ref-lua l.555-559).
+                        BenillaMoneyInput_SetCopper("BrowseBidPrice", requiredBid)
+                        local offered = BenillaMoneyInput_GetCopper("BrowseBidPrice")
+                        if not highBidder and owner ~= UnitName("player")
+                            and GetMoney() >= offered and offered <= BENILLA_MAX_BID then
+                            BrowseBidButton:Enable()
+                        end
+                    end
+                end
+            end
+
+            local rows = auctionPagerUpdate("Browse", AuctionFrameBrowse.page, numBatch, total, lastSlotEmpty)
+            FauxScrollFrame_Update(BrowseScrollFrame, rows, BENILLA_BROWSE_ROWS, BENILLA_AUCTION_ROW_HEIGHT)
+        end
+
+        -- The two Browse turners re-SEARCH rather than scroll: the next 50 rows live on the server
+        -- (ref-xml l.660/694). They disable themselves so a second click cannot outrun the answer;
+        -- the Search OnUpdate re-arms them once the throttle clears.
+        function BrowsePageButton_OnClick(delta)
+            PlaySound("igMainMenuOptionCheckBoxOn")
+            AuctionFrameBrowse.page = AuctionFrameBrowse.page + delta
+            this:Disable()
+            BrowseScrollFrameScrollBar:SetValue(0)
+            AuctionFrameBrowse_Search(AuctionFrameBrowse.page)
+        end
+
+        -- ── Bids tab (ref-lua l.604-791) ────────────────────────────────────────────────────────
+        function AuctionFrameBid_OnLoad(frame)
+            frame:RegisterEvent("AUCTION_BIDDER_LIST_UPDATE")
+            frame.page = 0
+        end
+
+        function AuctionFrameBid_OnEvent()
+            if event == "AUCTION_BIDDER_LIST_UPDATE" then AuctionFrameBid_Update() end
+        end
+
+        function AuctionFrameBid_OnShow()
+            -- Fetched once per window session; after that the server pushes updates (ref-lua
+            -- l.615-619). The flag is cleared by the window's own OnShow.
+            if not AuctionFrame.gotBids then
+                AuctionFrame.gotBids = 1
+                GetBidderAuctionItems()
+            end
+            AuctionFrameBid.page = 0
+            AuctionFrameBid_Update()
+        end
+
+        function AuctionFrameBid_Update()
+            local numBatch, total = GetNumAuctionItems("bidder")
+            local offset = FauxScrollFrame_GetOffset(BidScrollFrame)
+            local selected = GetSelectedAuctionItem("bidder")
+            local lastSlotEmpty
+
+            BidBidButton:Disable()
+            BidBuyoutButton:Disable()
+
+            auctionUpdateArrows("bidder")
+
+            local rowWidth, highlightWidth, bidHeaderWidth = 769, 735, 145
+            if numBatch < BENILLA_BID_ROWS
+                or (numBatch == BENILLA_BID_ROWS and total <= BENILLA_BID_ROWS) then
+                rowWidth, highlightWidth, bidHeaderWidth = 793, 758, 169
+            end
+            BidBidSort:SetWidth(bidHeaderWidth)
+
+            for i = 1, BENILLA_BID_ROWS do
+                local index = offset + i
+                local button = getglobal("BidButton" .. i)
+                local name, texture, count, quality, canUse, level,
+                      minBid, minIncrement, buyoutPrice, bidAmount, highBidder, owner
+                if index <= numBatch then
+                    name, texture, count, quality, canUse, level,
+                        minBid, minIncrement, buyoutPrice, bidAmount, highBidder, owner =
+                        GetAuctionItemInfo("bidder", index)
+                end
+                if not minBid then
+                    button:Hide()
+                    if i == BENILLA_BID_ROWS then lastSlotEmpty = 1 end
+                else
+                    button:Show()
+                    local buttonName = "BidButton" .. i
+                    button:SetWidth(rowWidth)
+                    button:GetHighlightTexture():SetWidth(highlightWidth)
+
+                    auctionRowName(buttonName, name, quality)
+                    auctionRowLevel(buttonName, level)
+                    auctionRowClosingTime(buttonName, GetAuctionItemTimeLeft("bidder", index))
+                    auctionRowIcon(buttonName, texture, count, canUse)
+
+                    -- The whole point of this tab: whether your bid is still standing.
+                    if highBidder then
+                        getglobal(buttonName .. "BidStatus"):SetText(
+                            GREEN_FONT_COLOR_CODE .. gs("HIGH_BIDDER") .. FONT_COLOR_CODE_CLOSE)
+                    else
+                        getglobal(buttonName .. "BidStatus"):SetText(
+                            RED_FONT_COLOR_CODE .. gs("OUTBID") .. FONT_COLOR_CODE_CLOSE)
+                    end
+
+                    -- Both money lines always show here, and neither carries a caption: the two
+                    -- columns are headed instead (ref-tmpl l.651/666).
+                    local currentBid = bidAmount
+                    if currentBid == 0 then currentBid = minBid end
+                    MoneyFrame_Update(buttonName .. "CurrentBidMoneyFrame", currentBid)
+                    MoneyFrame_Update(buttonName .. "BuyoutMoneyFrame", buyoutPrice)
+
+                    if selected ~= index then
+                        button:UnlockHighlight()
+                    else
+                        button:LockHighlight()
+                        if canBuyout(buyoutPrice, currentBid, bidAmount, highBidder) then
+                            BidBuyoutButton:Enable()
+                            AuctionFrame.buyoutPrice = buyoutPrice
+                        elseif not (buyoutPrice > 0 and buyoutPrice >= currentBid) then
+                            AuctionFrame.buyoutPrice = nil
+                        end
+                        BenillaMoneyInput_SetCopper("BidBidPrice", currentBid + minIncrement)
+                        -- Looser than Browse's: this list is auctions you already bid on, so the
+                        -- "not your own auction" test is redundant and the ceiling is not applied
+                        -- (ref-lua l.737).
+                        if not highBidder and GetMoney() >= BenillaMoneyInput_GetCopper("BidBidPrice") then
+                            BidBidButton:Enable()
+                        end
+                    end
+                end
+            end
+
+            local rows = auctionPagerUpdate("Bid", AuctionFrameBid.page, numBatch, total, lastSlotEmpty)
+            FauxScrollFrame_Update(BidScrollFrame, rows, BENILLA_BID_ROWS, BENILLA_AUCTION_ROW_HEIGHT)
+        end
+
+        function BidButton_OnClick(button)
+            if not button then button = this end
+            local index = button:GetID() + FauxScrollFrame_GetOffset(BidScrollFrame)
+            SetSelectedAuctionItem("bidder", index)
+            CloseAuctionStaticPopups()
+            AuctionFrameBid_Update()
+        end
+
+        -- Silent, unlike Browse's pair (ref-xml l.1252/1285 play nothing) — and a plain re-fetch
+        -- rather than a search.
+        function BidPageButton_OnClick(delta)
+            AuctionFrameBid.page = AuctionFrameBid.page + delta
+            BidScrollFrameScrollBar:SetValue(0)
+            GetBidderAuctionItems(AuctionFrameBid.page)
+            this:Disable()
+        end
+
+        -- ── Auctions tab (ref-lua l.796-1046) ───────────────────────────────────────────────────
+        function AuctionFrameAuctions_OnLoad(frame)
+            frame:RegisterEvent("AUCTION_OWNED_LIST_UPDATE")
+            frame.page = 0
+            -- 8 hours is the default the window opens on (ref-lua l.798).
+            AuctionsRadioButton_OnClick(2)
+        end
+
+        function AuctionFrameAuctions_OnEvent()
+            if event == "AUCTION_OWNED_LIST_UPDATE" then
+                AuctionFrameAuctions_Update()
+            end
+        end
+
+        function AuctionFrameAuctions_OnShow()
+            AuctionsTitle:SetText(format(gs("AUCTION_TITLE", "%s"), UnitName("player") or ""))
+            AuctionsFrameAuctions_ValidateAuction()
+            if not AuctionFrame.gotAuctions then
+                AuctionFrame.gotAuctions = 1
+                GetOwnerAuctionItems()
+            end
+            AuctionFrameAuctions.page = 0
+            AuctionFrameAuctions_Update()
+        end
+
+        function AuctionFrameAuctions_Update()
+            local numBatch, total = GetNumAuctionItems("owner")
+            local offset = FauxScrollFrame_GetOffset(AuctionsScrollFrame)
+            local selected = GetSelectedAuctionItem("owner")
+            local lastSlotEmpty
+
+            auctionUpdateArrows("owner")
+
+            local rowWidth, highlightWidth, bidHeaderWidth = 576, 543, 193
+            if numBatch < BENILLA_AUCTIONS_ROWS
+                or (numBatch == BENILLA_AUCTIONS_ROWS and total <= BENILLA_AUCTIONS_ROWS) then
+                rowWidth, highlightWidth, bidHeaderWidth = 599, 565, 213
+            end
+            AuctionsBidSort:SetWidth(bidHeaderWidth)
+
+            for i = 1, BENILLA_AUCTIONS_ROWS do
+                local index = offset + i
+                local button = getglobal("AuctionsButton" .. i)
+                local name, texture, count, quality, canUse, level,
+                      minBid, minIncrement, buyoutPrice, bidAmount, highBidder, owner
+                if index <= numBatch then
+                    name, texture, count, quality, canUse, level,
+                        minBid, minIncrement, buyoutPrice, bidAmount, highBidder, owner =
+                        GetAuctionItemInfo("owner", index)
+                end
+                if not minBid then
+                    button:Hide()
+                    if i == BENILLA_AUCTIONS_ROWS then lastSlotEmpty = 1 end
+                else
+                    button:Show()
+                    local buttonName = "AuctionsButton" .. i
+                    button:SetWidth(rowWidth)
+                    button:GetHighlightTexture():SetWidth(highlightWidth)
+
+                    auctionRowName(buttonName, name, quality)
+                    auctionRowClosingTime(buttonName, GetAuctionItemTimeLeft("owner", index))
+                    auctionRowIcon(buttonName, texture, count, canUse)
+
+                    -- This list has no level column and no seller column — you ARE the seller. The
+                    -- HighBidder column carries a name, or the red "no bids" line (ref-lua
+                    -- l.872-876).
+                    if highBidder then
+                        getglobal(buttonName .. "HighBidder"):SetText(owner or "")
+                    else
+                        getglobal(buttonName .. "HighBidder"):SetText(
+                            RED_FONT_COLOR_CODE .. gs("NO_BIDS") .. FONT_COLOR_CODE_CLOSE)
+                    end
+
+                    -- With bids, the row shows the live bid at full strength and cancelling costs
+                    -- a 5% cut of it; without, it shows your own opening price greyed and
+                    -- cancelling costs nothing beyond the deposit (ref-lua l.896-910).
+                    local money = getglobal(buttonName .. "MoneyFrame")
+                    if bidAmount > 0 then
+                        MoneyFrame_Update(buttonName .. "MoneyFrame", bidAmount)
+                        money:SetAlpha(1)
+                        button.cancelPrice = floor(bidAmount * 0.05)
+                    else
+                        MoneyFrame_Update(buttonName .. "MoneyFrame", minBid)
+                        money:SetAlpha(0.5)
+                        button.cancelPrice = 0
+                    end
+
+                    if buyoutPrice > 0 then
+                        money:SetPoint("RIGHT", buttonName, "RIGHT", 0, 10)
+                        getglobal(buttonName .. "BuyoutMoneyFrame"):Show()
+                    else
+                        money:SetPoint("RIGHT", buttonName, "RIGHT", 0, 3)
+                        getglobal(buttonName .. "BuyoutMoneyFrame"):Hide()
+                    end
+                    MoneyFrame_Update(buttonName .. "BuyoutMoneyFrame", buyoutPrice)
+
+                    if selected == index then button:LockHighlight() else button:UnlockHighlight() end
+                end
+            end
+
+            if selected > 0 then AuctionsCancelAuctionButton:Enable() else AuctionsCancelAuctionButton:Disable() end
+
+            local rows = auctionPagerUpdate("Auctions", AuctionFrameAuctions.page, numBatch, total, lastSlotEmpty)
+            FauxScrollFrame_Update(AuctionsScrollFrame, rows, BENILLA_AUCTIONS_ROWS, BENILLA_AUCTION_ROW_HEIGHT)
+        end
+
+        function AuctionsButton_OnClick(button)
+            if not button then button = this end
+            local index = button:GetID() + FauxScrollFrame_GetOffset(AuctionsScrollFrame)
+            SetSelectedAuctionItem("owner", index)
+            -- The popup needs the clicked row's own cut, which only the row knows.
+            AuctionFrameAuctions.cancelPrice = button.cancelPrice
+            CloseAuctionStaticPopups()
+            AuctionFrameAuctions_Update()
+        end
+
+        function AuctionsPageButton_OnClick(delta)
+            AuctionFrameAuctions.page = AuctionFrameAuctions.page + delta
+            AuctionsScrollFrameScrollBar:SetValue(0)
+            GetOwnerAuctionItems(AuctionFrameAuctions.page)
+            this:Disable()
+        end
+
+        -- ── Create auction (the Auctions tab's left column) ─────────────────────────────────────
+        -- A duration radio's label — "2 Hours" / "8 Hours" / "24 Hours" in the player's own
+        -- locale, through the plural rule (ref-xml l.1826/1843/1860, `GetText("HOURS", nil, n)`).
+        function AuctionsRadioButton_SetLabel(button, hours)
+            getglobal(button:GetName() .. "Text"):SetText(hours .. " " .. gsPlural("HOURS", hours))
+        end
+
+        -- The three run times, as radio buttons (ref-lua l.991-1006). The deposit is a function of
+        -- the duration, so picking one is one of exactly TWO things that refresh it.
+        function AuctionsRadioButton_OnClick(index)
+            AuctionsLongAuctionButton:SetChecked(nil)
+            AuctionsMediumAuctionButton:SetChecked(nil)
+            AuctionsShortAuctionButton:SetChecked(nil)
+            local picked = AuctionsLongAuctionButton
+            if index == 1 then
+                picked = AuctionsShortAuctionButton
+            elseif index == 2 then
+                picked = AuctionsMediumAuctionButton
+            end
+            picked:SetChecked(1)
+            AuctionFrameAuctions.duration = BENILLA_AUCTION_DURATIONS[index] or 480
+            UpdateDeposit()
+        end
+
+        -- The OTHER refresh trigger is NEW_AUCTION_UPDATE. Editing a price never moves the deposit
+        -- — it is charged on the item's vendor value and the run time, not on what you ask for
+        -- (auction.rs's CalculateAuctionDeposit, which reproduces the client's own truncation).
+        function UpdateDeposit()
+            MoneyFrame_Update("AuctionsDepositMoneyFrame",
+                CalculateAuctionDeposit(AuctionFrameAuctions.duration))
+        end
+
+        -- Icon, name and stack for whatever is in the sell slot. Called from the event AND from
+        -- the slot's own handlers (header, divergence 5) — idempotent, so the two agree.
+        function AuctionsFrameAuctions_UpdateSellItem()
+            -- SIX values always, even for an empty slot (auction.rs): count is a hard 1 and
+            -- quality -1 rather than nils, because this reads count unguarded.
+            local name, texture, count = GetAuctionSellItemInfo()
+            AuctionsItemButton:SetNormalTexture(texture)
+            AuctionsItemButtonName:SetText(name or "")
+            if count <= 1 then
+                AuctionsItemButtonCount:Hide()
+            else
+                AuctionsItemButtonCount:SetText(count)
+                AuctionsItemButtonCount:Show()
+            end
+        end
+
+        function AuctionSellItemButton_OnEvent()
+            if event ~= "NEW_AUCTION_UPDATE" then return end
+            AuctionsFrameAuctions_UpdateSellItem()
+            local name, texture, count, quality, canUse, price = GetAuctionSellItemInfo()
+            -- The suggested opening price: half again the stack's vendor value, floored at one
+            -- silver (ref-lua l.1023).
+            BenillaMoneyInput_SetCopper("StartPrice", max(100, floor(price * 1.5)))
+            UpdateDeposit()
+            BenillaMoneyInput_SetCopper("BuyoutPrice", 0)
+            AuctionsFrameAuctions_ValidateAuction()
+        end
+
+        function AuctionsItemButton_OnClick()
+            ClickAuctionSellItemButton()
+            AuctionsFrameAuctions_UpdateSellItem()
+            AuctionsFrameAuctions_ValidateAuction()
+        end
+
+        function AuctionsItemButton_OnEnter()
+            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+            if GetAuctionSellItemInfo() then
+                GameTooltip:SetAuctionSellItem()
+            else
+                GameTooltip:SetText(gs("AUCTION_ITEM_TEXT"), 1.0, 1.0, 1.0)
+            end
+            GameTooltip:Show()
+        end
+
+        -- The Create gate (ref-lua l.1029-1046). Re-run from the slot, from both money inputs'
+        -- change callbacks, and from the pane's OnShow — it is the ONE place the button opens.
+        function AuctionsFrameAuctions_ValidateAuction()
+            AuctionsBuyoutErrorText:Hide()
+            AuctionsCreateAuctionButton:Disable()
+            if not GetAuctionSellItemInfo() then
+                return
+            end
+            local start = BenillaMoneyInput_GetCopper("StartPrice")
+            local buyout = BenillaMoneyInput_GetCopper("BuyoutPrice")
+            -- A buyout under the opening price is the one error this form explains out loud.
+            if buyout > 0 and start > buyout then
+                AuctionsBuyoutErrorText:Show()
+                return
+            end
+            if start < 1 or start > BENILLA_MAX_BID then
+                return
+            end
+            AuctionsCreateAuctionButton:Enable()
+        end
+
+        function AuctionsCreateAuctionButton_OnClick()
+            StartAuction(BenillaMoneyInput_GetCopper("StartPrice"),
+                BenillaMoneyInput_GetCopper("BuyoutPrice"),
+                AuctionFrameAuctions.duration)
+        end
+    ]]></Script>
+
+    <!-- The editable money entry (ref MoneyInputFrameTemplate, MoneyInputFrame.xml l.3-260, quoted
+         verbatim: 176x18 overall; gold 58x20 at TOPLEFT, silver/copper 30x20 chained +26/+16; each
+         box's L slice 8x20 at (-5,0), R slice at RIGHT (gold 0, silver/copper -10), M stretched
+         between; the denomination coin 13x13 at LEFT->RIGHT +2 (gold) / -8 (silver, copper)). The
+         boxes are named $parentGold/Silver/Copper, which is the prefix contract the shared
+         BenillaMoneyInput_* helpers read. -->
+    <Frame name="BenillaAuctionMoneyInputTemplate" virtual="true">
+        <Size><AbsDimension x="176" y="18"/></Size>
+        <Frames>
+            <EditBox name="$parentGold" historyLines="0" numeric="true" autoFocus="false">
+                <Size><AbsDimension x="58" y="20"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="RIGHT"/></Anchors>
+                            <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="10" y="20"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                            </Anchors>
+                            <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
+                            <Size><AbsDimension x="13" y="13"/></Size>
+                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="0.25" top="0" bottom="1"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnTabPressed>getglobal(this:GetParent():GetName() .. "Silver"):SetFocus()</OnTabPressed>
+                    <OnEnterPressed>getglobal(this:GetParent():GetName() .. "Silver"):SetFocus()</OnEnterPressed>
+                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                    <OnTextChanged>BenillaAuctionMoneyInput_OnChanged(this)</OnTextChanged>
+                    <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
+                    <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
+                </Scripts>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
+            <EditBox name="$parentSilver" letters="2" historyLines="0" numeric="true" autoFocus="false">
+                <Size><AbsDimension x="30" y="20"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="$parentGold" relativePoint="RIGHT"><Offset><AbsDimension x="26" y="0"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="10" y="20"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                            </Anchors>
+                            <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
+                            <Size><AbsDimension x="13" y="13"/></Size>
+                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnTabPressed>getglobal(this:GetParent():GetName() .. "Copper"):SetFocus()</OnTabPressed>
+                    <OnEnterPressed>getglobal(this:GetParent():GetName() .. "Copper"):SetFocus()</OnEnterPressed>
+                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                    <OnTextChanged>BenillaAuctionMoneyInput_OnChanged(this)</OnTextChanged>
+                    <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
+                    <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
+                </Scripts>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
+            <EditBox name="$parentCopper" letters="2" historyLines="0" numeric="true" autoFocus="false">
+                <Size><AbsDimension x="30" y="20"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="$parentSilver" relativePoint="RIGHT"><Offset><AbsDimension x="16" y="0"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="10" y="20"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                            </Anchors>
+                            <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture file="Interface\MoneyFrame\UI-MoneyIcons">
+                            <Size><AbsDimension x="13" y="13"/></Size>
+                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                    <OnTextChanged>BenillaAuctionMoneyInput_OnChanged(this)</OnTextChanged>
+                    <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
+                    <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
+                </Scripts>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
+        </Frames>
+    </Frame>
+
+    <!-- ref-tmpl l.3-28: the duration radio. Three crops of one 64x16 strip. -->
+    <CheckButton name="AuctionRadioButtonTemplate" virtual="true">
+        <Size><AbsDimension x="16" y="16"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentText" inherits="GameFontNormalSmall">
+                    <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <NormalTexture file="Interface\Buttons\UI-RadioButton"><TexCoords left="0" right="0.25" top="0" bottom="1"/></NormalTexture>
+        <HighlightTexture file="Interface\Buttons\UI-RadioButton" alphaMode="ADD"><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></HighlightTexture>
+        <CheckedTexture file="Interface\Buttons\UI-RadioButton"><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></CheckedTexture>
+    </CheckButton>
+
+    <!-- ref-tmpl l.30-73: one row of the Browse tab's category tree. The plate IS the button's
+         normal texture, which is what lets FilterButton_SetType fade it per indent level; the
+         branch line only shows on a slot row. -->
+    <Button name="AuctionClassButtonTemplate" virtual="true">
+        <Size><AbsDimension x="136" y="20"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentLines" file="Interface\AuctionFrame\UI-AuctionFrame-FilterLines" hidden="true">
+                    <Size><AbsDimension x="7" y="20"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.4375" top="0" bottom="0.625"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnClick>AuctionFrameFilter_OnClick()</OnClick>
+        </Scripts>
+        <NormalTexture file="Interface\AuctionFrame\UI-AuctionFrame-FilterBg">
+            <TexCoords left="0" right="0.53125" top="0" bottom="0.625"/>
+        </NormalTexture>
+        <HighlightTexture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD"/>
+        <ButtonText name="$parentNormalText">
+            <Size><AbsDimension x="115" y="8"/></Size>
+            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormalSmall" justifyH="LEFT"/>
+        <HighlightFont inherits="GameFontHighlightSmall" justifyH="LEFT"/>
+    </Button>
+
+    <!-- ref-tmpl l.75-147: a column header. The tab art is a three-slice off WhoFrame-ColumnTabs;
+         the sort arrow rides in the button's NORMAL texture slot (the reference's own choice — it
+         is the only state texture a header needs), which is why SortButton_UpdateArrow reaches it
+         through GetNormalTexture. -->
+    <Button name="AuctionSortButtonTemplate" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentLeft" file="Interface\FriendsFrame\WhoFrame-ColumnTabs">
+                    <Size><AbsDimension x="5" y="19"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.078125" top="0" bottom="0.59375"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\FriendsFrame\WhoFrame-ColumnTabs">
+                    <Size><AbsDimension x="4" y="19"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                    <TexCoords left="0.90625" right="0.96875" top="0" bottom="0.59375"/>
+                </Texture>
+                <Texture name="$parentMiddle" file="Interface\FriendsFrame\WhoFrame-ColumnTabs">
+                    <Size><AbsDimension x="10" y="19"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                        <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                    </Anchors>
+                    <TexCoords left="0.078125" right="0.90625" top="0" bottom="0.59375"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <ButtonText name="$parentText">
+            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontHighlightSmall"/>
+        <NormalTexture file="Interface\Buttons\UI-SortArrow">
+            <Size><AbsDimension x="9" y="8"/></Size>
+            <Anchors><Anchor point="LEFT" relativeTo="$parentText" relativePoint="RIGHT"><Offset><AbsDimension x="3" y="-2"/></Offset></Anchor></Anchors>
+            <TexCoords left="0" right="0.5625" top="0" bottom="1.0"/>
+        </NormalTexture>
+        <HighlightTexture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
+            <Size><AbsDimension x="5" y="24"/></Size>
+            <Anchors>
+                <Anchor point="LEFT"/>
+                <Anchor point="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor>
+            </Anchors>
+        </HighlightTexture>
+    </Button>
+
+    <!-- ref-tmpl l.149-450: a BROWSE result row. Widest of the three (it carries a seller column
+         and two captioned money lines) and the only one whose money lines hide. -->
+    <Button name="BrowseButtonTemplate" virtual="true">
+        <Size><AbsDimension x="597" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="167" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="43" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentLevel" inherits="GameFontHighlightSmall">
+                    <Size><AbsDimension x="52" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="205" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentHighBidder" inherits="GameFontHighlightSmall">
+                    <Size><AbsDimension x="78" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="345" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- The name plate: a three-slice off UI-AuctionItemNameFrame, 10px caps with the
+                     middle stretched between them so the row can change width. -->
+                <Texture name="$parentLeft" file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="34" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.078125" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.75" right="0.828125" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                        <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                    </Anchors>
+                    <TexCoords left="0.078125" right="0.75" top="0" bottom="1.0"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentItem">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BORDER">
+                        <Texture name="$parentIconTexture" setAllPoints="true"/>
+                        <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT" hidden="true">
+                            <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>AuctionFrameItem_OnEnter("list", this:GetParent():GetID() + FauxScrollFrame_GetOffset(BrowseScrollFrame))</OnEnter>
+                    <OnLeave>AuctionFrameItem_OnLeave()</OnLeave>
+                    <OnClick>BrowseButton_OnClick(this:GetParent())</OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\Buttons\UI-Quickslot2">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+                <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+            </Button>
+            <!-- Mouse-enabled purely for the hover: the bucket word is short, its meaning is a
+                 range, and the range lives in the tooltip the row stashes on it. -->
+            <Frame name="$parentClosingTime" enableMouse="true">
+                <Size><AbsDimension x="65" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="267" y="0"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="$parentText" inherits="GameFontHighlightSmall">
+                            <Size><AbsDimension x="65" y="32"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>
+                        if ( not this.tooltip or this.tooltip == "" ) then return end
+                        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                        GameTooltip:SetText(this.tooltip)
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Frame>
+            <Frame name="$parentMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="10" y="3"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>
+                    SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("AUCTION")
+                </OnLoad></Scripts>
+            </Frame>
+            <Frame name="$parentBuyoutMoneyFrame" inherits="SmallMoneyFrameTemplate" hidden="true">
+                <Anchors><Anchor point="TOPRIGHT" relativeTo="$parentMoneyFrame" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>
+                    SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("AUCTION")
+                    -- The buyout line is gold where the bid above it is white (ref-tmpl l.392).
+                    SetMoneyFrameColor(this:GetName(),
+                        NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+                </OnLoad></Scripts>
+            </Frame>
+            <!-- The two captions are Frames, where the reference makes them Buttons (ref-tmpl
+                 l.363/396). Neither carries a script; a Button would take the click that belongs
+                 to the row underneath it, and a caption is not a target. -->
+            <Frame name="$parentYourBidText" hidden="true">
+                <Size><AbsDimension x="10" y="11"/></Size>
+                <Anchors><Anchor point="RIGHT" relativeTo="$parentMoneyFrame" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <FontString inherits="GameFontNormalSmall" text="YOUR_BID" justifyH="RIGHT">
+                        <Anchors><Anchor point="RIGHT"/></Anchors>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <Frame name="$parentBuyoutText" hidden="true">
+                <Size><AbsDimension x="10" y="11"/></Size>
+                <Anchors><Anchor point="RIGHT" relativeTo="$parentBuyoutMoneyFrame" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <FontString inherits="GameFontNormalSmall" text="BUYOUT_COST" justifyH="RIGHT">
+                        <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnClick>
+                local index = this:GetID() + FauxScrollFrame_GetOffset(BrowseScrollFrame)
+                if ( not AuctionRow_ModifierClick("list", index) ) then BrowseButton_OnClick(this) end
+            </OnClick>
+        </Scripts>
+        <HighlightTexture name="$parentHighlight" file="Interface\HelpFrame\HelpFrameButton-Highlight" alphaMode="ADD">
+            <Size><AbsDimension x="523" y="32"/></Size>
+            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="33" y="0"/></Offset></Anchor></Anchors>
+            <TexCoords left="0" right="1.0" top="0" bottom="0.578125"/>
+        </HighlightTexture>
+    </Button>
+
+    <!-- ref-tmpl l.452-699: a BIDS row. No captions and no hiding — both money lines always show,
+         because both columns are headed; a bid-status column replaces the seller. -->
+    <Button name="BidButtonTemplate" virtual="true">
+        <Size><AbsDimension x="793" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="187" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="41" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentLevel" inherits="GameFontHighlightSmall">
+                    <Size><AbsDimension x="32" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="250" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentBidStatus" inherits="GameFontHighlightSmall">
+                    <Size><AbsDimension x="75" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="543" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <Texture name="$parentLeft" file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="34" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.078125" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.75" right="0.828125" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                        <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                    </Anchors>
+                    <TexCoords left="0.078125" right="0.75" top="0" bottom="1.0"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentItem">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BORDER">
+                        <Texture name="$parentIconTexture" setAllPoints="true"/>
+                        <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT" hidden="true">
+                            <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>AuctionFrameItem_OnEnter("bidder", this:GetParent():GetID() + FauxScrollFrame_GetOffset(BidScrollFrame))</OnEnter>
+                    <OnLeave>AuctionFrameItem_OnLeave()</OnLeave>
+                    <OnClick>BidButton_OnClick(this:GetParent())</OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\Buttons\UI-Quickslot2">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+                <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+            </Button>
+            <Frame name="$parentClosingTime" enableMouse="true">
+                <Size><AbsDimension x="75" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="295" y="0"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="$parentText" inherits="GameFontHighlightSmall">
+                            <Size><AbsDimension x="75" y="32"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>
+                        if ( not this.tooltip or this.tooltip == "" ) then return end
+                        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                        GameTooltip:SetText(this.tooltip)
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Frame>
+            <Frame name="$parentBuyoutMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors><Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="535" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>
+                    SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("AUCTION")
+                </OnLoad></Scripts>
+            </Frame>
+            <Frame name="$parentCurrentBidMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>
+                    SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("AUCTION")
+                </OnLoad></Scripts>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnClick>
+                local index = this:GetID() + FauxScrollFrame_GetOffset(BidScrollFrame)
+                if ( not AuctionRow_ModifierClick("bidder", index) ) then BidButton_OnClick(this) end
+            </OnClick>
+        </Scripts>
+        <HighlightTexture name="$parentHighlight" file="Interface\HelpFrame\HelpFrameButton-Highlight" alphaMode="ADD">
+            <Size><AbsDimension x="670" y="32"/></Size>
+            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="33" y="0"/></Offset></Anchor></Anchors>
+            <TexCoords left="0" right="1.0" top="0" bottom="0.578125"/>
+        </HighlightTexture>
+    </Button>
+
+    <!-- ref-tmpl l.701-949: an AUCTIONS row. No level column (you know what you listed) and the
+         buyout line carries a static caption rather than a hidden one. -->
+    <Button name="AuctionsButtonTemplate" virtual="true">
+        <Size><AbsDimension x="576" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="142" y="28"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="43" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentHighBidder" inherits="GameFontHighlightSmall">
+                    <Size><AbsDimension x="104" y="28"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="279" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <Texture name="$parentLeft" file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="34" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.078125" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.75" right="0.828125" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture file="Interface\AuctionFrame\UI-AuctionItemNameFrame">
+                    <Size><AbsDimension x="10" y="32"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                        <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                    </Anchors>
+                    <TexCoords left="0.078125" right="0.75" top="0" bottom="1.0"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentItem">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BORDER">
+                        <Texture name="$parentIconTexture" setAllPoints="true"/>
+                        <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT" hidden="true">
+                            <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>AuctionFrameItem_OnEnter("owner", this:GetParent():GetID() + FauxScrollFrame_GetOffset(AuctionsScrollFrame))</OnEnter>
+                    <OnLeave>AuctionFrameItem_OnLeave()</OnLeave>
+                    <OnClick>AuctionsButton_OnClick(this:GetParent())</OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\Buttons\UI-Quickslot2">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+                <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+            </Button>
+            <Frame name="$parentClosingTime" enableMouse="true">
+                <Size><AbsDimension x="65" y="28"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="191" y="0"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="$parentText" inherits="GameFontHighlightSmall">
+                            <Size><AbsDimension x="65" y="28"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>
+                        if ( not this.tooltip or this.tooltip == "" ) then return end
+                        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                        GameTooltip:SetText(this.tooltip)
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Frame>
+            <Frame name="$parentMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>
+                    SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("AUCTION")
+                </OnLoad></Scripts>
+            </Frame>
+            <Frame name="$parentBuyoutMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <FontString inherits="GameFontNormalSmall" text="BUYOUT">
+                        <Anchors><Anchor point="RIGHT" relativePoint="LEFT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                    </FontString>
+                </Layer></Layers>
+                <Scripts><OnLoad>
+                    SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("AUCTION")
+                </OnLoad></Scripts>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnClick>
+                local index = this:GetID() + FauxScrollFrame_GetOffset(AuctionsScrollFrame)
+                if ( not AuctionRow_ModifierClick("owner", index) ) then AuctionsButton_OnClick(this) end
+            </OnClick>
+        </Scripts>
+        <HighlightTexture name="$parentHighlight" file="Interface\HelpFrame\HelpFrameButton-Highlight" alphaMode="ADD">
+            <Size><AbsDimension x="540" y="32"/></Size>
+            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="33" y="0"/></Offset></Anchor></Anchors>
+            <TexCoords left="0" right="1.0" top="0" bottom="0.578125"/>
+        </HighlightTexture>
+    </Button>
+
+    <!-- ref-tmpl l.951-955: the window tab, on benilla's CharacterFrameTabButtonTemplate. -->
+    <Button name="AuctionTabTemplate" inherits="CharacterFrameTabButtonTemplate" virtual="true">
+        <Scripts>
+            <OnClick>AuctionFrameTab_OnClick()</OnClick>
+        </Scripts>
+    </Button>
+
+    <!-- The page turners, as one template: 32x32 spellbook arrows with a label hung off the outer
+         edge. Hidden until a list actually overflows the server's page (ref-xml l.639/673). -->
+    <Button name="BenillaAuctionPrevPageTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="32" y="32"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString inherits="GameFontNormal" text="PREV" justifyH="LEFT">
+                    <Anchors><Anchor point="LEFT" relativePoint="RIGHT"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Up"/>
+        <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Down"/>
+        <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Disabled"/>
+        <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+    </Button>
+    <Button name="BenillaAuctionNextPageTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="32" y="32"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString inherits="GameFontNormal" text="NEXT" justifyH="RIGHT">
+                    <Anchors><Anchor point="RIGHT" relativePoint="LEFT"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Up"/>
+        <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Down"/>
+        <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Disabled"/>
+        <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+    </Button>
+
+    <!-- The scroll trough, quoted from the reference's own composition (ref-xml l.401/414 and its
+         five twins): the UI-Character-ScrollBar channel in two pieces hung off the scroll frame's
+         right edge at (-2,5) / (-2,-2). Those offsets against our FauxScrollFrameTemplate's bar
+         (seated 6,-16 / 6,+16) are exactly the 21/20 overhang that lands each arrow button in its
+         own authored socket — ScrollTemplates.xml's own law, reached from the other side. -->
+    <Frame name="BenillaAuctionScrollTemplate" inherits="FauxScrollFrameTemplate" virtual="true">
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Size><AbsDimension x="31" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-2" y="5"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.484375" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Size><AbsDimension x="31" y="106"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="-2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.515625" right="1.0" top="0" bottom="0.4140625"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Frame>
+
+    <!-- ═══ The window (ref-xml l.5-1982) ══════════════════════════════════════════════════════
+         832x447, and NO <Anchors>: it is registered `area = "doublewide"` (UiPanels.xml), so the
+         panel manager takes both the left and centre seats and places it. -->
+    <Frame name="AuctionFrame" toplevel="true" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="832" y="447"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- The auctioneer's own portrait — the "npc" unit token's live model bake, bound
+                     in OnShow (MerchantFrame/TrainerFrame's binding). -->
+                <Texture name="AuctionPortraitTexture">
+                    <Size><AbsDimension x="58" y="58"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="12" y="-8"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- Six slabs in a 2x3 grid, re-textured per tab by AuctionFrameTab_OnClick. The
+                     middle column is 320 wide; the two flanks are 256. -->
+                <Texture name="$parentTopLeft" file="Interface\AuctionFrame\UI-AuctionFrame-Browse-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture name="$parentTop" file="Interface\AuctionFrame\UI-AuctionFrame-Browse-Top">
+                    <Size><AbsDimension x="320" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture name="$parentTopRight" file="Interface\AuctionFrame\UI-AuctionFrame-Browse-TopRight">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentTop" relativePoint="TOPRIGHT"/></Anchors>
+                </Texture>
+                <Texture name="$parentBotLeft" file="Interface\AuctionFrame\UI-AuctionFrame-Browse-BotLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-256"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture name="$parentBot" file="Interface\AuctionFrame\UI-AuctionFrame-Browse-Bot">
+                    <Size><AbsDimension x="320" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="-256"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture name="$parentBotRight" file="Interface\AuctionFrame\UI-AuctionFrame-Browse-BotRight">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBot" relativePoint="TOPRIGHT"/></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentTab1" inherits="AuctionTabTemplate" id="1" text="BROWSE">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="15" y="11"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentTab2" inherits="AuctionTabTemplate" id="2" text="BIDS">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentTab1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentTab3" inherits="AuctionTabTemplate" id="3" text="AUCTIONS">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentTab2" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <!-- The player's purse (ref-xml l.130). Type PLAYER by SmallMoneyFrame_OnLoad's own
+                 default, which is also what makes it self-driving: it listens for PLAYER_MONEY and
+                 repaints itself, so nothing in this file paints it. The frame is anchored by its
+                 RIGHT edge, so the coins stay pinned at x=181 and a longer number grows LEFT into
+                 the plate rather than out over its border. -->
+            <Frame name="AuctionFrameMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="181" y="18"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Button name="AuctionFrameCloseButton" inherits="UIPanelCloseButton">
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="3" y="-8"/></Offset></Anchor></Anchors>
+            </Button>
+
+            <!-- ══ Browse (ref-xml l.149-957) ═════════════════════════════════════════════════ -->
+            <Frame name="AuctionFrameBrowse" hidden="true">
+                <Size><AbsDimension x="758" y="447"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="BrowseTitle" inherits="GameFontNormal" text="BROWSE_AUCTIONS">
+                            <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <FontString name="BrowseTabText" inherits="GameFontHighlightSmall" text="FILTERS">
+                            <Anchors><Anchor point="TOP" relativePoint="TOPLEFT"><Offset><AbsDimension x="85" y="-85"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BrowseNameText" inherits="GameFontHighlightSmall" text="NAME">
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="80" y="-41"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BrowseLevelText" inherits="GameFontHighlightSmall" text="LEVEL_RANGE">
+                            <Anchors><Anchor point="BOTTOMLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="230" y="-47"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BrowseBidText" inherits="GameFontHighlightSmall" text="BID" justifyH="RIGHT">
+                            <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOM"><Offset><AbsDimension x="-75" y="21"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BrowseIsUsableText" inherits="GameFontHighlightSmall" text="USABLE_ITEMS">
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="485" y="-56"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BrowseSearchCountText" inherits="GameFontHighlightSmall" hidden="true">
+                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="80" y="53"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BrowseNoResultsText" inherits="GameFontNormal" text="BROWSE_SEARCH_TEXT" hidden="true">
+                            <Anchors><Anchor point="TOP"><Offset><AbsDimension x="115" y="-120"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BrowseSearchDotsText" inherits="GameFontNormal" hidden="true">
+                            <Anchors><Anchor point="LEFT" relativeTo="BrowseNoResultsText" relativePoint="RIGHT"/></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="AuctionFilterButton1" inherits="AuctionClassButtonTemplate">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="23" y="-105"/></Offset></Anchor></Anchors>
+                    </Button>
+                    <Button name="AuctionFilterButton2" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton3" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton4" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton5" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton6" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton7" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton8" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton9" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton10" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton11" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton10" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton12" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton11" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton13" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton12" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton14" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton13" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionFilterButton15" inherits="AuctionClassButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionFilterButton14" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Frame name="BrowseFilterScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                        <Size><AbsDimension x="160" y="305"/></Size>
+                        <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPLEFT"><Offset><AbsDimension x="158" y="-105"/></Offset></Anchor></Anchors>
+                    </Frame>
+
+                    <Button name="BrowseQualitySort" inherits="AuctionSortButtonTemplate" text="RARITY">
+                        <Size><AbsDimension x="214" y="19"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="186" y="-82"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("list", "quality")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BrowseLevelSort" inherits="AuctionSortButtonTemplate" text="LEVEL_ABBR">
+                        <Size><AbsDimension x="57" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BrowseQualitySort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("list", "level")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BrowseDurationSort" inherits="AuctionSortButtonTemplate" text="CLOSES_IN">
+                        <Size><AbsDimension x="91" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BrowseLevelSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("list", "duration")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BrowseHighBidderSort" inherits="AuctionSortButtonTemplate" text="AUCTION_CREATOR">
+                        <Size><AbsDimension x="76" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BrowseDurationSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("list", "seller")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BrowseCurrentBidSort" inherits="AuctionSortButtonTemplate" text="CURRENT_BID">
+                        <Size><AbsDimension x="163" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BrowseHighBidderSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("list", "bid")</OnClick></Scripts>
+                    </Button>
+
+                    <Button name="BrowseButton1" inherits="BrowseButtonTemplate" id="1">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="195" y="-110"/></Offset></Anchor></Anchors>
+                    </Button>
+                    <Button name="BrowseButton2" inherits="BrowseButtonTemplate" id="2"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BrowseButton3" inherits="BrowseButtonTemplate" id="3"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BrowseButton4" inherits="BrowseButtonTemplate" id="4"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BrowseButton5" inherits="BrowseButtonTemplate" id="5"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BrowseButton6" inherits="BrowseButtonTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BrowseButton7" inherits="BrowseButtonTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BrowseButton8" inherits="BrowseButtonTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="BrowseButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Frame name="BrowseScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                        <Size><AbsDimension x="465" y="306"/></Size>
+                        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="39" y="-105"/></Offset></Anchor></Anchors>
+                    </Frame>
+                    <Button name="BrowsePrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BrowseButton8" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>BrowsePageButton_OnClick(-1)</OnClick></Scripts>
+                    </Button>
+                    <Button name="BrowseNextPageButton" inherits="BenillaAuctionNextPageTemplate">
+                        <Anchors><Anchor point="RIGHT" relativeTo="BrowseButton8" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>BrowsePageButton_OnClick(1)</OnClick></Scripts>
+                    </Button>
+
+                    <!-- The usable filter carries NO scripts at all: its state is read once, when
+                         Search is pressed (ref-xml l.707). -->
+                    <CheckButton name="IsUsableCheckButton" inherits="UICheckButtonTemplate">
+                        <Size><AbsDimension x="24" y="24"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BrowseIsUsableText" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                    </CheckButton>
+                    <EditBox name="BrowseName" inherits="InputBoxTemplate" autoFocus="false">
+                        <Size><AbsDimension x="140" y="16"/></Size>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BrowseNameText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="3" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts>
+                            <OnTabPressed>BrowseMinLevel:SetFocus()</OnTabPressed>
+                            <OnEnterPressed>AuctionFrameBrowse_Search(); this:ClearFocus()</OnEnterPressed>
+                        </Scripts>
+                        <FontString inherits="ChatFontNormal" bytes="64"/>
+                    </EditBox>
+                    <!-- Enter in a LEVEL box only drops focus — it does not search (ref-xml
+                         l.777/801). The name box is the one that searches. -->
+                    <EditBox name="BrowseMinLevel" inherits="InputBoxTemplate" letters="2" numeric="true" autoFocus="false">
+                        <Size><AbsDimension x="25" y="16"/></Size>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BrowseLevelText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="3" y="-6"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString name="BrowseLevelHyphen" inherits="GameFontHighlightSmall" text="-">
+                                    <Anchors><Anchor point="LEFT" relativeTo="BrowseMinLevel" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnTabPressed>BrowseMaxLevel:SetFocus()</OnTabPressed>
+                            <OnEnterPressed>this:ClearFocus()</OnEnterPressed>
+                        </Scripts>
+                        <FontString inherits="ChatFontNormal"/>
+                    </EditBox>
+                    <EditBox name="BrowseMaxLevel" inherits="InputBoxTemplate" letters="2" numeric="true" autoFocus="false">
+                        <Size><AbsDimension x="25" y="16"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BrowseMinLevel" relativePoint="RIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts>
+                            <OnTabPressed>BrowseBidPriceGold:SetFocus()</OnTabPressed>
+                            <OnEnterPressed>this:ClearFocus()</OnEnterPressed>
+                        </Scripts>
+                        <FontString inherits="ChatFontNormal"/>
+                    </EditBox>
+                    <Frame name="BrowseDropDown" inherits="UIDropDownMenuTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BrowseLevelText" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="-1"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="OVERLAY">
+                                <FontString name="BrowseDropDownName" inherits="GameFontHighlightSmall" text="RARITY">
+                                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="20" y="0"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnLoad>BrowseDropDown_OnLoad()</OnLoad>
+                            <OnShow>BrowseDropDown_OnLoad()</OnShow>
+                        </Scripts>
+                    </Frame>
+                    <Frame name="BrowseBidPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                        <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="25" y="18"/></Offset></Anchor></Anchors>
+                    </Frame>
+                    <Button name="BrowseCloseButton" inherits="UIPanelButtonTemplate" text="CLOSE">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="66" y="14"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>HideUIPanel(AuctionFrame)</OnClick></Scripts>
+                    </Button>
+                    <Button name="BrowseBuyoutButton" inherits="UIPanelButtonTemplate" text="BUYOUT">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="BrowseCloseButton" relativePoint="LEFT"/></Anchors>
+                        <Scripts><OnClick>AuctionFrame_ShowBuyoutPopup(); this:Disable()</OnClick></Scripts>
+                    </Button>
+                    <Button name="BrowseBidButton" inherits="UIPanelButtonTemplate" text="BID">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="BrowseBuyoutButton" relativePoint="LEFT"/></Anchors>
+                        <Scripts>
+                            <OnClick>
+                                PlaceAuctionBid("list", GetSelectedAuctionItem("list"), BenillaMoneyInput_GetCopper("BrowseBidPrice"))
+                                this:Disable()
+                            </OnClick>
+                        </Scripts>
+                    </Button>
+                    <Button name="BrowseSearchButton" inherits="UIPanelButtonTemplate" text="SEARCH">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="IsUsableCheckButton" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts>
+                            <OnClick>AuctionFrameBrowse_Search()</OnClick>
+                            <OnUpdate>BrowseSearchButton_OnUpdate(arg1)</OnUpdate>
+                        </Scripts>
+                    </Button>
+                </Frames>
+                <Scripts>
+                    <OnLoad>AuctionFrameBrowse_OnLoad(self)</OnLoad>
+                    <OnShow>AuctionFrameBrowse_OnShow()</OnShow>
+                    <OnEvent>AuctionFrameBrowse_OnEvent()</OnEvent>
+                </Scripts>
+            </Frame>
+
+            <!-- ══ Bids (ref-xml l.960-1370) ══════════════════════════════════════════════════ -->
+            <Frame name="AuctionFrameBid" hidden="true">
+                <Size><AbsDimension x="758" y="447"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="BidTitle" inherits="GameFontNormal" text="BID">
+                            <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <FontString name="BidBidText" inherits="GameFontHighlightSmall" text="BID" justifyH="RIGHT">
+                            <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOM"><Offset><AbsDimension x="-115" y="21"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BidSearchCountText" inherits="GameFontHighlightSmall" hidden="true">
+                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-10" y="53"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="BidQualitySort" inherits="AuctionSortButtonTemplate" text="RARITY">
+                        <Size><AbsDimension x="195" y="19"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="65" y="-52"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("bidder", "quality")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidLevelSort" inherits="AuctionSortButtonTemplate" text="LEVEL_ABBR">
+                        <Size><AbsDimension x="65" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BidQualitySort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("bidder", "level")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidDurationSort" inherits="AuctionSortButtonTemplate" text="CLOSES_IN">
+                        <Size><AbsDimension x="79" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BidLevelSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("bidder", "duration")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidBuyoutSort" inherits="AuctionSortButtonTemplate" text="BUYOUT_PRICE">
+                        <Size><AbsDimension x="162" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BidDurationSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("bidder", "buyout")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidStatusSort" inherits="AuctionSortButtonTemplate" text="BID_STATUS">
+                        <Size><AbsDimension x="94" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BidBuyoutSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("bidder", "status")</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidBidSort" inherits="AuctionSortButtonTemplate" text="CURRENT_BID">
+                        <Size><AbsDimension x="169" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BidStatusSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("bidder", "bid")</OnClick></Scripts>
+                    </Button>
+
+                    <Button name="BidButton1" inherits="BidButtonTemplate" id="1">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="27" y="-76"/></Offset></Anchor></Anchors>
+                    </Button>
+                    <Button name="BidButton2" inherits="BidButtonTemplate" id="2"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BidButton3" inherits="BidButtonTemplate" id="3"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BidButton4" inherits="BidButtonTemplate" id="4"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BidButton5" inherits="BidButtonTemplate" id="5"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BidButton6" inherits="BidButtonTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BidButton7" inherits="BidButtonTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BidButton8" inherits="BidButtonTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="BidButton9" inherits="BidButtonTemplate" id="9"><Anchors><Anchor point="TOPLEFT" relativeTo="BidButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Frame name="BidScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                        <Size><AbsDimension x="625" y="335"/></Size>
+                        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="40" y="-74"/></Offset></Anchor></Anchors>
+                    </Frame>
+                    <Button name="BidPrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BidButton9" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>BidPageButton_OnClick(-1)</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidNextPageButton" inherits="BenillaAuctionNextPageTemplate">
+                        <Anchors><Anchor point="RIGHT" relativeTo="BidButton9" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>BidPageButton_OnClick(1)</OnClick></Scripts>
+                    </Button>
+
+                    <Frame name="BidBidPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                        <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-15" y="18"/></Offset></Anchor></Anchors>
+                    </Frame>
+                    <Button name="BidCloseButton" inherits="UIPanelButtonTemplate" text="CLOSE">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="66" y="14"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>HideUIPanel(AuctionFrame)</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidBuyoutButton" inherits="UIPanelButtonTemplate" text="BUYOUT">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="BidCloseButton" relativePoint="LEFT"/></Anchors>
+                        <Scripts><OnClick>AuctionFrame_ShowBuyoutPopup(); this:Disable()</OnClick></Scripts>
+                    </Button>
+                    <Button name="BidBidButton" inherits="UIPanelButtonTemplate" text="BID">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="BidBuyoutButton" relativePoint="LEFT"/></Anchors>
+                        <Scripts>
+                            <OnClick>
+                                PlaceAuctionBid("bidder", GetSelectedAuctionItem("bidder"), BenillaMoneyInput_GetCopper("BidBidPrice"))
+                                this:Disable()
+                            </OnClick>
+                        </Scripts>
+                    </Button>
+                </Frames>
+                <Scripts>
+                    <OnLoad>AuctionFrameBid_OnLoad(self)</OnLoad>
+                    <OnShow>AuctionFrameBid_OnShow()</OnShow>
+                    <OnEvent>AuctionFrameBid_OnEvent()</OnEvent>
+                </Scripts>
+            </Frame>
+
+            <!-- ══ Auctions (ref-xml l.1373-1962) — the owned list on the right, the create form
+                 down the left column ═══════════════════════════════════════════════════════════ -->
+            <Frame name="AuctionFrameAuctions" hidden="true">
+                <Size><AbsDimension x="758" y="447"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <!-- Filled in OnShow with the player's own name. -->
+                        <FontString name="AuctionsTitle" inherits="GameFontNormal">
+                            <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <FontString name="AuctionsTabText" inherits="GameFontHighlightSmall" text="CREATE_AUCTION">
+                            <Anchors><Anchor point="TOP" relativePoint="TOPLEFT"><Offset><AbsDimension x="121" y="-55"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="AuctionsItemText" inherits="GameFontHighlightSmall" text="AUCTION_ITEM">
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="28" y="-83"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="AuctionsPriceText" inherits="GameFontHighlightSmall" text="STARTING_PRICE">
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsItemText" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-70"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="AuctionsDurationText" inherits="GameFontHighlightSmall" text="AUCTION_DURATION">
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsPriceText" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-50"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <!-- Composed in AuctionFrame_OnLoad: the label plus a grey "(optional)". -->
+                        <FontString name="AuctionsBuyoutText" inherits="GameFontHighlightSmall">
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsPriceText" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-144"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="AuctionsBuyoutErrorText" inherits="GameFontRedSmall" text="AUCTION_BUYOUT_ERROR" hidden="true">
+                            <Anchors><Anchor point="BOTTOMLEFT" relativeTo="AuctionsBuyoutText" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="AuctionsDepositText" inherits="GameFontNormal" text="DEPOSIT_COLON">
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsBuyoutText" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-67"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="AuctionsSearchCountText" inherits="GameFontHighlightSmall" hidden="true">
+                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="90" y="53"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="AuctionsQualitySort" inherits="AuctionSortButtonTemplate" text="RARITY">
+                        <Size><AbsDimension x="185" y="19"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="219" y="-51"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("owner", "quality")</OnClick></Scripts>
+                    </Button>
+                    <Button name="AuctionsDurationSort" inherits="AuctionSortButtonTemplate" text="CLOSES_IN">
+                        <Size><AbsDimension x="100" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="AuctionsQualitySort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("owner", "duration")</OnClick></Scripts>
+                    </Button>
+                    <Button name="AuctionsHighBidderSort" inherits="AuctionSortButtonTemplate" text="HIGH_BIDDER">
+                        <Size><AbsDimension x="108" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="AuctionsDurationSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("owner", "status")</OnClick></Scripts>
+                    </Button>
+                    <Button name="AuctionsBidSort" inherits="AuctionSortButtonTemplate" text="CURRENT_BID">
+                        <Size><AbsDimension x="193" y="19"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="AuctionsHighBidderSort" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>SortAuctionItems("owner", "bid")</OnClick></Scripts>
+                    </Button>
+
+                    <Button name="AuctionsButton1" inherits="AuctionsButtonTemplate" id="1">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="219" y="-76"/></Offset></Anchor></Anchors>
+                    </Button>
+                    <Button name="AuctionsButton2" inherits="AuctionsButtonTemplate" id="2"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionsButton3" inherits="AuctionsButtonTemplate" id="3"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionsButton4" inherits="AuctionsButtonTemplate" id="4"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionsButton5" inherits="AuctionsButtonTemplate" id="5"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionsButton6" inherits="AuctionsButtonTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionsButton7" inherits="AuctionsButtonTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionsButton8" inherits="AuctionsButtonTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Button name="AuctionsButton9" inherits="AuctionsButtonTemplate" id="9"><Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                    <Frame name="AuctionsScrollFrame" inherits="BenillaAuctionScrollTemplate">
+                        <Size><AbsDimension x="435" y="339"/></Size>
+                        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="40" y="-72"/></Offset></Anchor></Anchors>
+                    </Frame>
+                    <Button name="AuctionsPrevPageButton" inherits="BenillaAuctionPrevPageTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="AuctionsButton9" relativePoint="LEFT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>AuctionsPageButton_OnClick(-1)</OnClick></Scripts>
+                    </Button>
+                    <Button name="AuctionsNextPageButton" inherits="BenillaAuctionNextPageTemplate">
+                        <Anchors><Anchor point="RIGHT" relativeTo="AuctionsButton9" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>AuctionsPageButton_OnClick(1)</OnClick></Scripts>
+                    </Button>
+
+                    <!-- The sell slot. NO empty-slot ring: the recess is painted into the window
+                         art behind it (ref-xml l.1730 declares only the highlight), and the icon
+                         arrives as the button's own normal texture. Click, drag-off and drop are
+                         all the same verb. -->
+                    <Button name="AuctionsItemButton">
+                        <Size><AbsDimension x="37" y="37"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="28" y="-98"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <FontString name="$parentName" inherits="GameFontNormal">
+                                    <Size><AbsDimension x="124" y="30"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                            <Layer level="OVERLAY">
+                                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT" hidden="true">
+                                    <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnLoad>
+                                this:RegisterEvent("NEW_AUCTION_UPDATE")
+                                this:RegisterForDrag("LeftButton")
+                            </OnLoad>
+                            <OnEvent>AuctionSellItemButton_OnEvent()</OnEvent>
+                            <OnClick>AuctionsItemButton_OnClick()</OnClick>
+                            <OnDragStart>AuctionsItemButton_OnClick()</OnDragStart>
+                            <OnReceiveDrag>AuctionsItemButton_OnClick()</OnReceiveDrag>
+                            <OnEnter>AuctionsItemButton_OnEnter()</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+                    </Button>
+                    <Frame name="StartPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsPriceText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="3" y="-2"/></Offset></Anchor></Anchors>
+                    </Frame>
+                    <CheckButton name="AuctionsShortAuctionButton" inherits="AuctionRadioButtonTemplate" id="1">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsDurationText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="3" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts>
+                            <OnLoad>AuctionsRadioButton_SetLabel(this, 2)</OnLoad>
+                            <OnClick>AuctionsRadioButton_OnClick(1)</OnClick>
+                        </Scripts>
+                    </CheckButton>
+                    <CheckButton name="AuctionsMediumAuctionButton" inherits="AuctionRadioButtonTemplate" id="2">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsShortAuctionButton" relativePoint="BOTTOMLEFT"/></Anchors>
+                        <Scripts>
+                            <OnLoad>AuctionsRadioButton_SetLabel(this, 8)</OnLoad>
+                            <OnClick>AuctionsRadioButton_OnClick(2)</OnClick>
+                        </Scripts>
+                    </CheckButton>
+                    <CheckButton name="AuctionsLongAuctionButton" inherits="AuctionRadioButtonTemplate" id="3">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsMediumAuctionButton" relativePoint="BOTTOMLEFT"/></Anchors>
+                        <Scripts>
+                            <OnLoad>AuctionsRadioButton_SetLabel(this, 24)</OnLoad>
+                            <OnClick>AuctionsRadioButton_OnClick(3)</OnClick>
+                        </Scripts>
+                    </CheckButton>
+                    <Frame name="BuyoutPrice" inherits="BenillaAuctionMoneyInputTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="AuctionsBuyoutText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-2"/></Offset></Anchor></Anchors>
+                    </Frame>
+                    <!-- The deposit (ref-xml l.1882). Its own money type, and the ONLY money in
+                         this window that does not keep its smaller coins: a 3-copper deposit reads
+                         "3c", not "0g 0s 3c". -->
+                    <Frame name="AuctionsDepositMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="AuctionsDepositText" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>
+                            SmallMoneyFrame_OnLoad()
+                            MoneyFrame_SetType("AUCTION_DEPOSIT")
+                        </OnLoad></Scripts>
+                    </Frame>
+                    <Button name="AuctionsCloseButton" inherits="UIPanelButtonTemplate" text="CLOSE">
+                        <Size><AbsDimension x="80" y="22"/></Size>
+                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="66" y="14"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>HideUIPanel(AuctionFrame)</OnClick></Scripts>
+                    </Button>
+                    <Button name="AuctionsCancelAuctionButton" inherits="UIPanelButtonTemplate" text="CANCEL_AUCTION">
+                        <Size><AbsDimension x="126" y="22"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="AuctionsCloseButton" relativePoint="LEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts>
+                            <OnClick>
+                                if ( GetSelectedAuctionItem("owner") > 0 ) then AuctionFrame_ShowCancelPopup() end
+                            </OnClick>
+                        </Scripts>
+                    </Button>
+                    <Button name="AuctionsCreateAuctionButton" inherits="UIPanelButtonTemplate" text="CREATE_AUCTION">
+                        <Size><AbsDimension x="191" y="20"/></Size>
+                        <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="18" y="39"/></Offset></Anchor></Anchors>
+                        <Scripts><OnClick>AuctionsCreateAuctionButton_OnClick()</OnClick></Scripts>
+                    </Button>
+                </Frames>
+                <Scripts>
+                    <OnLoad>AuctionFrameAuctions_OnLoad(self)</OnLoad>
+                    <OnShow>AuctionFrameAuctions_OnShow()</OnShow>
+                    <OnEvent>AuctionFrameAuctions_OnEvent()</OnEvent>
+                </Scripts>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>AuctionFrame_OnLoad(self)</OnLoad>
+            <OnShow>AuctionFrame_OnShow()</OnShow>
+            <OnHide>AuctionFrame_OnHide()</OnHide>
+            <OnEvent>AuctionFrame_OnEvent(self)</OnEvent>
+            <OnMouseWheel>AuctionFrame_OnMouseWheel(arg1)</OnMouseWheel>
+        </Scripts>
+    </Frame>
+</Ui>

@@ -5,17 +5,18 @@
 //! named regions exist, the rows populate from a fed `MailState`, the paging math is right, and the
 //! unread/read row state tracks the wire `wasRead` flag.
 
-use benilla_ui::script::{MailInboxRow, MailState, UiScript};
+use benilla_ui::script::{MailInboxRow, MailInvoice, MailState, UiScript};
 
 const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 
 /// The mail window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// MerchantFrame.xml rides along because MailFrame.xml reuses its global `BenillaMoney_*` coin
 /// helpers (postage display), so a load error in either fails here.
-const FILES: [&str; 5] = [
+const FILES: [&str; 6] = [
     "Fonts.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
+    "MoneyFrame.xml",
     "MerchantFrame.xml",
     "MailFrame.xml",
 ];
@@ -64,12 +65,14 @@ fn row(sender: &str, subject: &str, was_read: bool, item_id: u32, cod: u32) -> M
         body: Some("body".into()),
         stationery_texture: "STATIONERYTEST".into(),
         is_invoice: false,
+        invoice: None,
         has_body: true,
         item_id,
         item_name: (item_id != 0).then(|| "Linen Cloth".to_string()),
         item_texture: (item_id != 0).then(|| "Interface\\Icons\\INV_Fabric_Linen_01".to_string()),
         item_quality: (item_id != 0).then_some(1),
         can_delete: false,
+        item_random_property_id: 0,
     }
 }
 
@@ -228,6 +231,70 @@ fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
     );
     assert!(s.take_mail_opens().contains(&1), "opening queued the row");
     assert!(s.take_errors().is_empty());
+}
+
+/// **The letter and the centre seat exclude each other, in BOTH arrival orders** (decision 1520,
+/// director-reported and ref-checked): with the mailbox at the left slot and the character sheet
+/// pushed to centre beside it (its pushable=2 row), clicking a mail item must EVICT the sheet —
+/// the letter's OnShow is the ref's own (`if GetCenterFrame() then HideUIPanel(...)`, ref
+/// MailFrame.xml l.1903-1907) — not open underneath it, which is what a bare Show did. The
+/// reverse order is 1507's child-window loop: a frame arriving at centre puts the letter away.
+/// Whichever comes second wins the space; they can never stack. A bare stand-in carries the
+/// CharacterFrame row (the real file isn't in this harness's chain).
+#[test]
+fn a_letter_and_the_centre_occupant_evict_each_other() {
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_mail(Some(small_inbox()));
+    s.fire_event("MAIL_SHOW", vec![]);
+    s.fire_event("MAIL_INBOX_UPDATE", vec![]);
+    let _ = s.take_mail_opens();
+
+    // The director's setup: mailbox left, character sheet pushed to centre beside it.
+    s.run(
+        r#"local c = CreateFrame("Frame", "CharacterFrame") c:SetSize(50, 50) c:Hide()
+           ShowUIPanel(CharacterFrame)"#,
+    )
+    .unwrap();
+    assert!(
+        s.eval::<bool>(
+            "return GetLeftFrame():GetName() == 'MailFrame' \
+             and GetCenterFrame():GetName() == 'CharacterFrame'"
+        )
+        .unwrap(),
+        "mail holds left, the sheet was pushed to centre"
+    );
+
+    // Click a mail item: the letter opens AND the sheet is evicted — one thing beside the mailbox.
+    s.run("MailItem1Button:Click()").unwrap();
+    assert!(s.take_errors().is_empty());
+    assert!(
+        s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap(),
+        "the letter opened"
+    );
+    assert!(
+        !s.eval::<bool>("return CharacterFrame:IsShown()").unwrap(),
+        "the centre occupant was evicted, not covered (the reported bug)"
+    );
+    assert!(
+        s.eval::<bool>("return GetCenterFrame() == nil").unwrap(),
+        "the eviction is a plain vacate — nothing slides"
+    );
+    assert!(
+        s.eval::<bool>("return MailFrame:IsShown() and GetLeftFrame():GetName() == 'MailFrame'")
+            .unwrap(),
+        "the mailbox itself is untouched"
+    );
+
+    // The reverse arrival: re-opening the sheet over the open letter puts the LETTER away
+    // (1507's child-window loop) — the same exclusion, other direction.
+    s.run("ShowUIPanel(CharacterFrame)").unwrap();
+    assert!(s.take_errors().is_empty());
+    assert!(
+        s.eval::<bool>("return CharacterFrame:IsShown()").unwrap()
+            && !s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap(),
+        "a frame arriving at centre hides the letter"
+    );
 }
 
 #[test]
@@ -435,5 +502,223 @@ fn inbox_page_label_stays_empty_like_the_reference() {
     assert!(
         text.as_deref().unwrap_or("").is_empty(),
         "InboxCurrentPage must stay unwritten (got {text:?})"
+    );
+}
+
+/// A runtime-shown child `<Frame>` renders its own `<Layers>` FontStrings (decision 1517).
+///
+/// This pins a fact three window files spent months asserting the opposite of. `SendMailFrame`
+/// ships `hidden="true"` and is shown by the tab click; its title lives in its OWN Layers, not on
+/// the window root. The "flat layout" those windows adopted was a workaround for a constraint that
+/// never existed — and it produced no symptom precisely because it was always obeyed, which is why
+/// the claim needed a test rather than a header comment.
+#[test]
+fn a_runtime_shown_pane_renders_its_own_layers() {
+    let s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.eval::<()>("MailFrame:Show() SendMailFrame:Show()")
+        .unwrap();
+    assert!(
+        s.eval::<bool>("return SendMailFrame:IsVisible()").unwrap(),
+        "the pane itself"
+    );
+    assert!(
+        s.eval::<bool>("return SendMailTitleText:IsVisible()")
+            .unwrap(),
+        "a FontString declared inside a runtime-shown child frame's own <Layers>"
+    );
+}
+
+/// The auction house's mail is a RECEIPT, not a letter (decision 1522). Before this the window
+/// showed exactly what the server wrote — `From: Unknown / Subject: 5529:0:2` over a body of
+/// `6C:10000:10000:25:500` — because nothing parsed it. The subject rewrite is the engine's
+/// (`ui_mail::invoice`); this is the pane, and it comes in two shapes off one set of seven values.
+///
+/// (`From: Unknown` is NOT part of the bug and is not fixed here: an auction mail carries no
+/// player sender guid, so the reference's own `if ( not sender ) then sender = UNKNOWN` is what
+/// puts that word there — MailFrame.lua l.286-288.)
+///
+/// The body text assertion is the 1527 fold-back: `GetInboxText` returns **nil** for an invoice by
+/// an explicit carve-out in the reference, so `SetText(nil)` leaves the page genuinely empty.
+#[test]
+fn an_auction_invoice_renders_as_a_receipt() {
+    /// The pane reads the player's own GlobalStrings, which a bare-XML harness has none of. Stand
+    /// in synthetic ones: what is under test is that each reaches the right region, never their text.
+    fn strings(s: &UiScript) {
+        s.run(concat!(
+            "ITEM_SOLD_COLON = 'SOLD:' PURCHASED_BY_COLON = 'BY:' AMOUNT_RECEIVED_COLON = 'GOT:' ",
+            "ITEM_PURCHASED_COLON = 'BOUGHT:' SOLD_BY_COLON = 'FROM:' AMOUNT_PAID_COLON = 'PAID:' ",
+            "BUYOUT = 'Buyout' HIGH_BIDDER = 'High Bidder'",
+        ))
+        .unwrap();
+    }
+    fn open_with(invoice: MailInvoice) -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        load_ui(&s);
+        strings(&s);
+        let mut inbox = small_inbox();
+        inbox.inbox[0].is_invoice = true;
+        inbox.inbox[0].invoice = Some(invoice);
+        s.set_mail(Some(inbox));
+        s.fire_event("MAIL_SHOW", vec![]);
+        s.fire_event("MAIL_INBOX_UPDATE", vec![]);
+        s.run("MailItem1Button:Click()").unwrap();
+        s
+    }
+    let text = |s: &UiScript, region: &str| {
+        s.eval::<String>(&format!("return tostring({region}:GetText())"))
+            .unwrap()
+    };
+    let money = |s: &UiScript, frame: &str| {
+        s.eval::<String>(&format!("return tostring({frame}.staticMoney)"))
+            .unwrap()
+    };
+
+    // ── The seller's: the full sum. 1g sale + 25c deposit back − 5c the house takes. ──────────
+    let mut s = open_with(MailInvoice {
+        seller: true,
+        item_name: "Linen Cloth".into(),
+        player_name: "Twowarrior".into(),
+        bid: 10_000,
+        buyout: 10_000,
+        deposit: 25,
+        consignment: 500,
+    });
+    assert!(
+        s.eval::<bool>("return OpenMailInvoiceFrame:IsShown()")
+            .unwrap(),
+        "a sold-auction mail shows the receipt"
+    );
+    assert_eq!(text(&s, "OpenMailInvoiceItemLabel"), "SOLD: Linen Cloth");
+    assert_eq!(text(&s, "OpenMailInvoicePurchaser"), "BY: Twowarrior");
+    // bid == buyout, so it was bought outright rather than won on a bid.
+    assert_eq!(text(&s, "OpenMailInvoiceBuyMode"), "(Buyout)");
+    assert_eq!(money(&s, "OpenMailSalePriceMoneyFrame"), "10000");
+    assert_eq!(money(&s, "OpenMailDepositMoneyFrame"), "25");
+    assert_eq!(money(&s, "OpenMailHouseCutMoneyFrame"), "500");
+    assert_eq!(
+        money(&s, "OpenMailTransactionAmountMoneyFrame"),
+        "9525",
+        "sale + deposit - cut, which is the whole point of the four lines"
+    );
+    assert!(s
+        .eval::<bool>("return OpenMailInvoiceHouseCut:IsShown()")
+        .unwrap());
+    assert_eq!(
+        text(&s, "OpenMailBodyText"),
+        "nil",
+        "an invoice has no letter body at all — `GetInboxText` nils it (1527), so the receipt has \
+         nothing to sit on top of"
+    );
+    assert!(s.take_errors().is_empty());
+
+    // ── The buyer's: one line, and the seller-only rows gone. Won on a bid, not bought out. ───
+    let mut s = open_with(MailInvoice {
+        seller: false,
+        item_name: "Small Blue Pouch".into(),
+        player_name: "Onewarrior".into(),
+        bid: 9_000,
+        buyout: 10_000,
+        deposit: 0,
+        consignment: 0,
+    });
+    assert!(s
+        .eval::<bool>("return OpenMailInvoiceFrame:IsShown()")
+        .unwrap());
+    assert_eq!(
+        text(&s, "OpenMailInvoiceItemLabel"),
+        "BOUGHT: Small Blue Pouch  (High Bidder)",
+        "the buy mode rides the item line here, not the purchaser line"
+    );
+    assert_eq!(text(&s, "OpenMailInvoicePurchaser"), "FROM: Onewarrior");
+    assert_eq!(text(&s, "OpenMailInvoiceBuyMode"), "");
+    assert_eq!(money(&s, "OpenMailTransactionAmountMoneyFrame"), "9000");
+    for gone in [
+        "OpenMailInvoiceSalePrice",
+        "OpenMailInvoiceDeposit",
+        "OpenMailInvoiceHouseCut",
+        "OpenMailSalePriceMoneyFrame",
+        "OpenMailDepositMoneyFrame",
+        "OpenMailHouseCutMoneyFrame",
+    ] {
+        assert!(
+            !s.eval::<bool>(&format!("return {gone}:IsShown()")).unwrap(),
+            "{gone} is a seller-only line"
+        );
+    }
+    assert!(s.take_errors().is_empty());
+}
+
+/// A mail that is NOT an auction invoice keeps its letter: the pane stays hidden and the body text
+/// survives. The blanking above is aimed at one kind of mail and must not reach any other.
+#[test]
+fn a_plain_letter_keeps_its_body_and_shows_no_receipt() {
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_mail(Some(small_inbox()));
+    s.fire_event("MAIL_SHOW", vec![]);
+    s.fire_event("MAIL_INBOX_UPDATE", vec![]);
+    s.run("MailItem1Button:Click()").unwrap();
+    assert!(!s
+        .eval::<bool>("return OpenMailInvoiceFrame:IsShown()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return OpenMailBodyText:GetText()")
+            .unwrap(),
+        "body"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// The open letter's ring holds an ordinary **item** icon (`INV_Misc_Note_01`), so it has to go
+/// through the PORTRAIT verb and not a bare `SetTexture` — which is exactly what the reference
+/// reaches for here, and nowhere else in the file (`MailFrame.lua` l.174).
+///
+/// Set raw, the icon's square dark border shows through the ring's transparent corners as four
+/// little squares around the circle (director's report, 2026-08-22). The INBOX window's ring is the
+/// control: it holds `Mail-Icon`, purpose-drawn art that needs no mask, and the reference leaves
+/// that one at its `file=` (ref l.258) — so a blanket "mask every ring" would be wrong too.
+#[test]
+fn the_open_letters_ring_icon_is_masked_but_the_inboxs_is_not() {
+    use benilla_ui::script::QuadContent;
+
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_screen_size(1024.0, 768.0);
+    s.set_mail(Some(small_inbox()));
+    s.fire_event("MAIL_SHOW", vec![]);
+    s.fire_event("MAIL_INBOX_UPDATE", vec![]);
+    s.run("MailItem1Button:Click()").unwrap();
+    s.resolve();
+
+    let masked = |needle: &str| -> Vec<bool> {
+        s.extract()
+            .into_iter()
+            .filter_map(|q| match q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    circular,
+                    ..
+                } if p.contains(needle) => Some(circular),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let stationery = masked("INV_Misc_Note_01");
+    assert!(
+        !stationery.is_empty(),
+        "the stationery icon should be drawn somewhere"
+    );
+    assert!(
+        stationery.contains(&true),
+        "the open letter's ring icon draws masked to its inscribed circle; got {stationery:?}"
+    );
+
+    let mail_icon = masked("Mail-Icon");
+    assert!(
+        !mail_icon.contains(&true),
+        "the inbox window's own ring is purpose-drawn art and stays raw, as in the reference; \
+         got {mail_icon:?}"
     );
 }

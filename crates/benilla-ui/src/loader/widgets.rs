@@ -142,18 +142,13 @@ impl Loader<'_> {
                 }
             }
         };
-        tex("NormalTexture", "SetNormalTexture", self);
-        tex("PushedTexture", "SetPushedTexture", self);
-        tex("DisabledTexture", "SetDisabledTexture", self);
-        tex("HighlightTexture", "SetHighlightTexture", self);
-        if is_check {
-            tex("CheckedTexture", "SetCheckedTexture", self);
-            tex("DisabledCheckedTexture", "SetDisabledCheckedTexture", self);
-            if let Some(c) = el.attr("checked") {
-                let checked = c.eq_ignore_ascii_case("true") || c == "1";
-                self.call(wrapper, "SetChecked", checked, dbg);
-            }
-        }
+        // The LABEL is published before the state textures, and the order is load-bearing: a
+        // state texture may anchor to `$parentText` (the reference's own sort-header template
+        // hangs its arrow off the label's RIGHT), and this loader resolves `relativeTo` eagerly by
+        // name at SetPoint time. Applied the other way round, every such anchor missed and fell
+        // back to the owner — 14 of them in one window, each a sort arrow sitting in the wrong
+        // place. The real client is order-free here because it resolves anchors later; we are not,
+        // so we order it ourselves rather than making each author work around it.
         for bt in children_named(el, "ButtonText") {
             // Create the label slot even with no text yet (the geometry below must land on a real
             // region; SetText is the slot's lazy constructor), then apply the element's own
@@ -166,6 +161,26 @@ impl Loader<'_> {
                 Some(raw) => self.resolve_text(raw, dbg),
                 None => String::new(),
             };
+            // A NAMED `<ButtonText name="$parentText">` is created as a named region and bound,
+            // rather than left to `SetText`'s lazy constructor and aliased afterwards.
+            //
+            // Publishing a Lua global is not the same thing as naming the region, and the gap was
+            // invisible until something anchored to it: `relativeTo="$parentText"` resolves through
+            // the engine's own named-region lookup, which a global alias never reaches, so every
+            // such anchor missed and fell back to the owner. `GetFontString():GetName()` also
+            // answered nil, which is wrong for any addon that asks.
+            let bt_name = bt.name().map(|raw| framexml::resolve_name(raw, self_name));
+            if let Some(rname) = bt_name.clone() {
+                match wrapper
+                    .call_method::<Table>("CreateFontString", (rname, Option::<String>::None))
+                {
+                    Ok(fs) => self.call(wrapper, "SetFontString", fs, dbg),
+                    Err(e) => self
+                        .report
+                        .warnings
+                        .push(format!("{dbg}: ButtonText CreateFontString: {e}")),
+                }
+            }
             self.call(wrapper, "SetText", label, dbg);
             if let Ok(region) = wrapper.call_method::<Table>("GetFontString", ()) {
                 // Same clear→layout→implicit order as the state textures above (decision 1310):
@@ -183,13 +198,25 @@ impl Loader<'_> {
                 // Publish the label under its resolved name (`<ButtonText name="$parentText">`) —
                 // the ref kit addresses tab/button labels by exactly this global
                 // (PanelTemplates_TabResize's `getglobal(tabName.."Text")`).
-                if let Some(rname) = bt.name().map(|raw| framexml::resolve_name(raw, self_name)) {
+                if let Some(rname) = bt_name {
                     if let Err(e) = self.lua().globals().set(rname.clone(), region) {
                         self.report
                             .warnings
                             .push(format!("{dbg}: ButtonText global '{rname}': {e}"));
                     }
                 }
+            }
+        }
+        tex("NormalTexture", "SetNormalTexture", self);
+        tex("PushedTexture", "SetPushedTexture", self);
+        tex("DisabledTexture", "SetDisabledTexture", self);
+        tex("HighlightTexture", "SetHighlightTexture", self);
+        if is_check {
+            tex("CheckedTexture", "SetCheckedTexture", self);
+            tex("DisabledCheckedTexture", "SetDisabledCheckedTexture", self);
+            if let Some(c) = el.attr("checked") {
+                let checked = c.eq_ignore_ascii_case("true") || c == "1";
+                self.call(wrapper, "SetChecked", checked, dbg);
             }
         }
         if let Some(text) = el.attr("text") {

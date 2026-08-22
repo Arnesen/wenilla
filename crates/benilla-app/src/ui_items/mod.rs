@@ -55,7 +55,9 @@ use drain::{
     drain_container_autoequips, drain_container_destroys, drain_container_moves,
     drain_container_uses, drain_inventory_uses,
 };
-use feed::{feed_containers, feed_item_sets, feed_item_stats, feed_player_req};
+use feed::{
+    feed_containers, feed_item_sets, feed_item_stats, feed_player_req, feed_random_properties,
+};
 
 /// The backpack's fixed capacity (`PLAYER_FIELD_PACK_SLOT_1..` — 16 slots on the 1.12 wire).
 pub(super) const PACK_SLOTS: u8 = 16;
@@ -960,6 +962,13 @@ fn load_item_dbcs(mut commands: Commands, world_assets: Option<Res<benilla_asset
         }
         Err(e) => warn!("ui_items: ItemClass.dbc failed to load: {e:#}"),
     }
+    match benilla_formats::load_auction_houses(&mut chain) {
+        Ok(cat) => {
+            info!("ui_items: AuctionHouse.dbc loaded ({} houses)", cat.len());
+            commands.insert_resource(crate::ui_auction::AuctionHouses(cat));
+        }
+        Err(e) => warn!("ui_items: AuctionHouse.dbc failed to load: {e:#}"),
+    }
     match benilla_formats::load_item_bag_families(&mut chain) {
         Ok(cat) => {
             info!(
@@ -1005,6 +1014,9 @@ impl Plugin for UiItemsPlugin {
                     // re-hover the very next frame already sees them.
                     feed_item_stats.in_set(UnitFeed).before(UiInput),
                     feed_item_sets.in_set(UnitFeed).before(UiInput),
+                    // The roll table, pushed whole once per VM (1547) — before the input pass, so
+                    // the first hover of the session already resolves a drop's suffix lines.
+                    feed_random_properties.in_set(UnitFeed).before(UiInput),
                     feed_player_req.in_set(UnitFeed).before(UiInput),
                     // After the input pass, so a click's UseContainerItem goes out the same frame.
                     drain_container_uses.after(UiInput),

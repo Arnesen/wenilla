@@ -8,12 +8,21 @@
 //! (center `rec+0x5c/0x60`, radius `rec+0x68`), then picks a fade band **purely by the doodad's
 //! bounding-sphere radius** (the size split the user observed — big things stay, small props fade near):
 //!
-//! | bounding radius | fade band (start→end yd) | examples |
+//! | bounding radius | fade band (start→end yd) | examples (MEASURED, not guessed) |
 //! |---|---|---|
 //! | `> 7.0`         | never fades (`1.0`)      | trees, buildings — drawn until the frustum far-clip |
-//! | `≤ 0.5`         | `40 → 50`                | fences, haystacks, pumpkins (fade nearest) |
-//! | `0.5 … 2.5`     | `100 → 125`              | mid props |
-//! | `2.5 … 7.0`     | `150 → 200`              | large props (far end clamped by farclip) |
+//! | `≤ 0.5`         | `40 → 50`                | candles, a dandelion, a squash — table-top scale only |
+//! | `0.5 … 2.5`     | `100 → 125`              | most fences + posts, small haystacks, field pumpkins |
+//! | `2.5 … 7.0`     | `150 → 200`              | long fence spans, big haystacks (far end clamped by farclip) |
+//!
+//! **The band is chosen by SIZE, never by what the thing is** — and the intuitive example is
+//! usually the wrong one. This table's examples were measured with
+//! `cargo run -p benilla-formats --example fade_bucket -- <substring>`, after an earlier version of
+//! this comment listed "fences, haystacks, pumpkins" against `≤ 0.5` and a reader believed it. Not
+//! one of the 42 models whose path contains "fence" is in that band: they measure 0.75–4.97 yd, so
+//! a fence fades at `100→125` or `150→200` — roughly **twice** the ~70 yd clutter horizon, the
+//! ordering a player actually sees. Across all 9691 M2s the split is 2916 / 3042 / 1840 / 1893
+//! (smallest → never-fades). Re-measure before trusting an example here.
 //!
 //! `fade = 1 − (d − start) / range`, clamped to `[0, 1]`; monotonic in size (bigger ⇒ fades farther).
 //! `fade ≥ 1` ⇒ fully opaque (drawn); `fade ≤ 0` ⇒ culled (not added to the draw list). The scalar
@@ -59,8 +68,8 @@ pub const NEVER_FADE_RADIUS: f32 = 7.0;
 /// bucket whose `max_radius` it does not exceed; `fade = 1 − (d − start) / range`. Exact `FUN_00683f80`
 /// constants (see module docs). Buckets are ordered small→large; `NEVER_FADE_RADIUS` caps the table.
 const BUCKETS: [(f32, f32, f32); 3] = [
-    (0.5, 40.0, 10.0),                // ≤ 0.5 yd → 40→50  (fences/hay/pumpkins)
-    (2.5, 100.0, 25.0),               // ≤ 2.5 yd → 100→125
+    (0.5, 40.0, 10.0),  // ≤ 0.5 yd → 40→50  (candles/dandelions — NOT fences)
+    (2.5, 100.0, 25.0), // ≤ 2.5 yd → 100→125
     (NEVER_FADE_RADIUS, 150.0, 50.0), // ≤ 7.0 yd → 150→200
 ];
 

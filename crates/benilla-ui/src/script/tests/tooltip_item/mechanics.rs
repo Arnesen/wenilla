@@ -615,6 +615,204 @@ fn temporary_enchant_line_carries_its_countdown_and_charges() {
     );
 }
 
+/// **The loot hover shows the ROLL, never the placeholder** (decision 1547; wow-re §E6-LOOT).
+/// `SetLootItem 0x533470` writes an instance block (p6=1) whose `+0x424` is the wire's
+/// randomPropertyId and whose seven enchant slots are zeroed, and passes an all-zero item GUID —
+/// so there is never an object, the builder takes §E5's suffix-row copy into slots 2..6, and the
+/// `ITEM_RANDOM_ENCHANT` arm is unreachable (§E1's fork). The row's name is the suffix-joined one
+/// (`0x5d8b00`, the same string `GetLootSlotInfo` returns), so the plate reads "… of the Monkey".
+///
+/// This is the reported bug's exact shape: through the template path (`SetItemById`) the same
+/// hover printed `<Random enchantment>` until the item reached a bag.
+#[test]
+fn a_looted_roll_shows_its_lines_and_never_the_placeholder() {
+    let mut s = script();
+    s.set_item_template(
+        8888,
+        ItemTemplateView {
+            name: "Bloodrazor".into(),
+            quality: 2,
+            class: 2,
+            // The template CAN roll — the placeholder's own gate, so its absence below is the law
+            // and not an accident of the fixture.
+            random_property: 42,
+            ..Default::default()
+        },
+    );
+    s.set_loot(Some(LootState {
+        rows: vec![Some(LootRow {
+            name: Some("Bloodrazor of the Monkey".into()),
+            texture: None,
+            quantity: 1,
+            quality: Some(2),
+            is_coin: false,
+            item_id: 8888,
+            link: Some("|cff1eff00|Hitem:8888:0:584:0|h[Bloodrazor of the Monkey]|h|r".into()),
+            // The row carries the ROLL, not resolved lines — the engine resolves it, like the
+            // reference reading its own DBC store off the block's `+0x424`.
+            random_property_id: 584,
+        })],
+        fishing: false,
+    }));
+    s.set_random_properties(
+        [(
+            584,
+            RandomPropertyView {
+                suffix: "of the Monkey".into(),
+                enchants: vec![
+                    EnchantView {
+                        slot: 2,
+                        name: "Agility +7".into(),
+                        ..Default::default()
+                    },
+                    EnchantView {
+                        slot: 3,
+                        name: "Stamina +7".into(),
+                        ..Default::default()
+                    },
+                ],
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetLootItem(1)
+    "#,
+    )
+    .unwrap();
+    let lines = super::lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert!(
+        !texts.contains(&"<Random enchantment>"),
+        "a block source never reaches the placeholder arm — got {texts:?}"
+    );
+    assert_eq!(
+        texts.first(),
+        Some(&"Bloodrazor of the Monkey"),
+        "the plate takes the roll's suffixed name — got {texts:?}"
+    );
+    for line in ["Agility +7", "Stamina +7"] {
+        let l = lines
+            .iter()
+            .find(|(t, _)| t == line)
+            .unwrap_or_else(|| panic!("the roll's slot line {line} — got {texts:?}"));
+        // Slots 2..6 are always WHITE, whatever the sign (§E3).
+        assert_eq!(l.1, [1.0, 1.0, 1.0, 1.0], "{line} is white");
+    }
+}
+
+/// The other half of the same law: a loot row with **no** roll shows no enchant line AND no
+/// placeholder, even though the template can roll. The fork tests the block's presence, not its
+/// contents (§E1) — which is why this cannot be expressed as "print the placeholder when the
+/// slots are empty".
+#[test]
+fn a_looted_item_with_no_roll_shows_neither_line_nor_placeholder() {
+    let mut s = script();
+    s.set_item_template(
+        8888,
+        ItemTemplateView {
+            name: "Bloodrazor".into(),
+            quality: 2,
+            class: 2,
+            random_property: 42,
+            ..Default::default()
+        },
+    );
+    s.set_loot(Some(LootState {
+        rows: vec![Some(LootRow {
+            name: Some("Bloodrazor".into()),
+            quantity: 1,
+            quality: Some(2),
+            item_id: 8888,
+            ..Default::default()
+        })],
+        fishing: false,
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetLootItem(1)
+    "#,
+    )
+    .unwrap();
+    let texts: Vec<String> = super::lines_of(&mut s)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    assert!(
+        !texts.iter().any(|t| t == "<Random enchantment>"),
+        "no placeholder on a block source — got {texts:?}"
+    );
+}
+
+/// A **chat link** is a block source too (`SetHyperlink 0x532181`, p6=1): its `|Hitem:` token 2 is
+/// the roll, which §E5 expands into slots 2..6, and the placeholder arm is unreachable. Decision
+/// 0920's prose said a hyperlink hover shows the placeholder; §E1's fork says otherwise, and this
+/// is the case that proves it — the same drop, linked in chat instead of hovered in the loot
+/// window, must read identically.
+#[test]
+fn a_linked_roll_shows_its_lines_and_never_the_placeholder() {
+    let mut s = script();
+    s.set_item_template(
+        8888,
+        ItemTemplateView {
+            name: "Bloodrazor".into(),
+            quality: 2,
+            class: 2,
+            random_property: 42,
+            ..Default::default()
+        },
+    );
+    s.set_random_properties(
+        [(
+            584,
+            RandomPropertyView {
+                suffix: "of the Monkey".into(),
+                enchants: vec![EnchantView {
+                    slot: 2,
+                    name: "Agility +7".into(),
+                    ..Default::default()
+                }],
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetHyperlink("|cff1eff00|Hitem:8888:0:584:0|h[Bloodrazor of the Monkey]|h|r")
+    "#,
+    )
+    .unwrap();
+    let texts: Vec<String> = super::lines_of(&mut s)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    assert!(
+        !texts.iter().any(|t| t == "<Random enchantment>"),
+        "a link never reaches the placeholder arm — got {texts:?}"
+    );
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("Bloodrazor of the Monkey"),
+        "the plate takes the link's own suffixed name — got {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "Agility +7"),
+        "the roll's slot line — got {texts:?}"
+    );
+}
+
 /// `<Random enchantment>` (§E5) — the template-only placeholder: a random-property item with NO
 /// instance to read a roll from prints it, green, and the per-slot lines and this one are mutually
 /// exclusive by construction. The control is the same template hovered as a real enchanted

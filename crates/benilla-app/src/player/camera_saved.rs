@@ -228,8 +228,11 @@ pub(super) fn plugin(app: &mut App) {
                 .before(super::control)
                 .run_if(in_state(ClientState::InWorld)),
         )
-        .add_systems(OnExit(ClientState::InWorld), save_on_session_end)
-        .add_systems(Update, save_on_exit);
+        .add_systems(OnExit(ClientState::InWorld), save_on_session_end);
+    // The quit root goes on the exit edge, never `Update` (decision 1528): the close button's
+    // `AppExit` is not written until `PostUpdate`, so an `Update` reader watched the pose die with
+    // the process — a `/logout` saved it and quitting from in-world did not.
+    crate::shutdown::on_app_exit(app, save_on_exit.into_configs());
 }
 
 #[cfg(test)]

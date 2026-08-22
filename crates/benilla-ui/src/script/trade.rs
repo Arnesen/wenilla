@@ -140,19 +140,6 @@ fn flag(b: bool) -> Value {
     }
 }
 
-/// An item's `isUsable`, the shared item-usable gate over the slot's template from the
-/// merchant/tooltip store, keyed by the item id — usable while the template is still in flight (the
-/// null-record skip, the mail/merchant path). Spell knowledge comes from the engine's spellbook
-/// mirror, as the tooltip's "Requires <spell>" red does.
-fn is_usable(model: &Model, item_id: u32) -> bool {
-    item_id == 0
-        || model.item_templates.get(&item_id).is_none_or(|v| {
-            super::item_stats::item_usable(v, &model.player_req, |id| {
-                model.spellbook.slots.iter().any(|s| s.spell_id == id)
-            })
-        })
-}
-
 /// Fetch a cloned slot for a 1-based index off one side, or `None` (out of range / empty / no trade
 /// open). `pick` selects the side from the pushed [`TradeState`].
 fn slot_at(
@@ -218,7 +205,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let (slot, usable) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let slot = slot_at(&model, id, |t| &t.player);
-                let usable = slot.as_ref().is_none_or(|s| is_usable(&model, s.item_id));
+                let usable = slot
+                    .as_ref()
+                    .is_none_or(|s| super::item_stats::item_usable_by_id(&model, s.item_id));
                 (slot, usable)
             };
             let Some(s) = slot else {
@@ -248,7 +237,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let (slot, usable) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let slot = slot_at(&model, id, |t| &t.target);
-                let usable = slot.as_ref().is_none_or(|s| is_usable(&model, s.item_id));
+                let usable = slot
+                    .as_ref()
+                    .is_none_or(|s| super::item_stats::item_usable_by_id(&model, s.item_id));
                 (slot, usable)
             };
             let Some(s) = slot else {

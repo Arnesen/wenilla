@@ -56,7 +56,9 @@
 //! bevy negation this pipeline never had — copying it flipped every back-facing canopy card).
 //!
 //! **Known B1 gaps** (B2+ owns them): dev-instrument identity (inspector/WOW_PICK name nothing
-//! — the weld/merge trade, one side table if missed). The other one B1 left open — no
+//! — the weld/merge trade, one side table if missed) is **CLOSED by 1534**: the side table is the
+//! items' own [`GxItem::object`]/[`GxItem::local_aabb`], and [`pick`] is the lane answering the ray
+//! from this frame's published selection. The other one B1 left open — no
 //! `presentable()` coupling, so an unbaked region shows a hole for a beat on a cold arrival
 //! where the merge publishes `merge_pending` into the reveal cover (1419) — is **CLOSED by
 //! 1498**: [`StaticGx::undrawn_regions`] is that coupling, and [`StaticGx::flush_now`] is why
@@ -116,6 +118,7 @@
 //! lever that attributed the residue; `WOW_GX_CENSUS=1` is the agreement instrument; the
 //! `house-north-midnight` fixture is the one capture where SIDN is live pixels.
 
+use bevy::camera::primitives::Aabb;
 use bevy::mesh::MeshVertexAttribute;
 use bevy::prelude::*;
 use bevy::render::render_resource::VertexFormat;
@@ -126,6 +129,7 @@ use benilla_formats::{ModelBlend, RenderSubmesh, WmoBatchClass};
 
 mod bake;
 mod cull;
+mod pick;
 mod pool;
 mod render;
 
@@ -278,6 +282,13 @@ pub(crate) fn gx_perf_guard(i: usize) -> GxPerfGuard {
 struct GxItem {
     geometry: Arc<RenderSubmesh>,
     transform: Transform,
+    /// This item's placement identity — what the inspector/`WOW_PICK` name when the cursor lands
+    /// on it (decision 1534). Shared per placement, so a 40-batch building costs one allocation.
+    object: Arc<crate::interact::WorldObject>,
+    /// The batch's model-local bound (the render form's build-time `Aabb`), kept for the pick's
+    /// broad phase — the drawn side recentres and unions its bounds per cell, which cannot
+    /// answer "which batch is under the cursor". `None` ⇒ narrow-tested unconditionally.
+    local_aabb: Option<Aabb>,
     /// The owner TILE — read only by [`StaticGx::release_owner`], i.e. only for cell items.
     /// A WMO region's lifecycle keys on its instance entity instead (see `cull::cull_cells`).
     owner: (i32, i32),
@@ -322,8 +333,9 @@ struct GxItemProp {
 struct GxFader {
     owner: (i32, i32),
     uid: u32,
-    /// The placement's model label (`WorldObject` identity for the exiled entities).
-    label: std::sync::Arc<str>,
+    /// The placement's identity — carried onto the exiled entities' `WorldObject` so a feathering
+    /// doodad names the same thing whichever lane is drawing it that frame.
+    object: Arc<crate::interact::WorldObject>,
     transform: Transform,
     radius: f32,
     /// Model-local fade-sphere centre; `transform` maps it to [`Self::center`].
@@ -450,6 +462,11 @@ pub struct StaticGx {
 pub struct GxBatch<'a> {
     pub geometry: &'a Arc<RenderSubmesh>,
     pub transform: Transform,
+    /// The placement's shared identity — the pick's answer for geometry no entity owns (1534).
+    pub object: &'a Arc<crate::interact::WorldObject>,
+    /// The batch's model-local build-time bound (the render form's `Aabb`) — the pick's broad
+    /// phase.
+    pub aabb: Option<Aabb>,
     /// The owner tile (cell items' release key; unread for WMO items — their region follows
     /// the instance entity's lifetime).
     pub owner: (i32, i32),
@@ -471,7 +488,7 @@ pub struct GxBatch<'a> {
     /// `Some` = a FADER batch (B2, decision 1431): the exile seed. `None` on never-fade
     /// batches, the WMO lane, and the prop lane (an exterior fader prop never diverts —
     /// see the assemble gate).
-    pub fade: Option<GxFadeSeed<'a>>,
+    pub fade: Option<GxFadeSeed>,
 }
 
 /// The prop half of [`GxBatch`] (B4): the building's instance entity (the region key, the
@@ -489,12 +506,7 @@ pub struct GxPropBatch {
 /// exile protocol spawns the feather-band entity from. Everything is a handle clone of what
 /// the production assembler holds at the divert point, so the exiled entity IS the entity
 /// path's bundle.
-pub struct GxFadeSeed<'a> {
-    /// The placement uniqueId — one exile unit per placement (all its batches cross the band
-    /// together; they share one fade sphere).
-    pub uid: u32,
-    /// The placement's model label (dev-instrument identity on the exiled entities).
-    pub label: &'a str,
+pub struct GxFadeSeed {
     /// Bounding-sphere radius (yd, placement-scaled) — selects the fade band.
     pub radius: f32,
     /// Model-local bbox centre; the fade distance is measured to its world image.
@@ -509,13 +521,9 @@ pub struct GxFadeSeed<'a> {
 /// the site decides which population an eligible batch joins and which lifecycle key it
 /// takes — cells release by owner tile, WMO regions by instance death.
 pub enum GxSite<'a> {
-    /// A world-static ADT-doodad placement. `uid`/`label` feed the fader seed (B2) — the
-    /// exile unit is the placement, and its exiled entities carry its instrument identity.
-    Doodad {
-        owner: (i32, i32),
-        uid: u32,
-        label: &'a str,
-    },
+    /// A world-static ADT-doodad placement — cell items, released by owner tile. The exile unit
+    /// (B2) is the placement, identified by the shared [`GxBatch::object`] every site now carries.
+    Doodad { owner: (i32, i32) },
     /// A WMO placement's group geometry: the pre-spawned `WmoPortalInstance` entity + the
     /// model's per-batch group map (`WmoModel::submesh_group`, index-parallel with batches).
     Wmo { instance: Entity, groups: &'a [u16] },
@@ -708,18 +716,19 @@ impl StaticGx {
         // placements start Steady; the scan classifies them against the live camera the same
         // frame their cell bakes (states run before the bitmap rebuild), so a placement that
         // streams in beyond its band never draws retained for even one frame.
-        let fader_uid = b.fade.as_ref().map(|f| f.uid);
+        let fader_uid = b.fade.as_ref().map(|_| b.object.id);
         if let Some(seed) = b.fade {
             // A never-fade radius cannot reach here (the assemble gate builds a seed only
             // for `!class.never_fade`), but a MAX band is the honest fallback: it reads
             // "always steady", which IS never-fade semantics.
             let (near, far) =
                 crate::model_fade::fade_band(seed.radius).unwrap_or((f32::MAX, f32::MAX));
-            let is_new = !entry.faders.contains_key(&seed.uid);
-            let fader = entry.faders.entry(seed.uid).or_insert_with(|| GxFader {
+            let uid = b.object.id;
+            let is_new = !entry.faders.contains_key(&uid);
+            let fader = entry.faders.entry(uid).or_insert_with(|| GxFader {
                 owner: b.owner,
-                uid: seed.uid,
-                label: std::sync::Arc::from(seed.label),
+                uid,
+                object: b.object.clone(),
                 transform: b.transform,
                 radius: seed.radius,
                 local_center: seed.local_center,
@@ -757,6 +766,8 @@ impl StaticGx {
         entry.items.push(GxItem {
             geometry: b.geometry.clone(),
             transform: b.transform,
+            object: b.object.clone(),
+            local_aabb: b.aabb,
             owner: b.owner,
             texture: b.texture.as_ref().map(Handle::id),
             _texture_handle: b.texture,
@@ -922,15 +933,45 @@ pub(crate) mod testkit {
     //! Shared test fixtures for the collector/bake test modules.
     use super::*;
 
+    /// A test placement identity — `uid` is the id the fader lane keys its exile unit on.
+    pub fn object(uid: u32) -> Arc<crate::interact::WorldObject> {
+        Arc::new(crate::interact::WorldObject {
+            kind: crate::model_render::ModelKind::Doodad,
+            label: "World\\test\\fence.m2".into(),
+            id: uid,
+            detail: String::new(),
+        })
+    }
+
+    /// The one identity [`batch`] borrows — a test that needs distinct placements uses
+    /// [`batch_of`] with its own [`object`].
+    fn shared_object() -> &'static Arc<crate::interact::WorldObject> {
+        static O: std::sync::OnceLock<Arc<crate::interact::WorldObject>> =
+            std::sync::OnceLock::new();
+        O.get_or_init(|| object(1))
+    }
+
     pub fn batch(
         geometry: &Arc<RenderSubmesh>,
         at: Vec3,
         texture: Option<Handle<bevy::image::Image>>,
         blend: ModelBlend,
     ) -> GxBatch<'_> {
+        batch_of(shared_object(), geometry, at, texture, blend)
+    }
+
+    pub fn batch_of<'a>(
+        object: &'a Arc<crate::interact::WorldObject>,
+        geometry: &'a Arc<RenderSubmesh>,
+        at: Vec3,
+        texture: Option<Handle<bevy::image::Image>>,
+        blend: ModelBlend,
+    ) -> GxBatch<'a> {
         GxBatch {
             geometry,
             transform: Transform::from_translation(at),
+            object,
+            aabb: None,
             owner: (0, 0),
             texture,
             blend,
@@ -960,7 +1001,7 @@ pub(crate) mod testkit {
 
 #[cfg(test)]
 mod tests {
-    use super::testkit::{batch, tri};
+    use super::testkit::{batch, batch_of, object, tri};
     use super::*;
 
     /// A diverted batch is collected geometry that draws NOTHING until its region bakes — the
@@ -1012,8 +1053,6 @@ mod tests {
         let mut gx = StaticGx::default();
         let g = tri([0.0; 3]);
         let mk_seed = || GxFadeSeed {
-            uid: 77,
-            label: "World\\test\\fence.m2",
             radius: 0.4,
             local_center: Vec3::ZERO,
             stat_mesh: Handle::default(),
@@ -1021,10 +1060,25 @@ mod tests {
             cutout: Handle::default(),
             blend: Handle::default(),
         };
-        let mut a = batch(&g, Vec3::new(5.0, 0.0, 5.0), None, ModelBlend::Opaque);
+        // The exile unit is keyed by the PLACEMENT identity every lane shares (1534) — one
+        // object, two batches, one seed.
+        let fence = object(77);
+        let mut a = batch_of(
+            &fence,
+            &g,
+            Vec3::new(5.0, 0.0, 5.0),
+            None,
+            ModelBlend::Opaque,
+        );
         a.fade = Some(mk_seed());
         assert!(gx.divert(a));
-        let mut b = batch(&g, Vec3::new(5.0, 0.0, 5.0), None, ModelBlend::AlphaTest);
+        let mut b = batch_of(
+            &fence,
+            &g,
+            Vec3::new(5.0, 0.0, 5.0),
+            None,
+            ModelBlend::AlphaTest,
+        );
         b.fade = Some(mk_seed());
         assert!(gx.divert(b));
         assert!(gx.divert(batch(
@@ -1099,11 +1153,10 @@ mod tests {
     fn a_dead_owner_queues_its_exiles() {
         let mut gx = StaticGx::default();
         let g = tri([0.0; 3]);
-        let mut a = batch(&g, Vec3::ZERO, None, ModelBlend::Opaque);
+        let doomed = object(9);
+        let mut a = batch_of(&doomed, &g, Vec3::ZERO, None, ModelBlend::Opaque);
         a.owner = (1, 1);
         a.fade = Some(GxFadeSeed {
-            uid: 9,
-            label: "x",
             radius: 0.4,
             local_center: Vec3::ZERO,
             stat_mesh: Handle::default(),

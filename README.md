@@ -33,8 +33,8 @@ and no bundled game assets.
 - **Movement:** a WoW-feel controller, networked movement in both directions, the server-granted
   modes from slow fall to roots, a follow camera with collision, boats, zeppelins and taxi flights.
 - **Networking:** SRP6 auth through world-session crypto, the object mirror into the ECS, and live
-  wire coverage from movement and chat through spells, party, quests, mail, trade, vendors, bank
-  and loot.
+  wire coverage from movement and chat through spells, party, quests, mail, trade, vendors, bank,
+  loot, the auction house and PvP honor.
 - **UI:** a from-scratch FrameXML + Lua engine driving the built-in interface, from the login and
   character screens through the full HUD, the classic windows (guild, macros and key bindings
   included), chat, nameplates, floating combat text and tooltips; third-party addons load from
@@ -46,8 +46,8 @@ and no bundled game assets.
 
 ## Not built yet
 
-Battlegrounds and honor, and the auction house. Third-party addons are partial: AtlasLoot and
-Bagnon run, and the addon API fills in as other addons are tried.
+Battlegrounds. Third-party addons are partial: AtlasLoot and Bagnon run, and the addon API
+fills in as other addons are tried.
 
 ## Running it
 

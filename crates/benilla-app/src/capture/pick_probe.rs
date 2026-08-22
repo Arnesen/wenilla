@@ -43,7 +43,7 @@ use bevy::window::PrimaryWindow;
 
 use super::probes::ProbeClock;
 use benilla_assets::materials::WowModelMaterial;
-use benilla_world::interact::{cast_pick_ray, PickParts, WorldObject};
+use benilla_world::interact::{WorldObject, WorldPick};
 use benilla_world::view::WorldCamera;
 
 pub(crate) struct PickProbePlugin;
@@ -192,7 +192,10 @@ fn fire_pick(
     // the probe keys on it too and stays a pure instrument: nothing outside this file reads it.
     objects: Query<Entity, Pickable>,
     names: HitNames,
-    parts: PickParts,
+    // Everything drawn, entity-owned or not ([`WorldPick`]). Without the entity-less lanes this
+    // probe reports `0 hits` over every absorbed tree, building and prop — which is exactly what
+    // it did between 1434's default flip and 1534.
+    pick: WorldPick,
 ) {
     if probe.taken >= probe.count || probe.pixels.is_empty() || time.elapsed_secs() < probe.next_at
     {
@@ -216,7 +219,7 @@ fn fire_pick(
         // surface behind it, which is exactly what we came for. The cast reads each part's
         // RESIDENT geometry (decision 0857) — the render meshes are `RENDER_WORLD`-only since
         // 0834, so a `MeshRayCast` here reports nothing for any static model.
-        let hits = cast_pick_ray(ray, &pickable, &parts, true);
+        let hits = pick.cast(ray, &pickable, true);
         // The camera's GLOBAL transform, bit-exact, on the line that carries the cast index — so
         // "did the camera move on this frame?" is answerable against "was this frame dim?" without
         // aligning two logs by hand. It is deliberately *this* transform: it is the one
@@ -244,7 +247,8 @@ fn fire_pick(
         // while the along-ray gap stays large. So report the perpendicular distance from this hit's
         // point to the previous hit's plane as well: that is the number a depth buffer sees.
         let mut previous: Option<(f32, Vec3, Vec3)> = None;
-        for (i, (entity, hit)) in hits.iter().enumerate() {
+        for (i, found) in hits.iter().enumerate() {
+            let hit = &found.hit;
             let gap = previous.map_or(String::new(), |(d, point, normal): (f32, Vec3, Vec3)| {
                 let perp = (hit.point - point).dot(normal).abs();
                 format!(
@@ -254,10 +258,25 @@ fn fire_pick(
                 )
             });
             previous = Some((hit.distance, hit.point, hit.normal));
-            let Ok((obj, part, mat, tag, card)) = names.identity.get(*entity) else {
-                info!("  {i:2}  {:9.4} yd  <untagged>{gap}", hit.distance);
-                continue;
+            // A CONSOLIDATED hit — a merge blob's member or a retained-pass item — has no entity,
+            // so the per-entity columns (material, bound texture, mesh tag, blend) are simply not
+            // there to read: its draw state lives in the lane's baked record, not in a component.
+            // It is still named, posed and ordered like every other hit, which is what a "what is
+            // at this pixel" reading is for; `CONSOLIDATED` says why the columns are bare.
+            let (part, mat, tag, card) = match found.entity.map(|e| names.identity.get(e)) {
+                Some(Ok((_, part, mat, tag, card))) => (part, mat, tag, card),
+                Some(Err(_)) => {
+                    info!("  {i:2}  {:9.4} yd  <untagged>{gap}", hit.distance);
+                    continue;
+                }
+                None => (None, None, None, false),
             };
+            let lane = if found.entity.is_some() {
+                ""
+            } else {
+                " CONSOLIDATED"
+            };
+            let obj = found.object.as_ref();
             // The WMO authored batch order rides in the material's `sun_scale.y` (see
             // `model_render`): 0 means "no bias applied", which for a WMO batch is itself a finding.
             let resolved = mat.and_then(|m| names.materials.get(&m.0));
@@ -299,7 +318,7 @@ fn fire_pick(
                 },
             );
             info!(
-                "  {i:2}  {:9.4} yd  {kind} {id:<10} bias {batch:3}  {:?}{}  {:5.1}° to the ray  mat {:?}  tex {tex}  {label}{gap}",
+                "  {i:2}  {:9.4} yd  {kind} {id:<10} bias {batch:3}  {:?}{}{lane}  {:5.1}° to the ray  mat {:?}  tex {tex}  {label}{gap}",
                 hit.distance,
                 part.map(|p| p.blend),
                 if card { " CARD" } else { "" },

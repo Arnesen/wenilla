@@ -149,18 +149,6 @@ impl super::UiScript {
     }
 }
 
-/// A row's `isUsable`, the real getters' exact read: the item-usable gate over the row's
-/// template from the shared store, keyed by the row's item id — usable while the template is
-/// still in flight (the null-record skip, `0x4fb298`). Spell knowledge comes from the engine's
-/// spellbook mirror, the same source the tooltip's "Requires <spell>" red reads.
-fn is_usable(model: &Model, item_id: u32) -> bool {
-    model.item_templates.get(&item_id).is_none_or(|v| {
-        super::item_stats::item_usable(v, &model.player_req, |id| {
-            model.spellbook.slots.iter().any(|s| s.spell_id == id)
-        })
-    })
-}
-
 /// `1`/`nil` — how the client pushes a usable flag (`pushnumber(1.0)` / `pushnil`).
 fn usable_value(usable: bool) -> Value {
     if usable {
@@ -209,7 +197,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .as_ref()
                     .and_then(|m| index.checked_sub(1).and_then(|n| m.items.get(n)))
                     .cloned();
-                let usable = item.as_ref().is_none_or(|it| is_usable(&model, it.item_id));
+                let usable = item
+                    .as_ref()
+                    .is_none_or(|it| super::item_stats::item_usable_by_id(&model, it.item_id));
                 (item, usable)
             };
             let Some(it) = item else {
@@ -337,7 +327,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .as_ref()
                     .and_then(|m| index.checked_sub(1).and_then(|n| m.buyback.get(n)))
                     .cloned();
-                let usable = item.as_ref().is_none_or(|it| is_usable(&model, it.item_id));
+                let usable = item
+                    .as_ref()
+                    .is_none_or(|it| super::item_stats::item_usable_by_id(&model, it.item_id));
                 (item, usable)
             };
             let Some(it) = item else {

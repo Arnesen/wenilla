@@ -393,6 +393,13 @@ pub(super) fn apply_server_moves(
             // the outgoing mover — resetting movement flags and cancelling click-to-move — and
             // carrying any of it across would have the new body sprinting, falling or standing on a
             // boat it is nowhere near.
+            //
+            // `first` scopes this to a mover change **inside one session**, and that gate is
+            // right: on a login there is no outgoing mover here to tear down, because the session
+            // that owned it ended at `release_on_session_end`, which since decision 1542 takes the
+            // whole resource. Until it did, the two lists were the same law kept in two places and
+            // this one was the longer — the reason B306's root outlived a `/logout` was that the
+            // only teardown naming `modes` was the one a login skips.
             if !first {
                 player.vel_y = 0.0;
                 player.horiz_vel = Vec3::ZERO;
@@ -586,15 +593,33 @@ fn apply_self_move(
     player.wedge_still = 0;
 }
 
-/// **The avatar went away with the session** — drop control, so the next login re-takes it from
-/// its own streamed `SelfPlayer` (possibly a different character on a different map — the boot
-/// path). The entity itself is despawned by the net drain the same frame these messages are
-/// written.
+/// **The avatar went away with the session** — the whole resource goes back to the state the
+/// process booted in (`player::setup` inserts `Player::default()`), so the next login re-takes
+/// control from its own streamed `SelfPlayer` (possibly a different character on a different map
+/// — the boot path) owing nothing to the session that ended. The entity itself is despawned by the
+/// net drain the same frame these messages are written.
 ///
 /// Two edges, one answer (decision 1262): a confirmed `/logout` (decision 0193), and a **lost**
 /// session, which since 1262 takes the avatar too — there is no reconnect left for it to be the
 /// puppet of. Missing the second edge would leave `Player.active` true over a despawned entity: a
 /// controller driving nothing, which is the shape of the free camera this arc is about.
+///
+/// **Everything on this resource belonged to the mover that just ended, so all of it dies here**
+/// (decision 1542, B306 — reported and diagnosed by Liho). It used to clear a hand-picked six
+/// fields, and the field it did not name was `modes`: `/logout` has vmangos root us for the
+/// countdown (`MiscHandler.cpp` `SetRooted(true)`), we ack the grant, and the next session never
+/// hears an unroot — the fresh server-side `Player` was never rooted, so there is nothing for it
+/// to revoke. `modes.rooted` therefore survived into the new world and killed WASD for the rest of
+/// the run. The list was the bug, not the missing line: the take-control edge above keeps its own
+/// list for the same law (a mover *change* tears the old mover down — `SetActiveMover 0x6006e0`),
+/// the two drifted apart, and only one of them ran here. So this end takes the resource whole —
+/// a field added tomorrow is mover state by default, which is the safe direction.
+///
+/// It is also what the reference does, by construction rather than by list: the server's logout
+/// confirm runs `ShutdownGame 0x491180` (wow-re `ui/scratch/lua-state-lifecycle.md` §3.3 —
+/// `0x5aaeb0` → `0x401ee0` → `0x402039`, ~35 subsystem shutdowns, the Lua VM replaced twice), so
+/// the real client has no per-mover state left to carry across a character-select round trip. Ours
+/// is a long-lived resource; this is where it pays that back.
 pub(super) fn release_on_session_end(
     mut logouts: MessageReader<crate::net::LoggedOutMessage>,
     mut lost: MessageReader<crate::net::DisconnectedMessage>,
@@ -603,16 +628,129 @@ pub(super) fn release_on_session_end(
     // Both readers drain unconditionally — `|`, not `||`: a short-circuit would leave the other
     // message unread, and its cursor would carry it into the next frame.
     if logouts.read().next().is_some() | lost.read().any(|m| m.session_over) {
-        player.active = false;
-        player.move_flags = 0;
-        player.airborne_since = None;
-        player.wedged = false;
-        player.wedge_still = 0;
-        // The arrival debt dies with the session (decision 1340): a logout mid-settle must not
-        // carry a worldport ack into the NEXT login's settle release — the server would reject
-        // an ack from a player who is in world (vmangos ProcessPackets, STATUS_TRANSFER), and
-        // the old session's transfer was already force-acked server-side at logout.
-        player.owes_worldport_ack = false;
+        // Nothing is carried across. Among what this clears that a named list kept missing: the
+        // granted modes (B306's root, and water-walk/feather-fall/hover with it — vmangos re-sends
+        // every one the new session really holds, `Player::SendInitialPacketsAfterAddToMap`
+        // re-applies the aura family), the reins (`control_lost`, `foreign_mover`) which would
+        // otherwise leave the next login driving a guid that no longer exists, the autorun latch,
+        // and — as before — `active`, the movement flags, the fall/wedge state and the worldport
+        // ack debt (decision 1340: an ack from the old transfer is rejected by a player who is
+        // already in world, and the server force-acked it at logout anyway).
+        *player = Player::default();
+    }
+}
+
+#[cfg(test)]
+mod session_end_tests {
+    use super::*;
+    use crate::net::{DisconnectedMessage, LoggedOutMessage};
+    use benilla_protocol::SessionEnd;
+
+    fn harness() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Player>()
+            .add_message::<LoggedOutMessage>()
+            .add_message::<DisconnectedMessage>()
+            .add_systems(Update, release_on_session_end);
+        app
+    }
+
+    /// A session that actually ran: in world, moving, with every mode the server can grant on our
+    /// mover — and the reins in somebody else's hands. Every one of these was granted TO THE MOVER
+    /// this session owned, which is the whole of why none of it may outlive it.
+    fn a_session_that_ran(app: &mut App) {
+        let mut p = app.world_mut().resource_mut::<Player>();
+        p.active = true;
+        p.modes = super::super::state::MoveModes {
+            rooted: true,
+            water_walking: true,
+            feather_fall: true,
+            hover: true,
+            levitating: true,
+        };
+        p.autorun = true;
+        p.control_lost = true;
+        p.foreign_mover = Some(0xBB);
+        p.server_riding = true;
+        p.swimming = true;
+        p.move_flags = crate::creature_anim::move_flags::FORWARD;
+        p.pos = Vec3::new(10.0, 20.0, 30.0);
+        p.owes_worldport_ack = true;
+        p.airborne_since = Some(4.0);
+        p.wedged = true;
+    }
+
+    /// **B306, at its own edge** (decision 1542; reported and diagnosed by Liho). `/logout` has
+    /// vmangos root the player for the countdown (`MiscHandler.cpp:329 SetRooted(true)`), which
+    /// reaches us as the ack'd `SMSG_FORCE_MOVE_ROOT` above; the next login gets no unroot, because
+    /// server-side the fresh `Player` was never rooted (`SendInitialPacketsBeforeAddToMap` re-sends
+    /// the water-walk/feather-fall/hover aura family and roots only for a stun aura). So anything
+    /// the ended session left on this resource is permanent, and `modes.rooted` is WASD.
+    ///
+    /// The assertion is deliberately against `Player::default()` whole rather than a list of
+    /// fields: a list is what failed — this reset named six fields, the take-control edge's own
+    /// teardown named nine, and only the second list named `modes`. A field added to `Player`
+    /// tomorrow is covered by this test on the day it is added.
+    #[test]
+    fn a_logout_takes_every_grant_the_ended_session_made() {
+        let mut app = harness();
+        a_session_that_ran(&mut app);
+        app.world_mut().write_message(LoggedOutMessage);
+        app.update();
+
+        let p = app.world().resource::<Player>();
+        assert!(
+            p.modes == Default::default(),
+            "the granted modes belonged to the mover that just ended — a root that survives \
+             `/logout` is B306: the character re-enters the world and WASD is dead"
+        );
+        assert!(
+            *p == Player::default(),
+            "and nothing else survives either: the session boundary returns the resource to the \
+             state `player::setup` inserts at boot (1542)"
+        );
+    }
+
+    /// The second edge (decision 1262) is the same answer: a lost session takes the avatar too, so
+    /// it takes everything granted to it. Not a variant of the above — it is a different message
+    /// on a different reader, and the `|` that drains both is load-bearing.
+    #[test]
+    fn a_lost_session_takes_them_too() {
+        let mut app = harness();
+        a_session_that_ran(&mut app);
+        app.world_mut().write_message(DisconnectedMessage {
+            reason: "world stream closed".into(),
+            end: SessionEnd::Lost,
+            session_over: true,
+        });
+        app.update();
+
+        assert!(*app.world().resource::<Player>() == Player::default());
+    }
+
+    /// **A teardown that is not the end must not wipe a live avatar.** Both cases that reach this
+    /// system with `session_over: false` are ones where the body stays ours: the `/logout`'s own
+    /// teardown disconnect (the roster relist *inside* one session — its `LoggedOutMessage` is the
+    /// edge, above) and an unattended run's seamless reconnect (0065). Resetting on the mere
+    /// arrival of a `DisconnectedMessage` would drop control from under a probe mid-run.
+    #[test]
+    fn a_teardown_that_is_not_the_end_keeps_the_avatar() {
+        let mut app = harness();
+        a_session_that_ran(&mut app);
+        app.world_mut().write_message(DisconnectedMessage {
+            reason: "logged out".into(),
+            end: SessionEnd::LoggedOut,
+            session_over: false,
+        });
+        app.update();
+
+        let p = app.world().resource::<Player>();
+        assert!(
+            p.active,
+            "the session is not over — the avatar is still ours"
+        );
+        assert!(p.modes.rooted, "and so is everything granted to its mover");
     }
 }
 

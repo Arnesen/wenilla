@@ -14,6 +14,7 @@ use benilla_m2::M2TextureType;
 
 use crate::Chain;
 
+use super::anim::parse_m2_animations;
 use super::key_anim::SeqSlot;
 use super::mat_anim;
 use super::tex_anim;
@@ -861,6 +862,80 @@ pub fn owner_last_rung_bucket(rung: f32) -> f32 {
         }
     }
     OWNER_RUNG_BUCKETS[OWNER_RUNG_BUCKETS.len() - 1]
+}
+
+/// **Which of a model's textures a given sequence actually shows**, resolved to `.blp` paths in
+/// batch order.
+///
+/// A model can carry several alternative arts as separate batches and let the *played sequence*
+/// choose between them — one M2Color alpha track per batch, each stepping its own layer to 1.0 in
+/// its own sequence's band and holding 0.0 everywhere else. `Interface\Minimap\Rotating-MinimapArrow`
+/// is built exactly that way: six layers, four of them the four rim-arrow arts (decision 1519). That
+/// is invisible from the batch list alone, which just shows six textures, so this answers the
+/// question the batch list can't: play sequence `N`, see what.
+///
+/// The evaluation is the reference's, and both halves matter. A track's keys live on the model's
+/// **global** timeline with a per-sequence key *window* ([`benilla_m2::M2Track::ranges`]), so a
+/// sequence's value is searched inside its own window, not across every key; and these tracks are
+/// authored `interp = 0` (**step**), so a band that keys nothing holds the last key at or before it
+/// — which is how three of four layers stay at 0.0 through a band they never touch. A batch counts
+/// as shown when both its colour alpha and its texture-weight evaluate nonzero at the band's start.
+///
+/// `None` if the model doesn't parse, has no skin, or authors no sequence with that id.
+pub fn m2_sequence_visible_textures(bytes: &[u8], anim_id: u16) -> Option<Vec<String>> {
+    let format = parse_m2(&mut Cursor::new(bytes)).ok()?;
+    let model = format.model();
+    let skin = model.parse_embedded_skin(bytes, 0).ok()?;
+    let seq = parse_m2_animations(bytes)
+        .into_iter()
+        .find(|a| a.anim_id == anim_id)?;
+
+    // Step-evaluate one track inside this sequence's own key window. An empty window (`lo >= hi`)
+    // degenerates to `keys[lo]`, the same value the reference's key search lands on there.
+    let at_band_start = |track: &benilla_m2::M2ScalarTrack| -> f32 {
+        let (lo, hi) = track
+            .ranges
+            .get(seq.seq_index)
+            .copied()
+            .unwrap_or((0, track.keys.len().saturating_sub(1) as u32));
+        let (lo, hi) = (
+            lo as usize,
+            (hi as usize).min(track.keys.len().saturating_sub(1)),
+        );
+        let window = track.keys.get(lo..=hi).unwrap_or(&[]);
+        window
+            .iter()
+            .take_while(|(ts, _)| *ts <= seq.start_ms)
+            .last()
+            .or(window.first())
+            .map_or(1.0, |&(_, v)| v)
+    };
+
+    let mut shown = Vec::new();
+    for b in skin.batches() {
+        let alpha = model
+            .color_alpha_tracks
+            .get(b.color_index as usize)
+            .map_or(1.0, at_band_start);
+        let weight = model
+            .transparency_lookup
+            .get(b.weight_combo_index as usize)
+            .and_then(|&t| model.transparency_tracks.get(t as usize))
+            .map_or(1.0, at_band_start);
+        if alpha <= 0.0 || weight <= 0.0 {
+            continue;
+        }
+        let Some(tex) = model
+            .raw_data
+            .texture_lookup_table
+            .get(b.texture_combo_index as usize)
+            .and_then(|&t| model.textures.get(t as usize))
+        else {
+            continue;
+        };
+        shown.push(tex.filename.string.to_string_lossy().to_string());
+    }
+    Some(shown)
 }
 
 #[cfg(test)]

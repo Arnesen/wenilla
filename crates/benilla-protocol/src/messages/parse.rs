@@ -11,10 +11,10 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, area_trigger, attack, bank, binder, channel, chat, combat_log, death, duel,
-    gameobject, gossip, group, guild, items, loot, mail, mirror_timer, monster_move, movement,
-    opcode, page_text, pet, progression, pvp, quest, social, spellbook, spells, taxi, trade,
-    trainer, update_object, vendor, world_state, Character, CreatureQueryInfo, MoveMode,
+    action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
+    duel, gameobject, gossip, group, guild, items, loot, mail, mirror_timer, monster_move,
+    movement, opcode, page_text, pet, progression, pvp, quest, social, spellbook, spells, taxi,
+    trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo, MoveMode,
     ServerPacket, SpeedKind,
 };
 
@@ -1103,6 +1103,65 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::MSG_QUERY_NEXT_MAIL_TIME => ServerPacket::NextMailTime {
             seconds: mail::read_query_next_mail_time(&mut r)?,
         },
+        // The auction house arc (decision 1511 P0). MSG_AUCTION_HELLO is two-way — this is the
+        // REPLY (our request is the same opcode with just the guid), and it is what opens the
+        // window. The three list results share one frame and one 64-byte record; their reader is
+        // bounded by the buffer as well as by the wire `count`, because vmangos's browse fast path
+        // can count a record it then fails to write.
+        opcode::MSG_AUCTION_HELLO => {
+            let (auctioneer, house_id) = auction::read_auction_hello(&mut r)?;
+            ServerPacket::AuctionHello {
+                auctioneer,
+                house_id,
+            }
+        }
+        opcode::SMSG_AUCTION_COMMAND_RESULT => {
+            let (auction_id, action, error, tail) = auction::read_auction_command_result(&mut r)?;
+            ServerPacket::AuctionCommandResult {
+                auction_id,
+                action,
+                error,
+                tail,
+            }
+        }
+        opcode::SMSG_AUCTION_LIST_RESULT => {
+            let (auctions, total_count) = auction::read_auction_list_result(&mut r)?;
+            ServerPacket::AuctionListResult {
+                auctions,
+                total_count,
+            }
+        }
+        opcode::SMSG_AUCTION_OWNER_LIST_RESULT => {
+            let (auctions, total_count) = auction::read_auction_list_result(&mut r)?;
+            ServerPacket::AuctionOwnerListResult {
+                auctions,
+                total_count,
+            }
+        }
+        opcode::SMSG_AUCTION_BIDDER_LIST_RESULT => {
+            let (auctions, total_count) = auction::read_auction_list_result(&mut r)?;
+            ServerPacket::AuctionBidderListResult {
+                auctions,
+                total_count,
+            }
+        }
+        // The two notifications carry different field orders and the owner one has no house id —
+        // two readers, never one.
+        opcode::SMSG_AUCTION_BIDDER_NOTIFICATION => ServerPacket::AuctionBidderNotification(
+            auction::read_auction_bidder_notification(&mut r)?,
+        ),
+        opcode::SMSG_AUCTION_OWNER_NOTIFICATION => ServerPacket::AuctionOwnerNotification(
+            auction::read_auction_owner_notification(&mut r)?,
+        ),
+        opcode::SMSG_AUCTION_REMOVED_NOTIFICATION => {
+            let (auction_id, item_entry, random_property_id) =
+                auction::read_auction_removed_notification(&mut r)?;
+            ServerPacket::AuctionRemovedNotification {
+                auction_id,
+                item_entry,
+                random_property_id,
+            }
+        }
         // The player-trade arc (decision 0592 P0): the state-machine status pulse and the
         // item/gold snapshot for one window side.
         opcode::SMSG_TRADE_STATUS => ServerPacket::TradeStatus {

@@ -4,11 +4,11 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, guild,
-    inspect, item_text, loot, loot_roll, macros, mail, merchant, party, pvp, quest, quest_log,
-    reputation, session, simplehtml, skills, slider, social, spellbook, taxi, trade, tradeskill,
-    trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
-    RegionData, ScriptValue, SoundRequest, UnitState,
+    auction, backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip,
+    guild, inspect, item_text, loot, loot_roll, macros, mail, merchant, party, pvp, quest,
+    quest_log, reputation, session, simplehtml, skills, slider, social, spellbook, taxi, trade,
+    tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView,
+    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -931,6 +931,30 @@ pub(crate) struct Model {
     /// (`MiniMapMailFrame`) reads this on `UPDATE_PENDING_MAIL`.
     pub(crate) has_new_mail: bool,
 
+    /// The open auction house's snapshot the app pushes (`None` = no auctioneer session) and the
+    /// intents the app drains — the auction seam ([`auction`], decision 1511). `auction_selected`
+    /// is engine-local per list ([`auction::LIST`]/`BIDDER`/`OWNER`) and holds the selected
+    /// **auction id**, not a row position (wow-re §5 TU-5): an id follows its row through a
+    /// re-sort, where an index would quietly come to mean the auction that took its place. `0` =
+    /// nothing selected. It is engine-local because the reference reads the selection back
+    /// synchronously inside the same handler that sets it, so it cannot be a round trip. `auction_can_query` is the app's 5 s browse
+    /// throttle, pushed separately from the snapshot because the Search button polls it every
+    /// frame and it would otherwise churn the snapshot's diff.
+    pub(crate) auction: Option<auction::AuctionState>,
+    pub(crate) auction_selected: [u32; 3],
+    pub(crate) auction_can_query: bool,
+    pub(crate) auction_query: Option<auction::AuctionQuery>,
+    pub(crate) auction_owner_query: Option<u32>,
+    pub(crate) auction_bidder_query: Option<u32>,
+    pub(crate) auction_bids: Vec<auction::AuctionBid>,
+    pub(crate) auction_cancels: Vec<u32>,
+    pub(crate) auction_start: Option<auction::AuctionStartRequest>,
+    pub(crate) auction_sorts: Vec<(usize, String)>,
+    pub(crate) auction_close: bool,
+    /// The sell slot's staged item (a cursor drop, decision 0216) — carried until `StartAuction`
+    /// fires, when the app resolves its `(bag, slot)` to the wire item guid.
+    pub(crate) auction_sell_item: Option<cursor::CursorItem>,
+
     /// The open trade window's snapshot the app pushes (`None` = no trade open) and the intents the
     /// app drains — the trade seam ([`trade`], decision 0592 P1). `trade_initiates` are the unit
     /// tokens `InitiateTrade` queued (the app resolves each → guid → `CMSG_INITIATE_TRADE`); the
@@ -977,6 +1001,14 @@ pub(crate) struct Model {
     /// push/ask flow as the templates ([`item_stats`] module doc).
     pub(crate) item_sets: HashMap<u32, super::ItemSetView>,
     pub(crate) item_set_asks: HashSet<u32>,
+    /// The **random-suffix roll** store (`ItemRandomProperties` id → its resolved view) — pushed
+    /// WHOLE at startup, not asked for (decision 1547). It is a static DBC the app has in memory
+    /// from load, and its consumers are click-driven (a chat-link tooltip has no hover re-enter
+    /// loop to repaint on a late answer), so the ask-once shape the template store uses would
+    /// leave a first click showing an item with no lines. This mirrors the reference exactly: the
+    /// builder resolves its `+0x424` against the loaded DBC store `0xc0dbd4` at draw time, and
+    /// every source supplies only the id (wow-re `tooltip-content-law.md` §1-ENCHANT §E5).
+    pub(crate) random_properties: HashMap<u32, super::RandomPropertyView>,
     /// The red-line law's player state (level/class/race/skills — [`item_stats`] module doc).
     pub(crate) player_req: PlayerReqState,
     /// The spell-tooltip store: `spell id → resolved view` ([`tooltip_spell`] module doc,
@@ -1462,6 +1494,18 @@ impl Model {
             mail_send_cod: 0,
             mail_send_item: None,
             has_new_mail: false,
+            auction: None,
+            auction_selected: [0; 3],
+            auction_can_query: true,
+            auction_query: None,
+            auction_owner_query: None,
+            auction_bidder_query: None,
+            auction_bids: Vec::new(),
+            auction_cancels: Vec::new(),
+            auction_start: None,
+            auction_sorts: Vec::new(),
+            auction_close: false,
+            auction_sell_item: None,
             trade: None,
             trade_initiates: Vec::new(),
             trade_accept: false,
@@ -1482,6 +1526,7 @@ impl Model {
             item_templates: HashMap::new(),
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),
+            random_properties: HashMap::new(),
             item_stat_asks: HashSet::new(),
             player_req: PlayerReqState::default(),
             spell_tooltips: HashMap::new(),

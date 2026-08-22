@@ -49,7 +49,6 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
 use crate::portrait::InspectBooth;
-use crate::ui_items::item_link;
 use crate::ui_script::UiInput;
 
 /// The unit tokens a UnitPopup row can name for another player — the popup menus' own set
@@ -125,18 +124,29 @@ fn inspect_slot_view(
     store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
-    enchant_rows: Option<&crate::items::Enchants>,
+    rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     slot0: u8,
 ) -> Option<InvSlotView> {
     let entry = store.0.player_visible_item_entry(slot0)?;
+    // The broadcast roll (`PLAYER_VISIBLE_ITEM_<slot>_PROPERTIES`'s low half — the same `movzx
+    // WORD` the reference's inspect leg feeds its `+0x424` with): the NAME's suffix, and only
+    // that. Its *lines* would come from the visible enchant slots 2..6, which 1.12 servers leave
+    // empty — so an inspected roll names itself and shows no stat lines, on both clients (1547).
+    let roll = store.0.player_visible_item_properties(slot0);
     // Template-only ask (`guid` 0 — `Items::template`'s own documented shape): there is no item
     // object to name, and asking by entry is precisely what the real client's ItemCache does.
     let (name, quality, display) = match items.template(entry, 0, commands) {
-        Some(t) => (Some(t.name.clone()), t.quality, t.display_info_id),
+        Some(t) => (
+            Some(rolls.name(&t.name, roll)),
+            t.quality,
+            t.display_info_id,
+        ),
         None => (None, 0, 0),
     };
-    let link = name.as_ref().map(|n| item_link(entry, n, quality));
+    let link = name
+        .as_ref()
+        .map(|n| crate::ui_items::item_link_full(entry, 0, roll, 0, n, quality));
     Some(InvSlotView {
         item_id: entry,
         icon: icons
@@ -155,7 +165,7 @@ fn inspect_slot_view(
                 let id = store.0.player_visible_item_enchant(slot0, j).unwrap_or(0);
                 (j, id as i32, 0, None)
             }),
-            enchant_rows,
+            rolls.enchants,
         ),
         ..Default::default()
     })
@@ -169,8 +179,12 @@ fn feed_inspect(
     mut booth: ResMut<InspectBooth>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
-    // `SpellItemEnchantment`'s name column — the inspected item's enchant line (decision 0915).
-    enchants: Option<Res<crate::items::Enchants>>,
+    // `SpellItemEnchantment`'s name column — the inspected item's enchant line (decision 0915) —
+    // and `ItemRandomProperties`, the roll behind its "of the Monkey" name (1547).
+    catalogs: (
+        Option<Res<crate::items::Enchants>>,
+        Option<Res<crate::items::RandomProperties>>,
+    ),
     commands: Res<NetCommands>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
@@ -273,7 +287,10 @@ fn feed_inspect(
             store,
             &mut items,
             icons.as_deref(),
-            enchants.as_deref(),
+            crate::items::RollCatalogs {
+                enchants: catalogs.0.as_deref(),
+                props: catalogs.1.as_deref(),
+            },
             &commands,
             slot - 1,
         );

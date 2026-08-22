@@ -15,6 +15,13 @@ use super::names::*;
 /// object, no lines), and keeps the authored full max/max durability.
 #[derive(Default)]
 pub(super) struct ItemInstance {
+    /// The source's own display NAME, when it knows one the template cannot compose — today that
+    /// is exactly the **random-suffix roll**: "Chipped Claw" + `ItemRandomProperties[id].suffix`
+    /// = "Chipped Claw of the Bear". The reference composes it inside the builder (`0x52b7bf`
+    /// keeps the suffix row for the name, and `0x5d8b00` joins it through `ITEM_SUFFIX_TEMPLATE`);
+    /// here the app owns every DBC join, so it arrives already joined — the same division the
+    /// enchant lines below already use. `None` = the template's own name (`ItemTemplateView::name`).
+    pub name: Option<String>,
     /// Live `(current, max)` durability (director-reported: the spirit healer's 25% loss
     /// showed nowhere); `None` = indestructible (max 0) or the create not yet landed.
     pub durability: Option<(u32, u32)>,
@@ -113,7 +120,10 @@ pub(super) fn render_view(
     } else {
         quality_color(v.quality)
     };
-    add((v.name.clone(), name_color))?;
+    let name = inst
+        .and_then(|i| i.name.clone())
+        .unwrap_or_else(|| v.name.clone());
+    add((name, name_color))?;
     // ITEM_SIGNABLE (green) — Flags bit 0x2000 (petitions).
     if v.flags & 0x2000 != 0 {
         add(("<Right Click for Details>".into(), GREEN))?;
@@ -305,8 +315,17 @@ pub(super) fn render_view(
         false => inst.map(|i| i.enchants.as_slice()).unwrap_or_default(),
     };
     // "No id source" is the reference's own three-way fork (§E1): a wrapped gift, or no item
-    // object AND no caller-supplied instance block. Ours reduces to "this hover carries no
-    // instance" — a template or link hover — plus the wrapped-gift bit, which is the same set.
+    // object AND no caller-supplied instance block (`+0x440 == 0`). Ours reads the same: a hover
+    // that passes NO [`ItemInstance`] is a p6=0 leg — the template sources (merchant, quest,
+    // craft, buyback, send-mail, the compare legs, `SetItemById`) — plus the wrapped-gift bit.
+    //
+    // **A block-supplying source never prints the placeholder, even carrying no ids at all.** The
+    // fork tests the block's presence, not its contents, so `SetLootItem`/`SetHyperlink`/
+    // `SetInboxItem`/`SetAuctionItem`/`SetLootRollItem`/the trade legs fall into the slot loop and
+    // print whatever their slots hold — nothing, when the roll is absent. Decision 0920's prose
+    // put a hyperlink hover on the placeholder arm; §E1's `0x52c9a3` fork says otherwise, and
+    // that is the drift 1547 corrects (a linked or looted "of the Monkey" showed the placeholder
+    // where the reference shows the rolled lines).
     let no_id_source = inst.is_none_or(|i| i.flags & 0x8 != 0);
     if no_id_source && !signable && v.random_property != 0 {
         add(("<Random enchantment>".into(), GREEN))?;

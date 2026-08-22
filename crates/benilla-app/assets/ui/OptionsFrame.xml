@@ -619,7 +619,10 @@
                 "RowEnableMusic", "RowEnableAmbience",
             },
             Graphics = { "RowUiScale", "RowFarclip", "RowWorldDetail", "RowVerticalSync" },
-            Nameplates = { "RowPlayerNames", "RowNpcNames", "RowOwnName" },
+            Nameplates = {
+                "RowEnemyPlates", "RowFriendlyPlates",
+                "RowPlayerNames", "RowNpcNames", "RowOwnName",
+            },
             -- The stock globals that were already defined AND consumed when 1134 opened the store
             -- (1136; Buff Durations 1139), plus the two equipment-display toggles (1472), in the
             -- reference's own on-screen order. Its Basic Options Display box is three COLUMNS read
@@ -2742,21 +2745,52 @@
                                     </Frames>
                                 </Frame>
                                 <!-- The Nameplates page (0992 — the page 0952 promised when the
-                                     category row joined): the three 1.12 UnitName* checkboxes over
-                                     the overhead-name gates (nameplates.rs NameConfig), rows in
-                                     the 1.12 Interface Options' own index order (21/30/67), labels
-                                     its GlobalStrings verbatim (SHOW_PLAYER_NAMES/SHOW_NPC_NAMES/
-                                     SHOW_OWN_NAME). -->
+                                     category row joined). Two groups, plates first: the V-key
+                                     HEALTH-BAR plates (vplates.rs VPlateMode — the engine bitmask
+                                     [0xc4da34] bit 0 / bit 3), then the three 1.12 UnitName*
+                                     checkboxes over the overhead-name gates (nameplates.rs
+                                     NameConfig), rows in the 1.12 Interface Options' own index
+                                     order (21/30/67), labels its GlobalStrings verbatim
+                                     (SHOW_PLAYER_NAMES/SHOW_NPC_NAMES/SHOW_OWN_NAME).
+
+                                     The plate pair leads because it is what "Nameplates" means to
+                                     a player pressing V, and it is the pair that had no surface at
+                                     all — 1.12's own options UI has NO nameplate row (its
+                                     UIOptionsFrame keeps NAMEPLATES_ON/FRIENDNAMEPLATES_ON as
+                                     RegisterForSave'd globals driven only by the keybinding, and
+                                     says so in a comment), so the rows are era grammar over a
+                                     1.12 knob — 0959's law, the WorldDetail dropdown's posture.
+                                     Labels take the 1.12 binding names' own two-word spelling
+                                     ("Name Plates", BINDING_NAME_NAMEPLATES) with the era's
+                                     enemy/friendly split naming the two bits; no 1.12
+                                     OPTION_TOOLTIP string exists for either (nil, like Auto
+                                     Loot). -->
                                 <Frame name="$parentNameplates" hidden="true">
                                     <Anchors>
                                         <Anchor point="TOPLEFT"/>
                                         <Anchor point="BOTTOMRIGHT"/>
                                     </Anchors>
                                     <Frames>
-                                        <Frame name="$parentRowPlayerNames" inherits="OptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowEnemyPlates" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "nameplateShowEnemies",
+                                                "Enemy Name Plates")</OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowFriendlyPlates" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnemyPlates" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnemyPlates" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "nameplateShowFriends",
+                                                "Friendly Name Plates")</OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowPlayerNames" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFriendlyPlates" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFriendlyPlates" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNamePlayer", "Player Names",
                                                 "OPTION_TOOLTIP_SHOW_PLAYER_NAMES")</OnLoad></Scripts>

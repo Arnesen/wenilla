@@ -1,5 +1,6 @@
 //! Distant low-detail terrain (WDL): streams the map's coarse horizon heightmap around the view —
-//! beyond the detailed ADT ring — drawn unlit-white + fogged, the hills the reference shows on the
+//! beyond the detailed ADT ring — drawn unlit-white under a fog pair of its own that saturates it
+//! into the flat scene-fog colour (a "fog hull", decision 1521), the hills the reference shows on the
 //! horizon where ours used to fade to void. The parse + coarse mesh live in `benilla_formats::wdl`; this
 //! is just the Bevy streaming + render glue (one shared [`WdlMaterial`], one mesh per ring tile).
 //!
@@ -23,9 +24,10 @@ use benilla_assets::MapCatalogRes;
 use benilla_assets::{AssetSet, RenderConfig, WorldAssets};
 use benilla_formats::WdlFile;
 
-/// Chebyshev tile radius the WDL ring covers around the view. Past ~`fog_end` (~481 yd ≈ <1 tile) WDL
-/// is pure haze, but hills 2–4 tiles out still rise above the horizon as fogged silhouettes, so we
-/// extend toward the reference's `horizonfarclip` (~2112 yd ≈ 4 tiles). Drawn as a full ring; the
+/// Chebyshev tile radius the WDL ring covers around the view. WDL is flat haze at every distance (its
+/// own saturated fog pair, decision 1521) — what it contributes is silhouette, and hills 2–4 tiles out
+/// still rise above the horizon as fog-coloured silhouettes, so we extend toward the reference's
+/// `horizonfarclip` (~2112 yd ≈ 4 tiles). Drawn as a full ring; the
 /// shader makes it a **backdrop** — near plane at `farclip − 33`, depth clamped behind everything the
 /// detailed world can draw (`wdl.wgsl`'s header, decision 0684) — so it fills whatever the detailed
 /// world leaves empty and can never overlap it. (The reference's own far walk is a ±3-tile window.)
@@ -214,7 +216,7 @@ fn stream_wdl(
             .map(|p| wow_to_bevy(*p).to_array())
             .collect();
         // Unlit + untextured: a constant up-normal and zero UV satisfy the StandardMaterial pipeline;
-        // the custom WDL shader reads neither (it outputs white × fog).
+        // the custom WDL shader reads neither (it outputs the flat fog colour).
         let n = positions.len();
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -268,5 +270,26 @@ fn the_far_band_stays_a_depth_pushed_backdrop() {
         src.contains("out.depth = depth;") && src.contains("view_z_to_depth_ndc(-farclip)"),
         "wdl.wgsl: the far band no longer clamps its depth behind the far-clip wall — its overlap \
          now pokes THROUGH the detailed terrain (the reference's compressed far-band depth range)"
+    );
+}
+
+/// The hull is a **fog hull**, not a fogged surface (decision 1521): the reference's far-band emitter
+/// submits its own fog pair — start `0`, end `1.0` (`0x6bd7ae`–`0x6bd7c8` inside `0x6bd780`) — so the
+/// hull is the flat fog colour at every distance. Reading the SCENE fog distances here is the bug this
+/// pins: the 33 yd overlap then sits inside the fog ramp, up to `33 / (end − start)` white (25% at
+/// farclip 177), a pale band above the fine terrain's fogged-out silhouette that grows as the view
+/// distance drops — and it is invisible at 777, so it can sit in the open for months.
+#[test]
+fn the_far_band_is_a_fog_hull_not_a_fogged_surface() {
+    let src = benilla_assets::materials::WDL_WGSL;
+    assert!(
+        src.contains("rgb = w.fog_color.xyz;"),
+        "wdl.wgsl: the hull no longer paints the flat fog colour (the reference's own start-0 / \
+         end-1.0 fog pair, saturated beyond one yard)"
+    );
+    assert!(
+        !src.contains("w.fog_params.x") && !src.contains("w.fog_params.y"),
+        "wdl.wgsl: the hull reads the SCENE fog distances again — the 33 yd overlap goes partly \
+         white at low view distances (the band decision 1521 closed)"
     );
 }

@@ -25,7 +25,16 @@
 //! ray-caster and the three click gestures — reaches for none of it.
 //!
 //! The player-facing consumers (`crate::target`) run their picks through [`pick`] unconditionally.
+//!
+//! **Not every drawn thing has an entity** (decision 1534). The consolidating render lanes — the
+//! static merge's blobs and the retained static pass — draw many placements as one thing, and the
+//! per-placement entity that used to carry the declaration is gone. So the declaration has two more
+//! shapes: [`PickBlob`] (members on the blob entity, for a lane that still draws from one) and
+//! [`PickSource`] (the lane answers the ray itself, for one that draws from retained buffers).
+//! [`WorldPick`] is the bundle that hands a consumer all three at once — reach for it, not for
+//! [`PickParts`] alone, or the answer goes quiet over most of the static world.
 
+use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
 use crate::model_render::ModelKind;
@@ -33,13 +42,15 @@ use crate::model_render::ModelKind;
 mod pick;
 
 pub use pick::{
-    cast_pick_ray, cast_pick_ray_inflated, pick_at_cursor, PickBox, PickMesh, PickParts,
+    cast_object_ray, cast_pick_ray, cast_pick_ray_inflated, pick_at_cursor, pick_object_at_cursor,
+    ObjectHit, PickBlob, PickBox, PickMember, PickMesh, PickParts, PickSource,
 };
-pub use pick::{ray_mesh_bounds, ray_posed_mesh};
+
+pub use pick::{ray_member, ray_mesh_bounds, ray_posed_mesh, RayHit};
 
 /// The identity of a pickable world thing, read by the inspector now and by tooltips/cursor/targeting
 /// later. Attached to a thing's renderable mesh entities at spawn.
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Debug)]
 pub struct WorldObject {
     pub kind: ModelKind,
     /// Primary label — a model path (doodads/WMOs/GameObjects) or a unit name. Shown to the player/dev.
@@ -96,6 +107,71 @@ pub struct WorldRightClick;
 /// BUTTON2 turn and the release's context click still run).
 #[derive(Message, Clone, Copy)]
 pub struct WorldRightPress;
+
+/// **The world's pick sources, as one `SystemParam`** — the ECS pick geometry ([`PickParts`]) plus
+/// every lane that draws without entities ([`PickSource`]).
+///
+/// Bundled deliberately. A consumer that reaches for the entity half alone still compiles, still
+/// casts, and still returns hits — it just stops seeing most of the static world, silently. That is
+/// precisely how the inspector, the hover and `WOW_PICK` went quiet when the consolidating lanes
+/// shipped (decision 1534): nothing failed, the answers just went blank over trees and buildings.
+/// So the roster of lanes lives HERE, once, and a new consumer gets it by construction.
+///
+/// The caster itself stays lane-agnostic — it only knows the trait. This is the one place that
+/// knows which lanes exist.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct WorldPick<'w, 's> {
+    parts: PickParts<'w, 's>,
+    /// The identity every hit resolves through — including the doodad/WMO parts the entity path
+    /// still spawns.
+    objects: Query<'w, 's, &'static WorldObject>,
+    /// The retained static pass — `None` when `WOW_STATIC_GX=0` leaves every placement on the
+    /// entity path. (The static merge needs no entry: its blobs ARE entities, and answer through
+    /// [`PickBlob`].)
+    gx: Option<Res<'w, crate::static_gx::StaticGx>>,
+}
+
+impl WorldPick<'_, '_> {
+    /// This frame's entity-less sources, in the shape [`cast_object_ray`] takes.
+    fn sources(&self) -> Vec<&dyn PickSource> {
+        self.gx
+            .as_deref()
+            .map(|gx| gx as &dyn PickSource)
+            .into_iter()
+            .collect()
+    }
+
+    /// The identified cast against everything drawn — see [`cast_object_ray`].
+    pub fn cast(&self, ray: Ray3d, pickable: &HashSet<Entity>, all_hits: bool) -> Vec<ObjectHit> {
+        cast_object_ray(
+            ray,
+            pickable,
+            &self.parts,
+            &self.objects,
+            &self.sources(),
+            all_hits,
+        )
+    }
+
+    /// The identified cast through a screen pixel — the mouseover's whole job.
+    pub fn at_cursor(
+        &self,
+        cursor: Vec2,
+        camera: &Camera,
+        cam_tf: &GlobalTransform,
+        pickable: &HashSet<Entity>,
+    ) -> Option<ObjectHit> {
+        pick_object_at_cursor(
+            cursor,
+            camera,
+            cam_tf,
+            pickable,
+            &self.parts,
+            &self.objects,
+            &self.sources(),
+        )
+    }
+}
 
 /// Registers the world-interaction **foundation**: the identity component's three click messages
 /// and the shared ray-caster's parameters. The inspector surface and the cast journal that used to

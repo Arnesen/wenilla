@@ -25,7 +25,7 @@ use crate::entities::Creatures;
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
-use super::framing::{attachment_point, diag_to_vert, PORTRAIT_CROP_ASPECT};
+use super::framing::{attachment_point, diag_to_vert, PORTRAIT_ASPECT};
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
     BoothBillboardSpec, BoothCam, BoothEffects, BoothLight, BoothMotion, BoothPart, BoothRider,
@@ -71,6 +71,26 @@ pub(crate) struct SelectLook {
     /// `CHARACTER_FLAG_*` bits (hide-helm / hide-cloak honored by the builder).
     pub(crate) flags: u32,
     pub(crate) equipment: [benilla_protocol::CharEnumItem; 19],
+    /// The roster row's **pet** triple — the hunter/warlock companion that stands beside the
+    /// selected character. It rides the look, not a `GluePreview` field of its own, because it is
+    /// part of the enum record and wants the same change detection every other select field gets:
+    /// swapping rows re-bakes the pet with the body.
+    ///
+    /// All three words matter. The display names the model; the **level and family are its size**
+    /// (`CreatureFamily`'s ramp — decision 1538), so a freshly tamed wolf stands visibly smaller
+    /// than a level-60 one.
+    pub(crate) pet_display_id: u32,
+    pub(crate) pet_level: u32,
+    pub(crate) pet_family: u32,
+}
+
+/// The select pet, as the booth needs it: which creature, and the two words that size it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct PetLook {
+    /// `CreatureDisplayInfo` id — never `0` here ([`GlueLook::pet`] is what filters that out).
+    pub(crate) display_id: u32,
+    pub(crate) level: u32,
+    pub(crate) family: u32,
 }
 
 impl From<&benilla_protocol::Character> for SelectLook {
@@ -85,6 +105,9 @@ impl From<&benilla_protocol::Character> for SelectLook {
             facial_hair: c.facial_hair,
             flags: c.flags,
             equipment: c.equipment,
+            pet_display_id: c.pet_display_id,
+            pet_level: c.pet_level,
+            pet_family: c.pet_family,
         }
     }
 }
@@ -102,6 +125,20 @@ impl GlueLook {
         match self {
             GlueLook::Create(l) => (l.race, l.sex),
             GlueLook::Select(l) => (l.race, l.sex),
+        }
+    }
+
+    /// The **pet** standing beside the character, or `None`. Only a select look can carry one: the
+    /// create screen builds a character that has no pet yet, and the wire field it would come from
+    /// doesn't exist until the character does.
+    pub(crate) fn pet(&self) -> Option<PetLook> {
+        match self {
+            GlueLook::Create(_) => None,
+            GlueLook::Select(l) => (l.pet_display_id != 0).then_some(PetLook {
+                display_id: l.pet_display_id,
+                level: l.pet_level,
+                family: l.pet_family,
+            }),
         }
     }
 }
@@ -158,9 +195,32 @@ pub(crate) struct CreateScene {
     cam: Option<benilla_assets::PortraitCamera>,
     /// The character's stage spot — scene attachment 0 (Bevy model space), `ZERO` with no scene.
     /// (Verified for select too: the body seats on attachment **0**, `0x473039` — attachment 1 is
-    /// the rare enum secondary model, wow-re `glue-select-model.md` TU-B; 0429's attachment-1
+    /// the enum's secondary model, wow-re `glue-select-model.md` TU-B; 0429's attachment-1
     /// presumption is dead.)
     char_spot: Vec3,
+    /// The stage's **authored frame** — attachment 0's bone matrix ([`stage_frame`]): the rotation
+    /// and uniform scale the scene author parked on that bone. Identity/1.0 with no scene;
+    /// UI_Human's holds the −16.5° yaw that aims the character at that scene's off-axis camera
+    /// (and a 0.97 scale), UI_Tauren's a 1.04 scale (1533).
+    char_facing: Quat,
+    char_scale: f32,
+    /// The **pet's** spot — scene attachment 1 (`0x47306b` chains the secondary model there), a few
+    /// yards off the stage. Every `UI_*` scene authors exactly these two attachments and no more,
+    /// and both their bones are parentless roots — so the seat is that bone's own frame, with
+    /// nothing above it to compose, which is why the pet is placed the same way the body is.
+    pet_root: Entity,
+    pet_spot: Vec3,
+    /// The pet's share of the stage's frame — attachment **1**'s bone, read the same way
+    /// [`Self::char_facing`] is. 1536 placed the pet with a pure translation on the reading that
+    /// both attachment bones are unkeyed; that holds on five scenes and **not** on two of them.
+    /// UI_Human's attachment-1 bone (bone 5) carries the identical constant −16.5° yaw and 0.97
+    /// scale its attachment-0 bone does — without the yaw the pet stands square beside an owner
+    /// turned 16.5° away — and UI_Tauren's parks a **0.7324** scale on the pet's bone alone, three
+    /// quarters the size we were drawing it (1533).
+    pet_facing: Quat,
+    pet_stage_scale: f32,
+    /// The pet bake standing at [`Self::pet_spot`] — its revision, so a re-bake happens once.
+    pet_baked: Option<u64>,
     /// Whether the current spawn wrote the fog rows enabled (the create law) — a screen hop with
     /// the same scene race still rebuilds when this flips.
     fog: bool,
@@ -274,6 +334,12 @@ pub(crate) struct PreviewPart {
     pub(crate) static_mesh: Handle<Mesh>,
     pub(crate) skinned_mesh: Option<Handle<Mesh>>,
     pub(crate) material: Handle<WowModelMaterial>,
+    /// The batch's **animated material alpha**, carried to the booth's [`BoothPart`]. The CHARACTER
+    /// assembly still supplies `None` here — threading it through the appearance layer is decision
+    /// 0807's named gap, and the select body's look is signed off as it stands. The **pet** builder
+    /// has the field in hand (it reads the display's `EntityPart`s straight, with no compositor in
+    /// between), so it fills it.
+    pub(crate) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
 }
 
 /// One equipment rider on the assembled preview (helm / shoulder / sheathed weapon — decision
@@ -362,6 +428,41 @@ pub(crate) struct GluePreviewBake {
     pub(crate) revision: u64,
 }
 
+/// The select screen's **pet** — the hunter/warlock companion standing beside the selected
+/// character (`SMSG_CHAR_ENUM`'s pet triple, the reference's "secondary model" `record+0x114`).
+///
+/// Its own resource, and its own revision, deliberately: the pet's model can land frames after the
+/// body's, and folding it into [`GluePreviewBake`] would make that late arrival re-bake the
+/// character too — restarting an already-correct Stand loop for nothing. Empty (`display_id == 0`)
+/// whenever the look carries no pet, which is every character but a living hunter's or warlock's
+/// (the server suppresses the triple for the rest — see [`benilla_protocol::Character`]).
+#[derive(Resource, Default)]
+pub(crate) struct GluePetBake {
+    /// The pet's `CreatureDisplayInfo` id — `0` = no pet, and the booth stands empty.
+    pub(crate) display_id: u32,
+    pub(crate) parts: Vec<PreviewPart>,
+    /// The pet's camera-facing batches — the voidwalker's eyes are exactly this.
+    pub(crate) billboards: Vec<PreviewBillboard>,
+    /// The pet model's **own** particle emitters, straight off the display cache — the imp's three
+    /// green flame jets (bones 17/45/46, `FlameLickSmall`, rate keyed alive in every sequence), the
+    /// felhunter's, the succubus's. Unlike the body's [`GluePreviewBake::effects`] — which are an
+    /// *equipped item's* emitters, seated on a character bone through a host — these are authored on
+    /// the pet's own skeleton, so they ride its own joints: the scene-backdrop recipe, not the
+    /// worn-item one ([`sync_glue_pet`]).
+    pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
+    /// The uniform render scale — the **`CreatureFamily` level ramp**, `minScale` → `maxScale`
+    /// across `minScaleLevel` → `maxScaleLevel`
+    /// ([`benilla_formats::CreatureFamily::scale_at`], decision 1538).
+    ///
+    /// Not the `CreatureModelData.modelScale × CreatureDisplayInfo.scale` product this field
+    /// briefly held: the reference computes that product one instruction before the ramp and then
+    /// overwrites it (`0x472e87 fstp`), so the product is only ever the fallback for a family the
+    /// table doesn't know. Either way the glue pet has no wire object, so — unlike every unit in
+    /// the world — nothing has folded a scale in for it and the client must size it itself.
+    pub(crate) scale: f32,
+    pub(crate) revision: u64,
+}
+
 /// Stand up the create booth beside the portrait/paper-doll ones (called from [`super::setup_booths`],
 /// which owns the shared image/booth resources). Same off-screen pipeline as the paper doll — HDR +
 /// FfxGlow, negative order — but a [`GLUE_SIZE`] target cleared *transparent*, its own layer,
@@ -428,6 +529,12 @@ pub(super) fn spawn_glue_booth(
     );
     // The background scene's own root (the character root above yaws; the scene never does).
     let scene_root = commands
+        .spawn((Transform::IDENTITY, Visibility::Visible, layer.clone()))
+        .id();
+    // …and the pet's, a third sibling: it stands on its own scene attachment and, like the scene,
+    // never yaws — the reference's facing call touches only the character component's model
+    // (`0x4730e0` → `cc+0x38`), so dragging the character spins the character alone.
+    let pet_root = commands
         .spawn((Transform::IDENTITY, Visibility::Visible, layer))
         .id();
     commands.insert_resource(CreateScene {
@@ -437,6 +544,13 @@ pub(super) fn spawn_glue_booth(
         spawned: false,
         cam: None,
         char_spot: Vec3::ZERO,
+        char_facing: Quat::IDENTITY,
+        char_scale: 1.0,
+        pet_root,
+        pet_spot: Vec3::ZERO,
+        pet_facing: Quat::IDENTITY,
+        pet_stage_scale: 1.0,
+        pet_baked: None,
         fog: true,
         light: None,
         variants: default(),
@@ -491,6 +605,9 @@ pub(super) fn sync_glue_scene(
             scene.spawned = false;
             scene.cam = None;
             scene.char_spot = Vec3::ZERO;
+            scene.char_facing = Quat::IDENTITY;
+            scene.char_scale = 1.0;
+            clear_pet(&mut commands, &mut scene);
             resize_target(&mut images, &booth.target, GLUE_SIZE, GLUE_SIZE);
         }
         return;
@@ -526,6 +643,7 @@ pub(super) fn sync_glue_scene(
         scene.spawned = false;
         scene.cam = None;
         scene.char_spot = Vec3::ZERO;
+        clear_pet(&mut commands, &mut scene);
         commands.entity(scene.root).despawn_related::<Children>();
         // The model may still be loading — strip the old rig state off the outliving root now,
         // not only at the next spawn (which may be many frames away).
@@ -547,6 +665,12 @@ pub(super) fn sync_glue_scene(
         // portraits' shared studio light stays untouched. Rewritten in place on every scene swap
         // (the cached scene + character materials keep binding it).
         let stage = attachment_point(&model.skeleton, &model.attachments, 0).unwrap_or(Vec3::ZERO);
+        // The stage's frame, not just its point — see [`stage_frame`].
+        let (stage_facing, stage_scale) = model
+            .attachments
+            .iter()
+            .find(|a| a.id == 0)
+            .map_or((Quat::IDENTITY, 1.0), |a| stage_frame(model, a.bone));
         let rig = scene_rig(&model.lights);
         let (fog_rgb, fog_far) = scene_fog(token);
         // Rig materials read the probe + point table; the core rows still carry the plain ambient
@@ -635,62 +759,65 @@ pub(super) fn sync_glue_scene(
             &[],               // …nor a character's eye-glow
         );
         // The scene's authored particle emitters (decision 0539 §5) — the braziers/embers every
-        // UI_* scene carries (MainMenu 28, Orc 11, NightElf 12…), dead until now. The world spawn
-        // path, on the booth's layer, lit/fogged by the SCENE's own light buffer (the ModelFFX fog
-        // covers the whole model, emitters included — carried by `EffectLightOverride` into the
-        // shared lane's per-draw bind group); owner = the emitter bone's anchor, so fire flicker
-        // rides the animated bones; anchored at the static scene root. No `EmitterFade`: a glue
-        // scene always ticks. Parented under the scene root so teardown cascades.
-        let mut emitters = 0usize;
-        for em in &model.emitters {
-            let owner = scene_rig
-                .anchor(&mut commands, em.def.bone)
-                .map_or((scene.root, [0.0; 3]), |j| (j, em.bone_pivot));
-            if let Some(e) = benilla_world::particles::spawn_emitter(
-                &mut commands,
-                em,
-                Transform::IDENTITY,
-                benilla_world::particles::EmitterFrames {
-                    owner: Some(owner),
-                    attach: None, // a backdrop scene is never an attached model
-                    anchor: Some(scene.root),
-                    // The scene root is torn down and rebuilt as a whole.
-                    on_owner_loss: benilla_world::particles::OwnerLoss::Free,
-                    // A booth bake has no appear/despawn ramp and no self-avatar feather — its
-                    // riders are always opaque (0827).
-                    alpha: None,
-                    // Scene-graph-carried: this model's world motion arrives on the reference's
-                    // device stack, so its cloud RIDES (0986's baseline).
-                    world_composed: false,
-                },
-                // A glue scene loops its one authored clip forever — the doodad law.
-                benilla_world::particles::EmitClock::Pinned,
-            ) {
-                commands.entity(e).insert((
-                    booth.layer.clone(),
-                    ChildOf(scene.root),
-                    benilla_world::particles::buffer::EffectLightOverride(light.clone()),
-                ));
-                emitters += 1;
-            }
-        }
+        // UI_* scene carries (MainMenu 28, Orc 11, NightElf 12…). Lit/fogged by the SCENE's own
+        // light buffer: the ModelFFX fog covers the whole model, emitters included, carried by
+        // `EffectLightOverride` into the shared lane's per-draw bind group. The seating, the
+        // billboard arm and the teardown parenting are the shared recipe's (1539).
+        let (emitters, fx_frames) = super::spawn_booth_own_emitters(
+            &mut commands,
+            &mut scene_rig,
+            scene.root,
+            &booth.layer,
+            Some(&light),
+            &model.emitters,
+        );
         if emitters > 0 {
-            info!("create scene: UI_{token} — {emitters} particle emitter(s) up");
+            info!(
+                "create scene: UI_{token} — {emitters} particle emitter(s) up \
+                 ({fx_frames} on a billboard frame)"
+            );
         }
         scene_rig.finish(&mut commands);
         scene.spawned = true;
         scene.cam = model.camera0;
         scene.char_spot = stage;
+        scene.char_facing = stage_facing;
+        scene.char_scale = stage_scale;
+        // The pet's seat comes off the same skeleton, one attachment along — frame and all. A scene
+        // that somehow authors none leaves the pet at the origin rather than on the stage — visibly
+        // wrong, and it never happens: all six `UI_*` scenes author 0 and 1.
+        scene.pet_spot =
+            attachment_point(&model.skeleton, &model.attachments, 1).unwrap_or(Vec3::ZERO);
+        let (pet_facing, pet_stage_scale) = model
+            .attachments
+            .iter()
+            .find(|a| a.id == 1)
+            .map_or((Quat::IDENTITY, 1.0), |a| stage_frame(model, a.bone));
+        scene.pet_facing = pet_facing;
+        scene.pet_stage_scale = pet_stage_scale;
+        // A rebuilt scene moved the seat, so the standing pet is re-seated (its bake is still good;
+        // `sync_glue_pet` re-runs the placement every frame the spot changes).
+        scene.pet_baked = None;
         scene.rev += 1; // the character re-lights onto the scene rig (sync_glue_booth's key)
         info!(
-            "create scene: UI_{token} up — {} submeshes, camera {} stage {:?}",
+            "create scene: UI_{token} up — {} submeshes, camera {} stage {:?} facing {:.2}° \
+             scale {:.3}",
             model.submeshes.len(),
             scene.cam.is_some(),
             scene.char_spot,
+            scene.char_facing.to_euler(EulerRot::YXZ).0.to_degrees(),
+            scene.char_scale,
         );
         // Seat the character on the stage at the current facing (the yaw-only path below only
         // runs when the yaw *changes*).
-        apply_yaw(&mut commands, booth.root, scene.char_spot, preview.yaw);
+        apply_yaw(
+            &mut commands,
+            booth.root,
+            scene.char_spot,
+            scene.char_facing,
+            scene.char_scale,
+            preview.yaw,
+        );
     }
     // The authored camera owns the booth camera while the scene shows (re-asserted every frame —
     // cheap, and it also tracks live window-aspect changes through the diagonal-FOV conversion).
@@ -770,13 +897,16 @@ pub(super) fn sync_glue_booth(
     };
     // Where the character stands (the scene's stage spot while a scene is up, else the origin) —
     // and the scene revision, so the bake re-lights the moment a scene rig lands.
-    let (spot, scene_rev) = scene.as_deref().map_or((Vec3::ZERO, 0), |s| {
-        if s.spawned {
-            (s.char_spot, s.rev)
-        } else {
-            (Vec3::ZERO, s.rev)
-        }
-    });
+    let (spot, stage, stage_scale, scene_rev) =
+        scene
+            .as_deref()
+            .map_or((Vec3::ZERO, Quat::IDENTITY, 1.0, 0), |s| {
+                if s.spawned {
+                    (s.char_spot, s.char_facing, s.char_scale, s.rev)
+                } else {
+                    (Vec3::ZERO, Quat::IDENTITY, 1.0, s.rev)
+                }
+            });
     let (last_rev, last_yaw, last_scene) = last.unwrap_or((u64::MAX, f32::NAN, u64::MAX));
     let rebake = last_rev != bake.revision || last_scene != scene_rev;
     let reyaw = last_yaw != preview.yaw;
@@ -794,7 +924,14 @@ pub(super) fn sync_glue_booth(
             booth.rigged = false;
             booth.parked = false;
             *last = Some((bake.revision, preview.yaw, scene_rev));
-            apply_yaw(&mut commands, booth.root, spot, preview.yaw);
+            apply_yaw(
+                &mut commands,
+                booth.root,
+                spot,
+                stage,
+                stage_scale,
+                preview.yaw,
+            );
             return;
         }
         // The rig + framing come from the display cache — the same readiness gate the builder used
@@ -926,9 +1063,10 @@ pub(super) fn sync_glue_booth(
         // Since 1089 that transform is the model's own `<PlayerModel>` pane camera (raw index 1),
         // which is the client's full-body character framing — the right stand-in, and the fov below
         // now comes off the same record rather than from the retired body-fit constant. The crop
-        // aspect is the portrait bake's 4/3 rather than this window's: exact framing here does not
-        // matter, because `sync_glue_scene` re-aims onto the scene's authored camera the frame the
-        // art lands, and this rig only ever shows for those few loading frames.
+        // aspect is the portrait bake's ([`PORTRAIT_ASPECT`]) rather than this window's: exact
+        // framing here does not matter, because `sync_glue_scene` re-aims onto the scene's authored
+        // camera the frame the art lands, and this rig only ever shows for those few loading
+        // frames.
         let (t, _) = body_frame(&anchors, 1.0);
         let record_fov = anchors
             .pane_camera
@@ -939,7 +1077,7 @@ pub(super) fn sync_glue_booth(
             &(
                 t,
                 Projection::from(PerspectiveProjection {
-                    fov: diag_to_vert(record_fov, PORTRAIT_CROP_ASPECT),
+                    fov: diag_to_vert(record_fov, PORTRAIT_ASPECT),
                     near: 0.02,
                     far: 100.0,
                     ..default()
@@ -947,16 +1085,247 @@ pub(super) fn sync_glue_booth(
             ),
         );
     }
-    apply_yaw(&mut commands, booth.root, spot, preview.yaw);
+    apply_yaw(
+        &mut commands,
+        booth.root,
+        spot,
+        stage,
+        stage_scale,
+        preview.yaw,
+    );
     *last = Some((bake.revision, preview.yaw, scene_rev));
 }
 
-/// Seat the model root on the stage `spot` facing `yaw` (the ref's `Model:SetRotation` — rotation
-/// about the root's own origin, never about the scene's).
-fn apply_yaw(commands: &mut Commands, root: Entity, spot: Vec3, yaw: f32) {
+/// Stand the select screen's **pet** on scene attachment 1 — the hunter/warlock companion beside
+/// the selected character (the reference's secondary model `record+0x114`, wow-re
+/// `glue-select-model.md` §A4/§B1).
+///
+/// The booth twin of [`sync_glue_booth`], and deliberately the simpler one: a pet is an ordinary
+/// creature display, so its parts come straight off the shared display cache with no compositor,
+/// no equipment, no geoset selection and no riders. What it does share is the law that matters —
+/// a fresh instance looping its own **Stand**, relit onto the scene's authored rig, on the booth's
+/// layer — plus the model's own particle emitters riding its own joints, which is what makes an
+/// imp an imp.
+///
+/// It runs only while a scene is up: both the seat and the light come from the background model,
+/// and a pet standing at the origin next to a body standing at the origin is worse than no pet at
+/// all for the frame or two the art takes to land.
+///
+/// **Not yaw-driven.** Dragging the character spins the character: the reference's facing call
+/// (`0x4730e0`) writes the character component's model transform and nothing else, and both scene
+/// attachments are parentless unkeyed pivots, so the pet keeps the seat's own orientation.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sync_glue_pet(
+    mut commands: Commands,
+    pet: Res<GluePetBake>,
+    booths: Res<Booths>,
+    mut scene: Option<ResMut<CreateScene>>,
+    mut materials: ResMut<Assets<WowModelMaterial>>,
+    creatures: Option<Res<Creatures>>,
+    anim_data: Option<Res<crate::creature_anim::AnimData>>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+) {
+    let Some(scene) = scene.as_deref_mut() else {
+        return;
+    };
+    let Some(booth) = booths.0.get(GLUE_SLOT) else {
+        return;
+    };
+    // No pet on this character (every class but a living hunter/warlock) — clear once and stop.
+    if pet.display_id == 0 || pet.parts.is_empty() {
+        if scene.pet_baked.is_some() {
+            clear_pet(&mut commands, scene);
+        }
+        return;
+    }
+    if !scene.spawned {
+        return; // no stage yet — nothing to stand on, nothing to be lit by
+    }
+    if scene.pet_baked == Some(pet.revision) {
+        return; // already standing, and nothing about it changed
+    }
+    // The rig comes from the same display cache that produced the parts, so both are ready
+    // together; if somehow not, leave `pet_baked` alone and retry next frame.
+    let (Some(creatures), Some(light)) = (creatures.as_deref(), scene.light.clone()) else {
+        return;
+    };
+    let Some(rig) = creatures.display_rig(pet.display_id) else {
+        return;
+    };
+    let mut relight = |material: &Handle<WowModelMaterial>,
+                       variants: &mut std::collections::HashMap<
+        AssetId<WowModelMaterial>,
+        Handle<WowModelMaterial>,
+    >| {
+        super::material_variant(variants, &light, material, &mut materials, true)
+            .unwrap_or_else(|| material.clone())
+    };
+    let booth_parts: Vec<BoothPart> = pet
+        .parts
+        .iter()
+        .map(|p| BoothPart {
+            skinned: p.skinned_mesh.clone(),
+            static_mesh: p.static_mesh.clone(),
+            material: relight(&p.material, &mut scene.variants),
+            alpha_anim: p.alpha_anim.clone(),
+        })
+        .collect();
+    let booth_billboards: Vec<BoothBillboardSpec> = pet
+        .billboards
+        .iter()
+        .map(|b| BoothBillboardSpec {
+            mesh: b.mesh.clone(),
+            material: relight(&b.material, &mut scene.variants),
+            bone: b.bone,
+            offset: b.offset,
+            kind: b.kind,
+        })
+        .collect();
     commands
-        .entity(root)
-        .insert(Transform::from_translation(spot).with_rotation(Quat::from_rotation_y(yaw)));
+        .entity(scene.pet_root)
+        .despawn_related::<Children>();
+    super::clear_booth_rig(&mut commands, scene.pet_root);
+    let mut pet_rig = spawn_booth_model(
+        &mut commands,
+        &mut palettes,
+        scene.pet_root,
+        booth.layer.clone(),
+        &booth_parts,
+        &[], // a pet wears nothing
+        rig.inverse_bindposes
+            .as_ref()
+            .map(|ibp| (rig.skeleton, ibp, rig.animations)),
+        anim_data.as_deref().map(|a| &a.0),
+        BoothMotion::Loop, // Stand, looping — the same live scene the character is
+        [false, false],    // …and no hands to grip with
+        &booth_billboards,
+    );
+    // The pet's OWN emitters — the imp's flames (decision 1539). Authored on the pet's own bones,
+    // so this is the model's-own recipe, NOT the worn-item one (`spawn_booth_effects`, which seats
+    // a *separate* model's emitters on a body bone through a host): the flame at the hand rides the
+    // hand through the Stand loop.
+    //
+    // Anchored at `pet_root`, whose scale is the pet's — a half-size imp gets half-size flames,
+    // positions and quads alike (`particles::quads`, the `sizeByInstanceScale` flag all three of
+    // the imp's set). Relit like every other booth draw, onto the SCENE's light buffer, so the
+    // flames take the backdrop's fog instead of the world's time of day.
+    let (emitters, fx_frames) = super::spawn_booth_own_emitters(
+        &mut commands,
+        &mut pet_rig,
+        scene.pet_root,
+        &booth.layer,
+        Some(&light),
+        &pet.emitters,
+    );
+    // After the emitter spawn: `anchor` writes into the pose buffer, `finish` is what commits it.
+    pet_rig.finish(&mut commands);
+    // The seat: attachment 1's whole frame — its translation, the constant yaw its bone carries on
+    // the Human scene and the constant scale it carries on Human and Tauren (1533) — times the DBC
+    // scale product the wire never carries here (see [`GluePetBake::scale`]).
+    commands.entity(scene.pet_root).insert(
+        Transform::from_translation(scene.pet_spot)
+            .with_rotation(scene.pet_facing)
+            .with_scale(Vec3::splat(pet.scale.max(0.01) * scene.pet_stage_scale)),
+    );
+    scene.pet_baked = Some(pet.revision);
+    info!(
+        "glue pet: display {} up — {} part(s), {} camera-facing, {} emitter(s) ({} on a billboard \
+         frame), scale {:.3} at {:?}",
+        pet.display_id,
+        booth_parts.len(),
+        booth_billboards.len(),
+        emitters,
+        fx_frames,
+        pet.scale,
+        scene.pet_spot,
+    );
+}
+
+/// Tear the standing pet down (no pet on this character, or the stage went away).
+fn clear_pet(commands: &mut Commands, scene: &mut CreateScene) {
+    commands
+        .entity(scene.pet_root)
+        .despawn_related::<Children>();
+    // The rig state lives on the root, which outlives its bakes — the despawn doesn't reach it.
+    super::clear_booth_rig(commands, scene.pet_root);
+    scene.pet_baked = None;
+}
+
+/// Seat the model root on the stage `spot`, in the stage's own frame (`stage` + `stage_scale`),
+/// facing `yaw` (the ref's `Model:SetRotation` — rotation about the root's own origin, never about
+/// the scene's).
+fn apply_yaw(
+    commands: &mut Commands,
+    root: Entity,
+    spot: Vec3,
+    stage: Quat,
+    stage_scale: f32,
+    yaw: f32,
+) {
+    commands.entity(root).insert(
+        Transform::from_translation(spot)
+            .with_rotation(stage * Quat::from_rotation_y(yaw))
+            .with_scale(Vec3::splat(stage_scale)),
+    );
+}
+
+/// The stage's **authored frame**: attachment `bone`'s chain, composed from the constant rotation
+/// and scale the scene author parked on it.
+///
+/// A stage is an M2 *attachment*, and an attachment carries a frame, not just a point. The
+/// reference composes the whole thing: `child+0xfc = child+0xbc × (T(att.pos) · parentBone[att.bone])`
+/// (`MatrixMultiply` at `0x71439b`, inside `0x714260`) — **rotation and scale go in, not only the
+/// translation** (wow-re `glue/scratch/glue-preview-facing-law.md`, §the attachment leg).
+/// Five of the six shipped `UI_*` scenes leave that bone unrotated,
+/// because their camera is authored looking straight down the stage's +X and a WoW model's default
+/// facing already looks that way (measured on the files: Orc +0.02°, Dwarf +0.62°, NightElf
+/// −0.24°, Scourge 0.00°, Tauren +0.02° between the camera's eye→target and +X).
+///
+/// **`UI_Human`'s is the exception, and taking only the attachment *point* was why every Human
+/// stood angled away on the login and select screens (1533).** That scene is a lifted chunk of
+/// Elwynn at world (−225, −81), and its camera sits at azimuth −18.2° from the stage rather than
+/// on the axis; the author aimed the character at it by keying the stage bone (bone 4) with a
+/// constant **−16.5°** yaw — two identical quaternion keys `(0, 0, −0.14349, 0.98965)` on global
+/// sequence 1, byte-read from the shipped `UI_Human.m2`.
+///
+/// Read off the model's baked global-sequence channels because that is where a *constant* M2
+/// rotation lives: vanilla's rest pose is identity rotations with the pivot carrying bind position,
+/// so an author who wants a bone held at an angle keys it and parks the key. The channels are
+/// already conjugated into Bevy space by the loader, so the composed quaternion drops straight into
+/// the character root's transform.
+///
+/// The **scale** rides the same channels and is uniform on every shipped scene — UI_Human parks
+/// 0.97 on both its attachment bones, UI_Tauren 1.04 on the character's and 0.7324 on the pet's,
+/// the other four none — so it is carried as one factor rather than a `Vec3`, and `x` is read
+/// because a non-uniform stage would be an authoring surprise, not a case to silently average.
+fn stage_frame(model: &M2Model, bone: u16) -> (Quat, f32) {
+    let Some(anims) = model.animations.as_ref() else {
+        return (Quat::IDENTITY, 1.0);
+    };
+    let mut rot = Quat::IDENTITY;
+    let mut scale = 1.0;
+    let mut idx = bone;
+    // Cycle-guarded by the joint count, exactly as the pivot walk beside it is.
+    for _ in 0..=model.skeleton.joints.len() {
+        if let Some(g) = anims.global_bones.iter().find(|g| g.bone == idx) {
+            // Parent-first composition up the chain; `t = 0` because these are parked keys — a
+            // stage bone that genuinely animated would need the live joint, and none does.
+            if let Some(c) = g.rotation.as_ref() {
+                rot = c.sample(0.0) * rot;
+            }
+            if let Some(c) = g.scale.as_ref() {
+                scale *= c.sample(0.0).x;
+            }
+        }
+        let Some(joint) = model.skeleton.joints.get(usize::from(idx)) else {
+            break;
+        };
+        match u16::try_from(joint.parent) {
+            Ok(parent) => idx = parent,
+            Err(_) => break, // -1 = root reached
+        }
+    }
+    (rot, scale)
 }
 
 /// The phase-3 preview instrument (`WOW_CREATE_TEST="race,sex[,class,skin,face,hairStyle,hairColor,facialHair]"`,
@@ -1022,6 +1391,71 @@ mod tests {
     use super::*;
     use benilla_assets::ModelLight;
     use benilla_formats::M2Light;
+
+    /// **Only a select look stands a pet, and only when the wire named one.**
+    ///
+    /// `petDisplayId == 0` is the entire client-side gate: the server suppresses the triple for
+    /// everything but a living hunter or warlock (vmangos `Player::BuildEnumData`), so a class or
+    /// ghost test here would be a second, drifting copy of a rule we do not own. The create screen
+    /// builds a character that has no pet yet and must never show one.
+    #[test]
+    fn a_pet_stands_only_for_a_select_look_whose_wire_named_one() {
+        let mut c = benilla_protocol::Character {
+            guid: 1,
+            name: "Hunter".into(),
+            race: 1,
+            class: 3,
+            gender: 0,
+            skin: 0,
+            face: 0,
+            hair_style: 0,
+            hair_color: 0,
+            facial_hair: 0,
+            level: 60,
+            zone: 0,
+            map: 0,
+            position: benilla_protocol::wire::Vector3d {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            flags: 0,
+            equipment: [benilla_protocol::CharEnumItem::default(); 19],
+            pet_display_id: 517,
+            pet_level: 60,
+            pet_family: 1,
+        };
+        assert_eq!(
+            GlueLook::Select(SelectLook::from(&c)).pet(),
+            Some(PetLook {
+                display_id: 517,
+                level: 60,
+                family: 1,
+            }),
+            "the roster row's whole pet triple rides the select look — the level and family are \
+             its size, not decoration"
+        );
+
+        c.pet_display_id = 0;
+        assert_eq!(
+            GlueLook::Select(SelectLook::from(&c)).pet(),
+            None,
+            "a zeroed triple is 'no pet' — the only gate the client applies"
+        );
+
+        // The create screen: a character being built has no pet, whatever class is picked.
+        let create = GlueLook::Create(CreateLook {
+            race: 1,
+            sex: 0,
+            class: 3, // hunter
+            skin: 0,
+            face: 0,
+            hair_style: 0,
+            hair_color: 0,
+            facial_hair: 0,
+        });
+        assert_eq!(create.pet(), None);
+    }
 
     /// A same-size `resize_target` must not touch the image at all. `Assets::get_mut` queues
     /// `AssetEvent::Modified` whether or not the caller writes, and this target is the glue

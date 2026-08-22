@@ -108,6 +108,10 @@ const CELL: f32 = 533.333_3 / 4.0;
 /// spheres (index-parallel with `parts`), baked at flush.
 struct MergeAcc {
     parts: Vec<(Arc<RenderSubmesh>, Transform)>,
+    /// Each part's placement identity (index-parallel with `parts`) — what the pick names when
+    /// the cursor lands on this blob (decision 1534). Shared per placement, so a merged cell of
+    /// 300 trees holds 300 refcount bumps, not 300 strings.
+    objects: Vec<Arc<crate::interact::WorldObject>>,
     spheres: Vec<Vec4>,
     /// Interior-prop accs only (index-parallel with `parts`): each part's SH-probe slot, baked
     /// per vertex at flush. Empty on every other lane — homogeneous per key by construction,
@@ -128,6 +132,7 @@ impl MergeAcc {
     fn source(&self) -> BlobSource<'_> {
         BlobSource {
             parts: &self.parts,
+            objects: &self.objects,
             spheres: &self.spheres,
             slots: &self.slots,
             blend: self.blend,
@@ -140,6 +145,7 @@ impl MergeAcc {
 /// concatenation. Index-parallel slices; `slots` is empty on every non-interior lane.
 struct BlobSource<'a> {
     parts: &'a [(Arc<RenderSubmesh>, Transform)],
+    objects: &'a [Arc<crate::interact::WorldObject>],
     spheres: &'a [Vec4],
     slots: &'a [u32],
     blend: ModelBlend,
@@ -207,6 +213,7 @@ type DoodadKey = ((i32, i32), (i32, i32), Handle<WowModelMaterial>);
 struct SettledBlob {
     entity: Entity,
     parts: Vec<(Arc<RenderSubmesh>, Transform)>,
+    objects: Vec<Arc<crate::interact::WorldObject>>,
     spheres: Vec<Vec4>,
     verts: usize,
 }
@@ -285,6 +292,7 @@ impl StaticMerge {
         fade_sphere: Vec4,
         blend: ModelBlend,
         kind: ModelKind,
+        object: &Arc<crate::interact::WorldObject>,
     ) -> bool {
         let frame = self.frame;
         let acc = match site {
@@ -297,6 +305,7 @@ impl StaticMerge {
                     .entry((*owner, cell, mat.clone()))
                     .or_insert_with(|| MergeAcc {
                         parts: Vec::new(),
+                        objects: Vec::new(),
                         spheres: Vec::new(),
                         slots: Vec::new(),
                         verts: 0,
@@ -311,6 +320,7 @@ impl StaticMerge {
                     .entry((*uid, Arc::clone(groups), mat.clone()))
                     .or_insert_with(|| MergeAcc {
                         parts: Vec::new(),
+                        objects: Vec::new(),
                         spheres: Vec::new(),
                         slots: Vec::new(),
                         verts: 0,
@@ -341,6 +351,7 @@ impl StaticMerge {
         self.baked_verts += verts as u64;
         self.batches += 1;
         acc.parts.push((geometry.clone(), transform));
+        acc.objects.push(object.clone());
         acc.verts += verts;
         acc.last_add = frame;
         true
@@ -414,6 +425,7 @@ pub(super) fn flush_static_merge(
             cell.blobs.push(SettledBlob {
                 entity,
                 parts: std::mem::take(&mut acc.parts),
+                objects: std::mem::take(&mut acc.objects),
                 spheres: std::mem::take(&mut acc.spheres),
                 verts: acc.verts,
             });
@@ -492,6 +504,10 @@ pub(super) fn flush_static_merge(
                     .iter()
                     .flat_map(|b| b.parts.iter().cloned())
                     .collect();
+                let objects: Vec<_> = members
+                    .iter()
+                    .flat_map(|b| b.objects.iter().cloned())
+                    .collect();
                 let spheres: Vec<_> = members
                     .iter()
                     .flat_map(|b| b.spheres.iter().copied())
@@ -502,6 +518,7 @@ pub(super) fn flush_static_merge(
                     &key.2,
                     BlobSource {
                         parts: &parts,
+                        objects: &objects,
                         spheres: &spheres,
                         slots: &[],
                         blend: cell.blend,
@@ -515,6 +532,7 @@ pub(super) fn flush_static_merge(
                     entity,
                     verts: members.iter().map(|b| b.verts).sum(),
                     parts,
+                    objects,
                     spheres,
                 });
             }
@@ -651,9 +669,14 @@ pub(crate) fn log_blob_vis(
 /// One blob bake (a closed accumulator, or a re-consolidated cell's chunk) → one blob entity
 /// carrying exactly what its members carried minus
 /// the per-placement machinery the shader lane now owns (1418): no `DoodadFade` (the baked
-/// fade spheres drive `WOW_MERGED_FADE`; `MeshTag` stays at opaque), no `PickMesh` (nameable,
-/// not pickable — the weld's identity rule, 0929), `ExteriorScene` (every member had it), the
-/// union `Aabb` (authored: `NoAutoAabb`).
+/// fade spheres drive `WOW_MERGED_FADE`; `MeshTag` stays at opaque), `ExteriorScene` (every
+/// member had it), the union `Aabb` (authored: `NoAutoAabb`).
+///
+/// Its pick declaration is a [`PickBlob`], not a `PickMesh`: the baked mesh is the union of
+/// every member, so casting against it would answer "static-merge", which is what this blob's
+/// `WorldObject` said and why 1418's "nameable, not pickable" was a real loss of the inspector
+/// over merged content (decision 1534). The members carry the placement identities, and the
+/// entity keeps the broad phase and the drawn test it always had.
 fn spawn_blob(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -664,6 +687,7 @@ fn spawn_blob(
 ) -> Entity {
     let BlobSource {
         parts,
+        objects,
         spheres,
         slots,
         blend,
@@ -691,12 +715,27 @@ fn spawn_blob(
         MeshTag(tag),
         Aabb::from_min_max(mn, mx),
         NoAutoAabb,
+        // The blob's own identity is the DRAW's, not a placement's — the members answer the
+        // pick, and this is only what a query for the blob entity itself reads.
         WorldObject {
             kind,
             label: "static-merge".into(),
             id: 0,
             detail: format!("{n} batches merged"),
         },
+        crate::interact::PickBlob(
+            objects
+                .iter()
+                .zip(parts)
+                .map(
+                    |(object, (geometry, transform))| crate::interact::PickMember {
+                        object: object.clone(),
+                        geometry: geometry.clone(),
+                        transform: *transform,
+                    },
+                )
+                .collect(),
+        ),
     ));
     if exterior {
         blob.insert(crate::exterior_cull::ExteriorScene);
@@ -749,6 +788,16 @@ mod tests {
         }
     }
 
+    /// A test placement identity — every divert carries one (decision 1534).
+    fn object() -> Arc<crate::interact::WorldObject> {
+        Arc::new(crate::interact::WorldObject {
+            kind: ModelKind::Doodad,
+            label: "World\\test\\tree.m2".into(),
+            id: 1,
+            detail: String::new(),
+        })
+    }
+
     fn divert_doodad(merge: &mut StaticMerge, owner: (i32, i32), at: Vec3, verts: usize) {
         let mat = Handle::<WowModelMaterial>::default();
         assert!(merge.divert(
@@ -760,6 +809,7 @@ mod tests {
             Vec4::new(at.x, at.y, at.z, 1.5),
             ModelBlend::Opaque,
             ModelKind::Doodad,
+            &object(),
         ));
     }
 
@@ -800,6 +850,7 @@ mod tests {
             Vec4::new(0.0, 0.0, 0.0, f32::INFINITY),
             ModelBlend::Opaque,
             ModelKind::Wmo,
+            &object(),
         ));
         assert!(merge.doodads.is_empty() && merge.props.is_empty());
     }
@@ -848,6 +899,7 @@ mod tests {
                     Vec4::new(0.0, 0.0, 0.0, f32::INFINITY),
                     ModelBlend::Opaque,
                     ModelKind::Doodad,
+                    &object(),
                 ));
             }
         }
@@ -902,6 +954,7 @@ mod tests {
                 Vec4::new(0.0, 0.0, 0.0, 4.0),
                 ModelBlend::Opaque,
                 ModelKind::Doodad,
+                &object(),
             ));
         }
         app.world_mut().run_system_once(flush_static_merge).unwrap();

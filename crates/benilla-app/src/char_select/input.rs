@@ -15,11 +15,8 @@ use super::dialog::DeleteDialog;
 use super::screen::SelectAction;
 use super::{class_name, send_pick, ClientState, Roster};
 
-/// The ref's drag constant (`CHARACTER_ROTATION_CONSTANT = 0.6`, CharacterSelect.lua — degrees per
-/// pixel; the facing setter is in degrees, deg→rad at the C boundary).
-pub(crate) const ROTATION_PER_PX: f32 = 0.6 * std::f32::consts::PI / 180.0;
-/// The rotate buttons' hold rate — the ref's 2°-per-frame `CHARACTER_FACING_INCREMENT`, per-second.
-const ROTATE_RATE: f32 = 120.0 * std::f32::consts::PI / 180.0;
+use crate::glue::{drag_yaw, ROTATE_RATE};
+
 /// The double-click window (the ref rides the OS notion; this is the conventional interval).
 const DOUBLE_CLICK_SECS: f32 = 0.4;
 
@@ -29,7 +26,8 @@ const DOUBLE_CLICK_SECS: f32 = 0.4;
 /// sits over the buttons).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn select_input(
-    presses: Query<(&SelectAction, &Interaction), Changed<Interaction>>,
+    buttons: Query<(Entity, &SelectAction)>,
+    clicks: Res<crate::glue::GlueClicks>,
     keys: Res<ButtonInput<KeyCode>>,
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
@@ -48,8 +46,10 @@ pub(super) fn select_input(
     let now = time.elapsed_secs();
     let mut enter_world = false;
     let mut back_to_login = false;
-    for (action, interaction) in &presses {
-        if *interaction != Interaction::Pressed {
+    // Buttons fire on the RELEASE, over the button that took the press — the reference's stock
+    // `<Button>` click mask is `LeftButtonUp` alone (1533, `crate::glue::glue_clicks`).
+    for (entity, action) in &buttons {
+        if !clicks.hit(entity) {
             continue;
         }
         match *action {
@@ -58,10 +58,13 @@ pub(super) fn select_input(
                 // within the window is the double-click → enter world.
                 let double =
                     last_click.is_some_and(|(row, at)| row == i && now - at < DOUBLE_CLICK_SECS);
+                let was = roster.selected();
                 *last_click = Some((i, now));
-                if roster.selected != Some(i) {
-                    roster.selected = Some(i);
-                } else if double {
+                // The ref selects on **every** click, the row you were already on included — which
+                // is what re-squares the facing (`Roster::select_seq`). Only the double still
+                // needs the "already selected" test.
+                roster.select(Some(i));
+                if was == Some(i) && double {
                     enter_world = true;
                 }
             }
@@ -121,13 +124,13 @@ pub(super) fn select_input(
         let back = keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft);
         let fwd = keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::ArrowRight);
         if back || fwd {
-            let cur = roster.selected.unwrap_or(0);
+            let cur = roster.selected().unwrap_or(0);
             let sel = if back {
                 (cur + n - 1) % n
             } else {
                 (cur + 1) % n
             };
-            roster.selected = Some(sel);
+            roster.select(Some(sel));
         }
     }
 
@@ -148,15 +151,17 @@ pub(super) fn rotate_model(
     panes: Query<(&Interaction, &SelectAction)>,
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut preview: ResMut<GluePreview>,
 ) {
+    let window = window.single().ok();
     for (interaction, action) in &panes {
         if *interaction != Interaction::Pressed {
             continue;
         }
         match action {
             SelectAction::Scene if motion.delta.x != 0.0 => {
-                preview.yaw += motion.delta.x * ROTATION_PER_PX;
+                preview.yaw += drag_yaw(motion.delta.x, window);
             }
             SelectAction::RotateLeft => preview.yaw -= ROTATE_RATE * time.delta_secs(),
             SelectAction::RotateRight => preview.yaw += ROTATE_RATE * time.delta_secs(),

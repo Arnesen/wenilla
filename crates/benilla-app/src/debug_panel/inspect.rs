@@ -10,7 +10,7 @@ use bevy_egui::{egui, EguiContexts};
 use super::{overlay_text, OVERLAY_FILL, OVERLAY_TEXT_DIM};
 use crate::net::ObjectStore;
 use crate::ui_script::{InspectMode, PointerOverUi};
-use benilla_world::interact::{pick_at_cursor, PickParts, WorldObject};
+use benilla_world::interact::{WorldObject, WorldPick};
 use benilla_world::model_render::ModelKind;
 use benilla_world::modkeys::DEV_CHORD;
 use benilla_world::view::WorldCamera;
@@ -85,6 +85,16 @@ pub(super) struct InspectStores<'w, 's> {
     motion: Query<'w, 's, MotionReadout>,
     factions: Option<Res<'w, crate::target::ring::Factions>>,
     self_store: Query<'w, 's, &'static ObjectStore, With<crate::net::SelfPlayer>>,
+    /// The live standings — the other half of the reaction resolve (`ring_reaction` takes the
+    /// reputation branch first, and a rank that came off a standing rather than a faction-template
+    /// comparison is the single most confusing thing about a unit's colour).
+    reputations: Res<'w, crate::net::Reputations>,
+    /// This frame's plate verdict ([`crate::vplates::VPlates`]) — the *rendered* answer, not a
+    /// re-derivation, so the card can never disagree with what is on screen.
+    plates: Res<'w, crate::vplates::VPlates>,
+    /// Which of the two master bits are on, so a `plate ✗` can say whether the unit lost its plate
+    /// on the category gate or on something else.
+    plate_mode: Res<'w, crate::vplates::VPlateMode>,
     /// The ask-once GO template cache — the readable head a TEXT object's line reports
     /// (decision 1105).
     go_templates: Res<'w, crate::go_templates::GameObjectTemplates>,
@@ -111,7 +121,6 @@ pub(super) fn inspect_ui(
     mut contexts: EguiContexts,
     inspect: Res<InspectMode>,
     mouseover: Res<MouseoverTarget>,
-    objects: Query<&WorldObject>,
     // The pickable mesh is a child of the net entity; its descriptor store (`ObjectStore`) lives on the
     // parent, so the readout hops child → parent.
     parents: Query<&ChildOf>,
@@ -160,7 +169,7 @@ pub(super) fn inspect_ui(
         });
 
     // The identity card: only when hovering a picked object, pinned just off the cursor tip.
-    let Some(obj) = mouseover.entity.and_then(|e| objects.get(e).ok()) else {
+    let Some(obj) = mouseover.object.as_ref() else {
         return Ok(());
     };
     let Some(cursor) = ctx.pointer_latest_pos() else {
@@ -174,6 +183,8 @@ pub(super) fn inspect_ui(
         .and_then(|e| parents.get(e).ok())
         .map(|c| c.parent());
     let (factions, self_store) = (stores.factions.as_deref(), stores.self_store.single().ok());
+    let (reputations, plates, plate_mode) =
+        (&*stores.reputations, &stores.plates.0, &*stores.plate_mode);
     let go_templates = &*stores.go_templates;
     let (stores, kinds, collision, lit, motion, go_anims) = (
         &stores.stores,
@@ -321,6 +332,70 @@ pub(super) fn inspect_ui(
             s.0.unit_gender().unwrap_or(0)
         )
     });
+    // **Why this unit does or does not carry a V-plate** — the whole input set of
+    // `vplates::drive_vplates`'s gate on one line, plus the verdict it actually reached this frame
+    // (read out of [`crate::vplates::VPlates`], never re-derived, so the card cannot disagree with
+    // the screen). "These plates shouldn't be here" is otherwise a question no amount of looking
+    // can answer: the plate is drawn from a REACTION rank whose provenance (a reputation standing
+    // vs a faction-template comparison) is invisible, over unit flags nothing displays, and the
+    // two master bits are off-screen state. Reading `reaction 3 neutral(rep)` off a green-looking
+    // city NPC is the entire diagnosis.
+    let plate_line = store.filter(|_| is_unit).map(|s| {
+        let rank = crate::target::ring::ring_reaction(factions, reputations, Some(s), self_store);
+        let word = match rank {
+            0 => "hated",
+            1 => "hostile",
+            2 => "unfriendly",
+            3 => "neutral",
+            4 => "friendly",
+            5 => "honored",
+            6 => "revered",
+            _ => "exalted",
+        };
+        // Which branch produced it: a faction WITH a reputation slot colours by our standing
+        // (`0x605fc0` → `0x4d63a0`, before any template comparison), everything else by the
+        // template comparator. The two disagree constantly — a battleground emissary is `friendly`
+        // by template and `neutral` by standing — and only this tag says which one you are seeing.
+        let branch = s
+            .0
+            .unit_faction_template()
+            .and_then(|t| factions?.catalog().template(t))
+            .map(|t| {
+                if factions.is_some_and(|f| f.catalog().reputation_faction(t.faction).is_some()) {
+                    "rep"
+                } else {
+                    "tpl"
+                }
+            })
+            .unwrap_or("?");
+        let ctype = net_entity
+            .and_then(|p| guids.get(p).ok())
+            .and_then(|g| benilla_protocol::guid::entry(g.0))
+            .and_then(|e| names.creature_type(e));
+        let ctype = ctype.map_or_else(|| "type ?".to_string(), |t| format!("type {t}"));
+        let verdict = match net_entity {
+            Some(p) if plates.contains(&p) => "plate ✓".to_string(),
+            _ => {
+                // The category the gate would have put it in, and whether that bit is on — the
+                // first thing to check when a plate is missing (or present) unexpectedly.
+                let (category, bit) = if rank >= 4 {
+                    ("friendly", plate_mode.friends)
+                } else {
+                    ("enemy", plate_mode.enemies)
+                };
+                if bit {
+                    "plate ✗".to_string()
+                } else {
+                    format!("plate ✗ ({category} bit off)")
+                }
+            }
+        };
+        format!(
+            "{verdict} · reaction {rank} {word}({branch}) · faction {} · unitflags {:#x} · {ctype}",
+            s.0.unit_faction_template().unwrap_or(0),
+            s.0.unit_flags(),
+        )
+    });
     // Player-only customization: the compositor's input, shown raw so we can
     // confirm the PLAYER_BYTES decode against an in-game character.
     let customization_line = store.filter(|_| is_player).map(|s| {
@@ -444,6 +519,9 @@ pub(super) fn inspect_ui(
     if let Some(line) = &appearance_line {
         lines.push(line.clone());
     }
+    if let Some(line) = &plate_line {
+        lines.push(line.clone());
+    }
     if let Some(line) = &customization_line {
         lines.push(line.clone());
     }
@@ -497,6 +575,9 @@ pub(super) fn inspect_ui(
                     if let Some(line) = &appearance_line {
                         ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));
                     }
+                    if let Some(line) = &plate_line {
+                        ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));
+                    }
                     if let Some(line) = &customization_line {
                         ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));
                     }
@@ -532,10 +613,17 @@ pub(super) fn inspect_ui(
     Ok(())
 }
 
-/// The nearest [`WorldObject`] under the cursor this frame, or `None`. Consumers read `entity` and look
-/// up its [`WorldObject`]; `point`/`distance` are the world-space hit.
+/// The nearest identified thing under the cursor this frame, or `None`. `point`/`distance` are the
+/// world-space hit.
+///
+/// The identity is the resource's own (`object`), not something the consumer looks up off `entity`:
+/// most of the static world draws from a consolidated lane and has **no entity** to look anything
+/// up on (decision 1534). `entity` is `Some` only when one owns the geometry — which is exactly
+/// when the extra per-entity readouts (a unit's descriptor store, a GameObject's collision) mean
+/// anything.
 #[derive(Resource, Default)]
 pub struct MouseoverTarget {
+    pub object: Option<WorldObject>,
     pub entity: Option<Entity>,
     pub point: Vec3,
     pub distance: f32,
@@ -550,15 +638,18 @@ pub(super) fn update_mouseover(
     mut target: ResMut<MouseoverTarget>,
     window: Query<&Window, With<PrimaryWindow>>,
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
-    objects: Query<Entity, With<WorldObject>>,
-    parts: PickParts,
+    objects: Query<(Entity, &WorldObject)>,
+    // Everything drawn, entity-owned or not — see [`WorldPick`]: most of the static world draws
+    // from a consolidating lane and would be invisible to a bare `PickParts` cast (1534).
+    pick: WorldPick,
 ) {
     if !inspect.enabled {
-        if target.entity.is_some() {
+        if target.object.is_some() {
             *target = MouseoverTarget::default();
         }
         return;
     }
+    target.object = None;
     target.entity = None;
     // The pointer is over the dev UI (e.g. the now-overlaid debug panel), not the world — don't pick
     // behind it. This replaces the old "is the cursor in the inset world viewport?" test, which no
@@ -575,12 +666,11 @@ pub(super) fn update_mouseover(
     let Some(cursor) = window.cursor_position() else {
         return; // cursor left the window, or we're in mouselook (hidden)
     };
-    let identified: HashSet<Entity> = objects.iter().collect();
-    if let Some((entity, point, distance)) =
-        pick_at_cursor(cursor, camera, cam_tf, &identified, &parts)
-    {
-        target.entity = Some(entity);
-        target.point = point;
-        target.distance = distance;
+    let identified: HashSet<Entity> = objects.iter().map(|(e, _)| e).collect();
+    if let Some(hit) = pick.at_cursor(cursor, camera, cam_tf, &identified) {
+        target.object = hit.object;
+        target.entity = hit.entity;
+        target.point = hit.hit.point;
+        target.distance = hit.hit.distance;
     }
 }

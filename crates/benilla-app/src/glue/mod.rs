@@ -10,6 +10,7 @@ pub(crate) mod art;
 pub(crate) mod backdrop;
 pub(crate) mod widgets;
 
+use bevy::ecs::entity::EntityHashSet;
 use bevy::prelude::*;
 
 use art::{tc_rect, GlueArt, BTN_BG, BTN_HOVER, BUTTON_TC, GOLD};
@@ -30,10 +31,71 @@ impl Plugin for GluePlugin {
                 Startup,
                 crate::glue_strings::load_glue_strings.after(benilla_assets::AssetSet::Open),
             )
+            .init_resource::<GlueClicks>()
+            .add_systems(PreUpdate, glue_clicks.after(bevy::ui::UiSystems::Focus))
             .add_systems(
                 Update,
                 (backdrop::fit_backdrop_borders, seat_outline_copies),
             );
+    }
+}
+
+/// The glue widgets whose click landed **this frame** — the reference's `OnClick`.
+///
+/// Ask this, never `Interaction::Pressed`, to run a button's action: pressing is not clicking (see
+/// [`glue_clicks`]). Rebuilt every frame in `PreUpdate`, so an `Update` reader sees exactly the
+/// current frame's clicks and a screen that did not run misses nothing it should have had.
+#[derive(Resource, Default)]
+pub(crate) struct GlueClicks(EntityHashSet);
+
+impl GlueClicks {
+    /// Did this widget's click land this frame?
+    pub(crate) fn hit(&self, widget: Entity) -> bool {
+        self.0.contains(&widget)
+    }
+}
+
+/// The glue layer's click law: a button fires on the **release**, and only when the release lands
+/// back on the button that took the press.
+///
+/// VERIFIED against the real 1.12.1 client (wow-re `ui.md`, the `OnDoubleClick`/`RegisterForClicks`
+/// byte law): `CSimpleButton`'s ctor default click mask `[+0x330] = 0x100` is **`LeftButtonUp`
+/// alone**, so a stock `<Button>` — every glue button is one — is dispatched from the mouse-**up**
+/// dispatcher `0x7792d0`; the mouse-**down** dispatcher `0x779210` fires nothing a glue screen
+/// registers. Two more predicates ride the release: the button must be in state `[+0x328] == 2`
+/// (PUSHED — it took the press), and the release must **hit-test inside the frame** (`0x76b020`).
+/// So press-and-slide-off cancels, and press-off-slide-on does nothing — which is what a player
+/// expects of every button they have ever used. Our own in-game FrameXML path already implements
+/// exactly this (`benilla_ui::script::pointer`'s `same_frame` gate); the glue screens were the half
+/// that dispatched on the press edge, and every one of them moved here (1533).
+///
+/// Bevy's [`Interaction`] carries the same three states under other names, so the up edge is a
+/// state transition and needs no cursor maths: `ui_focus_system` sets `Pressed` only on the frame
+/// the press lands on a hovered node, holds it through a drag that leaves the node, and on release
+/// clears every `Pressed` back to `None` — after which the same run re-raises `Hovered` on whatever
+/// still contains the cursor. **`Pressed → Hovered` is therefore exactly "released inside"**, and
+/// `Pressed → None` exactly "released outside, or hidden mid-press". The `pushed` set is the ref's
+/// state byte.
+pub(crate) fn glue_clicks(
+    interactions: Query<(Entity, &Interaction)>,
+    mut pushed: Local<EntityHashSet>,
+    mut clicks: ResMut<GlueClicks>,
+) {
+    clicks.0.clear();
+    pushed.retain(|&e| match interactions.get(e) {
+        Ok((_, Interaction::Pressed)) => true, // still held
+        Ok((_, Interaction::Hovered)) => {
+            clicks.0.insert(e); // released inside — the click
+            false
+        }
+        // Released outside, hidden mid-press, or despawned: the press is simply dropped, as the
+        // ref drops one whose release fails the hit test.
+        _ => false,
+    });
+    for (e, interaction) in &interactions {
+        if *interaction == Interaction::Pressed {
+            pushed.insert(e);
+        }
     }
 }
 
@@ -54,6 +116,36 @@ pub(crate) fn seat_outline_copies(
         }
     }
 }
+
+/// The character-preview **drag rate**: the ref's `CHARACTER_ROTATION_CONSTANT = 0.6` degrees per
+/// **UI unit** (declared once in `CharacterSelect.lua` and read by both screens' `OnUpdate`; the
+/// facing setter takes degrees, deg→rad at the C boundary). Dragging right increases the facing.
+///
+/// It lives here for the reason this module exists: it is one number the two screens share, and it
+/// had already forked — the create screen carried a bare `0.01` rad/px, 4.5 % off its neighbour and
+/// off its own comment (1533). Apply it through [`drag_yaw`], never to a raw pixel delta.
+pub(crate) const ROTATION_PER_UI_UNIT: f32 = 0.6 * std::f32::consts::PI / 180.0;
+
+/// The yaw a horizontal cursor move of `delta_px` **logical** pixels turns the preview by.
+///
+/// `CHARACTER_ROTATION_CONSTANT` is per UI unit, not per pixel: `GetCursorPosition` (`0x46dad0`)
+/// answers on the glue engine's `aspect·768 × 768` virtual canvas, so the same physical drag turns
+/// the character *less* on a taller display — 0.6°/px only at a 768-line window, 0.427°/px at 1080p
+/// (wow-re `glue/scratch/glue-preview-facing-law.md`, 1533). Feeding it the raw pixel delta ran the
+/// drag ~40 % fast at 1080p and made it scale with the window instead of with the canvas.
+///
+/// The divisor is the true `height / 768`, not [`screen_scale`]: that one is clamped at 2.2 so the
+/// *layout* stops growing on a very tall window, and the cursor's canvas has no such clamp.
+pub(crate) fn drag_yaw(delta_px: f32, window: Option<&Window>) -> f32 {
+    let ui_per_px = 768.0 / window.map_or(768.0, |w| w.height().max(1.0));
+    delta_px * ui_per_px * ROTATION_PER_UI_UNIT
+}
+
+/// The rotate buttons' **hold rate** — the ref's `CHARACTER_FACING_INCREMENT = 2`, applied per
+/// `OnUpdate` tick by both screens' `RotateLeft/Right_OnUpdate`. Ours is per *second* at the ref's
+/// 60 fps, so the arrow turns at one speed instead of at the frame rate (`method.md` step 3: the
+/// mechanism, not the quirk).
+pub(crate) const ROTATE_RATE: f32 = 120.0 * std::f32::consts::PI / 180.0;
 
 /// The glue engine's virtual-screen scale: the ref lays every glue screen out on a 1024×768
 /// virtual screen stretched to the window, so each authored coordinate draws at `value · this`.
@@ -120,9 +212,9 @@ pub(crate) fn glue_button_visuals(
     art: Res<GlueArt>,
     mut glue_btns: Query<
         (
+            Entity,
             &GlueDisabled,
             &Interaction,
-            &Children,
             &mut ImageNode,
             &mut BackgroundColor,
             Has<widgets::FallbackFace>,
@@ -130,10 +222,11 @@ pub(crate) fn glue_button_visuals(
         ),
         (With<GlueBtn>, Without<ArtSwap>),
     >,
+    children: Query<&Children>,
     mut captions: Query<&mut TextColor, With<GlueCaption>>,
     mut hilights: Query<&mut Visibility, With<widgets::Hilight>>,
 ) {
-    for (disabled, interaction, children, mut node, mut bg, fallback, tc) in &mut glue_btns {
+    for (btn, disabled, interaction, mut node, mut bg, fallback, tc) in &mut glue_btns {
         let disabled = disabled.0;
         let pressed = !disabled && *interaction == Interaction::Pressed;
         let hovered = !disabled && *interaction != Interaction::None;
@@ -160,8 +253,14 @@ pub(crate) fn glue_button_visuals(
         } else if fallback {
             bg.0 = if hovered { BTN_HOVER } else { BTN_BG };
         }
-        for child in children {
-            if let Ok(mut caption) = captions.get_mut(*child) {
+        // DESCENDANTS, not children. The caption is a **grandchild's** child: `outlined_text`
+        // wraps every glue string in a layout wrapper + the −1px trim node before the real string,
+        // so a direct-children scan finds the `Hilight` overlay and the wrapper and never the
+        // `GlueCaption` — which is why the sheen lit on hover for a year while the caption stayed
+        // gold, and why a disabled button's caption never grayed either (1533). The walk is over a
+        // ~11-entity subtree; depth is the primitive's business, not this pass's.
+        for child in children.iter_descendants(btn) {
+            if let Ok(mut caption) = captions.get_mut(child) {
                 // The disabled caption grays (`GlueFontDisable`), hover whitens, rest is gold.
                 caption.0 = if disabled {
                     Color::srgb(0.5, 0.5, 0.5)
@@ -171,7 +270,7 @@ pub(crate) fn glue_button_visuals(
                     GOLD
                 };
             }
-            if let Ok(mut vis) = hilights.get_mut(*child) {
+            if let Ok(mut vis) = hilights.get_mut(child) {
                 *vis = if hovered {
                     Visibility::Inherited
                 } else {
@@ -184,9 +283,147 @@ pub(crate) fn glue_button_visuals(
 
 #[cfg(test)]
 mod tests {
-    use super::screen_scale;
+    use super::widgets::{FallbackFace, GlueBtn, GlueCaption, GlueDisabled};
+    use super::{glue_button_visuals, glue_clicks, screen_scale, GlueArt, GlueClicks, GOLD};
     use bevy::prelude::*;
     use bevy::window::WindowResolution;
+
+    /// Drive one widget's [`Interaction`] through a press/release and read back whether the click
+    /// landed — the whole of the law in [`glue_clicks`], exercised the way `ui_focus_system` writes
+    /// it (see that function's doc for the three transitions).
+    fn click_run(app: &mut App, widget: Entity, interaction: Interaction) -> bool {
+        *app.world_mut().get_mut::<Interaction>(widget).unwrap() = interaction;
+        app.update();
+        app.world().resource::<GlueClicks>().hit(widget)
+    }
+
+    fn click_app() -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<GlueClicks>()
+            .add_systems(Update, glue_clicks);
+        let widget = app.world_mut().spawn(Interaction::None).id();
+        (app, widget)
+    }
+
+    /// **A press is not a click.** The reference dispatches a stock `<Button>` from the mouse-UP
+    /// handler alone (ctor click mask `0x100` = `LeftButtonUp`), so the action must not fire while
+    /// the button is held — the whole glue layer used to fire here (1533).
+    #[test]
+    fn a_held_button_has_not_clicked_yet() {
+        let (mut app, widget) = click_app();
+        assert!(
+            !click_run(&mut app, widget, Interaction::Hovered),
+            "hover alone is not a click"
+        );
+        assert!(
+            !click_run(&mut app, widget, Interaction::Pressed),
+            "the press is not the click"
+        );
+        assert!(
+            !click_run(&mut app, widget, Interaction::Pressed),
+            "and holding it does not become one"
+        );
+    }
+
+    /// The release **over the button that took the press** is the click, and it fires exactly once.
+    #[test]
+    fn the_release_over_the_button_is_the_click() {
+        let (mut app, widget) = click_app();
+        click_run(&mut app, widget, Interaction::Pressed);
+        assert!(
+            click_run(&mut app, widget, Interaction::Hovered),
+            "released inside → the click"
+        );
+        assert!(
+            !click_run(&mut app, widget, Interaction::Hovered),
+            "and it does not repeat while the cursor rests there"
+        );
+    }
+
+    /// Press, slide off, release: **no click**. The ref hit-tests the release inside the frame
+    /// (`0x76b020`) before firing, which is the escape hatch every player expects of a button they
+    /// pressed by mistake. Bevy leaves the node `Pressed` through the slide and drops it to `None`
+    /// on a release elsewhere, so the law reads it off the transition.
+    #[test]
+    fn sliding_off_before_the_release_cancels() {
+        let (mut app, widget) = click_app();
+        click_run(&mut app, widget, Interaction::Pressed);
+        click_run(&mut app, widget, Interaction::Pressed); // dragged off, still held
+        assert!(
+            !click_run(&mut app, widget, Interaction::None),
+            "released outside → nothing"
+        );
+        assert!(
+            !click_run(&mut app, widget, Interaction::Hovered),
+            "and coming back afterwards is not a click either"
+        );
+    }
+
+    /// A press that begins somewhere else and releases here is not this button's click.
+    #[test]
+    fn a_release_without_a_press_is_not_a_click() {
+        let (mut app, widget) = click_app();
+        assert!(
+            !click_run(&mut app, widget, Interaction::Hovered),
+            "no press ever landed"
+        );
+    }
+
+    /// The caption whitens on hover and grays when disabled — the ref's `<HighlightFont>` /
+    /// `<DisabledFont>` on `GlueButtonTemplate`.
+    ///
+    /// The regression this pins is a *depth* bug, so the test builds the real depth:
+    /// [`super::widgets::outlined_text`] wraps every glue string in a layout wrapper and a −1px
+    /// trim node before the string itself, which put `GlueCaption` three levels under the button
+    /// while `glue_button_visuals` scanned the button's direct children. The sheen (a direct child)
+    /// lit on hover and the caption never moved off gold (1533).
+    #[test]
+    fn the_caption_whitens_on_hover_however_deep_the_outline_nests_it() {
+        let mut app = App::new();
+        app.init_resource::<GlueArt>()
+            .add_systems(Update, glue_button_visuals);
+        let mut caption = Entity::PLACEHOLDER;
+        let button = app
+            .world_mut()
+            .spawn((
+                GlueBtn,
+                GlueDisabled(false),
+                FallbackFace,
+                Interaction::None,
+                ImageNode::default(),
+                BackgroundColor::DEFAULT,
+            ))
+            .with_children(|btn| {
+                // wrapper → trim → the real string, exactly as `outlined_text` builds it.
+                btn.spawn(Node::default()).with_children(|wrapper| {
+                    wrapper.spawn(Node::default()).with_children(|trim| {
+                        caption = trim.spawn((GlueCaption, TextColor(GOLD))).id();
+                    });
+                });
+            })
+            .id();
+
+        let colour = |app: &App| app.world().get::<TextColor>(caption).unwrap().0;
+        app.update();
+        assert_eq!(colour(&app), GOLD, "at rest the caption is gold");
+
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Hovered;
+        app.update();
+        assert_eq!(
+            colour(&app),
+            Color::WHITE,
+            "hover whitens it (the ref's HighlightFont)"
+        );
+
+        app.world_mut().get_mut::<GlueDisabled>(button).unwrap().0 = true;
+        app.update();
+        assert_ne!(
+            colour(&app),
+            Color::WHITE,
+            "a disabled button does not highlight"
+        );
+        assert_ne!(colour(&app), GOLD, "it grays (the ref's GlueFontDisable)");
+    }
 
     /// The authored layout must FIT the window at every height — the B120 regression.
     /// [`screen_scale`] is the only thing standing between a 768-unit-tall tree and a shorter

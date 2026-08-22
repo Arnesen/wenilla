@@ -627,6 +627,209 @@ fn ffa_reaction(
         && own.player_flags() & PLAYER_FLAGS_FFA_PVP != 0
 }
 
+/// `UNIT_FIELD_FLAGS` bits `CanAttack` (`0x606980`) tests on its TARGET, any one of which refuses
+/// the attack outright — byte-verified at `0x6069b7`–`0x6069ff` (wow-re
+/// `object-layer/scratch/nameplate-category-gate.md` §3b). **The bit NUMBERS are VERIFIED; the
+/// vanilla names are not** (three wow-re workers hunted for a labelled consumer of bit 9 and found
+/// none), so nothing here is written in terms of a name — 1 `0x2`, 7 `0x80`, 16 `0x10000`,
+/// 20 `0x100000`, 25 `0x2000000`.
+const CANNOT_BE_ATTACKED: u32 = 0x2 | 0x80 | 0x1_0000 | 0x10_0000 | 0x200_0000;
+/// The two cross-flag immunity bits `CanAttack` reads on BOTH sides (`0x606a05`–`0x606a8a`): bit 8
+/// `0x100` and bit 9 `0x200`, each paired against the other unit's `PLAYER_CONTROLLED` bit 3.
+const IMMUNE_TO_PLAYER_CONTROLLED: u32 = 0x100;
+const IMMUNE_TO_UNCONTROLLED: u32 = 0x200;
+/// `UNIT_FIELD_FLAGS` bit 12 (`0x1000`) — the PvP-flag the both-players arm of `CanAttack` accepts
+/// on its target (`0x606b5c`).
+const UNIT_FLAG_PVP: u32 = 0x1000;
+
+/// The **local player's** reaction toward a unit — `0x6061e0(this = localPlayer, arg = unit)`,
+/// byte-verified (wow-re `nameplate-category-gate.md` §5 leg 3 + §8a, §5 cross-checked 2026-08-22).
+///
+/// **This is NOT [`ring_reaction`] with the arguments swapped, and that is the whole point.** The
+/// two directions take genuinely different code inside `0x6061e0`, and the client uses both:
+///
+/// - **This direction** (`A` = the local player) always reaches leg 3 at `0x606372`, because
+///   `0x606170(localPlayer)` resolves to the player themselves. Leg 3 answers a rep-slot faction
+///   with the **AT-WAR BIT** — `at_war ? 1 : 4` — and never looks at the standing. Only a
+///   faction with no reputation slot falls through to the template comparator.
+/// - **[`ring_reaction`]'s direction** (`A` = the unit) never reaches leg 3, falls into `0x606530`,
+///   and *there* the standing is read. That is the correct input for the plate's bar COLOUR, the
+///   ring, and the overhead name.
+///
+/// So a not-at-war neutral-standing NPC — a Booty Bay goblin, an Argent Dawn quartermaster, a
+/// battleground emissary — is **friendly** to this function and **neutral** to the other one, and
+/// the client shows exactly that: a friendly-category plate with a yellow bar. Substituting the
+/// standing here is what put those 36 shipped faction templates in the enemy category (1530).
+///
+/// Deferred, and each one only ever makes a unit *more* friendly than we say: the forced-reaction
+/// table (`0x4d6490`, `SMSG_SET_FORCED_REACTIONS` — no wire support yet), the party rung of the
+/// player-vs-player block, and the charmed-player case that would stop leg 3 firing at all.
+pub(crate) fn reaction_from_player(
+    factions: Option<&Factions>,
+    reputations: &Reputations,
+    target_store: Option<&ObjectStore>,
+    self_store: Option<&ObjectStore>,
+) -> u8 {
+    // The player-vs-player block (`0x606217`) sits ahead of all faction work in BOTH directions,
+    // and benilla implements the same two rungs of it here that [`ring_reaction`] does.
+    if let (Some(target), Some(own)) = (target_store, self_store) {
+        if let Some(rank) = duel_reaction(&target.0, &own.0) {
+            return rank;
+        }
+        if ffa_reaction(&target.0, &own.0) {
+            return Reaction::Hostile as u8;
+        }
+    }
+    let resolved = (|| {
+        let catalog = &factions?.0;
+        let target_tpl = catalog.template(target_store?.0.unit_faction_template()?)?;
+        // Leg 3: a faction that owns a reputation slot is answered by the AT-WAR bit alone.
+        // `faction_flags::AT_WAR` is the same wire byte the reputation pane's war checkbox reads,
+        // which is what makes declaring war on Booty Bay turn its goblins' plates red *and* move
+        // them into the enemy category — one bit, both consequences, as the reference has it.
+        if let Some(info) = catalog.reputation_faction(target_tpl.faction) {
+            let at_war = usize::try_from(info.rep_index)
+                .ok()
+                .and_then(|i| reputations.0.get(i))
+                .is_some_and(|&(flags, _)| flags & benilla_formats::faction_flags::AT_WAR != 0);
+            return Some(if at_war {
+                Reaction::Hostile as u8
+            } else {
+                Reaction::Friendly as u8
+            });
+        }
+        // Leg 4: no reputation slot → the template comparator, PLAYER → UNIT.
+        let self_tpl = catalog.template(self_store?.0.unit_faction_template()?)?;
+        Some(self_tpl.reaction_toward(target_tpl) as u8)
+    })();
+    resolved.unwrap_or(Reaction::Neutral as u8)
+}
+
+/// `CGUnit::CanAttack(this = the local player → arg = unit)` — `0x606980`, byte-verified complete
+/// (wow-re `nameplate-category-gate.md` §3, §5 cross-checked 2026-08-22). Every leg, in the
+/// binary's order.
+///
+/// This is the predicate the V-plate category actually turns on (see [`plate_is_friendly`]), and
+/// it is deliberately **not** a reaction threshold: §3b lists six shipped ways it disagrees with
+/// one, including an unflagged opposite-faction player on a PvE realm (hostile reaction, cannot be
+/// attacked → friendly plate) and a same-faction duel opponent (friendly reaction, can be attacked
+/// → enemy plate).
+pub(crate) fn can_attack_from_player(
+    factions: Option<&Factions>,
+    reputations: &Reputations,
+    target_store: Option<&ObjectStore>,
+    self_store: Option<&ObjectStore>,
+    target_is_player: bool,
+) -> bool {
+    let (Some(target), Some(own)) = (target_store, self_store) else {
+        return false; // fields not streamed yet — the reference's own null path refuses
+    };
+    let (tflags, oflags) = (target.0.unit_flags(), own.0.unit_flags());
+    // (a) The ghost gate (`0x606987`): a ghost PLAYER can only be attacked by an attacker holding a
+    // creature record whose type-flags carry `0x2` — which a player never does. So for the local
+    // player as attacker this leg is unconditional.
+    const PLAYER_FLAGS_GHOST: u32 = 0x10;
+    if target_is_player && target.0.player_flags() & PLAYER_FLAGS_GHOST != 0 {
+        return false;
+    }
+    // (b) Five target-flag disqualifiers.
+    if tflags & CANNOT_BE_ATTACKED != 0 {
+        return false;
+    }
+    // (c) The four cross-flag immunity legs, each pairing one side's immunity bit against the
+    // other's `PLAYER_CONTROLLED`.
+    let (t_controlled, o_controlled) = (
+        tflags & UNIT_FLAG_PVP_ATTACKABLE != 0,
+        oflags & UNIT_FLAG_PVP_ATTACKABLE != 0,
+    );
+    if o_controlled && tflags & IMMUNE_TO_PLAYER_CONTROLLED != 0
+        || !o_controlled && tflags & IMMUNE_TO_UNCONTROLLED != 0
+        || oflags & IMMUNE_TO_PLAYER_CONTROLLED != 0 && t_controlled
+        || oflags & IMMUNE_TO_UNCONTROLLED != 0 && !t_controlled
+    {
+        return false;
+    }
+    // (d) The three terminal arms, selected by the two `PLAYER_CONTROLLED` bits.
+    let toward_target = || reaction_from_player(factions, reputations, target_store, self_store);
+    match (o_controlled, t_controlled) {
+        // Neither is player-controlled: hostile in EITHER direction is enough.
+        (false, false) => {
+            toward_target() <= Reaction::Hostile as u8
+                || ring_reaction(factions, reputations, target_store, self_store)
+                    <= Reaction::Hostile as u8
+        }
+        // Both are: the PvP arm. A friendly reaction refuses outright; past that an attack needs a
+        // live duel, the target's PvP flag, or mutual FFA. (The charm-owner resolve `0x606170` is
+        // an identity for both sides here — benilla has no charm.)
+        (true, true) => {
+            if toward_target() >= Reaction::Friendly as u8 {
+                return false;
+            }
+            matches!(duel_rung(&target.0, &own.0), DuelRung::Engaged { .. })
+                || tflags & UNIT_FLAG_PVP != 0
+                || ffa_reaction(&target.0, &own.0)
+        }
+        // The mixed arm — the local player against any ordinary NPC, i.e. the case the plate gate
+        // takes for almost everything on screen: attackable iff worse than friendly.
+        _ => toward_target() < Reaction::Friendly as u8,
+    }
+}
+
+/// `CanCooperate(this = the local player → arg = unit)` — `0x606ba0`, byte-verified (wow-re
+/// `nameplate-category-gate.md` §2a): the two `FactionTemplate` rows' **faction-group masks**
+/// (`row + 0xc`) being equal, with neither side mind-controlled and the two not being the same
+/// unit. It reads no party or raid state — a committed wow-re note called it a party/raid predicate
+/// and was corrected by the same round.
+pub(crate) fn can_cooperate_with_player(
+    factions: Option<&Factions>,
+    target_store: Option<&ObjectStore>,
+    self_store: Option<&ObjectStore>,
+) -> bool {
+    let (Some(target), Some(own)) = (target_store, self_store) else {
+        return false;
+    };
+    if target.0.unit_charmed_by().is_some_and(|g| g != 0)
+        || own.0.unit_charmed_by().is_some_and(|g| g != 0)
+    {
+        return false;
+    }
+    let resolved = (|| {
+        let catalog = &factions?.0;
+        let target_tpl = catalog.template(target.0.unit_faction_template()?)?;
+        let self_tpl = catalog.template(own.0.unit_faction_template()?)?;
+        Some(target_tpl.group_mask == self_tpl.group_mask)
+    })();
+    resolved.unwrap_or(false)
+}
+
+/// **The V-plate category** — `0x60f6b7`–`0x60f6f1`, byte-verified (wow-re
+/// `nameplate-category-gate.md` §2). `true` = the FRIENDLY bucket (Shift-V's bit `0x8`), `false` =
+/// the ENEMY bucket (V's bit `0x1`). There is no reaction rank anywhere in this expression.
+///
+/// > A unit lands in the FRIENDLY category iff — for a non-player subject —
+/// > `CanAttack(localPlayer → subject)` is FALSE; and for a player subject, additionally
+/// > `CanCooperate(localPlayer → subject)` is TRUE.
+pub(crate) fn plate_is_friendly(
+    factions: Option<&Factions>,
+    reputations: &Reputations,
+    target_store: Option<&ObjectStore>,
+    self_store: Option<&ObjectStore>,
+    target_is_player: bool,
+) -> bool {
+    let attackable = can_attack_from_player(
+        factions,
+        reputations,
+        target_store,
+        self_store,
+        target_is_player,
+    );
+    if target_is_player {
+        can_cooperate_with_player(factions, target_store, self_store) && !attackable
+    } else {
+        !attackable
+    }
+}
+
 /// Why [`duel_reaction`]'s rung did or did not fire, with the values it judged on. This is the
 /// diagnostic face of the same walk — `/reaction` prints it, so a duel that fails to turn the
 /// opponent red names the gate that refused instead of silently reporting "neutral". Keeping one
@@ -692,7 +895,10 @@ pub(crate) fn duel_rung(
 
 #[cfg(test)]
 mod tests {
-    use super::{ring_variant, RingVariant};
+    use super::{
+        plate_is_friendly, ring_reaction, ring_variant, Factions, RingVariant,
+        UNIT_FLAG_PVP_ATTACKABLE,
+    };
 
     /// The selector's player path — the `¬X∧¬Y` split the party arc added (0434 phase 6). A
     /// friendly player reads soft blue solo, pale blue in our party; PvP-flagged reads green
@@ -742,5 +948,122 @@ mod tests {
             ring_variant(5, false, false, true, true),
             RingVariant::Friendly
         );
+    }
+
+    /// **The plate category, end to end on the REAL build-5875 DBC — the two subjects the director
+    /// observed on the reference client** (1530), plus the leg that actually discriminates the
+    /// mechanism.
+    ///
+    /// This is the regression pin the old `rank >= 4` model could never have passed. It asserts the
+    /// *divergence itself*: the emissary's reaction rank stays 3 (neutral — which is right, and is
+    /// what paints its bar yellow) while its plate CATEGORY is friendly. A future refactor that
+    /// "simplifies" the category back into a rank threshold fails here, on real data, naming the
+    /// creature.
+    #[test]
+    fn the_plate_category_reproduces_the_reference_on_the_real_dbc() {
+        use crate::net::{ObjectStore, Reputations};
+        use benilla_protocol::ObjectFields;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let factions = Factions(benilla_formats::load_faction_catalog(&mut chain).expect("dbc"));
+        // Field indices: 35 = UNIT_FIELD_FACTIONTEMPLATE, 46 = UNIT_FIELD_FLAGS.
+        let unit = |tpl: u32| ObjectStore(ObjectFields::from_pairs(&[(35, tpl)]));
+        // Us: faction template 1 (PLAYER, Human), carrying `PLAYER_CONTROLLED`.
+        let me = ObjectStore(ObjectFields::from_pairs(&[
+            (35, 1),
+            (46, UNIT_FLAG_PVP_ATTACKABLE),
+        ]));
+        let quiet = Reputations::default(); // nothing at war — the out-of-box state
+        let category = |unit: &ObjectStore, reps: &Reputations| {
+            plate_is_friendly(Some(&factions), reps, Some(unit), Some(&me), false)
+        };
+        let rank = |unit: &ObjectStore, reps: &Reputations| {
+            ring_reaction(Some(&factions), reps, Some(unit), Some(&me))
+        };
+
+        // A Chicken (FT 31 → faction 28 "Prey", NO reputation slot) falls to the template
+        // comparator, which matches nothing → 3 → attackable → the ENEMY bucket, plain V. The
+        // director confirmed this on the reference: critters do plate, and nothing excludes them.
+        let chicken = unit(31);
+        assert!(!category(&chicken, &quiet), "a critter is enemy-category");
+        assert_eq!(rank(&chicken, &quiet), 3, "and its bar is neutral yellow");
+
+        // A League of Arathor Emissary (FT 1577 → faction 509, reputation slot 53) is answered by
+        // the AT-WAR bit — not at war → 4 → not attackable → the FRIENDLY bucket, Shift-V only.
+        // The director confirmed exactly this on the reference.
+        let emissary = unit(1577);
+        assert!(category(&emissary, &quiet), "friendly-category at neutral");
+        assert_eq!(
+            rank(&emissary, &quiet),
+            3,
+            "…while the BAR stays yellow: the two halves run the reaction in opposite \
+             directions, and this disagreement is the reference's own"
+        );
+
+        // **The discriminating population** (wow-re §7: 36 shipped templates where the at-war leg
+        // and the mask comparison disagree). Booty Bay's mask answer is 3 — so if this read as
+        // enemy-category we would be back on the comparator, and the at-war leg would be fiction.
+        let goblin = unit(120);
+        assert!(category(&goblin, &quiet), "Booty Bay: friendly, not at war");
+        // …and declaring war flips it, which is the same bit the reputation pane's checkbox writes.
+        let mut slots = vec![(0u8, 0i32); 64];
+        slots[1] = (benilla_formats::faction_flags::AT_WAR, 0); // Booty Bay = slot 1
+        let at_war = Reputations(slots);
+        assert!(!category(&goblin, &at_war), "at war → enemy category");
+        assert!(
+            category(&emissary, &at_war),
+            "…and only that faction's own bit moves"
+        );
+
+        // A Stormwind guard (FT 12 → faction 72, slot 19) is friendly by BOTH routes — the case
+        // that agreed all along, kept so the fix cannot be read as having moved it.
+        assert!(category(&unit(12), &quiet));
+        assert_eq!(rank(&unit(12), &quiet), 4);
+    }
+
+    /// `CanAttack`'s flag disqualifiers put a unit in the FRIENDLY bucket **at any reaction** — the
+    /// class of case a rank threshold gets wrong in the other direction (wow-re §3b). Asserted on
+    /// the mask path (a Monster-faction template, hostile by reaction) so the reaction is
+    /// unambiguously hostile and only the flag can be doing the work.
+    #[test]
+    fn an_unattackable_flag_beats_a_hostile_reaction() {
+        use crate::net::{ObjectStore, Reputations};
+        use benilla_protocol::ObjectFields;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let factions = Factions(benilla_formats::load_faction_catalog(&mut chain).expect("dbc"));
+        let me = ObjectStore(ObjectFields::from_pairs(&[
+            (35, 1),
+            (46, UNIT_FLAG_PVP_ATTACKABLE),
+        ]));
+        let reps = Reputations::default();
+        let mob = |flags: u32| ObjectStore(ObjectFields::from_pairs(&[(35, 14), (46, flags)]));
+
+        // FT 14 "Monster" — hostile to the player by the mask comparison.
+        assert_eq!(
+            ring_reaction(Some(&factions), &reps, Some(&mob(0)), Some(&me)),
+            1
+        );
+        assert!(
+            !plate_is_friendly(Some(&factions), &reps, Some(&mob(0)), Some(&me), false),
+            "a plain hostile mob is enemy-category"
+        );
+        // Each of the five refusal bits alone flips the category, hostile reaction and all.
+        for bit in [0x2u32, 0x80, 0x1_0000, 0x10_0000] {
+            assert!(
+                plate_is_friendly(Some(&factions), &reps, Some(&mob(bit)), Some(&me), false),
+                "flag {bit:#x} refuses the attack → friendly category"
+            );
+        }
+        // Bit 8 (0x100) refuses only because WE are player-controlled — the cross-flag leg.
+        assert!(plate_is_friendly(
+            Some(&factions),
+            &reps,
+            Some(&mob(0x100)),
+            Some(&me),
+            false
+        ));
     }
 }

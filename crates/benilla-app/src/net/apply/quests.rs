@@ -8,9 +8,9 @@ use benilla_protocol::messages::{
 };
 use bevy::prelude::*;
 
-use crate::ui_action::UiError;
+use crate::ui_action::{MsgSurface, UiError};
 use crate::ui_chat::ChatLog;
-use crate::ui_quest::{MsgSurface, QuestGiver};
+use crate::ui_quest::QuestGiver;
 use crate::ui_quest_log::QuestLog;
 
 use super::super::NetCommands;

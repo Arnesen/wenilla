@@ -28,7 +28,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{ui_error_text, UiError};
+use crate::ui_action::{ui_error_text, MsgSurface, UiError};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
@@ -172,20 +172,6 @@ impl QuestGiver {
         self.statuses.clear();
         self.messages.clear();
     }
-}
-
-/// Where a client message is shown — the `kind` field (`+0x04`) of the reference's message record
-/// (`0xb4b498 + 20*msgId`), which `CGGameUI::DisplayError` (`0x496720`) dispatches on through the
-/// four-way jump at `0x496888`: **0 → the chat window** (`0x49a870`), 1 → `AddErrorMessage(text, 0)`
-/// (the yellow info line), **2 → `AddErrorMessage(text, 1)`** (the red error line), 3 → the console.
-/// Only the two the quest messages use are modeled (decision 0669); the info line has its own
-/// established route (`UI_INFO_MESSAGE`, decision 0340).
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum MsgSurface {
-    /// kind 0 — a chat-window system line.
-    Chat,
-    /// kind 2 — the red `UIErrorsFrame` line.
-    Error,
 }
 
 /// `SMSG_QUESTGIVER_QUEST_INVALID`'s `QuestFailedReason` → its GlobalStrings key, resolved to text

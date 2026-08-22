@@ -613,7 +613,7 @@ fn spawn_slot(
         // (`BillboardCard::frame_following`). Nothing else in the chain is live: of the
         // 95 item models whose emitters ride a billboard bone, none animates its chain.
         let owner = match em.billboard {
-            Some((kind, pivot)) => {
+            Some(benilla_assets::EmitterBillboard { kind, pivot, .. }) => {
                 let frame = commands
                     .spawn(BillboardCard::frame_following(
                         kind,
@@ -1020,7 +1020,11 @@ mod tests {
             def: benilla_world::testing::plain_particle_def(),
             texture: None,
             bone_pivot: [0.0; 3],
-            billboard: Some((benilla_formats::BillboardKind::Spherical, [0.0; 3])),
+            billboard: Some(benilla_assets::EmitterBillboard {
+                kind: benilla_formats::BillboardKind::Spherical,
+                pivot: [0.0; 3],
+                bone: 1,
+            }),
             recursion: None,
             geometry: None,
             owner_reach: 0.0,

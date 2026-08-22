@@ -67,6 +67,25 @@ impl CastErrors {
 #[derive(Resource, Default)]
 pub(crate) struct MountErrors(pub Vec<(bool, u32)>);
 
+/// Where a client message is SHOWN — the `kind` field (`+0x04`) of the reference's message record
+/// (`0xb4b498 + 20*msgId`), which `CGGameUI::DisplayError` (`0x496720`) dispatches on through the
+/// four-way jump at `0x496888`: **0 → the chat window** (`0x49a870`), 1 → `AddErrorMessage(text, 0)`
+/// (the yellow info line), **2 → `AddErrorMessage(text, 1)`** (the red error line), 3 → the console.
+/// Only the two our messages use are modeled (decision 0669); the info line has its own established
+/// route (`UI_INFO_MESSAGE`, decision 0340) and rides [`UiError::info`] instead.
+///
+/// This lives beside [`UiError`] rather than in any one window because the surface is a property of
+/// the MESSAGE, not of the window that raised it — and it has more than one tenant: the quest
+/// refusals (0669) and, since 1523, the auction house, where the twenty `ERR_AUCTION_*` ids split
+/// clean down the middle of this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MsgSurface {
+    /// kind 0 — a chat-window system line.
+    Chat,
+    /// kind 2 — the red `UIErrorsFrame` line.
+    Error,
+}
+
 /// One `DisplayError` message: a GlobalStrings key plus the argText fills. The 1.12 error
 /// formats use at most one `%s` and one `%d` ("Requires %s", "Requires %s %d" — wow-re
 /// cursor-system.md §8.8's lock-refusal toasts, decision 0545); a key whose string carries no

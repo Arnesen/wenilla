@@ -38,10 +38,12 @@
             selection-highlight Frame, and the `button.craftIndex`/`Button:SetTextColor` engine-gap
             substitutions (deviation 7 below).
 
-        FLAT layout (TradeSkillFrame.xml's own house constraint, restated here): a child <Frame> shown
-        at runtime does not render its own <Layers> FontStrings in this engine, so the detail-pane
-        FontStrings + the title live on BenillaCraftFrame's OWN <Layers> (OVERLAY, above the window's
-        own BACKGROUND/BORDER/ARTWORK art groups), never on a nested sub-frame. The ref's
+        FLAT layout — a CHOICE inherited from TradeSkillFrame.xml, which inherited it from
+        TrainerFrame.xml, which stated it as a house constraint it never was. A runtime-shown child
+        <Frame> DOES render its own <Layers> FontStrings in this engine (probed; decision 1517). The
+        detail-pane FontStrings + the title live on BenillaCraftFrame's OWN <Layers> (OVERLAY, above
+        the window's own BACKGROUND/BORDER/ARTWORK art groups) because that is how this window was
+        built, not because nesting fails. The ref's
         `CraftDetailScrollFrame`/`CraftDetailScrollChildFrame` therefore don't exist here — the detail
         is a FIXED (non-scrolling) pane, computed once from the flattened ScrollFrame+ScrollChild
         offsets (TOPLEFT 20,-234 + each child's own ref-quoted offset — BYTE-IDENTICAL to TradeSkill's

@@ -587,8 +587,8 @@ pub(super) fn drive_addons_panel(
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     mut sounds: MessageWriter<GlueSound>,
-    presses: Query<(&AddonsAction, &Interaction), Changed<Interaction>>,
-    hovers: Query<(Entity, &AddonsAction, &Interaction)>,
+    clicks: Res<crate::glue::GlueClicks>,
+    hovers: Query<(Entity, &AddonsAction, Ref<Interaction>)>,
     lit: Query<(&Interaction, &Children), With<HoverLit>>,
     mut hilights: Query<&mut Visibility, With<Hilight>>,
     band: Query<(&ComputedNode, &UiGlobalTransform), With<ScrollBand>>,
@@ -608,8 +608,17 @@ pub(super) fn drive_addons_panel(
     let mut close_and_save = false;
     let mut close_and_discard = false;
     let mut bar_pressed = false;
-    for (action, interaction) in &presses {
-        if *interaction != Interaction::Pressed {
+    for (entity, action, interaction) in &hovers {
+        // **The scroll bar warps on the PRESS**, and only it: the reference's `CSimpleSlider`
+        // OnMouseDown (`0x789ca0`, 45 bytes, zero branches) warps the value from any press inside
+        // the hit rect — there is no thumb hit-test in the class (wow-re `ui.md`). Every *button*
+        // in this panel fires on the RELEASE, over the button that took the press (1533).
+        let click = if *action == AddonsAction::ScrollBar {
+            interaction.is_changed() && *interaction == Interaction::Pressed
+        } else {
+            clicks.hit(entity)
+        };
+        if !click {
             continue;
         }
         match *action {
@@ -761,7 +770,7 @@ pub(super) fn drive_addons_panel(
     }
 
     let hover = hovers.iter().find_map(|(_, a, i)| {
-        if !matches!(i, Interaction::Hovered | Interaction::Pressed) {
+        if !matches!(*i, Interaction::Hovered | Interaction::Pressed) {
             return None;
         }
         match a {

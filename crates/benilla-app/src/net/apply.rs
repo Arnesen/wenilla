@@ -17,6 +17,7 @@ use super::{
 use benilla_world::weather::WeatherMessage;
 
 mod anim;
+mod auction;
 mod chat;
 mod combat;
 mod combat_log;
@@ -216,6 +217,9 @@ pub(super) fn apply_net_updates(
                 // source of another player's honor numbers, so the reply parks here and
                 // `crate::ui_honor` pushes it into the pane and fires `INSPECT_HONOR_UPDATE`.
                 ResMut<crate::ui_honor::InspectHonor>,
+                // The auctioneer session (decision 1511) — the hello reply opens it, the three
+                // list results fill it, and `crate::ui_auction` feeds it to the window.
+                ResMut<crate::ui_auction::AuctionOpen>,
             ),
         ),
     ),
@@ -373,6 +377,7 @@ pub(super) fn apply_net_updates(
                 mut poi_marker,
                 current_map,
                 mut inspect_honor,
+                mut auction_open,
             ),
         ),
     ) = caches;
@@ -463,6 +468,7 @@ pub(super) fn apply_net_updates(
                     &mut mail_open,
                     &mut mail_pending,
                     &mut trade_session,
+                    &mut auction_open,
                     &mut bank_open,
                     &mut duel,
                     &mut social,
@@ -1485,6 +1491,41 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::NextMailTime { seconds } => {
                 mail::next_mail_time(seconds, &mut mail_pending)
+            }
+            // The auction house arc (decision 1511 P1): the hello reply OPENS the window — our
+            // send does not — and the three list results fill the three tabs.
+            SessionEvent::AuctionHello {
+                auctioneer,
+                house_id,
+            } => auction::auction_hello(auctioneer, house_id, &mut auction_open),
+            SessionEvent::AuctionCommandResult {
+                auction_id,
+                action,
+                error,
+                tail,
+            } => {
+                auction::auction_command_result(auction_id, action, error, &tail, &mut auction_open)
+            }
+            SessionEvent::AuctionListResult {
+                auctions,
+                total_count,
+            } => auction::auction_list_result(auctions, total_count, &mut auction_open),
+            SessionEvent::AuctionOwnerListResult {
+                auctions,
+                total_count,
+            } => auction::auction_owner_list_result(auctions, total_count, &mut auction_open),
+            SessionEvent::AuctionBidderListResult {
+                auctions,
+                total_count,
+            } => auction::auction_bidder_list_result(auctions, total_count, &mut auction_open),
+            SessionEvent::AuctionBidderNotification(n) => {
+                auction::auction_bidder_notification(&n, &mut auction_open)
+            }
+            SessionEvent::AuctionOwnerNotification(n) => {
+                auction::auction_owner_notification(&n, &mut auction_open)
+            }
+            SessionEvent::AuctionRemovedNotification { item_entry, .. } => {
+                auction::auction_removed_notification(item_entry, &mut auction_open)
             }
             // The player-trade arc (decision 0592 P1): the status packet drives the open/accept/close
             // state machine, the extended snapshot replaces one side's item/gold — both into the

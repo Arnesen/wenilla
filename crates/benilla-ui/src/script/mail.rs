@@ -70,13 +70,27 @@ pub struct MailInboxRow {
     /// The stationery texture basename (`GetInboxText`'s second return) — the Lua wraps it as
     /// `Interface\Stationery\<basename>1`/`2` for the open-letter backdrop.
     pub stationery_texture: String,
-    /// `message_type == AUCTION(2)` — `GetInboxText`'s `isInvoice`.
+    /// `GetInboxText`'s fourth return. **Narrower than "an auction mail"**: the reference answers
+    /// `1` iff the record carries the three fields its subject parser persisted (`[rec+0x250] != 0`,
+    /// `0x4af2eb`), and the parser persists them *only* for result code 1 (won) or 2 (sold). An
+    /// outbid or expiry notice is an auction mail that is **not** an invoice (decision 1527).
     pub is_invoice: bool,
+    /// The auction invoice this mail carries, once it can be answered — `GetInboxInvoiceInfo`'s
+    /// seven values. `None` is the reference's **miss tail**, and it covers four different states
+    /// that all read the same from Lua: not an auction mail at all; an auction mail whose result
+    /// code is not won(1)/sold(2) (an outbid or expiry notice carries no body and no invoice); the
+    /// body not fetched yet; or the counterparty's name still in flight.
+    pub invoice: Option<MailInvoice>,
     /// The mail carries a fetchable letter body (`item_text_id != 0`) — gates the body ask.
     pub has_body: bool,
     /// The enclosed item's template entry (`0` = none) — the shared item-tooltip store's key
     /// (`GameTooltip:SetInboxItem`) and `GetInboxItem`'s identity.
     pub item_id: u32,
+    /// The enclosed item's **random-suffix roll** (`SMSG_MAIL_LIST`'s per-item `randomPropId`) —
+    /// what the hover resolves its enchant lines from, and the id whose suffix
+    /// [`Self::item_name`] already carries. `0` = unrolled. The reference's `SetInboxItem` writes
+    /// exactly this into the tooltip's `+0x424` (decision 1547).
+    pub item_random_property_id: u32,
     /// The enclosed item's name (`GetInboxItem`'s first return); `None` while the template is in
     /// flight.
     pub item_name: Option<String>,
@@ -87,6 +101,29 @@ pub struct MailInboxRow {
     /// `InboxItemCanDelete` — the delete-vs-return law (`!can_reply`: a not-yet-returned mail from a
     /// player is returnable, everything else is deletable — l.417/450).
     pub can_delete: bool,
+}
+
+/// One auction mail's invoice — what `GetInboxInvoiceInfo(index)` hands back, already parsed.
+///
+/// The invoice is **TEXT**, not wire data: the auction house writes the numbers into the mail's
+/// subject and body and the client `sscanf`s them back out (wow-re `ui/scratch/auction-house.md`
+/// §11.1a). The app owns that parse; this is its result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MailInvoice {
+    /// `true` → the literal token `"seller"` (your auction sold), `false` → `"buyer"` (you won).
+    /// A bare ASCII token in the reference too, not a GlobalString — the Lua compares it as one.
+    pub seller: bool,
+    /// The auctioned item's name, composed from the subject's item entry.
+    pub item_name: String,
+    /// The counterparty: who bought it (seller invoice) or who sold it (buyer invoice).
+    pub player_name: String,
+    /// The winning bid. `bid == buyout` is how the window knows it was a buyout rather than a bid.
+    pub bid: u32,
+    pub buyout: u32,
+    /// Seller invoices only (`0` on a buyer invoice — the body carries three fields, not five).
+    pub deposit: u32,
+    /// The auction house's cut, seller invoices only.
+    pub consignment: u32,
 }
 
 /// The open mailbox's inbox snapshot. Pushed whole by the app; `None` means no mailbox is open (the
@@ -209,19 +246,6 @@ fn flag(b: bool) -> Value {
     }
 }
 
-/// An enclosed item's `canUse`, the shared item-usable gate over the row's template from the
-/// merchant/tooltip store, keyed by the item id — usable while the template is still in flight (the
-/// null-record skip). Spell knowledge comes from the engine's spellbook mirror, as the tooltip's
-/// "Requires <spell>" red does.
-fn is_usable(model: &Model, item_id: u32) -> bool {
-    item_id == 0
-        || model.item_templates.get(&item_id).is_none_or(|v| {
-            super::item_stats::item_usable(v, &model.player_req, |id| {
-                model.spellbook.slots.iter().any(|s| s.spell_id == id)
-            })
-        })
-}
-
 /// Fetch a cloned inbox row for a 1-based index, or `None` (out of range / no mailbox open).
 fn row_at(model: &Model, index: usize) -> Option<MailInboxRow> {
     model
@@ -316,10 +340,61 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(MultiValue::from_vec(vec![Value::Nil]));
             };
             Ok(MultiValue::from_vec(vec![
-                Value::String(lua.create_string(r.body.as_deref().unwrap_or(""))?),
+                // **An invoice's body is `nil`, and that is an explicit carve-out in the reference,
+                // not an accident** (`0x4af1cf cmp [esi+0x4],2` / `je` → `lua_pushnil`, decision
+                // 1527). The auction house's raw `<guid>:<n>:<n>:…` bookkeeping really does sit in
+                // the shared text cache — `GetInboxInvoiceInfo` `sscanf`s exactly that string — but
+                // this binding refuses to hand it back. Two bindings, one cache, opposite purposes.
+                // It is what lets MailFrame lay the invoice pane over the letter page without the
+                // bookkeeping showing through above it.
+                if r.is_invoice {
+                    Value::Nil
+                } else {
+                    Value::String(lua.create_string(r.body.as_deref().unwrap_or(""))?)
+                },
                 Value::String(lua.create_string(&r.stationery_texture)?),
                 flag(r.has_body),
                 flag(r.is_invoice),
+            ]))
+        })?,
+    )?;
+
+    // GetInboxInvoiceInfo(index) → invoiceType, itemName, playerName, bid, buyout, deposit,
+    // consignment (MailFrame.lua l.302). **SEVEN values, always** — the reference's own
+    // `mov eax,7`, with the miss tail `nil, nil, nil, 0, 0, 0, 0`: three nils then four zeros
+    // (wow-re `ui/scratch/auction-house.md` §11.1a). MailFrame.lua guards on the third
+    // (`if playerName then`), so the shape of the miss is what keeps the invoice pane hidden —
+    // returning one bare nil instead would leave the four numeric destructures nil and the pane's
+    // arithmetic would run on them.
+    g.set(
+        "GetInboxInvoiceInfo",
+        lua.create_function(|lua, index: usize| {
+            let row = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                row_at(&model, index)
+            };
+            let miss = || {
+                MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Integer(0),
+                    Value::Integer(0),
+                    Value::Integer(0),
+                ])
+            };
+            let Some(inv) = row.and_then(|r| r.invoice) else {
+                return Ok(miss());
+            };
+            Ok(MultiValue::from_vec(vec![
+                Value::String(lua.create_string(if inv.seller { "seller" } else { "buyer" })?),
+                Value::String(lua.create_string(&inv.item_name)?),
+                Value::String(lua.create_string(&inv.player_name)?),
+                Value::Integer(i64::from(inv.bid)),
+                Value::Integer(i64::from(inv.buyout)),
+                Value::Integer(i64::from(inv.deposit)),
+                Value::Integer(i64::from(inv.consignment)),
             ]))
         })?,
     )?;
@@ -334,7 +409,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let (row, usable) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let row = row_at(&model, index);
-                let usable = row.as_ref().is_none_or(|r| is_usable(&model, r.item_id));
+                let usable = row
+                    .as_ref()
+                    .is_none_or(|r| super::item_stats::item_usable_by_id(&model, r.item_id));
                 (row, usable)
             };
             let Some(r) = row.filter(|r| r.item_id != 0) else {
@@ -466,11 +543,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSendMailItem",
         lua.create_function(|lua, ()| {
+            // The stack count is read while the model is borrowed: a whole-stack pickup records
+            // no count of its own, so the true size comes back from the source slot.
             let item = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.mail_send_item.clone()
+                model.mail_send_item.clone().map(|it| {
+                    let count = cursor::held_count(&model, &it);
+                    (it, count)
+                })
             };
-            let Some(it) = item else {
+            let Some((it, count)) = item else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
@@ -495,7 +577,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(MultiValue::from_vec(vec![
                 name,
                 texture,
-                Value::Integer(i64::from(it.count.unwrap_or(1).max(1))),
+                Value::Integer(i64::from(count)),
                 quality,
             ]))
         })?,
@@ -576,6 +658,7 @@ mod tests {
             body: Some("Lok'tar.".into()),
             stationery_texture: "STATIONERYTEST".into(),
             is_invoice: false,
+            invoice: None,
             has_body: true,
             item_id,
             item_name: (item_id != 0).then(|| "Linen Cloth".to_string()),
@@ -583,6 +666,7 @@ mod tests {
                 .then(|| "Interface\\Icons\\INV_Fabric_Linen_01".to_string()),
             item_quality: (item_id != 0).then_some(1),
             can_delete: false, // from a player, not returned → returnable (not deletable)
+            item_random_property_id: 0,
         }
     }
 
@@ -590,6 +674,129 @@ mod tests {
         MailState {
             inbox: vec![row(2589), row(0)],
         }
+    }
+
+    /// `GetInboxInvoiceInfo` answers **seven values, always** — the reference's own `mov eax,7`.
+    /// The miss tail is the part that matters and the part that is easy to get wrong: three nils
+    /// then four ZEROS, not one bare nil. MailFrame.lua destructures all seven unguarded and only
+    /// then tests the third, so a short return leaves its arithmetic running on nils.
+    #[test]
+    fn the_invoice_answers_seven_values_or_a_three_nil_four_zero_miss() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        st.inbox[0].is_invoice = true;
+        st.inbox[0].invoice = Some(MailInvoice {
+            seller: true,
+            item_name: "Linen Cloth".into(),
+            player_name: "Twowarrior".into(),
+            bid: 10_000,
+            buyout: 10_000,
+            deposit: 25,
+            consignment: 500,
+        });
+        s.set_mail(Some(st));
+
+        assert_eq!(
+            s.eval::<usize>("return select('#', GetInboxInvoiceInfo(1))")
+                .unwrap(),
+            7
+        );
+        let vals: Vec<String> = (1..=7)
+            .map(|i| {
+                s.eval::<String>(&format!(
+                    "return tostring((select({i}, GetInboxInvoiceInfo(1))))"
+                ))
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            vals,
+            [
+                "seller",
+                "Linen Cloth",
+                "Twowarrior",
+                "10000",
+                "10000",
+                "25",
+                "500"
+            ],
+            "a seller invoice, in the reference's own order"
+        );
+
+        // Row 2 carries no invoice — and neither does an index off the end.
+        for idx in [2, 99] {
+            assert_eq!(
+                s.eval::<usize>(&format!("return select('#', GetInboxInvoiceInfo({idx}))"))
+                    .unwrap(),
+                7,
+                "the miss is still seven values"
+            );
+            let tail: Vec<String> = (1..=7)
+                .map(|i| {
+                    s.eval::<String>(&format!(
+                        "return tostring((select({i}, GetInboxInvoiceInfo({idx}))))"
+                    ))
+                    .unwrap()
+                })
+                .collect();
+            assert_eq!(tail, ["nil", "nil", "nil", "0", "0", "0", "0"]);
+        }
+    }
+
+    /// `GetInboxText` returns **four** values always, and for an INVOICE the first is `nil`.
+    /// That is the reference's own carve-out (`0x4af1cf cmp [esi+0x4],2` → `lua_pushnil`), and it
+    /// is what lets MailFrame lay the invoice pane over the letter page: the auction house's raw
+    /// bookkeeping is in the text cache — `GetInboxInvoiceInfo` parses exactly that string — and
+    /// this binding refuses to hand it back (decision 1527).
+    #[test]
+    fn an_invoice_has_no_letter_body() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        st.inbox[0].is_invoice = true;
+        st.inbox[0].body = Some("6C:10000:10000:25:500".into());
+        s.set_mail(Some(st));
+
+        assert_eq!(
+            s.eval::<usize>("return select('#', GetInboxText(1))")
+                .unwrap(),
+            4,
+            "four values, invoice or not"
+        );
+        assert_eq!(
+            s.eval::<String>("return tostring((GetInboxText(1)))")
+                .unwrap(),
+            "nil",
+            "the bookkeeping is never handed back as a letter body"
+        );
+        // Row 2 is an ordinary letter and keeps its text.
+        assert_eq!(
+            s.eval::<String>("return tostring((GetInboxText(2)))")
+                .unwrap(),
+            "Lok'tar."
+        );
+    }
+
+    /// A BUYER invoice says so with the bare ASCII token the Lua compares against — not a
+    /// GlobalString, not localized.
+    #[test]
+    fn a_buyer_invoice_is_the_literal_token_buyer() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        st.inbox[0].is_invoice = true;
+        st.inbox[0].invoice = Some(MailInvoice {
+            seller: false,
+            item_name: "Small Blue Pouch".into(),
+            player_name: "Onewarrior".into(),
+            bid: 9_000,
+            buyout: 10_000,
+            deposit: 0,
+            consignment: 0,
+        });
+        s.set_mail(Some(st));
+        assert_eq!(
+            s.eval::<String>("return (GetInboxInvoiceInfo(1))").unwrap(),
+            "buyer"
+        );
     }
 
     #[test]

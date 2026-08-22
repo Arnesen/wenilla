@@ -573,22 +573,155 @@ const CAM_RETURN_RATE: f32 = 6.0;
 /// floors. The collision sweep still starts from the *head* (not the pivot), so a jump in a low room
 /// stops the camera under the ceiling — see `control`.
 ///
-/// Floor (yd) on the world pivot height — VERIFIED `5/6` (`0x50e570`'s `max(hi, target)` lower bound).
+/// Floor (yd) on the world pivot height — VERIFIED `5/6` (`0x50ca90`'s per-preset clamp, and
+/// `0x50e570`'s corridor lower bound).
 pub(super) const CAM_PIVOT_FLOOR: f32 = 5.0 / 6.0;
+/// Ceiling (yd) on the world pivot height — VERIFIED `15.0` (`[0x8089c8]`, the upper arm of the same
+/// per-preset clamp in `0x50ca90`). A giant's scale cannot walk the framing pivot off into the sky.
+pub(super) const CAM_PIVOT_CEIL: f32 = 15.0;
 /// Pivot height used before the avatar model has attached (so `CameraPivot` isn't on the entity yet):
 /// a human's ~neck height, so the first frames of third-person don't ride high. Replaced by the exact
-/// model-derived value the moment the body attaches.
+/// model-derived value the moment the body attaches — as a **snap**, not a glide ([`PivotGlide`]).
 pub(super) const CAM_PIVOT_FALLBACK: f32 = 1.8;
 
-/// World head height above a modeled unit's feet — its model-local [`CameraPivot`] (`attach17`-derived
-/// head/eye for a character, else `0.9 × bbox-z`) × the live scale, floored at [`CAM_PIVOT_FLOOR`], or
-/// the neck-height [`CAM_PIVOT_FALLBACK`] before the body attaches. The single definition shared by the
-/// two things that sit at the character's head: the third-person framing pivot and the 3D-audio
-/// listener (the client's `SoundListenerAtCharacter=1` default, wow-re benilla-pins B14).
+/// One modeled unit's world head height: its model-local [`CameraPivot`] × the given scale, clamped
+/// to `[CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL]` — the reference's per-preset clamp in `0x50ca90`.
+pub(super) fn model_pivot_height(pivot: &CameraPivot, scale: f32) -> f32 {
+    (pivot.height_local * scale).clamp(CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL)
+}
+
+/// World head height above a modeled unit's feet — [`model_pivot_height`], or the neck-height
+/// [`CAM_PIVOT_FALLBACK`] when the body has no model yet. The single definition shared by the things
+/// that sit at the character's head: the framing-pivot *target*, the far-sight subject's pivot, and
+/// the 3D-audio listener (the client's `SoundListenerAtCharacter=1` default, wow-re benilla-pins B14).
+///
+/// **Which `scale` to pass is a fidelity question with a verified answer** (wow-re
+/// `pivot-height-glide.md`, C3): the reference's pivot preset multiplies the **raw**
+/// `OBJECT_FIELD_SCALE_X` descriptor (vtable slot 7 = `0x469f10`, `fld [descriptors+0x10]`), *not*
+/// the 2 s-eased render scale — the two are deliberately split in the binary (`0x4833d3` folds the
+/// eased one in for a selection-ring consumer, and only there). So the camera passes
+/// [`crate::net::NetEntity::scale`] and the pivot moves in **one** step per model event, which
+/// [`PivotGlide`] then walks; multiplying by the eased scale instead would stack a second, slower
+/// ease on top of the first and is what made a shapeshift snap *and* drift. The audio listener still
+/// passes the rendered scale — it tracks the drawn body, and nothing verified says otherwise.
 pub(crate) fn head_height(pivot: Option<&CameraPivot>, scale: f32) -> f32 {
-    pivot.map_or(CAM_PIVOT_FALLBACK, |p| {
-        (p.height_local * scale).max(CAM_PIVOT_FLOOR)
-    })
+    pivot.map_or(CAM_PIVOT_FALLBACK, |p| model_pivot_height(p, scale))
+}
+
+/// `cameraHeightSmoothSpeed` (yd/s) — the pivot channel's rate, VERIFIED registrar default `"1.2"`.
+/// The duration of a move is `|Δh| / this` (`0x51276c`/`0x512777`), so it is an *average* rate: the
+/// cosine profile peaks at `π/2 ×` it in the middle and is zero at both ends. There is no duration
+/// clamp on this channel (unlike the yaw channel's `[0.1 s, 2.0 s]`).
+const CAM_PIVOT_SMOOTH_SPEED: f32 = 1.2;
+/// The pivot setter's "already there / already arming this" epsilon — VERIFIED `0.001` (`[0x801360]`,
+/// `0x5126b0`). It is what makes the per-frame re-arm a no-op in steady state.
+const CAM_PIVOT_EPS: f32 = 0.001;
+
+/// **The camera's pivot-height channel** — the height the framing pivot actually rides, chasing the
+/// model-derived target with a cosine smoothstep instead of taking it raw.
+///
+/// The reference's live `cam+0xfc` chasing target `cam+0x1c8`: armed by `0x5126b0` → `0x512790`,
+/// stepped by `0x50f160`'s `[0x50f36a, 0x50f417)` block (wow-re `pivot-height-glide.md`, §5 round).
+/// **This is why a druid shapeshift does not snap the reference's camera**, and it glides in *both*
+/// directions: the solver's `max(target, live)` (`0x50e5a9`) is only the collision-corridor seed, and
+/// the far chain clamps the result back down to the live value (`0x50e767`), so an unobstructed pivot
+/// simply *is* `cam+0xfc` — rising or falling.
+///
+/// Two structural facts, both load-bearing:
+/// - **The first arm of a camera's life snaps** (`0x5127d4`; the latch bit `0x80` is never cleared —
+///   image-wide census). So logging in establishes the height instantly, and everything after it
+///   glides. Nothing else re-snaps: a target-GUID change, a mount, a morph, `SetView` — all glide.
+/// - **A model that has not resolved yet holds the channel**, it does not re-aim it (the reference
+///   skips the whole camera update while the preset is stale, `0x50e907`). Ours is the `None` target:
+///   during the frames a swapped-in model is loading, the pivot stays where it is and one glide runs
+///   when the new height lands.
+pub(super) struct PivotGlide {
+    /// The live height — what the camera uses (`cam+0xfc`).
+    live: f32,
+    /// Where the move started (`cam+0x1cc`) and where it is going (`cam+0x1c8`).
+    from: f32,
+    to: f32,
+    /// Seconds since arming, and the move's total (`cam+0x1c0`/`+0x1c4`); `None` = nothing in
+    /// flight (the reference's armed bit `[cam+0x90] & 0x20000000`).
+    flight: Option<(f32, f32)>,
+    /// Has the channel ever been armed? The reference's latch bit `0x80` — false only until the
+    /// first model-derived height arrives, which is therefore a snap.
+    seeded: bool,
+}
+
+impl Default for PivotGlide {
+    fn default() -> Self {
+        Self {
+            live: CAM_PIVOT_FALLBACK,
+            from: CAM_PIVOT_FALLBACK,
+            to: CAM_PIVOT_FALLBACK,
+            flight: None,
+            seeded: false,
+        }
+    }
+}
+
+impl PivotGlide {
+    /// Arm the channel with this frame's model-derived target (`None` while the subject has no
+    /// model — hold), step whatever is in flight, and return the height to frame at.
+    ///
+    /// Called every frame, which is the reference's own cadence (`0x50f880` from the driver tail
+    /// `0x50f011`): the epsilon tests below turn a steady target into a no-op, so "arm per frame"
+    /// and "arm on change" are the same thing except at the instant the target actually moves.
+    pub(super) fn advance(&mut self, target: Option<f32>, dt: f32) -> f32 {
+        if let Some(target) = target {
+            self.arm(target);
+        }
+        if let Some((elapsed, dur)) = self.flight.as_mut() {
+            *elapsed += dt;
+            let s = *elapsed / *dur;
+            if s >= 1.0 {
+                self.live = self.to;
+                self.flight = None;
+            } else {
+                // The reference's kernel `0x5b7bb0` — the same cosine smoothstep the yaw channel
+                // and the render-scale ease use: `a + (b − a)·(1 − cos(πs))/2`.
+                let e = (1.0 - (std::f32::consts::PI * s).cos()) * 0.5;
+                self.live = self.from + (self.to - self.from) * e;
+            }
+        }
+        self.live
+    }
+
+    /// The arming half (`0x5126b0` → `0x512790`), in its own order: the re-arm memo, the
+    /// already-there test, then the duration — and the once-per-camera snap.
+    fn arm(&mut self, target: f32) {
+        if !self.seeded {
+            // The latch: the first height a camera ever sees is established, not travelled to.
+            self.seeded = true;
+            self.live = target;
+            self.to = target;
+            self.from = target;
+            self.flight = None;
+            return;
+        }
+        // Already arming exactly this — a no-op, so a per-frame re-arm cannot restart the move
+        // from its own midpoint (which would stretch it forever, asymptotically never arriving).
+        if self.flight.is_some() && (self.to - target).abs() < CAM_PIVOT_EPS {
+            return;
+        }
+        if (self.live - target).abs() < CAM_PIVOT_EPS {
+            // Already there: park the target and disarm. The steady-state path, every frame.
+            self.to = target;
+            self.flight = None;
+            return;
+        }
+        self.from = self.live;
+        self.to = target;
+        self.flight = Some((0.0, (target - self.live).abs() / CAM_PIVOT_SMOOTH_SPEED));
+    }
+
+    /// What the channel is doing, for `WOW_CAM_DUMP`: `(live, target)`. A pivot question is a
+    /// *timing* question — "does it snap?" is answered by these two columns on a trace, never by
+    /// watching a capture (method: timing is measured, never eyeballed).
+    pub(super) fn probe(&self) -> (f32, f32) {
+        (self.live, self.to)
+    }
 }
 
 /// A small sphere swept from the camera pivot toward the desired camera seat each frame to keep walls
@@ -626,6 +759,11 @@ pub(crate) struct CameraControl {
     /// return in flight. It lives on the rig rather than beside the knob because it is *pose*, not
     /// setting — a transition survives the frame, not the session.
     pub(super) follow: FollowRig,
+    /// The framing pivot's height channel — smoothed, not taken raw ([`PivotGlide`]). On the rig
+    /// for the same reason `follow` is, and for one more: it belongs to the **camera**, not to the
+    /// body, which is why it glides *through* a change of subject (a shapeshift, a far-sight
+    /// switch) instead of being reset by one.
+    pub(super) pivot: PivotGlide,
 }
 
 impl CameraControl {
@@ -1351,6 +1489,104 @@ mod tests {
 
     use benilla_world::billboard::BillboardCard;
     use benilla_world::mesh_tag::alpha_bits;
+
+    /// Step a [`PivotGlide`] at 60 Hz for `secs`, holding the target, and return the heights it
+    /// passed through (one per frame).
+    fn glide_run(g: &mut PivotGlide, target: Option<f32>, secs: f32) -> Vec<f32> {
+        let dt = 1.0 / 60.0;
+        (0..(secs / dt).round() as usize)
+            .map(|_| g.advance(target, dt))
+            .collect()
+    }
+
+    /// **The report** (the director, on the reference vs ours): shifting form on the real client
+    /// *glides* the camera to the new body's height; ours snapped there and then drifted. The
+    /// channel's whole job is that this is one smooth move, in **both** directions — the solver's
+    /// `max(target, live)` is only a collision seed, and the far chain clamps back to the live
+    /// value (`0x50e767`), so nothing about a *rising* target arrives early (wow-re
+    /// `pivot-height-glide.md`, C2).
+    #[test]
+    fn a_shapeshift_glides_the_pivot_both_ways_and_never_snaps() {
+        // Tauren → cat: the heights measured off a live probe run.
+        let (tauren, cat) = (2.4659_f32, 1.0552_f32);
+        let mut g = PivotGlide::default();
+        // The first height a camera ever sees is established, not travelled to (`0x5127d4`).
+        assert_eq!(
+            g.advance(Some(tauren), 1.0 / 60.0),
+            tauren,
+            "the first arm snaps"
+        );
+
+        for (from, to) in [(tauren, cat), (cat, tauren)] {
+            let expected = (to - from).abs() / CAM_PIVOT_SMOOTH_SPEED;
+            let frames = glide_run(&mut g, Some(to), expected * 2.0);
+            // It arrives, and only at the end.
+            assert!((frames.last().copied().unwrap() - to).abs() < CAM_PIVOT_EPS);
+            let arrived = frames
+                .iter()
+                .position(|h| (h - to).abs() < CAM_PIVOT_EPS)
+                .unwrap();
+            let took = arrived as f32 / 60.0;
+            assert!(
+                (took - expected).abs() < 0.05,
+                "|Δh| / 1.2 yd/s = {expected:.3} s, took {took:.3} s ({from} → {to})"
+            );
+            // No frame jumps: the biggest single step is the cosine's own midpoint rate, which
+            // for these Δ is far under half the total. A snap would put the whole Δ in one frame.
+            let biggest = frames
+                .windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0, f32::max);
+            assert!(
+                biggest < (to - from).abs() * 0.5,
+                "the pivot must never teleport: biggest step {biggest} of Δ {}",
+                (to - from).abs()
+            );
+        }
+    }
+
+    /// A model that has not resolved yet **holds** the channel — the reference skips the camera
+    /// update outright while the preset is stale (`0x50e907`), which is what makes a display swap
+    /// read as a pause and then one glide. Aiming at a placeholder in the meantime would send the
+    /// camera on a round trip.
+    #[test]
+    fn a_body_with_no_model_holds_the_pivot_instead_of_re_aiming_it() {
+        let mut g = PivotGlide::default();
+        g.advance(Some(2.4659), 1.0 / 60.0);
+        let held = glide_run(&mut g, None, 0.5);
+        assert!(
+            held.iter().all(|h| *h == 2.4659),
+            "no target ⇒ no motion (the model is still loading)"
+        );
+        // …and the glide that follows starts from where it held, not from a placeholder.
+        let frames = glide_run(&mut g, Some(1.0552), 2.0);
+        assert!(frames[0] < 2.4659 && frames[0] > 2.4);
+    }
+
+    /// The per-frame re-arm has to be a **no-op** in steady state (the setter's 0.001 epsilon,
+    /// `0x5126b0`). Restarting the move from its own midpoint every frame would stretch it
+    /// asymptotically and it would never arrive — the classic re-arm bug this epsilon prevents.
+    #[test]
+    fn re_arming_the_same_target_every_frame_does_not_stretch_the_glide() {
+        let mut g = PivotGlide::default();
+        g.advance(Some(1.0), 1.0 / 60.0);
+        let frames = glide_run(&mut g, Some(2.2), 2.0);
+        assert!(
+            (frames.last().copied().unwrap() - 2.2).abs() < CAM_PIVOT_EPS,
+            "a per-frame re-arm must still arrive"
+        );
+    }
+
+    /// The pivot target is the model height × the **raw** scale, clamped to the reference's own
+    /// `[5/6, 15]` band (`0x50ca90`) — a giant's aura cannot walk the framing pivot into the sky,
+    /// and a shrink cannot bury it in the floor.
+    #[test]
+    fn the_pivot_target_is_clamped_to_the_references_band() {
+        let p = CameraPivot { height_local: 2.0 };
+        assert_eq!(model_pivot_height(&p, 1.0), 2.0);
+        assert_eq!(model_pivot_height(&p, 0.01), CAM_PIVOT_FLOOR);
+        assert_eq!(model_pivot_height(&p, 100.0), CAM_PIVOT_CEIL);
+    }
 
     /// A press that has travelled `yaw`/`pitch` **degrees** of camera rotation.
     fn press(yaw_deg: f32, pitch_deg: f32) -> PressGesture {

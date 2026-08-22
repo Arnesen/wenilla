@@ -22,6 +22,7 @@ fn enum_entry(
     level: u8,
     map: u32,
     pos: [f32; 3],
+    pet_display: u32,
 ) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&guid.to_le_bytes());
@@ -38,7 +39,7 @@ fn enum_entry(
     b.extend_from_slice(&0u32.to_le_bytes()); // guild id
     b.extend_from_slice(&0x0200_0000u32.to_le_bytes()); // character flags (DECLINED — junk)
     b.push(1); // first login
-    b.extend_from_slice(&99u32.to_le_bytes()); // pet display id
+    b.extend_from_slice(&pet_display.to_le_bytes()); // pet display id
     b.extend_from_slice(&7u32.to_le_bytes()); // pet level
     b.extend_from_slice(&1u32.to_le_bytes()); // pet family
     for slot in 0..19u32 {
@@ -62,6 +63,7 @@ fn char_enum_roster_parses_and_decodes() {
         1,
         0,
         [-8949.95, -132.493, 83.5312],
+        99, // a pet — the select screen stands one beside this character
     ));
     body.extend(enum_entry(
         0x0000_0000_0000_0009,
@@ -72,6 +74,7 @@ fn char_enum_roster_parses_and_decodes() {
         60,
         1,
         [1.5, -2.5, 3.5],
+        0, // a mage: the server sends the triple zeroed, and no pet renders
     ));
 
     let p = messages::parse_server(messages::opcode::SMSG_CHAR_ENUM, &body).unwrap();
@@ -91,6 +94,15 @@ fn char_enum_roster_parses_and_decodes() {
         (3, 4, 5, 6, 7)
     );
     assert_eq!((c.zone, c.flags), (12, 0x0200_0000));
+    // The pet triple, which used to be three alignment-skips: it sits between the first-login byte
+    // and the equipment array, and reading it *as* the roster's fields is what stands a pet on the
+    // select screen. The equipment assertions below are the alignment half of this — a triple read
+    // one field wide would slide every display id.
+    assert_eq!(
+        (c.pet_display_id, c.pet_level, c.pet_family),
+        (99, 7, 1),
+        "the hunter/warlock pet the select screen renders"
+    );
     assert_eq!((c.level, c.map), (1, 0));
     assert_eq!((c.position.x, c.position.y), (-8949.95, -132.493));
     // All 19 equipment pairs, in slot order: display 1000+slot, invType = slot.
@@ -107,6 +119,9 @@ fn char_enum_roster_parses_and_decodes() {
     );
     assert_eq!((c.level, c.map, c.position.z), (60, 1, 3.5));
     assert_eq!(c.equipment[18].display_id, 1018);
+    // No pet: `petDisplayId == 0` is the whole gate — the server zeroes the triple for every
+    // character but a living hunter's or warlock's, so the client needs no class test of its own.
+    assert_eq!(c.pet_display_id, 0);
 
     // Decodes to one CharacterList event carrying the roster through (no realm context on the raw
     // decode path — the IO thread's own emit is what carries the auth realm entry).

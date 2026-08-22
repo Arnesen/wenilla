@@ -239,14 +239,14 @@ pub(super) fn emit(
             shadow_spec,
         );
         for q in &mut sq {
-            // Flatten rgb to the shadow color (markup tints ride the fill only), but multiply
-            // the layout's own alpha — it carries the shadow's base alpha AND the write-on
-            // gradient's per-glyph ramp (a revealing char's shadow fades with its fill).
+            // Flatten rgb to the shadow color (markup tints ride the fill only); the alpha is
+            // every scalar the fill rides plus the shadow's own — see [`shadow_alpha`], which
+            // names the set and the symptom a missing member wears.
             q.color = [
                 sh.color[0],
                 sh.color[1],
                 sh.color[2],
-                q.color[3] * host.alpha,
+                shadow_alpha(q.color[3], base_color[3], host.alpha),
             ];
             // Every glyph quad inherits the owning Text quad's ScrollFrame clip — the
             // FontString's own extract-time clip, not a per-glyph concept.
@@ -394,9 +394,50 @@ fn shadow_offset_px(scaled: f32) -> f32 {
     }
 }
 
+/// A shadow glyph's alpha: **every scalar the fill rides, plus its own.**
+///
+/// Named because the set is the whole law and a missing member is invisible until something fades
+/// through the one that was dropped. There are three:
+///
+/// - `layout` — what the shadow pass laid out with: the font object's `<Shadow>` colour alpha,
+///   times the write-on gradient's per-glyph ramp.
+/// - `fill` — the FILL colour's alpha (`base_color[3]`): `SetTextColor(r,g,b,a)`, and every
+///   MessageFrame line, whose fade is a colour ramp rather than a frame-alpha one.
+/// - `host` — the region's effective frame alpha (`SetAlpha` and every parent's).
+///
+/// `fill` was the one missing. A frame that fades through its colour (UIErrorsFrame,
+/// RaidWarningFrame, chat) holds `host` at 1.0 throughout, so the shadow stayed a fully opaque
+/// black copy of a vanishing string: the text read as turning BLACK across the ramp and then
+/// popping out when the line retired, instead of fading.
+fn shadow_alpha(layout: f32, fill: f32, host: f32) -> f32 {
+    layout * fill * host
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{band_clip_slack, shadow_offset_px};
+    use super::{band_clip_slack, shadow_alpha, shadow_offset_px};
+
+    /// A drop shadow fades with the string it belongs to — through EITHER fade lane.
+    ///
+    /// The regression this pins: `UIErrorsFrame`'s "Requires Mining" and every other MessageFrame
+    /// line ramps its COLOUR alpha and holds frame alpha at 1.0, so a shadow that only rode
+    /// `host` stayed opaque black under a vanishing red fill — the text turned black across the
+    /// ramp and then vanished in one frame (director, 2026-08-22). Anything that fades through
+    /// `SetTextColor`'s alpha wore the same defect.
+    #[test]
+    fn a_drop_shadow_fades_through_the_colour_lane_as_well_as_the_frame_lane() {
+        // Nothing fading: an opaque shadow, as before.
+        assert_eq!(shadow_alpha(1.0, 1.0, 1.0), 1.0);
+        // The colour lane alone (a message-frame line mid-ramp): the shadow follows it. This is
+        // the assertion that fails without the fix — it used to answer 1.0.
+        assert_eq!(shadow_alpha(1.0, 0.25, 1.0), 0.25);
+        // The frame lane alone (UIFrameFadeOut, the zone splash): unchanged behaviour.
+        assert_eq!(shadow_alpha(1.0, 1.0, 0.25), 0.25);
+        // Both lanes compose, and the font object's own semi-transparent shadow rides on top.
+        assert_eq!(shadow_alpha(0.8, 0.5, 0.5), 0.2);
+        // Fully faded fill leaves NO shadow behind — the black that used to outlive the text.
+        assert_eq!(shadow_alpha(1.0, 0.0, 1.0), 0.0);
+    }
 
     /// The newest chat line's band bottom IS the frame's bottom edge, so every px the renderer
     /// adds below the band is a px the scissor would otherwise eat — the descender tails and

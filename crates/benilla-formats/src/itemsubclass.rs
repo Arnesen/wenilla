@@ -156,6 +156,30 @@ impl ItemSubClassCatalog {
             .is_some_and(|r| r.display_flags & 1 != 0)
     }
 
+    /// This subclass's raw `DisplayFlags` (`0` for an unknown key). Bit 0 is [`Self::hides_name`];
+    /// bit 1 marks a subclass the auction house's category filter does not offer. The bits are
+    /// served raw rather than as named predicates because each consumer owns the meaning of the
+    /// one it reads — the auction law lives in the auction module, not here.
+    pub fn display_flags(&self, class: u32, subclass: u32) -> u32 {
+        self.rows
+            .get(&(class, subclass))
+            .map_or(0, |r| r.display_flags)
+    }
+
+    /// Every subclass id defined for `class`, ascending. The shipped table is small (72 rows
+    /// total), so the scan costs nothing and the alternative — assuming subclass ids are dense
+    /// from 0 — is false for several classes.
+    pub fn subclasses_of(&self, class: u32) -> Vec<u32> {
+        let mut ids: Vec<u32> = self
+            .rows
+            .keys()
+            .filter(|(c, _)| *c == class)
+            .map(|(_, s)| *s)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Number of rows (for logging/diagnostics).
     pub fn len(&self) -> usize {
         self.rows.len()

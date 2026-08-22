@@ -133,14 +133,21 @@ pub(crate) struct AutoRepeatArmed;
 /// `shooter-stop-law.md` §J1.3). Deliberately NOT cleared on sheath change or volley end — the
 /// client's bit persists latent.
 ///
-/// **It gates nothing here, and that is the reference's own shape.** `0x400` is tested in
-/// exactly one place image-wide — `0x5fc3f0`'s Hold self-loop gates (`test ah,0x6` for HoldBow
-/// 109, `test ah,0x4` for 110/111/112) — and that dispatcher is never reached for a bow id
-/// (`shooter-stop-law.md` §J4.1), so no `0x400` test ever executes for a shooter. Reading it as
-/// a second *entry* into the drawn idle is what left a shooter aiming forever after one Serpent
-/// Sting (decision 0991) and what kept a fabricated Hold twin alive (0994). It is kept modelled,
-/// not deleted: §J4.1 is a proof-by-absence carrying an open `LIVE-CAPTURE` item, and this bit is
-/// what a correction would need. Nothing may gate on it until that capture lands.
+/// **It gates nothing here — but no longer for the reason this doc used to give.** `0x400` is
+/// tested in exactly one place image-wide: `0x5fc3f0`'s Hold self-loop gates (`test ah,0x6` for
+/// HoldBow 109, `test ah,0x4` for 110/111/112). 0994 recorded that the dispatcher is never
+/// reached for a bow id (`shooter-stop-law.md` §J4.1) and concluded the bit is dead. **wow-re's
+/// §5 refuted that absence proof** (decision 1544): the dispatcher has a second, deferred fire
+/// site, so those gates DO execute — they are the Hold's own per-completion re-arm.
+///
+/// We still gate nothing on it, and that is now a *modelling* choice with a stated equivalence
+/// rather than a claim about the binary. Our Hold is armed once and loops until a real recompute
+/// (`select::ranged_hold_anim`), where the reference re-arms it at each completion while the gate
+/// holds. The two diverge only where `0x400` holds *without* `0x200` — a remote shooter's latent
+/// hold — and a remote shooter never enters the drawn idle at all (`0x5fd460` claims on `0x200`,
+/// which only the local cast-send sets), so the case cannot arise. Reading the bit as a second
+/// *entry* into the drawn idle remains wrong: that is what left a shooter aiming forever after
+/// one Serpent Sting (decision 0991).
 #[derive(Component)]
 pub(crate) struct RangedHold;
 

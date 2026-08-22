@@ -30,7 +30,7 @@ pub(super) struct BoothPart {
     pub(super) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
 }
 
-/// Marks a booth part whose render-alpha `MeshTag` is driven by its own
+/// Marks a booth part whose render-alpha `MeshTag` **and `Visibility`** are driven by its own
 /// [`MatAnim`](benilla_world::doodad_anim::MatAnim) sample — the booth twin of the world lane's writer.
 ///
 /// The world path's writer is the *visibility authority* (`debug_panel::apply_model_visibility`),
@@ -39,6 +39,12 @@ pub(super) struct BoothPart {
 /// nothing to do with — so the booth owns this one small writer instead
 /// ([`push_booth_mat_alpha`]). Marker-scoped rather than inferred from "has no `ModelPart`", so the
 /// two lanes cannot silently overlap.
+///
+/// Being out of that query means being out of **both** halves of what it does, and the booth owes
+/// its parts both: the alpha field *and* the `mat_factor > 0.0` term in its `desired` verdict — the
+/// reference's `A <= 0` cull, which fires before the blend mode is ever read (wow-re
+/// `m2-alpha-combine-cull.md`). Marking the marker is therefore also a claim of sole `Visibility`
+/// authority over the parts that carry it; nothing else in the booth writes theirs.
 #[derive(Component)]
 pub(super) struct BoothMatAlpha;
 
@@ -210,17 +216,19 @@ pub(super) fn spawn_booth_effects(
             // seated at the pivot under the host. No billboard in the chain (every shipped glow
             // model, most items) → the host itself owns the emitter and the rest pose stands.
             let owner = match em.billboard {
-                Some((kind, pivot)) => {
+                Some(bb) => {
                     let frame = commands
                         .spawn((
-                            Transform::from_translation(benilla_assets::coords::wow_to_bevy(pivot)),
+                            Transform::from_translation(benilla_assets::coords::wow_to_bevy(
+                                bb.pivot,
+                            )),
                             layer.clone(),
                             ChildOf(host),
-                            BoothBillboard::frame(kind),
+                            BoothBillboard::frame(bb.kind),
                         ))
                         .id();
                     frames += 1;
-                    (frame, pivot)
+                    (frame, bb.pivot)
                 }
                 None => (host, [0.0; 3]),
             };
@@ -255,6 +263,93 @@ pub(super) fn spawn_booth_effects(
             }
             spawned += 1;
         }
+    }
+    (spawned, frames)
+}
+
+/// Spawn a booth model's **OWN** particle emitters — the ones authored on its own skeleton, riding
+/// its own joints. The twin of [`spawn_booth_effects`], and the distinction is which model the
+/// emitters belong to: that one seats a *separate* model's emitters (an equipped item's) on a body
+/// bone through a host; this one is the model itself burning — the backdrop scene's braziers, the
+/// select pet's flames. Returns `(emitters, frames)` like its twin.
+///
+/// `root` is the bake root: the fallback owner when a bone has no anchor (boneless bake, bad index),
+/// the cloud's anchor, and the parent every emitter is hung under so a re-bake's
+/// `despawn_related::<Children>` reaps them.
+///
+/// **The billboard arm is why this is a shared function and not two loops.** A booth pose drops the
+/// camera arms ([`benilla_world::rig_anim::RigPose::without_camera_billboards`] — the world pass
+/// would face them at the *world* camera), so unlike a rigged model in the world, a booth's emitter
+/// whose chain reaches a billboard bone gets no replacement from its palette and would sit at its
+/// rest-pose origin. It needs the same mesh-less [`BoothBillboard`] frame the no-rig lanes use —
+/// seated here on the **billboard bone's own joint** at `ZERO`, because that joint already bakes the
+/// pivot with the chain above it folded in (the 0130 rig identity, `BoothBillboardSpec::offset`'s
+/// rule). Only when that bone has no anchor does it fall back to the rest-pose placement at the
+/// pivot under `root`, which is all the no-rig lanes can ever do.
+pub(super) fn spawn_booth_own_emitters(
+    commands: &mut Commands,
+    rig: &mut BoothRig,
+    root: Entity,
+    layer: &RenderLayers,
+    light: Option<&bevy::render::render_resource::Buffer>,
+    emitters: &[benilla_assets::ModelEmitter],
+) -> (usize, usize) {
+    let mut spawned = 0usize;
+    let mut frames = 0usize;
+    for em in emitters {
+        let owner = match em.billboard {
+            Some(bb) => {
+                // The joint bakes the pivot → the frame sits at ZERO and only its rotation counts.
+                // No joint (boneless bake) → the rest-pose placement, at the pivot under the root.
+                let (seat, at) = match rig.anchor(commands, bb.bone) {
+                    Some(joint) => (joint, Vec3::ZERO),
+                    None => (root, benilla_assets::coords::wow_to_bevy(bb.pivot)),
+                };
+                let frame = commands
+                    .spawn((
+                        Transform::from_translation(at),
+                        layer.clone(),
+                        ChildOf(seat),
+                        BoothBillboard::frame(bb.kind),
+                    ))
+                    .id();
+                frames += 1;
+                (frame, bb.pivot)
+            }
+            // The ordinary case: the emitter rides its own bone's joint, in that bone's frame.
+            None => rig
+                .anchor(commands, em.def.bone)
+                .map_or((root, [0.0; 3]), |joint| (joint, em.bone_pivot)),
+        };
+        let Some(e) = benilla_world::particles::spawn_emitter(
+            commands,
+            em,
+            Transform::IDENTITY,
+            benilla_world::particles::EmitterFrames {
+                owner: Some(owner),
+                attach: None, // this model IS the host — nothing it hangs off swings it
+                anchor: Some(root),
+                // The bake root is torn down and rebuilt as a whole.
+                on_owner_loss: benilla_world::particles::OwnerLoss::Free,
+                // A booth bake has no appear/despawn ramp and no self-avatar feather (0827).
+                alpha: None,
+                // Scene-graph-carried: this model's motion arrives on the device stack (0986).
+                world_composed: false,
+            },
+            // A booth loops its one authored clip forever — the doodad law.
+            benilla_world::particles::EmitClock::Pinned,
+        ) else {
+            continue;
+        };
+        commands.entity(e).insert((layer.clone(), ChildOf(root)));
+        if let Some(buf) = light {
+            commands
+                .entity(e)
+                .insert(benilla_world::particles::buffer::EffectLightOverride(
+                    buf.clone(),
+                ));
+        }
+        spawned += 1;
     }
     (spawned, frames)
 }
@@ -546,25 +641,53 @@ pub(super) fn face_booth_billboards(
     }
 }
 
-/// Push each booth part's sampled material alpha onto its render-alpha `MeshTag` field — the booth's
-/// own tiny twin of the world visibility authority's write (see [`BoothMatAlpha`] for why the world
-/// one can't serve here).
+/// Resolve each booth part's sampled material alpha — **cull it at `A <= 0`, dim it otherwise** —
+/// the booth's own tiny twin of the world visibility authority (see [`BoothMatAlpha`] for why the
+/// world one can't serve here).
 ///
 /// `doodad_anim::sample_mat_anim` already ticks **every** `MatAnim` in the world, booth parts
-/// included, so this only moves the sampled value onto the channel: `with_alpha` writes the alpha
-/// field alone, so the rig slot (and the probe slot the rig lane reads from the same tag) ride
-/// through untouched. Write-on-change, so the overwhelmingly common case — an authored *constant*
-/// like UI_Tauren's 0.55 vignette — costs one compare per part per frame and never re-batches.
+/// included, so this only spends the sampled value. Two ways, exactly as
+/// `model_render::visibility` spends it on a world part:
+///
+/// - **`A <= 0` → `Hidden`.** The reference culls the batch before it looks at the blend mode, so a
+///   zero is a *disappearance*, not a fade to nothing — and only a `Visibility` write can say that.
+///   The tag alpha reaches the shader's blend source, which an Opaque draw ignores outright
+///   (`wow_model.wgsl`: "For steady cutout/opaque draws blend is off so this is ignored"), so a
+///   batch the artist keyed off in this sequence would otherwise draw **solid**. That is not an
+///   edge case: `alphascan` counts 56 of 420 creature models authoring per-sequence batch
+///   visibility, and the shipped one that stands in this booth is the Voidwalker, whose two
+///   shoulder props are keyed to zero for the whole of Stand and hung in the air without this.
+///   `Inherited` rather than `Visible`, so a hidden bake root still takes its parts with it.
+/// - **Otherwise → the alpha field.** `with_alpha` writes that field alone, so the rig slot (and the
+///   probe slot the rig lane reads from the same tag) ride through untouched.
+///
+/// Both are write-on-change, so the overwhelmingly common case — an authored *constant* like
+/// UI_Tauren's 0.55 vignette — costs two compares per part per frame and never re-batches.
+///
+/// `Visibility` is required, not optional, and that is safe by construction: every site that adds
+/// [`BoothMatAlpha`] spawns the part with a `Mesh3d`, which requires `Visibility` — and a part
+/// without one is not a booth draw at all. Required rather than `Option`, because an optional match
+/// would quietly ship the dimming half alone again, which is the whole defect this system had.
 pub(super) fn push_booth_mat_alpha(
     mut parts: Query<
         (
             &benilla_world::doodad_anim::MatAnim,
             &mut bevy::mesh::MeshTag,
+            &mut Visibility,
         ),
         With<BoothMatAlpha>,
     >,
 ) {
-    for (anim, mut tag) in &mut parts {
+    for (anim, mut tag, mut vis) in &mut parts {
+        // The cull, the same term the world authority ANDs into its verdict as `mat_factor > 0.0`.
+        let want = if anim.current > 0.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
         let bits = benilla_world::mesh_tag::with_alpha(tag.0, anim.current);
         if tag.0 != bits {
             tag.0 = bits;
@@ -610,6 +733,10 @@ mod tests {
                 bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(rig_slot, 1.0)),
                 anim,
                 BoothMatAlpha,
+                // Mirrors production: both marker sites spawn a `Mesh3d`, which *requires*
+                // `Visibility` — the writer's query takes it unconditionally, so a fixture without
+                // one is not a booth part and would silently fall out.
+                Visibility::Inherited,
             ))
             .id();
         app.update();
@@ -628,6 +755,56 @@ mod tests {
         assert!(
             (alpha - 0.55).abs() <= 1.0 / 63.0,
             "authored 0.55 reached the tag (got {alpha})"
+        );
+    }
+
+    /// The `A <= 0` cull — the half the booth twin was missing, and the reason the Voidwalker
+    /// stood in the char-select booth with two shoulder props hung in the air. The reference culls
+    /// the batch before it reads the blend mode (wow-re `m2-alpha-combine-cull.md`), and the world
+    /// lane says so as `mat_factor > 0.0` in its `desired` verdict
+    /// (`model_render::visibility`); a tag write alone cannot express it, because an Opaque draw
+    /// never looks at the blend source the tag alpha feeds. Both directions, in one run: a zeroed
+    /// batch goes `Hidden`, a live one stays drawable, and the writer keeps up when the sample moves.
+    #[test]
+    fn a_batch_the_artist_zeroed_in_this_sequence_is_culled_not_merely_dimmed() {
+        let mut app = App::new();
+        app.add_systems(Update, push_booth_mat_alpha);
+        let spawn = |app: &mut App, v: f32| {
+            app.world_mut()
+                .spawn((
+                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(0, 1.0)),
+                    MatAnim::driving_tag(constant_alpha(v), 0.0, None),
+                    BoothMatAlpha,
+                    Visibility::Inherited,
+                ))
+                .id()
+        };
+        // The Voidwalker's Stand: the shoulder shackles keyed to 0, the wrist pair left at 1.
+        let shoulder = spawn(&mut app, 0.0);
+        let wrist = spawn(&mut app, 1.0);
+        app.update();
+
+        let vis = |app: &App, e: Entity| *app.world().entity(e).get::<Visibility>().unwrap();
+        assert_eq!(
+            vis(&app, shoulder),
+            Visibility::Hidden,
+            "A <= 0 is a disappearance, not a fade to nothing — an Opaque draw ignores the tag"
+        );
+        assert_eq!(
+            vis(&app, wrist),
+            Visibility::Inherited,
+            "and a live batch stays drawable — Inherited, so a hidden bake root still wins"
+        );
+
+        // Not a one-shot verdict: the sample is per frame, so a batch keyed back on comes back.
+        app.world_mut()
+            .entity_mut(shoulder)
+            .insert(MatAnim::driving_tag(constant_alpha(1.0), 0.0, None));
+        app.update();
+        assert_eq!(
+            vis(&app, shoulder),
+            Visibility::Inherited,
+            "the cull tracks the sample; it does not latch"
         );
     }
 

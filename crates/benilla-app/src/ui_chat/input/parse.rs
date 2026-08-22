@@ -89,6 +89,10 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// the subject on, the rung that decided, and the resulting `can_attack` verdict. Bare uses
     /// the current target; a name resolves a streamed player (what a scripted probe can reach).
     Reaction { name: Option<String> },
+    /// `/convertraid` — convert the party to a raid (`CMSG_GROUP_RAID_CONVERT`, leader only,
+    /// server-judged). A benilla addition: 1.12's only trigger is the RaidFrame tab's Convert
+    /// button, not built yet — see the [`SlashIndex::ConvertRaid`] doc.
+    ConvertRaid,
     /// `/help` (aliases /h /?) — the command summary.
     Help,
     /// A `/name` line that resolved in `EmotesText` (`/wave` → text id 101) — sent as
@@ -400,6 +404,7 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
         // The console command match is case-insensitive like the engine's console; `0x4035f0`
         // reads no arguments, so anything after `reloadUI` is ignored rather than an error.
         S::ReloadUi => ParsedChat::ReloadUi,
+        S::ConvertRaid => ParsedChat::ConvertRaid,
         // `/errors` (ours, 1495) → the script error log. Routed as Lua rather than a new
         // `ParsedChat` variant for the same reason `/macro` is: the window is FrameXML, the
         // toggle is a FrameXML function, and a Rust arm would only forward to it.

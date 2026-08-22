@@ -53,8 +53,6 @@ pub(crate) const ALLIANCE: [u8; 4] = [1, 3, 4, 7]; // Human, Dwarf, Night Elf, G
 const HORDE: [u8; 4] = [2, 5, 6, 8]; // Orc, Scourge, Tauren, Troll
 /// The ref's initial model facing (`SetCharacterCreateFacing(-15)`), reset on every race switch.
 const INITIAL_FACING: f32 = -15.0 * std::f32::consts::PI / 180.0;
-/// The rotate buttons' hold rate — the ref's 2°-per-frame `CHARACTER_FACING_INCREMENT`, per-second.
-const ROTATE_RATE: f32 = 120.0 * std::f32::consts::PI / 180.0;
 
 /// The character-creation subsystem (decision 0423): the screen + its selection state.
 pub(crate) struct CharCreatePlugin;
@@ -384,7 +382,8 @@ fn class_file(class: u8) -> &'static str {
 /// re-running the whole dial/panel/icon refresh 60× a second.
 #[allow(clippy::too_many_arguments)]
 fn create_input(
-    presses: Query<(&CreateAction, &Interaction), Changed<Interaction>>,
+    buttons: Query<(Entity, &CreateAction)>,
+    clicks: Res<crate::glue::GlueClicks>,
     mut keyboard: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     catalog: Option<Res<CharCreate>>,
@@ -407,8 +406,11 @@ fn create_input(
     let mut changed_look = false;
     let mut do_create = false;
 
-    for (action, interaction) in &presses {
-        if *interaction != Interaction::Pressed {
+    // Every control on this screen is a Button, and a Button fires on the RELEASE, over the
+    // button that took the press (1533, `crate::glue::glue_clicks`). The name box needs no
+    // press-to-focus: the screen has one field and it is always focused while up.
+    for (entity, action) in &buttons {
+        if !clicks.hit(entity) {
             continue;
         }
         match *action {
@@ -537,24 +539,33 @@ fn refresh_name_box(
 
 /// Rotate the preview: drag on the model pane (the ref's full-frame mouse rotation: `facing +=
 /// Δcursor·CHARACTER_ROTATION_CONSTANT` — dragging right *increases* the facing, same sign as the
-/// right rotate button; the engine constant's magnitude is unverified, ours ≈0.6°/px), or hold a
-/// rotate button (the ref's ±2°-per-frame `RotateLeft/Right_OnUpdate`; left decrements the facing).
+/// right rotate button), or hold a rotate button (the ref's ±2°-per-frame
+/// `RotateLeft/Right_OnUpdate`; left decrements the facing).
+///
+/// The drag constant is the select screen's, because in the reference it is literally the same
+/// number: `CHARACTER_ROTATION_CONSTANT = 0.6` is declared once in `CharacterSelect.lua` and read
+/// by both screens' `OnUpdate`. This screen carried a bare `0.01` rad/px (0.573°/px) instead — a
+/// 4.5 % drift from the screen next door, against a comment that already claimed 0.6 (1533).
 fn rotate_model(
     panes: Query<(&Interaction, &CreateAction)>,
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut preview: ResMut<GluePreview>,
 ) {
+    let window = window.single().ok();
     for (interaction, action) in &panes {
         if *interaction != Interaction::Pressed {
             continue;
         }
         match action {
             CreateAction::Model if motion.delta.x != 0.0 => {
-                preview.yaw += motion.delta.x * 0.01;
+                preview.yaw += crate::glue::drag_yaw(motion.delta.x, window);
             }
-            CreateAction::RotateLeft => preview.yaw -= ROTATE_RATE * time.delta_secs(),
-            CreateAction::RotateRight => preview.yaw += ROTATE_RATE * time.delta_secs(),
+            CreateAction::RotateLeft => preview.yaw -= crate::glue::ROTATE_RATE * time.delta_secs(),
+            CreateAction::RotateRight => {
+                preview.yaw += crate::glue::ROTATE_RATE * time.delta_secs()
+            }
             _ => {}
         }
     }

@@ -125,12 +125,10 @@ fn spawn_exile(commands: &mut Commands, f: &GxFader, alpha: f32, admitted: bool)
                 blend: b.blend.clone(),
             },
             crate::exterior_cull::ExteriorScene,
-            crate::interact::WorldObject {
-                kind: crate::model_render::ModelKind::Doodad,
-                label: f.label.to_string(),
-                id: f.uid,
-                detail: "static-gx exile".into(),
-            },
+            // The placement's own identity, not a lane-flavoured copy: a feathering doodad must
+            // name the same thing under the cursor whether the retained pass or these exiled
+            // entities are drawing it that frame (1534).
+            (*f.object).clone(),
         ));
         if admitted {
             e.insert(bevy::camera::visibility::InheritedVisibility::VISIBLE);

@@ -485,22 +485,24 @@ fn the_ranged_idle_is_entered_by_the_auto_repeat_bit_and_the_ranged_sheath_alone
     assert!(!ranged_idle_gate(false, Some(2)));
 }
 
-/// The ranged **fire** clips ([`is_ranged_fire`]) — the one-shots whose completion must not
-/// recompute the base (wow-re `shooter-stop-law.md` §J4: `0x5fc3f0` is never reached for a bow
-/// id, so AttackBow clamps on its authored tail). Recomputing re-picks the gait, which for an
-/// armed shooter is the Load clip — that is a full re-pull on every single shot.
+/// The Load → Hold promotion ([`ranged_hold_anim`]) — the completion dispatch's slot 11/12/15
+/// arms (decision 1544). Each ranged Load yields its weapon family's Hold, which is the one clip
+/// in the cycle authored as a LOOP and therefore the one that can sit between shots.
+///
+/// This replaces 0994's `is_ranged_fire` law test, which asserted the opposite mechanism: that a
+/// fire clip's completion must NOT recompute the base. wow-re's §5 refuted the absence proof it
+/// rested on — the completion dispatcher has a second, deferred fire site — so the fire clips
+/// recompute like every other one-shot and the promotion below is what holds the pose instead.
 #[test]
-fn the_ranged_fire_clips_are_the_three_attack_ids_and_not_the_loads() {
-    assert!(is_ranged_fire(46)); // AttackBow
-    assert!(is_ranged_fire(49)); // AttackRifle
-    assert!(is_ranged_fire(107)); // AttackThrown
-                                  // The Load clips are the base idle, not one-shots — they must never take the hold-out.
-    assert!(!is_ranged_fire(105));
-    assert!(!is_ranged_fire(106));
-    assert!(!is_ranged_fire(112));
-    // Nor any melee swing: those return to the gait the moment they finish, as they always have.
-    assert!(!is_ranged_fire(0));
-    assert!(!is_ranged_fire(15)); // AttackUnarmed
+fn each_ranged_load_promotes_to_its_weapon_familys_hold() {
+    assert_eq!(ranged_hold_anim(105), 109); // LoadBow → HoldBow
+    assert_eq!(ranged_hold_anim(106), 110); // LoadRifle → HoldRifle
+    assert_eq!(ranged_hold_anim(112), 111); // LoadThrown → HoldThrown
+    assert_eq!(ranged_hold_anim(111), 111); // the wand's idle IS the hold: it re-arms itself
+    assert_eq!(ranged_hold_anim(25), 25); // no ranged weapon holds nothing: ReadyUnarmed stays
+                                          // The promotion is keyed on the LOAD clip, so a fire id is not a valid input and must not
+                                          // silently map onto a hold — it recomputes the base instead, and the gait re-picks the Load.
+    assert_eq!(ranged_hold_anim(46), 46);
 }
 
 #[test]

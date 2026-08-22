@@ -265,7 +265,17 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// had stopped meaning it (decision 1498). The alternative was the game reaching into
 /// `StaticGx` itself, which is a whole engine subsystem through the door instead of one
 /// `usize` on the residency struct that exists to be read from outside.
-const CEILING: usize = 160;
+/// And 160 → 161: `mac_quit::MacQuitPlugin`, a PUBLISH in the exact class of the two engine
+/// plugins already through this door — `thread_qos::ThreadQosPlugin` and `bgwin::BgWinPlugin`.
+/// All three correct a *host platform default* at launch, both composition roots name all three,
+/// and they sit outside `WorldPlugins` because they are properties of the process and its window
+/// rather than of the world. This one re-points macOS's `Cmd+Q` (winit's default menu wires it
+/// straight to `terminate:`, which exits without ever running another frame) at the window close,
+/// so the client's shutdown tail gets the frame it needs — decision 1528, where that gesture was
+/// measured on the real client writing *nothing*: no saved variables, no addon files, no camera
+/// pose. The alternative was hiding it inside `WorldPlugins` to keep the count flat, which is
+/// gaming the instrument rather than paying for a name.
+const CEILING: usize = 161;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

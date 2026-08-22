@@ -456,7 +456,11 @@ pub(crate) fn incapacitated_flags(flags: u32, rooted: bool, stunned: bool) -> u3
 /// chord + `F` (decision 1043).
 /// `active`/`pos`/`detached` are `pub(crate)` so terrain streaming can center the loaded block on the
 /// avatar in third-person and on the free-flying camera while detached.
-#[derive(Resource, Default)]
+/// `PartialEq` is here for one assertion, and it is the assertion that keeps this type honest:
+/// the session boundary returns the whole resource to `Player::default()`
+/// ([`super::wire_in::release_on_session_end`], decision 1542), and its test says exactly that
+/// rather than re-listing the fields a hand-picked reset would have to remember.
+#[derive(Resource, Default, PartialEq)]
 pub(crate) struct Player {
     pub(crate) active: bool,
     /// **The granted mover modes** — what the server has switched on for our mover, as typed state
@@ -731,6 +735,7 @@ pub(crate) struct Player {
 }
 
 /// The player's attachment to a transport's platform frame — see [`Player::ride`].
+#[derive(PartialEq)]
 pub(super) struct PlayerRide {
     /// The transport's ECS entity (its collider is the ground support that attached us).
     pub(super) entity: Entity,
@@ -780,6 +785,44 @@ impl Player {
     /// the reference (`& 0xf` translating, `& 0x30` turning; wow-re CWater0Ripple driver `0x5fa760`).
     pub(crate) fn move_flags(&self) -> u32 {
         self.move_flags
+    }
+
+    /// **What is holding this body still** — every state on the resource that kills WASD, named,
+    /// or `"none"`. An *instrument*, not a gate (decision 1542): the controller keeps its own
+    /// tests, because each of these suppresses a different amount (`control_lost`/`server_riding`
+    /// take the whole controller at [`super::control`]'s early-out; `rooted` zeroes the direction
+    /// vector and the swim amounts but deliberately leaves turning live). What this exists for is
+    /// the question a *log line* has to answer after a session boundary — "can the character that
+    /// just entered the world be driven?" — which B306 proved nothing was asking: `scripts/smoke.sh`
+    /// has crossed `/logout` → re-enter on every run since 1291 while counting UI rebuilds, errors
+    /// and shutdown writes, none of which a frozen character disturbs.
+    ///
+    /// It does **not** make the smoke a B306 regression: that run logs in as a GM probe, so vmangos
+    /// takes the instant-logout branch and never roots us at all (`smoke.sh` reports that gap on
+    /// every run rather than banking a vacuous pass). What this covers live is the rest of the
+    /// family — a possession or a lost session that leaves the reins where they were.
+    ///
+    /// It reads only this resource. A stun (`UNIT_FIELD_FLAGS`, [`crate::player::UNIT_FLAG_STUNNED`])
+    /// lives on the unit's descriptor block and is not visible from here.
+    pub(crate) fn movement_suppressors(&self) -> String {
+        let named = [
+            (!self.active, "inactive"),
+            (self.detached, "free-fly"),
+            (self.modes.rooted, "root"),
+            (self.control_lost, "control-lost"),
+            (self.server_riding, "server-ride"),
+            (self.foreign_mover.is_some(), "possession"),
+            (self.reseat, "reseat-pending"),
+        ];
+        let list: Vec<&str> = named
+            .into_iter()
+            .filter_map(|(set, name)| set.then_some(name))
+            .collect();
+        if list.is_empty() {
+            "none".to_string()
+        } else {
+            list.join(",")
+        }
     }
 
     /// The **commanded planar speed** in yd/s — the reference's `[[player+0x118]+0x84]`, the

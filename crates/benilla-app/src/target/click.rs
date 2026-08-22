@@ -663,12 +663,21 @@ fn interact_command(
     match kind {
         CursorKind::Pickup => Some(ClientCommand::ListInventory { guid }),
         CursorKind::Taxi => Some(ClientCommand::TaxiQueryNodes { guid }),
-        // Buy(3) is banker OR auctioneer (the ladder's shared leg). A pure banker (bit 8 the
-        // lowest service bit — the only way Buy classified) opens the bank directly
-        // (`CMSG_BANKER_ACTIVATE`, decision 0604); the auctioneer stays on the gossip fallback
-        // (its window is its own arc).
+        // Buy(3) is banker OR auctioneer (the ladder's shared leg), so it forks twice. A pure
+        // banker (bit 8 — the lowest service bit, and the only way Buy classified) opens the bank
+        // directly (`CMSG_BANKER_ACTIVATE`, decision 0604).
         CursorKind::Buy if npc_flags & cursor_mode::npc_flags::BANKER != 0 => {
             Some(ClientCommand::BankerActivate { guid })
+        }
+        // An auctioneer (bit 12) greets its house (decision 1511). Note what this does NOT do:
+        // open anything. The greeting is a round trip, and the window opens when the *reply*
+        // lands — that is the real client's own law, and it is also what makes the house id
+        // (which only the reply carries) available before the sell pane needs a deposit rate.
+        // An auctioneer that also carries the gossip bit never reaches here: the service ladder
+        // is first-match-wins from the low bits, so bit 0 pre-empts bit 12 and the menu's own
+        // auctioneer option asks the server for the same greeting.
+        CursorKind::Buy if npc_flags & cursor_mode::npc_flags::AUCTIONEER != 0 => {
+            Some(ClientCommand::AuctionHello { auctioneer: guid })
         }
         CursorKind::Speak | CursorKind::Buy | CursorKind::Trainer | CursorKind::Interact => {
             Some(ClientCommand::GossipHello { guid })
@@ -944,8 +953,6 @@ mod tests {
         // Gossip (Speak) and the out-of-scope service kinds route through the universal hello.
         for (kind, flags) in [
             (CursorKind::Speak, 0x1),
-            // Buy with no banker bit (a pure auctioneer) stays on the gossip fallback.
-            (CursorKind::Buy, 0x1000),
             (CursorKind::Trainer, 0x10),
             (CursorKind::Interact, 0x80),
         ] {
@@ -960,8 +967,20 @@ mod tests {
         }
     }
 
+    /// The auctioneer split (decision 1511): a pure auctioneer greets its house rather than
+    /// falling to the gossip universal, and the greeting is all it does — the window opens when
+    /// the *reply* lands, which is the real client's own law.
+    #[test]
+    fn interact_routes_pure_auctioneer_to_the_hello() {
+        use cursor_mode::CursorKind;
+        assert!(matches!(
+            interact_command(CursorKind::Buy, 0x51, cursor_mode::npc_flags::AUCTIONEER),
+            Some(ClientCommand::AuctionHello { auctioneer: 0x51 })
+        ));
+    }
+
     /// The banker split (decision 0604): Buy(3) is banker OR auctioneer — the BANKER flag routes
-    /// the direct `CMSG_BANKER_ACTIVATE`, its absence falls to the gossip universal. A
+    /// the direct `CMSG_BANKER_ACTIVATE`, its absence falls to the auctioneer fork above. A
     /// gossip-flagged banker never reaches this fork (the low-bit-first ladder classified Speak).
     #[test]
     fn interact_routes_pure_banker_direct() {

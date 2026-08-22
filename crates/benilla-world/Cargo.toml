@@ -42,9 +42,15 @@ objc2-app-kit = { version = "0.2", features = [
     # `bgwin`'s Accessory demotion and window ordering, and `modkeys`' modifier read.
     "NSApplication",
     "NSEvent",
+    # `mac_quit` walks the default menu bar to re-point the Quit item (decision 1528).
+    "NSMenu",
+    "NSMenuItem",
     "NSResponder",
     "NSRunningApplication",
     "NSWindow",
 ] }
 # `MainThreadMarker`, for the AppKit calls above.
 objc2-foundation = "0.2"
+# `sel!`, for the two selectors `mac_quit` swaps. The pin objc2-app-kit 0.2 itself builds against,
+# so this adds a name to the manifest and nothing to the graph.
+objc2 = "0.5"

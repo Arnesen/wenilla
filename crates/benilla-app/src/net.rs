@@ -1263,6 +1263,71 @@ pub(crate) enum ClientCommand {
     /// login to seed `HasNewMail()`/the minimap letter icon (decision 0544 P3, sent by
     /// `crate::ui_mail`'s world-enter one-shot).
     QueryNextMailTime,
+    // ── The auction house arc (decision 1511; writer bodies in benilla-protocol
+    //    `world/writer/auction.rs`). Every verb carries the auctioneer guid — the server
+    //    re-checks the 5 yd interact distance on each one, so there is no session token, and
+    //    several refusals (a zero bid/duration, an unaffordable bid, a cancel whose cut can't be
+    //    paid, a list request while one is in flight) come back as NO packet at all. ──────────
+    //
+    //    Each variant carries `#[allow(dead_code)]`: decision 1511 P0 is the WIRE, and the
+    //    auction window that will construct these is a later phase. The allow is per-variant
+    //    rather than on the enum so a genuinely dead command elsewhere still surfaces, and each
+    //    one comes off the moment its caller lands.
+    /// Greet an auctioneer (`MSG_AUCTION_HELLO`, one guid) — the two-way opcode whose *reply*
+    /// (an `AuctionHello` event, carrying the `AuctionHouse.dbc` house id) opens the window.
+    #[allow(dead_code)]
+    AuctionHello { auctioneer: u64 },
+    /// Ask a Browse page (`CMSG_AUCTION_LIST_ITEMS`): the search filters exactly as the server
+    /// reads them, with `benilla_protocol::messages::auction_filter`'s sentinels for the unset
+    /// ones. **No sort rides the wire** — sorting the page is ours. `list_from` pages by 50.
+    /// Answered by `SMSG_AUCTION_LIST_RESULT` (an `AuctionListResult` event).
+    #[allow(dead_code)]
+    AuctionListItems {
+        auctioneer: u64,
+        list_from: u32,
+        searched_name: String,
+        level_min: u8,
+        level_max: u8,
+        slot_id: u32,
+        main_category: u32,
+        sub_category: u32,
+        quality: u32,
+        usable: u8,
+    },
+    /// Ask the Auctions tab page (`CMSG_AUCTION_LIST_OWNER_ITEMS`) — our own listings.
+    #[allow(dead_code)]
+    AuctionListOwnerItems { auctioneer: u64, list_from: u32 },
+    /// Ask the Bid tab page (`CMSG_AUCTION_LIST_BIDDER_ITEMS`). `auction_ids` is a **refresh
+    /// set**, not a filter: those rows are emitted first, then every auction we currently hold the
+    /// bid on. Empty for a plain page.
+    #[allow(dead_code)]
+    AuctionListBidderItems {
+        auctioneer: u64,
+        list_from: u32,
+        auction_ids: Vec<u32>,
+    },
+    /// List an item for auction (`CMSG_AUCTION_SELL_ITEM`) — the Create Auction pane.
+    /// `etime_minutes` must be 120, 480 or 1440; the deposit leaves the purse immediately.
+    #[allow(dead_code)]
+    AuctionSellItem {
+        auctioneer: u64,
+        item_guid: u64,
+        bid: u32,
+        buyout: u32,
+        etime_minutes: u32,
+    },
+    /// Bid on — or buy out — an auction (`CMSG_AUCTION_PLACE_BID`). One verb for both: a `price`
+    /// at or above a nonzero buyout *is* the buyout, inferred server-side.
+    #[allow(dead_code)]
+    AuctionPlaceBid {
+        auctioneer: u64,
+        auction_id: u32,
+        price: u32,
+    },
+    /// Cancel one of our own auctions (`CMSG_AUCTION_REMOVE_ITEM`). The deposit is forfeit, and a
+    /// cancel on an auction that already has a bid costs the 5% cut out of pocket.
+    #[allow(dead_code)]
+    AuctionRemoveItem { auctioneer: u64, auction_id: u32 },
     /// Ask for the server's wall clock (`CMSG_QUERY_TIME`, empty body) — sent on every world
     /// entry, answered by `SMSG_QUERY_TIME_RESPONSE` into [`ServerWallClock`]. That clock is the
     /// only way to read the absolute deadlines the server writes into descriptor fields, which is
@@ -1378,6 +1443,9 @@ pub(crate) enum ClientCommand {
     GroupSetLeader { guid: u64 },
     /// Leave the group (`CMSG_GROUP_DISBAND` — the wire's leave verb, despite the name).
     GroupLeave,
+    /// Convert the party into a raid (`CMSG_GROUP_RAID_CONVERT`, leader only; echoes back as a
+    /// `SMSG_GROUP_LIST` with `group_type` raid).
+    GroupRaidConvert,
     /// Set the loot rules (`CMSG_LOOT_METHOD`): `method` 0..4, `master` guid (master loot only),
     /// `threshold` quality 2..4. Leader only; echoes back as a fresh `SMSG_GROUP_LIST`.
     LootMethod {

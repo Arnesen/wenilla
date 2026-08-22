@@ -73,8 +73,8 @@ pub(crate) use camera::apply_self_model_fade;
 // `/follow` (decision 0890): chat asks with the message, `crate::target` resolves the subject into
 // the state, and this module owns the motion.
 use camera::{
-    apply_zoom_scroll, run_look_session, seat_camera, CameraProbe, FlyCam, LookButton,
-    CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT, CAM_PIVOT_FALLBACK,
+    apply_zoom_scroll, model_pivot_height, run_look_session, seat_camera, CameraProbe, FlyCam,
+    LookButton, CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT,
 };
 pub(crate) use camera::{head_height, CameraControl, CameraPivot};
 pub(crate) use follow::{FollowRequest, FollowState};
@@ -285,6 +285,21 @@ impl Plugin for PlayerPlugin {
                     .in_set(WorldStage::Input)
                     .before(control),
             )
+            // The camera shake (B298, decision 1540) lands on the camera AFTER `control` has
+            // seated it: the applier adds its offset to the pose `seat_camera` just wrote, so the
+            // eye it measures the distance falloff against is the un-shaken one. `control` is at
+            // Bevy's 16-param ceiling, so the offset cannot be threaded into it as a resource —
+            // and running after is the better shape anyway.
+            .add_systems(
+                Update,
+                crate::camera_shake::apply_camera_shake
+                    .in_set(WorldStage::Input)
+                    .after(control)
+                    // Gated off in capture mode alongside `control`, and for the same reason a
+                    // capture keeps the doodad rail static: a pinned camera that a passing kodo
+                    // could nudge is not a regression baseline any more.
+                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
+            )
             // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
             // input immediately BEFORE the controller, which folds the flag into its forward axis.
             // The player's own turn input therefore runs after us and wins, which is exactly what
@@ -330,6 +345,23 @@ fn mirror_mover_collision_height(
             player.collision_height = h;
         }
     }
+}
+
+/// The camera pivot's **target** height for a driven body: its model-local [`CameraPivot`] × the
+/// body's raw `OBJECT_FIELD_SCALE_X`, clamped — or `None` before its model has attached.
+///
+/// `None` is the load-bearing half. The reference recomputes the pivot preset only on a model event
+/// and *skips the camera update entirely* while the model is unresolved (`0x50e907`), so a
+/// display swap reads as a brief hold and then one glide. Aiming the channel at a placeholder height
+/// during those frames instead would send the camera on a round trip nobody asked for.
+///
+/// The **raw** scale (not the transform's eased one) is the reference's own input — see
+/// [`camera::head_height`] for the byte citation and why the distinction is visible.
+fn body_pivot_target(
+    pivot: Option<&CameraPivot>,
+    net: Option<&crate::net::NetEntity>,
+) -> Option<f32> {
+    pivot.map(|p| model_pivot_height(p, net.map_or(1.0, |n| n.scale)))
 }
 
 /// Camera + avatar controller. Free-flies until the server reports our position; then takes
@@ -435,6 +467,9 @@ fn control(
             // What is worn in each hand and in the ranged slot — the Z toggle's cycle reads it
             // (the ref's three `GetWeapon(0/1/2)` calls before the state walk, below).
             Option<&crate::creature_anim::Wielded>,
+            // The **raw** `OBJECT_FIELD_SCALE_X`, for the camera pivot's target height — not the
+            // transform's, which is the 2 s-eased render scale (see [`camera::head_height`]).
+            Option<&crate::net::NetEntity>,
         ),
         (With<Embodied>, Without<FlyCam>),
     >,
@@ -604,7 +639,7 @@ fn control(
     let stunned = body
         .single()
         .ok()
-        .and_then(|(.., store, _, _, _, _)| {
+        .and_then(|(.., store, _, _, _, _, _)| {
             store.map(|s| s.0.unit_flags() & UNIT_FLAG_STUNNED != 0)
         })
         .unwrap_or(false);
@@ -616,7 +651,7 @@ fn control(
         let f = body
             .single()
             .ok()
-            .and_then(|(.., store, _, _, _, _)| store.and_then(|s| s.0.player_drunk_byte()))
+            .and_then(|(.., store, _, _, _, _, _)| store.and_then(|s| s.0.player_drunk_byte()))
             .map_or(0.0, drunk::fraction);
         if stunned {
             0.0
@@ -805,19 +840,23 @@ fn control(
                     player.model_yaw = yaw;
                 }
             }
-            let pivot_h = body
-                .single()
-                .map(|(_, t, _, pivot, ..)| head_height(pivot, t.scale.x))
-                .unwrap_or(CAM_PIVOT_FALLBACK);
             let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
             // Far sight outlives all three, so it has to be honoured here too — Sentry Totem
             // carries no interrupt flags at all, which means you can board a taxi with your view
             // still on the totem. Same substitution as the main path below; skipping it would read
             // as far sight mysteriously dropping the moment a spline takes the body.
-            let (orbit_pos, sweep_from, orbit_pivot) = match view_subject.remote {
-                Some(v) => (v.feet, v.sweep_origin(), v.pivot_height),
-                None => (player.pos, head, pivot_h),
+            let (orbit_pos, sweep_from) = match view_subject.remote {
+                Some(v) => (v.feet, v.sweep_origin()),
+                None => (player.pos, head),
             };
+            // The pivot **height** takes the same substitution and then the channel: it is smoothed
+            // toward its target, never taken raw ([`camera::PivotGlide`]).
+            let pivot_target = view_subject.remote.map(|v| v.pivot_height).or_else(|| {
+                body.single()
+                    .ok()
+                    .and_then(|(_, _, _, pivot, .., net)| body_pivot_target(pivot, net))
+            });
+            let orbit_pivot = rig.pivot.advance(pivot_target, dt);
             seat_camera(
                 dt,
                 0.0,
@@ -1037,7 +1076,7 @@ fn control(
         let stand_byte = body
             .single()
             .ok()
-            .and_then(|(.., store, _, _, _, _)| store.map(|s| s.0.unit_stand_state()))
+            .and_then(|(.., store, _, _, _, _, _)| store.map(|s| s.0.unit_stand_state()))
             .unwrap_or(0);
         if player.stand_pending == Some(stand_byte) {
             player.stand_pending = None; // the echo landed
@@ -1076,7 +1115,7 @@ fn control(
             // wow-re `sheath-policy.md` §4): entering any stand-state ∉ {0 STAND, 2 SIT_CHAIR}
             // force-stows drawn weapons, through the anim layer's one setter.
             if s != 0 && s != 2 {
-                if let Ok((e, _, _, _, drv, _, _, _, _, _)) = body.single() {
+                if let Ok((e, _, _, _, drv, _, _, _, _, _, _)) = body.single() {
                     if drv.and_then(|d| d.sheath_state()).unwrap_or(0) != 0 {
                         net.3.write(crate::creature_anim::SheathRequest {
                             entity: e,
@@ -1097,7 +1136,7 @@ fn control(
         // `sheath-policy.md`). No body model yet (no driver) drops the toggle, the client's own
         // refusal.
         if binds.fired(crate::bindings::cmd::TOGGLE_SHEATH) {
-            if let Ok((e, _, _, _, Some(drv), store, engaged, _, _, wielded)) = body.single() {
+            if let Ok((e, _, _, _, Some(drv), store, engaged, _, _, wielded, _)) = body.single() {
                 // The manual toggle's guard chain (decision 0080d) — the guards of the client's
                 // 12-deep silent-refusal chain (`ToggleSheath` `0x5eb480`) whose states exist
                 // today: dead · engaged in combat · not standing (`GetStandState() != 0` —
@@ -1239,7 +1278,7 @@ fn control(
         // (TU-F: Space is the Jump command; it is NOT a pitch or ascend input) — and never
         // reaches this walk-side gate.
         if want_jump && !moving && !swimming && player.airborne_since.is_none() {
-            if let Ok((e, .., store, _, _, _, _)) = body.single() {
+            if let Ok((e, .., store, _, _, _, _, _)) = body.single() {
                 if store.is_some_and(|s| s.0.unit_mount_display_id() != 0) {
                     want_jump = false;
                     if !turning {
@@ -1664,11 +1703,12 @@ fn control(
         // animation selector reads. Scale is left untouched (the renderer baked the display scale on).
         // `horiz_vel` is already the directional speed (runBack when backpedaling), so the backpedal
         // clip scales by it and no longer drags.
-        // World camera-pivot height: `H = 0.9·bbox_z_extent·scale`, floored (see [`CameraPivot`] /
-        // `CAM_PIVOT_FLOOR`). Read the avatar's model-local pivot + its live scale here (where we hold the
-        // self entity); until the body attaches (no `CameraPivot` yet) fall back to a human neck height.
-        let mut cam_pivot_height = CAM_PIVOT_FALLBACK;
-        if let Ok((entity, mut t, motion, pivot, .., twist, _)) = body.single_mut() {
+        // This frame's camera-pivot **target** — the model-local [`CameraPivot`] × the body's RAW
+        // scale, clamped (see [`camera::head_height`] for why raw and not the rendered scale).
+        // `None` while the body has no model yet: the channel holds rather than aiming at a
+        // placeholder, which is what makes a display swap one glide instead of two.
+        let mut cam_pivot_target = None;
+        if let Ok((entity, mut t, motion, pivot, .., twist, _, net_entity)) = body.single_mut() {
             t.translation = player.pos;
             // The swim body pitch (TU-A, `0x60a110`→`0x710620`): while swimming AND moving fwd/back
             // the model root renders `Rz(yaw)·Ry(−pitch)` — in Bevy axes, the yaw then a nose-up
@@ -1695,7 +1735,7 @@ fn control(
                     descent: player.fall_start_y - player.pos.y,
                 });
             }
-            cam_pivot_height = head_height(pivot, t.scale.x);
+            cam_pivot_target = body_pivot_target(pivot, net_entity);
             if let Some(mut motion) = motion {
                 // A swimmer's stroke rate takes the flag-scalar directional speed (full rate at
                 // any pitch — a vertical climb must not freeze the stroke); the ground gaits
@@ -1716,33 +1756,6 @@ fn control(
             }
         }
 
-        // `WOW_CAM_DUMP`: the per-frame INPUT signal beside `seat_camera`'s realized-pose `[cam]`
-        // line — wall clock, frame dt, this frame's accumulated mouse delta, the active look mode,
-        // and the yaw/pos the frame produced. A turn-feel question ("keyboard turn smooth, mouse
-        // turn jittery") needs the input cadence and the output cadence on the same timeline: a
-        // bursty `dx` under a steady `dt` convicts event delivery; a steady `dx` with an uneven
-        // realized pose convicts everything downstream.
-        if std::env::var_os("WOW_CAM_DUMP").is_some() {
-            eprintln!(
-                "[turn] t={:.6} dt={:.6} dx={:.3} dy={:.3} look={} face={:.6} model={:.6} \
-                 pos [{:.4},{:.4},{:.4}]",
-                time.elapsed_secs_f64(),
-                dt,
-                mouse_motion.delta.x,
-                mouse_motion.delta.y,
-                match rig.look {
-                    Some(LookButton::Right) => "R",
-                    Some(LookButton::Left) => "L",
-                    None => "-",
-                },
-                player.face_yaw,
-                player.model_yaw,
-                player.pos.x,
-                player.pos.y,
-                player.pos.z,
-            );
-        }
-
         // The camera-collision sweep is rooted at the *head* (capsule top hemisphere centre), not the
         // framing pivot — see `seat_camera`'s doc for why. Computed here (not in `camera`) because it
         // depends on the avatar's own capsule constants, which are a movement concern.
@@ -1760,10 +1773,53 @@ fn control(
         // hearing and sending movement as yourself while only the picture moves. The sweep origin
         // moves with the subject too; rooting it at our own head would cast the boom across the
         // world and jam it on the first wall in between ([`RemoteView::sweep_origin`]).
-        let (orbit_pos, sweep_from, orbit_pivot) = match view_subject.remote {
-            Some(v) => (v.feet, v.sweep_origin(), v.pivot_height),
-            None => (player.pos, head, cam_pivot_height),
+        let (orbit_pos, sweep_from) = match view_subject.remote {
+            Some(v) => (v.feet, v.sweep_origin()),
+            None => (player.pos, head),
         };
+        // The framing height is the **channel's**, not this frame's target: it eases there over
+        // `|Δh| / 1.2` s with a cosine profile, so a shapeshift, a mount, a growth aura or a
+        // far-sight switch move the camera smoothly instead of teleporting it
+        // ([`camera::PivotGlide`]; wow-re `pivot-height-glide.md`). A far-sight subject supplies
+        // the target the same way the body does — one channel, whatever it is looking at.
+        let orbit_pivot = rig.pivot.advance(
+            view_subject
+                .remote
+                .map(|v| v.pivot_height)
+                .or(cam_pivot_target),
+            dt,
+        );
+
+        // `WOW_CAM_DUMP`: the per-frame INPUT signal beside `seat_camera`'s realized-pose `[cam]`
+        // line — wall clock, frame dt, this frame's accumulated mouse delta, the active look mode,
+        // and the yaw/pos the frame produced. A turn-feel question ("keyboard turn smooth, mouse
+        // turn jittery") needs the input cadence and the output cadence on the same timeline: a
+        // bursty `dx` under a steady `dt` convicts event delivery; a steady `dx` with an uneven
+        // realized pose convicts everything downstream.
+        if std::env::var_os("WOW_CAM_DUMP").is_some() {
+            eprintln!(
+                "[turn] t={:.6} dt={:.6} dx={:.3} dy={:.3} look={} face={:.6} model={:.6} \
+                 pos [{:.4},{:.4},{:.4}] pivot={:.4}->{:.4}",
+                time.elapsed_secs_f64(),
+                dt,
+                mouse_motion.delta.x,
+                mouse_motion.delta.y,
+                match rig.look {
+                    Some(LookButton::Right) => "R",
+                    Some(LookButton::Left) => "L",
+                    None => "-",
+                },
+                player.face_yaw,
+                player.model_yaw,
+                player.pos.x,
+                player.pos.y,
+                player.pos.z,
+                // The pivot channel's live height and where it is heading — the two columns that
+                // answer "does the camera snap?" numerically (decision 0404: timing is measured).
+                rig.pivot.probe().0,
+                rig.pivot.probe().1,
+            );
+        }
         // `turn_delta` is the character's own turn this frame (keyboard turn, or the drunk veer)
         // — the deck's yaw delta was already applied to `cam.yaw` at the ride block (frame motion
         // carries the camera unconditionally; only input turns respect `seat_camera`'s

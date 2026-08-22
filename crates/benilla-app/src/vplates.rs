@@ -7,8 +7,11 @@
 //!   **OFF** — ours boots enemy ON, friendly OFF (faithful): director calls, 0167 + 0599,
 //!   [`VPlateMode::default`]): the `ShowNameplates`/`ShowFriendNameplates` script pairs —
 //!   bound to **V / Shift-V** by FrameXML `Bindings.xml` (asset-sourced default, like TAB).
-//! - **Gate**: never the own unit; never `NOT_SELECTABLE` (UNIT_FIELD_FLAGS bit 25); enemy bit
-//!   covers reaction ≤ neutral, friendly bit ≥ friendly; **max 20 yd**, hardcoded; **no
+//! - **Gate**: never the own unit; never `NOT_SELECTABLE` (UNIT_FIELD_FLAGS bit 25); the
+//!   enemy/friendly split is **`CanAttack(localPlayer → unit)`**, NOT a reaction threshold
+//!   ([`crate::target::ring::plate_is_friendly`], wow-re `nameplate-category-gate.md` §2/§3,
+//!   §5-VERIFIED 2026-08-22 — this file shipped `rank >= 4` for a year and 1530 corrects it);
+//!   **max 20 yd**, hardcoded; **no
 //!   occlusion** (a 2-D overlay — plates draw through walls); snap, no smoothing. Anti-overlap
 //!   there *is*, since 0367 found the shared solver ([`crate::smart_rect`]) — this file's older
 //!   "no anti-overlap" was the census that missed it. And the sphere is bounded by the frustum:
@@ -94,11 +97,26 @@ mod border;
 /// call, which also gives friendly speech bubbles room: the faithful plate-blocks-bubble gate
 /// would otherwise suppress them). Both stay V / Shift-V togglable. `pub(crate)` so the capture
 /// harness can force plates on for the `vplates` scenario.
+///
+/// **This resource is the truth; the CVars are its persistence** (the [`CVAR_ENEMIES`] /
+/// [`CVAR_FRIENDS`] pair, [`crate::cvars`]). That mirrors the reference's own two-store shape: the
+/// engine bitmask is what the gate reads, and FrameXML keeps `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON`
+/// beside it for saving (`RegisterForSave`, UIOptionsFrame.lua) — pushing changes back through
+/// `ShowNameplates()`/`HideNameplates()`. 1.12 registers **no** nameplate CVar (wow-re, VERIFIED:
+/// no such string exists in the binary), so the names are the LATER-era engine's, the same posture
+/// as `autoLootDefault` — benilla's persistence lives in the CVar store (0954), and a setting with
+/// no 1.12 CVar takes the era name rather than inventing one.
 #[derive(Resource)]
 pub(crate) struct VPlateMode {
     pub(crate) enemies: bool,
     pub(crate) friends: bool,
 }
+
+/// The persisted names of the two toggles — see [`VPlateMode`]. Welded to [`crate::cvars`]'s
+/// registered table by its own test, so the spelling here and the row on the Nameplates page can
+/// never drift apart.
+pub(crate) const CVAR_ENEMIES: &str = "nameplateShowEnemies";
+pub(crate) const CVAR_FRIENDS: &str = "nameplateShowFriends";
 
 impl Default for VPlateMode {
     fn default() -> Self {
@@ -312,8 +330,19 @@ pub(crate) fn text_px(h: f32, basis: f32) -> f32 {
 /// than 1.12's exclusive dance (whose NAMEPLATES body also force-hides friendly plates — a
 /// recorded divergence, 0997 residue). ALLNAMEPLATES arrives with the table and takes the 1.12
 /// body's semantics as-is: both on unless both already on, else both off.
-fn toggle_vplates(binds: Res<crate::bindings::BindingsState>, mut mode: ResMut<VPlateMode>) {
+///
+/// **A key press mirrors into the CVar table** ([`VPlateMode`]'s doc): `set_cvar_engine` is the
+/// minimap-zoom pattern — the engine's own value moved, so the table follows it AND queues the
+/// change, which is what dirties `config.toml` and what makes the Nameplates page's checkboxes
+/// read right the next time they are opened. The resource stays authoritative either way: with no
+/// UI VM (a capture, a bare test app) the mirror is a silent no-op and V still works.
+fn toggle_vplates(
+    binds: Res<crate::bindings::BindingsState>,
+    mut mode: ResMut<VPlateMode>,
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+) {
     use crate::bindings::cmd;
+    let (was_enemies, was_friends) = (mode.enemies, mode.friends);
     if binds.fired(cmd::NAMEPLATES) {
         mode.enemies = !mode.enemies;
         info!(
@@ -333,6 +362,15 @@ fn toggle_vplates(binds: Res<crate::bindings::BindingsState>, mut mode: ResMut<V
         mode.enemies = !both;
         mode.friends = !both;
         info!("nameplates: all {}", if !both { "ON" } else { "OFF" });
+    }
+    if let Some(mut script) = script {
+        let flag = |b: bool| if b { "1" } else { "0" };
+        if mode.enemies != was_enemies {
+            script.set_cvar_engine(CVAR_ENEMIES, flag(mode.enemies));
+        }
+        if mode.friends != was_friends {
+            script.set_cvar_engine(CVAR_FRIENDS, flag(mode.friends));
+        }
     }
 }
 
@@ -542,8 +580,25 @@ fn drive_vplates(
         if (tf.translation - self_tf.translation).length_squared() > MAX_DIST_SQ {
             continue;
         }
-        // The enemy/friendly split over the shared reaction rank: ≤ neutral is the enemy bit's
-        // population, ≥ friendly the friend bit's.
+        // A unit with a CREATEDBY owner but no SUMMONEDBY owner, carrying `UNIT_FIELD_FLAGS`
+        // bit 9 (`0x200`), gets no plate in EITHER category (`0x60f70b`–`0x60f72d`, byte-verified
+        // — the same CHARMEDBY→SUMMONEDBY→CREATEDBY triple the standalone owner accessor
+        // `0x611670` walks in the same order). The bit's vanilla NAME is unrecorded; the number
+        // is what the binary tests, so that is what we test.
+        if store.is_some_and(|s| {
+            s.0.unit_created_by().is_some_and(|g| g != 0)
+                && s.0.unit_summoned_by().is_none_or(|g| g == 0)
+                && s.0.unit_flags() & 0x200 != 0
+        }) {
+            continue;
+        }
+        // **The enemy/friendly split is `CanAttack`, run PLAYER → UNIT** — not a reaction-rank
+        // threshold, which is what this shipped with and what 1530 corrects. The two halves of a
+        // plate genuinely run the reaction in opposite directions: the CATEGORY here asks "can I
+        // attack it?" (and for a rep-slot faction that question is answered by the AT-WAR bit,
+        // never by the standing), while the bar COLOUR below asks the unit for its reaction toward
+        // us — where the standing IS the input. A not-at-war neutral-standing NPC is therefore a
+        // friendly-category plate with a yellow bar, exactly as the reference draws it.
         let rank = ring_reaction(
             world.factions.as_deref(),
             &world.reputations,
@@ -551,7 +606,13 @@ fn drive_vplates(
             self_store,
         );
         let is_player = net.kind == EntityKind::Player;
-        let friendly = rank >= 4;
+        let friendly = crate::target::ring::plate_is_friendly(
+            world.factions.as_deref(),
+            &world.reputations,
+            store,
+            self_store,
+            is_player,
+        );
         if friendly && !mode.friends || !friendly && !mode.enemies {
             continue;
         }
@@ -1042,6 +1103,55 @@ mod tests {
         let big = plate_basis(Vec2::new(2560.0, 1440.0));
         assert_eq!(text_px(NAME_H, big), 21.0, "midway between 29 and 13");
         assert_eq!(text_px(NAME_H, 10_000.0), 32.0, "atlas-cell cap, raw law");
+    }
+
+    /// **A key press moves the CVar too** — the half a settings page cannot see for itself. V
+    /// flips the resource (the bitmask) AND mirrors into the table as an ENGINE write, which is
+    /// what dirties `config.toml` and what the Nameplates page's checkbox reads next time it
+    /// opens. Without the mirror, plates toggled by key would silently revert at every launch and
+    /// the window would show the wrong state.
+    #[test]
+    fn the_v_key_mirrors_into_the_cvar_table() {
+        use crate::bindings::{cmd, BindingsState};
+        let mut app = App::new();
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        script.register_cvars([(CVAR_ENEMIES, "1"), (CVAR_FRIENDS, "0")]);
+        app.add_systems(Update, toggle_vplates)
+            .init_resource::<VPlateMode>()
+            .insert_non_send_resource(script)
+            .insert_resource(BindingsState::test_fired(&[cmd::NAMEPLATES]));
+        app.update();
+        assert!(!app.world().resource::<VPlateMode>().enemies, "V turns off");
+        let mut script = app
+            .world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        assert_eq!(
+            script.take_cvar_changes(),
+            vec![(CVAR_ENEMIES.to_string(), "0".to_string())],
+            "the change queues, so the host dirties the config file"
+        );
+        assert_eq!(script.cvar(CVAR_FRIENDS).as_deref(), Some("0"), "untouched");
+
+        // Shift-V is the other bit, and only the other bit.
+        app.world_mut()
+            .insert_resource(BindingsState::test_fired(&[cmd::FRIEND_NAMEPLATES]));
+        app.update();
+        assert!(app.world().resource::<VPlateMode>().friends);
+        assert_eq!(
+            app.world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .take_cvar_changes(),
+            vec![(CVAR_FRIENDS.to_string(), "1".to_string())]
+        );
+
+        // A frame with nothing fired writes nothing at all.
+        app.world_mut().insert_resource(BindingsState::default());
+        app.update();
+        assert!(app
+            .world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .take_cvar_changes()
+            .is_empty());
     }
 
     /// The palette selector follows `0x7cbaa0`'s exact test order — notably reaction 2

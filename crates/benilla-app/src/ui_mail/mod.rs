@@ -257,6 +257,10 @@ pub(crate) fn mail_error_text(error: u32) -> String {
     }
 }
 
+mod invoice;
+
+use invoice::auction_mail;
+
 /// Resolve one wire [`MailListEntry`] into the Lua-facing [`MailInboxRow`]: sender through the ask-
 /// once name cache (player guids only), the enclosed item's name/quality/icon through the ask-once
 /// item-template cache + `ItemDisplayInfo.dbc`, the body from the cache, the stationery basename
@@ -271,7 +275,12 @@ fn resolve_row(
     stationery: Option<&Stationery>,
     names: &mut NameCache,
     commands: &NetCommands,
+    rolls: crate::items::RollCatalogs,
     macros: &crate::npc_text::MacroContext,
+    // The VM's own GlobalStrings, for the auction notice's subject template. A resolver rather than
+    // a table because the strings are the player's install's, and Rust must never carry a copy of
+    // them (decision 0669's shape).
+    get_text: &dyn Fn(&str) -> Option<String>,
 ) -> MailInboxRow {
     let is_gm = entry.stationery == STATIONERY_GM;
     let returned = entry.checked & CHECKED_RETURNED != 0;
@@ -286,18 +295,27 @@ fn resolve_row(
         returned || entry.sender_guid.is_none() || (entry.item.is_none() && entry.money == 0);
 
     // The enclosed item, resolved ask-once from its template.
-    let (item_id, item_count, item_name, item_texture, item_quality) = match &entry.item {
+    let (item_id, item_roll, item_count, item_name, item_texture, item_quality) = match &entry.item
+    {
         Some(att) => {
             let template = items.template(att.entry, 0, commands);
-            let name = template.map(|t| t.name.clone());
+            // The rolled name (1547) — the same join the loot window and the auction rows make.
+            let name = template.map(|t| rolls.name(&t.name, att.random_prop_id));
             let quality = template.map(|t| t.quality);
             let display_id = template.map(|t| t.display_info_id).unwrap_or(0);
             let texture = icons
                 .and_then(|i| i.catalog.get(display_id))
                 .and_then(|d| d.icon.clone());
-            (att.entry, u32::from(att.count), name, texture, quality)
+            (
+                att.entry,
+                att.random_prop_id,
+                u32::from(att.count),
+                name,
+                texture,
+                quality,
+            )
         }
-        None => (0, 0, None, None, None),
+        None => (0, 0, 0, None, None, None),
     };
 
     let sender = entry
@@ -307,6 +325,55 @@ fn resolve_row(
     let stationery_texture = stationery
         .map(|s| s.0.texture(entry.stationery).to_string())
         .unwrap_or_else(|| benilla_formats::StationeryCatalog::DEFAULT_TEXTURE.to_string());
+
+    // The letter body, raw. Hoisted because the auction invoice parses THIS and not the
+    // `$`-substituted text below: the invoice is machine-written colon fields, and running a macro
+    // expander over them would be expanding the auction house's own bookkeeping.
+    let raw_body = (entry.item_text_id != 0)
+        .then(|| bodies.get(&entry.item_text_id))
+        .flatten();
+
+    // ── The auction house's mail (`ui_mail::invoice`, wow-re §11.1a) ─────────────────────────
+    // Two independent resolves off one subject: the DISPLAYED subject, which every auction notice
+    // gets, and the INVOICE, which only a won/sold notice can answer and only once its body has
+    // been fetched.
+    let auction = (entry.message_type == mail_message_type::AUCTION)
+        .then(|| invoice::parse_subject(&entry.subject))
+        .flatten();
+    // The item the notice is ABOUT — resolved from the subject's own entry, not from the
+    // attachment: a "sold" notice encloses the money, and names an item it does not carry.
+    let notice_item_name = auction
+        .and_then(|a| items.template(a.entry, 0, commands))
+        .map(|t| t.name.clone());
+    // `<key>: %s` + the name. Until the item template lands the raw triplet stands — a subject that
+    // reads `4428:0:1` for one frame is better than one that reads `Auction won: ` forever if the
+    // query never answers, and the row re-resolves (and fires MAIL_INBOX_UPDATE) when it does.
+    let subject = match (auction, &notice_item_name) {
+        (Some(a), Some(name)) => invoice::subject_key(a.result)
+            .and_then(get_text)
+            .map(|t| t.replace("%s", name))
+            .unwrap_or_else(|| entry.subject.clone()),
+        _ => entry.subject.clone(),
+    };
+    let auction_invoice = auction
+        .filter(|a| matches!(a.result, auction_mail::WON | auction_mail::SOLD))
+        .and_then(|a| {
+            let seller = a.result == auction_mail::SOLD;
+            let n = invoice::parse_body(raw_body?, seller)?;
+            // An unresolved counterparty takes the miss tail this pass and fills in when the name
+            // query lands — the reference does exactly this, and fires MAIL_INBOX_UPDATE on the
+            // late arrival, which our snapshot diff does for free.
+            let player_name = names.resolve(n.player_guid, commands)?.to_string();
+            Some(benilla_ui::script::MailInvoice {
+                seller,
+                item_name: notice_item_name.clone()?,
+                player_name,
+                bid: n.bid,
+                buyout: n.buyout,
+                deposit: n.deposit,
+                consignment: n.consignment,
+            })
+        });
 
     MailInboxRow {
         package_icon: item_texture.clone(),
@@ -319,7 +386,7 @@ fn resolve_row(
             .to_string(),
         ),
         sender,
-        subject: entry.subject.clone(),
+        subject,
         money: entry.money,
         cod: entry.cod,
         days_left: entry.expire_days,
@@ -332,14 +399,19 @@ fn resolve_row(
         // The letter body is server-authored text, so it runs the `$`-macro expander — the
         // reference does it from two sites in `GetInboxText` (decision 0754). Subject is the
         // local player, as it is for every panel seam.
-        body: (entry.item_text_id != 0)
-            .then(|| bodies.get(&entry.item_text_id).cloned())
-            .flatten()
-            .map(|b| crate::npc_text::substitute(&b, macros)),
+        body: raw_body.map(|b| crate::npc_text::substitute(b, macros)),
         stationery_texture,
-        is_invoice: entry.message_type == mail_message_type::AUCTION,
+        // NOT "is an auction mail": the reference's `isInvoice` reads the fields its subject
+        // parser persisted, and it persists them only for won(1)/sold(2) — so an outbid or expiry
+        // notice answers false here (decision 1527). This is also what nils the body: the two
+        // answers come off the same record state, which is exactly why MailFrame can lay the
+        // invoice pane over the letter page.
+        is_invoice: auction
+            .is_some_and(|a| matches!(a.result, auction_mail::WON | auction_mail::SOLD)),
+        invoice: auction_invoice,
         has_body: entry.item_text_id != 0,
         item_id,
+        item_random_property_id: item_roll,
         item_name,
         item_texture,
         item_quality,
@@ -356,7 +428,9 @@ fn snapshot(
     stationery: Option<&Stationery>,
     names: &mut NameCache,
     commands: &NetCommands,
+    rolls: crate::items::RollCatalogs,
     macros: &crate::npc_text::MacroContext,
+    get_text: &dyn Fn(&str) -> Option<String>,
 ) -> Option<MailState> {
     mail.mailbox?;
     Some(MailState {
@@ -372,7 +446,9 @@ fn snapshot(
                     stationery,
                     names,
                     commands,
+                    rolls,
                     macros,
+                    get_text,
                 )
             })
             .collect(),
@@ -399,9 +475,16 @@ fn feed_mail(
     // The `$`-macro subject for the letter body: the local player, as at every panel seam.
     self_q: Query<(&crate::net::ObjectStore, &crate::net::Guid), With<crate::net::SelfPlayer>>,
     states: Res<crate::world_state::WorldStates>,
+    // The random-suffix roll's catalogs (1547): an enclosed item's rolled name.
+    props: Option<Res<crate::items::RandomProperties>>,
+    enchants: Option<Res<crate::items::Enchants>>,
 ) {
     let Some(mut script) = script else {
         return;
+    };
+    let rolls = crate::items::RollCatalogs {
+        props: props.as_deref(),
+        enchants: enchants.as_deref(),
     };
     let last = last.get(&script);
     let last_mailbox = last_mailbox.get(&script);
@@ -431,15 +514,21 @@ fn feed_mail(
         subject: subject.as_ref(),
         states: &states,
     };
-    let fresh = snapshot(
-        &mail,
-        &mut items,
-        icons.as_deref(),
-        stationery.as_deref(),
-        &mut names,
-        &commands,
-        &macros,
-    );
+    let fresh = {
+        // Scoped: the resolver borrows the VM, and `set_mail` below needs it back.
+        let get_text = |key: &str| script.lua().globals().get::<String>(key).ok();
+        snapshot(
+            &mail,
+            &mut items,
+            icons.as_deref(),
+            stationery.as_deref(),
+            &mut names,
+            &commands,
+            rolls,
+            &macros,
+            &get_text,
+        )
+    };
     let opened = last_mailbox.is_none() && mail.mailbox.is_some();
     let closed = last_mailbox.is_some() && mail.mailbox.is_none();
     let show_requested = std::mem::take(&mut mail.show_requested);
@@ -720,6 +809,12 @@ mod tests {
         assert!(m.bodies.is_empty());
     }
 
+    /// No GlobalStrings in a unit test — the auction-subject rewrite is exercised where the
+    /// strings are (`tests/mail_frame.rs`), and here every key simply misses.
+    fn no_strings(_key: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn resolve_row_derives_the_reply_and_delete_law() {
         let states = crate::world_state::WorldStates::default();
@@ -739,7 +834,9 @@ mod tests {
             None,
             &mut names,
             &commands,
+            crate::items::RollCatalogs::NONE,
             &no_macros(&states),
+            &no_strings,
         );
         assert!(row.can_reply);
         assert!(row.can_delete);
@@ -757,7 +854,9 @@ mod tests {
             None,
             &mut names,
             &commands,
+            crate::items::RollCatalogs::NONE,
             &no_macros(&states),
+            &no_strings,
         );
         assert!(row.can_reply);
         assert!(!row.can_delete);
@@ -772,7 +871,9 @@ mod tests {
             None,
             &mut names,
             &commands,
+            crate::items::RollCatalogs::NONE,
             &no_macros(&states),
+            &no_strings,
         );
         assert!(!row.can_reply);
         assert!(row.can_delete);
@@ -787,7 +888,9 @@ mod tests {
             None,
             &mut names,
             &commands,
+            crate::items::RollCatalogs::NONE,
             &no_macros(&states),
+            &no_strings,
         );
         assert!(row.can_delete);
     }
@@ -822,7 +925,9 @@ mod tests {
             None,
             &mut names,
             &commands,
+            crate::items::RollCatalogs::NONE,
             &no_macros(&states),
+            &no_strings,
         );
         assert_eq!(row.item_id, 2589);
         assert_eq!(row.item_count, 5);

@@ -40,6 +40,7 @@ use crate::target::ClickConfig;
 use crate::ui_loot::LootConfig;
 use crate::ui_script::UiScaleCvar;
 use crate::video::VideoConfig;
+use crate::vplates::VPlateMode;
 use benilla_ui::script::UiScript;
 use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
 use benilla_world::clutter::ClutterConfig;
@@ -96,6 +97,15 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     ("UnitNamePlayer", "1"),
     ("UnitNameNPC", "1"),
     ("UnitNameOwn", "1"),
+    // The two V-plate toggles over `VPlateMode` — the engine bitmask `[0xc4da34]`'s bit 0 and
+    // bit 3. 1.12 registers NO nameplate CVar (wow-re, VERIFIED — the bitmask is a plain runtime
+    // global, persisted FrameXML-side as the `RegisterForSave`'d `NAMEPLATES_ON` /
+    // `FRIENDNAMEPLATES_ON`), so these take the LATER-era engine's names: the `autoLootDefault`
+    // posture, where benilla's persistence IS the CVar store (0954) and a setting with no 1.12
+    // CVar gets the era spelling rather than an invented one. Defaults mirror
+    // `VPlateMode::default()` — enemy ON is the 0167 director call, friendly OFF is faithful.
+    (crate::vplates::CVAR_ENEMIES, "1"),
+    (crate::vplates::CVAR_FRIENDS, "0"),
     // World detail (0992): 1.12's video-panel var (the ENVIRONMENT_DETAIL slider, 0..2) over
     // the clutter-density knob — 0 is the client's bare frillDensity baseline (×1 = 16 visits),
     // each step +1×; the "2" default IS ClutterConfig's shipped ×3 (the reference's High).
@@ -234,7 +244,70 @@ impl Plugin for CvarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CvarPersist>()
             .add_systems(Startup, load_config)
-            .add_systems(Update, (sync_cvars, save_config).chain());
+            .add_systems(Update, sync_cvars);
+        // **The flush is on the exit edge, not beside its feed** (decision 1528). It used to be
+        // `(sync_cvars, save_config).chain()` in `Update`, which made the "or the app exiting"
+        // half of its own gate dead on the exit a player actually causes: the close button's
+        // `AppExit` is not written until `PostUpdate`, so the last second of slider drags went
+        // with the process. `Last` still runs after `sync_cvars` — schedule order does what the
+        // `.chain()` did — and now also after every announcement.
+        crate::shutdown::on_app_exit(app, save_config.into_configs());
+    }
+}
+
+/// The knob resources as a **SystemParam** — the one census, fetched once, shared by all three
+/// entry points ([`load_config`], [`sync_cvars`], [`fold_dying_vm_cvars`]).
+///
+/// It exists because the census had grown past Bevy's **16-param ceiling**: with fifteen knobs,
+/// `sync_cvars` (script + persist + knobs) and the fold's `SystemState` both stopped compiling the
+/// moment the plate toggles landed. Re-typing the list at every call site was already the shape
+/// that made a new knob a four-place edit; bundling it makes a new knob one field here, one field
+/// on [`Knobs`], and one arm in [`apply_to_knobs`], and the ceiling stops being reachable.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct KnobParams<'w> {
+    sound: ResMut<'w, SoundConfig>,
+    scale: ResMut<'w, UiScaleCvar>,
+    view: ResMut<'w, ViewDistance>,
+    look: ResMut<'w, LookConfig>,
+    click: ResMut<'w, ClickConfig>,
+    loot: ResMut<'w, LootConfig>,
+    names: ResMut<'w, NameConfig>,
+    plates: ResMut<'w, VPlateMode>,
+    clutter: ResMut<'w, ClutterConfig>,
+    minimap: ResMut<'w, MinimapZoom>,
+    bubbles: ResMut<'w, BubbleConfig>,
+    zoom: ResMut<'w, ZoomLimit>,
+    follow: ResMut<'w, FollowConfig>,
+    video: ResMut<'w, VideoConfig>,
+    pane_rate: ResMut<'w, PaneRate>,
+}
+
+impl KnobParams<'_> {
+    /// Borrow the set as [`Knobs`] for a write.
+    ///
+    /// **Deref-muts every resource, so call it only when a change is actually being applied**
+    /// (0992's change-detection trap: the clutter re-scatter watches `is_changed::<ClutterConfig>`,
+    /// and a set built on every frame — or before the change queue is known to be non-empty —
+    /// re-scattered the world on every MasterVolume drag tick). Reading a field off `self`
+    /// directly, as the session seed does, goes through `Deref` and flags nothing.
+    fn knobs(&mut self) -> Knobs<'_> {
+        Knobs {
+            sound: &mut self.sound,
+            scale: &mut self.scale,
+            view: &mut self.view,
+            look: &mut self.look,
+            click: &mut self.click,
+            loot: &mut self.loot,
+            names: &mut self.names,
+            plates: &mut self.plates,
+            clutter: &mut self.clutter,
+            minimap: &mut self.minimap,
+            bubbles: &mut self.bubbles,
+            zoom: &mut self.zoom,
+            follow: &mut self.follow,
+            video: &mut self.video,
+            pane_rate: &mut self.pane_rate,
+        }
     }
 }
 
@@ -248,6 +321,7 @@ struct Knobs<'a> {
     click: &'a mut ClickConfig,
     loot: &'a mut LootConfig,
     names: &'a mut NameConfig,
+    plates: &'a mut VPlateMode,
     clutter: &'a mut ClutterConfig,
     minimap: &'a mut MinimapZoom,
     bubbles: &'a mut BubbleConfig,
@@ -298,6 +372,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "unitnameplayer" => knobs.names.player = v != 0.0,
         "unitnamenpc" => knobs.names.npc = v != 0.0,
         "unitnameown" => knobs.names.own = v != 0.0,
+        // The two V-plate toggles — the bitmask's two bits, flags like every other checkbox.
+        // Lowercased here like every arm; `VPlateMode`'s consts carry the registered spelling.
+        "nameplateshowenemies" => knobs.plates.enemies = v != 0.0,
+        "nameplateshowfriends" => knobs.plates.friends = v != 0.0,
         // Two CVars with no HOST knob, because their consumers are Lua (1140, B230). Known — so
         // the caller dirties the config and the value persists — with nothing to apply this side.
         "statusbartext" | "ubertooltips" => {}
@@ -336,40 +414,8 @@ fn zoom_index(v: f32) -> u8 {
 /// to the knob resources — except keys the environment overrides this session (their resources
 /// already read the env var in their `Default`s). The VM does not exist yet; [`sync_cvars`]
 /// seeds the table when it does.
-#[allow(clippy::too_many_arguments)] // one knob resource per registered CVar family
-fn load_config(
-    mut persist: ResMut<CvarPersist>,
-    mut sound: ResMut<SoundConfig>,
-    mut scale: ResMut<UiScaleCvar>,
-    mut view: ResMut<ViewDistance>,
-    mut look: ResMut<LookConfig>,
-    mut click: ResMut<ClickConfig>,
-    mut loot: ResMut<LootConfig>,
-    mut names: ResMut<NameConfig>,
-    mut clutter: ResMut<ClutterConfig>,
-    mut minimap: ResMut<MinimapZoom>,
-    mut bubbles: ResMut<BubbleConfig>,
-    mut zoom: ResMut<ZoomLimit>,
-    mut follow: ResMut<FollowConfig>,
-    mut video: ResMut<VideoConfig>,
-    mut pane_rate: ResMut<PaneRate>,
-) {
-    let mut knobs = Knobs {
-        sound: &mut sound,
-        scale: &mut scale,
-        view: &mut view,
-        look: &mut look,
-        click: &mut click,
-        loot: &mut loot,
-        names: &mut names,
-        clutter: &mut clutter,
-        minimap: &mut minimap,
-        bubbles: &mut bubbles,
-        zoom: &mut zoom,
-        follow: &mut follow,
-        video: &mut video,
-        pane_rate: &mut pane_rate,
-    };
+fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
+    let mut knobs = params.knobs();
     if std::env::var_os("WOW_UI_SCALE").is_some() {
         persist.env_overridden.insert("uiscale".into());
     }
@@ -430,29 +476,34 @@ fn load_config(
 /// Per frame: seed the VM's table once it exists (registered set + the RESOLVED session values,
 /// so `GetCVar` reflects env overrides and the loaded config alike), then drain Lua `SetCVar`
 /// changes into the knob resources and mark the config dirty.
-#[allow(clippy::too_many_arguments)] // one knob resource per registered CVar family
 fn sync_cvars(
     script: Option<NonSendMut<UiScript>>,
     mut persist: ResMut<CvarPersist>,
-    mut sound: ResMut<SoundConfig>,
-    mut scale: ResMut<UiScaleCvar>,
-    mut view: ResMut<ViewDistance>,
-    mut look: ResMut<LookConfig>,
-    mut click: ResMut<ClickConfig>,
-    mut loot: ResMut<LootConfig>,
-    mut names: ResMut<NameConfig>,
-    mut clutter: ResMut<ClutterConfig>,
-    mut minimap: ResMut<MinimapZoom>,
-    mut bubbles: ResMut<BubbleConfig>,
-    mut zoom: ResMut<ZoomLimit>,
-    mut follow: ResMut<FollowConfig>,
-    mut video: ResMut<VideoConfig>,
-    mut pane_rate: ResMut<PaneRate>,
+    mut params: KnobParams,
 ) {
     let Some(mut script) = script else {
         return;
     };
     if persist.registered.claim(&script) {
+        // Read-only borrows for the seed: field access through `ResMut`'s `Deref` flags nothing,
+        // which is the half of 0992's change-detection trap this system has to keep.
+        let KnobParams {
+            sound,
+            scale,
+            view,
+            look,
+            click,
+            loot,
+            names,
+            plates,
+            clutter,
+            minimap,
+            bubbles,
+            zoom,
+            follow,
+            video,
+            pane_rate,
+        } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
         // knobless CVar (`statusBarText`) and an addon-declared one across a VM replacement; the
@@ -467,7 +518,7 @@ fn sync_cvars(
         );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 28] = [
+        let session: [(&str, String); 30] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -492,6 +543,8 @@ fn sync_cvars(
             ("UnitNamePlayer", flag(names.player)),
             ("UnitNameNPC", flag(names.npc)),
             ("UnitNameOwn", flag(names.own)),
+            (crate::vplates::CVAR_ENEMIES, flag(plates.enemies)),
+            (crate::vplates::CVAR_FRIENDS, flag(plates.friends)),
             // The session density on the panel scale (×1..×3 → 0..2). An env-driven off-grid
             // multiplier seeds off-grid honestly — the dropdown shows the raw number, checks
             // nothing (the 0959 out-of-range posture, dropdown-flavored).
@@ -514,22 +567,7 @@ fn sync_cvars(
     if changes.is_empty() {
         return;
     }
-    let mut knobs = Knobs {
-        sound: &mut sound,
-        scale: &mut scale,
-        view: &mut view,
-        look: &mut look,
-        click: &mut click,
-        loot: &mut loot,
-        names: &mut names,
-        clutter: &mut clutter,
-        minimap: &mut minimap,
-        bubbles: &mut bubbles,
-        zoom: &mut zoom,
-        follow: &mut follow,
-        video: &mut video,
-        pane_rate: &mut pane_rate,
-    };
+    let mut knobs = params.knobs();
     for (name, value) in changes {
         if apply_to_knobs(&name, &value, &mut knobs) {
             persist.dirty = true;
@@ -552,95 +590,31 @@ fn sync_cvars(
 ///
 /// `dirty` is left alone: if nothing changed, the fold is an identity; if something did, the
 /// change that did it already marked the config dirty.
-#[allow(clippy::type_complexity)] // one Option per knob resource, the same census sync_cvars keeps
 pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
-    // Every param is `Option` because this runs from an exclusive edge function, not the app's
-    // schedule: a test world or a stripped scenario may not carry the cvar plugin at all, and
-    // "no persist state" simply means there is no file to bridge — not a panic.
+    // A world with no persist state has no file to bridge — a test world or a stripped scenario
+    // that never added the plugin. It is checked up front because the knob set below is fetched
+    // NON-optionally, and the two facts are one: any world carrying `CvarPersist` carries every
+    // knob too (the plugin's own `load_config`/`sync_cvars` take them the same way, and would
+    // have panicked at startup otherwise).
+    if !world.contains_resource::<CvarPersist>() {
+        return;
+    }
     let mut state: bevy::ecs::system::SystemState<(
         Option<NonSendMut<UiScript>>,
-        Option<ResMut<CvarPersist>>,
-        Option<ResMut<SoundConfig>>,
-        Option<ResMut<UiScaleCvar>>,
-        Option<ResMut<ViewDistance>>,
-        Option<ResMut<LookConfig>>,
-        Option<ResMut<ClickConfig>>,
-        Option<ResMut<LootConfig>>,
-        Option<ResMut<NameConfig>>,
-        Option<ResMut<ClutterConfig>>,
-        Option<ResMut<MinimapZoom>>,
-        Option<ResMut<BubbleConfig>>,
-        Option<ResMut<ZoomLimit>>,
-        Option<ResMut<FollowConfig>>,
-        Option<ResMut<VideoConfig>>,
-        Option<ResMut<PaneRate>>,
+        ResMut<CvarPersist>,
+        KnobParams,
     )> = bevy::ecs::system::SystemState::new(world);
-    let (
-        script,
-        persist,
-        sound,
-        scale,
-        view,
-        look,
-        click,
-        loot,
-        names,
-        clutter,
-        minimap,
-        bubbles,
-        zoom,
-        follow,
-        video,
-        pane_rate,
-    ) = state.get_mut(world);
-    let (Some(mut script), Some(mut persist)) = (script, persist) else {
+    let (script, mut persist, mut params) = state.get_mut(world);
+    let Some(mut script) = script else {
         return;
     };
     let changes = script.take_cvar_changes();
     if !changes.is_empty() {
-        // The knobs exist whenever the app is real (each plugin inits its own); a world that
-        // carries CvarPersist but not the knobs is a partial test rig, where dropping the
-        // final-frame drain is the right degradation — the fold below still preserves the file.
-        if let (
-            Some(mut sound),
-            Some(mut scale),
-            Some(mut view),
-            Some(mut look),
-            Some(mut click),
-            Some(mut loot),
-            Some(mut names),
-            Some(mut clutter),
-            Some(mut minimap),
-            Some(mut bubbles),
-            Some(mut zoom),
-            Some(mut follow),
-            Some(mut video),
-            Some(mut pane_rate),
-        ) = (
-            sound, scale, view, look, click, loot, names, clutter, minimap, bubbles, zoom, follow,
-            video, pane_rate,
-        ) {
-            let mut knobs = Knobs {
-                sound: &mut sound,
-                scale: &mut scale,
-                view: &mut view,
-                look: &mut look,
-                click: &mut click,
-                loot: &mut loot,
-                names: &mut names,
-                clutter: &mut clutter,
-                minimap: &mut minimap,
-                bubbles: &mut bubbles,
-                zoom: &mut zoom,
-                follow: &mut follow,
-                video: &mut video,
-                pane_rate: &mut pane_rate,
-            };
-            for (name, value) in changes {
-                if apply_to_knobs(&name, &value, &mut knobs) {
-                    persist.dirty = true;
-                    persist.last_change = Some(Instant::now());
-                }
+        let mut knobs = params.knobs();
+        for (name, value) in changes {
+            if apply_to_knobs(&name, &value, &mut knobs) {
+                persist.dirty = true;
+                persist.last_change = Some(Instant::now());
             }
         }
     }
@@ -799,6 +773,12 @@ mod tests {
         assert_eq!(d["UnitNamePlayer"] != 0.0, names.player);
         assert_eq!(d["UnitNameNPC"] != 0.0, names.npc);
         assert_eq!(d["UnitNameOwn"] != 0.0, names.own);
+        // The V-plate pair welds to VPlateMode's defaults — the enemy "1" is the 0167 director
+        // divergence from the binary's both-OFF boot, the friendly "0" is faithful (0599).
+        let plates = VPlateMode::default();
+        assert_eq!(d[crate::vplates::CVAR_ENEMIES] != 0.0, plates.enemies);
+        assert_eq!(d[crate::vplates::CVAR_FRIENDS] != 0.0, plates.friends);
+        assert!(plates.enemies && !plates.friends, "the shipped boot pair");
         // ClutterConfig::default() reads $WOW_CLUTTER_DENSITY; the registered default mirrors
         // the env-less ×3 literal (clutter.rs: "Default ×3 = High") on the panel's 0..2 scale.
         assert_eq!(d["WorldDetail"], 2.0);
@@ -829,6 +809,7 @@ mod tests {
         let mut click = ClickConfig::default();
         let mut loot = LootConfig::default();
         let mut names = NameConfig::default();
+        let mut plates = VPlateMode::default();
         // Literal fields, not Default: ClutterConfig::default() reads the env A/B vars.
         let mut clutter = ClutterConfig {
             density: 3.0,
@@ -850,6 +831,7 @@ mod tests {
             click: &mut click,
             loot: &mut loot,
             names: &mut names,
+            plates: &mut plates,
             clutter: &mut clutter,
             minimap: &mut minimap,
             bubbles: &mut bubbles,
@@ -911,6 +893,15 @@ mod tests {
         assert!(!knobs.names.npc);
         assert!(apply_to_knobs("unitnameown", "1", &mut knobs));
         assert!(knobs.names.own);
+        // …and the plate pair on the two bits of the bitmask, either casing.
+        assert!(apply_to_knobs(
+            crate::vplates::CVAR_ENEMIES,
+            "0",
+            &mut knobs
+        ));
+        assert!(!knobs.plates.enemies);
+        assert!(apply_to_knobs("nameplateshowfriends", "1", &mut knobs));
+        assert!(knobs.plates.friends);
         // The bubble pair lands on the spawn gate's own knob (1139).
         assert!(apply_to_knobs("ChatBubbles", "0", &mut knobs));
         assert!(!knobs.bubbles.all);
@@ -989,6 +980,7 @@ mod tests {
             .init_resource::<ClickConfig>()
             .init_resource::<LootConfig>()
             .init_resource::<NameConfig>()
+            .init_resource::<VPlateMode>()
             .init_resource::<ClutterConfig>()
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()
@@ -1060,6 +1052,7 @@ mod tests {
             .init_resource::<ClickConfig>()
             .init_resource::<LootConfig>()
             .init_resource::<NameConfig>()
+            .init_resource::<VPlateMode>()
             .init_resource::<ClutterConfig>()
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()

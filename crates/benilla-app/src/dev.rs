@@ -114,6 +114,7 @@ impl Plugin for DevProbesPlugin {
                 "WOW_PROBE_KEY",
                 "WOW_PROBE_LUA",
                 "WOW_PROBE_CHEST",
+                "WOW_PROBE_CLAM",
                 "WOW_RIG",
                 "WOW_LIVE_FPS",
             ]
@@ -254,6 +255,12 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_MAIL").is_ok() {
                 app.add_plugins(crate::capture::ProbeMailPlugin);
             }
+            // The auction-arc live probe: `WOW_PROBE_AUCTION=1` GM-hops to a Stormwind auctioneer,
+            // greets it on the wire and drives browse/throttle/sell/owner-list/cancel through the
+            // live Lua VM — decision 1511's end-to-end instrument (see `capture::ProbeAuctionPlugin`).
+            if std::env::var("WOW_PROBE_AUCTION").is_ok() {
+                app.add_plugins(crate::capture::ProbeAuctionPlugin);
+            }
             // The bank-arc live probe: `WOW_PROBE_BANK=1` GM-hops to a pure banker, drives the whole
             // six-opcode bank wire (activate/deposit/withdraw/buy-slot/refusal) — decision 0604's
             // end-to-end instrument (see `capture::ProbeBankPlugin`).
@@ -279,6 +286,13 @@ impl Plugin for DevProbesPlugin {
             // see `capture::ProbeChestPlugin`).
             if std::env::var("WOW_PROBE_CHEST").is_ok() {
                 app.add_plugins(crate::capture::ProbeChestPlugin);
+            }
+            // The openable-item live probe: `WOW_PROBE_CLAM=1` stocks a clam, right-clicks it
+            // through the live VM's own `UseContainerItem` and reports whether a loot window opens
+            // on the item's own guid — the numeric answer to the director's "clams don't open"
+            // (decision 1531; see `capture::ProbeClamPlugin`).
+            if std::env::var("WOW_PROBE_CLAM").is_ok() {
+                app.add_plugins(crate::capture::ProbeClamPlugin);
             }
             // The cast-cancel live probe: `WOW_PROBE=castcancel` hearths and presses W mid-cast — the
             // local self-cancel's end-to-end timing instrument (see `capture::ProbeCastCancelPlugin`).

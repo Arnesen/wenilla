@@ -38,10 +38,14 @@
           - COLLAPSE WORKS. The "All" tab collapses/expands every group (Collapse/ExpandTrainerSkillLine(0));
             its +/- icon reflects whether all groups are folded (the backport's numHeaders/notExpanded).
 
-        FLAT layout (both windows' note): a child <Frame> shown at runtime does not render its own
-        <Layers> FontStrings in this engine, so the detail-pane FontStrings + the title/greeting live on
-        BenillaTrainerFrame's OWN <Layers>, never on a nested sub-frame. Per-row regions live on the row
-        Button template (Buttons render their own Layers). The detail is a FIXED (non-scrolling) pane
+        FLAT layout — a CHOICE, and it was written down here as a constraint that does not exist.
+        This block used to claim "a child <Frame> shown at runtime does not render its own <Layers>
+        FontStrings in this engine". That is FALSE, and it was propagated from here into two more
+        windows before anyone probed it (decision 1517): MailFrame's own SendMailTitleText lives in a
+        runtime-shown pane's Layers and has rendered correctly the whole time. The detail-pane
+        FontStrings + the title/greeting do live on BenillaTrainerFrame's OWN <Layers>, and that is
+        fine — it is simply one way to lay this out, not the only one available. Per-row regions live
+        on the row Button template. The detail is a FIXED (non-scrolling) pane
         (our descriptions are empty for now) — no real ScrollFrame, unlike the ref's DetailScrollFrame.
 
         Adaptations / deviations (flagged):

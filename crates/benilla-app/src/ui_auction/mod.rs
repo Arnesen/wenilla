@@ -1,0 +1,992 @@
+//! The app-side **auction feed** (decision 1511 P1) — the inward half of the auction seam around
+//! [`benilla_ui::script`]'s `auction` module, the auctioneer twin of [`crate::ui_merchant`]'s
+//! vendor seam and [`crate::ui_mail`]'s mailbox one.
+//!
+//! **The window is opened by the server, not by the click.** A right-click on an auctioneer
+//! ([`crate::target`]) sends `MSG_AUCTION_HELLO` and nothing else happens; the *reply* — the same
+//! opcode coming back with the auctioneer guid and an `AuctionHouse.dbc` house id — is what opens
+//! the session here (wow-re: the window's opener calls `SetInteractNPC` and fires
+//! `AUCTION_HOUSE_SHOW` from inside the hello handler). That house id is load-bearing rather than
+//! decorative: it keys the deposit rate the sell pane displays, and the six faction houses charge
+//! 5% where the neutral goblin house charges 25%.
+//!
+//! **Three lists, one session.** Browse (`"list"`), Bids (`"bidder"`) and Auctions (`"owner"`) are
+//! three independent server queries into one window. Each holds at most one 50-row page — the
+//! server's own cap — plus the pre-cap match count the pager needs, plus its own sort stack.
+//!
+//! **Sorting is ours and paging is the server's**, which is the split that shapes this module: a
+//! header click re-orders rows we already hold and sends nothing ([`sort`]), while a page turn
+//! re-sends the whole query. Nothing about the sort ever reaches the wire.
+//!
+//! **The browse throttle is real and it is silent.** The client refuses a browse query inside 5 s
+//! of the last one and *drops it with no failure event*, which is why the Search button polls
+//! [`benilla_ui::script::UiScript::set_auction_can_query`] every frame instead of reacting to a
+//! refusal. The window opening clears the gate, so the first search is always allowed. (INTERIM,
+//! decision 1511 — pinned to the in-flight §5's TU-2.)
+//!
+//! The net bridge ([`crate::net::apply::auction`]) fills [`AuctionOpen`] from the wire. Each frame
+//! [`feed_auction`] resolves each [`AuctionListEntry`] to a Lua-facing row (name/quality/icon via
+//! the ask-once item-template cache + `ItemDisplayInfo.dbc`, seller via the ask-once name cache,
+//! the time-left bucket from the wire's milliseconds), applies the sort, pushes the snapshot, and
+//! fires the events the reference Lua drives. [`drain_auction`] pulls the Lua intents back out
+//! into the auction `CMSG`s. The standardized NPC-session range guard ([`crate::ui_session`])
+//! client-side-closes the window when the player walks away from the auctioneer. That radius is
+//! **VERIFIED** rather than borrowed (wow-re §5 TU-6): the auction window's own interaction cell
+//! holds `30.864194869995117` — a radius of `5.5555553` yd — which is exactly the service gate
+//! the cursor already greys at, so the guard's existing constant is the right one. The close
+//! sends no packet, also byte-confirmed.
+
+use bevy::prelude::*;
+
+use benilla_protocol::messages::{auction_filter, AuctionListEntry};
+use benilla_ui::script::{
+    AuctionCategory, AuctionItemRow, AuctionListState, AuctionState, AuctionSubCategory,
+    ScriptValue, UiScript, BIDDER, LIST, OWNER,
+};
+
+use crate::entities::ItemDisplays;
+use crate::items::Items;
+use crate::names::NameCache;
+use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_action::{ui_error_text, MsgSurface, UiError};
+use crate::ui_chat::{ChatEvent, ChatEventKind};
+use crate::ui_script::UiInput;
+use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
+
+mod sort;
+
+use sort::SortStack;
+
+/// The browse query rate limit, in seconds. **VERIFIED** (wow-re §5 TU-2): the reference arms the
+/// gate with `tick + 0x1388` *after* the packet goes out, re-checks it inside the query itself,
+/// and its refusal path fires **nothing at all** — no event, no error. That silence is why the
+/// Search button polls the gate every frame instead of waiting to be told no.
+const QUERY_THROTTLE_SECS: f64 = 5.0;
+
+/// The time-left buckets, in milliseconds — the thresholds the reference's four
+/// `AUCTION_TIME_LEFT` strings key off. **VERIFIED** (wow-re §5 TU-3: the table at `0x8072a8`).
+const TIME_LEFT_SHORT_MS: u32 = 30 * 60 * 1000;
+const TIME_LEFT_MEDIUM_MS: u32 = 2 * 60 * 60 * 1000;
+const TIME_LEFT_LONG_MS: u32 = 8 * 60 * 60 * 1000;
+
+/// Past this, the wire's `time_left_ms` is not a duration — it is an underflow.
+///
+/// The server writes `(expireTime - now) * 1000` with **no clamp** and only sweeps expiry on a
+/// 60 s timer, so an auction that ran out less than a minute ago is still listed with a negative
+/// remaining time that arrives as a `u32` near 4.29 billion. The longest auction anyone can create
+/// is 24 h, so anything beyond a few days is that wrap and not a long auction — it reads as
+/// **expired**, never as "Very Long" (decision 1511's verified section).
+const TIME_LEFT_IMPLAUSIBLE_MS: u32 = 7 * 24 * 60 * 60 * 1000;
+
+/// `ItemSubClass.dbc` `DisplayFlags` bit 1 — this subclass is **not offered** in the auction
+/// house's category filter.
+///
+/// Read directly off the shipped table when the polarity was still ambiguous, and since
+/// **independently confirmed at the bytes** (wow-re §5 TU-4). Guessing it backwards would have
+/// emptied the filter instead of trimming it: every row carrying the bit is an obsolete or unused subclass —
+/// Spear, Buckler(OBSOLETE), the OBSOLETE quivers, bolts and wands, Engineering Bag — and every
+/// subclass a player can actually buy (Cloth, Leather, Mail, Plate, Shield, Arrow, Bullet, the
+/// weapon families, the nine Recipe professions) has it clear.
+const SUBCLASS_HIDDEN_FROM_AUCTIONS: u32 = 0x2;
+
+/// The ten item classes the auction house offers, in the reference's own menu order.
+///
+/// The set and the order are a structural fact of the window, not text: the four `(OBSOLETE)`
+/// classes plus Quest and Key are simply not auctionable, and every id here was checked to be a
+/// real `ItemClass.dbc` row. **Every string the filter displays comes from the player's own DBC**,
+/// which is what keeps this feature clear of decisions 1234/1260 — we ship the structure, the
+/// install supplies the words.
+const AUCTION_CLASSES: [u32; 10] = [
+    2,  // Weapon
+    4,  // Armor
+    1,  // Container
+    0,  // Consumable
+    7,  // Trade Goods
+    6,  // Projectile
+    11, // Quiver
+    9,  // Recipe
+    5,  // Reagent
+    15, // Miscellaneous
+];
+
+/// The `AuctionHouse.dbc` catalog, loaded with the other item DBCs ([`crate::ui_items`]). Optional
+/// resource — absent, the sell pane shows no deposit rather than inventing one.
+#[derive(Resource)]
+pub(crate) struct AuctionHouses(pub(crate) benilla_formats::AuctionHouseCatalog);
+
+/// A wire row resolved for display. Its 1-based position in [`AuctionListSlot::rows`] after the
+/// sort is the index the Lua API addresses it by, which is why the sort lives on this side: the
+/// index the player clicks has to mean the same thing as the index the drain maps back to
+/// [`Self::auction_id`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct AuctionRow {
+    pub(crate) auction_id: u32,
+    pub(crate) item_entry: u32,
+    /// The listed item's random-suffix roll — the suffix in [`Self::name`], the enchant lines the
+    /// row hover shows, and the link's third field (decision 1547).
+    pub(crate) random_property_id: u32,
+    pub(crate) count: u32,
+    pub(crate) name: Option<String>,
+    pub(crate) texture: Option<String>,
+    pub(crate) quality: Option<u32>,
+    /// The item's `RequiredLevel` — `0` until its template lands.
+    pub(crate) level: u32,
+    pub(crate) start_bid: u32,
+    pub(crate) min_increment: u32,
+    pub(crate) buyout: u32,
+    pub(crate) current_bid: u32,
+    /// `1..=4`, or `0` for a row whose remaining time we could not read.
+    pub(crate) time_left: u32,
+    /// Whether *the player* holds the high bid.
+    pub(crate) high_bidder: bool,
+    pub(crate) owner: Option<String>,
+    pub(crate) link: Option<String>,
+}
+
+impl AuctionRow {
+    /// What the row shows in its "current bid" column: the seller's opening price until somebody
+    /// has actually bid. A `0` current bid is "no bids", not "free".
+    pub(crate) fn displayed_bid(&self) -> u32 {
+        if self.current_bid == 0 {
+            self.start_bid
+        } else {
+            self.current_bid
+        }
+    }
+}
+
+/// One of the three lists.
+#[derive(Debug, Default)]
+pub(crate) struct AuctionListSlot {
+    /// The current page exactly as the wire delivered it.
+    pub(crate) entries: Vec<AuctionListEntry>,
+    /// `totalCount` — the pre-cap match count, which is what tells the pager there is a page 2.
+    pub(crate) total: u32,
+    sort: SortStack,
+}
+
+/// What the live end-to-end probe (`crate::capture::ProbeAuctionPlugin`) reads to tell an
+/// **empty** answer apart from **no** answer.
+///
+/// Three of this arc's outcomes are, by design, invisible in the window's own state — and each is
+/// a different failure a probe has to be able to name:
+///
+/// - a list result carrying **zero rows** changes nothing [`feed_auction`] can diff, so "the
+///   auction house is empty" and "the query never came back" look identical from the snapshot;
+/// - a *successful* `SMSG_AUCTION_COMMAND_RESULT` is consumed straight into a re-query
+///   (`crate::net::apply::auction`) and leaves no record — only a *failed* one surfaces, and only
+///   as an error line;
+/// - a browse query the throttle refuses is dropped with **no event at all** (the §5-verified
+///   silence this module's header describes), so "refused" and "sent" differ only in what went
+///   out on the wire.
+///
+/// Nothing in the client needs any of it: the window reacts to the *effects*. It therefore lives
+/// in one clearly-named block that the client never reads, rather than being smeared through the
+/// session's own fields — and it is a monotonic tally, deliberately **not** reset by
+/// [`AuctionOpen::clear`], so a count means the same thing across a session close.
+#[derive(Default)]
+pub(crate) struct AuctionWireLog {
+    /// How many list results have landed, per list, in [`LIST`]/[`BIDDER`]/[`OWNER`] order.
+    pub(crate) list_results: [u32; 3],
+    /// How many browse queries actually went out — the count the throttle refuses to raise.
+    pub(crate) browse_sent: u32,
+    /// The most recent `SMSG_AUCTION_COMMAND_RESULT`, as `(auction_id, action, error)`.
+    pub(crate) last_command: Option<(u32, u32, u32)>,
+}
+
+/// The open auctioneer session, filled by the net bridge ([`crate::net::apply::auction`]) and read
+/// by [`feed_auction`]. Cleared on a client-side close, on walking away, and on disconnect.
+#[derive(Resource, Default)]
+pub(crate) struct AuctionOpen {
+    /// The auctioneer whose window is open; `None` = no session.
+    pub(crate) auctioneer: Option<u64>,
+    /// The `AuctionHouse.dbc` row this auctioneer serves (1..=7) — keys the deposit rate.
+    pub(crate) house_id: u32,
+    pub(crate) lists: [AuctionListSlot; 3],
+    /// Fire `AUCTION_HOUSE_SHOW` next feed — set when the hello reply lands.
+    show_requested: bool,
+    /// Fire `NEW_AUCTION_UPDATE` next feed — the sell slot changed.
+    sell_slot_dirty: bool,
+    /// A list result landed, so the list events are owed **whether or not the snapshot changed**.
+    ///
+    /// Diffing the snapshot is not enough and the live probe is what proved it: an empty auction
+    /// house, or re-running the same search, produces a result identical to what we already hold.
+    /// The window's Browse pane clears its "Searching…" state only on `AUCTION_ITEM_LIST_UPDATE`,
+    /// so on an empty server a search animated its dots forever and never reported a result. The
+    /// reference has no diff here at all — one routine invalidates all three lists and fires all
+    /// three events.
+    list_result_landed: bool,
+    /// Empty the sell slot next feed — a listing was accepted, so the staged item is *gone*.
+    ///
+    /// Also from the probe: without this the pane kept painting a phantom stack after a successful
+    /// `StartAuction`, `Create Auction` stayed enabled, and a second click re-resolved the
+    /// remembered `(bag, slot)` at send time — which by then addresses whatever else has landed in
+    /// that slot. That is not a cosmetic bug: it auctions an item the player never chose.
+    sell_slot_taken: bool,
+    /// `Time::elapsed_secs_f64` before which a browse query is refused; `None` = allowed now.
+    /// Cleared when the window opens, so the first search never waits.
+    query_gate: Option<f64>,
+    /// Client messages the net apply queued for [`feed_auction`] to resolve and show — the
+    /// reference's `DisplayError(msgId)` split into (surface, GlobalStrings key, fill), so the line
+    /// comes from the VM's own strings and lands where that message's catalog row says (decisions
+    /// 0669 / 1523).
+    ///
+    /// **Not cleared by [`Self::clear`].** These outlive the window on purpose: "your auction sold"
+    /// arrives wherever the player is standing, and closing an auctioneer's window must not swallow
+    /// a notice that has not been printed yet.
+    pub(crate) messages: Vec<AuctionMessage>,
+    /// Set when the server tells us a list we hold is now wrong (our auction sold, we were
+    /// outbid, a cancel went through). The drain re-asks rather than patching the local page: the
+    /// server is the only thing that knows what the page looks like now, and the notification
+    /// carries an auction id, not a row.
+    pending_owner_refresh: bool,
+    pending_bidder_refresh: bool,
+    /// The live probe's observation window onto the wire. Written by the net bridge and the
+    /// drain, read by nothing in the client — see [`AuctionWireLog`].
+    pub(crate) wire: AuctionWireLog,
+}
+
+/// One queued auction message: which of the reference's twenty catalog rows, and the item name that
+/// fills its `%s` when it has one.
+///
+/// The surface is the row's own (decision 1523): the twelve **precondition failures** (`0x16c`-`0x177`
+/// — "you cannot auction a soulbound item", "your bid is too low") are kind 2 and land on the red
+/// `UIErrorsFrame`; the eight **outcomes** (`0x178`-`0x17f` — created, cancelled, outbid, won, sold,
+/// expired, removed, bid accepted) are kind 0 and land in the **chat window** as `CHAT_MSG_SYSTEM`.
+/// That split is the whole reason this is a queue of records rather than a queue of red strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuctionMessage {
+    pub(crate) surface: MsgSurface,
+    pub(crate) key: &'static str,
+    /// The item entry whose name fills the `%s`; `None` for the six fill-less lines.
+    ///
+    /// The reference composes a **plain** name here (`0x5d8b00`), never a coloured `|Hitem:` link —
+    /// so "Your auction of Linen Cloth sold." is unlinked in the real client too, and matching that
+    /// is deliberate. It also carries the random-property roll for a suffixed name; benilla's item
+    /// names are unsuffixed today, so only the entry is kept.
+    pub(crate) item: Option<u32>,
+}
+
+impl AuctionMessage {
+    /// A chat line with no fill (`ERR_AUCTION_STARTED` and friends).
+    pub(crate) fn chat(key: &'static str) -> Self {
+        Self {
+            surface: MsgSurface::Chat,
+            key,
+            item: None,
+        }
+    }
+
+    /// A chat line about one item — the five `_S` outcomes.
+    pub(crate) fn chat_item(key: &'static str, item: u32) -> Self {
+        Self {
+            surface: MsgSurface::Chat,
+            key,
+            item: Some(item),
+        }
+    }
+
+    /// A red line — the twelve refusals, none of which take a fill.
+    pub(crate) fn error(key: &'static str) -> Self {
+        Self {
+            surface: MsgSurface::Error,
+            key,
+            item: None,
+        }
+    }
+}
+
+impl AuctionOpen {
+    /// The hello reply — open (or re-open) the session. A *different* auctioneer resets everything
+    /// including the sort stacks; the same one keeps them and just re-shows, since the reference
+    /// re-fires its show on every greeting.
+    pub(crate) fn open(&mut self, auctioneer: u64, house_id: u32) {
+        if self.auctioneer != Some(auctioneer) {
+            self.auctioneer = Some(auctioneer);
+            self.lists = Default::default();
+        }
+        self.house_id = house_id;
+        // The window opening clears the throttle: the reference zeroes its gate in the same
+        // handler that stores the auctioneer, so the first search after walking up is free.
+        self.query_gate = None;
+        self.show_requested = true;
+    }
+
+    /// Replace one list's page. Always owes the list events, even for an identical page.
+    pub(crate) fn set_list(&mut self, which: usize, entries: Vec<AuctionListEntry>, total: u32) {
+        self.list_result_landed = true;
+        let slot = &mut self.lists[which];
+        slot.entries = entries;
+        // A server that reports fewer total matches than it just sent us is not a case worth
+        // trusting over our own eyes; the pager reads the larger of the two.
+        slot.total = total.max(slot.entries.len() as u32);
+    }
+
+    /// The wire auction id at a 1-based **display** row — what the auction `CMSG`s address. Takes
+    /// the sorted view rather than the list index, because that is the order the player clicked in.
+    fn auction_id_at(index_1based: u32, rows: &[AuctionRow]) -> Option<u32> {
+        index_1based
+            .checked_sub(1)
+            .and_then(|i| rows.get(i as usize))
+            .map(|r| r.auction_id)
+    }
+
+    /// A listing was accepted: the staged item has left the bag, so the slot must let go of it.
+    pub(crate) fn sell_slot_taken(&mut self) {
+        self.sell_slot_taken = true;
+    }
+
+    /// Mark our own listings stale — the drain re-queries next frame.
+    pub(crate) fn refresh_owner(&mut self) {
+        self.pending_owner_refresh = true;
+    }
+
+    /// Mark the bids we hold stale.
+    pub(crate) fn refresh_bidder(&mut self) {
+        self.pending_bidder_refresh = true;
+    }
+
+    /// Close the window (a client-side close — vanilla sends nothing).
+    pub(crate) fn clear(&mut self) {
+        self.auctioneer = None;
+        self.house_id = 0;
+        self.lists = Default::default();
+        self.show_requested = false;
+        self.sell_slot_dirty = false;
+        self.query_gate = None;
+        self.pending_owner_refresh = false;
+        self.pending_bidder_refresh = false;
+        self.list_result_landed = false;
+        self.sell_slot_taken = false;
+    }
+
+    /// Disconnect: drop the open window (mirrors every other session clear).
+    pub(crate) fn clear_session(&mut self) {
+        self.clear();
+    }
+}
+
+/// The auction window is an NPC session like any other: the standardized range guard closes it
+/// when the player leaves the auctioneer's service range.
+impl NpcSession for AuctionOpen {
+    fn npc(&self) -> Option<u64> {
+        self.auctioneer
+    }
+
+    fn close(&mut self) {
+        self.clear();
+    }
+}
+
+pub(crate) struct UiAuctionPlugin;
+
+impl Plugin for UiAuctionPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<AuctionOpen>().add_systems(
+            Update,
+            (
+                // The merchant/mail ordering exactly: range-close before the feed so the clear
+                // turns into AUCTION_HOUSE_CLOSED the same frame; feed before the input pass so an
+                // open/close is on screen the same frame; drain after it so a click's intent goes
+                // out the same frame. After the UnitFeed set so a row's tooltip reads a landed
+                // item-template store.
+                close_npc_session_out_of_range::<AuctionOpen>.before(feed_auction),
+                feed_auction.after(crate::ui_unit::UnitFeed).before(UiInput),
+                drain_auction.after(UiInput),
+            ),
+        );
+    }
+}
+
+/// The wire's unclamped millisecond remainder → the reference's four buckets.
+fn time_left_bucket(ms: u32) -> u32 {
+    // An expired-but-still-listed auction arrives as an underflowed u32. Caught first and on its
+    // own, because the alternative reading — a number larger than every threshold, so bucket 4 —
+    // would show an auction that ended a minute ago as the longest one on the page.
+    if ms >= TIME_LEFT_IMPLAUSIBLE_MS {
+        return 1;
+    }
+    if ms < TIME_LEFT_SHORT_MS {
+        1
+    } else if ms < TIME_LEFT_MEDIUM_MS {
+        2
+    } else if ms < TIME_LEFT_LONG_MS {
+        3
+    } else {
+        4
+    }
+}
+
+/// Resolve one wire entry into a display row: name/quality/icon/required-level through the
+/// ask-once item-template cache, seller through the ask-once name cache, the link built with the
+/// row's full enchant/property/suffix tail (an auction row carries all three, so it gets the
+/// complete link rather than the zeroed one a bag slot settles for). `None`s stay `None` while a
+/// query is in flight — the row shows a placeholder and fills in when the answer lands.
+#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
+fn resolve_row(
+    entry: &AuctionListEntry,
+    self_guid: Option<u64>,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    names: &mut NameCache,
+    commands: &NetCommands,
+    rolls: crate::items::RollCatalogs,
+) -> AuctionRow {
+    let template = items.template(entry.item_entry, 0, commands);
+    let roll = entry.random_property_id as u32;
+    // The rolled name — one formatter for every display of an item's name (1547), so the row, the
+    // link's bracket text and the hover's plate agree.
+    let name = template.map(|t| rolls.name(&t.name, roll));
+    let quality = template.map(|t| t.quality);
+    let level = template.map_or(0, |t| t.required_level);
+    let texture = crate::ui_items::item_icon(icons, template.map_or(0, |t| t.display_info_id));
+    let link = name.as_ref().map(|n| {
+        crate::ui_items::item_link_full(
+            entry.item_entry,
+            entry.perm_enchant,
+            roll,
+            entry.suffix_factor,
+            n,
+            quality.unwrap_or(0),
+        )
+    });
+
+    AuctionRow {
+        auction_id: entry.auction_id,
+        item_entry: entry.item_entry,
+        random_property_id: roll,
+        count: entry.count,
+        name,
+        texture,
+        quality,
+        level,
+        start_bid: entry.start_bid,
+        min_increment: entry.min_increment,
+        buyout: entry.buyout,
+        current_bid: entry.current_bid,
+        time_left: time_left_bucket(entry.time_left_ms),
+        // "High bidder" is about US, not about whether anyone has bid at all.
+        high_bidder: self_guid.is_some_and(|g| g == entry.bidder_guid),
+        owner: names
+            .resolve(entry.owner_guid, commands)
+            .map(str::to_string),
+        link,
+    }
+}
+
+/// Build the Browse tab's category tree from the player's own DBCs (decision 1511 §5).
+fn categories(
+    classes: Option<&crate::ui_items::ItemClasses>,
+    subclasses: Option<&crate::ui_items::ItemSubClasses>,
+) -> Vec<AuctionCategory> {
+    let (Some(classes), Some(subclasses)) = (classes, subclasses) else {
+        return Vec::new();
+    };
+    AUCTION_CLASSES
+        .iter()
+        .filter_map(|&class_id| {
+            let name = classes.0.name(class_id)?.to_string();
+            let subs = subclasses
+                .0
+                .subclasses_of(class_id)
+                .into_iter()
+                .filter(|&sub| {
+                    subclasses.0.display_flags(class_id, sub) & SUBCLASS_HIDDEN_FROM_AUCTIONS == 0
+                })
+                .filter_map(|sub| {
+                    Some(AuctionSubCategory {
+                        sub_id: sub,
+                        name: subclasses.0.name(class_id, sub)?.to_string(),
+                        // INTERIM (decision 1511, §5 TU-4): which class/subclass pairs offer the
+                        // fourteen inventory-slot rows is not yet derived from the binary. Armor
+                        // is the one the reference visibly offers them under, and it is the only
+                        // class where an equip slot narrows anything. Data, not logic — a
+                        // correction is this line.
+                        has_inv_types: class_id == 4,
+                    })
+                })
+                .collect();
+            Some(AuctionCategory {
+                class_id,
+                name,
+                subclasses: subs,
+            })
+        })
+        .collect()
+}
+
+/// Resolve + sort one list into its display rows.
+#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
+fn rows_for(
+    slot: &AuctionListSlot,
+    self_guid: Option<u64>,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    names: &mut NameCache,
+    commands: &NetCommands,
+    rolls: crate::items::RollCatalogs,
+) -> Vec<AuctionRow> {
+    let mut rows: Vec<AuctionRow> = slot
+        .entries
+        .iter()
+        .map(|e| resolve_row(e, self_guid, items, icons, names, commands, rolls))
+        .collect();
+    slot.sort.apply(&mut rows);
+    rows
+}
+
+/// One display row → the Lua-facing row.
+fn to_script_row(r: &AuctionRow) -> AuctionItemRow {
+    AuctionItemRow {
+        auction_id: r.auction_id,
+        item_id: r.item_entry,
+        random_property_id: r.random_property_id,
+        name: r.name.clone(),
+        texture: r.texture.clone(),
+        count: r.count,
+        quality: r.quality,
+        level: r.level,
+        min_bid: r.start_bid,
+        min_increment: r.min_increment,
+        buyout_price: r.buyout,
+        bid_amount: r.current_bid,
+        high_bidder: r.high_bidder,
+        owner: r.owner.clone(),
+        time_left: r.time_left,
+        link: r.link.clone(),
+    }
+}
+
+/// The DBC catalogs a row reads, as ONE system param — [`feed_auction`] is at the
+/// 16-SystemParam ceiling, and these four belong together anyway: the two class tables the
+/// category tree is built from, and the random-suffix pair a rolled listing needs
+/// (`ItemRandomProperties` for the name, `SpellItemEnchantment` for its lines — decision 1547).
+type AuctionCatalogs<'w> = (
+    Option<Res<'w, crate::ui_items::ItemClasses>>,
+    Option<Res<'w, crate::ui_items::ItemSubClasses>>,
+    Option<Res<'w, crate::items::RandomProperties>>,
+    Option<Res<'w, crate::items::Enchants>>,
+);
+
+/// Push the current auction house into the VM and fire the show/close/list-update events on a
+/// transition or content change. Diffed against a `VmMemo`, exactly like the merchant/mail feeds.
+#[allow(clippy::too_many_arguments)] // one parameter per ask-once cache a row reads
+fn feed_auction(
+    script: Option<NonSendMut<UiScript>>,
+    mut auction: ResMut<AuctionOpen>,
+    mut items: ResMut<Items>,
+    icons: Option<Res<ItemDisplays>>,
+    mut names: ResMut<NameCache>,
+    commands: Res<NetCommands>,
+    time: Res<Time>,
+    catalogs: AuctionCatalogs,
+    houses: Option<Res<AuctionHouses>>,
+    mut chat: ResMut<crate::ui_chat::ChatLog>,
+    self_q: Query<&crate::net::Guid, With<SelfPlayer>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<AuctionState>>>,
+    mut last_open: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut last_can_query: Local<crate::ui_script::VmMemo<bool>>,
+    mut last_sell: Local<crate::ui_script::VmMemo<Option<(i64, u32)>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let last = last.get(&script);
+    let last_open = last_open.get(&script);
+    let last_can_query = last_can_query.get(&script);
+    let last_sell = last_sell.get(&script);
+
+    // The queued client messages (decision 1523). Resolved against the VM's own GlobalStrings and
+    // shown on the surface the message's catalog row names — the `ui_quest` shape (0669).
+    //
+    // A `_S` line whose item template has not landed is **kept queued, not dropped**: the reference
+    // defers exactly this case through `0x4cd190` and prints the line when the item arrives. Ours
+    // falls out of the same ask-once cache the rows use, so the deferral is just "leave it in the
+    // queue and try again next frame" — and the `items.template` call below is what asks.
+    {
+        let mut deferred = Vec::new();
+        let mut lines = Vec::new();
+        for msg in std::mem::take(&mut auction.messages) {
+            let fill = match msg.item {
+                None => None,
+                Some(entry) => match items.template(entry, 0, &commands) {
+                    Some(t) => Some(t.name.clone()),
+                    // Not named yet — hold it and ask again next frame.
+                    None => {
+                        deferred.push(msg);
+                        continue;
+                    }
+                },
+            };
+            let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+            let err = UiError {
+                key: msg.key,
+                fill_s: fill,
+                fill_d: None,
+                info: false,
+            };
+            if let Some(text) = ui_error_text(&err, &get) {
+                lines.push((msg.surface, text));
+            }
+        }
+        auction.messages = deferred;
+        for (surface, text) in lines {
+            // Greppable, because the chat path has no log of its own — without this a live probe
+            // can count lines but never read one (0669's in-app leg).
+            debug!("ui_auction: message ({surface:?}) {text:?}");
+            match surface {
+                MsgSurface::Chat => {
+                    chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+                }
+                MsgSurface::Error => {
+                    script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+                }
+            }
+        }
+    }
+
+    let self_guid = self_q.iter().next().map(|g| g.0);
+    let (classes, subclasses) = (&catalogs.0, &catalogs.1);
+    let rolls = crate::items::RollCatalogs {
+        props: catalogs.2.as_deref(),
+        enchants: catalogs.3.as_deref(),
+    };
+    let fresh = auction.auctioneer.map(|_| {
+        let lists = [LIST, BIDDER, OWNER].map(|i| {
+            let slot = &auction.lists[i];
+            let rows = rows_for(
+                slot,
+                self_guid,
+                &mut items,
+                icons.as_deref(),
+                &mut names,
+                &commands,
+                rolls,
+            );
+            AuctionListState {
+                rows: rows.iter().map(to_script_row).collect(),
+                total: slot.total.max(rows.len() as u32),
+                sort: slot.sort.pairs(),
+            }
+        });
+        AuctionState {
+            lists,
+            categories: categories(classes.as_deref(), subclasses.as_deref()),
+            // The rate this house charges, keyed by the id the hello reply carried.
+            deposit_percent: houses
+                .as_deref()
+                .and_then(|h| h.0.deposit_percent(auction.house_id))
+                .unwrap_or(0),
+        }
+    });
+
+    let opened = last_open.is_none() && auction.auctioneer.is_some();
+    let closed = last_open.is_some() && auction.auctioneer.is_none();
+    let show_requested = std::mem::take(&mut auction.show_requested);
+    let result_landed = std::mem::take(&mut auction.list_result_landed);
+    let changed = fresh != *last;
+    if changed {
+        script.set_auction(fresh.clone());
+    }
+    if opened {
+        script.fire_event("AUCTION_HOUSE_SHOW", vec![]);
+    } else if closed {
+        script.fire_event("AUCTION_HOUSE_CLOSED", vec![]);
+        script.clear_auction_sell_item();
+    } else if auction.auctioneer.is_some() {
+        if show_requested {
+            script.fire_event("AUCTION_HOUSE_SHOW", vec![]);
+        }
+        // A landed result owes the events outright; a change owes them because an async name or
+        // template just filled a row in. Diffing ALONE was the bug: an empty house and a repeated
+        // search both produce a result identical to what we hold, and the Browse pane waits on
+        // this event to stop saying "Searching…".
+        if changed || result_landed {
+            // One routine invalidates all three lists in the reference too — the three events fire
+            // together rather than being diffed apart, and each tab's handler repaints only if it
+            // is the visible one.
+            for event in [
+                "AUCTION_ITEM_LIST_UPDATE",
+                "AUCTION_BIDDER_LIST_UPDATE",
+                "AUCTION_OWNED_LIST_UPDATE",
+            ] {
+                script.fire_event(event, vec![]);
+            }
+        }
+    }
+    *last = fresh;
+    *last_open = auction.auctioneer;
+
+    // A listing was accepted: drop the staged item before anything reads the slot again.
+    if std::mem::take(&mut auction.sell_slot_taken) {
+        script.clear_auction_sell_item();
+    }
+
+    // The sell slot's own event: the create pane re-reads the item, re-suggests a price and
+    // re-computes the deposit off this.
+    let sell = script.auction_sell_item();
+    if sell != *last_sell || std::mem::take(&mut auction.sell_slot_dirty) {
+        *last_sell = sell;
+        script.fire_event("NEW_AUCTION_UPDATE", vec![]);
+    }
+
+    // The browse throttle, pushed every frame it changes — the Search button polls it.
+    let now = time.elapsed_secs_f64();
+    let can_query = auction.query_gate.is_none_or(|gate| now >= gate);
+    if can_query != *last_can_query {
+        script.set_auction_can_query(can_query);
+        *last_can_query = can_query;
+    }
+}
+
+/// Drain the Lua intents into the auction `CMSG`s.
+#[allow(clippy::too_many_arguments)]
+fn drain_auction(
+    script: Option<NonSendMut<UiScript>>,
+    mut auction: ResMut<AuctionOpen>,
+    commands: Res<NetCommands>,
+    time: Res<Time>,
+    mut items: ResMut<Items>,
+    icons: Option<Res<ItemDisplays>>,
+    mut names: ResMut<NameCache>,
+    self_q: Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
+    // The click→auction-id map re-derives the same sorted rows the feed pushed, so it resolves
+    // them the same way, roll included (1547).
+    props: Option<Res<crate::items::RandomProperties>>,
+    enchants: Option<Res<crate::items::Enchants>>,
+) {
+    let rolls = crate::items::RollCatalogs {
+        props: props.as_deref(),
+        enchants: enchants.as_deref(),
+    };
+    let Some(mut script) = script else {
+        return;
+    };
+    let Some(auctioneer) = auction.auctioneer else {
+        // No session: honor a stray close and drop everything else on the floor.
+        if script.take_auction_close() {
+            auction.clear();
+        }
+        let _ = script.take_auction_query();
+        let _ = script.take_auction_owner_query();
+        let _ = script.take_auction_bidder_query();
+        let _ = script.take_auction_bids();
+        let _ = script.take_auction_cancels();
+        let _ = script.take_auction_start();
+        let _ = script.take_auction_sorts();
+        return;
+    };
+
+    // The browse query, behind the same gate the Search button is reading.
+    if let Some(q) = script.take_auction_query() {
+        let now = time.elapsed_secs_f64();
+        if auction.query_gate.is_none_or(|gate| now >= gate) {
+            auction.query_gate = Some(now + QUERY_THROTTLE_SECS);
+            auction.wire.browse_sent += 1;
+            let _ = commands.0.send(ClientCommand::AuctionListItems {
+                auctioneer,
+                list_from: q.page.saturating_mul(50),
+                searched_name: q.name,
+                level_min: u8::try_from(q.min_level).unwrap_or(u8::MAX),
+                level_max: u8::try_from(q.max_level).unwrap_or(u8::MAX),
+                slot_id: q.inv_type.unwrap_or(auction_filter::ANY),
+                main_category: q.class.unwrap_or(auction_filter::ANY),
+                sub_category: q.sub_class.unwrap_or(auction_filter::ANY),
+                quality: q.quality.unwrap_or(auction_filter::ANY),
+                usable: u8::from(q.usable_only),
+            });
+        }
+    }
+
+    // Server-driven refreshes: something we hold went stale (a sale, an outbid, a cancel). These
+    // are page-0 re-asks, deliberately separate from the Lua's own paging.
+    if std::mem::take(&mut auction.pending_owner_refresh) {
+        let _ = commands.0.send(ClientCommand::AuctionListOwnerItems {
+            auctioneer,
+            list_from: 0,
+        });
+    }
+    if std::mem::take(&mut auction.pending_bidder_refresh) {
+        let _ = commands.0.send(ClientCommand::AuctionListBidderItems {
+            auctioneer,
+            list_from: 0,
+            auction_ids: Vec::new(),
+        });
+    }
+
+    if let Some(page) = script.take_auction_owner_query() {
+        let _ = commands.0.send(ClientCommand::AuctionListOwnerItems {
+            auctioneer,
+            list_from: page.saturating_mul(50),
+        });
+    }
+    if let Some(page) = script.take_auction_bidder_query() {
+        // The refresh set is empty: it exists so a client can re-ask about auctions it was outbid
+        // on, and we do not track that memory yet (the reference keeps eight). A plain page still
+        // returns every auction we currently hold the bid on, which is the whole tab.
+        let _ = commands.0.send(ClientCommand::AuctionListBidderItems {
+            auctioneer,
+            list_from: page.saturating_mul(50),
+            auction_ids: Vec::new(),
+        });
+    }
+
+    // Bids and cancels address the wire auction id behind the row the player clicked, which means
+    // re-deriving the same sorted view the feed pushed.
+    let self_guid = self_q.iter().next().map(|(_, g)| g.0);
+    let bids = script.take_auction_bids();
+    let cancels = script.take_auction_cancels();
+    if !bids.is_empty() || !cancels.is_empty() {
+        for bid in bids {
+            let rows = rows_for(
+                &auction.lists[bid.list],
+                self_guid,
+                &mut items,
+                icons.as_deref(),
+                &mut names,
+                &commands,
+                rolls,
+            );
+            if let Some(auction_id) = AuctionOpen::auction_id_at(bid.index, &rows) {
+                let _ = commands.0.send(ClientCommand::AuctionPlaceBid {
+                    auctioneer,
+                    auction_id,
+                    price: bid.amount,
+                });
+            }
+        }
+        for index in cancels {
+            let rows = rows_for(
+                &auction.lists[OWNER],
+                self_guid,
+                &mut items,
+                icons.as_deref(),
+                &mut names,
+                &commands,
+                rolls,
+            );
+            if let Some(auction_id) = AuctionOpen::auction_id_at(index, &rows) {
+                let _ = commands.0.send(ClientCommand::AuctionRemoveItem {
+                    auctioneer,
+                    auction_id,
+                });
+            }
+        }
+    }
+
+    // Creating an auction: the sell slot's (bag, slot) resolves to the wire item guid HERE rather
+    // than at attach time, because the reference re-reads the slot when the create fires.
+    if let Some(req) = script.take_auction_start() {
+        let item_guid = script
+            .auction_sell_item()
+            .and_then(|(bag, slot)| {
+                self_q.iter().next().and_then(|(store, _)| {
+                    crate::ui_items::slot_guid(&store.0, bag, (slot.max(1) - 1) as u8, &items)
+                })
+            })
+            .unwrap_or(0);
+        if item_guid != 0 {
+            let _ = commands.0.send(ClientCommand::AuctionSellItem {
+                auctioneer,
+                item_guid,
+                bid: req.min_bid,
+                buyout: req.buyout,
+                etime_minutes: req.duration,
+            });
+        }
+    }
+
+    // Header clicks land LAST, and that ordering is load-bearing: a row pick above was made
+    // against the order the feed pushed last frame, so re-sorting before resolving it would point
+    // the same index at a different auction. Nothing here goes on the wire.
+    for (which, key) in script.take_auction_sorts() {
+        if let Some(slot) = auction.lists.get_mut(which) {
+            slot.sort.click(&key);
+        }
+    }
+
+    if script.take_auction_close() {
+        auction.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four buckets, and the one that matters: an expired auction the server has not swept yet
+    /// arrives as an underflowed u32 and must read as Short, never as "Very Long".
+    #[test]
+    fn the_time_left_buckets_read_an_underflow_as_expired() {
+        assert_eq!(time_left_bucket(0), 1, "already gone");
+        assert_eq!(time_left_bucket(29 * 60 * 1000), 1);
+        assert_eq!(time_left_bucket(31 * 60 * 1000), 2);
+        assert_eq!(time_left_bucket(3 * 60 * 60 * 1000), 3);
+        assert_eq!(time_left_bucket(20 * 60 * 60 * 1000), 4, "a 24h auction");
+        // `(expireTime - now) * 1000` one second past the deadline, unclamped.
+        assert_eq!(
+            time_left_bucket(u32::MAX - 1000),
+            1,
+            "an underflow is expired, not eternal"
+        );
+    }
+
+    /// An identical list result still owes its events. Diffing the snapshot was the bug: an empty
+    /// auction house and a repeated search both produce a page identical to the one we hold, and
+    /// the Browse pane clears its "Searching…" state only when the event arrives — so on an empty
+    /// server a search animated forever and never reported a result. Found by the live probe,
+    /// which is the only place an empty house is the normal case.
+    #[test]
+    fn an_identical_list_result_still_owes_its_events() {
+        let mut open = AuctionOpen::default();
+        open.open(0x1234, 1);
+
+        open.set_list(LIST, Vec::new(), 0);
+        assert!(open.list_result_landed, "the first empty page");
+
+        // The feed consumes the flag when it fires.
+        open.list_result_landed = false;
+
+        // The very same empty page again — nothing to diff, and still owed.
+        open.set_list(LIST, Vec::new(), 0);
+        assert!(
+            open.list_result_landed,
+            "an identical page owes the event too — this is the whole bug"
+        );
+    }
+
+    /// An accepted listing releases the sell slot. Without it the pane kept painting a phantom
+    /// stack, Create Auction stayed enabled, and a second click re-resolved the remembered
+    /// (bag, slot) at send time — auctioning whatever had since landed in that slot.
+    #[test]
+    fn an_accepted_listing_releases_the_sell_slot() {
+        let mut open = AuctionOpen::default();
+        open.open(0x1234, 1);
+        assert!(!open.sell_slot_taken, "nothing listed yet");
+
+        open.sell_slot_taken();
+        assert!(open.sell_slot_taken, "the feed owes the slot a clear");
+
+        // And a closed session forgets it rather than clearing a slot it no longer owns.
+        open.clear();
+        assert!(!open.sell_slot_taken);
+    }
+
+    /// The displayed bid falls back to the opening price until somebody has bid — a zero current
+    /// bid means "no bids", never "free".
+    #[test]
+    fn an_unbid_row_shows_its_opening_price() {
+        let unbid = AuctionRow {
+            start_bid: 5000,
+            current_bid: 0,
+            ..Default::default()
+        };
+        assert_eq!(unbid.displayed_bid(), 5000);
+        let bid = AuctionRow {
+            start_bid: 5000,
+            current_bid: 7500,
+            ..Default::default()
+        };
+        assert_eq!(bid.displayed_bid(), 7500);
+    }
+}

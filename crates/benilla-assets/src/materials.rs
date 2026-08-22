@@ -448,19 +448,19 @@ impl MaterialExtension for WowModelExt {
     }
 }
 
-/// Distant low-detail terrain (WDL): unlit white geometry fogged into the scene haze — the horizon
-/// hills the reference draws beyond the streamed detailed tiles. Both shader stages are custom
-/// (`shaders/wdl.wgsl`): white verts × the SAME planar-eye-Z fog as terrain (so WDL fades into the
-/// identical haze), opaque (`AlphaMode::Opaque` ⇒ depth-LEQUAL + depth-write, no blend — the verified
-/// WoW.8 state).
+/// Distant low-detail terrain (WDL): unlit white geometry under a saturated fog of its own — flat
+/// scene-fog colour, the "fog hull" (decision 1521) — the horizon hills the reference draws beyond the
+/// streamed detailed tiles. Both shader stages are custom (`shaders/wdl.wgsl`): white verts × the
+/// scene fog COLOUR with the hull pass's own start-0 / end-1.0 pair (never the scene's distances),
+/// opaque (`AlphaMode::Opaque` ⇒ depth-LEQUAL + depth-write, no blend — the verified WoW.8 state).
 pub type WdlMaterial = ExtendedMaterial<StandardMaterial, WdlExt>;
 
-/// WDL reads the scene fog straight off the shared global light — it has no per-material input of
-/// its own (the band is white geometry whose entire colour is the fog).
+/// WDL reads the scene fog COLOUR straight off the shared global light — it has no per-material input
+/// of its own (the band is white geometry whose entire colour is the fog, saturated).
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
 pub struct WdlExt {
     /// **The shared global light** (`lighting::global_light`), the same buffer terrain and the models
-    /// bind. `wdl.wgsl` reads rows 4/5 only — the SCENE fog (block 1) plus the farclip wall, which is
+    /// bind. `wdl.wgsl` reads rows 4/5 only — the SCENE fog colour (block 1) plus the farclip wall, which is
     /// right by construction: the band *is* the horizon, so it is never inside a WMO. Set once at
     /// startup, never mutated (this replaces the per-material `apply_wow_lighting` push).
     #[storage(90, read_only, buffer)]

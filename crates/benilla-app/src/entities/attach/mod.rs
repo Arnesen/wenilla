@@ -35,7 +35,7 @@ mod dress;
 use dress::{spawn_part, PartDress};
 mod preview;
 pub(crate) use preview::equip_slot;
-pub(super) use preview::{build_dressup_preview, build_glue_preview};
+pub(super) use preview::{build_dressup_preview, build_glue_pet, build_glue_preview};
 mod redress;
 pub(super) use redress::redress_player_looks;
 

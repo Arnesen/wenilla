@@ -88,6 +88,29 @@ pub struct CursorItem {
     pub bar_placeable: bool,
 }
 
+/// How many items the cursor is actually holding, for a payload picked up from a bag.
+///
+/// [`CursorItem::count`] is `None` for a **whole-stack** pickup — it records only what a *split*
+/// carry took — so reading it as `unwrap_or(1)` answers 1 for a stack of twenty. That is a
+/// display wart on a mail attachment and a real arithmetic error on an auction deposit, which is
+/// computed per stack: it would quote a twentieth of what the server then charges. So the true
+/// size comes back from the source slot, which still holds the stack (a pickup locks the slot, it
+/// does not empty it).
+///
+/// Falls back to 1 only when the source slot is genuinely unreadable — a bag the app has not
+/// pushed, or a slot that changed under us.
+pub(super) fn held_count(model: &super::Model, item: &CursorItem) -> u32 {
+    if let Some(n) = item.count {
+        return n.max(1);
+    }
+    model
+        .containers
+        .get(&item.bag)
+        .and_then(|c| c.slots.get(&item.slot))
+        .filter(|s| s.item_id == item.item_id)
+        .map_or(1, |s| s.count.max(1))
+}
+
 /// A spell payload ([`super::spellbook`]'s `PickupSpell` produces it): the spellbook slot it was
 /// picked from, its book (`"spell"`/`"pet"`, the Era `GetCursorInfo` shape), and the resolved
 /// spell id.

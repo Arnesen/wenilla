@@ -100,6 +100,12 @@ pub(crate) enum SlashIndex {
     /// not a `DevCmd`**: the people who need it are the people running addons, and gating it on a
     /// dev build would leave exactly the reporters who asked unable to type it.
     ScriptErrors,
+    /// `/convertraid` — **benilla's own addition**: convert the party to a raid
+    /// (`CMSG_GROUP_RAID_CONVERT`, leader only, server-judged). 1.12's only trigger is the
+    /// RaidFrame tab's Convert button, which is not built yet — until it is, this is the one way
+    /// to form a raid, so it is player-facing by the `/errors` reasoning, not a `DevCmd`. When
+    /// the Raid tab lands this alias stays, the way `/reload` outlived `/console reloadUI`.
+    ConvertRaid,
 }
 
 impl SlashIndex {
@@ -147,13 +153,15 @@ impl SlashIndex {
             // No shipped `SLASH_BENILLASCRIPTERRORS1` exists — the aliases are literals in
             // `build`. The key is still ours to name so the variant round-trips like any other.
             Self::ScriptErrors => "BENILLASCRIPTERRORS",
+            // Same shape: a benilla addition, alias a literal in `build`.
+            Self::ConvertRaid => "BENILLACONVERTRAID",
         }
     }
 
     /// Every registered index — the registry proper. A reference command NOT in this list resolves
     /// nowhere and answers `HELP_TEXT_SIMPLE`, exactly as an unknown command does in the reference
     /// (better than a registered handler that silently does nothing).
-    const ALL: [Self; 37] = [
+    const ALL: [Self; 38] = [
         Self::Reply,
         Self::Join,
         Self::Leave,
@@ -191,6 +199,7 @@ impl SlashIndex {
         Self::Console,
         Self::ReloadUi,
         Self::ScriptErrors,
+        Self::ConvertRaid,
     ];
 }
 
@@ -315,6 +324,11 @@ impl SlashCommands {
                 Command::Slash(SlashIndex::ScriptErrors),
             );
         }
+        insert(
+            &mut by_alias,
+            "convertraid",
+            Command::Slash(SlashIndex::ConvertRaid),
+        );
         let added_aliases = by_alias.len() - slash_aliases - emote_aliases;
 
         // 4 · benilla's instruments, last so they can never shadow a shipped command.

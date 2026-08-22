@@ -73,18 +73,6 @@ pub(crate) struct RemoteMotion {
     /// not anything the server said. Read by the runaway watch in [`extrapolate_remote_units`].
     pub(crate) last_apply_ms: f64,
     pub(crate) last_apply_pos: [f32; 3],
-    /// **The settled memo** — the position at which this mover's last world resolve was a
-    /// fixed point: flag-still, grounded on a real support, and returned bitwise where it
-    /// started. While the frame's pre-resolve position still equals it, the resolve is skipped
-    /// whole — a standing NPC was paying a depenetration contact enumeration (heap Vec + broad
-    /// phase) plus a capsule down-cast every frame for a result proven identical (1473 §3's
-    /// idle-remote row; the coordinate round-trip is sign/permutation-lossless and
-    /// `grounded_step` is pure in its inputs, so bitwise equality is the honest test, the
-    /// `facing.rs` dead-band's shape). Anything that moves the mover — a packet apply, a
-    /// direction flag, the reconcile lerp, a jump arc — changes the position or flags and
-    /// misses the memo; a mover standing where ground has not streamed in never arms it
-    /// (`ground` was `None`) and keeps resolving until the world exists under it.
-    pub(crate) settled_at: Option<[f32; 3]>,
 }
 
 /// What [`crate::net::apply`]'s `unit_move` did with an inbound relayed move — the `out=` field of
@@ -209,16 +197,25 @@ const REMOTE_TRACE_MS: f64 = 500.0;
 ///   whose own client is stopped dead is the dead-reckon marching into the geometry (wrong), and it
 ///   is the "sinks in and pops out again and again" report.
 ///
+/// - **`drop`** — how far **below the Z its last packet carried** we are currently drawing this
+///   mover (`last_apply_pos[2] − wow_pos[2]`; negative means we are drawing it *above*). This is
+///   the number that falsifies the whole under-the-floor class, and `rem` shipped without it:
+///   `dz` is a per-frame delta, so a 1/36-yd-a-frame creep through a WMO floor reads as an
+///   ordinary healthy ground-follow sample after sample while it accumulates into decision 1545's
+///   measured 2.14 yd. A sustained nonzero `drop` on a mover whose `age` keeps climbing is us
+///   inventing a height the server never described.
+///
 /// `age` (ms since a packet last applied) rides along so a sample is never read as server truth.
 fn trace_remote(e: Entity, rm: &RemoteMotion, held: f32, dz: f32, now_ms: f64) {
     benilla_assets::trace::line(
         "rem",
         &format!(
-            "{e} flags={:#x} pos=[{:.2},{:.2},{:.2}] dz={dz:+.3} held={held:.3} age={:.0}ms",
+            "{e} flags={:#x} pos=[{:.2},{:.2},{:.2}] dz={dz:+.3} drop={:+.3} held={held:.3} age={:.0}ms",
             rm.flags,
             rm.wow_pos[0],
             rm.wow_pos[1],
             rm.wow_pos[2],
+            rm.last_apply_pos[2] - rm.wow_pos[2],
             now_ms - rm.last_apply_ms,
         ),
     );
@@ -241,6 +238,20 @@ pub(in crate::net) fn arrival_snap() -> bool {
 fn flat_extrapolation() -> bool {
     static FLAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAT.get_or_init(|| std::env::var_os("WOW_REMOTE_FLAT").is_some())
+}
+
+/// The A/B switch behind decision 1545: `WOW_REMOTE_IDLE_GATE=off` resolves **every** remote mover
+/// against the world, flag-still ones included — the pre-1545 leg, where a watched player standing
+/// inside a building whose floor collider has not attached yet is walked down through the floor at
+/// `STEP_SNAP_SLACK` (1/36 yd) a frame — 1.67 yd/s at 60 fps — and left on the terrain under
+/// it for the session. Kept as the lever that reproduces B197's player site on the *fixed* binary,
+/// the twin of [`flat_extrapolation`] (0626) and `WOW_CLAMP_SEAT=off` (1384), and for the same
+/// reason: the fix's evidence never has to depend on two different builds.
+fn idle_gate_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("WOW_REMOTE_IDLE_GATE").is_ok_and(|v| matches!(v.as_str(), "off" | "0"))
+    })
 }
 
 /// The reconcile-arm tolerance (squared yards): predicted-vs-event disagreement below this needs
@@ -397,6 +408,14 @@ pub(in crate::net) fn drain_pending_moves(
 /// comes from the ground under the mover **every frame**, and the dead-reckon cannot walk a watched
 /// player into geometry.
 ///
+/// **…for a mover the reference integrates at all** (decision 1545). One controller, every mover —
+/// but a mover with none of [`move_flags::INTEGRATED`] (`0x20ff`) set does not reach that controller
+/// in the first place: `CMovement::Update`'s substep loop and the manager's per-mover tick both bail
+/// on the same mask, and a flag-less unit is not even in the mover list. So a *standing* watched
+/// player keeps its last packet's pose verbatim — which is also the only safe answer, because the
+/// resolve has anything to correct only when our world is missing a floor the server has, and a
+/// building's late collider is exactly that.
+///
 /// Without it the extrapolation ran in a vacuum, and the two symptoms that follow are the ones the
 /// director reported. **Height:** [`RemoteMotion::advance`] never moves a grounded mover's Z, so Z
 /// changed only where a *packet* put it — at the apply, or dragged there by the pre-fire reconcile
@@ -492,10 +511,31 @@ pub(in crate::net) fn extrapolate_remote_units(
         // fight it).
         let airborne = rm.flags & move_flags::FALLING != 0;
         let afloat = rm.flags & move_flags::SWIMMING != 0;
-        // The settled memo ([`RemoteMotion::settled_at`]): an idle mover standing exactly where
-        // its last resolve left it re-derives nothing — the resolve is skipped, `held` honestly
-        // stays 0.
-        if !afloat && !riding && rm.settled_at != Some(pos) && !flat_extrapolation() {
+        // …and **a flag-still mover is not integrated at all** (decision 1545) — the reference's
+        // own gate, [`move_flags::INTEGRATED`] = `0x20ff`: `CMovement::Update`'s substep loop
+        // (`0x616e20`) and the manager's per-mover tick (`0x6166f5`) both bail on it, and wow-re
+        // records that such a unit "is not even in the mover list". Its pose is the last packet's,
+        // verbatim.
+        //
+        // That is not merely faithful, it is the only safe answer, because **our world can be
+        // missing a floor the server has**: the WMO's collider attaches structurally later than the
+        // terrain under it (1384 §1 — the ADT decode *starts* the WMO load, `finish_colliders`
+        // heads the chain, and the paced form furnisher gates the bake; 1303 measured the gap in
+        // seconds at a city pin). Standing still the election's reach collapses to
+        // `STEP_SNAP_SLACK` (1/36 yd), and `grounded_step`'s no-hit branch spends that whole
+        // reach *descending* — right for the local mover, whose next frame elects a real fall, and
+        // open-loop for a remote, which has no fall election at all. So the resolve walked a
+        // watched player through the floor at 1/36 yd a frame — 1.67 yd/s at 60 fps, 3.3 at 120 —
+        // onto the terrain below, where the (now deleted) settled memo froze them for the session.
+        // A standing player sends no packets, so nothing ever re-seated them: B197's fourth site,
+        // and nazriel_0's "until I move around, then it pops up back to normal".
+        //
+        // Deleting the memo with the gate is the point, not a side effect: it existed only to skip
+        // this resolve for a flag-still mover whose answer was proven identical (1473 §3), and the
+        // gate skips it strictly earlier and for a stated reason — taking the last un-dated
+        // collision cache (1384's part 3, never fixed on this lane) with it.
+        let integrating = rm.flags & move_flags::INTEGRATED != 0 || idle_gate_disabled();
+        if integrating && !afloat && !riding && !flat_extrapolation() {
             let half_h = Vec3::Y * (crate::player::CAPSULE_HEIGHT * 0.5);
             let from = wow_to_bevy(rm.wow_pos) + half_h;
             // The frame's velocity by construction. Grounded, [`RemoteMotion::advance`] never moves
@@ -506,17 +546,8 @@ pub(in crate::net) fn extrapolate_remote_units(
             } else {
                 Vec3::ZERO
             };
-            let (resolved_center, supported) = if airborne {
-                (
-                    crate::player::mover::airborne_step(
-                        &world,
-                        &capsule.0,
-                        from,
-                        vel,
-                        time.delta(),
-                    ),
-                    false,
-                )
+            let resolved_center = if airborne {
+                crate::player::mover::airborne_step(&world, &capsule.0, from, vel, time.delta())
             } else {
                 let g = crate::player::mover::grounded_step(
                     &world,
@@ -534,15 +565,9 @@ pub(in crate::net) fn extrapolate_remote_units(
                     // next packet's wire Z corrects whatever that misses.
                     crate::player::mover::Support::default(),
                 );
-                (g.center, g.ground.is_some())
+                g.center
             };
             let resolved = bevy_to_wow(resolved_center - half_h);
-            // Arm the memo only at the fixed point: flag-still, on real ground, and the resolve
-            // handed back exactly its input (one snap frame after stopping, the second resolve
-            // does — deterministically, the wow↔bevy round-trip being lossless). A miss on any
-            // term keeps resolving every frame.
-            rm.settled_at = (supported && rm.flags & move_flags::ANY_MOVE == 0 && resolved == pos)
-                .then_some(resolved);
             held = (pos[0] - resolved[0]).hypot(pos[1] - resolved[1]);
             pos = resolved;
         }
@@ -818,5 +843,184 @@ impl RemoteMotion {
         // Grounded/floating: no ballistic vertical (a jump/fall arc returns earlier; a swimmer's
         // vertical is the pitched axis above, position-integrated, not a persisted velocity).
         (pos, orientation, 0.0, speed)
+    }
+}
+
+/// **B197's fourth site — the *player* one** (decision 1545), in a world small enough to assert on:
+/// a watched mover standing inside a building whose floor collider has not attached yet.
+///
+/// The same three facts as `spline::under_floor`, which is that record's creature twin: the terrain
+/// is under the mover, the floor is not there yet, and it arrives later. What differs is the lane —
+/// a player owns its Z through [`extrapolate_remote_units`], never through the creature clamp — and
+/// therefore what the fix is: not a seat and an epoch, but **not running at all**. A flag-still
+/// mover is not integrated by the reference (`0x20ff`, [`move_flags::INTEGRATED`]), so it is not
+/// integrated here, and the incomplete world under it never gets to say anything.
+///
+/// Run under `WOW_REMOTE_IDLE_GATE=off` the standing test fails with **7.00 against 9.08** — the
+/// mover buried on the terrain under the building — which is the bug, on this same binary. So the
+/// test is known to test something (1384's own standard for its creature twin).
+#[cfg(test)]
+mod under_floor {
+    use avian3d::prelude::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+    use bevy::time::Real;
+    use std::time::Duration;
+
+    use super::{extrapolate_remote_units, RelayChain, RemoteMotion};
+    use crate::creature_anim::move_flags;
+    use crate::player::{PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS};
+    use benilla_world::collision::ColliderEpoch;
+
+    /// Auberdine's geometry, to the yard (the pin `spline::under_floor` is built on): terrain at
+    /// 6.98, the building's floor 2.08 above it, and the wire Z for a body standing on that floor
+    /// a hair above it — for a *player* that hair is their own client's resting clearance against
+    /// the very geometry we baked our collider from, so it is small by construction.
+    const TERRAIN_Y: f32 = 6.98;
+    const FLOOR_Y: f32 = 9.06;
+    const WIRE_Y: f32 = 9.08;
+    /// 60 fps, the rate the pre-1545 creep was measured at (it is frame-rate dependent — the
+    /// descent is per *frame*, not per second, which is half of why it had to go).
+    const FRAME: Duration = Duration::from_nanos(16_666_667);
+
+    /// A 10×10 up-wound quad at `y` — a floor the one-sided down-cast will stand on.
+    fn floor_at(app: &mut App, y: f32) -> Entity {
+        let verts = vec![
+            Vec3::new(-5.0, y, -5.0),
+            Vec3::new(5.0, y, -5.0),
+            Vec3::new(5.0, y, 5.0),
+            Vec3::new(-5.0, y, 5.0),
+        ];
+        app.world_mut()
+            .spawn((
+                RigidBody::Static,
+                Collider::trimesh(verts, vec![[0u32, 2, 1], [0, 3, 2]]),
+                Transform::default(),
+            ))
+            .id()
+    }
+
+    fn mover(flags: u32, wow_z: f32) -> RemoteMotion {
+        RemoteMotion {
+            wow_pos: [0.0, 0.0, wow_z],
+            orientation: 0.0,
+            flags,
+            pitch: 0.0,
+            speed: 0.0,
+            vertical_velocity: 0.0,
+            jump_xy_vel: [0.0; 2],
+            fall_start_z: None,
+            pending: std::collections::VecDeque::new(),
+            relay: RelayChain::default(),
+            last_apply_ms: 0.0,
+            last_apply_pos: [0.0, 0.0, wow_z],
+        }
+    }
+
+    /// The terrain in, the building's floor still building, and one mover standing at the Z the
+    /// wire gave it.
+    fn half_arrived_world(flags: u32) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();
+        app.insert_resource(PlayerCapsule(Collider::capsule(
+            CAPSULE_RADIUS,
+            CAPSULE_HEIGHT - 2.0 * CAPSULE_RADIUS,
+        )));
+        // `update()` never runs plugin `finish()`, where avian seats its diagnostics resources —
+        // and the update that lands the late floor below does step physics.
+        app.finish();
+        app.cleanup();
+        floor_at(&mut app, TERRAIN_Y);
+        let e = app
+            .world_mut()
+            .spawn((mover(flags, WIRE_Y), Transform::from_xyz(0.0, WIRE_Y, 0.0)))
+            .id();
+        app.update(); // seats Position/Rotation and the collider trees
+        (app, e)
+    }
+
+    fn frames(app: &mut App, n: usize) {
+        for _ in 0..n {
+            app.world_mut()
+                .resource_mut::<Time<Real>>()
+                .advance_by(FRAME);
+            app.world_mut()
+                .run_system_once(extrapolate_remote_units)
+                .expect("extrapolate");
+        }
+    }
+
+    fn z_of(app: &App, e: Entity) -> f32 {
+        app.world().get::<RemoteMotion>(e).unwrap().wow_pos[2]
+    }
+
+    #[test]
+    fn a_standing_mover_never_leaves_the_z_the_wire_gave_it() {
+        let (mut app, e) = half_arrived_world(0);
+
+        // Four seconds inside a building we have not finished building. Pre-1545 this was a
+        // 1/36-yd-a-frame descent: z=9.05 after one frame, on the terrain (6.98 + the capsule's
+        // SKIN_WIDTH = 7.00) inside 1.3 s, and stuck there — the reported screenshot.
+        frames(&mut app, 240);
+        assert_eq!(
+            z_of(&app, e),
+            WIRE_Y,
+            "a flag-still mover is not integrated: no floor under us is OUR gap, not its business"
+        );
+
+        // The building's floor collider attaches, and stamps the world.
+        floor_at(&mut app, FLOOR_Y);
+        app.world_mut().resource_mut::<ColliderEpoch>().bump();
+        app.update();
+
+        // Still nothing to do — it was already standing on that floor, which is what its own
+        // client resolved before the packet was ever sent. (Pre-1545 this is where it stayed
+        // buried: the settled memo had armed on the terrain hit and carried no epoch.)
+        frames(&mut app, 60);
+        assert_eq!(
+            z_of(&app, e),
+            WIRE_Y,
+            "the floor arrived under a mover that was already standing on it"
+        );
+    }
+
+    /// The control: 0626's resolve is untouched for a mover the reference *does* integrate.
+    #[test]
+    fn a_moving_mover_still_meets_the_world() {
+        let (mut app, e) = half_arrived_world(move_flags::FORWARD);
+        frames(&mut app, 240);
+        assert!(
+            z_of(&app, e) < WIRE_Y,
+            "a mover carrying a direction bit is integrated and resolved, as it was before 1545"
+        );
+    }
+
+    /// …and the A/B lever still reproduces the bug on this binary, which is what makes the row
+    /// above evidence rather than an assertion (0626's `WOW_REMOTE_FLAT`, 1384's `WOW_CLAMP_SEAT`).
+    /// Serialised against the other two by running in-process only when the env var is set, since
+    /// the lever is a process-wide `OnceLock`; `cargo test` sees it unset and skips.
+    #[test]
+    fn the_lever_reproduces_the_sink() {
+        if !super::idle_gate_disabled() {
+            return; // WOW_REMOTE_IDLE_GATE=off cargo test -p benilla-app the_lever_reproduces
+        }
+        let (mut app, e) = half_arrived_world(0);
+        frames(&mut app, 240);
+        // `-- --nocapture` prints the number decision 1545's table quotes.
+        println!(
+            "pre-1545 leg, 240 frames: z={:.4} (wire {WIRE_Y})",
+            z_of(&app, e)
+        );
+        assert!(
+            z_of(&app, e) < TERRAIN_Y + 0.1,
+            "the pre-1545 leg walks a standing mover down onto the terrain under the building"
+        );
     }
 }

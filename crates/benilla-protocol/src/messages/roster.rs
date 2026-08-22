@@ -63,9 +63,10 @@ pub struct CharEnumItem {
 }
 
 /// A character from `SMSG_CHAR_ENUM` — the full roster entry the character-select screen renders
-/// (decision 0465): identity, the five appearance bytes, zone/map/position, the display flags, and
-/// the visible equipment display ids. Only the guild id, first-login byte, pet triple, and first-bag
-/// pair are parsed for alignment and discarded (nothing at select renders them).
+/// (decision 0465): identity, the five appearance bytes, zone/map/position, the display flags, the
+/// visible equipment display ids, and the **pet triple** (the hunter/warlock companion standing
+/// beside the selected character). Only the guild id, first-login byte and first-bag pair are
+/// parsed for alignment and discarded (nothing at select renders them).
 #[derive(Debug, Clone)]
 pub struct Character {
     pub guid: u64,
@@ -92,6 +93,16 @@ pub struct Character {
     /// The 19 visible equipment slots (vanilla order: head, neck, shoulders, shirt, chest, waist,
     /// legs, feet, wrists, hands, finger×2, trinket×2, back, main hand, off hand, ranged, tabard).
     pub equipment: [CharEnumItem; 19],
+    /// The pet's `CreatureDisplayInfo.dbc` id — the companion the select screen stands beside the
+    /// character. **0 = no pet**, and that one test is the whole client-side gate: the server
+    /// already suppresses the triple for anything but a living hunter/warlock (vmangos
+    /// `Player::BuildEnumData` — `!GHOST && (CLASS_WARLOCK || CLASS_HUNTER)`), so no class or
+    /// ghost check belongs here.
+    pub pet_display_id: u32,
+    /// The pet's level, and its `CreatureFamily.dbc` id. Carried because they are the record's own
+    /// fields; **nothing renders them today** — the select screen's pet is display-id-driven.
+    pub pet_level: u32,
+    pub pet_family: u32,
 }
 
 impl Character {
@@ -113,9 +124,9 @@ impl Character {
         let _guild_id = read_u32_le(r)?;
         let flags = read_u32_le(r)?;
         let _first_login = read_u8(r)?;
-        let _pet_display_id = read_u32_le(r)?;
-        let _pet_level = read_u32_le(r)?;
-        let _pet_family = read_u32_le(r)?;
+        let pet_display_id = read_u32_le(r)?;
+        let pet_level = read_u32_le(r)?;
+        let pet_family = read_u32_le(r)?;
         let mut equipment = [CharEnumItem::default(); 19];
         for slot in &mut equipment {
             slot.display_id = read_u32_le(r)?;
@@ -140,6 +151,9 @@ impl Character {
             position,
             flags,
             equipment,
+            pet_display_id,
+            pet_level,
+            pet_family,
         })
     }
 }

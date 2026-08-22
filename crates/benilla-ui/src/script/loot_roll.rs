@@ -67,6 +67,13 @@ pub struct LootRollEntry {
     /// popup shows the instant `START_LOOT_ROLL` fires, so this nil is the common case for the first
     /// frames of every roll — both click arms drop it rather than posting an empty link.
     pub link: Option<String>,
+    /// `SMSG_LOOT_START_ROLL`'s `randomPropertyId` — the drop's **random-suffix roll**, which the
+    /// hover resolves against [`super::Model::random_properties`] for its enchant lines. `0` =
+    /// unrolled. The reference's `SetLootRollItem 0x5364a0` copies the same value into the
+    /// tooltip's `+0x424` and passes no item object, so the roll is the roll window's only enchant
+    /// source — the loot window's own shape (decision 1547). [`Self::name`] carries the suffix the
+    /// same id joins on.
+    pub random_property_id: u32,
 }
 
 /// Every group loot roll currently open, in the order the app opened them. Pushed whole each frame.
@@ -221,6 +228,7 @@ mod tests {
                     time_left_ms: 42_000,
                     item_id: 17182,
                     link: Some("|cffa335ee|Hitem:17182:0:0:0|h[Staff of Jordan]|h|r".into()),
+                    random_property_id: 0,
                 },
                 // An in-flight item: the roll opened, the item-template answer hasn't landed.
                 LootRollEntry {
@@ -233,6 +241,7 @@ mod tests {
                     time_left_ms: 60_000,
                     item_id: 4306,
                     link: None,
+                    random_property_id: 0,
                 },
             ],
         }

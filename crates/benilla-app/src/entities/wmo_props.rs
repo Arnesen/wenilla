@@ -260,6 +260,19 @@ pub(super) fn spawn_wmo_gameobject_props(
                 }
                 slot
             });
+            // This path never diverts (below), so the identity only names the kind and what the
+            // parts are — the GameObject's own `WorldObject` is what a pick on the ship answers
+            // with, inserted by `entities::attach` on the parts it owns.
+            let object = std::sync::Arc::new(benilla_world::interact::WorldObject {
+                kind: benilla_world::model_render::ModelKind::Doodad,
+                label: prop
+                    .handle
+                    .path()
+                    .map(|p| p.path().to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                id: 0,
+                detail: "WMO gameobject prop".into(),
+            });
             let SpawnedModel {
                 entities: ents,
                 host,
@@ -272,7 +285,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &m.submeshes,
                 forms.slices(&prop.handle),
                 prop.local, // doodad-LOCAL — the parent composes the world pose
-                false,
+                &object,
                 // Deck props: plain matte, like a terrain exterior prop on lit ground (a boat is
                 // never MCSH-shadowed). Interior props: the selector is unread — the probe lane.
                 ShadeSel::Matte,

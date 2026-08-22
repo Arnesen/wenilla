@@ -157,6 +157,7 @@ pub(super) fn disconnected(
     mail: &mut MailOpen,
     mail_pending: &mut crate::ui_mail::MailPending,
     trade: &mut crate::ui_trade::TradeSession,
+    auction: &mut crate::ui_auction::AuctionOpen,
     bank: &mut crate::ui_bank::BankOpen,
     duel: &mut crate::ui_duel::DuelState,
     social: &mut crate::ui_social::SocialState,
@@ -221,6 +222,10 @@ pub(super) fn disconnected(
     // The arrival countdown is login-scoped (decision 0544 P3): a fresh login re-queries
     // `MSG_QUERY_NEXT_MAIL_TIME` at world-enter, so nothing carries over across a reconnect.
     *mail_pending = crate::ui_mail::MailPending::default();
+    // An open auction house dies with the socket (decision 1511): every auction command
+    // re-validates the auctioneer server-side, so a session that survived a reconnect would be a
+    // window whose every button silently failed.
+    auction.clear_session();
     // An open trade dies with the socket too (decision 0592) — the reconnect starts with no trade.
     trade.clear_session();
     // The bank window dies with the socket (decision 0604) — a reconnect re-opens via the banker.

@@ -482,6 +482,12 @@ pub(super) fn drain_chat_input(
                     let _ = commands.0.send(ClientCommand::GroupInvite { name });
                 }
             }
+            // Fire-and-forget: the server judges leader/group state and answers with either a
+            // raid-typed SMSG_GROUP_LIST (the "joined a raid group" line rides the apply) or a
+            // SMSG_PARTY_COMMAND_RESULT error, both already handled.
+            ParsedChat::ConvertRaid => {
+                let _ = commands.0.send(ClientCommand::GroupRaidConvert);
+            }
             ParsedChat::Uninvite { name } => {
                 if let Some(name) =
                     name.or_else(|| target_player_name(&selection, &mut names, &commands))

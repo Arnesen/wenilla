@@ -46,7 +46,9 @@ pub use wdt::{WdtIndex, WdtIndexLoader};
 mod blp;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
 mod m2;
-pub use m2::{M2Model, M2ModelLoader, ModelEmitter, ModelLight, ModelRibbon, PortraitCamera};
+pub use m2::{
+    EmitterBillboard, M2Model, M2ModelLoader, ModelEmitter, ModelLight, ModelRibbon, PortraitCamera,
+};
 mod wmo;
 pub use benilla_formats::{WmoPortalInfo, WmoPortalRef};
 pub use wmo::{

@@ -12,15 +12,21 @@
 //! |---|---|---|
 //! | 0 | 0x00 | `ID` — 1..28 with gaps (10, 13, 14, 18, 22 are absent) |
 //! | 1 | 0x04 | `minScale`, a **float** (0.4 … 1.0) |
-//! | 2 | 0x08 | `minScaleLevel` — 1 for every hunter family, 0 for the warlock ones and row 28 |
+//! | 2 | 0x08 | `minScaleLevel` — **1 on all 22 real families**, warlock minions included; 0 only on row 28 |
 //! | 3 | 0x0c | `maxScale`, a **float** (0.6 … 1.1) |
-//! | 4 | 0x10 | `maxScaleLevel` — 60, or 0 on the same rows |
+//! | 4 | 0x10 | `maxScaleLevel` — **60 on all 22**; 0 only on row 28 |
 //! | 5 | 0x14 | `skillLine[0]` — a `SkillLine.dbc` id (188…758), distinct on every row |
 //! | 6 | 0x18 | `skillLine[1]` — 270 on every tameable family, 0 on the rest |
 //! | 7 | 0x1c | **`petFoodMask`** — the bitfield this module's other half indexes |
 //! | 8..15 | 0x20 | the localized `Name` block; **enUS is field 8**, the other seven are all zero |
 //! | 16 | 0x40 | the name block's locale-present flags (0x7EFFFE or 0x3F007E) — **not** zero |
 //! | 17 | 0x44 | `iconFile` — `Interface\Icons\Ability_Hunter_Pet_*` (a string, not a dword) |
+//!
+//! (The 2026-08-06 dump's note that the level columns are "0 for the warlock ones" was wrong, and
+//! is corrected above off the shipped file: Imp/Voidwalker/Succubus/Felhunter/Doomguard all read
+//! 1 → 60 like every hunter family, and simply carry `minScale == maxScale` so their ramp is flat.
+//! Only "Remote Control" (row 28) is 0/0/0/0. It matters because those four columns are the
+//! character-select pet's SIZE — decision 1538.)
 //!
 //! That confirms the `0x48` record and the 23 rows [`crate::pet_stats`]'s header already recorded,
 //! and **corrects its "every dword from `0x28` up is zero"**: fields 10..15 (`0x28`–`0x3c`) are
@@ -64,7 +70,7 @@ use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::chain::Chain;
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::{f32_at, parse, str_at, u32_at};
 
 const CREATURE_FAMILY: &str = "DBFilesClient\\CreatureFamily.dbc";
 const ITEM_PET_FOOD: &str = "DBFilesClient\\ItemPetFood.dbc";
@@ -75,6 +81,13 @@ const FAMILY_FIELDS: usize = 18;
 /// `ItemPetFood.dbc`'s column count.
 const FOOD_FIELDS: usize = 10;
 
+/// `CreatureFamily.dbc`'s level → size ramp — bytes `0x04`/`0x08`/`0x0c`/`0x10`, i.e. fields 1–4.
+/// (Written as indices, not the `byte / 4` the columns below use: `0x04 / 4` is `4 / 4`, which
+/// clippy's `eq_op` reads as a mistake — and it is not worth an allow to keep one idiom.)
+const FAMILY_MIN_SCALE_FIELD: usize = 1;
+const FAMILY_MIN_SCALE_LEVEL_FIELD: usize = 2;
+const FAMILY_MAX_SCALE_FIELD: usize = 3;
+const FAMILY_MAX_SCALE_LEVEL_FIELD: usize = 4;
 /// `CreatureFamily.dbc`'s pet-food mask — byte `0x1c` = field 7.
 const FAMILY_FOOD_MASK_FIELD: usize = 0x1c / 4;
 /// `CreatureFamily.dbc`'s enUS `Name` — byte `0x20` = field 8.
@@ -90,8 +103,9 @@ const FOOD_NAME_FIELD: usize = 1;
 /// Turtle's "Raw Fish"). Bits above this are ignored rather than fabricating rows.
 const MAX_FOOD_BITS: u32 = 8;
 
-/// One `CreatureFamily.dbc` row, reduced to its two live columns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One `CreatureFamily.dbc` row, reduced to its live columns: the family word, the diet mask, and
+/// the **level → size ramp**.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CreatureFamily {
     /// The localized family word — "Wolf", "Imp", "Wind Serpent". What `UnitCreatureFamily` pushes.
     pub name: String,
@@ -99,6 +113,46 @@ pub struct CreatureFamily {
     /// Succubus, Felhunter, Doomguard all ship a zero mask, and so does row 28 ("Remote Control") —
     /// which is why a diet list can be legitimately empty without anything having gone wrong.
     pub pet_food_mask: u32,
+    /// The size ramp's ends (fields 1–4): the model scale at `min_scale_level` and at
+    /// `max_scale_level`. See [`CreatureFamily::scale_at`].
+    pub min_scale: f32,
+    pub min_scale_level: u32,
+    pub max_scale: f32,
+    pub max_scale_level: u32,
+}
+
+impl CreatureFamily {
+    /// **A pet's render scale at a level** — the character-select pet's whole size law (decision
+    /// 1538, wow-re `glue/scratch/glue-select-pet.md`):
+    ///
+    /// ```text
+    /// S = minScale + (maxScale − minScale) · clamp(level − minScaleLevel, 0, range) / range
+    /// range = maxScaleLevel − minScaleLevel
+    /// ```
+    ///
+    /// This is what the reference actually sizes the select pet with. It *also* computes the
+    /// familiar `CreatureModelData.modelScale × CreatureDisplayInfo.scale` product one instruction
+    /// earlier and then **overwrites it** with this (`0x472e87 fstp`) — the product survives only
+    /// when the family lookup misses, which for a real pet it never does.
+    ///
+    /// Every one of the 22 real families ramps 1 → 60, so a freshly tamed wolf really is visibly
+    /// smaller than a level-60 one (Wolf 0.7 → 1.0, Crab 0.7 → 1.4, Spider 0.4 → 0.6); the warlock
+    /// minions ship `min == max`, so theirs is flat at every level (Imp 0.5, Voidwalker 0.8,
+    /// Succubus and Doomguard 1.0, Felhunter 0.7).
+    ///
+    /// **`None` for a degenerate ramp** — `range <= 0`, which only row 28 ("Remote Control", all
+    /// four columns 0) ships. The reference has no guard there and divides by zero into a NaN
+    /// scale; that is a defect of the original, not a mechanism, so we answer "no ramp" and let the
+    /// caller take the product fallback the reference itself takes on a lookup miss.
+    pub fn scale_at(&self, level: u32) -> Option<f32> {
+        let range = self.max_scale_level.checked_sub(self.min_scale_level)?;
+        if range == 0 {
+            return None;
+        }
+        let over = level.saturating_sub(self.min_scale_level).min(range);
+        let t = over as f32 / range as f32;
+        Some(self.min_scale + (self.max_scale - self.min_scale) * t)
+    }
 }
 
 /// `CreatureFamily.dbc`, by id.
@@ -118,6 +172,13 @@ impl CreatureFamilies {
     /// The localized family word for an id — [`Self::get`]'s name half.
     pub fn name(&self, id: u32) -> Option<&str> {
         self.get(id).map(|f| f.name.as_str())
+    }
+
+    /// A pet's render scale from its family and level — [`CreatureFamily::scale_at`] over
+    /// [`Self::get`]. `None` for an unknown family (including the wire's `0`) or a degenerate ramp;
+    /// the caller then takes the display's own scale product, as the reference does.
+    pub fn pet_scale(&self, family: u32, level: u32) -> Option<f32> {
+        self.get(family)?.scale_at(level)
     }
 
     pub fn len(&self) -> usize {
@@ -213,6 +274,10 @@ pub fn load_creature_families(chain: &mut Chain) -> Result<CreatureFamilies> {
             CreatureFamily {
                 name,
                 pet_food_mask: u32_at(r, FAMILY_FOOD_MASK_FIELD).unwrap_or(0),
+                min_scale: f32_at(r, FAMILY_MIN_SCALE_FIELD).unwrap_or(1.0),
+                min_scale_level: u32_at(r, FAMILY_MIN_SCALE_LEVEL_FIELD).unwrap_or(0),
+                max_scale: f32_at(r, FAMILY_MAX_SCALE_FIELD).unwrap_or(1.0),
+                max_scale_level: u32_at(r, FAMILY_MAX_SCALE_LEVEL_FIELD).unwrap_or(0),
             },
         );
     }
@@ -242,6 +307,65 @@ mod tests {
     fn chain() -> Option<Chain> {
         let data = crate::wow_data_or_skip!(None);
         Some(crate::open_chain(&data).expect("open chain"))
+    }
+
+    /// **The level → size ramp, off the shipped file** (decision 1538) — the character-select pet's
+    /// whole size law, and four columns that fail silently if they slide: misread one and every pet
+    /// is simply the wrong size, which no other assertion here would catch.
+    ///
+    /// The load-bearing shape is that **all 22 real families ramp 1 → 60**, warlock minions
+    /// included — they are flat only because `min == max`, not because their level columns are
+    /// zero. Row 28 ("Remote Control") is the sole 0/0/0/0 row, and the sole `None`.
+    #[test]
+    fn the_family_size_ramp_reads_off_the_shipped_file() {
+        let Some(mut chain) = chain() else { return };
+        let fams = load_creature_families(&mut chain).expect("families");
+
+        // Every real family ramps across the same 1 → 60 band.
+        for (id, f) in (1..=27).filter_map(|id| fams.get(id).map(|f| (id, f))) {
+            assert_eq!(
+                (f.min_scale_level, f.max_scale_level),
+                (1, 60),
+                "family {id} ({}) does not ramp 1 → 60",
+                f.name
+            );
+        }
+
+        // A hunter family really does grow: Wolf 0.7 at level 1 → 1.0 at 60, linear between.
+        let wolf = fams.get(1).expect("Wolf");
+        assert_eq!(wolf.name, "Wolf");
+        assert!((wolf.scale_at(1).unwrap() - 0.7).abs() < 1e-6);
+        assert!((wolf.scale_at(60).unwrap() - 1.0).abs() < 1e-6);
+        let mid = wolf.scale_at(30).unwrap();
+        assert!(
+            (mid - (0.7 + 0.3 * 29.0 / 59.0)).abs() < 1e-6,
+            "midpoint {mid} is not on the line"
+        );
+        // …and the ramp CLAMPS at both ends rather than extrapolating.
+        assert_eq!(wolf.scale_at(0), wolf.scale_at(1));
+        assert_eq!(wolf.scale_at(255), wolf.scale_at(60));
+
+        // The warlock minions are flat — same band, `min == max`.
+        for (id, want) in [(23, 0.5_f32), (16, 0.8), (15, 0.7), (17, 1.0), (19, 1.0)] {
+            let f = fams.get(id).expect("warlock family");
+            for level in [1, 30, 60] {
+                let s = f.scale_at(level).expect("a real family ramps");
+                assert!(
+                    (s - want).abs() < 1e-6,
+                    "{} at level {level} is {s}, expected a flat {want}",
+                    f.name
+                );
+            }
+        }
+
+        // The one degenerate row: no ramp, and NOT a NaN.
+        let remote = fams.get(28).expect("Remote Control");
+        assert_eq!(remote.scale_at(60), None);
+
+        // Unknown families (the wire's `0` for every non-pet) answer None, not a fabricated size.
+        assert_eq!(fams.pet_scale(0, 60), None);
+        assert_eq!(fams.pet_scale(10, 60), None); // a real id-space gap
+        assert!((fams.pet_scale(1, 60).unwrap() - 1.0).abs() < 1e-6);
     }
 
     /// The real 5875 `CreatureFamily.dbc`, byte-anchored: 23 rows, the ids with their gaps, and

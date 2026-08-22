@@ -19,6 +19,7 @@ mod action_bar;
 pub mod addons;
 mod area_trigger;
 mod attack;
+mod auction;
 mod bank;
 mod binder;
 mod channel;
@@ -66,6 +67,12 @@ pub use action_bar::{
 pub use addons::{SecureAddon, STANDARD_MODULUS_CRC, STOCK_SECURE_ADDONS};
 pub use area_trigger::area_trigger;
 pub use attack::{attack_swing, AttackerState};
+pub use auction::{
+    auction_action, auction_duration, auction_error, auction_filter, auction_hello,
+    auction_list_bidder_items, auction_list_items, auction_list_owner_items, auction_place_bid,
+    auction_remove_item, auction_sell_item, AuctionBidderNotification, AuctionCommandTail,
+    AuctionListEntry, AuctionOwnerNotification, AUCTION_PAGE_SIZE, AUCTION_RECORD_BYTES,
+};
 pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,
 };

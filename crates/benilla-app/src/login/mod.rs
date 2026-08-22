@@ -444,7 +444,8 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
 /// boxes / press the buttons / toggle the checkbox.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn login_input(
-    presses: Query<(&LoginAction, &Interaction), Changed<Interaction>>,
+    presses: Query<(Entity, &LoginAction, Ref<Interaction>)>,
+    clicks: Res<crate::glue::GlueClicks>,
     mut keyboard: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     // The host pasteboard + the window handle the Wayland backend needs (decision 0702).
@@ -470,21 +471,41 @@ fn login_input(
     // While a dialog is up it owns the input; the box/button surface underneath is inert.
     let dialog_open = dialog.kind.is_some();
 
-    for (action, interaction) in &presses {
-        if *interaction != Interaction::Pressed || dialog_open {
+    // **The edit boxes focus on the PRESS**, and only they. The reference's `CEditBox` takes focus
+    // from its own OnMouseDown handler (`0x77b800`), unconditionally and autoFocus-independent
+    // (wow-re `ui.md`) — an edit box is not a Button and does not wait for the release. Every
+    // *button* on this screen fires from the release loop below (1533).
+    for (entity, action, interaction) in &presses {
+        if dialog_open {
+            continue;
+        }
+        // **The edit boxes focus on the PRESS**, and only they: the reference's `CEditBox` takes
+        // focus from its own OnMouseDown handler (`0x77b800`), unconditionally and
+        // autoFocus-independent (wow-re `ui.md`) — an edit box is not a Button and does not wait
+        // for the release. `Ref` supplies the press *edge* the old `Changed<Interaction>` filter
+        // gave, without costing this system a second query.
+        if interaction.is_changed() && *interaction == Interaction::Pressed {
+            match action {
+                // A click takes the focus the same way TAB does — including the solid caret the
+                // fresh focus starts on, so the box you just clicked never answers with a blank
+                // half-period.
+                LoginAction::FocusAccount => {
+                    form.focus = Field::Account;
+                    form.focused().reset_blink();
+                }
+                LoginAction::FocusPassword => {
+                    form.focus = Field::Password;
+                    form.focused().reset_blink();
+                }
+                _ => {}
+            }
+        }
+        // Everything else on this screen is a Button, and a Button fires on the RELEASE (1533).
+        if !clicks.hit(entity) {
             continue;
         }
         match action {
-            // A click takes the focus the same way TAB does — including the solid caret the fresh
-            // focus starts on, so the box you just clicked never answers with a blank half-period.
-            LoginAction::FocusAccount => {
-                form.focus = Field::Account;
-                form.focused().reset_blink();
-            }
-            LoginAction::FocusPassword => {
-                form.focus = Field::Password;
-                form.focused().reset_blink();
-            }
+            LoginAction::FocusAccount | LoginAction::FocusPassword => {} // focused on the press
             LoginAction::Login => do_login = true,
             LoginAction::Quit => do_quit = true,
             LoginAction::ToggleSave => {
@@ -670,7 +691,8 @@ fn drive_dialog(
     assets: Res<AssetServer>,
     strings: Option<Res<GlueStrings>>,
     keys: Res<ButtonInput<KeyCode>>,
-    presses: Query<(&LoginAction, &Interaction), Changed<Interaction>>,
+    buttons: Query<(Entity, &LoginAction)>,
+    clicks: Res<crate::glue::GlueClicks>,
     mut texts: Query<&mut Text, With<screen::DialogText>>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
@@ -714,9 +736,9 @@ fn drive_dialog(
     }
 
     // The one button (or its keys).
-    let mut pressed = presses
+    let mut pressed = buttons
         .iter()
-        .any(|(a, i)| matches!(a, LoginAction::Dialog) && *i == Interaction::Pressed);
+        .any(|(e, a)| matches!(a, LoginAction::Dialog) && clicks.hit(e));
     if keys.just_pressed(KeyCode::Escape) {
         pressed = true;
     }
