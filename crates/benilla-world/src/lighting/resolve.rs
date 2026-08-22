@@ -1,8 +1,8 @@
 //! The per-frame time-of-day RESOLVE: samples `Light.dbc` against the effective game clock (server
 //! clock, manual debug-panel scrub, or the pre-connect noon fallback) into a fresh [`super::WowLighting`]
 //! — the scene-fog stage, the camera-in-WMO interior-fog crossfade ([`WmoFogRamp`]), and the startup
-//! seed ([`setup_lighting`]) all live here, plus the [`fog_range`] helper the player camera's far plane
-//! borrows. Split from the resource type + plugin registration in `super`.
+//! seed ([`setup_lighting`]) all live here. Split from the resource type + plugin registration in
+//! `super`.
 
 use bevy::prelude::*;
 
@@ -12,17 +12,9 @@ use crate::view::WorldCamera;
 use crate::world_map::CurrentMap;
 use benilla_assets::coords::bevy_to_wow;
 use benilla_assets::{LockRecover, WorldAssets};
-use benilla_formats::{Atmosphere, LightCatalog, TILE_SIZE};
+use benilla_formats::{Atmosphere, LightCatalog};
 
 use super::{daynight, quantize_glow, ClockSource, GameClock, LightSampler, WowLighting};
-
-/// The default (non-haze) distance-fog range for a given tile load radius: anchored at the radius-1
-/// look (350→1100 yd), extended one `TILE_SIZE` per extra ring so a larger radius reveals more terrain
-/// before the fade. Shared by the lighting fog baseline and the player camera's far plane / seed fog.
-pub fn fog_range(tile_radius: u32) -> (f32, f32) {
-    let end = 1100.0 + tile_radius.saturating_sub(1) as f32 * TILE_SIZE;
-    (end - 750.0, end)
-}
 
 /// The scene-fog stage (`dn_scene_fog 0x6cee30`, wow-re `rf-weather-fog-veil.md`): resolve the
 /// **pushed** `(start, end)` fog pair from the blended bands. `end = min(zone_end, farclip)` — the

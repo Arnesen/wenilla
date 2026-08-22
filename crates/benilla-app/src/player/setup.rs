@@ -11,9 +11,8 @@ use bevy::render::view::Hdr;
 use benilla_assets::coords::wow_to_bevy;
 
 use benilla_assets::{RenderConfig, WorldAssets};
-use benilla_world::lighting::fog_range;
 use benilla_world::terrain_stream::SPAWN_XY;
-use benilla_world::view::{WorldCamera, CAM_FOVY, CAM_NEAR};
+use benilla_world::view::{WorldCamera, CAM_FAR, CAM_FOVY, CAM_NEAR};
 
 use super::{
     CameraControl, CameraProbe, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_COLLISION_RADIUS,
@@ -75,16 +74,16 @@ pub(super) fn setup_player(
     });
 
     // No client data → free-fly an empty scene.
-    let (Some(config), Some(_)) = (config, world_assets) else {
+    let (Some(_), Some(_)) = (config, world_assets) else {
         spawn_fallback_camera(&mut commands);
         return;
     };
 
     // Camera starts above the spawn (terrain streams in around it); `control` repositions it
-    // third-person once we're in the world. The far plane is sized from the load radius (the
-    // radius-derived view range); distance fog itself is added back in the lighting rebuild (step 5).
+    // third-person once we're in the world. The projection far is the horizon plane
+    // (`view::CAM_FAR`); the detailed world ends at `farclip`, by the wall, not by this plane.
     let spawn = wow_to_bevy([SPAWN_XY.0, SPAWN_XY.1, 100.0]);
-    let cam_far = (fog_range(config.tile_radius).1 + 800.0).max(3000.0);
+    let cam_far = CAM_FAR;
     let mut world_cam = commands.spawn((
         Camera3d::default(),
         // THE world camera (the portrait booths are further `Camera3d`s — every "where is the viewer"

@@ -79,14 +79,9 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
         );
         return;
     };
-    // Default 2 (a 5×5 block, ~1066 yd) so loaded terrain extends a buffer past the ~777 yd far-clip
-    // wall — tiles are resident before the wall reveals them, no streaming pop-in. Geometry beyond the
-    // wall is clipped/culled anyway. Lower $WOW_TILE_RADIUS to 1 to shrink the working set (less view
-    // distance / better perf); raise it for more buffer.
-    let tile_radius = std::env::var("WOW_TILE_RADIUS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
+    // How much terrain is resident is NOT a knob here: the streamer derives its window from the
+    // live `farclip` (`view::ViewDistance`, the player's Terrain Distance setting) the way the
+    // reference does — `terrain_stream::window`, decision 1513. `$WOW_TILE_RADIUS` is retired.
     // Ground-texture repeats per chunk; tunable live in the panel afterward.
     let tex_tiles = std::env::var("WOW_TEX_TILES")
         .ok()
@@ -99,7 +94,6 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
     commands.insert_resource(RenderConfig {
-        tile_radius,
         tex_tiles,
         unload_budget,
     });

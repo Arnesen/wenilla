@@ -417,6 +417,7 @@ fn emit_minimap(
         names,
         go_templates,
         locks,
+        poi_marker,
     ) = blip_inputs;
     // Hover resets every frame; the blip pass below re-establishes it while the map draws.
     *blip_hover = blips::MinimapBlipHover::None;
@@ -749,10 +750,14 @@ fn emit_minimap(
     });
     let mut hover = blips::MinimapBlipHover::None;
     if let Some(ctx) = &blip_ctx {
-        if let (Some(tex), Some(pois)) = (&assets.landmark, &assets.pois) {
+        // The guard-directions marker rides this pass as a landmark candidate, the way the
+        // reference appends its static blip slot after the DBC scan — so it draws even when
+        // `AreaPOI.dbc` failed to load, and the pass runs on the arrow art alone.
+        if let Some(tex) = &assets.landmark {
             blips::emit_landmarks(
                 ctx,
-                pois,
+                assets.pois.as_ref(),
+                poi_marker.on_map(map.0),
                 map.0,
                 tex,
                 assets.poi.as_ref(),

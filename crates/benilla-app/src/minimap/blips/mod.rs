@@ -42,7 +42,15 @@
 //! are plain textured quads (measured from the real M2s), so the flat-sprite stand-in is
 //! geometry-exact at the model's own quad size — no uv crop, the padding is authored.
 //!
-//! Remaining residue: the rim arrow model stacks SIX copies of its quad (an alpha-layering
+//! **The guard's directions marker** ([`crate::poi_marker`], decisions 1514/1516) is a landmark
+//! candidate like any other, appended after the DBC filter the way the reference appends its
+//! static blip slot — everything above applies to it unchanged.
+//!
+//! Remaining residue: two gates the landmark selection here does NOT yet implement, both found by
+//! the 1516 §5 and both belonging to the DBC rows rather than the marker — a `WorldStateID` gate
+//! at `0x6d9b27`, and a different rim-arrow model id per source (`0xa6` landmark, `0xa7` corpse,
+//! `0xa8` the guard marker, `0x4ed349`-`0x4ed37b`) where we draw one arrow for all three. Also:
+//! the rim arrow model stacks SIX copies of its quad (an alpha-layering
 //! trick that solidifies the soft texture edges) — we draw one, a brightness nuance for the
 //! director's eye; dots re-project every frame where the reference draws ~1 Hz-stale
 //! snapshot coords verbatim (a throttle quirk, deliberately not aped — positions agree for
@@ -127,7 +135,8 @@ pub(crate) enum MinimapBlipHover {
 /// ceiling: the quest-status store, the guid→entity index + unit positions, the cursor's
 /// window, the hover-out slot, the party state, and the tracking-dot inputs (candidates,
 /// our own descriptor's masks, the creature/GO template caches, `Lock.dbc`), plus the
-/// `uiScale` dial the tooltip's cursor seat converts through.
+/// `uiScale` dial the tooltip's cursor seat converts through, and the guard-directions marker
+/// the landmark pass draws as a candidate.
 pub(super) type BlipInputs<'w, 's> = (
     Res<'w, crate::ui_quest::QuestGiver>,
     Res<'w, GuidIndex>,
@@ -141,6 +150,7 @@ pub(super) type BlipInputs<'w, 's> = (
     Res<'w, NameCache>,
     Res<'w, GameObjectTemplates>,
     Option<Res<'w, crate::go_templates::Locks>>,
+    Res<'w, crate::poi_marker::PoiMarker>,
 );
 
 /// Every streamed object the tracking classifier considers (our own avatar excluded — the
@@ -201,8 +211,15 @@ pub(super) struct LandmarkSelection<'a> {
 /// The byte-verified landmark selection: candidacy (`ContinentID` + `Flags&1`), the 0.8
 /// in/out split against the live view radius, and the out-of-range nearest-3 ranked by
 /// (`Importance` signed asc, dist asc) within 694.444 yd.
+///
+/// `marker` is the guard-directions POI ([`crate::poi_marker`]) — the reference appends its
+/// static blip slot to the candidate list *after* the DBC scan, so it bypasses the candidacy
+/// gate and then competes as an equal for the rim slots. Equal, and no more: it gets **no**
+/// exemption from the 694.444-yd rank cut (that belongs to the corpse slot `0xcea848`, the only
+/// candidate `0x6d9cc2` spares — wow-re `gossip-poi-marker.md`).
 pub(super) fn select_landmarks<'a>(
     pois: impl Iterator<Item = &'a AreaPoi>,
+    marker: Option<&'a AreaPoi>,
     map_id: u32,
     wx: f32,
     wy: f32,
@@ -210,7 +227,10 @@ pub(super) fn select_landmarks<'a>(
 ) -> LandmarkSelection<'a> {
     let mut icons = Vec::new();
     let mut arrows: Vec<(f32, &AreaPoi)> = Vec::new();
-    for p in pois.filter(|p| p.continent_id == map_id && p.flags & FLAG_CANDIDATE != 0) {
+    let candidates = pois
+        .filter(|p| p.continent_id == map_id && p.flags & FLAG_CANDIDATE != 0)
+        .chain(marker);
+    for p in candidates {
         let d = ((p.pos[0] - wx).powi(2) + (p.pos[1] - wy).powi(2)).sqrt();
         if d / radius_yd <= BLIP_EDGE_RATIO {
             if p.flags & FLAG_IN_RANGE_ICON != 0 {
@@ -245,7 +265,8 @@ fn poi_icon_cell(icon: u32) -> Option<[f32; 4]> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_landmarks(
     ctx: &BlipCtx,
-    cat: &AreaPoiCatalog,
+    cat: Option<&AreaPoiCatalog>,
+    marker: Option<&AreaPoi>,
     map_id: u32,
     arrow_tex: &Handle<Image>,
     poi_icons: Option<&Handle<Image>>,
@@ -253,7 +274,8 @@ pub(super) fn emit_landmarks(
     hover: &mut MinimapBlipHover,
 ) {
     let sel = select_landmarks(
-        cat.rows().map(|(_, p)| p),
+        cat.into_iter().flat_map(|c| c.rows().map(|(_, p)| p)),
+        marker,
         map_id,
         ctx.wx,
         ctx.wy,
@@ -450,7 +472,7 @@ mod tests {
             poi(3, 0x1d, 556.0, "Stormwind"),
             poi(3, 0x5, 601.0, "Goldshire"),
         ];
-        let sel = select_landmarks(rows.iter(), 0, 0.0, 0.0, 133.0);
+        let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 133.0);
         assert!(sel.icons.is_empty(), "no Flags&2 row is in range");
         let names: Vec<&str> = sel.arrows.iter().map(|(_, p)| p.name.as_str()).collect();
         assert_eq!(names, ["Stormwind", "Goldshire"]);
@@ -468,9 +490,57 @@ mod tests {
             poi(3, 1, 400.0, "city-mid"),
             poi(0, 1, 695.0, "beyond-rank"),
         ];
-        let sel = select_landmarks(rows.iter(), 0, 0.0, 0.0, 100.0);
+        let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 100.0);
         let names: Vec<&str> = sel.arrows.iter().map(|(_, p)| p.name.as_str()).collect();
         assert_eq!(names, ["minor-near", "minor-far", "city-near"]);
+    }
+
+    /// The guard's directions marker ([`crate::poi_marker`]) is a landmark candidate like any
+    /// other — and, carrying the reference's `Importance 0`, it takes a rim slot ahead of the
+    /// town/city rows a capital is thick with. Out of the four here only three arrows draw, and
+    /// the marker is one of them despite being the farthest.
+    #[test]
+    fn the_guard_marker_competes_for_a_rim_slot_and_outranks_the_cities() {
+        let cities = [
+            poi(3, 0x1d, 200.0, "Stormwind"),
+            poi(3, 0x5, 300.0, "Goldshire"),
+            poi(3, 0x5, 400.0, "Northshire Abbey"),
+        ];
+        let marker = poi(0, 0x63, 500.0, "Stormwind Warrior Trainer");
+        let sel = select_landmarks(cities.iter(), Some(&marker), 0, 0.0, 0.0, 133.0);
+        let names: Vec<&str> = sel.arrows.iter().map(|(_, p)| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Stormwind Warrior Trainer", "Stormwind", "Goldshire"],
+            "Importance 0 ranks the marker first; the third city is crowded out"
+        );
+    }
+
+    /// In range, the marker draws its own `POIIcons` cell at its true position — `Flags & 2` is
+    /// set on every 5875-era `points_of_interest` row (99 = 0x63), so unlike an ordinary town it
+    /// keeps drawing once you are close.
+    #[test]
+    fn the_guard_marker_draws_its_icon_in_range() {
+        let marker = poi(0, 0x63, 50.0, "The Bank");
+        let sel = select_landmarks(std::iter::empty(), Some(&marker), 0, 0.0, 0.0, 133.0);
+        assert!(sel.arrows.is_empty(), "in range — no rim arrow");
+        assert_eq!(sel.icons.len(), 1);
+        assert_eq!(
+            poi_icon_cell(sel.icons[0].icon),
+            Some([0.75, 0.875, 0.0, 0.125]),
+            "icon 6 = ICON_POI_REDFLAG, col 6 row 0 of the 8x8 atlas"
+        );
+    }
+
+    /// The marker bypasses the candidacy gate the DBC rows pass through — the reference appends
+    /// its static blip slot *after* the scan. It is the caller ([`crate::poi_marker::PoiMarker`]'s
+    /// `on_map`) that decides the marker belongs to this map, not this filter.
+    #[test]
+    fn the_guard_marker_skips_the_candidacy_filter() {
+        let mut marker = poi(0, 0, 300.0, "The Inn"); // Flags bit 0 CLEAR — a DBC row would drop
+        marker.continent_id = 571; // and a continent that isn't the displayed one
+        let sel = select_landmarks(std::iter::empty(), Some(&marker), 0, 0.0, 0.0, 133.0);
+        assert_eq!(sel.arrows.len(), 1, "appended unconditionally");
     }
 
     /// An in-range row draws the icon only with Flags bit 1; the `Icon < 64` gate and the
@@ -481,7 +551,7 @@ mod tests {
         tower.icon = 9; // col 1, row 1
         let plain = poi(3, 0x5, 50.0, "Northshire Abbey");
         let rows = [tower, plain];
-        let sel = select_landmarks(rows.iter(), 0, 0.0, 0.0, 133.0);
+        let sel = select_landmarks(rows.iter(), None, 0, 0.0, 0.0, 133.0);
         assert_eq!(sel.arrows.len(), 0);
         assert_eq!(sel.icons.len(), 1, "only the Flags&2 tower draws in range");
         assert_eq!(

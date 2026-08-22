@@ -14,11 +14,11 @@
 //!
 //! Read by: the hard far-clip **wall** (terrain/model/liquid/WDL/particle shaders, pushed as
 //! `fog_params.w` by `lighting::apply_wow_lighting`), the per-object **cull**
-//! (`debug_panel::apply_model_visibility`), the particle **draw-set gate**
-//! (`particles::sim::simulate_particles`) — both through [`within_farclip`] — and
-//! — once `terrain_stream` is split — the tile
-//! **stream radius** (which should derive its coverage from `farclip`). Live-editable via the debug
-//! panel slider (the same A/B lever as before, now writing this resource).
+//! (`model_render::apply_model_visibility`), the particle **draw-set gate**
+//! (`particles::sim::simulate_particles`) — both through [`within_farclip`] — and the terrain
+//! **residency window** (`terrain_stream::window`), which derives its reach from `farclip` the way
+//! the reference does (decision 1513). The player's lever is the Terrain Distance row of the
+//! options window (the `farclip` CVar); `$WOW_FARCLIP` is the headless one.
 
 use bevy::prelude::*;
 
@@ -94,23 +94,31 @@ impl Viewer {
     }
 }
 
-/// View distance in yards. `farclip` = WoW's `farclip` CVar — the projection far plane for the detailed
-/// world; geometry beyond it is clipped per-pixel (the wall) and the WDL horizon fills in beyond.
-/// Default **777** (the vanilla max-view clamp `[177, 777]`; matches the reference `Config.wtf`).
+/// View distance in yards. `farclip` = WoW's `farclip` CVar — the ONE view distance: the far plane of
+/// the detailed world (geometry beyond it is clipped per-pixel, the wall, and the WDL horizon fills
+/// in beyond) **and** the reach of terrain residency (`terrain_stream::window`, decision 1513).
+/// Default **777** (the vanilla clamp's max; the reference registers 350 — 0954's deliberate
+/// divergence, matching the reference `Config.wtf` most players ran).
 #[derive(Resource, Clone, Copy)]
 pub struct ViewDistance {
     pub farclip: f32,
 }
 
-/// The settable range of [`ViewDistance::farclip`], shared by the debug-panel slider and the
-/// `$WOW_FARCLIP` env knob so the two can't drift. The vanilla `farclip` CVar clamp is `[177, 777]`
-/// (validate callback `0x688d40`, wow-re `terrain.md` "Camera-distance CVars"; its default is 350, ours
-/// is the max) — the upper end here runs past that ONLY as an A/B lever against the old
-/// "draw everything in the tile window" look.
-pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=1200.0;
+/// The settable range of [`ViewDistance::farclip`] — the vanilla `farclip` CVar clamp `[177, 777]`
+/// (validate callback `0x688d40`, wow-re `terrain.md` "Camera-distance CVars"), shared by the CVar
+/// apply, the options row and the `$WOW_FARCLIP` env knob so none can drift. It used to run to 1200
+/// as an A/B lever against the pre-wall "draw everything in the tile window" look; that look is
+/// gone and the window now follows this number, so the headroom went with it (1513).
+pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
+
+/// The world camera's projection far plane in yards — the **horizon** plane, far beyond `farclip`
+/// on purpose so the coarse WDL ring draws behind the wall (decision 0684; the reference's own
+/// `horizonfarclip` is a second plane floored at `farclip + 528`, default 2112). One number, not a
+/// function of anything: the detailed world ends at `farclip` by the wall, never by this plane.
+pub const CAM_FAR: f32 = 3000.0;
 
 impl Default for ViewDistance {
-    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 777 default. The panel slider is
+    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 777 default. The options row is
     /// the live lever, but a headless capture has no hands — and a horizon or fog report almost always
     /// arrives with the director's slider somewhere other than the default (the 0684 gap was invisible
     /// at 777 and glaring at 320), so reproducing one must not need a human. Read once at startup, like

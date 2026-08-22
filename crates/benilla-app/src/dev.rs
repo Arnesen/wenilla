@@ -242,6 +242,12 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE").as_deref() == Ok("taxi") {
                 app.add_plugins(crate::capture::ProbeTaxiPlugin);
             }
+            // The guard-directions live probe: `WOW_PROBE=guardpoi` asks a Stormwind guard where the
+            // weapons trainer is and reports the marker `SMSG_GOSSIP_POI` left on the map, checked
+            // field by field against the server's own row (see `capture::ProbeGuardPoiPlugin`).
+            if std::env::var("WOW_PROBE").as_deref() == Ok("guardpoi") {
+                app.add_plugins(crate::capture::ProbeGuardPoiPlugin);
+            }
             // The mail-arc live probe: `WOW_PROBE_MAIL=1` GM-mails the probe's own character, opens the
             // Goldshire mailbox on the real wire, and drives the inbox/take/send/delete surface through
             // the live Lua VM — decisions 0544/0548's end-to-end instrument (see `capture::ProbeMailPlugin`).

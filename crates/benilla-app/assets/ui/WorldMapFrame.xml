@@ -20,8 +20,9 @@
     art spun by SetRotation(GetPlayerFacing()) — the reference renders an engine arrow model;
     0203 flags the stand-in).
 
-    OUT (later slices, per 0203): POI landmarks;
-    party/raid/battlefield/corpse/ping children (no group wire); the magnifying-glass zoom-out
+    OUT (later slices, per 0203): the AreaPOI.dbc landmarks (the POI pool IS here — the guard's
+    directions marker fills it today, and the DBC rows join through the same GetNumMapLandmarks);
+    party/raid/battlefield/ping children (no group wire); the magnifying-glass zoom-out
     shortcut (redundant with the button); SetupFullscreenScale (the map renders at its native
     1024×768 centered; a scale pass is a taste knob); WorldMapTooltip (only unit blips used it).
 
@@ -35,6 +36,7 @@
     <Script><![CDATA[
         NUM_WORLDMAP_DETAIL_TILES = 12;
         NUM_WORLDMAP_OVERLAYS = 0;
+        NUM_WORLDMAP_POIS = 0;
 
         -- ref WorldMapFrame.lua l.509-515 is the spec. Through the PANEL MANAGER, not a bare
         -- Show/Hide: the map is registered `area = "full"` (UiPanels.xml), which is what makes it
@@ -138,11 +140,69 @@
                 getglobal("WorldMapOverlay"..slot):Hide();
             end
 
+            -- The POI icons (spec: ref WorldMapFrame.lua's landmark pass). One frame per landmark
+            -- the host reports for the displayed map, grown on demand from WorldMapPOITemplate and
+            -- never shrunk — the tail from a busier map is parked hidden, like the overlay pool
+            -- above. Today the host reports exactly one kind, the guard-directions marker
+            -- (SMSG_GOSSIP_POI); the AreaPOI.dbc landmarks are 0203's deferred slice and arrive
+            -- through this same list.
+            local numPOIs = GetNumMapLandmarks();
+            if ( numPOIs > NUM_WORLDMAP_POIS ) then
+                for slot = NUM_WORLDMAP_POIS + 1, numPOIs do
+                    CreateFrame("Button", "WorldMapFramePOI"..slot, WorldMapButton, "WorldMapPOITemplate");
+                end
+                NUM_WORLDMAP_POIS = numPOIs;
+            end
+            for slot = 1, NUM_WORLDMAP_POIS do
+                local poi = getglobal("WorldMapFramePOI"..slot);
+                if ( slot > numPOIs ) then
+                    poi:Hide();
+                else
+                    local name, description, textureIndex, x, y = GetMapLandmarkInfo(slot);
+                    WorldMapPOI_SetTexture(poi, textureIndex);
+                    poi.name = name;
+                    poi.description = description;
+                    poi:ClearAllPoints();
+                    poi:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT",
+                        x * WorldMapDetailFrame:GetWidth(), -y * WorldMapDetailFrame:GetHeight());
+                    poi:Show();
+                end
+            end
+
             if ( GetCurrentMapContinent() == 0 ) then
                 WorldMapZoomOutButton:Disable();
             else
                 WorldMapZoomOutButton:Enable();
             end
+        end
+
+        -- Point a POI frame's texture at its cell of Interface\Minimap\POIIcons — an 8x8 grid of
+        -- icons indexed across then down, the same atlas and the same indexing the minimap's
+        -- landmark blips use (the corpse marker below hardcodes its own cell of it).
+        function WorldMapPOI_SetTexture(poi, textureIndex)
+            local column = mod(textureIndex, 8);
+            local row = floor(textureIndex / 8);
+            getglobal(poi:GetName().."Texture"):SetTexCoord(
+                column * 0.125, (column + 1) * 0.125, row * 0.125, (row + 1) * 0.125);
+        end
+
+        -- Every marker on the sheet — the corpse, a POI — names itself in the shared GameTooltip,
+        -- and every one of them wants the plate opening AWAY from the edge it sits nearest, so the
+        -- side pick lives here once instead of in each OnEnter. `subtitle` is the second line the
+        -- landmarks that carry a live status use; the rest pass nothing.
+        function WorldMapMarker_ShowTooltip(marker, title, subtitle)
+            local markerX = marker:GetCenter();
+            local sheetX = marker:GetParent():GetCenter();
+            if ( markerX > sheetX ) then
+                GameTooltip:SetOwner(marker, "ANCHOR_LEFT");
+            else
+                GameTooltip:SetOwner(marker, "ANCHOR_RIGHT");
+            end
+            GameTooltip:SetText(title);
+            if ( subtitle and subtitle ~= "" ) then
+                GameTooltip:AddLine(subtitle, 1, 1, 1);
+            end
+            GameTooltip:Show();
         end
 
         -- The reference's rule: zone view → its continent; continent view → the world.
@@ -318,6 +378,25 @@
             </Layer>
         </Layers>
     </Frame>
+    <!-- One POI icon on the map (spec: ref WorldMapPOITemplate, WorldMapFrameTemplates.xml): a
+         16x16 cell of Interface\Minimap\POIIcons picked by the landmark's own textureIndex, with a
+         name/description tooltip. Grown on demand by WorldMapFrame_Update into WorldMapButton. -->
+    <Button name="WorldMapPOITemplate" virtual="true" enableMouse="true">
+        <Size><AbsDimension x="16" y="16"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentTexture" file="Interface\Minimap\POIIcons" setAllPoints="true"/>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnEnter>
+                WorldMapMarker_ShowTooltip(this, this.name, this.description);
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide();
+            </OnLeave>
+        </Scripts>
+    </Button>
     <Frame name="WorldMapFrame" frameStrata="FULLSCREEN_DIALOG" hidden="true" enableMouse="true" parent="UIParent">
         <Size><AbsDimension x="1024" y="768"/></Size>
         <Anchors>
@@ -553,7 +632,8 @@
                          (WorldMapFrameTemplates.xml l.55-88) inlined: 16x16, the POIIcons skull
                          cell (0.875-1.0 / 0-0.125), hover names it CORPSE_RED. The ref anchors its
                          tooltip to a WorldMapTooltip; ours rides the shared GameTooltip (this
-                         map ships no separate tooltip — header note), same side-pick law. -->
+                         map ships no separate tooltip — header note) through the side-pick every
+                         marker on the sheet shares. -->
                     <Frame name="WorldMapCorpse" hidden="true" enableMouse="true">
                         <Size><AbsDimension x="16" y="16"/></Size>
                         <Anchors><Anchor point="CENTER"/></Anchors>
@@ -566,15 +646,7 @@
                         </Layers>
                         <Scripts>
                             <OnEnter>
-                                local x = this:GetCenter()
-                                local parentX = this:GetParent():GetCenter()
-                                if x > parentX then
-                                    GameTooltip:SetOwner(this, "ANCHOR_LEFT")
-                                else
-                                    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
-                                end
-                                GameTooltip:SetText("|cffff2020Corpse|r")
-                                GameTooltip:Show()
+                                WorldMapMarker_ShowTooltip(this, "|cffff2020Corpse|r")
                             </OnEnter>
                             <OnLeave>
                                 GameTooltip:Hide()

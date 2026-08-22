@@ -303,6 +303,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::QuestGiverFailed { quest_id, reason }]
         }
         ServerPacket::GossipComplete => vec![SessionEvent::GossipComplete],
+        ServerPacket::GossipPoi(poi) => vec![SessionEvent::GossipPoi(poi)],
         ServerPacket::NpcText { text_id, blocks } => {
             vec![SessionEvent::NpcGreeting { text_id, blocks }]
         }

@@ -1,0 +1,210 @@
+//! The world map's **POI layer** — the icons `GetNumMapLandmarks`/`GetMapLandmarkInfo` feed into
+//! `WorldMapFrame_Update`'s frame pool. Today the only landmark is the guard's directions marker
+//! (`SMSG_GOSSIP_POI` → [`crate::poi_marker`]); the `AreaPOI.dbc` rows are 0203's deferred slice
+//! and arrive through the same list, so these tests pin the *pool*, not the marker.
+//!
+//! Driven through the shipped `assets/ui/WorldMapFrame.xml` in a bare engine (no Bevy) — the
+//! panel-test idiom: push host state, run the repaint, read the frames back.
+
+use benilla_ui::script::{UiScript, WorldMapLandmarkView};
+
+/// The map plus everything its OnLoad touches, in the shipped list's own order.
+fn harness() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "UIPanelTemplates.xml",
+        "GameTooltip.xml",
+        "UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
+        "ScrollTemplates.xml",
+        "WorldMapFrame.xml",
+    ] {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(file),
+        )
+        .unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(
+            report.errors.is_empty(),
+            "{file}: loader errors: {:?}",
+            report.errors
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    s
+}
+
+fn landmark(name: &str, icon: u32, uv: (f32, f32)) -> WorldMapLandmarkView {
+    WorldMapLandmarkView {
+        name: name.into(),
+        description: String::new(),
+        texture_index: icon,
+        uv,
+    }
+}
+
+/// A pushed landmark becomes a shown POI frame at its UV, wearing its own cell of the 8×8
+/// `POIIcons` atlas. Icon **6** is `ICON_POI_REDFLAG` — the red flag every 5875-era
+/// `points_of_interest` row ships, so this is the guard-directions case exactly.
+#[test]
+fn a_landmark_draws_its_poi_icon_at_its_map_position() {
+    let mut s = harness();
+    s.set_world_map_landmarks(vec![landmark("Stormwind Warrior Trainer", 6, (0.25, 0.5))]);
+    s.run("WorldMapFrame_Update()").unwrap();
+
+    assert_eq!(
+        s.eval::<i64>("return GetNumMapLandmarks()").unwrap(),
+        1,
+        "the host reports the one landmark"
+    );
+    assert!(
+        s.eval::<bool>("return WorldMapFramePOI1:IsShown()")
+            .unwrap(),
+        "the pool grew a frame for it and showed it"
+    );
+
+    // Cell 6 of the 8×8 grid = column 6, row 0.
+    let (l, r, t, b): (f32, f32, f32, f32) = s
+        .eval("return WorldMapFramePOI1Texture:GetTexCoord()")
+        .unwrap();
+    assert_eq!(
+        (l, r, t, b),
+        (0.75, 0.875, 0.0, 0.125),
+        "POIIcons cell 6 — the red flag"
+    );
+
+    // Seated at UV × the 1002×668 detail frame, from its TOPLEFT (y down).
+    let (x, y): (f32, f32) = s
+        .eval(
+            "local _, _, _, ox, oy = WorldMapFramePOI1:GetPoint(1) \
+             return ox, oy",
+        )
+        .unwrap();
+    assert_eq!((x, y), (0.25 * 1002.0, -0.5 * 668.0));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The pool grows and is reused, never shrunk: a busier map's tail parks hidden rather than being
+/// destroyed, and the same frame is re-seated when the list shrinks back.
+#[test]
+fn the_poi_pool_grows_and_parks_its_tail() {
+    let mut s = harness();
+    s.set_world_map_landmarks(vec![
+        landmark("The Bank", 6, (0.1, 0.1)),
+        landmark("The Inn", 6, (0.2, 0.2)),
+        landmark("The Auction House", 6, (0.3, 0.3)),
+    ]);
+    s.run("WorldMapFrame_Update()").unwrap();
+    assert_eq!(s.eval::<i64>("return NUM_WORLDMAP_POIS").unwrap(), 3);
+    assert!(s
+        .eval::<bool>("return WorldMapFramePOI3:IsShown()")
+        .unwrap());
+
+    s.set_world_map_landmarks(vec![landmark("The Inn", 6, (0.2, 0.2))]);
+    s.run("WorldMapFrame_Update()").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return NUM_WORLDMAP_POIS").unwrap(),
+        3,
+        "the pool never shrinks"
+    );
+    assert!(s
+        .eval::<bool>("return WorldMapFramePOI1:IsShown()")
+        .unwrap());
+    assert!(
+        !s.eval::<bool>("return WorldMapFramePOI2:IsShown()")
+            .unwrap(),
+        "slot 2 parked hidden"
+    );
+    assert!(!s
+        .eval::<bool>("return WorldMapFramePOI3:IsShown()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return WorldMapFramePOI1.name").unwrap(),
+        "The Inn",
+        "slot 1 was re-seated, not left on the stale landmark"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Hovering a POI names it. The description line only appears on landmarks that carry one — the
+/// guard's directions never do, a battleground node's "In Conflict" would.
+#[test]
+fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
+    let mut s = harness();
+    s.set_world_map_landmarks(vec![landmark("Lion's Pride Inn", 6, (0.5, 0.5))]);
+    s.run("WorldMapFrame_Update()").unwrap();
+    s.run("this = WorldMapFramePOI1 this:GetScript(\"OnEnter\")() this = nil")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Lion's Pride Inn"
+    );
+    assert!(
+        s.eval::<bool>("return GameTooltipTextLeft2:GetText() == nil or GameTooltipTextLeft2:GetText() == \"\"")
+            .unwrap(),
+        "no description → no second line"
+    );
+
+    let mut with_status = landmark("Stables", 6, (0.5, 0.5));
+    with_status.description = "In Conflict".into();
+    s.set_world_map_landmarks(vec![with_status]);
+    s.run("WorldMapFrame_Update()").unwrap();
+    s.run("this = WorldMapFramePOI1 this:GetScript(\"OnEnter\")() this = nil")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft2:GetText()")
+            .unwrap(),
+        "In Conflict"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// `GetMapLandmarkInfo` hands back the reference's own five values, and a landmark with no
+/// description answers **nil** there rather than an empty string (VERIFIED, `0x4a8740`) — the
+/// guard's marker never carries one.
+#[test]
+fn the_landmark_getter_returns_the_references_five_values() {
+    let mut s = harness();
+    let mut with_status = landmark("Stables", 9, (0.25, 0.75));
+    with_status.description = "In Conflict".into();
+    s.set_world_map_landmarks(vec![landmark("Woo Ping", 6, (0.5, 0.5)), with_status]);
+
+    let (name, desc_is_nil, icon, x, y): (String, bool, i64, f32, f32) = s
+        .eval("local n, d, t, x, y = GetMapLandmarkInfo(1) return n, d == nil, t, x, y")
+        .unwrap();
+    assert_eq!(
+        (name.as_str(), desc_is_nil, icon, x, y),
+        ("Woo Ping", true, 6, 0.5, 0.5)
+    );
+
+    let desc: String = s
+        .eval("local _, d = GetMapLandmarkInfo(2) return d")
+        .unwrap();
+    assert_eq!(
+        desc, "In Conflict",
+        "a landmark that HAS one still answers it"
+    );
+    assert!(
+        s.eval::<bool>("return GetMapLandmarkInfo(3) == nil")
+            .unwrap(),
+        "past the end is nil"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// No landmarks → no frames, and the repaint stays quiet. This is the common case by far: the map
+/// is open far more often than a guard has just given directions.
+#[test]
+fn no_landmarks_draws_nothing() {
+    let s = harness();
+    s.run("WorldMapFrame_Update()").unwrap();
+    assert_eq!(s.eval::<i64>("return GetNumMapLandmarks()").unwrap(), 0);
+    assert_eq!(s.eval::<i64>("return NUM_WORLDMAP_POIS").unwrap(), 0);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

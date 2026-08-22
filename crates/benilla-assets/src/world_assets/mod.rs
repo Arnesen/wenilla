@@ -597,18 +597,15 @@ impl WorldAssets {
 }
 
 /// World/render configuration read once at startup from the environment, shared by the subsystems
-/// that need it: terrain reads `tile_radius` (streaming) + `tex_tiles` (splat tiling); lighting reads
-/// `tile_radius` for the fog range. Inserted by [`AssetPlugin`] alongside [`WorldAssets`].
+/// that need it: terrain reads `tex_tiles` (splat tiling) + `unload_budget` (the release lane).
+/// Inserted by [`AssetPlugin`] alongside [`WorldAssets`]; its *presence* is also the "there is a
+/// client install" gate the world-side setups key on.
+///
+/// How far terrain streams is deliberately **not** here: the residency window derives from the
+/// live `farclip` view distance (`benilla_world::view::ViewDistance` — the player's Terrain
+/// Distance setting), as the reference derives it (decision 1513).
 #[derive(Resource, Clone, Copy)]
 pub struct RenderConfig {
-    /// Tiles loaded in each direction around the player (`$WOW_TILE_RADIUS`, default **2** — the
-    /// 5×5 block whose *worst* case (standing on a tile line) still reaches two full tiles
-    /// ≈ 1066 yd, clear of the 777 yd `farclip` wall, so terrain is resident before the wall
-    /// reveals it). `1` is the perf knob: a 3×3 block, ~2.8× smaller working set, reaching only
-    /// 533 yd in the worst case — the band from there to the wall has neither detailed terrain nor
-    /// the WDL backdrop (whose near plane sits at `farclip − 33`), so it shows only where the
-    /// zone's own fog end does not already hide it.
-    pub tile_radius: u32,
     /// Ground-texture repeats per chunk (`$WOW_TEX_TILES`, default 8).
     pub tex_tiles: f32,
     /// Stale tiles released per frame on a within-map window shift (`$WOW_TILE_UNLOAD`,

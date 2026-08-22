@@ -55,29 +55,31 @@ use benilla_formats::TILE_SIZE;
 const SWEEP_SECS: f32 = 1.0;
 
 /// Default eviction radius in yards — five ADT tiles (2667 yd). Chosen as the smallest round
-/// multiple of the tile grid comfortably clear of [`radius_floor`] at the default
-/// `$WOW_TILE_RADIUS` (2 ⇒ 2419 yd): far enough that art still on screen is never evicted, close
-/// enough that leaving one city for another recovers it (Stormwind → Booty Bay is ~5500 yd,
-/// Ironforge → Stormwind ~4250).
+/// multiple of the tile grid comfortably clear of [`radius_floor`] (2560 yd): far enough that art
+/// still on screen is never evicted, close enough that leaving one city for another recovers it
+/// (Stormwind → Booty Bay is ~5500 yd, Ironforge → Stormwind ~4250).
 const DEFAULT_RADIUS_YD: f32 = 5.0 * TILE_SIZE;
 
 /// The smallest radius that cannot evict art the streamer is still holding: the far **corner** of
-/// the `(2r+1)²` tile block it keeps resident, plus a tile of margin.
+/// the widest tile block the residency window can keep, plus a tile of margin.
 ///
 /// A stamp records where *the viewer* was when the art was last wanted, not where the art is — so an
-/// entry can be up to a streaming radius "behind" the art it belongs to. Flooring the radius at the
+/// entry can be up to a streaming reach "behind" the art it belongs to. Flooring the radius at the
 /// block's circumscribed radius means you have to leave the art's neighbourhood entirely before its
-/// dedup expires.
-fn radius_floor(tile_radius: u32) -> f32 {
-    (tile_radius as f32 + 0.5) * TILE_SIZE * std::f32::consts::SQRT_2 + TILE_SIZE
+/// dedup expires. The window follows the live `farclip` (1513), so the floor is taken at the clamp's
+/// **max** — the widest the window can ever be — rather than tracking the slider: a floor that
+/// shrank with the view distance would buy nothing (the default clears it either way) and would
+/// have to re-resolve on every drag.
+fn radius_floor() -> f32 {
+    crate::terrain_stream::window::max_resident_reach_yd(*crate::view::FARCLIP_RANGE.end())
 }
 
 /// Resolve `$WOW_ART_RADIUS` (yards; `0` or negative ⇒ eviction off, the A/B leg that reproduces the
 /// unbounded behaviour on a fixed build) against the streamer's reach. An explicitly-requested radius
 /// below [`radius_floor`] is raised **and** warned about, rather than silently obeyed: a knob that
 /// quietly means something else than it says is how decision 0789 happened.
-fn radius_from_env(tile_radius: u32) -> f32 {
-    let floor = radius_floor(tile_radius);
+fn radius_from_env() -> f32 {
+    let floor = radius_floor();
     match std::env::var("WOW_ART_RADIUS")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
@@ -86,7 +88,7 @@ fn radius_from_env(tile_radius: u32) -> f32 {
         Some(r) if r < floor => {
             warn!(
                 "art-scope: WOW_ART_RADIUS={r} is inside the streamer's own reach ({floor:.0} yd \
-                 at tile radius {tile_radius}) — using {floor:.0}"
+                 at the widest view distance) — using {floor:.0}"
             );
             floor
         }
@@ -228,13 +230,9 @@ impl ArtScope<'_> {
     }
 }
 
-/// Resolve the radius once the streamer's configuration exists (it decides the floor).
-fn configure_art_scope(
-    mut state: ResMut<ArtScopeState>,
-    cfg: Option<Res<benilla_assets::RenderConfig>>,
-) {
-    let tile_radius = cfg.map(|c| c.tile_radius).unwrap_or(2);
-    state.radius = radius_from_env(tile_radius);
+/// Resolve the radius once at startup (the floor is a constant of the view-distance clamp).
+fn configure_art_scope(mut state: ResMut<ArtScopeState>) {
+    state.radius = radius_from_env();
     if state.radius > 0.0 {
         info!(
             "art-scope: within-map art evicts beyond {:.0} yd of the view focus",
@@ -271,10 +269,7 @@ impl Plugin for ArtScopePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ArtCensus>()
             .init_resource::<ArtScopeState>()
-            .add_systems(
-                Startup,
-                configure_art_scope.after(benilla_assets::AssetSet::Open),
-            )
+            .add_systems(Startup, configure_art_scope)
             .add_systems(Update, track_art_scope);
     }
 }
@@ -288,31 +283,22 @@ mod tests {
     // stayed: how wide the sweep reaches, and that an unconfigured run still bounds itself.
 
     /// Eviction must never outrun the streamer: the default radius clears the far corner of the
-    /// resident tile block at the default `$WOW_TILE_RADIUS`, and the floor rises with it.
+    /// widest block the window keeps at the clamp's max view distance.
     #[test]
     fn the_radius_clears_the_streamers_own_reach() {
         assert!(
-            DEFAULT_RADIUS_YD > radius_floor(2),
+            DEFAULT_RADIUS_YD > radius_floor(),
             "default {DEFAULT_RADIUS_YD} must clear the floor {}",
-            radius_floor(2)
+            radius_floor()
         );
-        // The corner of the 5×5 block at tile radius 2 is ~1886 yd; the floor adds a tile.
-        assert!(
-            (radius_floor(2) - 2418.7).abs() < 1.0,
-            "{}",
-            radius_floor(2)
-        );
-        assert!(
-            radius_floor(4) > DEFAULT_RADIUS_YD,
-            "a wider window raises it"
-        );
+        // (26 + 1 + 16) chunks per axis at 777, the corner of that, plus a tile: ~2560 yd.
+        assert!((radius_floor() - 2560.0).abs() < 1.0, "{}", radius_floor());
     }
 
     /// With `$WOW_ART_RADIUS` unset (every ordinary run, and the test binary) the radius is the
     /// default, floored — never zero, so a shipped build always bounds itself.
     #[test]
     fn an_unconfigured_run_still_bounds_itself() {
-        assert_eq!(radius_from_env(2), DEFAULT_RADIUS_YD.max(radius_floor(2)));
-        assert!(radius_from_env(8) >= radius_floor(8));
+        assert_eq!(radius_from_env(), DEFAULT_RADIUS_YD.max(radius_floor()));
     }
 }

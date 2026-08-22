@@ -857,13 +857,15 @@ fn defaults_resets_the_audio_page_to_registered_defaults() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Selecting Graphics shows ITS page body (0959; one row since the farclip retirement, 0961)
-/// with the uiScale slider reading the table on the 0.64..1.0 panel range with the percent
-/// readout. The swap works both ways — Audio's body takes over when clicked.
+/// Selecting Graphics shows ITS page body (0959) with both 1.12 sliders reading the table:
+/// uiScale on the 0.64..1.0 panel range with the percent readout, farclip (Terrain Distance —
+/// retired 0961, back 1513) on 177..777 with the raw-yards readout. The swap works both ways —
+/// Audio's body takes over when clicked.
 #[test]
 fn the_graphics_page_reads_the_cvar_table_on_select() {
     let mut s = audio_harness();
     s.set_cvar_host("uiScale", "0.8");
+    s.set_cvar_host("farclip", "297");
     let s = harness_on(s);
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowGraphics:Click()")
@@ -887,11 +889,28 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
         .unwrap(),
         "80%"
     );
-    // The label is the 1.12 GlobalStrings' own.
+    assert!(s
+        .eval::<bool>(
+            "return math.abs(OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
+        )
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
+        )
+        .unwrap(),
+        "297"
+    );
+    // The labels are the 1.12 GlobalStrings' own.
     assert_eq!(
         s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowUiScaleLabel:GetText()")
             .unwrap(),
         "UI Scale"
+    );
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowFarclipLabel:GetText()")
+            .unwrap(),
+        "Terrain Distance"
     );
 
     // The swap, the other way: Audio in, Graphics out.
@@ -1214,13 +1233,55 @@ fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Defaults on the Graphics page: uiScale back to its registered default (0.9), the row
-/// following, ONLY the moved value queuing — and a pending edit dies with it (the default
-/// write supersedes what Apply would have committed).
+/// The Terrain Distance slider (1513) is a LIVE row, unlike uiScale: a move snaps to the 1.12
+/// panel grid — 177+n·60, ANCHORED AT THE MINIMUM, so 300 lands on 297, not the multiple-of-60
+/// 300 — writes the CVar on the move as a clean short string, and raises no Apply button. The
+/// write is what moves the far-clip wall and the residency window together.
+#[test]
+fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on select must not write it back"
+    );
+
+    s.run("OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:SetValue(300)")
+        .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "return math.abs(OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
+        )
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
+        )
+        .unwrap(),
+        "297"
+    );
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("farclip".to_string(), "297".to_string())]
+    );
+    assert!(
+        !s.eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+            .unwrap(),
+        "a live row stages nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Defaults on the Graphics page: uiScale back to its registered default (0.9) and farclip to
+/// its (777), the rows following, ONLY the moved values queuing — and a pending uiScale edit
+/// dies with it (the default write supersedes what Apply would have committed).
 #[test]
 fn defaults_resets_the_graphics_page_to_registered_defaults() {
     let mut s = audio_harness();
     s.set_cvar_host("uiScale", "0.8");
+    s.set_cvar_host("farclip", "297");
     let mut s = harness_on(s);
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowGraphics:Click()")
@@ -1232,10 +1293,25 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
 
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
     let changes = s.take_cvar_changes();
+    assert!(
+        changes.contains(&("uiScale".to_string(), "0.9".to_string())),
+        "{changes:?}"
+    );
+    assert!(
+        changes.contains(&("farclip".to_string(), "777".to_string())),
+        "{changes:?}"
+    );
     assert_eq!(
-        changes,
-        vec![("uiScale".to_string(), "0.9".to_string())],
-        "only the default write queues — never the dead pending"
+        changes.len(),
+        2,
+        "only the default writes queue — never the dead pending: {changes:?}"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
+        )
+        .unwrap(),
+        "777"
     );
     assert_eq!(
         s.eval::<String>(
@@ -1780,16 +1856,16 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 21 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
+    // 22 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
     // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's; Camera Following Style
-    // 1493's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 4 (3 from
+    // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 4 (3 from
     // 1136, Buff Durations 1139) and the Action Bars page's 2 (the lock 1136, Always Show
     // ActionBars 1500) + 6 API rows (the Interface page's Show Cloak / Show Helm, 1472; the Action
     // Bars page's four multibar switches, 1500) — which is the point of counting here rather than
     // per page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1); the other two ride the same census as the selection moves.
-    assert_eq!(checked, 47, "every row but one carries a live 1.12 key");
+    assert_eq!(checked, 48, "every row but one carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec!["ControlsRowAutoLoot".to_string()],
@@ -1878,12 +1954,13 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // 21 of the 22 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
-    // Max Camera Distance 1140's; Vertical Sync 1394's; Camera Following Style 1493's), plus the
-    // Combat page's 14 saved-variable rows (1134), the Interface page's 4 (1136, + Buff Durations
-    // 1139), Action Bars' 2 (the lock 1136, Always Show ActionBars 1500) and 6 API rows (Show
-    // Cloak / Show Helm, 1472; the four multibar switches, 1500).
-    assert_eq!(raised, 47, "every row but Auto Loot has a 1.12 description");
+    // 22 of the 23 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
+    // Max Camera Distance 1140's; Vertical Sync 1394's; Camera Following Style 1493's; Terrain
+    // Distance 1513's), plus the Combat page's 14 saved-variable rows (1134), the Interface
+    // page's 4 (1136, + Buff Durations 1139), Action Bars' 2 (the lock 1136, Always Show
+    // ActionBars 1500) and 6 API rows (Show Cloak / Show Helm, 1472; the four multibar switches,
+    // 1500).
+    assert_eq!(raised, 48, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

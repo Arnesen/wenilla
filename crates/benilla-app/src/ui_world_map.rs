@@ -29,7 +29,9 @@ use benilla_formats::{
     load_world_map_area_catalog, load_world_map_continent_catalog, load_world_map_overlay_catalog,
     load_zone_map, WorldMapArea,
 };
-use benilla_ui::script::{UiScript, WorldMapContinentView, WorldMapOverlayView, WorldMapZoneView};
+use benilla_ui::script::{
+    UiScript, WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapZoneView,
+};
 
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::player::Player;
@@ -254,6 +256,7 @@ fn feed_world_map(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     areas: Option<Res<crate::area::AreaTableRes>>,
     death_net: Res<crate::death::DeathNet>,
+    poi_marker: Res<crate::poi_marker::PoiMarker>,
     mut last_explored: Local<crate::ui_script::VmMemo<Option<Vec<u32>>>>,
 ) {
     let (Some(mut script), Some(data), Some(map), Some(areas)) = (script, data, map, areas) else {
@@ -325,6 +328,29 @@ fn feed_world_map(
             cp.position[1],
         )
     });
+
+    // The map's POI icons (`GetNumMapLandmarks`) — today just the guard-directions marker
+    // (`crate::poi_marker`), projected through the same law as the two blips above. A landmark
+    // list carries no `(0,0)` hide sentinel for its Lua to read (unlike the blips), so off-map is
+    // dropped here instead — including the `(0,0)` `zone_uv` answers with for a position outside
+    // the displayed rect. That last one is a deliberate divergence: the reference hands its
+    // landmark position back unclamped and filters only on the RECORD's position being non-zero,
+    // so a marker in the next zone over lands a flag on the sheet's top-left corner (wow-re
+    // `gossip-poi-marker.md`, `0x4a8740`). Dropping it is the same call as 1514's map stamp.
+    let landmarks: Vec<WorldMapLandmarkView> = poi_marker
+        .poi
+        .iter()
+        .filter_map(|poi| {
+            let uv = project(poi.continent_id, poi.pos[0], poi.pos[1])?;
+            (uv != (0.0, 0.0)).then(|| WorldMapLandmarkView {
+                name: poi.name.clone(),
+                description: poi.description.clone(),
+                texture_index: poi.icon,
+                uv,
+            })
+        })
+        .collect();
+    script.set_world_map_landmarks(landmarks);
 
     script.set_world_map_feed(player_zone, uv, player.facing(), corpse_uv);
 }

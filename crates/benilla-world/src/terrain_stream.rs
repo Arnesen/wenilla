@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use benilla_assets::coords::{bevy_to_wow, placement_rotation, wow_to_bevy};
 use benilla_assets::{AdtTile, M2Model, WdtIndex, WmoModel};
-use benilla_formats::{world_to_tile, Doodad, WmoInstance};
+use benilla_formats::{Doodad, WmoInstance};
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 use bevy::render::render_resource::Face;
@@ -45,6 +45,7 @@ pub mod merge;
 mod queries;
 mod spawn;
 mod weld;
+pub(crate) mod window;
 
 use collider::{finish_colliders, impassable_wall_data, terrain_collider_data};
 use furnish::furnish_tile_cells;
@@ -52,6 +53,7 @@ use merge::{flush_static_merge, StaticMerge};
 use spawn::prop_light::WmoDoodadInst;
 use spawn::spawn_loaded_placements;
 use weld::{flush_hull_welds, HullWelds};
+pub use window::StreamWindow;
 // The WMO prop-light machinery lives spawn-side (0830's named carve, executed in 0832); the two
 // outside consumers — `crate::interior` and `crate::entities`' `wmo_props` — keep their
 // `terrain_stream::X` paths, same as the `queries` items below.
@@ -89,6 +91,9 @@ pub struct TerrainStreamer {
     /// The focus tile [`stream_terrain`] last streamed around — the furnisher's nearest-first
     /// ordering key, published here so it never recomputes the focus ladder a second time.
     focus: (i32, i32),
+    /// The window's `(inner, outer)` half-widths as of last frame, so the reach is logged once
+    /// per change (the Terrain Distance slider) rather than per frame.
+    reach: Option<(i32, i32)>,
     /// The current map's WDT tile index (decision 0476), requested with the map: ADT requests wait
     /// for it and consult its `MAIN` grid — open ocean authors no tiles to ask for.
     wdt: Option<Handle<WdtIndex>>,
@@ -605,10 +610,14 @@ fn stream_terrain(
     camera: Query<&Transform, With<WorldCamera>>,
     shared_light: Option<Res<SharedLightBuffer>>,
     cfg: Option<Res<RenderConfig>>,
-    // "Where are we" — the server's map, the catalog that names its directory, and the roster row
-    // of a pick still in flight (the entry window's focus). Bundled for the same param-limit
-    // reason as `asset_stores`.
-    location: (Option<Res<CurrentMap>>, Option<Res<MapCatalogRes>>),
+    // "Where are we, and how far do we look" — the server's map, the catalog that names its
+    // directory, and the live view distance the residency window derives from (1513). Bundled
+    // for the same param-limit reason as `asset_stores`.
+    location: (
+        Option<Res<CurrentMap>>,
+        Option<Res<MapCatalogRes>>,
+        Res<crate::view::ViewDistance>,
+    ),
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
     // Bundled for the same 16-param reason as `asset_stores`: the two stream-batch accumulators
     // the map-change drop must clear.
@@ -622,7 +631,7 @@ fn stream_terrain(
 ) {
     let (mut welds, mut static_merge, mut staticgx) = batchers;
     let (mut materials, mut meshes, wdts, _time, mut activity) = asset_stores;
-    let (current_map, map_catalog) = location;
+    let (current_map, map_catalog, view) = location;
     // The shared light buffer + map catalog are set up by other plugins' startup; until they exist
     // there's nothing to stream against, so idle.
     let (Some(shared_light), Some(map_catalog)) = (shared_light, map_catalog) else {
@@ -703,27 +712,34 @@ fn stream_terrain(
         }
     }
 
-    // Stream around the *view focus* — see [`ViewFocus`] for the ladder.
+    // Stream around the *view focus* — see [`ViewFocus`] for the ladder — as far as the view
+    // distance reaches: the residency window is the reference's own, derived from the live
+    // `farclip` in chunk units (`window`, decision 1513). The slider that moves the far-clip
+    // wall moves this with it.
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
-    let radius = cfg.as_ref().map(|c| c.tile_radius as i32).unwrap_or(2);
+    let window = StreamWindow::at(view.farclip, center[0], center[1]);
     let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
-    let (cx, cy) = world_to_tile(center[0], center[1]);
-    let (cx, cy) = (cx as i32, cy as i32);
+    let (cx, cy) = window.focus_tile();
     state.focus = (cx, cy);
-
-    // Desired set: the (2r+1)² square around the focus, clamped to the 64×64 tile grid — and
-    // filtered to tiles the WDT says exist (open ocean authors none). The filter also fixes the
-    // loading screen's accounting: `ready == total` is reachable on a coast, and any fallback-era
-    // entry for a nonexistent tile turns stale and unloads below.
-    let mut desired: Vec<(i32, i32)> = Vec::new();
-    for dx in -radius..=radius {
-        for dy in -radius..=radius {
-            let (tx, ty) = (cx + dx, cy + dy);
-            if (0..=63).contains(&tx) && (0..=63).contains(&ty) {
-                desired.push((tx, ty));
-            }
-        }
+    // One line per change of reach — the slider moved, or the first frame — so a run log says
+    // what the residency window was when a tile count or a frame cost was read off it.
+    if state.reach != Some((window.inner, window.outer)) {
+        state.reach = Some((window.inner, window.outer));
+        info!(
+            "terrain: residency window ±{} chunks ({:.0} yd), release past ±{} — farclip {:.0}",
+            window.outer,
+            window.outer as f32 * benilla_formats::CHUNK_SIZE,
+            window.outer + window::KEEP_BAND_CHUNKS,
+            view.farclip
+        );
     }
+
+    // Desired set: every tile the outer window touches, clamped to the 64×64 tile grid — and
+    // filtered to tiles the WDT says exist (open ocean authors none; the reference's own
+    // `MAIN` bit-0 test at `0x69863c`). The filter also fixes the loading screen's accounting:
+    // `ready == total` is reachable on a coast, and any fallback-era entry for a nonexistent
+    // tile turns stale and unloads below.
+    let mut desired = window.wanted_tiles();
     if let Some(w) = wdt_index {
         desired.retain(|&(tx, ty)| w.has_tile(tx as u32, ty as u32));
     }
@@ -740,21 +756,22 @@ fn stream_terrain(
     // re-cross inside the drain window finds its tile still loaded (no re-decode, no re-spawn).
     // A cross-map swap is NOT budgeted (`drop_streamed_world` above): the loading screen covers
     // it, and holding a dead map's tiles through a fresh map's IO burst helps nothing.
-    // **The keep-band** (B181): a tile is requested inside `radius` but released only past
-    // `radius + 1` — one tile of hysteresis. Without it, a body straddling a tile line cycles a
-    // whole row per step: the reporter's own minimal repro (`.go` half a yard across, and back)
-    // re-decoded and re-spawned five tiles each way, and the row's landing — not the streamer's
+    // **The keep-band** (B181): a tile is wanted inside the outer window but released only past
+    // it plus one chunk (`StreamWindow::keeps`) — hysteresis. Without it, a body pacing across
+    // the one chunk line that toggles a far tile cycles that tile per step: the reporter's own
+    // minimal repro (`.go` half a yard across, and back) re-decoded and re-spawned five tiles
+    // each way under the old tile-centred window, and the row's landing — not the streamer's
     // own budgeted systems — is the frame spike (a fresh Undercity row lands ~3900 placements
     // and ~1300 mesh assets). A band tile stays fully resident, so a re-cross finds it and
     // streams NOTHING; the band's dedup entries need no art-sweep accommodation (0793's
     // `radius_floor` is about art the streamer will re-fetch — a band tile is already spawned
-    // and never re-consults the caches).
+    // and never re-consults the caches). The reference releases by window membership alone
+    // (`0x6984f0`) — its reload is a cheap async read; ours is the spawn wave above.
     //
     // Ablation switch (`WOW_NO_TILE_DROP=1`): never release stale tiles — a crossing becomes a
     // pure asset-ADD event and a re-cross a pure no-op, separating the load lane from the free
     // lane when measuring a streaming cost. Residency grows for the life of the run; dev-only.
     let unload_budget = cfg.as_ref().map(|c| c.unload_budget).unwrap_or(1);
-    let keep = radius + 1;
     let mut stale: Vec<(i32, i32)> = if tile_drop_disabled() {
         Vec::new()
     } else {
@@ -762,7 +779,7 @@ fn stream_terrain(
             .tiles
             .keys()
             .copied()
-            .filter(|&(tx, ty)| (tx - cx).abs().max((ty - cy).abs()) > keep)
+            .filter(|&tile| !window.keeps(tile))
             .collect()
     };
     if unload_budget > 0 && stale.len() > unload_budget {

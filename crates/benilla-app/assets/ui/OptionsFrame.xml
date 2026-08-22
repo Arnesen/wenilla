@@ -618,7 +618,7 @@
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
                 "RowEnableMusic", "RowEnableAmbience",
             },
-            Graphics = { "RowUiScale", "RowWorldDetail", "RowVerticalSync" },
+            Graphics = { "RowUiScale", "RowFarclip", "RowWorldDetail", "RowVerticalSync" },
             Nameplates = { "RowPlayerNames", "RowNpcNames", "RowOwnName" },
             -- The stock globals that were already defined AND consumed when 1134 opened the store
             -- (1136; Buff Durations 1139), plus the two equipment-display toggles (1472), in the
@@ -2157,18 +2157,22 @@
                                         </Frame>
                                     </Frames>
                                 </Frame>
-                                <!-- The Graphics page (0959; farclip row retired 0961 — the
-                                     director's call, standing: the farclip CVar/knob/env/
-                                     debug-panel plumbing all stay, only the row is off the page).
-                                     UI Scale is the 1.12 OptionsFrameSliders table verbatim
-                                     (OptionsFrame.lua l.25): uiscale 0.64..1.0 step 0.01 (UI_SCALE
-                                     "UI Scale", percent readout — era's own
-                                     FormatPercentageRounded on its uiscale row). 1.12's useUiScale
+                                <!-- The Graphics page (0959): the 1.12 OptionsFrameSliders rows
+                                     that have a benilla knob behind them, in the table's own order
+                                     (OptionsFrame.lua l.25-27). UI Scale: uiscale 0.64..1.0 step
+                                     0.01 (UI_SCALE "UI Scale", percent readout — era's own
+                                     FormatPercentageRounded on its uiscale row); 1.12's useUiScale
                                      gate has no benilla knob (our scale always applies; off ≡ 1.0)
-                                     so the checkbox doesn't ship. Environment Detail (0992) is the
-                                     same table's WorldDetail row (l.26: 0..2 step 1, label
-                                     ENVIRONMENT_DETAIL) over the clutter-density knob, worn as the
-                                     dropdown row — the shape call is the template's comment. -->
+                                     so the checkbox doesn't ship. Terrain Distance: farclip
+                                     177..777 step 60 = (max-min)/10 (FARCLIP "Terrain Distance",
+                                     raw-yards readout — era's law when a slider has no formatter);
+                                     retired by the director in 0961 and back by their call in
+                                     1513, now that the one number moves the far-clip wall AND how
+                                     much terrain is resident, as it does in the reference.
+                                     Environment Detail (0992) is the same table's WorldDetail row
+                                     (0..2 step 1, label ENVIRONMENT_DETAIL) over the clutter-density
+                                     knob, worn as the dropdown row — the shape call is the
+                                     template's comment. -->
                                 <Frame name="$parentGraphics" hidden="true">
                                     <Anchors>
                                         <Anchor point="TOPLEFT"/>
@@ -2191,10 +2195,21 @@
                                                 self.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowWorldDetail" inherits="OptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowFarclip" inherits="OptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "farclip", "Terrain Distance",
+                                                    "OPTION_TOOLTIP_FARCLIP")
+                                                OptionsSliderRow_Setup(self, 177, 777, 60, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowWorldDetail" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "WorldDetail", "Environment Detail",

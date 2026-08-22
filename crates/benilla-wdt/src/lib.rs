@@ -46,6 +46,25 @@ pub fn world_to_tile(world_x: f32, world_y: f32) -> (u32, u32) {
     (tile_x.min(63), tile_y.min(63))
 }
 
+/// Chunks per tile edge (16×16 per ADT) and per map edge (1024).
+const CHUNKS_PER_TILE: u32 = 16;
+/// Yards per terrain chunk (1/16 of a tile, 33⅓ yd).
+const CHUNK_YARDS: f32 = TILE_YARDS / CHUNKS_PER_TILE as f32;
+
+/// World `(x, y)` → the **chunk** index `(chunk_x, chunk_y)` on the 1024×1024 chunk grid — the same
+/// axis swap as [`world_to_tile`], and `chunk >> 4` is exactly that tile. Clamped to `0..=1023`.
+///
+/// This is the reference's own streaming coordinate: `0x672730` computes
+/// `fistp((17066.666 − pos) × 0.03 − 0.5)` per axis — the containing chunk — and sizes its
+/// residency windows in these units (wow-re `terrain.md`, "Streaming residency").
+pub fn world_to_chunk(world_x: f32, world_y: f32) -> (u32, u32) {
+    let offset = 32.0 * TILE_YARDS;
+    let max = MAP_SIZE as u32 * CHUNKS_PER_TILE - 1;
+    let chunk_x = ((offset - world_y) / CHUNK_YARDS) as u32;
+    let chunk_y = ((offset - world_x) / CHUNK_YARDS) as u32;
+    (chunk_x.min(max), chunk_y.min(max))
+}
+
 /// ADT tile `(tile_x, tile_y)` → the world `(x, y)` of its max-corner origin (inverse of
 /// [`world_to_tile`]).
 pub fn tile_to_world(tile_x: u32, tile_y: u32) -> (f32, f32) {
@@ -358,6 +377,25 @@ mod tests {
         // …nor one that ships the placement without the flag.
         let unflagged = parse(synth_wmo_only_wdt(false, true)).expect("parses");
         assert!(unflagged.global_wmo().is_none());
+    }
+
+    /// The chunk grid nests in the tile grid: `chunk >> 4` is the tile `world_to_tile` names, at
+    /// every chunk centre of a whole tile and at the map's far clamp.
+    #[test]
+    fn the_chunk_index_nests_in_the_tile_index() {
+        let (ox, oy) = tile_to_world(32, 44);
+        for cx in 0..16u32 {
+            for cy in 0..16u32 {
+                // Chunk (cx, cy) of tile (32, 44): tile_x runs along world y, tile_y along world x.
+                let wy = oy - (cx as f32 + 0.5) * CHUNK_YARDS;
+                let wx = ox - (cy as f32 + 0.5) * CHUNK_YARDS;
+                let (chx, chy) = world_to_chunk(wx, wy);
+                assert_eq!((chx >> 4, chy >> 4), world_to_tile(wx, wy));
+                assert_eq!((chx, chy), (32 * 16 + cx, 44 * 16 + cy));
+            }
+        }
+        assert_eq!(world_to_chunk(-1.0e6, -1.0e6), (1023, 1023));
+        assert_eq!(world_to_chunk(1.0e6, 1.0e6), (0, 0));
     }
 
     #[test]

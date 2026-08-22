@@ -184,6 +184,40 @@ fn gossip_message_wire() {
     }
 }
 
+/// `SMSG_GOSSIP_POI` — the guard's directions marker (vmangos `GossipDef.cpp:239-295`):
+/// `u32 flags, f32 x, f32 y, u32 icon, u32 data, cstr name`. The golden body is a REAL row of the
+/// 5875-era `points_of_interest` table (entry 658, "Lion's Pride Inn": flags 99, icon 6 =
+/// `ICON_POI_REDFLAG`, data 0) — the shape every guard direction actually takes.
+#[test]
+fn gossip_poi_wire_and_event() {
+    let body = hx(concat!(
+        "63000000",                         // u32 flags = 99 (0x63): candidate | in-range icon
+        "66cd13c6",                         // f32 x = -9459.35
+        "6f522842",                         // f32 y = 42.0805
+        "06000000",                         // u32 icon = 6 (ICON_POI_REDFLAG)
+        "00000000",                         // u32 data = 0
+        "4c696f6e277320507269646520496e6e", // "Lion's Pride Inn"
+        "00",                               // … NUL-terminated
+    ));
+
+    let expected = messages::GossipPoi {
+        flags: 99,
+        pos: [-9459.35, 42.0805],
+        icon: 6,
+        data: 0,
+        name: "Lion's Pride Inn".into(),
+    };
+    match messages::parse_server(messages::opcode::SMSG_GOSSIP_POI, &body).unwrap() {
+        ServerPacket::GossipPoi(poi) => assert_eq!(poi, expected),
+        other => panic!("gossip poi, got {}", other.name()),
+    }
+    let packet = messages::parse_server(messages::opcode::SMSG_GOSSIP_POI, &body).unwrap();
+    match decode(packet).pop().unwrap() {
+        SessionEvent::GossipPoi(poi) => assert_eq!(poi, expected),
+        other => panic!("gossip poi event, got {other:?}"),
+    }
+}
+
 #[test]
 fn npc_text_update_greeting_extraction() {
     // SMSG_NPC_TEXT_UPDATE (vmangos GossipDef.cpp:298-369): always 8 blocks of {f32 probability,

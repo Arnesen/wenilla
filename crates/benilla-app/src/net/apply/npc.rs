@@ -85,6 +85,29 @@ pub(super) fn gossip_complete(gossip: &mut GossipState, quest: &mut QuestGiver) 
     quest.clear();
 }
 
+/// The guard's directions (`SMSG_GOSSIP_POI`): drop the marker at that spot. Volunteered by the
+/// server for a gossip option carrying an `action_poi_id` — it answers nothing we asked for, and
+/// it does **not** end the gossip session on its own (vmangos `Player::OnGossipSelect`'s
+/// `GOSSIP_OPTION_GOSSIP` arm sends the POI *before* it decides whether to move the menu on, leave
+/// it, or close it).
+///
+/// `map_id` is the map the player is standing on, which is the only place the marker can mean
+/// anything — the wire carries no map field, and the reference reads its own current-map global at
+/// exactly this point. `now_secs` starts the marker's 8-minute clock ([`crate::poi_marker`]); it
+/// is the same real clock the corpse reclaim delay is stamped against (decision 0846).
+pub(super) fn gossip_poi(
+    poi: &benilla_protocol::messages::GossipPoi,
+    marker: &mut crate::poi_marker::PoiMarker,
+    map_id: u32,
+    now_secs: f64,
+) {
+    debug!(
+        "net: directions to \"{}\" at ({:.1}, {:.1}) — icon {}, flags {:#x}",
+        poi.name, poi.pos[0], poi.pos[1], poi.icon, poi.flags
+    );
+    marker.set(poi, map_id, now_secs);
+}
+
 /// A vendor's stock (`SMSG_LIST_INVENTORY`): fill the [`MerchantOpen`] the merchant feed
 /// (`crate::ui_merchant`) reads. A successful buy updates the stock display via
 /// [`vendor_buy_result`] (the item itself lands via item-create); a successful sell is silent

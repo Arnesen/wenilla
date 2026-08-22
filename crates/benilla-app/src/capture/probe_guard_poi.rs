@@ -1,0 +1,219 @@
+//! The guard-directions live probe (`WOW_PROBE=guardpoi`) — the end-to-end instrument for
+//! [`crate::poi_marker`], inert without the env: once in-world, GM-hop to a Stormwind City Guard,
+//! open his gossip on the real wire (`CMSG_GOSSIP_HELLO` → `SMSG_GOSSIP_MESSAGE`), click the
+//! directions option, and report what `SMSG_GOSSIP_POI` actually put on the map.
+//!
+//! The verdict is machine-checked against the server's own row, so a wrong parse cannot pass: the
+//! guard's "Weapons Trainer" option carries `action_poi_id = 808`, whose `points_of_interest` row
+//! is `("Woo Ping", -8796.2, 613.098, icon 6, flags 99)`. The probe asserts the name, the position,
+//! the icon and the flags, then classifies the marker exactly as the minimap's landmark pass would
+//! — distance, view radius, and which of the two draws it takes — so the run says *what would be
+//! on screen*, not merely that a packet arrived.
+//!
+//! Non-combat. Pair with the SLOT-KEYED probe identity (`WOW_USER=probeN WOW_PASS=pprobeN
+//! WOW_CHAR=Probe<N-spelled>`; `method.md`, "The local vmangos server"), and `WOW_NOSOUND=1` when
+//! it runs unattended. One `timeout`'d run plus a grep for `PROBE guardpoi:` is the whole harness.
+
+use bevy::prelude::*;
+
+use super::probes::ProbeClock;
+use crate::net::{ClientCommand, Guid, NetEntity, ObjectStore, SelfPlayer};
+use crate::player::Player;
+use crate::poi_marker::PoiMarker;
+use crate::ui_gossip::GossipState;
+
+/// A Stormwind City Guard's spawn (vmangos `creature` guid 79664, entry 68, map 0) — the `.go xyz`
+/// target. The guard himself is then found in the streamed world by his gossip flag, never by a
+/// hardcoded guid.
+const GUARD_AT: [f32; 3] = [-8854.14, 541.299, 105.984];
+/// `UNIT_NPC_FLAG_GOSSIP` (bit 0) — every direction-giving guard carries it.
+const NPC_FLAG_GOSSIP: u32 = 0x1;
+/// The option we click, by its label. Menu 435 lists it 9th ("Weapons Trainer", `action_poi_id`
+/// 808); matching on the text rather than the index keeps the probe honest if the row order moves.
+const OPTION_LABEL: &str = "Weapons Trainer";
+/// What `points_of_interest` row 808 says the answer must be.
+const EXPECT_NAME: &str = "Woo Ping";
+const EXPECT_POS: [f32; 2] = [-8796.2, 613.098];
+const EXPECT_ICON: u32 = 6; // ICON_POI_REDFLAG
+const EXPECT_FLAGS: u32 = 99; // candidate | draw-the-in-range-icon
+/// The in/out-of-range split the minimap's landmark pass applies (`0x811730`, VERIFIED).
+const BLIP_EDGE_RATIO: f32 = 0.8;
+
+pub(crate) struct ProbeGuardPoiPlugin;
+
+impl Plugin for ProbeGuardPoiPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<GuardPoiProbe>()
+            .add_systems(Update, guard_poi_probe);
+    }
+}
+
+#[derive(Resource, Default)]
+struct GuardPoiProbe {
+    phase: Phase,
+}
+
+/// `Wait` → (GM hop sent) `Hopped` → (guard found, hello sent) `Greeted` → (option clicked)
+/// `Asked` → verdict → `Done`.
+#[derive(Default, PartialEq)]
+enum Phase {
+    #[default]
+    Wait,
+    Hopped {
+        sent_at: f64,
+    },
+    Greeted {
+        guard: u64,
+        sent_at: f64,
+    },
+    Asked {
+        sent_at: f64,
+    },
+    Done,
+}
+
+// One Bevy system's full input set (the taxi-probe shape).
+#[allow(clippy::too_many_arguments)]
+fn guard_poi_probe(
+    time: ProbeClock,
+    mut probe: ResMut<GuardPoiProbe>,
+    self_player: Query<(), With<SelfPlayer>>,
+    player: Res<Player>,
+    gossip: Res<GossipState>,
+    marker: Res<PoiMarker>,
+    units: Query<(&Guid, &NetEntity, &ObjectStore, &Transform), Without<SelfPlayer>>,
+    net: Res<crate::net::NetCommands>,
+) {
+    if self_player.single().is_err() {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    match probe.phase {
+        Phase::Wait => {
+            let [x, y, z] = GUARD_AT;
+            info!("PROBE guardpoi: hopping to a Stormwind City Guard at ({x}, {y}, {z})");
+            let _ = net.0.send(ClientCommand::Chat {
+                kind: crate::net::ChatKind::Say,
+                target: None,
+                text: format!(".go xyz {x} {y} {z} 0"),
+            });
+            probe.phase = Phase::Hopped { sent_at: now };
+        }
+        Phase::Hopped { sent_at } => {
+            if now - sent_at < 3.0 {
+                return; // post-teleport settle: let the guard stream in
+            }
+            let me = player.pos;
+            let guard = units.iter().find(|(_, net_e, store, tf)| {
+                net_e.kind == benilla_protocol::EntityKind::Unit
+                    && store.0.unit_npc_flags() & NPC_FLAG_GOSSIP != 0
+                    && tf.translation.distance(me) < 15.0
+            });
+            if let Some((guid, ..)) = guard {
+                info!(
+                    "PROBE guardpoi: guard {:#x} in range — asking for directions",
+                    guid.0
+                );
+                let _ = net.0.send(ClientCommand::GossipHello { guid: guid.0 });
+                probe.phase = Phase::Greeted {
+                    guard: guid.0,
+                    sent_at: now,
+                };
+            } else if now - sent_at > 15.0 {
+                error!("PROBE guardpoi: FAILURE — no gossip NPC streamed in within 15 s");
+                probe.phase = Phase::Done;
+            }
+        }
+        Phase::Greeted { guard, sent_at } => {
+            if gossip.npc == Some(guard) && !gossip.options.is_empty() {
+                let labels: Vec<&str> = gossip.options.iter().map(|o| o.message.as_str()).collect();
+                info!(
+                    "PROBE guardpoi: menu open — {} options: {labels:?}",
+                    labels.len()
+                );
+                let Some(option) = gossip
+                    .options
+                    .iter()
+                    .find(|o| o.message == OPTION_LABEL)
+                    .map(|o| o.index)
+                else {
+                    error!("PROBE guardpoi: FAILURE — no \"{OPTION_LABEL}\" option on this menu");
+                    probe.phase = Phase::Done;
+                    return;
+                };
+                info!("PROBE guardpoi: clicking \"{OPTION_LABEL}\" (option {option})");
+                let _ = net.0.send(ClientCommand::GossipSelectOption {
+                    guid: guard,
+                    option,
+                });
+                probe.phase = Phase::Asked { sent_at: now };
+            } else if now - sent_at > 8.0 {
+                error!("PROBE guardpoi: FAILURE — SMSG_GOSSIP_MESSAGE never arrived");
+                probe.phase = Phase::Done;
+            }
+        }
+        Phase::Asked { sent_at } => {
+            let Some(poi) = &marker.poi else {
+                if now - sent_at > 8.0 {
+                    error!(
+                        "PROBE guardpoi: FAILURE — no marker 8 s after the click (no \
+                            SMSG_GOSSIP_POI, or it was cleared on arrival)"
+                    );
+                    probe.phase = Phase::Done;
+                }
+                return;
+            };
+            // Every field against the server's own row — a mis-ordered parse cannot survive this.
+            let mut wrong: Vec<String> = Vec::new();
+            if poi.name != EXPECT_NAME {
+                wrong.push(format!("name {:?} != {EXPECT_NAME:?}", poi.name));
+            }
+            let off = ((poi.pos[0] - EXPECT_POS[0]).powi(2) + (poi.pos[1] - EXPECT_POS[1]).powi(2))
+                .sqrt();
+            if off > 0.5 {
+                wrong.push(format!(
+                    "pos ({:.2}, {:.2}) is {off:.2} yd off ({}, {})",
+                    poi.pos[0], poi.pos[1], EXPECT_POS[0], EXPECT_POS[1]
+                ));
+            }
+            if poi.icon != EXPECT_ICON {
+                wrong.push(format!("icon {} != {EXPECT_ICON}", poi.icon));
+            }
+            if poi.flags != EXPECT_FLAGS {
+                wrong.push(format!("flags {} != {EXPECT_FLAGS}", poi.flags));
+            }
+
+            // What the minimap's landmark pass would do with it, from here (the default zoom's
+            // 133.3-yd view radius — the probe never opens the zoom dial, so this IS the live one).
+            let w = benilla_assets::coords::bevy_to_wow(player.pos);
+            let d = ((poi.pos[0] - w[0]).powi(2) + (poi.pos[1] - w[1]).powi(2)).sqrt();
+            let radius = 133.3;
+            let draw = match d / radius <= BLIP_EDGE_RATIO {
+                true if poi.flags & 0x2 != 0 => {
+                    format!("POIIcons cell {} at its true spot", poi.icon)
+                }
+                true => "nothing (in range, no Flags&2)".to_string(),
+                false => "a rim arrow pointing at it".to_string(),
+            };
+            info!(
+                "PROBE guardpoi: marker \"{}\" at ({:.1}, {:.1}) icon {} flags {} — {d:.1} yd away \
+                 (ratio {:.2} of the {radius:.0}-yd view) → minimap draws {draw}",
+                poi.name,
+                poi.pos[0],
+                poi.pos[1],
+                poi.icon,
+                poi.flags,
+                d / radius,
+            );
+            if wrong.is_empty() {
+                info!(
+                    "PROBE guardpoi: SUCCESS — the guard's directions match points_of_interest 808"
+                );
+            } else {
+                error!("PROBE guardpoi: FAILURE — {}", wrong.join("; "));
+            }
+            probe.phase = Phase::Done;
+        }
+        Phase::Done => {}
+    }
+}

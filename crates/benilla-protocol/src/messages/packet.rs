@@ -7,11 +7,11 @@ use crate::wire::Vector3d;
 use super::{
     ActionButton, AttackerState, CastOutcome, ChannelNotify, Character, ChatMessage,
     CorpseLocation, DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
-    FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry,
-    GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
-    InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
-    LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode, Object,
-    PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, QuestComplete, QuestDetails,
+    FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GossipPoi, GroupLootInfo,
+    GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse,
+    GuildRoster, InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed,
+    LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode,
+    Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, QuestComplete, QuestDetails,
     QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
     ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog,
     SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask, TradeStatus,
@@ -702,6 +702,9 @@ pub enum ServerPacket {
     },
     /// `SMSG_GOSSIP_COMPLETE` — the gossip window closes (vmangos `Npc.cpp:90`); an empty body.
     GossipComplete,
+    /// `SMSG_GOSSIP_POI` — the marker a guard drops when you ask for directions (vmangos
+    /// `GossipDef.cpp:253`). Volunteered, never requested.
+    GossipPoi(GossipPoi),
     /// `SMSG_NPC_TEXT_UPDATE` — answers `CMSG_NPC_TEXT_QUERY`: always 8 weighted text blocks
     /// (vmangos `GossipDef.cpp:298-369`), carried here **undecided**. Which line greets you needs
     /// the NPC's gender and a die roll, so it is drawn when the frame opens, not when the packet
@@ -1280,6 +1283,7 @@ impl ServerPacket {
             ServerPacket::QuestUpdateAddItem { .. } => "SMSG_QUESTUPDATE_ADD_ITEM".into(),
             ServerPacket::GossipMessage { .. } => "SMSG_GOSSIP_MESSAGE".into(),
             ServerPacket::GossipComplete => "SMSG_GOSSIP_COMPLETE".into(),
+            ServerPacket::GossipPoi(..) => "SMSG_GOSSIP_POI".into(),
             ServerPacket::NpcText { .. } => "SMSG_NPC_TEXT_UPDATE".into(),
             ServerPacket::VendorList { .. } => "SMSG_LIST_INVENTORY".into(),
             ServerPacket::BuyItem { .. } => "SMSG_BUY_ITEM".into(),

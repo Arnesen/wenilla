@@ -28,7 +28,9 @@
 //! Zone maps carry **exploration fog**: the base tiles are the unexplored parchment, and each
 //! discovered sub-area's overlay art (`GetNumMapOverlays`/`GetMapOverlayInfo`, filtered by the
 //! pushed `PLAYER_EXPLORED_ZONES` bitset) fills it in — the reference's own overlay pool draws
-//! the returned pieces. v1 stubs: the landmark (AreaPOI) family (`GetNumMapLandmarks` → 0).
+//! the returned pieces. The landmark family (`GetNumMapLandmarks`/`GetMapLandmarkInfo`) answers
+//! with the guard-directions marker (decision 1514); the `AreaPOI.dbc` rows that also belong in
+//! it are 0203's still-deferred slice.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -50,6 +52,28 @@ pub struct WorldMapZoneView {
     /// The zone's discovery overlays (WorldMapOverlay rows) — the art that fills the parchment
     /// as sub-areas are explored (`GetNumMapOverlays`/`GetMapOverlayInfo`).
     pub overlays: Vec<WorldMapOverlayView>,
+}
+
+/// One **map landmark** — a POI icon on the displayed map (`GetNumMapLandmarks` /
+/// `GetMapLandmarkInfo`). The app projects it, so what arrives here is already map UV.
+///
+/// Today the only landmark is the guard-directions marker (`SMSG_GOSSIP_POI` — the flag a guard
+/// drops when you ask where the warrior trainer is), and the reference routes it through this same
+/// list: its landmark-list builder `0x4a67a0` appends the marker as the one element with
+/// `+0x10 == 1`, exempt from every gate a real AreaPOI must pass (VERIFIED, wow-re
+/// `system/ui/scratch/gossip-poi-marker.md`). The `AreaPOI.dbc` rows that also belong here are
+/// 0203's still-deferred landmark slice, and land in this list when they do.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorldMapLandmarkView {
+    /// The label its tooltip shows ("Stormwind Warrior Trainer").
+    pub name: String,
+    /// The second tooltip line — a live status string on the AreaPOI rows that carry one (a
+    /// battleground node's "In Conflict"); empty for the guard marker.
+    pub description: String,
+    /// The `Interface\Minimap\POIIcons` cell, 8×8 grid (the guard marker's is `6` — the red flag).
+    pub texture_index: u32,
+    /// Position on the DISPLAYED map, `[0,1]` UV from its top-left.
+    pub uv: (f32, f32),
 }
 
 /// One discovery overlay: a sub-area's map art, drawn over the base tiles once any of its
@@ -195,6 +219,9 @@ pub struct WorldMapState {
     /// The discovery bitset (`PLAYER_EXPLORED_ZONES_1` — 64 u32 = 2048 bits, bit n = AreaTable
     /// exploreFlag n), pushed by the app when the descriptor changes. Empty = nothing explored.
     pub explored: Vec<u32>,
+    /// The POI icons on the displayed map (`GetNumMapLandmarks`/`GetMapLandmarkInfo`), already
+    /// projected into its UV — pushed by the app on change, which repaints an open map.
+    pub landmarks: Vec<WorldMapLandmarkView>,
 }
 
 /// Is explore-bit `n` set in the pushed bitset?
@@ -251,6 +278,19 @@ impl super::UiScript {
         let mut model = self.model_mut();
         if model.worldmap.explored != explored {
             model.worldmap.explored = explored;
+            model
+                .pending_events
+                .push(("WORLD_MAP_UPDATE".to_string(), Vec::new()));
+        }
+    }
+
+    /// Push the displayed map's landmarks (the app projects them; see [`WorldMapLandmarkView`]).
+    /// On change, queues `WORLD_MAP_UPDATE` — the repaint that re-seats the POI icons, exactly
+    /// the event the overlay push above uses for the same reason.
+    pub fn set_world_map_landmarks(&mut self, landmarks: Vec<WorldMapLandmarkView>) {
+        let mut model = self.model_mut();
+        if model.worldmap.landmarks != landmarks {
+            model.worldmap.landmarks = landmarks;
             model
                 .pending_events
                 .push(("WORLD_MAP_UPDATE".to_string(), Vec::new()));
@@ -562,11 +602,49 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The landmark (AreaPOI) family — a later phase-3 slice. Zero/nil now.
-    g.set("GetNumMapLandmarks", lua.create_function(|_, ()| Ok(0i64))?)?;
+    // GetNumMapLandmarks() — how many POI icons the displayed map carries. Today that is the
+    // guard-directions marker and nothing else; the `AreaPOI.dbc` rows are 0203's deferred
+    // landmark slice, and they join this same list when it lands.
+    g.set(
+        "GetNumMapLandmarks",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.worldmap.landmarks.len() as i64)
+        })?,
+    )?;
+
+    // GetMapLandmarkInfo(i) → name, description, textureIndex, x, y — the i-th (1-based) landmark
+    // (return shape VERIFIED at `0x4a8740`, wow-re `system/ui/scratch/gossip-poi-marker.md`).
+    // `textureIndex` indexes `Interface\Minimap\POIIcons`' 8×8 grid — for the guard's marker it is
+    // the packet's own `Icon`, verbatim, exempt from the substitution an ordinary landmark gets at
+    // zone level; x/y are `[0,1]` UV on the displayed map, the same space `GetPlayerMapPosition`
+    // answers in. A landmark with no description answers **nil** there, as the reference does
+    // (`0x6f3890` pushes nil on a NULL string) — the guard's marker never carries one.
     g.set(
         "GetMapLandmarkInfo",
-        lua.create_function(|_, _i: i64| Ok(Value::Nil))?,
+        lua.create_function(|lua, i: i64| {
+            let landmark = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                usize::try_from(i)
+                    .ok()
+                    .and_then(|i| i.checked_sub(1))
+                    .and_then(|i| model.worldmap.landmarks.get(i).cloned())
+            };
+            let Some(l) = landmark else {
+                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+            };
+            let description = match l.description.is_empty() {
+                true => Value::Nil,
+                false => Value::String(lua.create_string(&l.description)?),
+            };
+            Ok(MultiValue::from_vec(vec![
+                Value::String(lua.create_string(&l.name)?),
+                description,
+                Value::Integer(i64::from(l.texture_index)),
+                Value::Number(f64::from(l.uv.0)),
+                Value::Number(f64::from(l.uv.1)),
+            ]))
+        })?,
     )?;
 
     // GetNumMapOverlays() — how many of the displayed zone's overlays are REVEALED by the

@@ -614,8 +614,15 @@ pub const SMSG_GOSSIP_MESSAGE: u16 = 0x017D; // 381
 pub const SMSG_GOSSIP_COMPLETE: u16 = 0x017E; // 382
 pub const CMSG_NPC_TEXT_QUERY: u16 = 0x017F; // 383
 pub const SMSG_NPC_TEXT_UPDATE: u16 = 0x0180; // 384
-                                              // The questgiver panel set — "accept/turn-in a quest at an NPC" (VERIFIED vmangos
-                                              // `Opcodes_1_12_1.h`: 386-402). Bodies + SMSG layouts in [`super::quest`] (decision 0088).
+
+// The guard's directions marker. Volunteered by a gossip option carrying an `action_poi_id`
+// (vmangos `Player::OnGossipSelect` → `PlayerMenu::SendPointOfInterest`, `GossipDef.cpp:253`), so
+// it answers no request of ours — a gossip-family SMSG with no CMSG beside it, which is why it
+// sits out at 548 instead of inside the 379-384 block. Body in [`super::gossip`].
+pub const SMSG_GOSSIP_POI: u16 = 0x0224; // 548
+
+// The questgiver panel set — "accept/turn-in a quest at an NPC" (VERIFIED vmangos
+// `Opcodes_1_12_1.h`: 386-402). Bodies + SMSG layouts in [`super::quest`] (decision 0088).
 pub const CMSG_QUESTGIVER_STATUS_QUERY: u16 = 0x0182; // 386
 pub const SMSG_QUESTGIVER_STATUS: u16 = 0x0183; // 387
 pub const CMSG_QUESTGIVER_HELLO: u16 = 0x0184; // 388

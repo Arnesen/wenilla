@@ -19,7 +19,6 @@ mod sh; // the model SH light-probe coefficient math
 pub use blob::LightBlob;
 pub use global_light::{new_shared_light_buffer, LightRooms, SharedLightBuffer};
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
-pub use resolve::fog_range;
 // The std430 layout itself — row indices, byte sizes, region offsets and the folds that fill them
 // — stays in the crate. Off-world producers state values through `LightBlob` and never a row index
 // (see `blob`); `global_light` builds the world's own blob on the frame path.

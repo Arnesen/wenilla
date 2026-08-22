@@ -55,7 +55,7 @@ const SUN_SIZE: f32 = 0.0833;
 const GLARE_DIST: f32 = 12.0;
 
 /// Flare occlusion-march tuning: sample count and reach. The reach spans the whole DRAWN horizon —
-/// the detailed ADT ring (`tile_radius` 2 ≈ ±1066 units) and the coarse WDL beyond it, out to just
+/// the detailed ADT ring (the farclip-derived window, ≈ ±867 units at 777) and the coarse WDL beyond it, out to just
 /// inside the far plane — so a distant WDL mountain that visibly hides the body also kills its flare
 /// (the moon shone through the Westfall ridge when the march stopped at 1000). 48 quadratic samples
 /// ⇒ ≤ ~117-unit spacing at the far end, well under a horizon mountain's footprint.

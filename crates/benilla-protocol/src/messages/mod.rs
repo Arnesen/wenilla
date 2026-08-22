@@ -102,7 +102,7 @@ pub use duel::{
 };
 pub use gameobject::{gameobj_use, gameobject_query, GameObjectQueryInfo};
 pub use gossip::{
-    gossip_hello, gossip_select_option, npc_text_query, select_greeting, GossipOption,
+    gossip_hello, gossip_select_option, npc_text_query, select_greeting, GossipOption, GossipPoi,
     NpcTextBlock, QuestOption, NPC_TEXT_BLOCKS,
 };
 pub use group::{

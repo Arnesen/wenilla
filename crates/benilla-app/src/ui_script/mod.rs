@@ -880,6 +880,10 @@ mod quiver_tests;
 #[cfg(test)]
 mod world_entry_tests;
 
+/// The world map's POI pool — the guard's directions marker today, the AreaPOI landmarks later.
+#[cfg(test)]
+mod world_map_tests;
+
 #[cfg(test)]
 mod seam_scale_tests {
     use super::seam_scale;

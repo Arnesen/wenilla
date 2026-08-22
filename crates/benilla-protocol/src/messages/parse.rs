@@ -604,6 +604,7 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             }
         }
         opcode::SMSG_GOSSIP_COMPLETE => ServerPacket::GossipComplete,
+        opcode::SMSG_GOSSIP_POI => ServerPacket::GossipPoi(gossip::read_gossip_poi(&mut r)?),
         opcode::SMSG_NPC_TEXT_UPDATE => {
             let (text_id, blocks) = gossip::read_npc_text_update(&mut r)?;
             ServerPacket::NpcText { text_id, blocks }

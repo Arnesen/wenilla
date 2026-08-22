@@ -158,6 +158,49 @@ pub(super) fn read_npc_text_update(r: &mut &[u8]) -> io::Result<(u32, Vec<NpcTex
     Ok((text_id, blocks))
 }
 
+/// A point-of-interest marker (`SMSG_GOSSIP_POI`) — the flag a guard drops on your map when you
+/// ask where the warrior trainer is. Volunteered by the server when a gossip option carries an
+/// `action_poi_id` (vmangos `Player::OnGossipSelect` → `PlayerMenu::SendPointOfInterest`), so it
+/// answers no request of ours and can arrive with or without the menu staying open.
+///
+/// The reference client feeds it into the minimap's **AreaPOI landmark** pipeline as a synthetic
+/// record (`system/minimap/scratch/minimap-re.md`: blip slot 1, `0xcea7d4`, written by
+/// `set_blip 0x6dac10` from the 0x224 handler `0x4e2840`) — which is why the field names below are
+/// the DBC's: `flags` and `icon` are read by exactly the laws that read `AreaPOI.dbc`'s columns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GossipPoi {
+    /// The `AreaPOI.dbc` `Flags` column's role: bit 0 = a candidate at all, bit 1 = draw the
+    /// in-range icon. 5875-era `points_of_interest` rows all ship `99` (0x63 — both bits set).
+    pub flags: u32,
+    /// World position — **x, y only**; the wire carries no z (the marker is a map pin, and every
+    /// law that consumes it measures a 2-D distance).
+    pub pos: [f32; 2],
+    /// The `POIIcons.blp` cell, 8×8 grid, gated `< 64` by the draw. All 250 5875-era rows use
+    /// `6` = `ICON_POI_REDFLAG`, "red flag w/ yellow !" (vmangos `GossipDef.h:113`).
+    pub icon: u32,
+    /// vmangos `points_of_interest.data` — `0` in every 5875-era row (the `.debug send poi`
+    /// command sends `30`). Carried for the wire's sake; see the app-side marker for what the
+    /// reference does with it.
+    pub data: u32,
+    /// The destination's name ("Stormwind Warrior Trainer") — the marker's hover tooltip.
+    pub name: String,
+}
+
+/// Read `SMSG_GOSSIP_POI` (vmangos `GossipDef.cpp:239-295` — both overloads write the same
+/// shape): `u32 flags, f32 x, f32 y, u32 icon, u32 data, cstr name`.
+pub(super) fn read_gossip_poi(r: &mut &[u8]) -> io::Result<GossipPoi> {
+    let flags = read_u32_le(r)?;
+    let x = read_f32_le(r)?;
+    let y = read_f32_le(r)?;
+    Ok(GossipPoi {
+        flags,
+        pos: [x, y],
+        icon: read_u32_le(r)?,
+        data: read_u32_le(r)?,
+        name: read_cstring(r)?,
+    })
+}
+
 /// Pick the greeting line the way the reference does (`0x4e2010`, wow-re
 /// `system/ui/scratch/gossip-npctext-law.md`) — a **weighted random draw**, not the highest weight:
 ///

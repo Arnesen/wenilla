@@ -761,6 +761,9 @@ pub enum SessionEvent {
     QuestGiverFailed { quest_id: u32, reason: u32 },
     /// The gossip window closes (`SMSG_GOSSIP_COMPLETE`) — no menu is open server-side any more.
     GossipComplete,
+    /// A guard's directions (`SMSG_GOSSIP_POI`): drop a marker at that spot on the minimap and the
+    /// world map. Volunteered by a gossip option carrying an `action_poi_id` — never requested.
+    GossipPoi(crate::messages::GossipPoi),
     /// The greeting record for a gossip menu (`SMSG_NPC_TEXT_UPDATE`, answering our
     /// `CMSG_NPC_TEXT_QUERY`) — all 8 blocks, **undrawn**: which line greets you depends on the
     /// NPC's gender and a die roll, so the app draws it when the frame opens

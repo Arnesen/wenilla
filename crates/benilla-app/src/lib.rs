@@ -80,6 +80,7 @@ mod pending_item_ops;
 mod perf;
 mod pipe_warm;
 mod player;
+mod poi_marker;
 mod portrait;
 #[cfg(feature = "dev")]
 mod preflight;
@@ -524,6 +525,9 @@ pub fn run(build: BuildId) -> AppExit {
     // explore objectives; the server owns what each trigger means.
     .add_plugins(area_trigger::AreaTriggerPlugin)
     .add_plugins(ui_world_map::WorldMapUiPlugin)
+    // The guard's directions marker (`SMSG_GOSSIP_POI`) — one landmark record, drawn by the
+    // minimap's landmark pass and the world map's POI child, cleared by arriving at it.
+    .add_plugins(poi_marker::PoiMarkerPlugin)
     // The glyph atlas (client TTFs -> baked bitmap) `ui_script`'s extraction draws `FontString`
     // regions through. Loads at Startup, after the asset chain opens (decision 0068 §2).
     .add_plugins(UiTextPlugin)

@@ -40,7 +40,6 @@ use bevy_egui::{
 use benilla_world::lighting::{ClockSource, GameClock, WowLighting};
 use benilla_world::model_render::{ModelKind, ModelPart};
 use benilla_world::modkeys::{dev_chord, DEV_CHORD};
-use benilla_world::view::ViewDistance;
 
 /// The egui half of the pointer arbitration: this panel *writes* it, `ui_script` owns it —
 /// so a build without these overlays still compiles gameplay's reads (decision 1174; the
@@ -332,7 +331,6 @@ fn debug_panel_ui(
     mut contexts: EguiContexts,
     stamp: Res<benilla_world::build_id::BuildId>,
     mut debug: ResMut<DebugState>,
-    mut view: ResMut<ViewDistance>,
     clock: Res<GameClock>,
     lighting: Res<WowLighting>,
     parts: Query<&ModelPart>,
@@ -461,16 +459,6 @@ fn debug_panel_ui(
                             if ui.button("dump WMO cull trace").clicked() {
                                 cull_probe.dump_requested = true;
                             }
-
-                            ui.add_space(6.0);
-                            // Faithful `farclip`: doodads/WMOs hard-pop out past this (no fade). The
-                            // range (and why it runs past vanilla's 777) is `view::FARCLIP_RANGE`,
-                            // shared with the `$WOW_FARCLIP` capture knob so a setting seen here can
-                            // be reproduced headlessly.
-                            ui.add(
-                                egui::Slider::new(&mut view.farclip, benilla_world::view::FARCLIP_RANGE)
-                                    .text("view distance / farclip (yd)"),
-                            );
                         });
 
                     egui::CollapsingHeader::new("Lighting")

@@ -207,6 +207,11 @@ pub(super) fn apply_net_updates(
                 // parks the innkeeper's guid here and `crate::ui_binder` turns it into the
                 // CONFIRM_BINDER dialog, whose Accept is the only thing that binds anything.
                 ResMut<crate::ui_binder::BinderState>,
+                // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
+                // stamped with — the wire carries no map field, so "where you were standing when
+                // the guard told you" is the client's to remember (`crate::poi_marker`).
+                ResMut<crate::poi_marker::PoiMarker>,
+                Option<Res<benilla_world::world_map::CurrentMap>>,
             ),
         ),
     ),
@@ -356,7 +361,14 @@ pub(super) fn apply_net_updates(
             mut mirror_timers,
             mut pet_bar,
             mut ui_error_keys,
-            (mut page_texts, mut played_time_answer, mut guild, mut binder),
+            (
+                mut page_texts,
+                mut played_time_answer,
+                mut guild,
+                mut binder,
+                mut poi_marker,
+                current_map,
+            ),
         ),
     ) = caches;
     let (
@@ -1279,6 +1291,12 @@ pub(super) fn apply_net_updates(
                 npc::npc_greeting(text_id, blocks, &mut gossip, &index, &stores)
             }
             SessionEvent::GossipComplete => npc::gossip_complete(&mut gossip, &mut quest),
+            SessionEvent::GossipPoi(poi) => npc::gossip_poi(
+                &poi,
+                &mut poi_marker,
+                current_map.as_ref().map_or(0, |m| m.0),
+                aura.1.elapsed_secs_f64(),
+            ),
             // Questgiver panels (decision 0088): fill the `QuestGiver` the quest feed
             // (`crate::ui_quest`) reads. Each panel packet replaces the open view; the greeting/gossip
             // quest-row clicks and the panel buttons flow back out through the quest/gossip drains.

@@ -222,7 +222,9 @@ mod wdl;
 /// World (x, y) ↔ ADT tile `(col, row)` — the same mapping the streamer uses to pick tiles
 /// (and the minimap uses to place its tile art, decision 0203: minimap `map<X>_<Y>.blp` names
 /// share the ADT index order, chain-verified — `AhnQiraj_27_46.adt` exists, the swap doesn't).
-pub use benilla_wdt::{tile_to_world, world_to_tile, GlobalWmo, WdtFile, WdtReader, WowVersion};
+pub use benilla_wdt::{
+    tile_to_world, world_to_chunk, world_to_tile, GlobalWmo, WdtFile, WdtReader, WowVersion,
+};
 pub use wdl::{WdlFile, WdlTileMesh};
 
 // The map arc (decision 0203), phase 0: the minimap tile hash catalog + the world-map DBCs.

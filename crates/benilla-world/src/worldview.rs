@@ -31,10 +31,8 @@ use benilla_assets::coords::wow_to_bevy;
 
 use crate::boot;
 use crate::build_id::BuildId;
-use crate::lighting::fog_range;
 use crate::terrain_stream::SPAWN_XY;
 use crate::thread_qos;
-use benilla_assets::RenderConfig;
 
 /// Where the viewer opens, in WoW world coords. Northshire, Elwynn — the same anchor the client
 /// boots on ([`crate::terrain_stream::SPAWN_XY`]), so the two binaries stream the same tiles and a difference
@@ -312,11 +310,9 @@ struct ViewCam {
     speed: f32,
 }
 
-fn spawn_view_camera(mut commands: Commands, config: Option<Res<RenderConfig>>) {
+fn spawn_view_camera(mut commands: Commands) {
     let start = wow_to_bevy([VIEW_START.0, VIEW_START.1, 100.0]);
-    let far = config
-        .map(|c| (fog_range(c.tile_radius).1 + 800.0).max(3000.0))
-        .unwrap_or(3000.0);
+    let far = crate::view::CAM_FAR;
     commands.spawn((
         Camera3d::default(),
         crate::view::WorldCamera,
