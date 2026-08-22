@@ -270,3 +270,301 @@ fn quiver_survives_a_hunter_session_start_without_raising() {
         "Quiver raised at session start: {raised:#?}"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// The Auto Shot Timer's state machine — why the bar "just stays full".
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A ranged weapon on the character sheet, so `UnitRangedDamage("player")` answers a real speed.
+///
+/// 2.8s is a vanilla hunter bow. The addon computes `reloadTime = speed - 0.5`, so this is what
+/// makes the reload phase measurable rather than a divide by zero.
+fn seat_a_bow(s: &mut UiScript) {
+    use benilla_ui::script::UnitCombatStats;
+    s.set_player_combat_stats(Some(UnitCombatStats {
+        ranged_attack_time_ms: 2800,
+        ranged_min_damage: 31.0,
+        ranged_max_damage: 47.0,
+        damage_percent: 1.0,
+        ..Default::default()
+    }));
+}
+
+/// The event burst a real session start fires, in order.
+fn start_session(s: &mut UiScript) {
+    s.fire_event("ADDON_LOADED", vec![ScriptValue::Str("Quiver".into())]);
+    for e in ["VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD"] {
+        s.fire_event(e, Vec::new());
+    }
+}
+
+/// The addon's own state machine, read through the three globals it publishes for macros.
+/// Reading these beats measuring the bar's pixels: they ARE what the bar draws from.
+fn shot_state(s: &mut UiScript) -> (bool, bool, f64, f64) {
+    let mid = s.eval::<bool>("return Quiver.PredMidShot()").unwrap();
+    let (reloading, reload_left) = s
+        .eval::<(bool, f64)>("return Quiver.GetSecondsRemainingReload()")
+        .unwrap();
+    let (_, shoot_left) = s
+        .eval::<(bool, f64)>("return Quiver.GetSecondsRemainingShoot()")
+        .unwrap();
+    (mid, reloading, reload_left, shoot_left)
+}
+
+/// **The reported symptom, reproduced.** *"the shot timer doesn't seem to work properly when
+/// standing still and shooting, it just stays full."*
+///
+/// Quiver's ONLY detector for "an auto shot actually fired" is `ITEM_LOCK_CHANGED` — in the real
+/// client, spending an arrow toggles the ammo slot's lock, and the addon's own comment says so:
+/// *"Inventory event, such as using ammo or drinking a potion. This is how we detect auto shots."*
+///
+/// benilla fires `ITEM_LOCK_CHANGED` only from bag / cursor / mail / loot paths. Nothing fires it
+/// for ammo spent on a ranged attack. So the addon starts its 0.5s aim, saturates it, and waits
+/// forever for a shot it is never told about — which is a bar pinned at 100%.
+#[test]
+fn auto_shot_bar_saturates_when_no_ammo_lock_event_ever_arrives() {
+    let root = quiver_or_skip!();
+    let mut s = seat_a_hunter(&root);
+    seat_a_bow(&mut s);
+    assert!(load_addon_files(&s, &root, "Quiver").is_empty());
+    start_session(&mut s);
+
+    // The player presses the ranged-attack key, then stands still and shoots for two seconds.
+    s.fire_event("START_AUTOREPEAT_SPELL", Vec::new());
+    for _ in 0..20 {
+        s.tick(0.1);
+    }
+
+    let (mid, reloading, _, shoot_left) = shot_state(&mut s);
+    assert!(mid, "the addon does believe it is shooting");
+    assert!(
+        !reloading,
+        "THE BUG: two seconds into a 2.8s weapon cycle and the reload phase never began, \
+         because nothing told the addon a shot went off"
+    );
+    assert!(
+        shoot_left <= 0.0,
+        "THE SYMPTOM: the 0.5s aim bar saturated {shoot_left:.2}s ago and has nowhere to go — \
+         this is 'it just stays full'"
+    );
+}
+
+/// **The mechanism, proven.** The same session, plus the one event benilla never sends: the bar
+/// immediately behaves. This is what pins the diagnosis on the missing ammo lock rather than on
+/// the addon, on `SetWidth`, or on the standing-still check.
+#[test]
+fn auto_shot_bar_drains_the_moment_an_ammo_lock_event_arrives() {
+    let root = quiver_or_skip!();
+    let mut s = seat_a_hunter(&root);
+    seat_a_bow(&mut s);
+    assert!(load_addon_files(&s, &root, "Quiver").is_empty());
+    start_session(&mut s);
+
+    s.fire_event("START_AUTOREPEAT_SPELL", Vec::new());
+    s.tick(0.1);
+    // The arrow leaves the quiver. This is the event the real client fires and we do not.
+    s.fire_event("ITEM_LOCK_CHANGED", Vec::new());
+    s.tick(0.1);
+
+    let (_, reloading, reload_left, _) = shot_state(&mut s);
+    assert!(
+        reloading,
+        "one ITEM_LOCK_CHANGED is the whole difference between a dead bar and a live one"
+    );
+    // reloadTime = UnitRangedDamage speed (2.8) - the addon's 0.5s aiming constant, less the tick.
+    assert!(
+        (2.0..=2.3).contains(&reload_left),
+        "the reload should be draining from ~2.3s, got {reload_left:.2}"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// The Aspect Tracker — what it actually draws, and the one aspect it deliberately does not.
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Seat one active player buff by name and announce it the way the app's aura feed does.
+fn seat_a_buff(s: &mut UiScript, spell_id: u32, name: &str, icon: &str) {
+    use benilla_ui::script::AuraState;
+    s.set_auras(
+        "player",
+        Some(vec![AuraState {
+            spell_id,
+            name: Some(name.into()),
+            icon: Some(icon.into()),
+            count: 0,
+            debuff_type: None,
+            duration: 0.0,
+            expiration_time: 0.0,
+            helpful: true,
+            cancelable: true,
+            until_cancelled: true,
+            channeled: false,
+        }]),
+    );
+    s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
+}
+
+/// Is any quad drawing this art, visibly?
+///
+/// **The buff bar is hidden first, and that is load-bearing.** An active aura paints its own icon
+/// through `BuffButton*`, so while Aspect of the Hawk is up TWO quads carry
+/// `Spell_Nature_RavenForm` — the tracker's, and the player's buff bar. An earlier cut of this
+/// helper counted both and reported the tracker as drawing when it had correctly hidden itself.
+fn draws(s: &mut UiScript, leaf: &str) -> bool {
+    use benilla_ui::script::QuadContent;
+    s.eval::<()>("if BuffFrame then BuffFrame:Hide() end")
+        .unwrap();
+    for i in 1..=24 {
+        let _ = s.eval::<()>(&format!("if BuffButton{i} then BuffButton{i}:Hide() end"));
+    }
+    s.tick(0.1);
+    s.resolve();
+    s.extract().iter().any(|q| {
+        q.alpha > 0.0
+            && q.rect.is_some()
+            && matches!(&q.content,
+                QuadContent::Texture { path: Some(p), .. }
+                    if p.to_ascii_lowercase().ends_with(&leaf.to_ascii_lowercase()))
+    })
+}
+
+/// **The Aspect Tracker draws.** Cheetah up ⇒ the Cheetah icon is on screen.
+///
+/// This is the module end to end on our stack: the scanning tooltip
+/// (`CreateFrame("GameTooltip", …, "GameTooltipTemplate")` → `SetPlayerBuff` → the *named*
+/// `…TextLeft1` font string → a string compare against the localized spell name), then
+/// `Texture:SetTexture` and the backdrop frame it lives in. Every one of those is a real
+/// dependency of ours, and a break in any of them shows up here as a missing quad.
+#[test]
+fn aspect_tracker_draws_the_icon_for_an_active_aspect() {
+    let root = quiver_or_skip!();
+    let mut s = seat_a_hunter(&root);
+    assert!(load_addon_files(&s, &root, "Quiver").is_empty());
+    start_session(&mut s);
+
+    seat_a_buff(
+        &mut s,
+        5118,
+        "Aspect of the Cheetah",
+        "Interface\\Icons\\Ability_Mount_JungleTiger",
+    );
+    assert!(
+        draws(&mut s, "Ability_Mount_JungleTiger"),
+        "the aspect tracker drew nothing for an active Aspect of the Cheetah — \
+         errors: {:#?}",
+        s.errors()
+    );
+}
+
+/// **The Hawk arm is gated on the frame LOCK, and getting that wrong looks exactly like a bug.**
+///
+/// `chooseIconTexture` tests seven aspects by name (Beast, Cheetah, Fox, Monkey, Viper, Wild,
+/// Wolf) and then handles Hawk differently:
+///
+/// ```lua
+/// elseif Api.Spell.PredSpellLearned(Hawk) and not Api.Aura.PredBuffActive(Hawk)
+///     or not Quiver_Store.IsLockedFrames
+/// ```
+///
+/// `and` binds tighter than `or`, so this is `(learned and NOT active) or (UNLOCKED)`. Two
+/// clauses, and the second is the one that catches you out:
+///
+/// - the Hawk icon is a **missing-aspect reminder**, not a status light — with Hawk up it is
+///   suppressed by the first clause;
+/// - but **unlocked frames force it on regardless**, so you can see the frame you are dragging.
+///
+/// A fresh profile starts UNLOCKED, so the honest default is *the reminder shows even with Hawk
+/// up*. This test asserts both halves, because an earlier cut of it asserted only "blank while
+/// Hawk is up" and failed — the addon was right and the test was wrong.
+#[test]
+fn the_hawk_reminder_is_suppressed_only_once_frames_are_locked() {
+    let root = quiver_or_skip!();
+    let mut s = seat_a_hunter(&root);
+    assert!(load_addon_files(&s, &root, "Quiver").is_empty());
+    start_session(&mut s);
+
+    seat_a_buff(
+        &mut s,
+        13165,
+        "Aspect of the Hawk",
+        "Interface\\Icons\\Spell_Nature_RavenForm",
+    );
+
+    // Unlocked (the fresh-profile default): the reminder shows even though Hawk IS up.
+    s.eval::<()>("Quiver_Store.IsLockedFrames = false").unwrap();
+    s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
+    assert!(
+        draws(&mut s, "Spell_Nature_RavenForm"),
+        "unlocked frames force the icon on so it can be dragged — errors: {:#?}",
+        s.errors()
+    );
+
+    // Locked: the first clause governs, and Hawk being up suppresses its own reminder.
+    s.eval::<()>("Quiver_Store.IsLockedFrames = true").unwrap();
+    s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
+    assert!(
+        !draws(&mut s, "Spell_Nature_RavenForm"),
+        "locked + Hawk up must be blank: the reminder has nothing to remind you of"
+    );
+}
+
+/// **B267's second half, end to end through the real feed.** Not a hand-fired event this time:
+/// a container snapshot whose arrow stack ticks down by one, pushed through
+/// [`crate::ui_items::feed::apply_container_source`] exactly as a server object update does.
+///
+/// This is the test that would have caught the bug in the first place. The A/B above proves the
+/// addon reacts to `ITEM_LOCK_CHANGED`; this proves **we actually send one when an arrow is
+/// spent**, which is the half that was missing (decision 1509).
+#[test]
+fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
+    use crate::ui_items::feed::{apply_container_source, FeedMemory};
+    use benilla_ui::script::{ContainerSlot, ContainerState};
+    use std::collections::HashMap;
+
+    let root = quiver_or_skip!();
+    let mut s = seat_a_hunter(&root);
+    seat_a_bow(&mut s);
+    assert!(load_addon_files(&s, &root, "Quiver").is_empty());
+    start_session(&mut s);
+
+    let quiver = |count: u32| {
+        Some(HashMap::from([(
+            0i64,
+            ContainerState {
+                name: Some("Backpack".into()),
+                num_slots: 16,
+                slots: HashMap::from([(
+                    1u32,
+                    ContainerSlot {
+                        item_id: 2512, // Rough Arrow
+                        count,
+                        ..Default::default()
+                    },
+                )]),
+            },
+        )]))
+    };
+    let mut memory = FeedMemory::default();
+    apply_container_source(&mut s, &mut memory, quiver(200), Vec::new());
+
+    s.fire_event("START_AUTOREPEAT_SPELL", Vec::new());
+    s.tick(0.1);
+    let (_, reloading_before, _, _) = shot_state(&mut s);
+    assert!(!reloading_before, "no shot has landed yet");
+
+    // The server tells us the stack is one lighter. That is a fired shot, and the only way the
+    // addon can ever know it.
+    apply_container_source(&mut s, &mut memory, quiver(199), Vec::new());
+    s.tick(0.1);
+
+    let (_, reloading, reload_left, _) = shot_state(&mut s);
+    assert!(
+        reloading,
+        "spending an arrow must start the reload drain — errors: {:#?}",
+        s.errors()
+    );
+    assert!(
+        (2.0..=2.3).contains(&reload_left),
+        "draining from ~2.3s (2.8s bow - 0.5s aim), got {reload_left:.2}"
+    );
+}

@@ -124,6 +124,7 @@ mod tooltip;
 mod tooltip_item;
 mod tooltip_spell;
 mod tooltip_unit;
+mod ui_errors;
 pub use tooltip_unit::TooltipTint;
 mod trade;
 mod tradeskill;
@@ -534,6 +535,7 @@ impl UiScript {
         saved::install(&lua)?;
         keybind::install(&lua)?;
         sound::install(&lua)?;
+        ui_errors::install(&lua)?;
         pointer::install(&lua)?;
         action::install(&lua)?;
         action_bar_toggles::install(&lua)?;

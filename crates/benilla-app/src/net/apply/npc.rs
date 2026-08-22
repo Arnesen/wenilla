@@ -29,9 +29,10 @@ fn npc_gender(guid: u64, index: &GuidIndex, stores: &Query<&mut ObjectStore>) ->
 }
 
 /// A gossip menu opened (`SMSG_GOSSIP_MESSAGE`): fill the [`GossipState`] the gossip feed
-/// (`crate::ui_gossip`) reads. On a menu opening, auto-send the ask-once `CMSG_NPC_TEXT_QUERY`
-/// for its text record (served from the cache on a revisit); the record lands via [`npc_greeting`];
-/// [`gossip_complete`] closes it.
+/// (`crate::ui_gossip`) reads. A first visit to the text id sends the ask-once
+/// `CMSG_NPC_TEXT_QUERY` and the menu **stays closed until [`npc_greeting`] answers it** (B292's
+/// hold — the mechanics and the reference law live on [`GossipState::open_menu`]); a revisit
+/// serves from the cache and opens right away. [`gossip_complete`] closes it.
 ///
 /// The greeting is **drawn here**, not at the packet — this is the reference's own moment for it
 /// (`0x4e2010`), and the draw needs both this NPC's gender ([`npc_gender`]) and a fresh roll.
@@ -52,27 +53,19 @@ pub(super) fn gossip_menu(
         options.len(),
         quests.len()
     );
-    gossip.npc = Some(npc);
-    gossip.text_id = text_id;
-    gossip.options = options;
-    gossip.quests = quests;
-    match gossip.cached_record(text_id).is_some() {
-        true => gossip.greeting = gossip.draw_greeting(text_id, npc_gender),
-        false => {
-            gossip.greeting = None;
-            let _ = net_commands
-                .0
-                .send(ClientCommand::NpcTextQuery { text_id, guid: npc });
-        }
+    if gossip.open_menu(npc, text_id, options, quests, npc_gender) {
+        let _ = net_commands
+            .0
+            .send(ClientCommand::NpcTextQuery { text_id, guid: npc });
     }
 }
 
-/// The NPC-text answer (`SMSG_NPC_TEXT_UPDATE`) — seed the cache with the whole record, and draw
-/// the greeting only for the OPEN menu (a late answer for a menu we already closed just seeds the
-/// cache; the next open draws its own line).
+/// The NPC-text answer (`SMSG_NPC_TEXT_UPDATE`) — seed the cache with the whole record, and open
+/// the menu still waiting on it (a late answer for a menu we already closed or switched just
+/// seeds the cache; the next open draws its own line).
 ///
-/// The record answers a query we sent for the OPEN menu, so its NPC is the one whose gender picks
-/// the column (decision 0081's ask-once flow).
+/// The record answers a query we sent for the waiting menu, so its NPC is the one whose gender
+/// picks the column (decision 0081's ask-once flow).
 pub(super) fn npc_greeting(
     text_id: u32,
     blocks: Vec<NpcTextBlock>,
@@ -81,10 +74,7 @@ pub(super) fn npc_greeting(
     stores: &Query<&mut ObjectStore>,
 ) {
     let npc_gender = gossip.npc.map_or(0, |npc| npc_gender(npc, index, stores));
-    gossip.remember_record(text_id, blocks);
-    if gossip.npc.is_some() && gossip.text_id == text_id {
-        gossip.greeting = gossip.draw_greeting(text_id, npc_gender);
-    }
+    gossip.text_arrived(text_id, blocks, npc_gender);
 }
 
 /// `SMSG_GOSSIP_COMPLETE` ends the whole interaction (e.g. right after a quest accept), so the

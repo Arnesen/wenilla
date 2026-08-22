@@ -699,6 +699,9 @@ mod perf_bar_tests;
 mod panel_tests;
 
 #[cfg(test)]
+mod fade_tests;
+
+#[cfg(test)]
 mod merchant_tests;
 
 #[cfg(test)]

@@ -12,10 +12,12 @@
         defined in `UiPanels.xml:507-563` (battle-tested by Merchant/QuestLog, 0138) — reused
         here, not redefined.
 
-        Docks the left UIPanel slot exactly like Gossip/Merchant/Quest/QuestLog (`UiPanels.xml`
-        `UIPanelWindows["CharacterFrame"] = { area = "left", pushable = 0 }`, mirroring the
-        ref's own `CharacterFrame` row, `UIParent.lua` pin cited in `UiPanels.xml`'s header) — so it
-        competes for/replaces those windows, never stacks with them. `ToggleCharacter(tab)` (ref
+        Docks the left UIPanel slot (`UiPanels.xml` `UIPanelWindows["CharacterFrame"] =
+        { area = "left", pushable = 2, whileDead = 1 }`, the ref's own `UIParent.lua l.19` row —
+        decision 1507; pushable was wrongly 0 from 0208 until then). pushable=2 means it does NOT
+        simply replace the NPC-session windows: a pushable-0 window opening under it slides this
+        sheet to the CENTER seat (vendor left, your equipment beside it), and showing this over a
+        pushable-0 occupant parks it at center likewise. `ToggleCharacter(tab)` (ref
         `CharacterFrame.lua:3-23`) is the show/hide/tab-switch entry point;
         the app's 'C' binding calls it (`ui_script/mod.rs`).
 

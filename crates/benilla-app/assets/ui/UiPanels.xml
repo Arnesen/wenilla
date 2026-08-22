@@ -11,36 +11,51 @@
         reference's window arbitration (a different number is a different window order), and the
         `UISpecialFrames` seeds. The code around that data is ours.
 
-        Scope: `left`, `center` and `full` are all live. `doublewide` and `UIChildWindows` are not
-        — nothing benilla ships wants them — but the registration table keeps their exact shape so
-        a later row drops in unchanged. **`UISpecialFrames` is not ours to write into** (decision
-        1206): it is the table an ADDON puts its own window in, and 34 corpus call sites do.
+        Scope: `left`, `center` and `full` are all live, and so is `UIChildWindows` (decision 1507
+        — all four of the reference's child windows ship now). `doublewide` is not — its one 1.12
+        tenant is the auction house, which benilla doesn't ship — but the registration table keeps
+        its exact shape so a later row drops in unchanged. **`UISpecialFrames` is not ours to write
+        into** (decision 1206): it is the table an ADDON puts its own window in, and 34 corpus call
+        sites do.
 
         Rows are keyed by the frame names we actually ship. Most of those ARE the reference's own
         (`GossipFrame`, `MerchantFrame`, `LootFrame`); where ours differs, the row is `Benilla*` and
         its comment names the reference row it stands in for.
     -->
     <Script><![CDATA[
-        -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only the
-        -- rows benilla ships/anticipates today (pin §1): Gossip + Merchant are live; Loot registers
-        -- now (pushable=7) so the coming loot window lands on an already-wired system.
+        -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only
+        -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard, Petition,
+        -- GuildRegistrar, PetStable, Battlefield, Help, Cinematic, WorldStateScore, Minigame — and
+        -- the doublewide AuctionFrame) join as their windows land (audited row-by-row against the
+        -- bytes, decision 1507).
         UIPanelWindows = {}
         UIPanelWindows["GossipFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["MerchantFrame"] = { area = "left", pushable = 0 }
+        -- The item-text reader (decision 0572, ItemTextFrame.xml): the ref's own l.20 verbatim
+        -- (`UIPanelWindows["ItemTextFrame"] = { area = "left", pushable = 0 }`). The missing row
+        -- WAS bug B288 (decision 1507): the reader already opened through ShowUIPanel, but
+        -- unregistered that call is a bare Show() in no slot — so a quest giver's gossip seated
+        -- itself at the left slot straight over the open note, page text and greeting interleaved.
+        -- Registered, the two are ordinary left-slot rivals (both pushable 0): one replaces the
+        -- other, and the replaced reader's own OnHide sends its CloseItemText().
+        UIPanelWindows["ItemTextFrame"] = { area = "left", pushable = 0 }
         -- The mail window (decision 0544): the reference UIParent.lua l.37 registers MailFrame
-        -- area="left", pushable=0. The OpenMailFrame is NOT a panel — it is a special-frame toplevel
-        -- (UIParent.lua l.46 UISpecialFrames), closed by ESC in ToggleGameMenu below. Our own
-        -- escapable toplevels stay hard-listed in that chain rather than pushed into
-        -- UISpecialFrames — the table exists now (1206) but it is the ADDONS' list, and mixing our
-        -- windows into it would make an addon's `tremove` able to break the client's own ESC.
+        -- area="left", pushable=0. The OpenMailFrame is NOT a panel — it is a UIChildWindow
+        -- (UIParent.lua l.46; 0544 misread that line as UISpecialFrames, 1507 corrects it): shown
+        -- through ShowUIPanel's bare-Show unregistered branch exactly as the ref shows it
+        -- (MailFrame.lua l.206), hidden by SetCenterFrame's child-window loop when a frame takes
+        -- the center seat, and closed with its parent by MailFrame's own OnHide. ESC still closes
+        -- it on our own hard-listed chain in ToggleGameMenu below — never via UISpecialFrames,
+        -- the ADDONS' list (1206), where an addon's `tremove` could break the client's own ESC.
         UIPanelWindows["MailFrame"] = { area = "left", pushable = 0 }
         -- The script error log (decision 1495) — OURS, with no reference row to transcribe. It is
         -- registered here for exactly one reason: an unregistered frame takes ShowUIPanel's bare
         -- `frame:Show()` branch (no left-slot placement, and `CloseAllWindows` never sees it), so
         -- without this row the window would flip IsShown() without landing on screen and ESC would
         -- not close it. `pushable = 9` puts it behind everything already registered: a diagnostic
-        -- must never shove a player's real window out of the slot it wanted.
-        UIPanelWindows["BenillaScriptLogFrame"] = { area = "left", pushable = 9 }
+        -- must never shove a player's real window out of the slot it wanted. whileDead is ours by
+        -- the same logic (1507): a Lua error in the death flow is exactly one you need to read.
+        UIPanelWindows["BenillaScriptLogFrame"] = { area = "left", pushable = 9, whileDead = 1 }
         -- The trade window (decision 0592 P1, TradeFrame.xml): the ref's own UIParent.lua l.27
         -- registration (`UIPanelWindows["TradeFrame"] = { area = "left", pushable = 1 }`). Without
         -- this row ShowUIPanel takes its unregistered branch — a bare frame:Show() with no left-slot
@@ -65,26 +80,31 @@
         -- what makes "ctrl-click a merchant's item" show both.
         UIPanelWindows["DressUpFrame"] = { area = "left", pushable = 2 }
         UIPanelWindows["QuestFrame"] = { area = "left", pushable = 0 }
-        UIPanelWindows["QuestLogFrame"] = { area = "left", pushable = 0 }
+        -- The ref's own l.25 verbatim — whileDead carried since 1507: `UnitIsDead` is a live unit
+        -- binding now, so the flag decides, and checking your quest log while dead is 1.12's call.
+        UIPanelWindows["QuestLogFrame"] = { area = "left", pushable = 0, whileDead = 1 }
         UIPanelWindows["LootFrame"] = { area = "left", pushable = 7 }
-        -- The character window (decision 0208 phase 1a, CharacterFrame.xml): the ref's own
-        -- CharacterFrame row (area "left", pushable 0) — competes for/replaces the other left-slot
-        -- windows exactly like Gossip/Merchant/Quest/QuestLog above.
-        UIPanelWindows["CharacterFrame"] = { area = "left", pushable = 0 }
+        -- The character window (decision 0208 phase 1a, CharacterFrame.xml): the ref's own row is
+        -- `{ area = "left", pushable = 2 , whileDead = 1}` (UIParent.lua l.19, spacing and all) —
+        -- NOT the pushable=0 this line carried from 0208 until 1507 re-read the bytes. The 2 is
+        -- load-bearing arbitration: an NPC session (pushable 0) opening under an open character
+        -- sheet slides it to the center seat — vendor left, your equipment beside it — instead of
+        -- replacing it; and whileDead=1 lets you look your corpse's gear over while dead.
+        UIPanelWindows["CharacterFrame"] = { area = "left", pushable = 2, whileDead = 1 }
         -- The inspect window (decision 0631, InspectFrame.xml): the ref's own InspectFrame row
         -- (`Blizzard_InspectUI.lua:4` — area "left", pushable 0), so inspecting swaps out whichever
         -- left-slot window was open, exactly as the character window does.
         UIPanelWindows["BenillaInspectFrame"] = { area = "left", pushable = 0 }
         -- The spellbook (decision 0216 §8, SpellBookFrame.xml): the ref's own SpellBookFrame row
-        -- (area "left", pushable 0) — same left-slot competition as every window above.
-        UIPanelWindows["SpellBookFrame"] = { area = "left", pushable = 0 }
-        -- The talent window (decision 0304 §4, TalentFrame.xml): the ref's own TalentFrame row is
-        -- `{ area = "left", pushable = 6, whileDead = 1 }` — pushable 6 kept (one tier above the
-        -- plain NPC-session/player-state windows' 0, matching the ref exactly); `whileDead` is
-        -- OMITTED like every other row here (none of them model it, even though ShowUIPanel's own
-        -- guard already reads `info.whileDead` — ShowUIPanel's own comment: `UnitIsDead` doesn't
-        -- exist yet, so the guard is inert either way today).
-        UIPanelWindows["BenillaTalentFrame"] = { area = "left", pushable = 6 }
+        -- verbatim (`{ area = "left", pushable = 0, whileDead = 1 }`, UIParent.lua l.21; whileDead
+        -- carried since 1507) — same left-slot competition as every window above.
+        UIPanelWindows["SpellBookFrame"] = { area = "left", pushable = 0, whileDead = 1 }
+        -- The talent window (decision 0304 §4, TalentFrame.xml): the ref's own TalentFrame row
+        -- verbatim (`{ area = "left", pushable = 6, whileDead = 1 }`, Blizzard_TalentUI.lua:71) —
+        -- pushable 6 one tier above the plain NPC-session/player-state windows' 0. whileDead was
+        -- omitted here while `UnitIsDead` didn't exist; it is a live unit binding now, so 1507
+        -- carries the ref's flag on every row that has one.
+        UIPanelWindows["BenillaTalentFrame"] = { area = "left", pushable = 6, whileDead = 1 }
         -- The social window (decision 0668) — the ref's own registration line verbatim
         -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
         -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
@@ -129,6 +149,19 @@
         -- ShowUIPanel is what subjects it to the same rules as everything else.
         UIPanelWindows["WorldMapFrame"] = { area = "full", pushable = 0, whileDead = 1 }
 
+        -- UIChildWindows — the ref's own table verbatim (UIParent.lua l.44-50; its comment:
+        -- windows that "rely on a parent frame to be open. If the parent closes or a pushable
+        -- frame overlaps them they must be hidden."). Dropped as "none exist yet" until 1507 —
+        -- all four ship now: the open letter (MailFrame.xml) and the guild pane's three
+        -- satellites (FriendsFrame.xml). The parent-close half is each parent's own OnHide
+        -- (MailFrame hides the letter, FriendsFrame_OnHide hides the satellites); this table
+        -- serves the OVERLAP half — SetCenterFrame's hide loop below — because the child popups
+        -- sit exactly where the center seat puts a window.
+        UIChildWindows = {
+            "OpenMailFrame", "GuildControlPopupFrame",
+            "GuildMemberDetailFrame", "GuildInfoFrame",
+        }
+
         -- The real client stores `.left`/`.center`/`.doublewide`/`.fullscreen` as fields directly on
         -- the `UIParent` frame table (UIParent.lua l.789-885). benilla has no `UIParent` frame object
         -- yet (a later decision's job) — so the two slots this v1 tracks live in a private chunk-local
@@ -155,8 +188,13 @@
             end
         end
 
-        -- SetCenterFrame(frame, skipSetPoint) — UIParent.lua l.826-850. The `UIChildWindows` hide loop
-        -- (l.840-846) is dropped: no such frames exist in benilla yet (out of v1 scope).
+        -- SetCenterFrame(frame, skipSetPoint) — UIParent.lua l.826-850, the `UIChildWindows` hide
+        -- loop (l.839-846) carried since 1507: a frame ARRIVING at the center seat lands exactly
+        -- where the child popups sit, so they are put away first. Arriving is the ref's exact
+        -- trigger — MovePanelToCenter's slide re-seats by direct assignment after a
+        -- SetCenterFrame(nil), so a PUSHED panel does not run the loop; kept as transcribed.
+        -- (The ref's `for index, value in UIChildWindows do` is Lua 5.0's iterator-less
+        -- generic-for, which our VM cannot run — decision 1202; `ipairs` is the same walk.)
         function SetCenterFrame(frame, skipSetPoint)
             local oldFrame = slots.center
             slots.center = frame
@@ -167,6 +205,10 @@
                 frame:Show()
                 if not skipSetPoint then
                     frame:SetPoint("TOPLEFT", "UIParent", "TOPLEFT", 384, -104)
+                end
+                for _, name in ipairs(UIChildWindows) do
+                    local childWindow = getglobal(name)
+                    if childWindow then childWindow:Hide() end
                 end
             end
         end
@@ -254,9 +296,15 @@
         -- is the point: `force` is precisely the right to throw the incumbent out instead of being
         -- turned away, so each refusal and its eviction are one decision and are written as one.
         local function AdmitPanel(info, force)
-            -- A dead player gets only the windows that asked for it. UnitIsDead doesn't exist yet
-            -- (pin §3) — guarded rather than assumed absent-forever.
-            if type(UnitIsDead) == "function" and UnitIsDead("player") and not info.whileDead then
+            -- A dead player gets only the windows that asked for it (l.663-666) — and hears why:
+            -- NotWhileDeadError is the binary's 0x48d340 (wow-re §5 cross-check, 2026-08-21 —
+            -- decision 1507's open item): push id 0x7e into the message catalog, whose row is
+            -- ERR_PLAYER_DEAD → UI_ERROR_MESSAGE, sound "NONE". Our binding (ui_errors.rs)
+            -- pushes the same key onto the engine's client-local error queue, which the app
+            -- resolves against GlobalStrings and fires as the same event. The binding is a pure
+            -- display trigger — this line, like the reference's, decides WHEN.
+            if UnitIsDead("player") and not info.whileDead then
+                NotWhileDeadError()
                 return false
             end
             -- l.668-675: nothing opens behind a full-screen frame. The world map is the only

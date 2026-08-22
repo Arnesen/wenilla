@@ -13,7 +13,8 @@
         construction regardless (`widget/mod.rs`'s ctor comment).
 
         Docks the left UIPanel slot exactly like Gossip/Merchant/Quest (`UiPanels.xml`
-        `UIPanelWindows["QuestLogFrame"] = { area = "left", pushable = 0 }`, pin §8's
+        `UIPanelWindows["QuestLogFrame"] = { area = "left", pushable = 0, whileDead = 1 }`
+        (whileDead carried since 1507), pin §8's
         `UIParent.lua l.25` quote) — so it competes for/replaces those windows, never stacks with
         them. UNLIKE those windows this is not an NPC session: no `CloseX()` on hide, no range guard;
         it is durable player state the app can push at any time (`benilla-ui`'s `quest_log.rs` module

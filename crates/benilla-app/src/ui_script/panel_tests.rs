@@ -80,7 +80,7 @@ fn shipped_gossip_frame_drives_end_to_end() {
 
     // The app's feed: a two-option menu (a vendor option + a coded petition option).
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("Greetings, traveler. How may I help you?".into()),
+        greeting: "Greetings, traveler. How may I help you?".into(),
         quests: Vec::new(),
         options: vec![
             GossipOptionView {
@@ -234,7 +234,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     load_xml(&s, "GossipFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("A word, traveler.".into()),
+        greeting: "A word, traveler.".into(),
         quests: vec![
             GossipQuestRow {
                 title: "Report to Goldshire".into(),
@@ -356,7 +356,7 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
         coded: false,
     };
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("Make your choice!".into()),
+        greeting: "Make your choice!".into(),
         quests: Vec::new(),
         options: vec![
             long(
@@ -461,7 +461,7 @@ fn gossip_show_hide_plays_open_and_close_kits() {
     );
 
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("Well met.".into()),
+        greeting: "Well met.".into(),
         quests: Vec::new(),
         options: Vec::new(),
     }));
@@ -493,7 +493,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
     load_xml(&s, "MerchantFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("Well met.".into()),
+        greeting: "Well met.".into(),
         quests: Vec::new(),
         options: vec![GossipOptionView {
             label: "Let me browse your goods.".into(),
@@ -581,7 +581,7 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
 
     // Gossip opens over it → SetLeftFrame hides the merchant → merchant OnHide → CloseMerchant().
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("Well met.".into()),
+        greeting: "Well met.".into(),
         quests: Vec::new(),
         options: Vec::new(),
     }));
@@ -715,7 +715,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
 
         // The gossip menu is open on the banker (its bank option showing).
         s.set_gossip(Some(GossipMenu {
-            greeting: Some("Welcome to the bank of Ironforge!".into()),
+            greeting: "Welcome to the bank of Ironforge!".into(),
             quests: Vec::new(),
             options: vec![GossipOptionView {
                 label: "I would like to check my deposit box.".into(),
@@ -789,7 +789,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
         coded: false,
     };
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("Make your choice!".into()),
+        greeting: "Make your choice!".into(),
         quests: Vec::new(),
         options: (1..=8).map(long).collect(),
     }));
@@ -956,7 +956,7 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
     // when BOTH are pushable=0 (l.728-731). Getting this wrong for an addon means either losing
     // its window or leaving two panels on top of each other.
     s.set_gossip(Some(GossipMenu {
-        greeting: Some("Well met.".into()),
+        greeting: "Well met.".into(),
         quests: Vec::new(),
         options: Vec::new(),
     }));
@@ -980,98 +980,159 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-// ── The fade kit's driver (UIFrameFade / BenillaFadeDriver) ──────────────────────────────────
+// ── the registry pinned to the bytes (decision 1507) ──────────────────────────────────────────
 
-/// **The idle fade driver parks itself** (decision 1396's class, the audit's driver-hide item):
-/// with `FADEFRAMES` empty there is nothing to walk, so the driver's OnUpdate hides its own frame
-/// — and the engine dispatches OnUpdate only to visible frames (`tick.rs`), which stops the
-/// per-frame walk cold. The probe wraps `UIFrameFadeUpdate` in a counter BEFORE the first tick:
-/// ten idle ticks later it has never run, and the driver is hidden.
+/// **The 1507 rows read exactly as the reference wrote them.** The registry is DATA — a different
+/// number is a different window order — and 1507 exists because one row drifted unnoticed for
+/// months (CharacterFrame carried pushable=0 labelled as "the ref's own row"; the bytes say
+/// `pushable = 2, whileDead = 1`, UIParent.lua l.19) while another was simply missing
+/// (ItemTextFrame, l.20 — bug B288: the reader opened through ShowUIPanel's unregistered bare-Show
+/// branch, so gossip seated itself straight over the open note). A drive-by edit re-introducing
+/// either now fails a named test instead of waiting for a player with a Verdant Note.
 #[test]
-fn an_idle_fade_driver_parks_itself_off_the_tick() {
+fn the_1507_registry_rows_match_the_reference_bytes() {
+    let s = UiScript::new().unwrap();
+    load_xml(&s, "UiPanels.xml");
+    for probe in [
+        // ItemTextFrame — UIParent.lua l.20 (the B288 row).
+        "UIPanelWindows['ItemTextFrame'].area == 'left'",
+        "UIPanelWindows['ItemTextFrame'].pushable == 0",
+        "UIPanelWindows['ItemTextFrame'].whileDead == nil",
+        // CharacterFrame — UIParent.lua l.19: pushable 2 (slides beside an NPC session), not 0.
+        "UIPanelWindows['CharacterFrame'].pushable == 2",
+        "UIPanelWindows['CharacterFrame'].whileDead == 1",
+        // The whileDead flags the ref authors and 1507 carried (l.21, l.25, Blizzard_TalentUI:71).
+        "UIPanelWindows['SpellBookFrame'].whileDead == 1",
+        "UIPanelWindows['QuestLogFrame'].whileDead == 1",
+        "UIPanelWindows['BenillaTalentFrame'].whileDead == 1",
+        // UIChildWindows — UIParent.lua l.44-50 verbatim, all four shipped.
+        "table.getn(UIChildWindows) == 4",
+        "UIChildWindows[1] == 'OpenMailFrame'",
+        "UIChildWindows[2] == 'GuildControlPopupFrame'",
+        "UIChildWindows[3] == 'GuildMemberDetailFrame'",
+        "UIChildWindows[4] == 'GuildInfoFrame'",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {probe}")).unwrap(),
+            "registry drifted from the bytes: {probe}"
+        );
+    }
+}
+
+/// **A dead player opens only the windows whose row asked for it** — ShowUIPanel's own guard
+/// (UIParent.lua l.663-666: `UnitIsDead("player") and not info.whileDead` refuses the open),
+/// live now that `UnitIsDead` is a real unit binding. The refused window must not show AND must
+/// not take a slot; a `whileDead = 1` row (the quest log, l.25) opens exactly as alive.
+#[test]
+fn a_dead_player_opens_only_whiledead_windows() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "UiPanels.xml");
-    s.resolve();
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            max_health: 100,
+            health: 0,
+            dead: true,
+            ..Default::default()
+        }),
+    );
+
+    // Stand-ins for two shipped rows: GossipFrame (no whileDead) and QuestLogFrame (whileDead=1).
+    // Bare frames are enough — the guard runs before any seat is chosen.
     s.run(
-        "BENILLA_TEST_FADE_TICKS = 0\n\
-         local real = UIFrameFadeUpdate\n\
-         function UIFrameFadeUpdate(elapsed)\n\
-             BENILLA_TEST_FADE_TICKS = BENILLA_TEST_FADE_TICKS + 1\n\
-             real(elapsed)\n\
-         end",
+        r#"local g = CreateFrame("Frame", "GossipFrame") g:SetSize(50, 50) g:Hide()
+           local q = CreateFrame("Frame", "QuestLogFrame") q:SetSize(50, 50) q:Hide()
+           ShowUIPanel(GossipFrame)"#,
     )
     .unwrap();
-    for _ in 0..10 {
-        s.tick(0.016);
-        s.resolve();
-    }
-    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        !s.eval::<bool>("return BenillaFadeDriver:IsShown()")
-            .unwrap(),
-        "an empty FADEFRAMES parks the driver"
+        !s.eval::<bool>("return GossipFrame:IsShown()").unwrap(),
+        "a row without whileDead is refused while dead"
     );
+    assert!(
+        s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
+        "the refused window took no slot"
+    );
+    // ...and the refusal is heard: NotWhileDeadError (the binary's 0x48d340 — push 0x7e, wow-re
+    // cross-checked) queued the catalog row's key for the app to resolve and toast.
     assert_eq!(
-        s.eval::<i64>("return BENILLA_TEST_FADE_TICKS").unwrap(),
-        0,
-        "a parked driver never runs the fade walk"
+        s.take_ui_errors(),
+        vec!["ERR_PLAYER_DEAD"],
+        "the dead refusal queued its error key"
+    );
+
+    s.run("ShowUIPanel(QuestLogFrame)").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return QuestLogFrame:IsShown()").unwrap(),
+        "a whileDead = 1 row opens exactly as alive"
+    );
+    assert!(
+        s.eval::<bool>("return GetLeftFrame():GetName() == 'QuestLogFrame'")
+            .unwrap(),
+        "and it seats normally at the left slot"
+    );
+    assert!(
+        s.take_ui_errors().is_empty(),
+        "an admitted open raises no error"
     );
 }
 
-/// The control for the guard above: the gate must not cost the fades it gates. `UIFrameFade` (the
-/// kit's single insertion point — `UIFrameFadeIn`/`Out` both land there) wakes the driver beside
-/// its `table.insert`; the fade then ramps on real ticks, completes, and the driver re-parks on
-/// the first empty tick after.
+/// **A frame ARRIVING at the center seat puts the child windows away; a frame PUSHED there does
+/// not** — SetCenterFrame's `UIChildWindows` hide loop (UIParent.lua l.839-846), carried since
+/// 1507, and the ref's exact asymmetry: MovePanelToCenter re-seats by direct assignment after a
+/// `SetCenterFrame(nil)`, so the slide never runs the loop. The open letter (OpenMailFrame) is
+/// the shipped tenant; a bare stand-in proves the slot math without the mail window's whole
+/// dependency chain.
 #[test]
-fn a_started_fade_still_ramps_and_the_driver_reparks_after() {
+fn a_frame_arriving_at_center_puts_the_child_windows_away() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "UiPanels.xml");
-    s.resolve();
-    s.run(r#"CreateFrame("Frame", "BenillaFadeProbe")"#)
-        .unwrap();
-    for _ in 0..2 {
-        s.tick(0.016); // settle: the driver parks
-        s.resolve();
-    }
-    assert!(!s
-        .eval::<bool>("return BenillaFadeDriver:IsShown()")
-        .unwrap());
 
-    s.run("UIFrameFadeIn(BenillaFadeProbe, 1.0)").unwrap();
-    assert!(
-        s.eval::<bool>("return BenillaFadeDriver:IsShown()")
-            .unwrap(),
-        "starting a fade wakes the driver"
-    );
-    assert_eq!(
-        s.eval::<f64>("return BenillaFadeProbe:GetAlpha()").unwrap(),
-        0.0,
-        "the fade armed at its IN startAlpha"
-    );
-
-    s.tick(0.5);
-    s.resolve();
-    let mid = s.eval::<f64>("return BenillaFadeProbe:GetAlpha()").unwrap();
-    assert!(
-        (mid - 0.5).abs() < 1e-3,
-        "half the timeToFade in, half the ramp: {mid}"
-    );
-
-    s.tick(0.6); // past timeToFade: the fade completes and leaves the list
-    s.resolve();
-    assert_eq!(
-        s.eval::<f64>("return BenillaFadeProbe:GetAlpha()").unwrap(),
-        1.0,
-        "the fade completes at its endAlpha"
-    );
-    s.tick(0.016); // the first empty tick re-parks the driver
-    s.resolve();
-    assert!(
-        !s.eval::<bool>("return BenillaFadeDriver:IsShown()")
-            .unwrap(),
-        "the driver re-parks once the list is empty"
-    );
+    // The letter is open; two shipped-row stand-ins take the seats: MerchantFrame (pushable 0)
+    // holds left, TradeFrame (pushable 1) then ARRIVES at center (UIParent.lua l.734-741's
+    // else-arm: the incumbent outranks nobody, the newcomer settles at center).
+    s.run(
+        r#"local m = CreateFrame("Frame", "OpenMailFrame") m:SetSize(50, 50)
+           local a = CreateFrame("Frame", "MerchantFrame") a:SetSize(50, 50) a:Hide()
+           local b = CreateFrame("Frame", "TradeFrame") b:SetSize(50, 50) b:Hide()
+           ShowUIPanel(MerchantFrame)
+           ShowUIPanel(TradeFrame)"#,
+    )
+    .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return GetCenterFrame():GetName() == 'TradeFrame'")
+            .unwrap(),
+        "the pushable=1 newcomer arrived at the center seat"
+    );
+    assert!(
+        !s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap(),
+        "the arriving center frame hid the open letter (the UIChildWindows loop)"
+    );
+
+    // The asymmetry: seats cleared, letter re-shown, LootFrame (pushable 7) holds left and a
+    // pushable=0 window shoves it — MovePanelToCenter SLIDES loot across, and the letter stays.
+    s.run(
+        r#"HideUIPanel(TradeFrame) HideUIPanel(MerchantFrame)
+           OpenMailFrame:Show()
+           local l = CreateFrame("Frame", "LootFrame") l:SetSize(50, 50) l:Hide()
+           ShowUIPanel(LootFrame)
+           ShowUIPanel(MerchantFrame)"#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return GetCenterFrame():GetName() == 'LootFrame'")
+            .unwrap(),
+        "loot slid to center (MovePanelToCenter), merchant took left"
+    );
+    assert!(
+        s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap(),
+        "a PUSHED frame does not run the child-window loop — the ref's exact trigger"
+    );
 }

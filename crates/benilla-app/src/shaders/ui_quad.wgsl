@@ -15,11 +15,13 @@
 //
 // Why the encode below, rather than uploading UI art as raw `Rgba8Unorm`: our BLPs load as
 // `Rgba8UnormSrgb`, so the sampler hands us a LINEARIZED texel. `linear_to_srgb` puts the authored
-// byte back (exact in f32: encode ∘ decode = identity), and it is the one rule that holds for every
-// texture the pass samples — sRGB art, the sRGB glyph atlas, and the portrait booth's `Rgba8Unorm`
-// bake (which stores linear bytes). Uploading everything raw would be cheaper and would also move
-// bilinear filtering into gamma (as the reference filters), but it forces the booth to emit gamma —
-// a contained follow-up, not a look change.
+// byte back (exact in f32: encode ∘ decode = identity), and it is the rule for every texture the
+// pass samples — sRGB art, the sRGB glyph atlas, and the portrait booth's `Rgba8Unorm` bake (which
+// stores linear bytes) — EXCEPT a texture that says otherwise: a SKIP_DECODE upload (`gamma_texel`
+// below — the minimap tiles) already holds the authored byte, and encoding it again is the
+// double-gamma that washed the outdoor minimap bright. Uploading everything raw would be cheaper
+// and would also move bilinear filtering into gamma (as the reference filters), but it forces the
+// booth to emit gamma — a contained follow-up, not a look change.
 
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput
 
@@ -91,6 +93,11 @@
 // so folding the mask ramp into the test would saw the disc's soft rim into a hard, undersized
 // circle.
 @group(2) @binding(9) var<uniform> alpha_ref: f32;
+// The bound texture was uploaded UNDECODED — `BlpVariant::MapTile`'s `GL_SKIP_DECODE_EXT`, the
+// minimap tiles — so the sampler hands back the authored GAMMA byte itself and the ordinary arm's
+// `linear_to_srgb` has no decode to undo: the texel passes through as-is. The alpha-test arm
+// ignores this flag — its target is the un-encoded composite, so it decodes explicitly instead.
+@group(2) @binding(10) var<uniform> gamma_texel: u32;
 
 // ITU-R BT.601 luma — the `PARAM c[0]` of that shader, read as raw f32 words: `0x3E991687`,
 // `0x3F1645A2`, `0x3DE978D5`. Not `(0.3, 0.3, 0.3)`, not `(0.3, 0.59, 0.11)` (this file's own first
@@ -129,8 +136,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #endif
     // Back to the client's byte space, then tint there: `UiQuad.color` is already a client-space
     // sRGB value (FrameXML's `<Color>`, `|cff…`, quality colors), so this multiply IS the FFP's
-    // gamma-space `tint × texel`.
-    let texel = linear_to_srgb(t.rgb);
+    // gamma-space `tint × texel`. A SKIP_DECODE texture (`gamma_texel`) is already IN byte space —
+    // re-encoding it is the double-gamma that washed the outdoor minimap bright.
+    let texel = select(linear_to_srgb(t.rgb), t.rgb, gamma_texel != 0u);
     // The desaturated arm REPLACES the modulate — see the `desaturate` binding above. `c.rgb` is
     // deliberately unread here; only `c.a` carries into the alpha below, as it does on both paths.
     var rgb = texel * c.rgb;

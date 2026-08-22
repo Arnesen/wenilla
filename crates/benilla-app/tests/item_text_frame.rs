@@ -266,3 +266,81 @@ fn the_reported_html_page_draws_as_blocks_not_as_its_own_markup() {
         "a block was truncated — the page is height-pinned again: {drawn:?}"
     );
 }
+
+/// **B288, closed at the reported symptom** (CarlG, decision 1507): the Verdant Note open from
+/// the bag, then a quest giver's gossip — both frames drew at the same TOPLEFT 0,-104 anchor,
+/// page text and greeting interleaved. The cause was the reader's missing `UIPanelWindows` row:
+/// registered (the ref's own `{ area = "left", pushable = 0 }`, UIParent.lua l.20), the two are
+/// left-slot rivals and showing one replaces the other — in BOTH orders, each displaced window's
+/// OnHide ending its own session exactly as the merchant/gossip pair already does.
+#[test]
+fn a_quest_givers_gossip_displaces_the_open_reader() {
+    use benilla_ui::script::GossipMenu;
+
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    // The other rival, loaded exactly as the app's manifest does (after the reader's prefix).
+    {
+        let dir = std::path::Path::new(UI_DIR);
+        let text = std::fs::read_to_string(dir.join("GossipFrame.xml")).unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(
+            report.errors.is_empty(),
+            "GossipFrame.xml: {:?}",
+            report.errors
+        );
+    }
+
+    // The note is open and holding the left slot.
+    s.set_item_text(Some(letter()));
+    s.fire_event("ITEM_TEXT_BEGIN", vec![]);
+    s.fire_event("ITEM_TEXT_READY", vec![]);
+    assert!(s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
+    assert!(
+        s.eval::<bool>("return GetLeftFrame():GetName() == 'ItemTextFrame'")
+            .unwrap(),
+        "the registered reader seats at the left slot, not a bare Show"
+    );
+    let _ = s.take_item_text_close();
+
+    // The quest giver's gossip opens: one window, not two — the reported stack cannot form.
+    s.set_gossip(Some(GossipMenu {
+        greeting: "What can I do for you?".into(),
+        quests: Vec::new(),
+        options: Vec::new(),
+    }));
+    s.fire_event("GOSSIP_SHOW", vec![]);
+    assert!(s.take_errors().is_empty());
+    assert!(
+        !s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap(),
+        "gossip replaced the note — the B288 stack (both drawn at 0,-104) cannot form"
+    );
+    assert!(s
+        .eval::<bool>("return GossipFrame:IsShown() and GetLeftFrame():GetName() == 'GossipFrame'")
+        .unwrap());
+    assert!(
+        s.take_item_text_close(),
+        "the displaced reader's OnHide ended the read session (CloseItemText)"
+    );
+    // The app's answer to that close must not disturb the gossip that displaced it.
+    s.set_item_text(None);
+    s.fire_event("ITEM_TEXT_CLOSED", vec![]);
+    assert!(s.eval::<bool>("return GossipFrame:IsShown()").unwrap());
+
+    // The reverse order: reading the note over an open gossip ends the gossip session.
+    let _ = s.take_gossip_close();
+    s.set_item_text(Some(letter()));
+    s.fire_event("ITEM_TEXT_BEGIN", vec![]);
+    s.fire_event("ITEM_TEXT_READY", vec![]);
+    assert!(s.take_errors().is_empty());
+    assert!(
+        s.eval::<bool>("return ItemTextFrame:IsShown() and not GossipFrame:IsShown()")
+            .unwrap(),
+        "the reader replaces gossip the same way"
+    );
+    assert!(
+        s.take_gossip_close(),
+        "the displaced gossip's OnHide ended the gossip session (CloseGossip)"
+    );
+}

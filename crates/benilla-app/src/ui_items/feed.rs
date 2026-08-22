@@ -1136,8 +1136,44 @@ fn diff_and_push(
         .filter(|b| fresh.get(b) != memory.pushed.get(b))
         .collect();
     if !changed.is_empty() {
+        // **The spent-ammo signal** (decision 1509). The reference registers a field mirror on
+        // `ITEM_FIELD_STACK_COUNT` for TYPEID ITEM (`ClntObjMgrSetTypeMirrorHandler 0x468070` at
+        // `0x5d9360`, handler `0x5d9400`); for any item the active player owns, a stack-count
+        // write fires **ITEM_LOCK_CHANGED first**, ahead of the `BAG_UPDATE` the same handler
+        // emits further down. Nothing else in the image reaches that event from a server update —
+        // its other four fire sites are all local lock/unlock — so it is the ONLY per-shot signal
+        // an addon can detect a spent arrow with, and every auto-shot timer is built on it.
+        //
+        // Computed before `memory.pushed` is replaced at the bottom of this block.
+        let restacked = {
+            let empty = HashMap::new();
+            let mut v: Vec<(i64, u32)> = Vec::new();
+            for &bag in &changed {
+                let now = fresh.get(&bag).map_or(&empty, |c| &c.slots);
+                let was = memory.pushed.get(&bag).map_or(&empty, |c| &c.slots);
+                for (&slot, n) in now {
+                    // The SAME item, restacked. A slot whose entry changed is a create or a swap,
+                    // not a field write on one item, and it does not take this path.
+                    if was.get(&slot).is_some_and(|w| {
+                        w.item_id != 0 && w.item_id == n.item_id && w.count != n.count
+                    }) {
+                        v.push((bag, slot));
+                    }
+                }
+            }
+            // Map order is not an order, and an event stream has to be reproducible.
+            v.sort_unstable();
+            v
+        };
         for &bag in &changed {
             script.set_container(bag, fresh.get(&bag).cloned());
+        }
+        // Ahead of BAG_UPDATE below, which is the reference handler's own order.
+        for (bag, slot) in restacked {
+            script.fire_event(
+                "ITEM_LOCK_CHANGED",
+                vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
+            );
         }
         // Name the bags, not just the count: "3 changed" can't tell you WHICH container moved, and
         // the negative ids (−1 bank, −2 keyring) are exactly the ones you go looking for.
@@ -1237,6 +1273,80 @@ mod tests {
         apply_container_source(&mut s, &mut memory, Some(HashMap::new()), Vec::new());
         assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 0);
         assert_eq!(s.eval::<i64>("return BAG_EVENTS").unwrap(), 2);
+    }
+
+    /// **The spent-ammo signal** (decision 1509, B267's second half). A stack ticking down must
+    /// fire `ITEM_LOCK_CHANGED` for that slot, **before** the `BAG_UPDATE` for its bag — the
+    /// reference's `ITEM_FIELD_STACK_COUNT` mirror handler's own order.
+    ///
+    /// This is not cosmetic ordering. Quiver's auto-shot timer has no other way to learn a shot
+    /// fired: it starts the reload drain from this event, and without it the bar fills once and
+    /// sits at 100% forever (the director's report). Every vanilla shot timer works this way.
+    ///
+    /// The negative half matters as much: a slot whose ENTRY changed is a swap or a create, not a
+    /// field write on one item, and must NOT fire it — over-firing would make the addon count
+    /// shots that never happened.
+    #[test]
+    fn a_stack_ticking_down_fires_item_lock_changed_before_bag_update() {
+        use benilla_ui::script::ContainerSlot;
+
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "ORDER = {} \
+             local f = CreateFrame('Frame') \
+             f:RegisterEvent('ITEM_LOCK_CHANGED') \
+             f:RegisterEvent('BAG_UPDATE') \
+             f:SetScript('OnEvent', function() \
+                 table.insert(ORDER, event .. ':' .. tostring(arg1) .. ',' .. tostring(arg2)) \
+             end)",
+        )
+        .unwrap();
+
+        let arrows = |count: u32| ContainerSlot {
+            item_id: 2512, // Rough Arrow
+            count,
+            ..Default::default()
+        };
+        let bag = |s: ContainerSlot| {
+            HashMap::from([(
+                0,
+                ContainerState {
+                    name: Some("Backpack".into()),
+                    num_slots: 16,
+                    slots: HashMap::from([(1, s)]),
+                },
+            )])
+        };
+        let mut memory = FeedMemory::default();
+
+        // The quiver arrives full — a create, not a restack. No lock event.
+        apply_container_source(&mut s, &mut memory, Some(bag(arrows(200))), Vec::new());
+        assert_eq!(
+            s.eval::<String>("return table.concat(ORDER, ' ')").unwrap(),
+            "BAG_UPDATE:0,nil",
+            "a slot appearing is a create, not a stack-count field write"
+        );
+
+        // An arrow leaves the quiver.
+        s.run("ORDER = {}").unwrap();
+        apply_container_source(&mut s, &mut memory, Some(bag(arrows(199))), Vec::new());
+        assert_eq!(
+            s.eval::<String>("return table.concat(ORDER, ' ')").unwrap(),
+            "ITEM_LOCK_CHANGED:0,1 BAG_UPDATE:0,nil",
+            "the shot signal fires for (bag 0, slot 1) and precedes BAG_UPDATE"
+        );
+
+        // A DIFFERENT item in the same slot: a swap. The count differs too, and it must still
+        // not fire — otherwise an addon counts a shot every time you rearrange your bags.
+        s.run("ORDER = {}").unwrap();
+        let mut other = arrows(20);
+        other.item_id = 3033; // Razor Arrow
+        apply_container_source(&mut s, &mut memory, Some(bag(other)), Vec::new());
+        assert_eq!(
+            s.eval::<String>("return table.concat(ORDER, ' ')").unwrap(),
+            "BAG_UPDATE:0,nil",
+            "a changed entry is a swap, not a stack-count write"
+        );
     }
 
     fn slot(spell_id: u32, charges: i32) -> ItemSpellEntry {

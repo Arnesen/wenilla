@@ -183,6 +183,17 @@ pub(crate) struct UiQuad {
     /// Splits the run like `additive`/`circular`; a booth target is its own texture anyway, so no
     /// batching is lost.
     pub premultiplied: bool,
+    /// The sampled texture holds the client's **gamma bytes, undecoded** — a SKIP_DECODE upload
+    /// (`BlpVariant::MapTile`, the minimap tiles: the reference's tile sampler carries
+    /// `GL_TEXTURE_SRGB_DECODE_EXT = GL_SKIP_DECODE_EXT`, so the hardware filters authored bytes).
+    /// The ordinary arm's `linear_to_srgb` exists to undo the sampler's sRGB decode; on a texture
+    /// whose sampler did no decode it ENCODES A SECOND TIME, which is how the outdoor minimap
+    /// washed bright when MapTile moved off `Rgba8UnormSrgb` and only the alpha-test arm learned
+    /// the new contract. With this set the texel passes through as the authored byte and the
+    /// vertex-colour multiply lands on it directly — the fixed-function MODULATE, byte for byte.
+    /// The alpha-test arm ignores the flag: it decodes explicitly for the un-encoded composite
+    /// target. Splits the run like `additive`/`circular`.
+    pub gamma_texel: bool,
     /// **Alpha TEST** instead of alpha blend, at this reference value on the client's
     /// `texel.a × vertexColour.a` — `Some(224.0 / 255.0)` is the WMO-interior minimap tile draw and
     /// nothing else so far. A passing fragment writes FULLY OPAQUE (the screen mask still cuts it);
@@ -242,6 +253,7 @@ impl Default for UiQuad {
             circular: false,
             desaturated: false,
             premultiplied: false,
+            gamma_texel: false,
             alpha_test: None,
             clip: None,
             rotation: 0.0,
@@ -362,6 +374,10 @@ pub(crate) struct UiQuadMaterial {
     /// Alpha-TEST reference on `texel.a × colour.a`; `<= 0` disables — see [`UiQuad::alpha_test`].
     #[uniform(9)]
     alpha_ref: f32,
+    /// The texel is already the client's gamma byte (a SKIP_DECODE upload — the minimap tiles), so
+    /// the ordinary arm skips its `linear_to_srgb` re-encode — see [`UiQuad::gamma_texel`].
+    #[uniform(10)]
+    gamma_texel: u32,
     /// The screen-anchored mask span in **physical framebuffer px** (`min.xy, max.xy` — the
     /// fragment shader compares `@builtin(position)`, which is physical): [`UiQuadMask::rect`]
     /// scaled by the window's scale factor at mesh build. `z <= x` (degenerate) disables masking.
@@ -392,6 +408,9 @@ impl UiQuadMaterial {
             desaturate: 0,
             premultiplied: 0,
             alpha_ref,
+            // The alpha-test arm never reads this: it decodes explicitly (its target is the
+            // un-encoded composite), so the tile's SKIP_DECODE contract is already honoured there.
+            gamma_texel: 0,
             mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
             mask: None,
         }
@@ -634,6 +653,7 @@ struct Run {
     circular: bool,
     desaturated: bool,
     premultiplied: bool,
+    gamma_texel: bool,
     alpha_test: Option<f32>,
     mask: Option<UiQuadMask>,
     positions: Vec<[f32; 3]>,
@@ -643,23 +663,18 @@ struct Run {
 }
 
 impl Run {
-    fn new(
-        texture: Handle<Image>,
-        additive: bool,
-        circular: bool,
-        desaturated: bool,
-        premultiplied: bool,
-        alpha_test: Option<f32>,
-        mask: Option<UiQuadMask>,
-    ) -> Self {
+    /// A fresh run carrying `q`'s material identity (every flag that splits a run) under the
+    /// already-resolved `texture` (the quad's own, or the shared white fallback).
+    fn new(texture: Handle<Image>, q: &UiQuad) -> Self {
         Self {
             texture,
-            additive,
-            circular,
-            desaturated,
-            premultiplied,
-            alpha_test,
-            mask,
+            additive: q.additive,
+            circular: q.circular,
+            desaturated: q.desaturated,
+            premultiplied: q.premultiplied,
+            gamma_texel: q.gamma_texel,
+            alpha_test: q.alpha_test,
+            mask: q.mask.clone(),
             positions: Vec::new(),
             uvs: Vec::new(),
             colors: Vec::new(),
@@ -814,6 +829,7 @@ impl StoredRun {
 /// NaN/-0.0 can't split cache entries byte-equal materials would share).
 type MatKey = (
     AssetId<Image>,
+    bool,
     bool,
     bool,
     bool,
@@ -1004,19 +1020,12 @@ fn rebuild_ui_mesh(
                 && r.circular == q.circular
                 && r.desaturated == q.desaturated
                 && r.premultiplied == q.premultiplied
+                && r.gamma_texel == q.gamma_texel
                 && r.alpha_test == q.alpha_test
                 && r.mask == q.mask
         });
         if !same_run {
-            runs.push(Run::new(
-                texture,
-                q.additive,
-                q.circular,
-                q.desaturated,
-                q.premultiplied,
-                q.alpha_test,
-                q.mask.clone(),
-            ));
+            runs.push(Run::new(texture, q));
         }
         let run = runs.last_mut().unwrap();
         match (q.corners, plain) {
@@ -1083,6 +1092,7 @@ fn rebuild_ui_mesh(
             run.circular,
             run.desaturated,
             run.premultiplied,
+            run.gamma_texel,
             alpha_ref.to_bits(),
             mask.as_ref().map(bevy::asset::Handle::id),
             mask_rect.to_array().map(f32::to_bits),
@@ -1204,6 +1214,7 @@ fn rebuild_ui_mesh(
                     desaturate: u32::from(run.desaturated),
                     premultiplied: u32::from(run.premultiplied),
                     alpha_ref,
+                    gamma_texel: u32::from(run.gamma_texel),
                     mask_rect,
                     mask,
                 })

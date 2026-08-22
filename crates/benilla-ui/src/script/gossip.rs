@@ -15,8 +15,11 @@
 //! wire `GOSSIP_ICON` byte. The one addition is `IsGossipOptionCoded(i)` — a benilla-local
 //! predicate the XML uses to grey password-gated options (decision 0081 v1: coded options are
 //! parsed and greyed, never selected; the real client pops a password box, out of scope here).
-//! `GetGossipText()` returns the greeting body (`SMSG_NPC_TEXT_UPDATE`), `nil` while its ask-once
-//! query is still in flight.
+//! `GetGossipText()` returns the greeting body (`SMSG_NPC_TEXT_UPDATE`), `nil` when no menu is
+//! open. There is no "menu open, text pending" state: the app holds the menu closed until the
+//! greeting resolves, as the reference does (its greeting write and `GOSSIP_SHOW` are adjacent and
+//! unconditional on one success path — wow-re `gossip-npctext-law.md` §4; B292), which is why
+//! [`GossipMenu::greeting`] is a plain `String`.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -47,12 +50,13 @@ pub struct GossipQuestRow {
     pub active: bool,
 }
 
-/// One open gossip menu: the greeting body (once its query lands), the quest rows, and the option
-/// rows. Pushed whole by the app; `None` means no menu is open.
+/// One open gossip menu: the greeting body, the quest rows, and the option rows. Pushed whole by
+/// the app; `None` means no menu is open.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GossipMenu {
-    /// The NPC greeting (`SMSG_NPC_TEXT_UPDATE`); `None` while the ask-once query is in flight.
-    pub greeting: Option<String>,
+    /// The NPC greeting, always resolved: a menu is only pushed once its `SMSG_NPC_TEXT_UPDATE`
+    /// answered — an open gossip frame with a blank page is not a reachable state (module doc).
+    pub greeting: String,
     /// Quest rows the NPC offers/has active, riding the same packet (decision 0088).
     pub quests: Vec<GossipQuestRow>,
     pub options: Vec<GossipOptionView>,
@@ -86,13 +90,14 @@ impl super::UiScript {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // → the greeting body, or nil while its query is in flight / there is no menu.
+    // → the greeting body, or nil while there is no menu (an open menu always has one — the
+    // app-side hold, module doc).
     g.set(
         "GetGossipText",
         lua.create_function(|lua, ()| {
             let text = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.gossip.as_ref().and_then(|m| m.greeting.clone())
+                model.gossip.as_ref().map(|m| m.greeting.clone())
             };
             match text {
                 Some(t) => Ok(Value::String(lua.create_string(&t)?)),
@@ -212,7 +217,7 @@ mod tests {
 
     fn menu() -> GossipMenu {
         GossipMenu {
-            greeting: Some("Greetings, traveler.".into()),
+            greeting: "Greetings, traveler.".into(),
             quests: Vec::new(),
             options: vec![
                 GossipOptionView {

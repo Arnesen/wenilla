@@ -5,11 +5,19 @@
 //! `CMSG_NPC_TEXT_QUERY` for the greeting; `SMSG_NPC_TEXT_UPDATE` → the greeting; `SMSG_GOSSIP_COMPLETE`
 //! → cleared). Each frame [`feed_gossip`] turns that state into a [`GossipMenu`] snapshot, pushes it
 //! into the VM ([`benilla_ui::script::UiScript::set_gossip`]), and fires `GOSSIP_SHOW` on open (or a
-//! content change — the async greeting landing) / `GOSSIP_CLOSED` on clear. [`drain_gossip`] pulls the
-//! Lua intents back out: `SelectGossipOption` → [`ClientCommand::GossipSelectOption`] (mapped through
-//! the wire option `index`; coded options are guarded, never sent — decision 0081), and `CloseGossip`
-//! → a local clear (vanilla's client-side close sends no packet; verified against the 1.12 opcode set
-//! — there is no `CMSG_GOSSIP_CLOSE`).
+//! content change while open — the NPC's name resolving) / `GOSSIP_CLOSED` on clear.
+//! [`drain_gossip`] pulls the Lua intents back out: `SelectGossipOption` →
+//! [`ClientCommand::GossipSelectOption`] (mapped through the wire option `index`; coded options are
+//! guarded, never sent — decision 0081), and `CloseGossip` → a local clear (vanilla's client-side
+//! close sends no packet; verified against the 1.12 opcode set — there is no `CMSG_GOSSIP_CLOSE`).
+//!
+//! **The menu opens only with its greeting resolved** — a first visit to a text id keeps the frame
+//! closed for the query round trip instead of showing options over an empty page (B292). That is
+//! the reference's own law, VERIFIED at the bytes (wow-re `gossip-npctext-law.md` §4): its greeting
+//! write and `GOSSIP_SHOW` are adjacent and unconditional on one success path, every other exit of
+//! `0x4e2010` fires no event, so "gossip frame open with a blank greeting" is not a reachable
+//! state. [`snapshot`] encodes the hold; [`GossipState::open_menu`]/[`GossipState::text_arrived`]
+//! are the two wire edges that resolve it.
 
 use std::collections::HashMap;
 
@@ -40,8 +48,10 @@ pub(crate) struct GossipState {
     pub(crate) npc: Option<u64>,
     /// The open menu's `NpcText` id (drives the text query / cache).
     pub(crate) text_id: u32,
-    /// The greeting drawn for THIS menu-open, or `None` while its query is in flight (or when the
-    /// record names no line for this NPC — the reference's "Missing gossip text!" path).
+    /// The greeting drawn for THIS menu-open, or `None` while its query is in flight — the state
+    /// [`snapshot`] holds the menu closed on (B292; module doc). A record that names no line
+    /// ("Missing gossip text!") never parks here: [`GossipState::resolve_greeting`] ends the
+    /// interaction instead, as the reference does.
     pub(crate) greeting: Option<String>,
     /// The selectable option rows (wire `GossipOption`: `index` echoed on select, `icon`, `coded`,
     /// `message`).
@@ -70,6 +80,67 @@ impl GossipState {
     pub(crate) fn draw_greeting(&self, text_id: u32, npc_gender: u8) -> Option<String> {
         let blocks = self.cached_record(text_id)?;
         select_greeting(blocks, npc_gender, greeting_roll()).map(str::to_string)
+    }
+
+    /// A gossip menu arrived (`SMSG_GOSSIP_MESSAGE`): latch the session. Returns `true` when the
+    /// greeting still needs its `CMSG_NPC_TEXT_QUERY` (first visit to this text id) — the caller
+    /// sends it, and the menu stays closed until [`Self::text_arrived`] resolves it (B292's hold,
+    /// module doc). A cached record opens the menu right here; a `text_id` of 0 never queries and
+    /// never opens — the reference's `DBCache::Get` refuses id 0 before sending anything, so its
+    /// frame stays closed with option selects latched off, which is what our pending state is.
+    pub(crate) fn open_menu(
+        &mut self,
+        npc: u64,
+        text_id: u32,
+        options: Vec<GossipOption>,
+        quests: Vec<(u32, u32, String)>,
+        npc_gender: u8,
+    ) -> bool {
+        self.npc = Some(npc);
+        self.text_id = text_id;
+        self.options = options;
+        self.quests = quests;
+        self.greeting = None;
+        if text_id == 0 {
+            return false;
+        }
+        match self.cached_record(text_id).is_some() {
+            true => {
+                self.resolve_greeting(npc_gender);
+                false
+            }
+            false => true,
+        }
+    }
+
+    /// The NPC-text answer (`SMSG_NPC_TEXT_UPDATE`): seed the ask-once cache, and if it answers
+    /// the menu still waiting on it, open that menu now. A late answer for a menu we already
+    /// closed or switched away from just seeds the cache; an answer for a menu already open does
+    /// not re-roll its greeting (the reference's cache callback only re-enters for the pending
+    /// query it was registered by).
+    pub(crate) fn text_arrived(&mut self, text_id: u32, blocks: Vec<NpcTextBlock>, npc_gender: u8) {
+        self.remember_record(text_id, blocks);
+        if self.npc.is_some() && self.text_id == text_id && self.greeting.is_none() {
+            self.resolve_greeting(npc_gender);
+        }
+    }
+
+    /// Draw the open menu's greeting from its (present) record — or, when the record names no
+    /// line for this NPC's gender column, end the interaction: the reference's `missing` path
+    /// logs "Missing gossip text!" and fires `GOSSIP_CLOSED` instead of ever opening the frame
+    /// (wow-re `gossip-npctext-law.md` §2). Ours never opened either, so the clear is the whole
+    /// close.
+    fn resolve_greeting(&mut self, npc_gender: u8) {
+        match self.draw_greeting(self.text_id, npc_gender) {
+            Some(line) => self.greeting = Some(line),
+            None => {
+                debug!(
+                    "ui_gossip: missing gossip text (id {}) — ending the interaction",
+                    self.text_id
+                );
+                self.clear();
+            }
+        }
     }
 }
 
@@ -183,11 +254,13 @@ const GOSSIP_ICON_TYPES: [&str; 14] = [
     "gossip",
 ];
 
-/// Build the Lua-facing snapshot from [`GossipState`] — `None` when no menu is open.
+/// Build the Lua-facing snapshot from [`GossipState`] — `None` when no menu is open, **and while
+/// the greeting query is in flight**: the second `?` is B292's hold (module doc). The frame opens
+/// once, complete, when the text answers — never options over an empty page.
 fn snapshot(state: &GossipState) -> Option<GossipMenu> {
     state.npc?;
     Some(GossipMenu {
-        greeting: state.greeting.clone(),
+        greeting: state.greeting.clone()?,
         // Quest rows riding the gossip packet (decision 0088): split active-vs-available by the same
         // predicate the quest window's greeting panel uses — the WIRE ICON. The reference runs the
         // identical `{3,4}` test here, just lazily (`0x4e2430`/`0x4e2580`, behind
@@ -235,7 +308,7 @@ fn feed_gossip(
     let last_npc = last_npc.get(&script);
     let mut fresh = snapshot(&state);
     // Expand the greeting's chat-text macros ($N/$B/$G/$<n>w) client-side, as the real client does.
-    if let Some(greeting) = fresh.as_mut().and_then(|m| m.greeting.as_mut()) {
+    if let Some(greeting) = fresh.as_mut().map(|m| &mut m.greeting) {
         let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
         *greeting = crate::npc_text::substitute(
             greeting,
@@ -255,8 +328,12 @@ fn feed_gossip(
     let name_changed = *last_name != npc_name;
     // A different NPC while the menu is already open is a real close+open (decision 0096 /
     // [`crate::ui_session::npc_switched`]); a cross-window switch is handled by OnHide → CloseX on
-    // panel displacement (decision 0095).
-    let switched = npc_switched(*last_npc, state.npc);
+    // panel displacement (decision 0095). Switch is judged on the SHOWN menu's NPC, not the
+    // session's: a switch into a first-visit hold (open A → pending B) is a plain close now and a
+    // plain open when B's text answers — pairing them here would fire `GOSSIP_SHOW` on an empty VM
+    // menu, the blank frame B292 exists to make unreachable.
+    let shown_npc = if fresh.is_some() { state.npc } else { None };
+    let switched = npc_switched(*last_npc, shown_npc);
     if fresh == *last && !name_changed && !switched {
         return;
     }
@@ -274,13 +351,21 @@ fn feed_gossip(
             // Opened, or the greeting/options/name changed while open → (re)paint via GOSSIP_SHOW.
             (_, Some(_)) => script.fire_event("GOSSIP_SHOW", name_arg()),
             // Closed.
-            (Some(_), None) => script.fire_event("GOSSIP_CLOSED", vec![]),
+            (Some(_), None) => {
+                script.fire_event("GOSSIP_CLOSED", vec![]);
+                // When the close is a switch INTO a hold (open A → pending B), OnHide → CloseGossip
+                // queued a close intent for a session that must survive the wait — consume it, as
+                // the switched branch does, so the drain doesn't cancel pending B.
+                if state.npc.is_some() {
+                    let _ = script.take_gossip_close();
+                }
+            }
             (None, None) => {}
         }
     }
     *last = fresh;
     *last_name = npc_name;
-    *last_npc = state.npc;
+    *last_npc = shown_npc;
 }
 
 /// Drain the Lua intents: a selected option → `CMSG_GOSSIP_SELECT_OPTION` (mapped to the wire option
@@ -296,6 +381,15 @@ fn drain_gossip(
     };
     for pos in script.take_gossip_selects() {
         let Some(npc) = state.npc else { continue };
+        // While the greeting query is in flight the menu isn't open (B292's hold) — refuse the
+        // select, as the reference does: its `SelectGossipOption` (`0x4e2320`) is silently refused
+        // while the text-pending latch `0xbbb670` is set (wow-re `gossip-npctext-law.md` §1).
+        if state.greeting.is_none() {
+            debug!(
+                "ui_gossip: SelectGossipOption({pos}) while the text query is in flight — refused"
+            );
+            continue;
+        }
         // Lua position is 1-based; resolve it to the option's wire `index`.
         match pos
             .checked_sub(1)
@@ -316,6 +410,14 @@ fn drain_gossip(
     // QUERY_QUEST (available → look at/accept) or COMPLETE_QUEST (active → turn-in progress).
     for pos in script.take_gossip_quest_selects() {
         let Some(npc) = state.npc else { continue };
+        // Same session-pending rule as the option selects above (the latch there is the verified
+        // one; these rows belong to the same not-yet-open menu).
+        if state.greeting.is_none() {
+            debug!(
+                "ui_gossip: SelectGossipQuest({pos}) while the text query is in flight — refused"
+            );
+            continue;
+        }
         match pos
             .checked_sub(1)
             .and_then(|i| state.quests.get(i as usize))
@@ -363,9 +465,125 @@ mod tests {
             message: "Browse".into(),
         }];
         let menu = snapshot(&state).expect("open");
-        assert_eq!(menu.greeting.as_deref(), Some("Hello"));
+        assert_eq!(menu.greeting, "Hello");
         assert_eq!(menu.options.len(), 1);
         assert_eq!(menu.options[0].icon_type, "vendor");
+    }
+
+    /// B292's hold: a first visit (record not cached) keeps the menu CLOSED for the query round
+    /// trip — options never render over an empty page — and the text arriving opens it complete.
+    /// The reference's law, from the bytes (wow-re `gossip-npctext-law.md` §4): the greeting write
+    /// and `GOSSIP_SHOW` are adjacent and unconditional on one success path; every other exit
+    /// fires no event.
+    #[test]
+    fn first_visit_holds_the_menu_until_the_text_answers() {
+        let mut state = GossipState::default();
+        let options = vec![GossipOption {
+            index: 0,
+            icon: 9,
+            coded: false,
+            message: "I wish to join the battle!".into(),
+        }];
+        let wants_query = state.open_menu(0x42, 50, options, Vec::new(), 0);
+        assert!(wants_query, "first visit asks for the text");
+        assert!(
+            snapshot(&state).is_none(),
+            "menu held closed while the query is in flight"
+        );
+
+        state.text_arrived(
+            50,
+            vec![NpcTextBlock {
+                probability: 0.0,
+                male: "The Alliance needs you!".into(),
+                female: String::new(),
+            }],
+            0,
+        );
+        let menu = snapshot(&state).expect("text landed — the menu opens now, complete");
+        assert_eq!(menu.greeting, "The Alliance needs you!");
+        assert_eq!(menu.options.len(), 1, "options open WITH the greeting");
+    }
+
+    /// A revisit (record cached) opens immediately with no query — the half of B292 the reporter
+    /// saw as "never seen this before": the empty frame is a first-visit-only state.
+    #[test]
+    fn revisit_opens_immediately_from_the_cache() {
+        let mut state = GossipState::default();
+        state.remember_record(
+            50,
+            vec![NpcTextBlock {
+                probability: 0.0,
+                male: "Back again?".into(),
+                female: String::new(),
+            }],
+        );
+        let wants_query = state.open_menu(0x42, 50, Vec::new(), Vec::new(), 0);
+        assert!(!wants_query, "cached — no re-query");
+        assert_eq!(
+            snapshot(&state).expect("open at once").greeting,
+            "Back again?"
+        );
+    }
+
+    /// The reference's `missing` path (`0x4e216e`): a record that names no line for this NPC's
+    /// gender column ends the interaction — the frame never opens with a blank page, and never
+    /// parks half-open either. And `text_id == 0` never queries at all (`DBCache::Get` refuses
+    /// id 0): the menu stays latched closed.
+    #[test]
+    fn missing_text_ends_the_interaction_and_id_zero_never_queries() {
+        // Missing: the record arrives but its male column is empty → no line → session over.
+        let mut state = GossipState::default();
+        assert!(state.open_menu(0x42, 60, Vec::new(), Vec::new(), 0));
+        state.text_arrived(
+            60,
+            vec![NpcTextBlock {
+                probability: 0.0,
+                male: String::new(),
+                female: "Sister.".into(),
+            }],
+            0,
+        );
+        assert_eq!(state.npc, None, "missing gossip text — interaction ended");
+        assert!(snapshot(&state).is_none());
+
+        // Id 0: no query wanted, and the menu never opens.
+        let mut state = GossipState::default();
+        assert!(!state.open_menu(0x42, 0, Vec::new(), Vec::new(), 0));
+        assert!(snapshot(&state).is_none());
+    }
+
+    /// A late answer for a menu we closed or switched away from only seeds the cache; an answer
+    /// for a menu already open does not re-roll its greeting.
+    #[test]
+    fn late_or_duplicate_answers_only_seed_the_cache() {
+        let blocks = || {
+            vec![NpcTextBlock {
+                probability: 0.0,
+                male: "Hail.".into(),
+                female: String::new(),
+            }]
+        };
+        // Switched: the waiting menu is for id 70; id 50's late answer must not open it.
+        let mut state = GossipState::default();
+        assert!(state.open_menu(0x42, 70, Vec::new(), Vec::new(), 0));
+        state.text_arrived(50, blocks(), 0);
+        assert!(snapshot(&state).is_none(), "still waiting on id 70");
+        assert!(
+            state.cached_record(50).is_some(),
+            "the answer seeded the cache"
+        );
+
+        // Already open: a duplicate answer leaves the drawn line alone.
+        state.text_arrived(70, blocks(), 0);
+        assert_eq!(snapshot(&state).expect("open").greeting, "Hail.");
+        state.greeting = Some("The drawn line".into());
+        state.text_arrived(70, blocks(), 0);
+        assert_eq!(
+            state.greeting.as_deref(),
+            Some("The drawn line"),
+            "no re-roll"
+        );
     }
 
     #[test]

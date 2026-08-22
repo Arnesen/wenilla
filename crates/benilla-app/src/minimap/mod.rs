@@ -145,10 +145,14 @@ fn minimap_day_tint(ambient: [f32; 3], diffuse: [f32; 3]) -> [f32; 3] {
 }
 
 /// A `.map()` adaptor over a `md5translate.trs` hit: stream the hashed tile off-thread (like a
-/// terrain tile) but decode it as a UI **sprite** (sRGB, clamp, mip 0). The `WorldArt` default
-/// (gamma-space `Rgba8Unorm`, repeat) would draw the tile ~2× too bright through the UI pass and
-/// bleed tile edges — the invariant `benilla-assets`' `minimap_tile_settings_reach_the_async_loader`
-/// guards. Shared by the terrain and interior tile paths.
+/// terrain tile) but as a **minimap tile** (`BlpVariant::MapTile`: gamma bytes with no sRGB decode
+/// — the reference sampler's `GL_SKIP_DECODE_EXT` — clamp, mip 0, LINEAR). Gamma bytes move the
+/// sRGB decode to AFTER the filter, so every consumer must say so or draw the tile ~2× too bright
+/// through the UI pass: the outdoor quads carry
+/// [`UiQuad::gamma_texel`](crate::ui_pass::UiQuad::gamma_texel), and the interior composite's
+/// alpha-test arm decodes explicitly for its un-encoded target. The invariant `benilla-assets`'
+/// `minimap_tile_settings_reach_the_async_loader` guards these settings reaching the async loader.
+/// Shared by the terrain and interior tile paths.
 fn load_tile(asset_server: &AssetServer) -> impl Fn(&str) -> Handle<Image> + '_ {
     move |hash: &str| {
         asset_server.load_with_settings(
@@ -672,6 +676,11 @@ fn emit_minimap(
                     z_key: slot.z,
                     texture: Some(handle.clone()),
                     color: [tint[0], tint[1], tint[2], slot.alpha],
+                    // The tile is a SKIP_DECODE upload (gamma bytes — [`load_tile`]), so the
+                    // day-night MODULATE above lands on the authored byte, exactly the reference's
+                    // fixed-function stage. Without this the ordinary arm re-encodes an
+                    // already-encoded byte — the outdoor minimap reads visibly too bright.
+                    gamma_texel: true,
                     // No CPU clip (1463): the mask shader already zeroes everything outside
                     // `mask_rect` (`ui_quad.wgsl`'s `inside` test), and clipping a PANNING tile
                     // re-cut its quad every frame — constant positions, churning UVs — which is
