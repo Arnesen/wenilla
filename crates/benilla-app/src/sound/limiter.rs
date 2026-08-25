@@ -43,13 +43,28 @@
 //!
 //! This is **below** the decision-0070 seam, not across it: WoW's owned parameter math upstream is
 //! untouched, and the thing being replaced is not a reference behaviour but *kira's* hard clamp.
-//! The reference delegates its whole audible mix to FMOD 3 and its own headroom mechanism is a
-//! different one — the SFX-bus auto-duck (`0x457960`, wow-re `benilla-pins.md` B15: the
-//! SoundVolume category dips to 50 % while one-shots ring, restoring over 3 s), which benilla owes
-//! separately and which is a 6 dB constant, not a bound. Modern engines put a limiter here for
-//! exactly this reason — FMOD Studio ships one on the master bus by default, and Wwise's own
-//! guidance is a peak limiter on the master output. `SoundOutputLimiter 0` turns it off to A/B
-//! against what the director reported.
+//!
+//! **The reference has no headroom mechanism at all — on either side of its API boundary.** That
+//! is now read, not assumed: wow-re's §6 proved no constant factor exists anywhere in `WoW.exe`
+//! (a close-up 1.0 kit reaches `FSOUND_SetVolume(255)` with the SFX master also 255), and
+//! decision 1563 opened `fmod.dll` itself and found the other half — a complete multiply census
+//! over all three software mixers turns up per-channel volume, `1/255`, `1/256`, `2⁻³¹` and a
+//! mix-rate-derived ramp constant, and **nothing that depends on how many voices are live**. The
+//! FPU mixer sums into a float buffer and clamps once; the MMX mixers (what the reference
+//! actually runs) accumulate with **saturating** `paddsw` and their output stage is a bare
+//! `movq` copy. So the real client sums at full scale and clips, exactly as we did.
+//!
+//! Two things it does have are often mistaken for headroom and are neither: the 12-voice device
+//! ceiling with the 13 per-bus caps (ported — 1555, 1557), which bounds the *count*; and the SFX
+//! auto-duck (`0x457960`), which wow-re §10 corrected — it is a **sidechain for server-pushed
+//! unit voice lines** (`SMSG_PLAY_OBJECT_SOUND`), armed only by that one packet's pool, with the
+//! arming sound itself exempt. Footsteps, spell impacts, weapon hits, UI sounds, creature barks,
+//! music and ambience never arm it. It is not a bus limiter and would not have saved the mass
+//! buff.
+//!
+//! Modern engines put a limiter here for exactly this reason — FMOD Studio ships one on the
+//! master bus by default, and Wwise's own guidance is a peak limiter on the master output.
+//! `SoundOutputLimiter 0` turns it off to A/B against what the director reported.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -62,7 +62,7 @@ use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::lighting::GameClock;
 use benilla_world::schedule::WorldStage;
 
-use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
+use super::kit::{play_kit_ext, KitRef, Latch, PlayExtras, SoundCategory, SoundKits};
 use super::mixer::{self, StreamingSoundHandle};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
@@ -668,7 +668,21 @@ fn server_sounds(
                     .source
                     .and_then(|e| transforms.get(e).ok())
                     .map(|t| t.translation);
-                if let Err(e) = play_kit(
+                // A resolved object sound also REGISTERS on its unit — the reference's
+                // `AISOUNDDESC` pool (`0x278` → `0x458fb0` → `0x459120`), which its own vocal
+                // gates then query through `0x4591f0` so a scripted voice line is not talked over
+                // by the creature's grunts ([`Latch::ObjectSound`]). A plain 2D push, or one
+                // whose source is not streamed to us, has no unit to register on.
+                let source = match m.kind {
+                    ServerSoundKind::ObjectSound => m.source,
+                    _ => None,
+                };
+                let latch = if source.is_some() {
+                    Latch::ObjectSound
+                } else {
+                    Latch::None
+                };
+                if let Err(e) = play_kit_ext(
                     &mut kits,
                     &assets,
                     &mut out,
@@ -677,6 +691,11 @@ fn server_sounds(
                     KitRef::Id(m.sound_id),
                     pos,
                     SoundCategory::Sfx,
+                    PlayExtras {
+                        source,
+                        latch,
+                        ..default()
+                    },
                 ) {
                     warn!("server sound {}: {e:#}", m.sound_id);
                 }

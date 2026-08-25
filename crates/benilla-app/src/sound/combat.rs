@@ -8,18 +8,25 @@
 //! - **`$CSS`** — the swing whoosh, played only when nothing was contacted (miss/dodge/evade):
 //!   kits 7080/7081 `Combat Miss 1H/2H` by weapon handedness — exactly the two ids the client
 //!   caches by name at startup (wow-re `0x4575b0`, `_DONOTRENAME_` kits).
-//! - **`$CAH`** — the attacker's exertion vocal (`CreatureSoundData.Exertion[Critical]`, the
-//!   same voice chain as everything else — characters resolve via the model fallback). **INTERIM,
-//!   and now pinned wrong** (decision 1555): the sliver 0075 left open — "where the exertion
-//!   columns actually fire is unpinned" — has been answered, and it is not here. Exertion is
-//!   **packet-driven at swing start**: `SMSG_ATTACKERSTATEUPDATE` → `0x6246a0` → `0x624786` →
-//!   `0x623b10`, class `([hitrec+0x10] >> 7) & 1` (the crit bit — so the column index benilla
-//!   already computes is right), gated on `victimState != 0` and the victim's health > 0. There
-//!   is no `call [reg+0x88]` anywhere in `0x6247d0`, so `$CAH` never reaches the exertion columns
-//!   at all; what `$CAH` actually drives is `0x6249bb call 0x624530` — the **victim's** injury
-//!   vocal, which benilla already fires off that crossing. Correcting the trigger moves *when*
-//!   a grunt is heard (swing start, not mid-clip) and *whether* a clean miss grunts at all, so it
-//!   is deliberately a separate change from 1555's bus routing and is not folded in here.
+//! - **`$CAH`** — **not** the attacker's exertion, which is what this module used to think.
+//!   `$CAH` drives the **victim's** injury vocal (`0x624865 je 0x624902` → `0x6249bb call
+//!   0x624530`), which benilla already fires off that crossing; there is no `call [reg+0x88]`
+//!   anywhere in `0x6247d0`, so the tag never reaches the exertion columns at all.
+//!
+//! The **attacker's exertion** is packet-driven at swing start, and is now wired that way
+//! (`SMSG_ATTACKERSTATEUPDATE` → `0x6246a0` → `0x624786` → `0x623b10`). Read off the bytes:
+//!
+//! - `class = ([hitrec+0x10] >> 7) & 1` — the crit bit, so `Exertion` / `ExertionCritical`.
+//! - `0x62476a`: gated on **`victimState != 0`**, and only on that. (The earlier note here also
+//!   claimed a victim-health gate; `0x6246a0` contains no such test. Its other two bails —
+//!   `[[attacker+0x110]+0x40] <= 0` at `0x6246b1` and `hitInfo & 0x10000` at `0x6246c2` — sit
+//!   above the swing *animation* select as well, so they belong to that subsystem, not here.)
+//! - `force = 0` (`0x62477e`), so the **class chance roll applies**: threshold 70 for a creature
+//!   and 35 for a player on class 0, 100 on class 1. A crit always grunts; an ordinary swing
+//!   grunts ~70 % of the time for a creature and ~36 % for a player.
+//!
+//! This moves *when* a grunt is heard — swing start rather than mid-clip — and thins ordinary
+//! swings out, which the tag-driven version never did.
 //!
 //! The **contact family** consumes [`SwingImpact`] — the victim dispatch `0x624530` + the
 //! `0x6247d0` weapon-sound block, fired at the swing clip's **`$AH0–3`/`$CAH`** crossing, or at
@@ -46,12 +53,37 @@
 //! A `text_only` flush (supersede/attack-stop) drops its sounds — only the floating number
 //! flushes (decision 0149's flush law, inherited from the shared dispatch).
 //!
-//! Two legs of the reference's melee family benilla does not voice at all, both now pinned
-//! (decision 1555): the **connecting swing** — a `$CSS` on any victimState outside {0, 2, 6}
-//! plays `WeaponSwingSounds2.dbc` (kits 233–238, Light/Medium/Heavy × Normal/Critical, index
-//! `critical + swingType*2`) on the capped bus 6, where benilla plays nothing and voices only the
-//! miss whoosh; and the **material foley** that rides the same `$FSD` as the terrain footstep
-//! (`0x6233d9 call [vt+0x8c]` → `0x4584e0`, bus 0, uncapped).
+//! ## Two legs still unvoiced — and what each is actually blocked on
+//!
+//! Both were "pinned" by 1555 in the sense that the *route* is known. Neither is buildable from
+//! that alone, and the missing piece in each case is a specific unread function, not a judgement
+//! call. Named here so the next pass is a scoped question rather than a rediscovery.
+//!
+//! **1 · The connecting swing** — `$CSS` on any victimState outside {0, 2, 6} plays
+//! `WeaponSwingSounds2.dbc` on the capped bus 6, where benilla plays nothing and voices only the
+//! miss whoosh. So every landed melee swing is currently missing a sound the reference makes.
+//! The play itself is fully read: `0x624c81` → `0x457f60`, which bails on `swingType >= 3`
+//! (`0x457f63`), indexes the 6-slot cache `[0xb06bd4]` at `critical + swingType*2`
+//! (`0x457f8d lea eax,[eax+ecx*2]`) — kits 233–238, Light/Medium/Heavy × Normal/Critical — and
+//! plays on `ecx = 6` at volume **0.5 when `[attacker+0xd80] & 0x10` is set, else 1.0**
+//! (`0x457f74`/`0x457f7d`).
+//!
+//! **Blocked on `0x623870`**, which is where `swingType` comes from: the call site fills it via
+//! `0x624c55 call 0x623870(bool, &out)` and hands the result straight in. Its Light/Medium/Heavy
+//! classification rule — presumably off the equipped weapon — is unread, and so is the meaning of
+//! the two `[attacker+0xd80]` bits the site uses (`0x80` as the critical argument, `0x10` as the
+//! half-volume flag). Guessing the classification would put a *wrong* swing sound on every melee
+//! hit in the game, which is worse than the silence. `WeaponSwingSounds2.dbc` also has no loader
+//! yet (6 rows × 4 fields × 16 B: `{id, swingType, critical, SoundEntriesId}`).
+//!
+//! **2 · The material foley** rides the same `$FSD` as the terrain footstep — a footfall makes
+//! *two* sounds in the reference, the capped terrain step on bus 9 and an uncapped foley on bus 0
+//! (`0x6233d9 call [vt+0x8c]` → `0x623610` for CGUnit / `0x62fa30` for CGPlayer → `0x4584e0`).
+//! **Blocked on the material lookup itself**: CGUnit reads `[[unit+0xb3c]+0x28]` (a
+//! `CreatureModelData` column) and CGPlayer reads the equipped item's material, and `0x4584e0`
+//! then takes the material row's `+0x8` foley kit — but which DBC that row belongs to, and which
+//! column `+0x8` is, are unread. benilla's footstep chain resolves a different lookup
+//! (`FootstepTerrainLookup`) and cannot answer it by analogy.
 //!
 //! INTERIM readings (flagged for a wow-re pass): victims' armor lands on the flesh slot (the
 //! chain/plate slots need the armor-material chain);
@@ -73,10 +105,14 @@ use benilla_formats::{impact_slot, WeaponImpactCatalog};
 use crate::creature_anim::{AnimSoundEvent, SwingImpact, SwingMessage, Wielded};
 use crate::net::{Embodied, NetEntity};
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_protocol::EntityKind;
 use benilla_world::schedule::WorldStage;
 
 use super::creature::CreatureVoices;
-use super::kit::{play_kit_ext, Bus, KitRef, PlayExtras, SoundCategory, SoundKits};
+use super::kit::{
+    bark_chance_pass, object_sound_playing, play_kit_ext, Bus, KitRef, PlayExtras, SoundCategory,
+    SoundKits, EXERTION_CHANCE_CREATURE, EXERTION_CHANCE_PLAYER,
+};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 // vmangos `HitInfo` bits (UnitDefines.h, 1.12 wire).
@@ -122,9 +158,11 @@ fn load_weapon_impacts(mut commands: Commands, assets: Option<Res<WorldAssets>>)
     }
 }
 
-/// The latest swing outcome per attacker — written on the packet, read as the `$CSS`/`$CAH`
-/// events fire over the following frames, overwritten by the next swing. (The contact family
-/// no longer reads it: [`SwingImpact`] carries its own consumed record, decision 0529.)
+/// The latest swing outcome per attacker — written on the packet, read as the `$CSS` event
+/// fires over the following frames, overwritten by the next swing. (The contact family does not
+/// read it: [`SwingImpact`] carries its own consumed record, decision 0529. Neither does the
+/// exertion vocal any more — it fires from the packet itself, so it never needs the record to
+/// survive into a later frame.)
 #[derive(Default)]
 struct LastSwing(EntityHashMap<SwingMessage>);
 
@@ -208,15 +246,26 @@ fn combat_sounds(
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
 ) {
+    // The attacker's exertion vocal is **packet-driven**, not tag-driven (see the module note):
+    // `SMSG_ATTACKERSTATEUPDATE` -> `0x6246a0` -> `0x624786`. Collected here with the swing record
+    // so the vocal fires at swing start, which is where the reference puts it.
+    let mut exertions: Vec<(Entity, bool)> = Vec::new();
     for s in swings.read() {
         last.0.insert(s.attacker, *s);
+        // `0x62476a`: the vocal leg is gated on victimState, and ONLY on victimState — read off
+        // the bytes rather than the second-hand note, which also claimed a victim-health gate
+        // that is not in the function. A swing that contacted nothing at all is silent; every
+        // other outcome, hit or parried or blocked, grunts.
+        if s.victim_state != 0 {
+            exertions.push((s.attacker, s.hit_info & HITINFO_CRITICAL != 0));
+        }
     }
     // Bound the map: entries for despawned attackers die with the entity check below; a cheap
     // periodic sweep keeps a long session from accumulating dead keys.
     if last.0.len() > 128 {
         last.0.retain(|e, _| units.contains(*e));
     }
-    if events.is_empty() && contacts.is_empty() {
+    if events.is_empty() && contacts.is_empty() && exertions.is_empty() {
         return;
     }
     let (Some(impacts), Some(voices), Some(mut kits), Some(assets)) =
@@ -249,38 +298,70 @@ fn combat_sounds(
             }
         };
 
-    // The tag-driven pair: the whoosh and the exertion vocal.
+    // The attacker's exertion vocal, at swing start. `force = 0` at `0x62477e`, so the class
+    // chance roll applies: class 0 is 70 for a creature and 35 for a player, class 1
+    // (ExertionCritical) is 100 in both twins — a crit always grunts, an ordinary swing thins out,
+    // and a player grunts about half as often as a creature.
+    for (attacker, crit) in exertions {
+        let Ok((tr, _, net, _)) = units.get(attacker) else {
+            continue;
+        };
+        // Same `AISOUNDDESC` gate, on the attacker this time — exertion is classes 0/1.
+        if net.kind != EntityKind::Player && object_sound_playing(&out, attacker) {
+            continue;
+        }
+        if !crit {
+            let threshold = if net.kind == EntityKind::Player {
+                EXERTION_CHANCE_PLAYER
+            } else {
+                EXERTION_CHANCE_CREATURE
+            };
+            if !bark_chance_pass(threshold, kits.roll()) {
+                continue;
+            }
+        }
+        let vocal = net
+            .display_id
+            .and_then(|d| voices.0.for_display(d))
+            .map(|v| v.exertion[usize::from(crit)])
+            .unwrap_or(0);
+        play(
+            &mut kits,
+            &mut out,
+            vocal,
+            tr.translation,
+            Bus::EXERTION,
+            "exertion",
+        );
+    }
+
+    // The one tag this module still consumes: the swing whoosh.
     for ev in events.read() {
-        let is = |tag: &[u8; 4]| &ev.ident == tag;
-        if !(is(b"$CSS") || is(b"$CAH")) {
+        if ev.ident != *b"$CSS" {
             continue;
         }
         let Some(swing) = last.0.get(&ev.entity) else {
             continue; // an attack anim without a tracked swing (e.g. spawned mid-fight)
         };
-        let Ok((attacker_tr, wielded, net, _)) = units.get(ev.entity) else {
+        let Ok((attacker_tr, wielded, _, _)) = units.get(ev.entity) else {
             continue;
         };
-        let pos = attacker_tr.translation;
-        if is(b"$CSS") {
-            if no_contact(swing) {
-                let offhand = swing.hit_info & 0x4 != 0;
-                let (subclass, _) = swing_weapon(wielded, offhand);
-                let kit = if TWO_HANDED.contains(&subclass) {
-                    COMBAT_MISS_2H
-                } else {
-                    COMBAT_MISS_1H
-                };
-                play(&mut kits, &mut out, kit, pos, Bus::DEFAULT, "miss whoosh");
-            }
-        } else {
-            let crit = swing.hit_info & HITINFO_CRITICAL != 0;
-            let vocal = net
-                .display_id
-                .and_then(|d| voices.0.for_display(d))
-                .map(|v| v.exertion[usize::from(crit)])
-                .unwrap_or(0);
-            play(&mut kits, &mut out, vocal, pos, Bus::EXERTION, "exertion");
+        if no_contact(swing) {
+            let offhand = swing.hit_info & 0x4 != 0;
+            let (subclass, _) = swing_weapon(wielded, offhand);
+            let kit = if TWO_HANDED.contains(&subclass) {
+                COMBAT_MISS_2H
+            } else {
+                COMBAT_MISS_1H
+            };
+            play(
+                &mut kits,
+                &mut out,
+                kit,
+                attacker_tr.translation,
+                Bus::DEFAULT,
+                "miss whoosh",
+            );
         }
     }
 
@@ -374,7 +455,15 @@ fn combat_sounds(
             && swing.hit_info & 0x60 == 0
             && !matches!(swing.victim_state, VICTIM_PARRY | VICTIM_BLOCK)
         {
-            if let Some((victim_tr, _, net, victim_is_you)) = victim {
+            // The `AISOUNDDESC` gate (`0x4591f0` from `0x6234cb`): a server-pushed object sound
+            // live on the victim suppresses its own vocal, classes 0-3 and 8. The CGPlayer twin
+            // `0x62f880` omits the gate, so a player is never suppressed. Filtered off the victim
+            // rather than `continue`d, because everything else in this iteration still stands.
+            let vocal_victim = victim.filter(|(_, _, net, _)| {
+                net.kind == EntityKind::Player
+                    || !swing.victim.is_some_and(|v| object_sound_playing(&out, v))
+            });
+            if let Some((victim_tr, _, net, victim_is_you)) = vocal_victim {
                 let crushing = swing.hit_info & HITINFO_CRUSHING != 0;
                 let vocal = net
                     .display_id

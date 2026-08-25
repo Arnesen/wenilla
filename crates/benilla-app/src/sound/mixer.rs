@@ -24,6 +24,7 @@ use bevy::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait};
 use kira::backend::cpal::CpalBackendSettings;
 use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
+use kira::effect::volume_control::{VolumeControlBuilder, VolumeControlHandle};
 use kira::listener::ListenerHandle;
 use kira::sound::streaming::StreamingSoundData;
 use kira::sound::FromFileError;
@@ -138,6 +139,8 @@ pub(crate) struct Mixer {
     level: Arc<MixLevel>,
     /// The `SoundOutputLimiter` CVar cell the limiter reads each block.
     limiter_on: Arc<AtomicBool>,
+    /// The master gain — first in the main chain, **upstream** of the limiter ([`main_track`]).
+    master: VolumeControlHandle,
     /// The pre-limiter tap's frame clock while a probing run records; `None` otherwise.
     audio_pos: Option<Arc<AtomicU64>>,
     /// The device's negotiated sample rate — what turns a count of over-scale samples into a
@@ -152,8 +155,11 @@ impl Mixer {
         let (backend_settings, sample_rate) = backend_settings();
         let level = Arc::new(MixLevel::default());
         let limiter_on = Arc::new(AtomicBool::new(true));
-        let (main_track_builder, audio_pos) =
-            main_track(&level, &limiter_on, sample_rate, probe_dir);
+        let MainChain {
+            builder: main_track_builder,
+            master,
+            audio_pos,
+        } = main_track(&level, &limiter_on, sample_rate, probe_dir);
         let settings = AudioManagerSettings::<DefaultBackend> {
             backend_settings,
             main_track_builder,
@@ -202,6 +208,7 @@ impl Mixer {
             reverb,
             level,
             limiter_on,
+            master,
             sample_rate,
             audio_pos,
         })
@@ -261,12 +268,14 @@ impl Mixer {
     }
 
     /// Master volume as linear amplitude (the whole mix — every track routes to main). Fed every
-    /// frame, so it [`glide`]s: a step on the *main* track clicks the entire mix at once, and this
-    /// is the knob a slider drag and the mute toggle both move.
+    /// frame, so it [`glide`]s: a step clicks the entire mix at once, and this is the knob a
+    /// slider drag and the mute toggle both move.
+    ///
+    /// Drives the **first effect** in the main chain, not the main track's volume — see
+    /// [`main_track`] for why the difference is audible. Same `Parameter`, same interpolation;
+    /// only the position in the chain changes.
     pub(crate) fn set_master(&mut self, amp: f32) {
-        self.manager
-            .main_track()
-            .set_volume(amp_to_db(amp), glide());
+        self.master.set_volume(amp_to_db(amp), glide());
     }
 
     /// Arm or bypass the output limiter — the `SoundOutputLimiter` CVar (decision 1551). The
@@ -405,8 +414,16 @@ fn main_track(
     limiter_on: &Arc<AtomicBool>,
     sample_rate: Option<u32>,
     probe_dir: Option<&Path>,
-) -> (kira::track::MainTrackBuilder, Option<Arc<AtomicU64>>) {
+) -> MainChain {
     let mut main = kira::track::MainTrackBuilder::new();
+    // MASTER FIRST — and it is an *effect*, not the main track's own volume, for one reason:
+    // kira applies a track's volume **after** its effects (`track/main.rs`: the effect loop, then
+    // `*frame *= volume`). Left on the track, the master would sit downstream of the limiter, and
+    // the limiter would duck peaks the master was about to remove anyway. Turning the volume down
+    // would not stop the pumping — it would move the whole mix down *including* the pumping,
+    // which is the one thing a volume knob must never do. Here the limiter sees the signal that
+    // is actually going to the device, so it engages exactly when the output would have clipped.
+    let master = main.add_effect(VolumeControlBuilder::new(Decibels::IDENTITY));
     meter::install(&mut main, level);
     // A probing run brackets the limiter with two taps (decision 1556). One tap can only ever
     // say what was heard; two say whether the limiter is the thing that changed it — which is
@@ -419,7 +436,23 @@ fn main_track(
     if let Some((dir, rate)) = probe {
         super::mix_tap::install_at(&mut main, &dir.join("post.wav"), rate);
     }
-    (super::mix_tap::install(main, sample_rate), audio_pos)
+    MainChain {
+        builder: super::mix_tap::install(main, sample_rate),
+        master,
+        audio_pos,
+    }
+}
+
+/// What [`main_track`] hands back: the built chain, plus the two handles a caller needs to reach
+/// into it afterwards.
+struct MainChain {
+    builder: kira::track::MainTrackBuilder,
+    /// The master gain, first in the chain (see [`main_track`]). The main track's *own* volume is
+    /// left at unity forever — writing to it would reintroduce the post-limiter stage this
+    /// exists to avoid.
+    master: VolumeControlHandle,
+    /// The pre-limiter tap's frame clock, when a probing run armed one.
+    audio_pos: Option<Arc<AtomicU64>>,
 }
 
 /// kira's cpal backend takes `device.default_output_config().config()` when handed no config of
@@ -835,7 +868,7 @@ mod tests {
         let heard = Arc::new(MixLevel::default());
         let limiter_on = Arc::new(AtomicBool::new(limiter));
         // The client's own chain, plus one probe meter appended to read the limiter's output.
-        let (mut main, _) = main_track(&asked, &limiter_on, Some(RATE), None);
+        let mut main = main_track(&asked, &limiter_on, Some(RATE), None).builder;
         meter::install(&mut main, &heard);
         let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
             backend_settings: MockBackendSettings { sample_rate: RATE },
@@ -869,6 +902,119 @@ mod tests {
         (asked, heard.peak, heard.over)
     }
 
+    /// A quarter-second 0 dBFS sine as a stereo float WAV — the shape every WoW SFX ships in
+    /// (mastered to full scale), built in memory so a test about the *chain* never needs the
+    /// gitignored install.
+    fn full_scale_tone(rate: u32) -> Vec<u8> {
+        let frames = rate as usize / 4;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames as u32 * 8).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 8).to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
+        wav.extend_from_slice(&32u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames as u32 * 8).to_le_bytes());
+        for i in 0..frames {
+            let v = (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin();
+            wav.extend_from_slice(&v.to_le_bytes());
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        wav
+    }
+
+    /// The master volume must sit **upstream** of the limiter — the ordering fix in
+    /// [`main_track`], and the one place a unit test can prove it.
+    ///
+    /// kira applies a track's own volume *after* its effects, so a master left on the main track
+    /// lands downstream of the limiter. The audible symptom is specific and nasty: turn the
+    /// slider down and the limiter keeps ducking peaks that the slider was already going to
+    /// remove, so the *pumping scales with the mix instead of going away*. A quiet mix would
+    /// breathe exactly as hard as a loud one.
+    ///
+    /// Two 0 dBFS copies at master 0.25 sum to 2.0 before the master and **0.5 after** it —
+    /// comfortably inside full scale, so a correctly-placed limiter never engages at all.
+    /// Wrongly placed it sees 2.0, clamps to the ceiling, and the reading shows deep gain
+    /// reduction on a mix that was never going to clip.
+    #[test]
+    fn the_master_volume_sits_upstream_of_the_limiter() {
+        use kira::backend::mock::{MockBackend, MockBackendSettings};
+
+        const RATE: u32 = 44_100;
+        const MASTER: f32 = 0.25;
+        const COPIES: usize = 2;
+
+        let asked = Arc::new(MixLevel::default());
+        let heard = Arc::new(MixLevel::default());
+        let limiter_on = Arc::new(AtomicBool::new(true));
+        let chain = main_track(&asked, &limiter_on, Some(RATE), None);
+        let (mut main, mut master) = (chain.builder, chain.master);
+        // Appended last, so it reads the chain's actual output.
+        meter::install(&mut main, &heard);
+        let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
+            backend_settings: MockBackendSettings { sample_rate: RATE },
+            main_track_builder: main,
+            ..Default::default()
+        })
+        .expect("mock backend");
+        // Snap, not glide: a 10 ms ramp would let the tone's own attack through at near unity and
+        // the peak would be the ramp, not the steady state under test.
+        master.set_volume(amp_to_db(MASTER), snap());
+        // Even a zero-duration tween takes one block to land: kira interpolates a parameter from
+        // its previous value across the chunk in which the command is read. Settle over silence
+        // and reset the meters, so what follows measures the steady state and not that ramp.
+        {
+            let backend = manager.backend_mut();
+            for _ in 0..4 {
+                backend.on_start_processing();
+                backend.process();
+            }
+        }
+        asked.take();
+        heard.take();
+
+        let data = sfx_from_bytes(full_scale_tone(RATE)).expect("tone decodes");
+        for _ in 0..COPIES {
+            manager.play(data.clone()).expect("play");
+        }
+        let blocks = (data.duration().as_secs_f64() + 0.25) * f64::from(RATE) / 128.0;
+        let backend = manager.backend_mut();
+        for _ in 0..(blocks.ceil() as usize) {
+            backend.on_start_processing();
+            backend.process();
+        }
+        let heard = heard.take();
+        // The limiter reports its gain into the *shared* level cell it was installed with, not
+        // into the meter appended after it — read it from the one that can actually see it.
+        let inner = asked.take();
+
+        eprintln!(
+            "master ordering: {COPIES} copies at master {MASTER} — after master {:.3}x, \
+             heard {:.3}x, limiter deepest gain {:.3}",
+            inner.peak, heard.peak, inner.reduction,
+        );
+        // The whole point: the limiter never had anything to do.
+        assert!(
+            inner.reduction > 0.99,
+            "the limiter engaged (deepest gain {:.3}) on a mix that never exceeded full scale — \
+             the master is downstream of it again",
+            inner.reduction,
+        );
+        // And the output is the scaled sum, not the limited-then-scaled one (~0.25).
+        assert!(
+            (heard.peak - MASTER * COPIES as f32).abs() < 0.05,
+            "expected the plain scaled sum ~{:.2}, heard {:.3}",
+            MASTER * COPIES as f32,
+            heard.peak,
+        );
+        assert_eq!(heard.over, 0, "nothing should have passed full scale");
+    }
+
     /// The probe's two taps must **bracket** the limiter (decision 1556) — and this is the test
     /// that the capture handed to the director can actually tell the mechanisms apart.
     ///
@@ -894,32 +1040,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp capture dir");
 
-        // A 0 dBFS tone, in memory — the shape every WoW SFX ships in (mastered to full scale),
-        // without needing the gitignored install for a test about the *chain*.
-        let frames = RATE as usize / 4;
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + frames as u32 * 8).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&3u16.to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&RATE.to_le_bytes());
-        wav.extend_from_slice(&(RATE * 8).to_le_bytes());
-        wav.extend_from_slice(&8u16.to_le_bytes());
-        wav.extend_from_slice(&32u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&(frames as u32 * 8).to_le_bytes());
-        for i in 0..frames {
-            let v = (i as f32 * 440.0 * std::f32::consts::TAU / RATE as f32).sin();
-            wav.extend_from_slice(&v.to_le_bytes());
-            wav.extend_from_slice(&v.to_le_bytes());
-        }
+        let wav = full_scale_tone(RATE);
 
         {
             let level = Arc::new(MixLevel::default());
             let limiter_on = Arc::new(AtomicBool::new(true));
-            let (main, audio_pos) = main_track(&level, &limiter_on, Some(RATE), Some(&dir));
+            let chain = main_track(&level, &limiter_on, Some(RATE), Some(&dir));
+            let (main, audio_pos) = (chain.builder, chain.audio_pos);
             let audio_pos = audio_pos.expect("the pre-tap publishes a frame clock");
             let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
                 backend_settings: MockBackendSettings { sample_rate: RATE },

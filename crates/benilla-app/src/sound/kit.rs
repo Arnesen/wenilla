@@ -116,31 +116,69 @@ pub(crate) struct ActiveChannel {
     /// Does this channel loop? A loop is a *bed* — an ambience, a tracked body loop — and the
     /// voice cap never steals one: cutting a bed leaves an audible hole that stays open, where
     /// stealing a one-shot costs at most the tail of a sound already being buried. (The reference
-    /// makes no such distinction, but it does not have to: its exhaustion behaviour lives inside
-    /// `fmod.dll` and is unreadable, so the policy is ours to choose — decision 1557.)
+    /// makes no such distinction — it never steals *anything*; see [`claim_voice`] and decision
+    /// 1563. The bed/one-shot split is ours, and only matters because we do steal.)
     looping: bool,
     /// This channel's **current effective amplitude** — `category · v · gain · rolloff ·
     /// near_field`, refreshed by [`pump_channels`] every frame. Cached rather than recomputed
     /// because the voice cap needs to rank every live channel by audibility on the play path,
     /// which is the one place that must not walk the world.
     amp: f32,
-    /// The **voice category latched on this channel**, when this play is a unit's one-shot
-    /// creature bark — the reference's `[unit+0xb24]` beside the `[unit+0xb20]` handle
-    /// ([`unit_voice_playing`]). `None` for every other play, which is what keeps a unit's body
-    /// loop, greeting line and footsteps out of the voice slot.
-    voice: Option<u8>,
+    /// Which per-unit latch this channel's liveness represents ([`Latch`]).
+    latch: Latch,
 }
 
-/// The **voice categories** of the reference's per-unit one-shot bark dispatch `0x623a40` (its
-/// 5-way jump table at `0x623afc`; wow-re `object-layer/scratch/smsg-ai-reaction.md`). Only the
-/// one the note pins byte-exactly is named here — the rest of the table, and the priority
-/// ordering that decides which category may interrupt which, are an open wow-re question and are
-/// deliberately NOT guessed at: today only [`voice_category::HOSTILE`] is routed through the slot.
-pub(super) mod voice_category {
-    /// `0x623a40(0)` — the HOSTILE aggro bark, `CreatureSoundData` col 10. Byte-verified as the
-    /// **lowest** priority in the table: it never interrupts a playing bark, and it is dropped
-    /// outright while the unit's voice slot is live.
-    pub(in crate::sound) const HOSTILE: u8 = 0;
+/// **Which per-unit latch a channel holds** — the marker decision 1399 asked for, and the fix for
+/// the conflation [`source_playing`] used to document.
+///
+/// The reference keeps two separate handles on a unit: `[unit+0xb1c]` for its greeting line and
+/// `[unit+0xb20]` for its one-shot bark. benilla tags a channel with its `source` entity for
+/// *three* unrelated reasons, though — a latch, a thing the pump must follow in flight, and a
+/// thing a despawn must stop — and asking "is a channel tagged with this unit alive?" answered all
+/// three at once. So a creature's body loop, a missile's travel loop or a water splash silently
+/// held the greeting latch and muted a hello the reference would have played. It bit real data: 6
+/// of the 4 509 displays that carry an `NPCSounds` greeting also resolve a `CreatureSoundData`
+/// row with a nonzero `loop_sound`.
+///
+/// Splitting the *reason* out of the *tag* is what fixes it. `source` now means only "this channel
+/// belongs to that entity"; this says what, if anything, it latches.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Latch {
+    /// Tagged for ownership alone — the pump follows it, a despawn stops it, and it blocks
+    /// nothing. Body loops, missile travel loops, liquid loops, spell holds.
+    #[default]
+    None,
+    /// The NPC greeting line's `[unit+0xb1c]` (`0x60c28c`/`0x60c40a`): a unit with a greeting
+    /// line still sounding refuses a new one.
+    Greeting,
+    /// The one-shot creature bark's `[unit+0xb20]` — the per-unit slot of the reference's bark
+    /// dispatch `0x623a40` (5-way jump table `0x623afc`; wow-re
+    /// `object-layer/scratch/smsg-ai-reaction.md`).
+    ///
+    /// The reference keeps the latched **category** beside the handle in `[unit+0xb24]` and uses
+    /// it for an interrupt rule — only a *strictly higher* category stops what is playing
+    /// (`0x623a8d`, after `0x623a95 call 0x7a5700`). benilla does not carry the category, because
+    /// the ordering of that 5-way table is an open wow-re question and guessing it would invent
+    /// an interrupt the client may not have. Today only the HOSTILE aggro bark (`0x623a40(0)`,
+    /// `CreatureSoundData` col 10) is routed through the slot, and it is byte-verified as the
+    /// table's **lowest** category: it never interrupts a playing bark and is dropped outright
+    /// while this latch is held — which is exactly what plain liveness already gives. When the
+    /// ordering is pinned, the category becomes a payload here.
+    Voice,
+    /// A **server-pushed object sound** live on this unit — `SMSG_PLAY_OBJECT_SOUND`
+    /// (opcode `0x278`), the `AISOUNDDESC` pool at `[0xb05f38]`.
+    ///
+    /// The reference registers one of these per source GUID and then *queries* it from two
+    /// places: `0x4591f0`, reached from `0x6234cb` (the 13-way class route) and `0x623a59` (the
+    /// priority bark route). While an object sound is live on a unit, that unit's own vocals are
+    /// **suppressed** — a scripted voice line is not talked over by the creature's grunts. The
+    /// pool releases on the sound finishing or the emitter leaving `DistanceCutoff`
+    /// (`0x457a50`), which is what this channel's liveness represents.
+    ///
+    /// Two limits, both byte-derived: the suppression applies to classes **0–3 and 8 only**
+    /// (`0x6234bb`/`0x6234bf`/`0x6234c4`), and the **CGPlayer twin `0x62f880` omits the gate
+    /// entirely**, so a player's vocals are never suppressed by one.
+    ObjectSound,
 }
 
 /// The **class-bark chance roll** (wow-re `sound/scratch/creature-vocal-gates.md`, §5): the
@@ -163,11 +201,24 @@ pub(super) fn bark_chance_pass(threshold: u32, roll: u32) -> bool {
 /// The rest of the creature table is `{70, 100, 60, 100, 100, 40, 100, …}` (player twin
 /// `{35, 100, 30, 100, 100, 40, 100, …}`), and only classes 0, 2 and 5 are ever rolled — every
 /// other class carries 100, i.e. `P = 1`, which is why `$WNG`/`$WGG` (classes 7 and 10) and the
-/// ALERT bark (class 8) are faithfully unconditional. Classes 0 (exertion) and 2 (injury) are
-/// **not** encoded here on purpose: their live trigger route is still unpinned (`$CAH`'s exertion
-/// leg, `super::combat`'s own INTERIM), and a threshold is only safe to apply once you know the
-/// call actually reaches this gate.
+/// ALERT bark (class 8) are faithfully unconditional. Class 2 (injury) is **not** encoded here:
+/// its live trigger route is still unpinned. Class 0 (exertion) now is — see
+/// [`EXERTION_CHANCE_CREATURE`].
 pub(super) const STAND_CHANCE: u32 = 40;
+
+/// The class-0 (**exertion**) chance thresholds, and the one place in the vocal tables where the
+/// creature and player twins actually disagree — a player grunts about **half as often** as a
+/// creature on the same swing.
+///
+/// `0x8626d4[0] = 70` (creature) and `0x86424c[0] = 35` (player), read as dwords straight out of
+/// `WoW.exe`. With [`bark_chance_pass`]'s inclusive compare that is **P = 71/101 ≈ 70.3 %** for a
+/// creature and **36/101 ≈ 35.6 %** for a player.
+///
+/// Class **1** (ExertionCritical) carries 100 in both twins, so a *critical* swing always grunts.
+/// That asymmetry is the audible shape of the pair: ordinary swings thin out, crits never do.
+pub(super) const EXERTION_CHANCE_CREATURE: u32 = 70;
+/// The player twin of [`EXERTION_CHANCE_CREATURE`] — `0x86424c[0] = 35`.
+pub(super) const EXERTION_CHANCE_PLAYER: u32 = 35;
 
 /// The class-5 cooldown: **10 000 ms on ONE global timestamp** (`0x623290`,
 /// `GetTickCount − [0xc4e0e4] − 0x2710`). Not per unit and not per class — a single window shared
@@ -279,9 +330,16 @@ pub(crate) const SOFTWARE_CHANNELS: usize = 12;
 /// alternative (refuse whatever arrives last) silences the sword swinging in your face because
 /// twelve distant footsteps got there first.
 ///
-/// The reference cannot settle this for us: it passes `FSOUND_FREE` at every play site and, in
-/// wow-re's words, "never protects a voice" — so what FMOD does when all 12 are busy is inside
-/// `fmod.dll`, unreadable, and explicitly ours to decide (decision 1557).
+/// **This is a deliberate divergence, and decision 1563 read the bytes that make it one.** The
+/// rule below — lowest first, ties broken by lowest amplitude — *is* FMOD's own allocator
+/// (`fmod.dll 0x100268e6`–`0x1002690e`). What the reference does is switch that allocator off:
+/// every WoW voice is an `FSOUND_Stream`, `FSOUND_Stream_Create` stamps its sample priority
+/// **256** (`0x1002be47`), and the steal scan skips anything `>= 256` (`0x100268e9`). So the
+/// reference's 13th concurrent sound is not stolen for — it is **silently dropped**.
+///
+/// We let the allocator run instead. Dropping outright is faithful but worse to listen to, and
+/// with 1560's copy cap doing the crowd control the steal is rare and lands on the quietest thing
+/// in the mix. 1557 chose this when FMOD was still unread; 1563 kept it with the divergence named.
 fn claim_voice(out: &mut SoundOutput, candidate_amp: f32) -> bool {
     if out.live_voices() >= SOFTWARE_CHANNELS {
         // Reap first. [`pump_channels`] drops finished channels once a frame, but plays happen in
@@ -296,7 +354,7 @@ fn claim_voice(out: &mut SoundOutput, candidate_amp: f32) -> bool {
         .channels
         .iter()
         .enumerate()
-        .filter(|(_, c)| !c.looping)
+        .filter(|(_, c)| stealable(c.looping, c.latch))
         .map(|(i, c)| (i, c.amp));
     match pick_voice_slot(stealable, out.live_voices(), candidate_amp) {
         VoiceSlot::Free => true,
@@ -316,6 +374,33 @@ fn claim_voice(out: &mut SoundOutput, candidate_amp: f32) -> bool {
 }
 
 /// What [`claim_voice`] decided.
+/// May the voice cap take this channel's slot? Two exclusions, for two different reasons.
+///
+/// **Beds** (`looping`) — cutting an ambience or a body loop leaves an audible hole that stays
+/// open, where stealing a one-shot costs at most the tail of a sound already being buried.
+///
+/// **Latch holders** (`source`) — and this one is a correctness bug, not a taste call. A
+/// source-tagged channel's *liveness is the latch*: the NPC greeting's `[unit+0xb1c]` and the
+/// creature bark's `[unit+0xb20]` are held for exactly as long as the sound plays, and released
+/// when the pump reaps it. Stealing one **releases the latch early**, so the very next packet is
+/// free to re-fire — and the thing those latches exist to stop is precisely a burst of repeats
+/// (creature.rs measured a bear's aggro roar firing 63 times in two minutes, up to thirty
+/// overlapping copies, when it was played ungated). A voice cap that manufactures that under
+/// load is worse than no voice cap: it breaks hardest in exactly the crowded moment it was added
+/// for.
+///
+/// This exposure is **ours alone** — decision 1563 read `fmod.dll` and the reference never steals
+/// any voice at all (every WoW channel is a stream at priority 256, the one value the allocator
+/// refuses), so nothing there can release a latch early. It arrived with 1557's steal and is
+/// closed here.
+///
+/// The cost is nil in practice: only five play paths tag a source at all (the greeting line, the
+/// creature bark, the body loop, the missile travel loop and the liquid loop), and three of those
+/// are already `looping`.
+fn stealable(looping: bool, latch: Latch) -> bool {
+    !looping && latch == Latch::None
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum VoiceSlot {
     /// Under the ceiling — just play.
@@ -375,9 +460,9 @@ pub(super) struct PlayExtras {
     /// Loop regardless of the kit's own 0x200 flag, for the drivers whose *column* is the loop
     /// authority (the creature body-loop; see [`play_kit_ext`]'s own note).
     pub(super) force_loop: bool,
-    /// The category latched on the unit's one-shot bark slot ([`ActiveChannel::voice`]); `Some`
-    /// only for the barks the reference stores in `[unit+0xb20]`.
-    pub(super) voice: Option<u8>,
+    /// Which per-unit latch this play takes, if any ([`Latch`]). Defaults to [`Latch::None`] —
+    /// tagging a `source` is about ownership, and taking a latch has to be asked for.
+    pub(super) latch: Latch,
     /// The **voice bus** this play competes on ([`Bus`]). Defaults to the uncapped bus 0.
     pub(super) bus: Bus,
 }
@@ -443,7 +528,7 @@ pub(super) fn play_kit_ext(
         variant,
         source,
         force_loop,
-        voice,
+        latch,
         bus,
     } = extras;
     // The cover's audio hold ([`SoundConfig::world_hold`]): while the loading screen is up, no
@@ -618,7 +703,7 @@ pub(super) fn play_kit_ext(
         looping,
         amp,
         bus,
-        voice,
+        latch,
     });
     Ok(())
 }
@@ -635,7 +720,7 @@ pub(super) fn play_kit_ext(
 pub(super) fn unit_voice_playing(out: &SoundOutput, unit: Entity) -> bool {
     out.channels
         .iter()
-        .any(|c| occupies_voice_slot(c.source, c.voice, unit))
+        .any(|c| occupies_voice_slot(c.source, c.latch, unit))
 }
 
 /// Does one channel, described by its `(source, voice)` identity, occupy `unit`'s **voice** slot
@@ -643,18 +728,14 @@ pub(super) fn unit_voice_playing(out: &SoundOutput, unit: Entity) -> bool {
 /// `[unit+0xb1c]`)? The two are disjoint by construction, which is the whole point of separating
 /// them: a bark and a greeting line are different handles in the reference and must not mute each
 /// other.
-pub(super) fn occupies_voice_slot(source: Option<Entity>, voice: Option<u8>, unit: Entity) -> bool {
-    source == Some(unit) && voice.is_some()
+pub(super) fn occupies_voice_slot(source: Option<Entity>, latch: Latch, unit: Entity) -> bool {
+    source == Some(unit) && latch == Latch::Voice
 }
 
 /// The complement — the greeting latch's own test (see [`source_playing`] for what else currently
 /// lands in it).
-pub(super) fn occupies_greeting_latch(
-    source: Option<Entity>,
-    voice: Option<u8>,
-    unit: Entity,
-) -> bool {
-    source == Some(unit) && voice.is_none()
+pub(super) fn occupies_greeting_latch(source: Option<Entity>, latch: Latch, unit: Entity) -> bool {
+    source == Some(unit) && latch == Latch::Greeting
 }
 
 /// Is a channel tagged with `source` still live? The NPC-greeting per-unit latch (`[unit+0xb1c]`
@@ -666,18 +747,27 @@ pub(super) fn occupies_greeting_latch(
 /// ([`unit_voice_playing`]). Conflating them would let a unit's aggro roar mute its own greeting
 /// line, which the client never does.
 ///
-/// Everything else tagged with `source` is still counted, and that is a **known pre-existing
-/// conflation, not a claim of fidelity**: the body loop (`0x623800`'s own latch), the water
-/// splash and the spell hold all ride the same one `source` tag, so any of them currently masks
-/// a greeting the reference would let through. It bites real data — 6 of the 4 509 displays that
-/// carry an `NPCSounds` greeting also resolve a `CreatureSoundData` row with a nonzero
-/// `loop_sound` (1303, 10006, 10045, 10699, 11912, 12769; counted at the DBCs this session). The
-/// honest fix is a per-latch marker rather than one shared tag, which is wider than this change
-/// and is raised as such in decision 1399 — deliberately not slipped in here.
+/// **So is everything else tagged with `source`** — and that is what [`Latch`] fixed. This used
+/// to ask "is any channel tagged with this unit alive?", which the body loop (`0x623800`'s own
+/// latch), the missile travel loop, the water splash and the spell hold all answered yes to, so
+/// any of them masked a greeting the reference would have played. It bit real data: 6 of the
+/// 4 509 displays that carry an `NPCSounds` greeting also resolve a `CreatureSoundData` row with
+/// a nonzero `loop_sound` (1303, 10006, 10045, 10699, 11912, 12769), and every one of those
+/// creatures was permanently unable to say hello. Decision 1399 raised the per-latch marker as
+/// the honest fix; it is in, and this now asks only about the channel that actually holds
+/// `[unit+0xb1c]`.
+/// Is a **server-pushed object sound** live on `unit` — the reference's `AISOUNDDESC` pool query
+/// `0x4591f0`? See [`Latch::ObjectSound`] for what it gates and what it does not.
+pub(super) fn object_sound_playing(out: &SoundOutput, unit: Entity) -> bool {
+    out.channels
+        .iter()
+        .any(|c| c.source == Some(unit) && c.latch == Latch::ObjectSound)
+}
+
 pub(super) fn source_playing(out: &SoundOutput, source: Entity) -> bool {
     out.channels
         .iter()
-        .any(|c| occupies_greeting_latch(c.source, c.voice, source))
+        .any(|c| occupies_greeting_latch(c.source, c.latch, source))
 }
 
 /// Is a channel tagged with `source` playing kit `kit_id`? The kit-scoped latch — the creature
@@ -778,7 +868,7 @@ pub(crate) fn play_file(
         looping: false,
         amp,
         bus: Bus::DEFAULT,
-        voice: None,
+        latch: Latch::None,
     });
     Ok(())
 }
@@ -1149,6 +1239,34 @@ mod tests {
         assert_eq!(admitted, 41, "P = 41/101 for the class-5 stand vocal");
     }
 
+    /// The exertion pair's shape: **a crit always grunts, an ordinary swing does not, and a
+    /// player grunts about half as often as a creature.** These are the only vocal thresholds
+    /// where the creature and player twins disagree (`0x8626d4[0] = 70` vs `0x86424c[0] = 35`,
+    /// read as dwords out of `WoW.exe`), and class 1 carries 100 in both.
+    #[test]
+    fn a_crit_always_grunts_and_a_player_grunts_half_as_often() {
+        let bucket = |r: u32| ((101u64 * u64::from(r)) >> 32) as u32;
+        let admitted = |threshold: u32| {
+            (0..=100)
+                .filter(|&b| {
+                    let r = ((u64::from(b) << 32) / 101) as u32 + 1;
+                    bucket(r) == b && bark_chance_pass(threshold, r)
+                })
+                .count()
+        };
+        assert_eq!(
+            admitted(EXERTION_CHANCE_CREATURE),
+            71,
+            "P = 71/101 ≈ 70.3 %"
+        );
+        assert_eq!(admitted(EXERTION_CHANCE_PLAYER), 36, "P = 36/101 ≈ 35.6 %");
+        // Roughly half, which is the audible point of the split.
+        assert!(admitted(EXERTION_CHANCE_PLAYER) * 2 <= admitted(EXERTION_CHANCE_CREATURE) + 2);
+        // Class 1 (ExertionCritical) is 100 in both twins — combat.rs skips the roll entirely on
+        // a crit, and this is why that shortcut is faithful rather than a convenience.
+        assert_eq!(admitted(100), 101, "a critical swing always grunts");
+    }
+
     /// **The two per-unit handles are disjoint** (decision 1399): the one-shot bark occupies
     /// `[unit+0xb20]`, the greeting line `[unit+0xb1c]`, and neither may answer the other's
     /// question. This is the regression guard for the way the voice slot was added — tagging the
@@ -1158,21 +1276,33 @@ mod tests {
     fn the_voice_slot_and_the_greeting_latch_are_disjoint() {
         let bear = Entity::from_raw_u32(1).expect("valid entity id");
         let other = Entity::from_raw_u32(2).expect("valid entity id");
-        let bark = (Some(bear), Some(voice_category::HOSTILE));
-        let greet = (Some(bear), None);
+        let bark = (Some(bear), Latch::Voice);
+        let greet = (Some(bear), Latch::Greeting);
+        // The case decision 1399 was actually about: a channel tagged with the unit for
+        // *ownership* — its body loop, a missile's travel loop, a water splash — takes no latch
+        // at all. Before the marker these were indistinguishable from the greeting line, so a
+        // creature with a body loop could never say hello.
+        let body_loop = (Some(bear), Latch::None);
 
         assert!(occupies_voice_slot(bark.0, bark.1, bear));
         assert!(!occupies_greeting_latch(bark.0, bark.1, bear));
         assert!(occupies_greeting_latch(greet.0, greet.1, bear));
         assert!(!occupies_voice_slot(greet.0, greet.1, bear));
 
+        assert!(
+            !occupies_greeting_latch(body_loop.0, body_loop.1, bear),
+            "a body loop must not hold the greeting latch — 6 of the 4509 greeting displays \
+             also carry a nonzero loop_sound, and every one of them was mute"
+        );
+        assert!(!occupies_voice_slot(body_loop.0, body_loop.1, bear));
+
         // Neither slot is world-global: a bark on one unit says nothing about another.
         assert!(!occupies_voice_slot(bark.0, bark.1, other));
         assert!(!occupies_greeting_latch(greet.0, greet.1, other));
 
         // An untagged channel (every ordinary one-shot) is in neither slot.
-        assert!(!occupies_voice_slot(None, None, bear));
-        assert!(!occupies_greeting_latch(None, None, bear));
+        assert!(!occupies_voice_slot(None, Latch::None, bear));
+        assert!(!occupies_greeting_latch(None, Latch::None, bear));
     }
 
     /// The ceiling is the reference's, not a number we liked: `FSOUND_Init(44100, 12, 0x82)`,
@@ -1245,6 +1375,34 @@ mod tests {
         assert_eq!(
             pick_voice_slot(std::iter::empty(), SOFTWARE_CHANNELS, 1.0),
             VoiceSlot::Denied
+        );
+    }
+
+    /// A channel that holds a per-unit latch is never a steal victim — and unlike the bed rule
+    /// above, this one is correctness, not taste.
+    ///
+    /// A source-tagged channel's liveness **is** the latch (`[unit+0xb1c]` for the greeting line,
+    /// `[unit+0xb20]` for the bark). Steal it and the latch releases early, so the next packet on
+    /// that unit is free to re-fire — turning the voice cap into a *repeat generator* under
+    /// exactly the load it exists to handle. `creature.rs` measured the ungated version of that:
+    /// a bear's aggro roar 63 times in two minutes, up to thirty overlapping copies.
+    #[test]
+    fn a_channel_holding_a_units_latch_is_never_stolen() {
+        assert!(
+            stealable(false, Latch::None),
+            "an ordinary one-shot is the whole point of the steal"
+        );
+        assert!(
+            !stealable(false, Latch::Greeting),
+            "a greeting line holds [unit+0xb1c] — stealing it lets the unit re-greet at once"
+        );
+        assert!(
+            !stealable(false, Latch::Voice),
+            "a bark holds [unit+0xb20] — stealing it lets the unit re-bark at once"
+        );
+        assert!(
+            !stealable(true, Latch::None),
+            "beds are held for their own reason"
         );
     }
 
