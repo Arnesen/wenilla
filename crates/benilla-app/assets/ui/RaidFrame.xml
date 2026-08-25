@@ -534,7 +534,19 @@
             -- runs on the empty case too — its early `if ( savedInstances > 0 )` leaves a stale
             -- scroll bar standing when the last lockout expires, which is a bug rather than a
             -- behaviour (nothing can observe the bar's absence except by seeing it wrongly there).
-            set_shown(RaidInfoScrollFrameScrollBar, savedInstances > 4)
+            local scrollable = savedInstances > 4
+            set_shown(RaidInfoScrollFrameScrollBar, scrollable)
+            if scrollable then
+                -- **The bar has to move to the trough.** `UIPanelScrollFrameTemplate` seats it for
+                -- a bare ScrollFrame: 6 px out and 16 px down, so its up-arrow fits inside the
+                -- frame's own span. This panel draws an ornate trough behind it instead
+                -- (`RaidInfoScrollFrameTop`/`Bottom`, 30 px wide from +1), and the template's seat
+                -- leaves the 16-wide bar 2 px left of that trough's centre with its arrow floating
+                -- 13 px below the cap. The ref re-points it here for the same reason and never
+                -- puts it back — the value never varies, so setting it on each show is idempotent.
+                RaidInfoScrollFrameScrollBar:SetPoint(
+                    "TOPLEFT", "RaidInfoScrollFrame", "TOPRIGHT", 8, -3)
+            end
             RaidInfoScrollFrame:UpdateScrollChildRect()
         end
 

@@ -401,6 +401,25 @@ fn is_above(d: f32, r: f32) -> bool {
     d >= -r
 }
 
+/// Does a booth-layered emitter freeze this frame? The rule the body panes' item effects turn on
+/// (decision 1559), stated once because it was got wrong by being written inline.
+///
+/// A booth camera that is **asleep** — `gate_booth_cameras` put its pane's window away — draws
+/// none of this lane, so its emitters freeze with it: pool + age held, one frame's dt on
+/// re-entry, no catch-up. That is the draw-set law's own shape (the reference ticks an emitter
+/// only inside a draw the frame performs) and it is keyed on the reference's own cull.
+///
+/// A camera that is merely **rate-throttled** ([`super::ViewThrottled`]) is not asleep. Its scene
+/// is posing at full rate; `boothHalfRate` (decision 1444) is *our* pacing of the render, and a
+/// frame we chose to skip is not a frame the reference culled. Reading the two as one ran the
+/// body panes' item effects at half speed for as long as a pane was open — director report B312.
+///
+/// A **draining** emitter never freezes either way: its pool has to run out, and freezing one
+/// strands it forever (the world arm's rule further down).
+fn booth_frozen(cam_active: bool, throttled: bool, draining: bool) -> bool {
+    !cam_active && !throttled && !draining
+}
+
 /// Per-frame: emit, integrate, and expand each emitter's pool into the shared effect-quad
 /// stream ([`super::buffer::EffectQuads`]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
@@ -452,7 +471,13 @@ pub(super) fn simulate_particles(
     // rule. `Without<ParticleEmitter>`/`Without<ChildDraw>` keep the read provably disjoint from
     // the `&mut GlobalTransform` writes above.
     booth_cams: Query<
-        (Entity, &GlobalTransform, &RenderLayers, &Camera),
+        (
+            Entity,
+            &GlobalTransform,
+            &RenderLayers,
+            &Camera,
+            Has<super::ViewThrottled>,
+        ),
         (
             With<Camera3d>,
             Without<WorldCamera>,
@@ -504,14 +529,10 @@ pub(super) fn simulate_particles(
         // camera.
         let booth = layers
             .filter(|l| !l.intersects(&RenderLayers::default()))
-            .and_then(|l| booth_cams.iter().find(|(_, _, cl, _)| cl.intersects(l)));
+            .and_then(|l| booth_cams.iter().find(|(_, _, cl, ..)| cl.intersects(l)));
         let is_booth = booth.is_some();
-        // A sleeping booth camera (`gate_booth_cameras` — the pane's window closed) draws none
-        // of this lane, so its emitters freeze with it: pool + age held, the draw-set law's own
-        // shape (the reference ticks an emitter only inside a draw the frame performs). Draining
-        // pools still run out — freezing one strands it (the world arm's rule below).
-        if let Some((_, _, _, booth_cam)) = booth {
-            if !booth_cam.is_active && !emitter.draining {
+        if let Some((_, _, _, booth_cam, throttled)) = booth {
+            if booth_frozen(booth_cam.is_active, throttled, emitter.draining) {
                 if !emitter.gated {
                     emitter.gated = true;
                     for slot in &emitter.model_instances {
@@ -527,7 +548,7 @@ pub(super) fn simulate_particles(
             emitter.gated = false;
         }
         let (draw_cam, e_cam_pos, e_right, e_up) = match booth {
-            Some((cam_entity, tf, _, _)) => {
+            Some((cam_entity, tf, ..)) => {
                 let (_, rot, _) = tf.to_scale_rotation_translation();
                 (cam_entity, tf.translation(), rot * Vec3::X, rot * Vec3::Y)
             }
@@ -1244,8 +1265,8 @@ pub(super) fn simulate_particles(
 #[cfg(test)]
 mod tests {
     use super::{
-        inherit_trigger, integrate_particle, is_above, world_motion_kept, ChildEmitter, Particle,
-        StepEnv, Vec3,
+        booth_frozen, inherit_trigger, integrate_particle, is_above, world_motion_kept,
+        ChildEmitter, Particle, StepEnv, Vec3,
     };
     use bevy::prelude::{Quat, Transform};
 
@@ -1266,6 +1287,24 @@ mod tests {
         assert!(!is_above(-0.1, 0.0));
         // NaN → below, the reference's unordered-compare branch — `>=` gives it for free.
         assert!(!is_above(f32::NAN, 2.0));
+    }
+
+    /// **A paced booth camera is not a sleeping one** (1559, director report B312). The draw-set
+    /// freeze belongs to a camera whose scene stopped; `boothHalfRate` skips a *render* over a
+    /// scene that is still posing at full rate, so the emitter owes it nothing. Conflating the
+    /// two is what ran the paper doll's item effects at half speed while its pane was open.
+    #[test]
+    fn a_throttled_booth_camera_does_not_freeze_its_emitters() {
+        // Asleep: the pane closed. Freeze — the reference's cull, faithfully.
+        assert!(booth_frozen(false, false, false));
+        // Paced, on a frame it skipped: NOT frozen. This is the whole fix.
+        assert!(!booth_frozen(false, true, false));
+        // Paced, on a frame it drew: nothing to decide, it was never frozen.
+        assert!(!booth_frozen(true, true, false));
+        assert!(!booth_frozen(true, false, false));
+        // A draining pool runs out on any camera — freezing one strands it.
+        assert!(!booth_frozen(false, false, true));
+        assert!(!booth_frozen(false, true, true));
     }
 
     fn particle(pos: Vec3, vel: Vec3) -> Particle {

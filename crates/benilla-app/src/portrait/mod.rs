@@ -441,6 +441,8 @@ struct Booth {
     /// A rig stands in this booth ([`booth::BoothRig::rigged`] at the last bake) — the park
     /// gate's "is there anything to park". Cleared with the emptied booth.
     rigged: bool,
+    /// The rotate arrows' turn animation ([`Turn`], decision 1559) — body panes only.
+    turn: Turn,
     /// The booth scene is parked: its camera is asleep, so [`gate_booth_cameras`] put
     /// [`benilla_world::rig_anim::AnimParked`] on the root — the 0712 evaluator, the pose
     /// composes, the palette writes and the global-sequence writes all skip (the pose HOLDS —
@@ -450,6 +452,38 @@ struct Booth {
     /// already animates. Costs nothing while a window is open; retires the whole idle lane the
     /// rest of the session.
     parked: bool,
+}
+
+/// A body pane's **turn animation** state — the half of the reference's `SetRotation` that is not
+/// the facing write (decision 1559, director report B313).
+///
+/// `PlayerModel:SetRotation(angle)` (`0x505bb0`, wow-re `modelframe-camera-law.md` §6) does two
+/// things: it picks a turn-in-place shuffle by direction, queues it and arms a 100 ms expiry, and
+/// *then* writes the facing field `SetFacing` writes. Ours only ever did the second — the doll
+/// spun on the spot while the reference's steps its feet round, which is what a held arrow looks
+/// like there.
+///
+/// The producer/consumer split is one frame's width and deliberate: [`sync_body_booth`] holds the
+/// yaw and sets [`Self::spun`]; [`booth::drive_booth_turn`], which holds the `AnimationPlayer`,
+/// spends it. The syncs run before it in the same chain.
+#[derive(Default)]
+struct Turn {
+    /// The facing this booth's root is posed at — the reference's `[+0x39c]`, and the value its
+    /// direction test compares the incoming angle against. `None` until the first pose, which is
+    /// why a fresh bake does not step (the reference re-snapshots on `RefreshUnit` without
+    /// calling `SetRotation`).
+    faced: Option<f32>,
+    /// A rotation happened this frame, and the `AnimationData` id it arms
+    /// ([`booth::turn_shuffle`] picked it — a shuffle, or `Stand` for the equal/NaN case). Set by
+    /// the sync, taken by the driver, at most one frame old.
+    spun: Option<u16>,
+    /// The shuffle currently stepping — its `AnimationData` id and the wall-clock second it
+    /// expires at. `None` = the doll is back on Stand.
+    shuffle: Option<(u16, f64)>,
+    /// The graph node that shuffle is actually running, kept because the reference arms a
+    /// **frequency-weighted random variation** (`0x7121a0`'s `-1`), so the node playing is not
+    /// recoverable from the id alone.
+    playing: Option<bevy::animation::graph::AnimationNodeIndex>,
 }
 
 /// How many frames a content edge keeps a booth camera rendering ([`Booth::wake`]): covers the
@@ -670,23 +704,24 @@ fn feed_gx_aspect(
 /// touched); only the camera skips, so the held frame is always one the pose just produced.
 ///
 /// `boothHalfRate` is **benilla's own CVar** (the reference has no second view to rate-limit —
-/// its doll draws in the main pass, 1069's known rent). Default ON; whether a 30 fps doll
-/// *reads* right is the director's call (§7) — flip it live with
-/// `/script SetCVar("boothHalfRate", 0)` to A/B. Booth-lane item emitters tick only on drawn
-/// frames (the draw-set law, `particles::sim`), so at half rate a sparkle cloud advances at
-/// half speed — the law's own honest consequence, flagged for the same morning eye.
+/// its doll draws in the main pass, 1069's known rent). **Default OFF since 1559**: 1444 shipped
+/// it on and named the condition for the reverse — "whether a 30 fps doll *reads* right is the
+/// director's call (§7)" — and B312 is that call. Every frame is the faithful default; the
+/// ~1.6 ms/frame is one `/script SetCVar("boothHalfRate", 1)` away.
+///
+/// Turning it on no longer slows the item effects. Booth-lane emitters used to freeze on the
+/// camera's own `is_active` bit and so ticked once per *drawn* frame — the draw-set law read
+/// onto a skip the reference never makes. They key on
+/// [`benilla_world::particles::ViewThrottled`] now: a paced camera's scene is still live, so the
+/// sim runs at full rate and only the render is halved (1559).
 ///
 /// The glue screens (`live_scene`) are exempt: a fullscreen create/select scene at 30 fps is
 /// not a pane crop, and those screens have no world behind them to pay for.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) struct PaneRate {
+    /// Off by default — see the type's doc. The registered CVar's "0" is welded to this in
+    /// `cvars::tests`, so the shipped default cannot drift from the registered one.
     pub(crate) half: bool,
-}
-
-impl Default for PaneRate {
-    fn default() -> Self {
-        Self { half: true }
-    }
 }
 
 /// The two **framing inputs** a body booth reads, in one param: the pane geometry the UI extract
@@ -740,6 +775,8 @@ impl Plugin for PortraitPlugin {
                     // After the scene: the pet's seat and its light are the scene's to publish.
                     glue_booth::sync_glue_pet,
                     dressup::sync_dressup_booth,
+                    // After the syncs, which are the only writers of the yaw it spends (1559).
+                    booth::drive_booth_turn,
                     // Last: it reads the wake/pending state every sync above may have armed.
                     gate_booth_cameras,
                 )
@@ -946,6 +983,7 @@ fn setup_booths(
                 aspect: 1.0,
                 rigged: false,
                 parked: false,
+                turn: Turn::default(),
             },
         );
     }
@@ -1019,6 +1057,7 @@ fn setup_booths(
                 aspect: 1.0,
                 rigged: false,
                 parked: false,
+                turn: Turn::default(),
             },
         );
     }
@@ -1681,6 +1720,19 @@ fn sync_body_booth(
     // that (`DISPLAY_SIZE_CHANGED → RefreshUnit()`, which both panes register). Cheap enough to
     // re-derive here rather than key a whole re-bake on: the CAMERA does not depend on the display
     // aspect, only the root does.
+    //
+    // The **turn animation** rides the facing write, exactly as it does in the reference
+    // (`0x505bb0` picks the shuffle, arms its expiry, and only then stores the angle — 1559).
+    // Keyed on the yaw alone, not on this block's condition: a re-bake and a window resize both
+    // land here without the model having turned, and neither steps its feet in the reference.
+    // The comparison runs on the **Lua-facing scalar**, which is the very value the reference
+    // passes to `SetRotation`, so its own `current > angle` branch transfers with no sign work.
+    if booth.turn.faced != Some(yaw) {
+        if let Some(prev) = booth.turn.faced {
+            booth.turn.spun = Some(booth::turn_shuffle(prev, yaw));
+        }
+        booth.turn.faced = Some(yaw);
+    }
     if parts_changed || *last_pose != Some((yaw, model_scale)) {
         commands.entity(booth.root).insert(
             Transform::from_rotation(Quat::from_rotation_y(yaw))
@@ -1717,7 +1769,12 @@ fn gate_booth_cameras(
     images: Res<Assets<Image>>,
     warm: Res<crate::pipe_warm::WarmPass>,
     time: Res<Time<bevy::time::Real>>,
-    mut cams: Query<(&BoothCam, &mut Camera)>,
+    mut cams: Query<(
+        Entity,
+        &BoothCam,
+        &mut Camera,
+        Has<benilla_world::particles::ViewThrottled>,
+    )>,
     rate: Res<PaneRate>,
     frames: Res<bevy::diagnostic::FrameCount>,
     // `WOW_BOOTH_LOG` only: the marker's REAL state beside this gate's `booth.parked`
@@ -1731,7 +1788,7 @@ fn gate_booth_cameras(
     // `satisfied()` is false exactly while the covered warm window runs (the loading screen
     // holds on it), so this term costs nothing outside that window.
     let warming = !warm.satisfied();
-    for (BoothCam(token), mut cam) in &mut cams {
+    for (cam_entity, BoothCam(token), mut cam, was_paced) in &mut cams {
         let Some(booth) = booths.0.get_mut(token.as_str()) else {
             continue;
         };
@@ -1776,13 +1833,32 @@ fn gate_booth_cameras(
         // no fullscreen glue scene — skip every other frame. `active` stays the LOGICAL state:
         // the park bookkeeping below keys off it (the pose keeps evaluating; only the render
         // skips), and the wake counter keeps draining per real frame.
-        let throttled = rate.half
+        //
+        // `paced` is the REGIME — is this camera being rate-limited at all — and `throttled` is
+        // this frame's parity within it. The regime is what the rest of the engine needs to know:
+        // a camera whose render we skipped is not a camera whose scene stopped, and the emitter
+        // lane keys on exactly that distinction ([`benilla_world::particles::ViewThrottled`],
+        // decision 1559 — B312's half-speed item effects were it reading our skip as a cull).
+        // Marking the regime rather than the parity also keeps the archetype still: the marker
+        // moves when a pane opens or closes, not twice every frame.
+        let paced = rate.half
             && live_pane
             && !(test || warming || live_scene)
             && booth.wake == 0
-            && booth.pending.is_empty()
-            && frames.0 % 2 == 1;
+            && booth.pending.is_empty();
+        let throttled = paced && frames.0 % 2 == 1;
         let render = active && !throttled;
+        if was_paced != paced {
+            if paced {
+                commands
+                    .entity(cam_entity)
+                    .insert(benilla_world::particles::ViewThrottled);
+            } else {
+                commands
+                    .entity(cam_entity)
+                    .remove::<benilla_world::particles::ViewThrottled>();
+            }
+        }
         // `WOW_BOOTH_LOG=1`: the gate's timeline — every activity flip and every armed frame,
         // wall-stamped (the first-login black-pane hunt).
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

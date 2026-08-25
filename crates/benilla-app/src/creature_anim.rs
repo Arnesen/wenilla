@@ -45,7 +45,7 @@ use benilla_world::schedule::WorldStage;
 /// The pure animation-selection logic (RF-0057/0073 tables, movement/Special state, gait/swing/ready
 /// picks, playback-rate math) — kept in its own file as it carries the bulk of the unit-tested selector
 /// logic, separate from the Bevy driver systems in [`driver`].
-mod select;
+pub(crate) mod select;
 pub(crate) use select::{ease_strafe_yaw, move_flags, strafe_body_offset, MovementState};
 use select::{Mode, Special};
 

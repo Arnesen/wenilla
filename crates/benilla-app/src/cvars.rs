@@ -194,7 +194,12 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // rate-limit), while our RTT booths (1069) re-run the render graph per pane per frame. "1" =
     // the doll renders at half the frame rate while its pane is open; the knob is
     // [`crate::portrait::PaneRate`], and the default mirrors it (welded below).
-    ("boothHalfRate", "1"),
+    //
+    // **Default OFF since 1559.** 1444 shipped it on and named the condition for turning it
+    // back off — "whether a 30 fps doll *reads* right is the director's call". B312 is that
+    // call: the reference draws its doll every frame, so every frame is the faithful default
+    // and the ~1.6 ms/frame is one `SetCVar` away for anyone who wants it back.
+    ("boothHalfRate", "0"),
 ];
 
 /// `config.toml`'s shape: a `[cvars]` table of `Name = "value"` strings (CVars are strings in

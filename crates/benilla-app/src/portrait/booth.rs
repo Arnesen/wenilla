@@ -606,6 +606,162 @@ pub(super) fn spawn_booth_model(
     booth_rig
 }
 
+/// The ids `PlayerModel:SetRotation` chooses between — read off the reference's own name table
+/// (`0x6143b6 mov eax,[ecx*4+0x8686a8]`: 0 `Stand`, 11 `ShuffleLeft`, 12 `ShuffleRight`), not
+/// from DBC lore.
+const STAND: u16 = 0;
+const SHUFFLE_LEFT: u16 = 11;
+const SHUFFLE_RIGHT: u16 = 12;
+
+/// **Which sequence a facing change arms** — the reference's own direction test, stated once
+/// (`0x505bb0`, wow-re `modelframe-camera-law.md` **§13**).
+///
+/// The `fcomp` at `0x505bce` compares the **current** facing (in ST(0)) against the argument, and
+/// the two branches read out as: current **<** angle ⇒ `0xc` **ShuffleRight**, current **>** angle
+/// ⇒ `0xb` **ShuffleLeft**. Equal — and NaN, which falls the same way — arms `0` **Stand**, and
+/// that is an *active* play, not a no-op: it is why `Model:SetSequence` cannot stick on one of
+/// these panes.
+///
+/// **§6's prose had this pair inverted**, and this port was built on it before wow-re's §13
+/// re-derived the compare instruction by instruction. The direction was wrong in exactly the way
+/// nothing local can catch — the doll still stepped, just into its turn instead of with it.
+///
+/// It runs on the **Lua-facing scalar** — the very value the reference hands `SetRotation` — so
+/// the branch transfers with no sign work, and no reasoning about which way a Bevy `+Y` spin goes
+/// has to be right for the feet to match the turn.
+pub(super) fn turn_shuffle(faced: f32, angle: f32) -> u16 {
+    if faced < angle {
+        SHUFFLE_RIGHT
+    } else if faced > angle {
+        SHUFFLE_LEFT
+    } else {
+        STAND
+    }
+}
+
+/// How long one rotation keeps its shuffle stepping: the reference's `[+0x3ec] = clock() + 100`
+/// (`0x42c010` is a millisecond clock, so `+0x64` is +100 ms), drained by `0x505c50`'s per-paint
+/// timer.
+///
+/// The arm is **unconditional** — every one of `0x505bb0`'s three early exits jumps to `0x505c28`,
+/// where the flag and the deadline are written, so no path through it skips them (wow-re §13.1).
+/// A held rotate arrow rewrites the facing every frame (the pane's `OnUpdate`,
+/// `ROTATIONS_PER_SECOND`), so the deadline is pushed forward every frame and the doll steps
+/// continuously until the button comes up. Taking `spun` before the expiry check below reproduces
+/// the reference's second guard for free: `[+0x3e8]` is a one-paint "a rotation happened since the
+/// last paint" latch, and a paint preceded by a `SetRotation` can never expire.
+const SHUFFLE_HOLD_SECS: f64 = 0.100;
+
+/// **Step the doll's feet round when it turns** (decision 1559, director report B313).
+///
+/// The reference's rotate arrows do not spin the model on the spot: `Model:SetRotation` queues a
+/// turn-in-place shuffle by direction *and then* writes the facing. Ours wrote only the facing
+/// (0638's bake yaw), so the doll pivoted like a turntable.
+///
+/// The pose evaluator's own gate does the switching: a node at literal weight `0.0` is skipped
+/// entirely (`rig_anim::pose`), so raising the shuffle and dropping Stand leaves exactly one
+/// contribution — committed at full value — without stopping either clock. That matters on the
+/// way back: Stand's seek kept running under the shuffle, so resuming it is a continuation of the
+/// idle loop, never a pop back to `t = 0`.
+///
+/// Body panes only ([`Booth::live`]), which is the same set the reference's turn machinery sits
+/// on. The doll cannot clack while it steps: footstep keys are fired by
+/// `creature_anim::events::fire_anim_events`, whose query demands an `AnimDriver`, and a booth
+/// root has never carried one.
+pub(super) fn drive_booth_turn(
+    time: Res<Time<bevy::time::Real>>,
+    mut booths: ResMut<super::Booths>,
+    anim_data: Option<Res<crate::creature_anim::AnimData>>,
+    mut rigs: Query<(&mut AnimationPlayer, &benilla_assets::ModelAnimations)>,
+    // The variation roll's state — the reference passes variation `-1` to `0x7121a0`, which is
+    // "frequency-weighted random" off the CRT LCG (`0x71249a call 0x7400e5`). Same generator the
+    // world lane's picks use, so a doll and a world unit roll their idles alike.
+    mut rng: Local<u32>,
+) {
+    let Some(anim_data) = anim_data.as_deref() else {
+        return;
+    };
+    let now = time.elapsed_secs_f64();
+    for booth in booths.0.values_mut() {
+        if !booth.live {
+            continue;
+        }
+        let Ok((mut player, anims)) = rigs.get_mut(booth.root) else {
+            // No rig in this booth (empty, or a boneless display): a shuffle in flight when the
+            // bake went away has nothing left to step.
+            booth.turn.shuffle = None;
+            booth.turn.spun = None;
+            booth.turn.playing = None;
+            continue;
+        };
+        // Every id through the model's own resolution, the same path the bake's Stand takes.
+        // `find` is the HEAD variation — the stable identity to compare and to drop back to;
+        // `pick` is the reference's own weighted roll, which is what an *arm* uses.
+        let head = |id: u16| {
+            anims
+                .find(anims.resolve(id, &anim_data.0).id)
+                .map(|c| c.node)
+        };
+        let stand = head(STAND);
+        // Arm: a rotation this frame plays its direction's sequence and re-arms the expiry. A
+        // reversal mid-step is a fresh arm — the opposite id is, by definition, not the one on the
+        // root bone — and the reference restarts the clip from t = 0 there, which a `stop` before
+        // the `play` gives us (`play` alone is idempotent, so a HELD direction arms once and lets
+        // the clip loop, exactly as the reference's id-equality test does).
+        if let Some(want) = booth.turn.spun.take() {
+            let armed = booth.turn.shuffle.map(|(id, _)| id).unwrap_or(STAND);
+            if want == STAND {
+                // Equal facings — and NaN — arm Stand outright (wow-re §13.2). Nothing is
+                // stepping after this.
+                if let (Some(stand), Some(prev)) = (stand, booth.turn.playing) {
+                    player.stop(prev);
+                    player.play(stand).set_weight(1.0);
+                }
+                booth.turn.shuffle = None;
+                booth.turn.playing = None;
+            } else if want != armed {
+                // `resolve` walks the model's own fallback chain, so a display that authors no
+                // shuffle lands back on Stand — and "switch to Stand, then drop Stand to weight
+                // 0" would freeze the doll mid-turn instead of leaving it standing.
+                let next = anims
+                    .pick_variation(
+                        anims.resolve(want, &anim_data.0).id,
+                        crate::creature_anim::select::msvc_rand(&mut rng),
+                    )
+                    .map(|c| c.node)
+                    .filter(|n| Some(*n) != stand);
+                if let Some(next) = next {
+                    if let Some(prev) = booth.turn.playing {
+                        player.stop(prev);
+                    }
+                    player.play(next).repeat().set_weight(1.0);
+                    if let Some(stand) = stand {
+                        player.play(stand).set_weight(0.0);
+                    }
+                    booth.turn.playing = Some(next);
+                    booth.turn.shuffle = Some((want, now + SHUFFLE_HOLD_SECS));
+                }
+            } else if let Some((_, until)) = booth.turn.shuffle.as_mut() {
+                // Same direction still held: only the deadline moves.
+                *until = now + SHUFFLE_HOLD_SECS;
+            }
+        }
+        // Expire: the arrow came up (nothing re-armed the deadline) — back to Stand, which never
+        // stopped running underneath, so the idle continues rather than popping to t = 0.
+        if let Some((_, until)) = booth.turn.shuffle {
+            if now > until {
+                if let Some(prev) = booth.turn.playing.take() {
+                    player.stop(prev);
+                }
+                if let Some(stand) = stand {
+                    player.play(stand).set_weight(1.0);
+                }
+                booth.turn.shuffle = None;
+            }
+        }
+    }
+}
+
 /// Re-face each booth billboard card ([`BoothBillboard`]) to its booth's camera — the booth twin of
 /// the world's [`benilla_world::billboard::face_billboards`]. Each booth owns one camera, matched here by
 /// their shared render layer. The card is a child of its billboard bone's joint, so we set its
@@ -937,6 +1093,55 @@ mod tests {
             ),
             1.0,
             "no BoothMatAlpha marker ⇒ untouched"
+        );
+    }
+
+    /// **The rotate arrows arm the shuffle the model turns toward** (1559, B313), and the pair is
+    /// the one wow-re §13.2 read off the `fcomp` at `0x505bce` — *not* the pair §6's prose
+    /// carried, which was inverted and which this port was first built on. Current facing **<**
+    /// the new angle ⇒ `0xc` ShuffleRight; **>** ⇒ `0xb` ShuffleLeft; equal (and NaN, which the
+    /// compare's unordered flags send the same way) ⇒ `0` Stand, an active arm rather than a
+    /// no-op.
+    ///
+    /// The pane's own Lua is what makes the mapping checkable end to end, and it is why an
+    /// inversion cannot be caught by reading either side alone: the reference uses **opposite
+    /// sign conventions** in its two callers, and both must still land on the foot the model
+    /// turns onto. The held arrows (`BenillaPaperDollModel_OnUpdate`) have held-LEFT *add*; the
+    /// click helpers (`BenillaPaperDollModel_RotateLeft`) have left *subtract*.
+    #[test]
+    fn a_turn_arms_the_shuffle_for_the_way_it_turned() {
+        assert_eq!(turn_shuffle(0.9, 1.0), SHUFFLE_RIGHT, "facing rose");
+        assert_eq!(turn_shuffle(1.0, 0.9), SHUFFLE_LEFT, "facing fell");
+        assert_eq!(turn_shuffle(0.61, 0.61), STAND, "a re-pose arms Stand");
+        assert_eq!(
+            turn_shuffle(0.61, f32::NAN),
+            STAND,
+            "unordered falls to Stand"
+        );
+        let facing = 0.61;
+        // Held: left ADDS, so a held left arrow steps ShuffleRight — the reference's own pairing,
+        // and the one that reads backwards until you have both halves in front of you.
+        assert_eq!(
+            turn_shuffle(facing, facing + 0.05),
+            SHUFFLE_RIGHT,
+            "held left"
+        );
+        assert_eq!(
+            turn_shuffle(facing, facing - 0.05),
+            SHUFFLE_LEFT,
+            "held right"
+        );
+        // Clicked: left SUBTRACTS, so the same arrow lands on the other shuffle. Both are the
+        // reference's, quoted not re-derived.
+        assert_eq!(
+            turn_shuffle(facing, facing - 0.03),
+            SHUFFLE_LEFT,
+            "clicked left"
+        );
+        assert_eq!(
+            turn_shuffle(facing, facing + 0.03),
+            SHUFFLE_RIGHT,
+            "clicked right"
         );
     }
 }

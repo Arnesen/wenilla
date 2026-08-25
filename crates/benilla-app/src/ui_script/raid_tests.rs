@@ -755,6 +755,119 @@ fn the_raid_info_panel_lists_the_saved_lockouts() {
     assert!(!visible(&s, "RaidInfoFrame"), "and closes it again");
 }
 
+/// **The player with no lockouts at all** — the case that shipped broken (1561). Two answers, both
+/// empty, is the whole ordinary session: one for `PLAYER_ENTERING_WORLD`'s `RequestRaidInfo` and
+/// one for the pane's own on show. The first arms `RaidFrame.hasRaidInfo` and returns; the second
+/// is the one that has to put the button away and empty the panel behind it.
+///
+/// Its sibling above proves the same arithmetic from a list that had something in it. This one
+/// proves it from a list that never did, which is the case a *diff* cannot reach — and the button
+/// left live over an empty panel is exactly what the director saw.
+#[test]
+fn a_player_with_no_lockouts_loses_the_raid_info_button_on_the_second_answer() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+
+    // Answer one: the latch, and nothing else. The button is still whatever it loaded as — the
+    // reference does not disable it in `RaidFrame_OnLoad` either, so this window is its own.
+    s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
+    assert_eq!(
+        s.eval::<i64>("return RaidFrame.hasRaidInfo or 0").unwrap(),
+        1,
+        "the first answer only arms the latch"
+    );
+
+    // Answer two, saying the same nothing.
+    s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
+    assert_eq!(
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+            .unwrap(),
+        0,
+        "an empty lockout list is a dead button"
+    );
+
+    // And the panel behind it is emptied, not left in the state the XML loaded: every row away,
+    // and no scroll bar standing over a list of nothing.
+    s.run("RaidInfoFrame:Show()").unwrap();
+    assert!(!visible(&s, "RaidInfoInstance1"));
+    assert!(!visible(&s, "RaidInfoInstance10"));
+    assert!(!visible(&s, "RaidInfoScrollFrameScrollBar"));
+    s.run("RaidInfoFrame:Hide()").unwrap();
+
+    // The button is dead to a real click, not merely drawn grey — the half the director asked for
+    // by name. Driven through the pointer, because that is the path a press actually takes.
+    let (bx, by) = {
+        let l: f32 = s.eval("return RaidFrameRaidInfoButton:GetLeft()").unwrap();
+        let r: f32 = s.eval("return RaidFrameRaidInfoButton:GetRight()").unwrap();
+        let t: f32 = s.eval("return RaidFrameRaidInfoButton:GetTop()").unwrap();
+        let b: f32 = s
+            .eval("return RaidFrameRaidInfoButton:GetBottom()")
+            .unwrap();
+        ((l + r) / 2.0, (t + b) / 2.0)
+    };
+    s.mouse_button(bx, by, "LeftButton", true);
+    s.mouse_button(bx, by, "LeftButton", false);
+    s.tick(0.016);
+    assert!(
+        !visible(&s, "RaidInfoFrame"),
+        "a disabled button does not open the panel"
+    );
+}
+
+/// The scroll bar the fifth lockout brings on has to land on the trough drawn behind it, not where
+/// `UIPanelScrollFrameTemplate` seats a bare ScrollFrame's bar (1561).
+///
+/// Geometry, asserted as the relationship rather than as four numbers: the bar is CENTRED in the
+/// trough art on X, and its top is the panel's own -3 rather than the template's -16. Both were
+/// wrong before — 2 px left, 13 px low — and neither is visible to any test that only asks whether
+/// the bar is shown.
+#[test]
+fn the_scroll_bar_is_seated_on_the_trough_the_panel_draws_behind_it() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
+    s.set_saved_instances(
+        (1..=6)
+            .map(|i| SavedInstanceInfo {
+                name: format!("Instance {i}"),
+                instance: 1000 + i,
+                reset: i * 3_600,
+            })
+            .collect(),
+    );
+    s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
+    s.run("RaidInfoFrame:Show()").unwrap();
+    assert!(
+        visible(&s, "RaidInfoScrollFrameScrollBar"),
+        "six lockouts do not fit in four rows"
+    );
+
+    let mid_x = |s: &UiScript, f: &str| -> f32 {
+        let l: f32 = s.eval(&format!("return {f}:GetLeft()")).unwrap();
+        let r: f32 = s.eval(&format!("return {f}:GetRight()")).unwrap();
+        (l + r) / 2.0
+    };
+    let top = |s: &UiScript, f: &str| -> f32 { s.eval(&format!("return {f}:GetTop()")).unwrap() };
+
+    let bar = mid_x(&s, "RaidInfoScrollFrameScrollBar");
+    let trough = mid_x(&s, "RaidInfoScrollFrameTop");
+    assert!(
+        (bar - trough).abs() < 0.01,
+        "the bar rides the middle of its trough: bar {bar} vs trough {trough}"
+    );
+    assert!(
+        (top(&s, "RaidInfoScrollFrameScrollBar") - (top(&s, "RaidInfoScrollFrame") - 3.0)).abs()
+            < 0.01,
+        "and hangs 3 px under the frame's top, not the template's 16"
+    );
+    // The up arrow rides above the bar, so re-seating the bar is what lifts it into the trough's
+    // own cap — the piece of this that is actually visible.
+    assert!(
+        top(&s, "RaidInfoScrollFrameScrollBarScrollUpButton") > top(&s, "RaidInfoScrollFrame"),
+        "the up arrow clears the scroll frame, where the template left it 13 px inside"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The ready check
 // ─────────────────────────────────────────────────────────────────────────────────────────────

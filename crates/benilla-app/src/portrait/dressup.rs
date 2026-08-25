@@ -162,6 +162,7 @@ pub(super) fn spawn_dressup_booth(
             aspect: 1.0,
             rigged: false,
             parked: false,
+            turn: super::Turn::default(),
         },
     );
 }
@@ -350,6 +351,18 @@ pub(super) fn sync_dressup_booth(
     }
     // The yaw (the ref's `Model:SetRotation`) — applied on a fresh bake and on every spin, never on
     // an idle frame. A spin is a content edge too (decision 0540).
+    //
+    // And the other half of `SetRotation`: the turn-in-place shuffle
+    // ([`super::booth::drive_booth_turn`], 1559). The dressing room wires the same held-arrow
+    // `OnUpdate` the character window does (`BenillaDressUpModel_OnUpdate`), so it steps its feet
+    // the same way. Keyed on the yaw alone — this block also runs for a re-bake, which is a
+    // `RefreshUnit` in the reference and does not turn the model.
+    if booth.turn.faced != Some(preview.yaw) {
+        if let Some(prev) = booth.turn.faced {
+            booth.turn.spun = Some(super::booth::turn_shuffle(prev, preview.yaw));
+        }
+        booth.turn.faced = Some(preview.yaw);
+    }
     commands
         .entity(booth.root)
         .insert(Transform::from_rotation(Quat::from_rotation_y(preview.yaw)));

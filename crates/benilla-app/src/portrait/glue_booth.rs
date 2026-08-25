@@ -525,6 +525,7 @@ pub(super) fn spawn_glue_booth(
             aspect: 1.0,
             rigged: false,
             parked: false,
+            turn: super::Turn::default(),
         },
     );
     // The background scene's own root (the character root above yaws; the scene never does).

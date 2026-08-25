@@ -275,7 +275,17 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// measured on the real client writing *nothing*: no saved variables, no addon files, no camera
 /// pose. The alternative was hiding it inside `WorldPlugins` to keep the count flat, which is
 /// gaming the instrument rather than paying for a name.
-const CEILING: usize = 161;
+/// And 161 → 162: `particles::ViewThrottled`, a PUBLISH of the same shape as
+/// `rig_anim::AnimParked` already through this door — a marker the ENGINE reads and the GAME
+/// writes, which is the 1160 line drawn exactly where 1163 drew it. Freezing an emitter with the
+/// view that stopped drawing it is machinery (the draw-set law lives in `particles::sim`);
+/// deciding that a particular booth camera is being *paced* rather than put to sleep is policy,
+/// and it is `portrait::gate_booth_cameras`'s, in the game. There is no engine-side way to tell
+/// the two apart — a camera's `is_active` bit says only that it did not draw — which is precisely
+/// the conflation that ran the body panes' item effects at half speed (decision 1559, B312). The
+/// alternative was passing a `Res<PaneRate>`-shaped opinion down into the engine's own sim, which
+/// puts the game's knob inside the renderer to keep a count flat.
+const CEILING: usize = 162;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

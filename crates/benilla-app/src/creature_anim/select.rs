@@ -917,7 +917,7 @@ pub(super) fn blend_lambda(remaining_frac: f32) -> f32 {
 /// ([`replay_count`] — the second `_rand` site). Owned exactly rather than delegating to a host
 /// RNG, per the determinism guidance in the same note; one stream shared by every play, like the
 /// client's single CRT stream.
-pub(super) fn msvc_rand(state: &mut u32) -> u16 {
+pub(crate) fn msvc_rand(state: &mut u32) -> u16 {
     *state = state.wrapping_mul(214013).wrapping_add(2531011);
     ((*state >> 16) & 0x7fff) as u16
 }

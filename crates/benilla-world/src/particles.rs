@@ -43,6 +43,27 @@ use sim::simulate_particles;
 // model's emitters and classifies the same way; `sky_order::FAR_SIDE_BIAS`).
 pub(crate) use sim::{far_side_of_water, model_far_side, WaterInterleave};
 
+/// This camera is **rate-throttled**: it renders on some frames and skips others *by our own
+/// pacing*, while the scene behind it keeps running at full rate. A frame it does not draw is a
+/// SKIPPED frame, not a sleeping scene — so the lanes that freeze with a sleeping booth camera
+/// ([`sim::simulate_particles`]) must keep simulating through it.
+///
+/// The distinction is the whole point (decision 1559). The draw-set law — an emitter ticks only
+/// inside a draw the frame performs, one frame's dt, no catch-up — is the *reference's*, and it
+/// is keyed on the reference's own cull. `boothHalfRate` (decision 1444) is **ours**: a camera it
+/// skips has a scene that is still posing at full rate (the skeleton's `AnimParked` keys on the
+/// booth's LOGICAL active state, never on the rendered frame). Reading our skip as the
+/// reference's cull ran the body panes' item emitters at half speed — director report B312,
+/// which 1444's own record had flagged as the law's honest consequence and which is not: our
+/// throttle must not reach the simulation at all.
+///
+/// Maintained on the booth camera entity by `portrait::gate_booth_cameras`, which owns both
+/// halves of the state (the logical `active` and the physical `render`). It marks the *regime*,
+/// not the parity — it is present for as long as the camera is being paced, on drawn frames and
+/// skipped ones alike, so the archetype does not churn every frame.
+#[derive(Component)]
+pub struct ViewThrottled;
+
 /// Hard cap on a single emitter's live particle count — a backstop against a pathological model. Real
 /// props sit far under this (a campfire's steady state is `rate·lifespan` ≈ 30 + 24 particles).
 const MAX_PARTICLES: usize = 1024;

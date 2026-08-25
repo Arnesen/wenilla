@@ -44,15 +44,26 @@ pub(super) struct FedParty {
     /// The raid roster's IDENTITY, which is what `RAID_ROSTER_UPDATE` fires on — see the fire
     /// site for why it is these four fields and not the whole row.
     raid_key: Vec<(u64, u32, u32, bool)>,
-    /// The saved-instance list last pushed, and whether the server had answered — the pair
-    /// `UPDATE_INSTANCE_INFO` fires on.
+    /// The saved-instance list last pushed, and the answer ticket it came in on
+    /// ([`GroupState::saved_instances_answers`]).
     saved: Vec<SavedInstanceInfo>,
-    saved_seen: bool,
+    saved_answers: u32,
     /// The ready-check ticket last seen ([`GroupState::ready_check`]).
     ready_check: u32,
 }
 
 const PARTY_TOKENS: [&str; 4] = ["party1", "party2", "party3", "party4"];
+
+/// **The saved-instance edge** — a new LIST *or* a new ANSWER (1561).
+///
+/// Its own named rule because the second half is the one that is easy to lose, and losing it is
+/// silent: every other edge in this feed is a diff, this one cannot be. The reference throws its
+/// first `UPDATE_INSTANCE_INFO` away (`RaidFrame.hasRaidInfo`) and decides the Raid Info button on
+/// the second, so a player with no lockouts — whose list is empty and never changes — has to reach
+/// a second answer through the ticket alone. Diff the list only, and their button never dies.
+fn saved_instances_moved(saved: &[SavedInstanceInfo], answers: u32, fed: &FedParty) -> bool {
+    saved != fed.saved || answers != fed.saved_answers
+}
 
 /// `raid1`..`raid40` — the unit tokens the RaidFrame's rows target, tooltip and re-read levels
 /// through. Spelled out rather than `format!`ed per push: [`UiScript::set_unit`] wants a `&str`,
@@ -383,9 +394,7 @@ pub(super) fn feed_party(
     // ── UPDATE_INSTANCE_INFO (decision 1549) ────────────────────────────────────────────────
     //
     // The saved-lockout list, pushed with its map names already resolved (the wire carries
-    // `Map.dbc` ids; a missing catalog degrades to the id rather than to a blank row). The event
-    // fires on the list OR on the "server has answered" flag moving, because the reference's
-    // Raid Info button is enabled off exactly that second fact.
+    // `Map.dbc` ids; a missing catalog degrades to the id rather than to a blank row).
     let saved: Vec<SavedInstanceInfo> = group
         .saved_instances
         .iter()
@@ -398,12 +407,24 @@ pub(super) fn feed_party(
             reset: e.reset,
         })
         .collect();
-    if saved != fed.saved || group.saved_instances_seen != fed.saved_seen {
+    // **The event follows the ANSWER, not the list** (1561). It is the one edge here that is not a
+    // diff, and it cannot be: the reference throws its first `UPDATE_INSTANCE_INFO` away
+    // (`RaidFrame.hasRaidInfo`) and decides the Raid Info button on the second, so a player with no
+    // lockouts — whose list is empty and stays empty — would never reach a second one and would
+    // keep a live button onto an empty panel. The client signals per packet, empty answers
+    // included; `GroupState::saved_instances_answers` carries the bytes that settle it.
+    //
+    // The list is diffed as well, so a fresh VM is re-seeded with lockouts it never saw arrive —
+    // but the EVENT is a packet's to fire, and no packet arrives on a `/reload`, so a reset seeds
+    // in silence and the pane's own `RequestRaidInfo` on show fetches the real one.
+    if saved_instances_moved(&saved, group.saved_instances_answers, fed) {
         gate.audit("feed_party", "the saved-instance edge");
         fed.saved = saved.clone();
-        fed.saved_seen = group.saved_instances_seen;
+        fed.saved_answers = group.saved_instances_answers;
         script.set_saved_instances(saved);
-        script.fire_event("UPDATE_INSTANCE_INFO", vec![]);
+        if !vm_reset {
+            script.fire_event("UPDATE_INSTANCE_INFO", vec![]);
+        }
     }
 
     if group.pending_invite != fed.invite {
@@ -1043,8 +1064,13 @@ fn test_apply_local(
             true
         }
         PartyRequest::RequestRaidInfo => {
-            // `/raidtest` seeds the lockouts up front; the ask just marks them answered.
-            group.saved_instances_seen = true;
+            // `/partytest raid` seeds the lockouts up front, so the ask is answered on the spot —
+            // with the list it already holds, which is exactly what the server does for a second
+            // ask. Re-applying it is what bumps the answer ticket, and the ticket is what fires
+            // `UPDATE_INSTANCE_INFO` (1561), so the sandbox reaches the second answer the Raid
+            // Info button is decided on instead of stalling on the first.
+            let held = std::mem::take(&mut group.saved_instances);
+            group.apply_raid_instance_info(held);
             true
         }
         _ => false,
@@ -1284,19 +1310,31 @@ pub(crate) fn synthetic_raid(
             },
         );
     }
-    // Two lockouts for the Raid Info panel: Molten Core (map 409) and Onyxia's Lair (249).
-    group.apply_raid_instance_info(vec![
-        benilla_protocol::messages::RaidInstanceEntry {
-            map: 409,
-            reset: 3 * 86_400 + 7_200,
-            instance: 1234,
-        },
-        benilla_protocol::messages::RaidInstanceEntry {
-            map: 249,
-            reset: 14_400,
-            instance: 77,
-        },
-    ]);
+    // SIX lockouts for the Raid Info panel, not the two this seeded through 1560. The panel fits
+    // four rows and grows a scroll bar at five (`RaidInfoFrame_Update`), and that bar has to be
+    // re-seated onto the trough art drawn behind it — so with two rows the one part of the panel
+    // with any geometry in it was unreachable from the instrument, and the misalignment shipped
+    // (1561). An instrument that can only reach the states a real character reaches by accident is
+    // not an instrument. Map ids are real ones, so the rows carry `Map.dbc`'s own names.
+    group.apply_raid_instance_info(
+        [
+            (409, 3 * 86_400 + 7_200, 1234), // Molten Core
+            (249, 14_400, 77),               // Onyxia's Lair
+            (469, 5 * 86_400, 812),          // Blackwing Lair
+            (309, 2_700, 3),                 // Zul'Gurub
+            (509, 2 * 86_400 + 60, 640),     // Ruins of Ahn'Qiraj
+            (533, 6 * 86_400, 91),           // Naxxramas
+        ]
+        .into_iter()
+        .map(
+            |(map, reset, instance)| benilla_protocol::messages::RaidInstanceEntry {
+                map,
+                reset,
+                instance,
+            },
+        )
+        .collect(),
+    );
     // Sandbox on, after `apply_list` cleared it (the wire-wins default) — see [`synthetic_roster`].
     group.test = true;
     lines
@@ -1305,6 +1343,34 @@ pub(crate) fn synthetic_raid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A repeat answer is an edge even when it repeats *nothing* — the rule the Raid Info button
+    /// hangs off, and the one that was missing (1561).
+    #[test]
+    fn a_second_empty_answer_is_still_a_saved_instance_edge() {
+        let mut fed = FedParty::default();
+        assert!(
+            saved_instances_moved(&[], 1, &fed),
+            "the first answer moves it"
+        );
+        fed.saved_answers = 1;
+        assert!(
+            !saved_instances_moved(&[], 1, &fed),
+            "and nothing has happened since"
+        );
+        assert!(
+            saved_instances_moved(&[], 2, &fed),
+            "the SECOND empty answer is an edge too — the button is decided on it, and a diff \
+             over the list alone can never reach it"
+        );
+        // The list half still works on its own, for the answer that actually brings something.
+        let one = [SavedInstanceInfo {
+            name: "Molten Core".into(),
+            instance: 1234,
+            reset: 86_400,
+        }];
+        assert!(saved_instances_moved(&one, 1, &fed));
+    }
 
     /// The sandbox drain half: each group-mutating intent lands on the local mirror exactly as
     /// the server echo would have — and a real wire list always switches the sandbox back off.

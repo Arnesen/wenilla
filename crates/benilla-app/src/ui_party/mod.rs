@@ -91,11 +91,20 @@ pub struct GroupState {
     /// must die with the socket, and [`Self::clear_session`] is that guarantee — a second
     /// resource would be a second thing to remember to clear.
     pub saved_instances: Vec<benilla_protocol::messages::RaidInstanceEntry>,
-    /// **Answered by the server**: has any `SMSG_RAID_INSTANCE_INFO` arrived this session? The
-    /// reference gates its Raid Info button on the SECOND `UPDATE_INSTANCE_INFO`
-    /// (`RaidFrame.hasRaidInfo`), which is the same idea by a different route — an empty list and
-    /// "we have not asked yet" are indistinguishable without this.
-    pub saved_instances_seen: bool,
+    /// **How many times the server has answered** — one per `SMSG_RAID_INSTANCE_INFO`. A TICKET,
+    /// not a flag (the [`Self::ready_check`] shape), and the difference is load-bearing: the
+    /// reference decides its Raid Info button on the SECOND `UPDATE_INSTANCE_INFO`, because
+    /// `RaidFrame.hasRaidInfo` swallows the first. A feed that fires that event on a *diff* never
+    /// reaches the second for the ordinary player — their lockout list is empty, every answer says
+    /// so, nothing ever changes, and the button they should not be able to press stays live (1561).
+    ///
+    /// The real client fires per PACKET, not per change. VERIFIED off the bytes: the handler at
+    /// `0x49e070` takes `jbe 0x49e19d` (`0x49e0d8`) when the entry count is zero — straight past
+    /// the parse loop to `mov ecx, 0x21b` (539 = `UPDATE_INSTANCE_INFO`) and the one
+    /// `call FrameScript_SignalEvent 0x703e50` at `0x49e1a7`, which is the function's only exit
+    /// and the event's only fire site in the binary (`re/events/event-firesites.tsv`). The empty
+    /// answer signals exactly like a full one.
+    pub saved_instances_answers: u32,
     /// A ready-check TICKET, not a flag: every `MSG_RAID_READY_CHECK` open bumps it, so the feed
     /// fires `READY_CHECK` on a counter edge and a second check while the first popup is still up
     /// re-arms it. A boolean could not tell the two apart.
@@ -353,13 +362,15 @@ impl GroupState {
     }
 
     /// `SMSG_RAID_INSTANCE_INFO` — our saved lockouts, replacing the list wholesale (decision
-    /// 1549). The empty answer is the ordinary one and still counts as an answer.
+    /// 1549). **The empty answer is the ordinary one and still counts as an answer**: it bumps the
+    /// ticket like any other, which is what makes the feed fire `UPDATE_INSTANCE_INFO` for a
+    /// player who has no lockouts at all — see [`GroupState::saved_instances_answers`] (1561).
     pub fn apply_raid_instance_info(
         &mut self,
         entries: Vec<benilla_protocol::messages::RaidInstanceEntry>,
     ) {
         self.saved_instances = entries;
-        self.saved_instances_seen = true;
+        self.saved_instances_answers = self.saved_instances_answers.wrapping_add(1);
     }
 
     /// `MSG_RAID_READY_CHECK` (open form) — the leader started one. Bumps the ticket the feed
@@ -380,6 +391,41 @@ mod tests {
             status: 1,
             flags: 0,
         }
+    }
+
+    /// **Every answer is an answer, including the one that says nothing changed** (1561). This is
+    /// the invariant the whole Raid Info button hangs off: the reference throws its first
+    /// `UPDATE_INSTANCE_INFO` away and decides the button on the second, so an empty list that
+    /// answers a second time has to be distinguishable from an empty list that answered once. A
+    /// flag cannot; a ticket can. Revert this to a `bool` and a player with no lockouts keeps a
+    /// live button onto an empty panel — which is exactly how it shipped.
+    #[test]
+    fn an_unchanged_lockout_list_still_counts_as_an_answer() {
+        let mut g = GroupState::default();
+        assert_eq!(g.saved_instances_answers, 0, "nobody has asked yet");
+
+        // The ordinary player: no lockouts, and the server says so every time it is asked.
+        g.apply_raid_instance_info(Vec::new());
+        assert_eq!(g.saved_instances_answers, 1);
+        g.apply_raid_instance_info(Vec::new());
+        assert_eq!(
+            g.saved_instances_answers, 2,
+            "the second empty answer is the one the button is decided on"
+        );
+
+        // And a list that DOES change is not counted twice for it.
+        g.apply_raid_instance_info(vec![benilla_protocol::messages::RaidInstanceEntry {
+            map: 409,
+            reset: 86_400,
+            instance: 7,
+        }]);
+        assert_eq!(g.saved_instances_answers, 3);
+        assert_eq!(g.saved_instances.len(), 1, "and the list is the new one");
+
+        // The socket dies, the ticket dies with it — a fresh session has not been answered.
+        g.clear_session();
+        assert_eq!(g.saved_instances_answers, 0);
+        assert!(g.saved_instances.is_empty());
     }
 
     /// The ungated diff (0440 byte law): a FIRST roster prints joins for everyone already

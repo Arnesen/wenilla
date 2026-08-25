@@ -156,6 +156,13 @@ fn inspect_slot_view(
         quality: quality as i32,
         name,
         link,
+        // `already_bound` stays `false` here, deliberately: `0x5da2c0` reads `ITEM_FIELD_FLAGS`
+        // off an item OBJECT, and an inspected player's gear arrives as descriptor fields on
+        // THEM — there is no item object and no flags word to read. So an inspect tooltip prints
+        // the template's own bind line (Binds when equipped), which is what the reference prints
+        // for the same reason. The enchant half below cannot rescue it: those slots name rows,
+        // not the instance's bound state.
+        already_bound: false,
         // All 7 slots, exactly as the reference's own inspect leg copies and renders them
         // (§E7) — a 1.12 server happens to fill only PERM and TEMP. No item object here, so no
         // charges and no `SMSG_ITEM_ENCHANT_TIME_UPDATE` countdown: the reference's inspect
