@@ -843,4 +843,69 @@ mod tests {
             "a night elf is over twice a gnome ({nelf} vs {gnome}) — the whole point of the plumb"
         );
     }
+
+    /// **Why the collision-prism FLOOR is invisible on shipped data** — and therefore why its
+    /// absence hid until a server override went looking for it (B311's triage, decision 1568).
+    ///
+    /// The real client's prism height is `CollisionHeight × max(SCALE_X, CreatureDisplayInfo.scale)`
+    /// (`0x60b312` → `0x617501`). vmangos folds `modelScale × displayScale` into `SCALE_X`, so the
+    /// floor can only bite where `modelScale < 1` would drag the product under the display column —
+    /// and **no shipped row scales below 1.0**. So on stock data `max` always picks `SCALE_X`, our
+    /// old `× SCALE_X` was bit-identical, and only a `creature_template.display_scale` override or
+    /// a shrink aura can separate the two.
+    #[test]
+    fn no_shipped_model_scales_below_one_so_the_prism_floor_is_inert_at_rest() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        let under: Vec<_> = cat
+            .models
+            .iter()
+            .filter(|(_, m)| m.scale < 1.0)
+            .map(|(id, m)| (*id, m.scale))
+            .collect();
+        assert!(
+            under.is_empty(),
+            "a sub-1 modelScale would make the floor bite at rest: {under:?}"
+        );
+        // Not vacuous: the column is really read, and really varies.
+        assert!(
+            cat.models.values().any(|m| m.scale > 1.0),
+            "some row scales above 1.0, or this is asserting on a zeroed column"
+        );
+    }
+
+    /// **The Shore Strider, pinned** (B311, decision 1568). The reported giant's own chain and
+    /// numbers, recorded so nobody re-suspects the height: display 4945 → `CreatureModelData` 35,
+    /// `Creature\SeaGiant\SeaGiant.mdx`, column 2.083 over a display scale of 1.75 and a
+    /// `modelScale` of 1.0. Its prism is `2.083 × 1.75 = 3.645` yd under **both** the old
+    /// `× SCALE_X` reading and the corrected `× max(SCALE_X, displayScale)` — identical to the
+    /// float — so the height was never why it glided. The cause was the missing
+    /// `UNIT_FIELD_FLAGS` enter gate; this row is the control that says so.
+    #[test]
+    fn the_shore_strider_prism_is_the_same_under_both_readings() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        let m = cat.model(4945).expect("display 4945 resolves");
+        assert_eq!(m.model_path, "Creature\\SeaGiant\\SeaGiant.mdx");
+        let column = cat.collision_height(4945).expect("collision height");
+        let display_scale = cat.display_scale(4945).expect("display scale");
+        assert!((column - 2.083).abs() < 5e-4, "column is {column}");
+        assert!(
+            (display_scale - 1.75).abs() < 5e-4,
+            "CreatureDisplayInfo.scale is {display_scale}"
+        );
+        // vmangos ships `creature_template.display_scale = 0` for entry 5359, so SCALE_X is the
+        // folded `modelScale × displayScale` = 1.0 × 1.75.
+        let scale_x = m.scale;
+        assert!((scale_x - 1.75).abs() < 5e-4, "folded SCALE_X is {scale_x}");
+        assert_eq!(
+            column * scale_x,
+            column * scale_x.max(display_scale),
+            "the floor is inert on this row — the height was not the bug"
+        );
+    }
 }

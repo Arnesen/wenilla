@@ -81,6 +81,46 @@ const SWIM_DEPTH_FRAC: f32 = 0.75;
 /// `0.75·h`, leave against `0.75·h − 1/36`, so between them the swim state holds (`0x603100`/`0x6031c0`).
 const SWIM_HYSTERESIS: f32 = 1.0 / 36.0;
 
+/// The `UNIT_FIELD_FLAGS` bits that permit a unit to **enter** swim at all — **VERIFIED** in the
+/// shipped 5875 image, the gate `0x6030c0` runs *after* `depth > 0.75·h` and *before* TryStartSwim
+/// `0x60df70`:
+///
+/// ```text
+/// 60310b mov ecx,[esi+0x110]      ; the unit's descriptor block base (&m_uint32Values[OBJECT_END])
+/// 603111 mov eax,[ecx+0xa0]       ; +0xa0 = field OBJECT_END+0x28 = UNIT_FIELD_FLAGS (1.12.1 idx 46)
+/// 603117 test ah,ah   ; js  60312c    ; bit 15 set → proceed
+/// 60311b shr edx,3    ; test dl,1 ; jne 60312c   ; bit  3 set → proceed
+/// 603125 shr eax,0xb  ; test al,1 ; je  60314a   ; bit 11 clear → SKIP TryStartSwim
+/// ```
+///
+/// Any **one** of the three permits entry; with none of them the unit stays in walk mode however
+/// deep the water, and **walks the lakebed**. What each bit is (vmangos `UnitDefines.h`, and its
+/// own writers):
+///
+/// - `0x8` **PLAYER_CONTROLLED** — every body a player can steer: players (set at creation,
+///   `Player.cpp:462`), pets, totems, guardians, companions, charms (`SpellAuras.cpp` charm/possess).
+/// - `0x800` **PET_IN_COMBAT**.
+/// - `0x8000` **USE_SWIM_ANIMATION** — the server's "this creature swims" bit, applied on spawn from
+///   `creature_template.static_flags1 & CREATURE_STATIC_FLAG_CAN_SWIM` (`Creature::
+///   ToggleUnitFlagsFromStaticFlags`). vmangos names the client behaviour it is naming exactly:
+///   *"Without it units walk on the sea floor instead of swimming"*, and, at its pathing site,
+///   *"Giant type creatures walk underwater"*. **956 of the 10912** rows on our server carry it.
+///
+/// The gate is on **ENTER only** — the exit leg `0x6031b4` reads no flags, so a unit that is
+/// already swimming leaves on depth alone.
+///
+/// **The local avatar does not consult this**, and that is a verified no-op rather than an
+/// omission: bit 3 is set on every body a player can be [`crate::net::Embodied`] in — its own
+/// character, a charmed creature, a possessed one — so the gate always passes there. It bites only
+/// on the creature marker (`crate::net::motion::spline::mark_swimming_creatures`), which is where
+/// benilla derives a creature's swim state the wire never carries.
+const SWIM_ENTER_UNIT_FLAGS: u32 = 0x8 | 0x800 | 0x8000;
+
+/// May this unit **enter** swim from its own depth? — [`SWIM_ENTER_UNIT_FLAGS`]'s one spelling.
+pub(crate) fn may_enter_swim(unit_flags: u32) -> bool {
+    unit_flags & SWIM_ENTER_UNIT_FLAGS != 0
+}
+
 /// Submersion depth (yd, water surface above the feet) to **start** swimming — VERIFIED `0.75·h`
 /// from the feet, where `h` is **the unit's own collision height**
 /// ([`crate::entities::CollisionHeight`]): water covering ~three-quarters of its collision box,
@@ -417,6 +457,30 @@ mod tests {
             collision_height: crate::entities::CollisionHeight(h),
             ..Default::default()
         }
+    }
+
+    /// The ENTER gate's three bits, named — `0x6030c0`'s `js` / `shr 3` / `shr 0xb` tests.
+    /// PET_IN_COMBAT is the one that reads like a typo and is not: the reference really does let a
+    /// pet's combat bit admit it to swim, and it is bit 11 of `UNIT_FIELD_FLAGS` in 1.12.1.
+    #[test]
+    fn the_swim_enter_gate_is_those_three_unit_flags_and_no_others() {
+        const PLAYER_CONTROLLED: u32 = 0x8;
+        const PET_IN_COMBAT: u32 = 0x800;
+        const USE_SWIM_ANIMATION: u32 = 0x8000;
+        assert_eq!(
+            SWIM_ENTER_UNIT_FLAGS,
+            PLAYER_CONTROLLED | PET_IN_COMBAT | USE_SWIM_ANIMATION
+        );
+        for bit in [PLAYER_CONTROLLED, PET_IN_COMBAT, USE_SWIM_ANIMATION] {
+            assert!(
+                may_enter_swim(bit),
+                "any ONE of the three admits ({bit:#x})"
+            );
+        }
+        assert!(!may_enter_swim(0), "no flags at all → walks the lakebed");
+        // Not vacuous: a unit carrying every OTHER unit flag still cannot enter. IN_COMBAT,
+        // SKINNABLE, PVP, NOT_SELECTABLE — none of them is a swim permit.
+        assert!(!may_enter_swim(!SWIM_ENTER_UNIT_FLAGS));
     }
 
     /// Swim mode latches with the verified 1/36-yd hysteresis: enter is a strict `depth > 0.75·h`, leave

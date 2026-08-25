@@ -228,6 +228,57 @@ impl SoundOutput {
 /// *facing* about world-up (`Quat::from_rotation_y(face_yaw)`), so panning tracks where the body
 /// faces, NOT where the camera looks. The camera eye + basis are the fallback (the client's
 /// `=0` path): pre-login, in free-fly (`detached`), or before the body attaches.
+/// `Material.dbc` — a shared sound fact with two consumers: the armor foley off `$FSD`
+/// ([`footsteps`]) and, through the same table's `Flags` column, both the metal/wood split of
+/// every weapon impact and the armor slot a player victim presents ([`combat`]). Loaded once
+/// here rather than in either, because a second loader over one DBC is how a schema drifts.
+#[derive(Resource)]
+pub(crate) struct Materials(pub(crate) benilla_formats::MaterialCatalog);
+
+fn load_materials(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_material_catalog(&mut chain)
+    };
+    match loaded {
+        Ok(cat) => {
+            info!("sound: {} material rows", cat.len());
+            commands.insert_resource(Materials(cat));
+        }
+        Err(e) => warn!("sound: materials failed to load: {e:#}"),
+    }
+}
+
+/// **The material of the body you are wearing** — the chest item's `Material` id, or `None`.
+///
+/// Two sounds ask this, and both ask it the reference's way, through `[player+0x1d38]` element 4
+/// (`EQUIPMENT_SLOT_CHEST`): the armor foley ([`footsteps`], `0x62fa30`) and the impact slot a
+/// player victim presents ([`combat`], `0x62fb70`). Shared rather than written twice, because
+/// they are one question with one answer and the reach is the subtle part.
+///
+/// **That reach is self-only, and not by our choice.** The array's count is written 113 when the
+/// object's guid matches the local player's and 0 otherwise (`0x5dd454`), so in the reference no
+/// other player has a chest material at all. benilla lands there for free: `PLAYER_FIELD_INV_SLOT_*`
+/// is a private descriptor field the server sends only to you, so `player_inv_slot` returns
+/// `None` for everyone else. Callers therefore need no "is this me" test of their own — but they
+/// must ask it of a store that IS the player's.
+///
+/// `None` covers every one of the reference's own misses: no store, an empty chest, the item
+/// object not streamed, and a template still in flight (asked once, answered next frame).
+pub(super) fn worn_chest_material(
+    store: Option<&crate::net::ObjectStore>,
+    items: &mut crate::items::Items,
+    net: &crate::net::NetCommands,
+) -> Option<u32> {
+    /// Index 4 of the inv-slot array — `0x62fa50`/`0x62fb86` read the fifth 8-byte guid.
+    const EQUIPMENT_SLOT_CHEST: u8 = 4;
+    let guid = store?.0.player_inv_slot(EQUIPMENT_SLOT_CHEST)?;
+    let entry = items.object(guid)?.object_entry()?;
+    Some(items.held(entry, net)?.material)
+}
+
 #[derive(Resource)]
 pub(crate) struct AudioListener {
     pub(crate) pos: Vec3,
@@ -313,6 +364,12 @@ impl Plugin for SoundPlugin {
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
         .add_systems(Startup, hal_overload::setup)
+        // `Material.dbc` — shared by the foley and the melee impact, so it loads here rather
+        // than inside either consumer.
+        .add_systems(
+            Startup,
+            load_materials.after(benilla_assets::AssetSet::Open),
+        )
         // The cover's audio hold (see [`SoundConfig::world_hold`]): fed in PreUpdate so every
         // trigger system this frame — whatever stage it runs in — reads one answer.
         .add_systems(PreUpdate, feed_world_hold)

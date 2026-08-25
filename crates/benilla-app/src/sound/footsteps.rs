@@ -61,7 +61,7 @@
 use bevy::prelude::*;
 
 use benilla_assets::coords::bevy_to_wow;
-use benilla_formats::{FootstepCatalog, MaterialCatalog};
+use benilla_formats::FootstepCatalog;
 
 use crate::creature_anim::{is_footstep_sound, move_flags, AnimSoundEvent, MovementState};
 use crate::entities::{CollisionHeight, Creatures};
@@ -81,34 +81,11 @@ use super::{AudioListener, SoundConfig, SoundOutput};
 #[derive(Resource)]
 pub(crate) struct Footsteps(pub(crate) FootstepCatalog);
 
-/// `Material.dbc` — the foley half of a footfall (`0x4584e0`'s table).
-#[derive(Resource)]
-pub(crate) struct Materials(pub(crate) MaterialCatalog);
-
-fn load_materials(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
-    let Some(assets) = assets else { return };
-    let loaded = {
-        let mut chain = assets.chain.lock_recover();
-        benilla_formats::load_material_catalog(&mut chain)
-    };
-    match loaded {
-        Ok(cat) => {
-            info!("sound: {} material rows", cat.len());
-            commands.insert_resource(Materials(cat));
-        }
-        Err(e) => warn!("sound: materials failed to load: {e:#}"),
-    }
-}
-
 /// **The foley's Z offset** — `0x45851d fadd [0x801628]`, a flat `2.0` added to the emitter's Z
 /// before the play. The rustle comes from the body, not the boots, and the reference lifts it by
 /// a fixed two yards rather than anything model-derived. WoW's Z is Bevy's Y at the same scale
 /// (`benilla_assets::coords`), so this adds to `translation.y`.
 const FOLEY_HEIGHT: f32 = 2.0;
-
-/// `EQUIPMENT_SLOT_CHEST` — index 4 of the player's inv-slot array, the one the reference's
-/// player foley reads (`0x62fa50`'s `[ptr+0x20]`, i.e. the fifth 8-byte guid).
-const EQUIPMENT_SLOT_CHEST: u8 = 4;
 
 fn load_footsteps(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     let Some(assets) = assets else { return };
@@ -142,7 +119,7 @@ fn footstep_sounds(
     // The foley half: the material table, the creature catalog that answers a unit's material,
     // and the item store that answers a player's (a chest template ask rides the same
     // once-per-entry discipline every other consumer uses).
-    materials: Option<Res<Materials>>,
+    materials: Option<Res<super::Materials>>,
     creatures: Option<Res<Creatures>>,
     mut items: Option<ResMut<Items>>,
     net_commands: Res<NetCommands>,
@@ -192,14 +169,7 @@ fn footstep_sounds(
                 // The player override (`0x62fa30`) reads the chest through the *private*
                 // inv-slot array, so this resolves for you and no one else — the reference's
                 // own reach, not a restriction added here.
-                EntityKind::Player => {
-                    let entry = store
-                        .and_then(|s| s.0.player_inv_slot(EQUIPMENT_SLOT_CHEST))
-                        .and_then(|guid| it.object(guid)?.object_entry());
-                    entry
-                        .and_then(|entry| it.held(entry, &net_commands))
-                        .map(|t| t.material)
-                }
+                EntityKind::Player => super::worn_chest_material(store, it, &net_commands),
                 _ => net
                     .display_id
                     .and_then(|d| creatures.as_deref()?.foley_material(d)),
@@ -287,9 +257,6 @@ fn footstep_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(
-        Startup,
-        (load_footsteps, load_materials).after(AssetSet::Open),
-    )
-    .add_systems(Update, footstep_sounds.in_set(WorldStage::Present));
+    app.add_systems(Startup, load_footsteps.after(AssetSet::Open))
+        .add_systems(Update, footstep_sounds.in_set(WorldStage::Present));
 }

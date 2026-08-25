@@ -653,6 +653,14 @@ pub(super) fn turn_shuffle(faced: f32, angle: f32) -> u16 {
 /// last paint" latch, and a paint preceded by a `SetRotation` can never expire.
 const SHUFFLE_HOLD_SECS: f64 = 0.100;
 
+/// How much of a cross-fade's window is **still to run**, `1 → 0` — the `t` the client recomputes
+/// inline from the live descriptor and clock on every arm and every frame (`(blendEnd − now) ·
+/// blendRate`), never a cached weight. Named because two places must agree on it exactly: the
+/// per-frame weights, and the half-blend refusal that decides whether an arm re-seeds at all.
+fn fade_frac(fade: &super::Fade, now: f64) -> f32 {
+    ((fade.until - now) / f64::from(fade.span)) as f32
+}
+
 /// Arm one `AnimationData` id on a booth root the way the reference's turn does — every one of its
 /// plays is `0x7121a0(bone -1, id, variation -1, offset 0, rate 1.0f, blend 1, primary 1)`
 /// (wow-re `modelframe-camera-law.md` §13.4), and all three of those trailing arguments show:
@@ -696,23 +704,49 @@ fn arm_turn(
         return false;
     };
     let (node, looping, blend) = (clip.node, clip.looping, clip.blend_time.max(0.0));
-    // The one secondary slot: a fade still in flight is displaced here, and its pose stops being
-    // drawn at all — except when it is the node we are about to (re)play, which a reversal *back*
-    // inside a running window makes it (hold left, flick right, flick left again). The second
-    // clause holds the invariant rather than a live case: an arm always leaves `fade.node` and
-    // `playing` distinct, so the displaced fade is never the pose the new one starts from.
-    if let Some(old) = turn.fade.take() {
+    // **The half-blend refusal** (decision 1570, `0x7125c9`/`0x7125d4`). A blend already running
+    // with λ > 0.5 — more than half its window still to run — is NOT re-seeded: the client keeps
+    // the old secondary on its old window, and the clip that was primary is simply dropped. Read
+    // as a rule: *a pose that never got past half weight is not worth fading out.* Equality takes
+    // the snapshot, and the strictness is real — the f32 lands exactly on 0.5 at `remaining =
+    // span/2`, so the boundary falls on the snapshot side.
+    //
+    // Reachable in ordinary use, which is why it is here: Stand's blend is 500 ms, so **a second
+    // nudge of the arrow within 250 ms of the last release** meets it — a repeated-nudge cadence,
+    // not an exotic input. (λ against 0.5 rather than the fraction against ½ because the law is
+    // stated on λ; at our amplitude of 1.0 the two are the same test, `smoothstep` being strictly
+    // increasing with `smoothstep(½) = ½`.)
+    let refused = turn
+        .fade
+        .is_some_and(|f| crate::creature_anim::select::blend_lambda(fade_frac(&f, now)) > 0.5);
+    if refused {
+        // The outgoing primary goes nowhere — not into the secondary, which keeps the older pose
+        // it was already fading, at the older λ. Only this clip is dropped.
+        if let Some(out) = outgoing.filter(|o| *o != node) {
+            player.stop(out);
+        }
+    } else if let Some(old) = turn.fade.take() {
+        // The one secondary slot: a fade still in flight is displaced here, and its pose stops
+        // being drawn at all — except when it is the node we are about to (re)play, which a
+        // reversal *back* inside a running window makes it (hold left, flick right, flick left
+        // again). The second clause holds the invariant rather than a live case: an arm always
+        // leaves `fade.node` and `playing` distinct, so the displaced fade is never the pose the
+        // new one starts from.
         if old.node != node && Some(old.node) != outgoing {
             player.stop(old.node);
         }
     }
-    let fade = outgoing
-        .filter(|o| *o != node && blend > 0.0)
-        .map(|node| super::Fade {
-            node,
-            until: now + f64::from(blend),
-            span: blend,
-        });
+    let fade = if refused {
+        turn.fade // untouched: old node, old window, old λ
+    } else {
+        outgoing
+            .filter(|o| *o != node && blend > 0.0)
+            .map(|node| super::Fade {
+                node,
+                until: now + f64::from(blend),
+                span: blend,
+            })
+    };
     {
         // Explicit, not defaulted: `play` is idempotent on a live node, so a re-arm of a node
         // some earlier turn left running would otherwise keep that turn's clock and weight.
@@ -841,7 +875,7 @@ fn step_turn(
     let Some(fade) = turn.fade else {
         return;
     };
-    let frac = ((fade.until - now) / f64::from(fade.span)) as f32;
+    let frac = fade_frac(&fade, now);
     if frac <= 0.0 {
         turn.fade = None;
         player.stop(fade.node);
@@ -1380,15 +1414,19 @@ mod tests {
         );
     }
 
-    /// One secondary slot, exactly as the client keeps one (`0x7125d6` overwrites `[blk+0xc4]`): a
-    /// reversal inside a running window displaces the fade it found — the pose that was fading out
-    /// is dropped there and then, and the new fade runs from the shuffle being replaced.
+    /// **The half-blend refusal, both legs** (decision 1570). One secondary slot, as the client
+    /// keeps one — but an arm only *takes* it when the running blend is at or past halfway. Inside
+    /// the first half, `0x7125d4` refuses: the older pose keeps fading on its own untouched window,
+    /// and the clip that was primary is dropped outright rather than fading out of a weight it
+    /// never reached.
     #[test]
-    fn a_reversal_displaces_the_fade_it_found() {
+    fn a_reversal_is_refused_inside_the_half_blend_and_displaces_it_after() {
         let (anims, catalog) = (
             turning_model(),
             benilla_formats::AnimDataCatalog::from_rows([]),
         );
+
+        // Reverse at 0.1 s of a 0.25 s blend — 60% still to run, λ = 0.648. REFUSED.
         let (mut player, mut rng) = (baked(), 0u32);
         let mut turn = super::super::Turn {
             spun: Some(SHUFFLE_LEFT),
@@ -1404,12 +1442,78 @@ mod tests {
             "the opposite shuffle took over"
         );
         assert_eq!(
+            turn.fade.map(|f| (f.node, f.until)),
+            Some((node(1), 1.25)),
+            "the ORIGINAL fade is untouched — same pose, same window"
+        );
+        assert_eq!(
+            weight(&player, 3),
+            None,
+            "the first shuffle is dropped, not faded"
+        );
+        assert_eq!(turn.shuffle.map(|(id, _)| id), Some(SHUFFLE_RIGHT));
+
+        // Reverse at 0.2 s instead — 20% still to run, λ = 0.104. The slot is taken.
+        let (mut player, mut rng) = (baked(), 0u32);
+        let mut turn = super::super::Turn {
+            spun: Some(SHUFFLE_LEFT),
+            ..Default::default()
+        };
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
+        turn.spun = Some(SHUFFLE_RIGHT);
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.2);
+
+        assert_eq!(
             turn.fade.map(|f| f.node),
             Some(node(3)),
             "…fading out of the first"
         );
         assert_eq!(weight(&player, 1), None, "the displaced Stand is gone");
-        assert_eq!(turn.shuffle.map(|(id, _)| id), Some(SHUFFLE_RIGHT));
+    }
+
+    /// The refusal's **reachable** case, and the one that decided it was worth building: Stand
+    /// blends in over 0.5 s, so a second nudge of the arrow within 250 ms of the last release meets
+    /// a blend that is more than half to run. Without the guard those stack — each nudge would fade
+    /// out a Stand that had barely faded in. With it, the doll goes on fading out of the shuffle it
+    /// was actually in.
+    #[test]
+    fn a_second_nudge_inside_stands_own_blend_is_refused() {
+        let (anims, catalog) = (
+            turning_model(),
+            benilla_formats::AnimDataCatalog::from_rows([]),
+        );
+        let (mut player, mut rng) = (baked(), 0u32);
+        let mut turn = super::super::Turn {
+            spun: Some(SHUFFLE_LEFT),
+            ..Default::default()
+        };
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
+        turn.spun = Some(SHUFFLE_LEFT);
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.1);
+        // Released: the expiry arms Stand, fading out of the shuffle over Stand's own 0.5 s.
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.3);
+        let settling = turn.playing.expect("Stand armed");
+        assert_eq!(turn.fade.map(|f| (f.node, f.until)), Some((node(3), 1.8)));
+
+        // Nudged again 100 ms later — 80% of Stand's blend still to run, λ = 0.896. REFUSED.
+        turn.spun = Some(SHUFFLE_RIGHT);
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.4);
+
+        assert_eq!(
+            turn.playing,
+            Some(node(4)),
+            "the new shuffle is the primary"
+        );
+        assert_eq!(
+            turn.fade.map(|f| (f.node, f.until)),
+            Some((node(3), 1.8)),
+            "still fading the shuffle it was already fading, on the same window"
+        );
+        assert_eq!(
+            player.animation(settling).map(|a| a.weight()),
+            None,
+            "the half-faded Stand is dropped, not layered on"
+        );
     }
 
     /// A display that does not author the shuffles at all — most pet models — is left **standing**,

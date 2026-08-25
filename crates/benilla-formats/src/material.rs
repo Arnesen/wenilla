@@ -31,6 +31,11 @@ use crate::Chain;
 /// `Material.dbc` keyed by id.
 pub struct MaterialCatalog {
     foley: HashMap<u32, u32>,
+    /// The `Flags` column — the *other* half of what this three-column table is for. It decides
+    /// the metal/wood split of every weapon impact ([`MaterialCatalog::is_metal`]) and, on a
+    /// player's chest, which armor slot the victim presents
+    /// ([`MaterialCatalog::armor_impact_slot`]).
+    flags: HashMap<u32, u32>,
 }
 
 impl MaterialCatalog {
@@ -40,6 +45,38 @@ impl MaterialCatalog {
     /// callers need no sentinel of their own.
     pub fn foley_kit(&self, material: u32) -> Option<u32> {
         self.foley.get(&material).copied().filter(|&k| k != 0)
+    }
+
+    /// Is this material **metal-bodied** — `Flags & 0x1`, the reference's `0x5d9a50`.
+    ///
+    /// It is the only thing that picks the metal vs wood half of `WeaponImpactSounds` (both the
+    /// weapon's own impact row and the victim's parry slot: `0x457e80` computes it, `0x457dc0`
+    /// asks it twice). The flag is set on metal (1), jewelry (4), chain (5) and plate (6) — so
+    /// it is genuinely "is this thing metal", not "is this thing not wood": leather, cloth and
+    /// liquid all read as non-metal, and so does an **unknown or absent material**, which is the
+    /// reference's answer for id 0 (no row) and the reason a guess of `material != WOOD` gets a
+    /// materialless creature weapon wrong.
+    pub fn is_metal(&self, material: u32) -> bool {
+        self.flags.get(&material).is_some_and(|f| f & 0x1 != 0)
+    }
+
+    /// The `WeaponImpactSounds` **target slot** a body wearing this material presents —
+    /// `0x62fb70`, the CGPlayer override of the victim's impact type, read off the same `Flags`
+    /// column: bit 1 → 2 (plate), else bit 2 → 1 (chain), else 0 (flesh).
+    ///
+    /// On the shipped table that is exactly plate → plate and chain → chain, with **leather and
+    /// cloth landing on flesh** — armor that does not ring. Creatures do not come through here:
+    /// their slot is a `CreatureSoundData` column remapped through `{0, 8, 7, 9}` (`0x6238f0`),
+    /// i.e. flesh/stone/wood/ethereal, a disjoint half of the same ten.
+    pub fn armor_impact_slot(&self, material: u32) -> u32 {
+        let Some(&flags) = self.flags.get(&material) else {
+            return 0;
+        };
+        if flags & 0x2 != 0 {
+            2
+        } else {
+            (flags & 0x4) >> 2
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -66,12 +103,14 @@ pub fn load_material_catalog(chain: &mut Chain) -> Result<MaterialCatalog> {
         .context("reading Material.dbc")?;
     let rs = parse(&bytes, schema(), "Material")?;
     let mut foley = HashMap::with_capacity(rs.records().len());
+    let mut flags = HashMap::with_capacity(rs.records().len());
     for r in rs.records() {
         if let Some(id) = u32_at(r, 0) {
             foley.insert(id, u32_at(r, 2).unwrap_or(0));
+            flags.insert(id, u32_at(r, 1).unwrap_or(0));
         }
     }
-    Ok(MaterialCatalog { foley })
+    Ok(MaterialCatalog { foley, flags })
 }
 
 #[cfg(test)]
@@ -101,5 +140,32 @@ mod tests {
         // Off the end of the table, and the "no material" id the wire sends for an empty slot.
         assert_eq!(cat.foley_kit(0), None);
         assert_eq!(cat.foley_kit(9), None);
+    }
+
+    /// The `Flags` column's two consumers, on the shipped table. **`is_metal` is not
+    /// `!= wood`**: leather and cloth are non-metal too, and so is a missing material — the case
+    /// a creature with no virtual-item info actually hits.
+    #[test]
+    fn the_flags_column_splits_metal_and_names_the_armor_slot() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_material_catalog(&mut chain).expect("load materials");
+
+        for metal in [1, 4, 5, 6] {
+            assert!(cat.is_metal(metal), "material {metal} is metal-bodied");
+        }
+        for soft in [2, 3, 7, 8] {
+            assert!(!cat.is_metal(soft), "material {soft} is not metal");
+        }
+        assert!(!cat.is_metal(0), "an absent material is not metal");
+        assert!(!cat.is_metal(99), "an unknown material is not metal");
+
+        // The armor slot a chest presents: plate rings as plate, chain as chain, everything
+        // else — leather and cloth included — as flesh.
+        assert_eq!(cat.armor_impact_slot(6), 2, "plate");
+        assert_eq!(cat.armor_impact_slot(5), 1, "chain");
+        for flesh in [0, 1, 2, 3, 4, 7, 8, 99] {
+            assert_eq!(cat.armor_impact_slot(flesh), 0, "material {flesh}");
+        }
     }
 }
