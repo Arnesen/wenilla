@@ -61,9 +61,12 @@ pub(super) fn weather(
 }
 
 /// `SMSG_INIT_WORLD_STATES` / `SMSG_UPDATE_WORLD_STATE` — both wires funnel into the one setter,
-/// as the reference's own handler does. An init does NOT clear first: what its `(map, zone)` dwords
-/// drive is unrecorded, so we log the scope rather than act on it (rationale on
-/// [`crate::world_state`]).
+/// as the reference's own handler does.
+///
+/// An **init clears the table first** and records its `(map, zone)` as the world-state UI's display
+/// filter — the reference's `0x4c5650`, which runs before the pair loop (wow-re
+/// `system/ui/scratch/worldstate-ui-law.md`; rationale on [`crate::world_state`]). The order below
+/// is that handler's: clear + scope, then the packet's pairs.
 pub(super) fn world_states(
     scope: Option<(u32, u32)>,
     states: Vec<(u32, u32)>,
@@ -74,6 +77,7 @@ pub(super) fn world_states(
             "world states: map {map} zone {zone}, {} entries",
             states.len()
         );
+        world_states.init_scope(map, zone);
     }
     world_states.write(&states);
 }

@@ -29,6 +29,10 @@ mod language;
 #[cfg(test)]
 mod tests;
 
+/// The joined-channel roster + the `ChatChannels.dbc` catalog. Read outside this module by the
+/// world-state readout ([`crate::world_state_ui`]), whose `Type == 1` gate is "has the player
+/// joined a zone-dependent defense channel".
+pub(crate) use edit::ChannelState;
 /// Test-only: `ui_script::chat_tests` checks every name we fire against the live `ChatTypeInfo`
 /// table, which lives on that side of the tree. The app itself calls it through `event::` — the
 /// router is the only production caller and it is inside this module.

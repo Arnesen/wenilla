@@ -256,6 +256,8 @@ pub use world_map_continent::{
 };
 mod area_poi;
 pub use area_poi::{load_area_poi_catalog, AreaPoi, AreaPoiCatalog};
+mod world_state_ui;
+pub use world_state_ui::{load_world_state_ui_catalog, WorldStateUiCatalog, WorldStateUiRow};
 mod area_table;
 pub use area_table::{load_area_table_catalog, AreaTableCatalog, AreaTableRow};
 mod chat_channels;

@@ -461,6 +461,12 @@ pub enum ServerPacket {
     LearnedSpell {
         spell_id: u16,
     },
+    /// `SMSG_REMOVED_SPELL` — the server took a spell out of the book (layout in
+    /// [`super::spellbook::read_removed_spell`]). One per spell: a talent wipe sends a burst of
+    /// them, one for every rank of every talent (decision 1584).
+    RemovedSpell {
+        spell_id: u16,
+    },
     /// `SMSG_SUPERCEDED_SPELL` — a rank-up replaced its predecessor in the book + action bar
     /// (layout in [`super::spellbook::read_superceded_spell`]).
     SupercededSpell {
@@ -1303,6 +1309,7 @@ impl ServerPacket {
             ServerPacket::InitialSpells { .. } => "SMSG_INITIAL_SPELLS".into(),
             ServerPacket::ActionButtons { .. } => "SMSG_ACTION_BUTTONS".into(),
             ServerPacket::LearnedSpell { .. } => "SMSG_LEARNED_SPELL".into(),
+            ServerPacket::RemovedSpell { .. } => "SMSG_REMOVED_SPELL".into(),
             ServerPacket::SupercededSpell { .. } => "SMSG_SUPERCEDED_SPELL".into(),
             ServerPacket::CastResult { .. } => "SMSG_CAST_RESULT".into(),
             ServerPacket::PetSpells(_) => "SMSG_PET_SPELLS".into(),

@@ -33,6 +33,7 @@
 
 pub mod addon_harness;
 mod area;
+mod area_poi;
 mod area_trigger;
 #[cfg(feature = "dev")]
 mod asset_churn;
@@ -157,6 +158,7 @@ mod ui_world_map;
 mod video;
 mod vplates;
 mod world_state;
+mod world_state_ui;
 
 use bevy::prelude::*;
 use blob_shadow::BlobShadowPlugin;
@@ -537,6 +539,8 @@ pub fn run(build: BuildId) -> AppExit {
     // The shared AreaTable catalog + the ZONE_CHANGED event family / zone-text host globals
     // behind GetZoneText & co. (the zone-entry splash arc, decision 0287).
     .add_plugins(area::AreaPlugin)
+    .add_plugins(area_poi::AreaPoiPlugin)
+    .add_plugins(world_state_ui::WorldStateUiPlugin)
     // The `AreaTrigger.dbc` volumes + the per-frame containment check that reports walking into
     // one (`CMSG_AREATRIGGER`) — the client's whole part in portals, instance entrances and
     // explore objectives; the server owns what each trigger means.

@@ -272,6 +272,7 @@ pub(super) type BlipInputs<'w, 's> = (
     Res<'w, GameObjectTemplates>,
     Option<Res<'w, crate::go_templates::Locks>>,
     Res<'w, crate::poi_marker::PoiMarker>,
+    Option<Res<'w, crate::area_poi::AreaPoiRes>>,
 );
 
 /// Every streamed object the tracking classifier considers (our own avatar excluded — the

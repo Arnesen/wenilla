@@ -158,11 +158,6 @@ fn fx_part_material(
 /// alpha source and no owner (decision 0833).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct EffectHost {
-    /// Is this an **attached** model in the client's sense (`[model+0x17c] ≠ 0`)? It sets the
-    /// emitters' attach frame `A` — the birth orientation a kit effect fans by (wow-re
-    /// `part-kit-effect-attach-orient.md`, decision 0395). It does **not** decide ride-vs-trail:
-    /// that is the emitter's own file flag `0x10`, on every host class alike (1578).
-    pub attached: bool,
     /// The model instance this one is **chained to** ([`benilla_world::model_fade::ParentModel`]): the
     /// unit a kit effect is hung on, the item root a weapon glow rides. `None` for a model that
     /// belongs to no other — a missile, the fixture preview — which is also what keeps the 0202
@@ -210,7 +205,6 @@ pub(crate) fn attach_effect_visuals(
     let Some(parts) = dm.parts.as_ref() else {
         return false; // still loading — attach on a later pass
     };
-    let attach = host.attached.then_some(root);
     // Chain this instance onto the model it hangs from, so its effects compose through the
     // parent's computed alpha the way `0x714000` does — a weapon's glow through the item, the
     // item through its wearer (decision 0833).
@@ -422,9 +416,9 @@ pub(crate) fn attach_effect_visuals(
             Transform::IDENTITY,
             particles::EmitterFrames {
                 owner: Some(owner),
-                attach,
-                // The cloud anchors at the instance root — the emitter's bone only composes births
-                // (the food sparkle's bone orbits; the risen stars must not swirl with it).
+                // The cloud SORTS at the instance root — the emitter's bone only composes births.
+                // Since 1585 that is all this is: a world-mode store is frozen at birth, so
+                // neither this root nor the bone can move a particle that already exists.
                 anchor: Some(root),
                 // Free with the model when this instance belongs to one, drain when it stands
                 // alone (the impacting missile's trail — 0202's case). See `on_owner_loss` above.
@@ -933,10 +927,7 @@ pub(super) fn attach_spell_fx(
                 // A kit instance on a unit is an attached model, chained to that unit: it fades
                 // with the body it is cast on, and it is freed with it (0833) — where before, a
                 // gear change that tore the unit's visual down left its cloud in the air.
-                EffectHost {
-                    attached: true,
-                    parent: Some(unit),
-                },
+                EffectHost { parent: Some(unit) },
                 // A kit effect IS a `CEffect`: it runs the stage's animation lifecycle.
                 Some(inst.stage),
                 &mut wow_materials,

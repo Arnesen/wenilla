@@ -375,4 +375,19 @@ mod tests {
         let holey: BTreeSet<u32> = [102].into_iter().collect();
         assert_eq!(rank_of(&t, &holey), 3);
     }
+
+    /// **The respec, at the seam that made it look like it hadn't happened** (decision 1584). The
+    /// window's rank is a read of the known-spell set and nothing else, so a wipe only shows here
+    /// once the server's `SMSG_REMOVED_SPELL` burst has emptied it — one packet per rank, all of
+    /// them dropped before 1584. That is why the director's screenshot could show a 20-point
+    /// Discipline tree beside "Talent Points: 51": the points are a descriptor field and arrived,
+    /// the ranks are this set and did not. The arm that empties it has its own test beside it
+    /// (`net::apply::spells::a_removal_shrinks_the_book_and_dirties_the_feeds`).
+    #[test]
+    fn an_emptied_book_reads_as_a_wiped_tree() {
+        let t = talent(1, 201, 0, 0, &[14522, 14788, 14789]);
+        let spent: BTreeSet<u32> = [14522, 14788, 14789].into_iter().collect();
+        assert_eq!(rank_of(&t, &spent), 3);
+        assert_eq!(rank_of(&t, &BTreeSet::new()), 0);
+    }
 }

@@ -62,8 +62,6 @@ pub(super) struct CamBasis {
 /// coordinates reach the world (the anchored/model split of [`super::Particle`]'s doc).
 pub(super) struct DrawFrame {
     pub(crate) anchored: bool,
-    pub(crate) anchor: Vec3,
-    pub(crate) attach_rot: Quat,
     /// The owning MODEL's render alpha, folded into every particle's alpha channel — the
     /// reference's `emitter+0x1a8` (decision 0827). 1.0 for a model that isn't fading.
     pub(crate) alpha: f32,
@@ -74,8 +72,11 @@ pub(super) struct DrawFrame {
 /// re-derivation that can drift.
 pub(super) fn particle_center(frame: &DrawFrame, placement: &Transform, p: &Particle) -> Vec3 {
     if frame.anchored {
-        frame.anchor + frame.attach_rot * p.pos
+        // WORLD mode (`0x10` CLEAR): the store IS world and the draw folds nothing — the
+        // reference's `0x7b3f48`, which omits `rt+0x1fc` (decision 1585, wow-re §2c-B).
+        p.pos
     } else {
+        // MODEL mode (`0x10` SET): the live emitter matrix, re-applied every frame — `0x7b3efb`.
         placement.transform_point(wow_to_bevy([p.pos.x, p.pos.y, p.pos.z]))
     }
 }
@@ -181,10 +182,8 @@ pub(super) fn expand_quads(
         // bytes; the byte buffer's SATURATION (a stack can never exceed 255) is restored at
         // the FFX chain's scene reads (`ffx_glow.wgsl`, the Frost Nova mist diagnosis) — a
         // too-bright additive stack is never this ramp's bug, do not "fix" it here.
-        // Anchored positions ride the emitter's live translation — through the CURRENT attach
-        // rotation on an attached model (`DrawMx = A·Translate·V`, the heading-since-birth
-        // fan); model mode folds the whole live placement transform (the reference's rt-0x100
-        // render fold, `0x7b3d20`).
+        // World-mode positions are already world and are drawn raw; model mode folds the whole
+        // live placement transform (the reference's rt-0x100 render fold, `0x7b3d20`).
         let center = particle_center(frame, placement, p);
         // `size` is the half-extent: the reference quad corners are ±1.0 (verified in wow-5875-re,
         // `quad_expand`), so a vertex sits at `center ± size` and the world quad edge spans 2·size.
@@ -250,7 +249,7 @@ pub(super) fn expand_quads(
         if def.head_tail >= 1 {
             let ((u0, u1), (v0, v1)) = cell_uv(ol.tail_cell);
             let vel_world = if anchored {
-                frame.attach_rot * p.vel
+                p.vel
             } else {
                 placement.rotation * (placement.scale * wow_to_bevy(p.vel.to_array()))
             };
@@ -339,8 +338,6 @@ mod tests {
         let shoot = |alpha| {
             let frame = DrawFrame {
                 anchored: true,
-                anchor: Vec3::ZERO,
-                attach_rot: Quat::IDENTITY,
                 alpha,
             };
             let mut out = Vec::new();

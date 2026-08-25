@@ -7,8 +7,11 @@
 //! - **The reference binary** (wow-re `system/ui/scratch/questtext-macro-expander.md` §3): the one
 //!   handler `0x48f690` holds the only two callers of the table setter `0x4c5870`, registered
 //!   against exactly these two opcodes at `0x48f515-0x48f52f`. `0x2C2` is *two leading dwords*
-//!   (passed to the unexamined `0x4c5650`), a `u16` count, then `count × (id:u32, value:u32)`;
-//!   `0x2C3` is a single such pair.
+//!   (handed to `0x4c5650`), a `u16` count, then `count × (id:u32, value:u32)`; `0x2C3` is a
+//!   single such pair. **`0x4c5650` is carved** (2026-08-25, wow-re
+//!   `system/ui/scratch/worldstate-ui-law.md`): it CLEARS the table, stores the two dwords as the
+//!   world-state UI's display filter, and rebuilds that list — all before the pair loop runs. See
+//!   [`InitWorldStates::zone`].
 //! - **vmangos's writers** (`Player::SendInitWorldStates`, `Player.cpp:8219-8293`, and
 //!   `WorldPackets::Misc::UpdateWorldState::AppendBodyTo`, `Misc.cpp:685-694`): `u32 mapId`,
 //!   `u32 zoneId` (the zone dword is `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_11_2`, so 1.12.1
@@ -32,9 +35,13 @@ use crate::wire::{read_u16_le, read_u32_le};
 /// (vmangos `Player::UpdateZone` → `SendInitWorldStates`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InitWorldStates {
-    /// The map the states are scoped to. The reference hands this and `zone` to `0x4c5650` and
-    /// nothing else; what that call does with them is **not recorded** (see [`read_init_world_states`]).
+    /// The map the states are scoped to — the client's `[0xb71e84]`, and the first half of the
+    /// filter its world-state UI list is built against (see the module doc).
     pub map: u32,
+    /// The second leading dword. Named `zone` for the field vmangos fills it from; the client
+    /// stores it as `[0xb71ea8]` and matches it against **`WorldStateUI.dbc`'s `AreaID`** when it
+    /// decides which always-up rows a scope admits, so "whatever the server put here" is exactly
+    /// the comparand either way.
     pub zone: u32,
     /// `(id, value)` verbatim, including the trailing `(0, 0)` terminator.
     pub states: Vec<(u32, u32)>,

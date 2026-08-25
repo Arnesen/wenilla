@@ -850,6 +850,8 @@ mod quest_timer_tests;
 
 #[cfg(test)]
 mod durability_tests;
+#[cfg(test)]
+mod world_state_tests;
 
 #[cfg(test)]
 mod screenshot_tests;

@@ -1,0 +1,180 @@
+<Ui>
+    <!--
+        The always-up world-state readout — report B190's second half: the alliance/horde progress
+        line an outdoor-PvP zone or a battleground shows at the top of the screen. In Eastern
+        Plaguelands that is the two tower counters ("Towers Controlled: 3") plus the capture-point
+        progress; in Warsong Gulch the flag captures; in Arathi Basin bases and resources.
+
+        The SPEC is the reference's two C bindings, byte-carved (wow-re
+        system/ui/scratch/worldstate-ui-law.md, 0x4c5a40 / 0x4c5a70) and re-expressed here:
+
+            GetNumWorldStateUI()      -> how many rows the current scope admits
+            GetWorldStateUIInfo(i)    -> TEN values, in this order:
+                                         uiState, text, icon, dynamicIcon,
+                                         tooltip, dynamicTooltip, extendedUI,
+                                         extUIState1, extUIState2, extUIState3
+
+        Note what that return is NOT: there is no uiType and no hidden in 1.12 — those are a later
+        expansion of the API, and reading this list as if they were there shifts every value by two.
+        `text` arrives already macro-expanded (the host runs the reference's %<id>w expander);
+        every other string is its DBC column verbatim, and never nil — an empty column is "".
+
+        Which rows exist at all is the host's (crates/benilla-app/src/world_state_ui.rs), including
+        the gate that makes this frame look broken if you don't know about it: the world-PvP rows
+        (Eastern Plaguelands, Silithus) are Type 1, which the reference admits only while the player
+        has joined the zone-dependent DEFENSE chat channel. Leave LocalDefense and the readout goes
+        away while the map icons stay.
+
+        `uiState` picks which of the two icons a row draws: the reference's dynamic pair is a state
+        that toggles (Warsong Gulch's "the enemy flag has been picked up"), so a row with a
+        dynamicIcon shows it while its state is live and the static icon otherwise. A row with no
+        StateVariable of its own answers uiState = 1, which is why the plain counters draw their
+        static icon and never blink.
+
+        OUT, named: the CAPTUREPOINT extended UI — the sliding bar over
+        Interface\WorldStateFrame\WorldState-CaptureBar that the one Eastern Plaguelands progress
+        row drives. Its two states come through the binding already (extUIState1/2 carry the
+        alliance/horde fractions), so it is a widget to add, not a seam to change; the row itself
+        renders as its text line until then, so the progress number is on screen either way. Also
+        out: the battleground scoreboard (the Type 2 rows), which the reference builds from the
+        same DBC through a DIFFERENT handler and a different pair of bindings whose bail leg is not
+        even the same shape — GetNumBattlefieldStats/GetBattlefieldStatInfo, a separate slice.
+    -->
+    <Script>
+        <![CDATA[
+        NUM_ALWAYS_UP_ROWS = 0;
+
+        -- Vertical pitch between rows, and the icon's box. Ours, not measured from the reference:
+        -- this frame is being written rather than transcribed, and the numbers below are what make
+        -- a two- or three-row readout sit legibly under the top edge.
+        WORLD_STATE_ROW_HEIGHT = 22;
+        WORLD_STATE_ICON_SIZE = 20;
+
+        -- Rebuild the readout from the host's list. Cheap enough to run whole on every fire: the
+        -- list is at most a handful of rows, and the events are a zone's worth apart.
+        function WorldStateAlwaysUpFrame_Update()
+            local numUI = GetNumWorldStateUI();
+
+            -- Grow the row pool on demand and never shrink it, the way every pooled list here
+            -- does: the tail from a busier zone is parked hidden rather than destroyed.
+            if ( numUI > NUM_ALWAYS_UP_ROWS ) then
+                for i = NUM_ALWAYS_UP_ROWS + 1, numUI do
+                    local row = CreateFrame("Frame", "WorldStateAlwaysUpFrame" .. i,
+                        WorldStateAlwaysUpFrame, "WorldStateAlwaysUpTemplate");
+                    row:SetPoint("TOP", WorldStateAlwaysUpFrame, "TOP", 0,
+                        -(i - 1) * WORLD_STATE_ROW_HEIGHT);
+                end
+                NUM_ALWAYS_UP_ROWS = numUI;
+            end
+
+            for i = 1, NUM_ALWAYS_UP_ROWS do
+                local row = getglobal("WorldStateAlwaysUpFrame" .. i);
+                if ( i > numUI ) then
+                    row:Hide();
+                else
+                    local uiState, text, icon, dynamicIcon, tooltip, dynamicTooltip = GetWorldStateUIInfo(i);
+                    local iconTexture = getglobal(row:GetName() .. "Icon");
+                    local textString = getglobal(row:GetName() .. "Text");
+
+                    -- The dynamic icon replaces the static one while the row's own state is live.
+                    -- A row with neither draws no icon at all and the text takes the whole width;
+                    -- the reference's own data has several such rows (the progress line).
+                    local shown = icon;
+                    row.tooltip = tooltip;
+                    if ( dynamicIcon ~= "" and uiState ~= 0 ) then
+                        shown = dynamicIcon;
+                        if ( dynamicTooltip ~= "" ) then
+                            row.tooltip = dynamicTooltip;
+                        end
+                    end
+                    -- ClearAllPoints first: SetPoint ADDS an anchor, and the template already
+                    -- seated the text against the icon.
+                    textString:ClearAllPoints();
+                    if ( shown == "" ) then
+                        iconTexture:Hide();
+                        textString:SetPoint("LEFT", row, "LEFT", 0, 0);
+                    else
+                        iconTexture:SetTexture(shown);
+                        iconTexture:Show();
+                        textString:SetPoint("LEFT", iconTexture, "RIGHT", 4, 0);
+                    end
+                    textString:SetText(text);
+                    row:Show();
+                end
+            end
+
+            -- The container is only as tall as the rows it shows, and disappears entirely when
+            -- there are none — this frame has no chrome of its own to leave behind.
+            if ( numUI > 0 ) then
+                WorldStateAlwaysUpFrame:SetHeight(numUI * WORLD_STATE_ROW_HEIGHT);
+                WorldStateAlwaysUpFrame:Show();
+            else
+                WorldStateAlwaysUpFrame:Hide();
+            end
+        end
+
+        function WorldStateAlwaysUpFrame_OnEvent()
+            WorldStateAlwaysUpFrame_Update();
+        end
+        ]]>
+    </Script>
+
+    <!-- One row: an icon and its line of text, with the row's tooltip on hover. Grown on demand
+         into WorldStateAlwaysUpFrame by the update above. -->
+    <Frame name="WorldStateAlwaysUpTemplate" virtual="true" enableMouse="true">
+        <Size><AbsDimension x="220" y="20"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentIcon">
+                    <Size><AbsDimension x="20" y="20"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT"/>
+                    </Anchors>
+                </Texture>
+                <FontString name="$parentText" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentIcon" relativePoint="RIGHT">
+                            <Offset><AbsDimension x="4" y="0"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnEnter>
+                if ( this.tooltip and this.tooltip ~= "" ) then
+                    GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT");
+                    GameTooltip:SetText(this.tooltip);
+                    GameTooltip:Show();
+                end
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide();
+            </OnLeave>
+        </Scripts>
+    </Frame>
+
+    <!-- The container. Top-centre of the screen, which is where an outdoor-PvP zone's counters and
+         a battleground's score belong: the minimap owns the top-right and the readout must not
+         fight it. Hidden until a scope admits a row. -->
+    <Frame name="WorldStateAlwaysUpFrame" parent="UIParent" hidden="true">
+        <Size><AbsDimension x="220" y="20"/></Size>
+        <Anchors>
+            <Anchor point="TOP" relativeTo="UIParent" relativePoint="TOP">
+                <Offset><AbsDimension x="0" y="-15"/></Offset>
+            </Anchor>
+        </Anchors>
+        <Scripts>
+            <OnLoad>
+                -- UPDATE_WORLD_STATES is the reference's own event for this list (0x20e). The
+                -- entering-world fire is what paints the readout on a login that lands inside a
+                -- scope the server has already sent states for.
+                this:RegisterEvent("UPDATE_WORLD_STATES");
+                this:RegisterEvent("PLAYER_ENTERING_WORLD");
+            </OnLoad>
+            <OnEvent>
+                WorldStateAlwaysUpFrame_OnEvent();
+            </OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

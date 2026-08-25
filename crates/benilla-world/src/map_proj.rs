@@ -70,6 +70,24 @@ pub fn world_uv(proj: WorldProj, wx: f32, wy: f32) -> (f32, f32) {
 /// numerator short-circuit to 0 (an input exactly on the right/bottom edge yields 0, not 1).
 /// Then the combined range check zeroes both outputs if either leaves [0,1] — the `(0,0)` the
 /// reference FrameXML reads as "not on this map, hide the blip".
+///
+/// **That range check was contested and is now settled** (2026-08-25): wow-re's
+/// `scratch/gossip-poi-marker.md` §8.3 had recorded that neither axis is clamped and that "a
+/// re-implementation that clamps diverges", against `geometry.md`'s diffed reading. The re-carve
+/// found §8.3's window stopped **two bytes short** of the clamp, which lives at
+/// `[0x4a74d6, 0x4a7533)` — four `fcomp`s against `0.0` (`0x7ffd74`) and `1.0` (`0x7ff9d8`), any
+/// failure zeroing *both* outputs. §8.3 is corrected; this function was already right, and it is
+/// what makes the world map's landmark pass show a zone only its own POIs rather than scattering
+/// the continent's off-art.
+///
+/// Two residual differences from the bytes, both named rather than chased:
+///
+/// - the compares are **inclusive** — exactly `0.0` and exactly `1.0` pass, which is what
+///   `(0.0..=1.0)` does — but an **unordered** (NaN) compare passes all four in the reference and
+///   is zeroed here. No DBC-sourced or wire-sourced position can produce one.
+/// - the reference compares its two axes at **different precisions**: the first against its `f32`
+///   store, the second as the live 80-bit `st0` the `fsubr` left. An `f32` reimplementation cannot
+///   have that asymmetry, and it can only matter within an ulp of an edge.
 pub fn zone_uv(rect: ZoneRect, wx: f32, wy: f32) -> (f32, f32) {
     fn axis(input: f32, low: f32, span: f32) -> f32 {
         if input - low != 0.0 && span != 0.0 {

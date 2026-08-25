@@ -68,6 +68,14 @@ pub(super) fn read_learned_spell(r: &mut impl Read) -> io::Result<u16> {
     Ok(spell_id)
 }
 
+/// Read `SMSG_REMOVED_SPELL` (vmangos `RemovedSpell::AppendBodyTo`, `Server/Packets/Spell.cpp:181`):
+/// a bare `u16 spellId`, and **no action-bar slot** — unlike its `SMSG_LEARNED_SPELL` sibling above,
+/// which pads one on. The spell is gone from the book; what happens to a bar button still pointing
+/// at it is a separate law (decision 1584).
+pub(super) fn read_removed_spell(r: &mut impl Read) -> io::Result<u16> {
+    read_u16_le(r)
+}
+
 /// Read `SMSG_SUPERCEDED_SPELL` (vmangos `SupercededSpell::AppendBodyTo`, `Spell.cpp:169-173`): `u16
 /// oldSpellId, u16 newSpellId` — a rank-up replaces the old spell with the new one in both the book
 /// and the action bar (decision 0237).
@@ -124,6 +132,27 @@ pub(super) fn read_cooldown_cheat(r: &mut impl Read) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three incremental book packets, side by side, because their bodies differ in exactly the
+    /// way that bites: LEARNED pads an unused action-bar slot after the id, REMOVED does not pad
+    /// anything, and SUPERCEDED carries a pair. Reading REMOVED with LEARNED's reader would work by
+    /// accident on a 4-byte body and starve on the real 2-byte one.
+    #[test]
+    fn the_three_book_deltas_have_three_different_bodies() {
+        // SMSG_LEARNED_SPELL: u16 spell + u16 slot (dropped).
+        let body: Vec<u8> = [1752u16.to_le_bytes(), 0u16.to_le_bytes()].concat();
+        assert_eq!(read_learned_spell(&mut &body[..]).unwrap(), 1752);
+
+        // SMSG_REMOVED_SPELL: the bare u16, and nothing after it.
+        let body = 1752u16.to_le_bytes().to_vec();
+        let mut r = &body[..];
+        assert_eq!(read_removed_spell(&mut r).unwrap(), 1752);
+        assert!(r.is_empty(), "the removal body is two bytes, full stop");
+
+        // SMSG_SUPERCEDED_SPELL: the pair.
+        let body: Vec<u8> = [1752u16.to_le_bytes(), 1757u16.to_le_bytes()].concat();
+        assert_eq!(read_superceded_spell(&mut &body[..]).unwrap(), (1752, 1757));
+    }
 
     #[test]
     fn cooldown_bodies_golden() {

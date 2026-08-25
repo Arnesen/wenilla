@@ -424,6 +424,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_LEARNED_SPELL => ServerPacket::LearnedSpell {
             spell_id: spellbook::read_learned_spell(&mut r)?,
         },
+        opcode::SMSG_REMOVED_SPELL => ServerPacket::RemovedSpell {
+            spell_id: spellbook::read_removed_spell(&mut r)?,
+        },
         opcode::SMSG_SUPERCEDED_SPELL => {
             let (old_spell_id, new_spell_id) = spellbook::read_superceded_spell(&mut r)?;
             ServerPacket::SupercededSpell {

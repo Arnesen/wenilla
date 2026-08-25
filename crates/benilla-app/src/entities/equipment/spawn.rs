@@ -641,7 +641,6 @@ fn spawn_slot(
             benilla_world::particles::EmitterFrames {
                 owner: Some(owner),
                 // A held item is an attached model — the flame fans with the swing.
-                attach: Some(root),
                 // The cloud anchors at the MODEL; the bone composes births only.
                 anchor: Some(root),
                 // The item model is destroyed when the item is replaced or unequipped, and the

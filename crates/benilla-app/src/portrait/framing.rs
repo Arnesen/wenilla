@@ -46,6 +46,51 @@ pub(super) fn diag_to_vert(fov: f32, aspect: f32) -> f32 {
     fov / (aspect * aspect + 1.0).sqrt()
 }
 
+/// The **authored aspect** of every 1.12 glue composition: `4/3`.
+///
+/// It is the client's own reference frame, not a guess. The Lua screen is `768a × 768`
+/// (wow-re `ui/scratch/modelframe-camera-law.md` §12.1), so at the era's default `a = 4/3` the
+/// design space is exactly `1024×768` — the resolution every `UI_<Race>` diorama and its camera-0
+/// framing were authored against.
+pub(super) const GLUE_AUTHORED_ASPECT: f32 = 4.0 / 3.0;
+
+/// The **glue scene's** vertical opening angle — the authored 4:3 view box, never cropped.
+///
+/// The reference law and why we do not ship it: a glue screen's `<ModelFFX>` is `setAllPoints` to
+/// `GlueParent`, which is `setAllPoints` to the screen, so the pane rect *is* the window and
+/// `0x5c3cc0`'s single `aspect` is the display's own (wow-re §12.1: `aspect = (W/H)·(a/a_screen)`,
+/// which is `a` for a full-screen pane — the `gxResolution`/`widescreen` CVar pair, normally the
+/// live mode). Feeding that straight into [`diag_to_vert`] makes the *diagonal* angle the invariant,
+/// so every pixel of extra width is paid for out of height: `0.600·fov` at 4:3, `0.492·fov` at 16:9,
+/// `0.386·fov` at 21:9. On a 3440×1440 panel that is a **1.55× zoom** over the authored framing, and
+/// the character's head and feet leave the frame (B242, decision 1587). The reference does the same
+/// thing on the same monitor — it is a convention from before 21:9 panels existed, not a mechanism
+/// worth reproducing.
+///
+/// It is also the only layer of ours that behaves that way. [`crate::glue::screen_scale`] lays the
+/// 2-D GlueXML chrome out on `height/768` alone, so the panels in *front* of the diorama hold their
+/// vertical composition at every width while the diorama behind them shrank.
+///
+/// So: pin the authored 4:3 view box and give the extra to whichever axis the window actually has.
+/// At `a ≥ 4/3` the vertical opening is frozen at its 4:3 value and the width grows (hor+, what
+/// every modern client does); below it the *horizontal* extent is frozen instead, so a tall or
+/// narrow window opens upward rather than cropping the diorama's sides. Continuous at `4/3`, where
+/// both legs give `0.6·fov`.
+///
+/// Scoped to the full-screen glue scene on purpose. A `<PlayerModel>` pane renders into a fixed
+/// rect that is *not* the window, so its crop is its own `W/H` and stays verbatim ([`diag_to_vert`],
+/// decisions 1089/1543).
+pub(super) fn glue_scene_vert_fov(fov: f32, window_aspect: f32) -> f32 {
+    let authored = diag_to_vert(fov, GLUE_AUTHORED_ASPECT);
+    if window_aspect >= GLUE_AUTHORED_ASPECT || window_aspect <= 0.0 {
+        authored
+    } else {
+        // Hold the authored *horizontal* half-extent `tan(authored/2)·(4/3)` and solve for the
+        // vertical that a narrower window needs to keep it.
+        2.0 * ((authored * 0.5).tan() * GLUE_AUTHORED_ASPECT / window_aspect).atan()
+    }
+}
+
 /// The real client's portrait/model **projection**: gxumath `0x5c3cc0`, a *diagonal-FOV*
 /// perspective — half-angle `θ = (fov/2)/√(aspect²+1)`, `m11 = 1/tan θ`, `m00 = m11/aspect`.
 ///
@@ -628,6 +673,62 @@ mod tests {
             diag_to_vert(1.0, PORTRAIT_ASPECT),
             std::f32::consts::FRAC_1_SQRT_2
         ));
+    }
+
+    /// **B242 / decision 1587.** The full-screen glue scene holds the authored 4:3 view box on
+    /// every window shape, instead of spending height on width the way the reference's
+    /// `aspect = a_screen` does.
+    ///
+    /// The three numbers that matter: the authored `0.6·fov` survives at 4:3, at 16:9 and at the
+    /// 3440×1440 panel the report came from — where the un-pinned law gives `0.386·fov`, a 1.55×
+    /// zoom, and the character's head and feet leave the frame.
+    #[test]
+    fn the_glue_scene_holds_its_authored_vertical_on_every_wide_window() {
+        let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
+        let authored = diag_to_vert(1.0, GLUE_AUTHORED_ASPECT);
+        assert!(
+            close(authored, 0.6),
+            "the authored 4:3 opening is the 0.6 legend"
+        );
+        for wide in [
+            GLUE_AUTHORED_ASPECT,
+            16.0 / 10.0,
+            16.0 / 9.0,
+            3440.0 / 1440.0,
+            32.0 / 9.0,
+        ] {
+            assert!(
+                close(glue_scene_vert_fov(1.0, wide), authored),
+                "a{wide} must keep the authored vertical opening"
+            );
+        }
+        // What we are NOT doing any more — the reference's own numbers, kept here so the size of
+        // the correction stays legible.
+        assert!(close(diag_to_vert(1.0, 16.0 / 9.0), 0.490_26));
+        assert!(close(diag_to_vert(1.0, 3440.0 / 1440.0), 0.386_14));
+    }
+
+    /// The other side of the same clamp: a window NARROWER than 4:3 opens upward rather than
+    /// cropping the diorama's sides, so the authored horizontal half-extent is the invariant there.
+    /// Continuous at 4:3, where both legs of [`glue_scene_vert_fov`] agree.
+    #[test]
+    fn a_narrow_glue_window_holds_its_authored_width_instead() {
+        let half_width = |vert: f32, a: f32| (vert * 0.5).tan() * a;
+        let authored = half_width(
+            diag_to_vert(1.0, GLUE_AUTHORED_ASPECT),
+            GLUE_AUTHORED_ASPECT,
+        );
+        for narrow in [5.0 / 4.0, 1.0, 3.0 / 4.0] {
+            let got = half_width(glue_scene_vert_fov(1.0, narrow), narrow);
+            assert!(
+                (got - authored).abs() < 5e-4,
+                "a{narrow}: authored half-width {authored} vs {got}"
+            );
+        }
+        // …and it never *narrows* the view: a tall window sees more, never less.
+        assert!(glue_scene_vert_fov(1.0, 1.0) > glue_scene_vert_fov(1.0, GLUE_AUTHORED_ASPECT));
+        // A degenerate window (zero height, mid-resize) must not produce a NaN fov.
+        assert!(glue_scene_vert_fov(1.0, 0.0).is_finite());
     }
 
     /// **The portrait bake's projection, pinned against the real client's own GL stream**

@@ -20,11 +20,9 @@
     art spun by SetRotation(GetPlayerFacing()) — the reference renders an engine arrow model;
     0203 flags the stand-in).
 
-    OUT (later slices, per 0203): the AreaPOI.dbc landmarks (the POI pool IS here — the guard's
-    directions marker fills it today, and the DBC rows join through the same GetNumMapLandmarks);
-    raid/battlefield/ping children (the PARTY blips landed with report B320 — the raid pool
-    waits on `GetPlayerMapPosition` answering a `raid` token); the magnifying-glass zoom-out
-    shortcut (redundant with the button); SetupFullscreenScale (the map renders at its native
+    OUT (later slices, per 0203): the raid/battlefield/ping children (the PARTY blips landed with
+    report B320 — the raid pool waits on `GetPlayerMapPosition` answering a `raid` token); the
+    magnifying-glass zoom-out shortcut (redundant with the button); SetupFullscreenScale (the map renders at its native
     1024×768 centered; a scale pass is a taste knob); WorldMapTooltip (only unit blips used it).
 
     Deviations from the reference, deliberate: BlackoutWorld fills via anchors instead of the
@@ -144,9 +142,9 @@
             -- The POI icons (spec: ref WorldMapFrame.lua's landmark pass). One frame per landmark
             -- the host reports for the displayed map, grown on demand from WorldMapPOITemplate and
             -- never shrunk — the tail from a busier map is parked hidden, like the overlay pool
-            -- above. Today the host reports exactly one kind, the guard-directions marker
-            -- (SMSG_GOSSIP_POI); the AreaPOI.dbc landmarks are 0203's deferred slice and arrive
-            -- through this same list.
+            -- above. The host reports the AreaPOI.dbc rows the displayed level admits (town and
+            -- city icons, a capital's "Under Attack" marker, the Eastern Plaguelands towers),
+            -- then the guard-directions marker (SMSG_GOSSIP_POI) last.
             local numPOIs = GetNumMapLandmarks();
             if ( numPOIs > NUM_WORLDMAP_POIS ) then
                 for slot = NUM_WORLDMAP_POIS + 1, numPOIs do

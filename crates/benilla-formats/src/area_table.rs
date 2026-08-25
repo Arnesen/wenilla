@@ -7,9 +7,9 @@
 //! Layout — VERIFIED against build 5875 (2026-07-07, real-row decode: Northshire Valley id 9 →
 //! zone 12 = Elwynn Forest; Booty Bay id 35 → zone 33 = Stranglethorn Vale; cross-checked against
 //! mangoszero's `AreaTableEntry`): **25 × u32 cols**: `ID(0), MapID(1), ZoneID(2 — the parent
-//! area, 0 = this row IS a top-level zone), ExploreFlag(3), Flags(4), … AreaName(11)` + loc
-//! block, `FactionGroupMask(20)`. Sibling readers of the same file: `quest_headers.rs` (id →
-//! name only), `area_sound.rs` (the audio columns).
+//! area, 0 = this row IS a top-level zone), ExploreFlag(3), Flags(4), … ExplorationLevel(10, the
+//! binary's `+0x28`), AreaName(11)` + loc block, `FactionGroupMask(20)`. Sibling readers of the
+//! same file: `quest_headers.rs` (id → name only), `area_sound.rs` (the audio columns).
 //!
 //! The PvP columns (zone-splash arc, decision 0287) — census of the real 5875 table:
 //! `FactionGroupMask` is 2/4/0 (Alliance/Horde/neither) on zone rows and ~always 0 on subzone
@@ -42,6 +42,13 @@ pub struct AreaTableRow {
     /// `FactionGroup.dbc` mask of the owning side (col 20): 2 = Alliance, 4 = Horde, 0 = neither
     /// (contested — or a subzone row deferring to its zone).
     pub faction_group_mask: u32,
+    /// `ExplorationLevel` (col 10, the binary's `AreaTable+0x28`) — **signed**, and read only as
+    /// `>= 0` vs `< 0`. It is the world-map landmark builder's exploration gate: a landmark whose
+    /// `AreaID` lands on a row with `>= 0` here stays hidden until the player has explored that
+    /// area ([`Self::explore_flag`]'s bit); `-1` exempts it (wow-re `gossip-poi-marker.md` §8.2,
+    /// `0x4a6890`–`0x4a68f3`). The 5875 table is `-1` on exactly one row and `>= 0` on the other
+    /// 1080, so in practice the gate applies wherever an `AreaID` resolves at all.
+    pub exploration_level: i32,
     /// The localized display name ("Elwynn Forest").
     pub name: String,
 }
@@ -52,6 +59,15 @@ pub struct AreaTableCatalog {
 }
 
 impl AreaTableCatalog {
+    /// A catalog over rows given directly, rather than read off the chain — for a caller that
+    /// needs a table of exactly known shape (the map-arc gate tests build two-row ones, so that
+    /// what a gate does with `ExplorationLevel -1` is asserted rather than hoped for).
+    pub fn from_rows(rows: Vec<(u32, AreaTableRow)>) -> Self {
+        Self {
+            by_id: rows.into_iter().collect(),
+        }
+    }
+
     pub fn get(&self, id: u32) -> Option<&AreaTableRow> {
         self.by_id.get(&id)
     }
@@ -143,8 +159,9 @@ impl AreaTableCatalog {
     }
 }
 
-/// 25 u32-wide columns; only `ID/MapID/ZoneID/ExploreFlag/Flags/AreaName/FactionGroupMask` are
-/// read (see module doc).
+/// 25 u32-wide columns; only
+/// `ID/MapID/ZoneID/ExploreFlag/Flags/ExplorationLevel/AreaName/FactionGroupMask` are read (see
+/// module doc).
 fn schema() -> Schema {
     let mut s = Schema::new("AreaTable");
     for i in 0..25 {
@@ -175,6 +192,9 @@ pub fn load_area_table_catalog(chain: &mut Chain) -> Result<AreaTableCatalog> {
             continue;
         };
         let faction_group_mask = u32_at(r, 20).unwrap_or(0);
+        // Signed: `-1` is the "no exploration requirement" row. Absent reads as `-1` for the
+        // same reason — an unreadable column must not invent a gate.
+        let exploration_level = u32_at(r, 10).map_or(-1, |v| v as i32);
         by_id.insert(
             id,
             AreaTableRow {
@@ -183,6 +203,7 @@ pub fn load_area_table_catalog(chain: &mut Chain) -> Result<AreaTableCatalog> {
                 explore_flag,
                 flags,
                 faction_group_mask,
+                exploration_level,
                 name,
             },
         );

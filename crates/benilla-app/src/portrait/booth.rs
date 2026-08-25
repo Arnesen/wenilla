@@ -239,7 +239,6 @@ pub(super) fn spawn_booth_effects(
                 Transform::IDENTITY,
                 benilla_world::particles::EmitterFrames {
                     owner: Some(owner),
-                    attach: Some(host), // an attached model — its fan swings with the item
                     anchor: Some(host), // the cloud anchors at the MODEL; bones compose births only
                     // A booth rider's host is torn down with the bake it belongs to.
                     on_owner_loss: benilla_world::particles::OwnerLoss::Free,
@@ -325,7 +324,6 @@ pub(super) fn spawn_booth_own_emitters(
             Transform::IDENTITY,
             benilla_world::particles::EmitterFrames {
                 owner: Some(owner),
-                attach: None, // this model IS the host — nothing it hangs off swings it
                 anchor: Some(root),
                 // The bake root is torn down and rebuilt as a whole.
                 on_owner_loss: benilla_world::particles::OwnerLoss::Free,

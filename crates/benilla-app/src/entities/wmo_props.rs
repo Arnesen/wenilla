@@ -350,7 +350,6 @@ pub(super) fn spawn_wmo_gameobject_props(
                         placement,
                         particles::EmitterFrames {
                             owner: Some(owner),
-                            attach: None, // a placed prop is never an attached model
                             // The cloud anchors at the PROP: the boat carries the risen flame (the
                             // reference re-anchors every cloud to the emitter's live position),
                             // while an animated bone still never drags it.

@@ -784,3 +784,137 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **Selecting the Combat Log must not stop the dock.** The falsification for decision 1588.
+///
+/// `FCF_OnUpdate` is the dock's whole driver — the hover reveal, both tabs' alphas, the label
+/// settle, the whisper blink — and it used to ride `ChatFrame1`'s own `OnUpdate`.
+/// `BenillaFCF_SelectDock(2)` hides ChatFrame1, and a hidden frame gets no `OnUpdate`
+/// ([`UiScript::tick`] runs only effectively-visible frames, which is the reference's rule), so the
+/// driver died at the exact moment the feature it drives was first used: the tabs froze mid-write,
+/// still showing General as the selected one. That is what the director saw and reported, and every
+/// test we had passed straight through it — including this file's two dock tests, because both only
+/// ever exercise window 1.
+///
+/// The trap this walks around: calling `FCF_OnUpdate()` by hand — which the first live probe did,
+/// and which every earlier test does — bypasses the visibility gate and reports healthy alphas on a
+/// dead driver. So this drives the clock and nothing else.
+#[test]
+fn selecting_the_combat_log_keeps_the_dock_driver_running() {
+    let mut s = chat_frame();
+    // Hover the dock and let the reveal settle: General at full, Combat Log at half.
+    let (x, y): (f32, f32) = s
+        .eval(
+            "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+             (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+        )
+        .unwrap();
+    s.mouse_move(x, y);
+    for _ in 0..25 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(
+        close(
+            s.eval::<f32>("return ChatFrame1Tab:GetAlpha()").unwrap(),
+            1.0
+        ) && close(
+            s.eval::<f32>("return ChatFrame2Tab:GetAlpha()").unwrap(),
+            0.5
+        ),
+        "the hovered dock starts with General selected — this test must not pass vacuously"
+    );
+
+    // Click the Combat Log tab, then advance the clock WITHOUT touching FCF_OnUpdate.
+    s.run("BenillaFCF_TabClick(2)").unwrap();
+    for _ in 0..10 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    assert!(
+        s.eval::<bool>("return ChatFrame2:IsShown() and not ChatFrame1:IsShown()")
+            .unwrap(),
+        "the click swapped the windows"
+    );
+    let (a1, a2): (f32, f32) = s
+        .eval("return ChatFrame1Tab:GetAlpha(), ChatFrame2Tab:GetAlpha()")
+        .unwrap();
+    assert!(
+        close(a1, 0.5) && close(a2, 1.0),
+        "the selected tab is the one at full alpha — got General {a1}, Combat Log {a2}"
+    );
+}
+
+/// The other half of the same freeze, and the one a screenshot cannot show: with the driver dead,
+/// `reveal` never decayed either, so the chat box and both tabs stayed lit after the cursor left.
+#[test]
+fn the_dock_still_fades_out_with_the_combat_log_selected() {
+    let mut s = chat_frame();
+    let (x, y): (f32, f32) = s
+        .eval(
+            "return (ChatFrame1:GetLeft() + ChatFrame1:GetRight()) / 2, \
+             (ChatFrame1:GetBottom() + ChatFrame1:GetTop()) / 2",
+        )
+        .unwrap();
+    s.mouse_move(x, y);
+    for _ in 0..25 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    s.run("BenillaFCF_TabClick(2)").unwrap();
+    for _ in 0..10 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(
+        close(
+            s.eval::<f32>("return ChatFrame2Tab:GetAlpha()").unwrap(),
+            1.0
+        ),
+        "revealed before the cursor leaves"
+    );
+
+    s.mouse_move(1500.0, 850.0); // away from the dock
+    for _ in 0..20 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    let a2: f32 = s.eval("return ChatFrame2Tab:GetAlpha()").unwrap();
+    assert!(
+        a2 < 1e-6,
+        "the dock conceals itself again on leave — got Combat Log tab alpha {a2}"
+    );
+}
+
+/// The Combat Log window has the scroll column too — the third part of window 2 that was simply
+/// never authored (after the tab, 1575, and the border art, 1579). It is a behavioural check, not
+/// a name check: scroll up and the bottom button's flash must start blinking on window 2's own
+/// button, which only happens if window 2 both HAS the button and runs `ChatFrame_OnUpdate`.
+#[test]
+fn the_combat_log_window_runs_its_own_bottom_button_blink() {
+    let mut s = chat_frame();
+    s.run("BenillaFCF_TabClick(2)").unwrap();
+    for i in 0..40 {
+        s.add_chat_message("ChatFrame2", &format!("line {i}"), 1.0, 1.0, 1.0);
+    }
+    s.run("ChatFrame2:ScrollUp()").unwrap();
+    assert!(
+        !s.eval::<bool>("return ChatFrame2:AtBottom()").unwrap(),
+        "scrolled off the bottom — this test must not pass vacuously"
+    );
+
+    // CHAT_BUTTON_FLASH_TIME is 0.5 s; 40 frames of 16 ms crosses it.
+    for _ in 0..40 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return ChatFrame2BottomButtonFlash:IsVisible()")
+            .unwrap(),
+        "window 2's bottom-button flash blinks while it is scrolled up"
+    );
+}

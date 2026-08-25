@@ -51,9 +51,9 @@ use quests::{
 };
 use spells::{
     action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
-    clear_cooldown, cooldown_cheat, cooldown_event, item_cooldown, learned_spell, spell_book,
-    spell_chain_targets, spell_cooldowns, spell_delayed, spell_failed_other, spell_go, spell_start,
-    superceded_spell,
+    clear_cooldown, cooldown_cheat, cooldown_event, item_cooldown, learned_spell, removed_spell,
+    spell_book, spell_chain_targets, spell_cooldowns, spell_delayed, spell_failed_other, spell_go,
+    spell_start, superceded_spell,
 };
 
 /// Which unit's cooldown store a wire cooldown packet addresses (decision 0982).
@@ -820,6 +820,7 @@ pub(super) fn apply_net_updates(
             } => spell_book(spell_ids, cooldowns, &mut ui_actions.0, &mut ui_actions.10),
             SessionEvent::ActionButtons { buttons } => action_buttons(buttons, &mut ui_actions.0),
             SessionEvent::SpellLearned { spell_id } => learned_spell(spell_id, &mut ui_actions.0),
+            SessionEvent::SpellRemoved { spell_id } => removed_spell(spell_id, &mut ui_actions.0),
             SessionEvent::SpellSuperceded {
                 old_spell_id,
                 new_spell_id,

@@ -42,7 +42,7 @@ use bevy::prelude::*;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_assets::minimap_grid::group_axis_grid;
 use benilla_assets::WmoModel;
-use benilla_formats::{tile_to_world, world_to_tile, AreaPoiCatalog, MinimapTranslate};
+use benilla_formats::{tile_to_world, world_to_tile, MinimapTranslate};
 
 use interior::{interior_group_selection, wmo_minimap_stem};
 
@@ -253,9 +253,6 @@ struct MinimapAssets {
     /// The unit-blip atlas (`Interface\Minimap\ObjectIcons`, five 32-px dot cells) — the
     /// quest-giver dots.
     object_icons: Option<Handle<Image>>,
-    /// The `AreaPOI.dbc` catalog the landmark selection draws from; `None` = the DBC failed
-    /// to load (no landmark blips, everything else intact).
-    pois: Option<AreaPoiCatalog>,
     /// `SpellShapeshiftForm.dbc` — the tracking dots' creature-type override (a cat-form
     /// druid is a Beast; decision 0564). `None` = no override (unshifted resolution only).
     forms: Option<HashMap<u32, benilla_formats::ShapeshiftForm>>,
@@ -298,16 +295,6 @@ fn setup_minimap(
             }
             let object_icons =
                 assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
-            let pois = {
-                let mut chain = assets.chain.lock_recover();
-                match benilla_formats::load_area_poi_catalog(&mut chain) {
-                    Ok(cat) => Some(cat),
-                    Err(e) => {
-                        warn!("minimap: AreaPOI.dbc failed — no landmark blips: {e:#}");
-                        None
-                    }
-                }
-            };
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");
             }
@@ -328,7 +315,6 @@ fn setup_minimap(
                 poi,
                 rim_arrows,
                 object_icons,
-                pois,
                 forms,
             });
         }
@@ -423,6 +409,7 @@ fn emit_minimap(
         go_templates,
         locks,
         poi_marker,
+        pois,
     ) = blip_inputs;
     // Hover resets every frame; the blip pass below re-establishes it while the map draws.
     *blip_hover = blips::MinimapBlipHover::None;
@@ -720,7 +707,7 @@ fn emit_minimap(
                     .iter()
                     .filter(|k| assets.rim_arrows.get(**k).is_some())
                     .count(),
-                assets.pois.as_ref().map(|c| c.len()).unwrap_or(0),
+                pois.as_ref().map(|c| c.0.len()).unwrap_or(0),
                 map.0,
                 tracking.creatures,
                 tracking.resources,
@@ -764,7 +751,7 @@ fn emit_minimap(
         if assets.rim_arrows.any() {
             blips::emit_landmarks(
                 ctx,
-                assets.pois.as_ref(),
+                pois.as_ref().map(|p| &p.0),
                 poi_marker.on_map(map.0),
                 map.0,
                 &assets.rim_arrows,

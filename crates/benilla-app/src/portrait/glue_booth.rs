@@ -25,7 +25,7 @@ use crate::entities::Creatures;
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
-use super::framing::{attachment_point, diag_to_vert, PORTRAIT_ASPECT};
+use super::framing::{attachment_point, diag_to_vert, glue_scene_vert_fov, PORTRAIT_ASPECT};
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
     BoothBillboardSpec, BoothCam, BoothEffects, BoothLight, BoothMotion, BoothPart, BoothRider,
@@ -829,13 +829,15 @@ pub(super) fn sync_glue_scene(
             .unwrap_or(4.0 / 3.0);
         let fwd = (cam.target - cam.eye).normalize_or_zero();
         let up = Quat::from_axis_angle(fwd, cam.roll) * Vec3::Y;
-        // The record fov is the client's *diagonal* convention → vertical = fov/√(aspect²+1)
-        // (the portrait path's 0.6 factor is exactly this at 4/3). Far kept generous: fog is not
+        // The record fov is the client's *diagonal* convention. The scene is a FULL-SCREEN pane, so
+        // the reference feeds that conversion the display's own aspect and spends height on width —
+        // a 1.55× zoom at 21:9 that crops head and feet (B242). [`glue_scene_vert_fov`] pins the
+        // authored 4:3 view box instead; its doc carries the law. Far kept generous: fog is not
         // rendered yet, so the authored far (27.8 on Orc) would slice unfogged geometry.
         let rig = (
             Transform::from_translation(cam.eye).looking_at(cam.target, up),
             Projection::from(PerspectiveProjection {
-                fov: cam.fov / (aspect * aspect + 1.0).sqrt(),
+                fov: glue_scene_vert_fov(cam.fov, aspect),
                 near: cam.near,
                 far: cam.far.max(1000.0),
                 ..default()

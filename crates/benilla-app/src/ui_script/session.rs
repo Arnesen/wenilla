@@ -223,6 +223,12 @@ mod tests {
         ("ui_script/extract/mod.rs", "last_dpi"),
         // Pushed unconditionally every frame; there is nothing remembered to go stale.
         ("ui_script/mod.rs", "smoothed"),
+        // A fact about the CHAT ROSTER, not about the VM: whether the player has joined a
+        // zone-dependent defense channel (the world-state readout's `Type == 1` gate). It is
+        // recomputed whenever `ChannelState` changes and is the same answer either side of a
+        // login; the push it feeds is memoized beside it in a real `VmMemo`, which is what
+        // re-seats the new VM.
+        ("world_state_ui.rs", "defense_channel"),
         // The cursor systems, both platform arms: these track the OS cursor and an `NSCursor` raw
         // pointer. The OS keeps that state across the VM's death and rebirth, so re-seating them at
         // a login would re-assert a cursor nothing changed. (`last_set` is the key we last handed

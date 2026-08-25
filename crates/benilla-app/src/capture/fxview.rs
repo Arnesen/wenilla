@@ -206,10 +206,7 @@ pub(crate) fn drive_fx_view(
             true, // the fixture plants at a world point — ground quads decal onto the terrain
             // The fixture previews kit effects, which are attached models — but it hangs on
             // nothing (there is no host model in a preview), so its pool keeps the drain.
-            EffectHost {
-                attached: true,
-                parent: None,
-            },
+            EffectHost { parent: None },
             // `WOW_FX_HOLD=1` previews a PERSISTENT instance, so it must show the persistent
             // lifecycle — birth then `Hold` — or the instrument would report a freeze the game
             // does not have. Without it the fixture previews a one-shot, which runs its birth once

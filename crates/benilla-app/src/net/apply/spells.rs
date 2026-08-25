@@ -57,6 +57,25 @@ pub(super) fn learned_spell(spell_id: u32, actions: &mut PlayerActions) {
     }
 }
 
+/// A spell taken back out of the book (`SMSG_REMOVED_SPELL`, decision 1584) — the inverse of
+/// [`learned_spell`] above, and the packet a **talent wipe** arrives as: vmangos's `ResetTalents`
+/// walks every talent of the class and calls `RemoveSpell` on every rank, each of which tails into
+/// `Player::SendSpellRemoved`. Until this arm existed all of them were dropped, so the respec's
+/// only visible effect was the points coming back — the talent window went on drawing the ranks it
+/// had, because [`crate::ui_talent`] derives rank from exactly this set.
+///
+/// The insert's mirror image, and deliberately no more than that: the spellbook, talent and pet
+/// feeds all diff `spells` and fire their own refresh events, and
+/// [`crate::ui_action::LearnedAbilities`] re-derives off the same change (the reference's own
+/// unlearn write site, `0x4b2c50`). What happens to a **bar button** still pointing at the removed
+/// spell is a separate law this arm deliberately does not invent — see 1584's scope note.
+pub(super) fn removed_spell(spell_id: u32, actions: &mut PlayerActions) {
+    debug!("net: removed spell {spell_id}");
+    if actions.spells.remove(&spell_id) {
+        actions.dirty = true;
+    }
+}
+
 /// A rank-up (`SMSG_SUPERCEDED_SPELL`): the new rank replaces the old **in the book** (decision
 /// 0237). The server sends no fresh `SMSG_ACTION_BUTTONS` for this (VERIFIED vmangos
 /// `Player::learnSpell` — the `supercededOld` path touches only the spell store), so the bar has to
@@ -1438,5 +1457,23 @@ mod tests {
                 .any(|c| matches!(c, crate::net::ClientCommand::CancelAutoRepeat)),
             "the cancel acks the server (CMSG_CANCEL_AUTO_REPEAT_SPELL, the 0x6ea0c6 send)"
         );
+    }
+
+    /// `SMSG_REMOVED_SPELL` shrinks the book and dirties the feeds (decision 1584) — the packet a
+    /// talent wipe arrives as, one per rank of every talent. The dirty flag is a real EDGE, not a
+    /// blanket set: a wipe sends removals for ranks the character never learned too (vmangos walks
+    /// the whole class tree), and a repaint per no-op would be a repaint per talent in the game.
+    #[test]
+    fn a_removal_shrinks_the_book_and_dirties_the_feeds() {
+        let mut actions = PlayerActions::default();
+        actions.spells.extend([14522, 14788, 14789]);
+
+        removed_spell(14788, &mut actions);
+        assert!(!actions.spells.contains(&14788));
+        assert!(actions.dirty);
+
+        actions.dirty = false;
+        removed_spell(14788, &mut actions);
+        assert!(!actions.dirty, "a spell we never knew is not a repaint");
     }
 }

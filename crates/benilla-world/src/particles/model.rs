@@ -194,8 +194,9 @@ pub(super) fn update_model_particles(
             rgba[3] *= emitter.render_alpha();
             let tf = if anchored {
                 Transform {
-                    translation: emitter.anchor_pos + emitter.attach_rot * p.pos,
-                    rotation: emitter.attach_rot * p.quat,
+                    // World mode: the instance transform IS the stored one (decision 1585).
+                    translation: p.pos,
+                    rotation: p.quat,
                     scale: Vec3::splat(size * inst_scale),
                 }
             } else {

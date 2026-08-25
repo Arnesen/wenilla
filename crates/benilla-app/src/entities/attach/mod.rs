@@ -786,7 +786,6 @@ pub(super) fn attach_entity_visuals(
                         particles::EmitterFrames {
                             owner: Some(owner),
                             // A unit's OWN model is not an attached model (`[model+0x17c]` = 0).
-                            attach: None,
                             // The cloud anchors at the unit; bones compose births only.
                             anchor: Some(entity),
                             // The unit's model going away IS this emitter's model going away

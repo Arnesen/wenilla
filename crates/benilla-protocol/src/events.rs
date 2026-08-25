@@ -482,6 +482,10 @@ pub enum SessionEvent {
     /// A spell added to the book after login (`SMSG_LEARNED_SPELL`): trainer/quest/level-up, widened
     /// from the wire `u16`. The first post-login spell-book mutation (decision 0237).
     SpellLearned { spell_id: u32 },
+    /// A spell taken back out of the book (`SMSG_REMOVED_SPELL`), widened from the wire `u16`:
+    /// a talent wipe, an abandoned profession, a GM `.unlearn`. Every rank of every talent arrives
+    /// as one of these after a respec, and until decision 1584 none of them did.
+    SpellRemoved { spell_id: u32 },
     /// A rank-up (`SMSG_SUPERCEDED_SPELL`): the new rank replaces the old in the book and on the
     /// action bar. Both ids widened from the wire `u16`.
     SpellSuperceded {

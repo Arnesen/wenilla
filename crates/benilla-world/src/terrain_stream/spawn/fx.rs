@@ -218,7 +218,6 @@ pub(super) fn spawn_emitters_for(
             transform,
             particles::EmitterFrames {
                 owner,
-                attach: None, // placed doodads/props are never attached models
                 anchor: None, // anchor at the placement: an animated bone never drags the cloud
                 // An animated doodad's rig goes when its placement unloads, and that IS this
                 // model being destroyed — free the pool with it, the same rule the WMO-prop lane

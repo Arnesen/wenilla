@@ -1197,6 +1197,9 @@ pub(crate) struct Model {
     /// The world-map seam ([`worldmap`](super::worldmap)): the pushed catalog/feed + the
     /// engine-owned selection.
     pub(crate) worldmap: super::worldmap::WorldMapState,
+    /// The always-up world-state readout's rows ([`worldstate`](super::worldstate)), already
+    /// gated and resolved app-side.
+    pub(crate) worldstate: super::worldstate::WorldStateUiState,
     /// Events (name + args) queued by Lua bindings (`SetMapZoom` → `WORLD_MAP_UPDATE`;
     /// `PickupContainerItem`/`ClearCursor`/… → `CURSOR_UPDATE`/`ITEM_LOCK_CHANGED`/
     /// `DELETE_ITEM_CONFIRM`, decision 0216 §4/§5) to fire at the next
@@ -1555,6 +1558,7 @@ impl Model {
             quest_log_watched: Vec::new(),
             server_unix_time: None,
             worldmap: super::worldmap::WorldMapState::default(),
+            worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             cursor_pos: (0.0, 0.0),
             chat_sends: Vec::new(),

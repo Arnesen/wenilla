@@ -80,76 +80,33 @@ fn integrate_particle(p: &mut Particle, env: &StepEnv) -> bool {
     true
 }
 
-/// **How much of the emitter's per-frame world motion a live particle keeps** — the ride-vs-trail
-/// law, in one place (`speed` is `|Δ| / dt`, the yd/s the authored follow response is keyed on).
+/// **The follow-delta fraction** (file flag `0x4000`, rt `0x40000`) — the share of the emitter's
+/// per-frame world translation that is added to every live particle on top of whatever its
+/// storage space already gives it (`speed` is `|Δ| / dt`, the yd/s the authored response is
+/// keyed on). Zero when unauthored, and zero for a degenerate response (equal authored speeds,
+/// which the reference answers by zeroing both).
 ///
-/// **The discriminator is the emitter's own FILE FLAG `0x10`, not the host class** (wow-re
-/// `part-emitter-motion.md` §2c, byte-settled by a three-worker §5 with objdump arbitration — the
-/// round benilla's 0986 dispatched, which *refuted* the host-class reading 0986 shipped). Spawn and
-/// draw are the two halves of one storage-space choice:
+/// **The ride-vs-trail baseline is NOT here** — it is the storage space itself (decision 1585).
+/// wow-re `part-emitter-motion.md` §2c-B: file `0x10` SET stores the raw emitter-LOCAL pos/vel
+/// (`0x7b8aa5`) and the draw folds the live emitter matrix `rt+0x1fc` back in every frame
+/// (`0x7b3efb`) ⇒ a rigid ride, keep `1.0`, for free. CLEAR bakes pos/vel through that matrix
+/// into WORLD at birth (`0x7b8acf`/`0x7b8b0f`) and the draw does *not* fold `rt+0x1fc`
+/// (`0x7b3f48`) ⇒ world-frozen, keep `0.0`, also for free. Spending a per-frame correction term
+/// to *simulate* either baseline is what decision 1578 did, and it could only ever approximate
+/// the translation half — see 1585.
 ///
-/// - `0x10` **SET** (rt `0x100`): the spawn stores the raw emitter-LOCAL pos/vel (`0x7b8aa5`) and
-///   the draw folds the live emitter matrix `rt+0x1fc` back in every frame (`0x7b3efb`) ⇒ a
-///   **rigid ride**, keep `1.0`. A carried torch (`Club_1H_Torch_A_01.m2` = `0x0011`) is flagged
-///   for exactly this.
-/// - `0x10` **CLEAR**: the spawn bakes pos/vel through the emitter matrix into WORLD (`0x7b8acf`/
-///   `0x7b8b0f`) and the draw does *not* fold `rt+0x1fc` (`0x7b3f48`) ⇒ **world-frozen**, keep
-///   `0.0`: a trail of length `host speed × particle lifetime`. Sprint's `RibbonTrail` (`0x0029`)
-///   and Multi-Shot's flares (`0x0309`) are this, and so is the kobold's head candle (`0x0001`) —
-///   whose 0.2 s life makes its ~1 yd smear invisible, which is what let two earlier rounds read
-///   the null as a refutation and build the host-class law on it.
-///
-/// The host class is not consulted at all: `rt+0x1fc` is a world matrix for **every** host
-/// (`0x719090`–`0x719164`, no per-class branch), because the device matrix it composes is
-/// `scene+0x9c` followed by `scene+0xdc = inverse(scene+0x9c)` — it cancels exactly.
-///
-/// **The follow-delta term** (file `0x4000`, §2) then ADDS the authored two-point response
-/// ([`benilla_formats::ParticleEmitterDef::follow_line`]) on top, *independently of `0x10`*:
-/// `0x7b5303` builds `rt+0x26c` and `0x7b2744` adds `rt+0x278` whatever `0x100` says. Over the
-/// CLEAR baseline that recovers the ride fraction — ArcaneShot's head glow, 0.1 @ 2.5 yd/s → 0.9
-/// @ 16.7, riding the arrowhead while its three unflagged siblings hang behind it. Over a SET
-/// baseline (12 emitters corpus-wide carry both) it genuinely leads, and we reproduce that
-/// literally. A degenerate response — equal authored speeds, which the reference answers by
-/// zeroing both — is no follow term at all.
-fn world_motion_kept(def: &benilla_formats::ParticleEmitterDef, speed: f32) -> f32 {
-    let baseline = if def.model_space() { 1.0 } else { 0.0 };
+/// This term is read independently of `0x10`: `0x7b5303` builds `rt+0x26c` and `0x7b2744` adds
+/// `rt+0x278` whatever `0x100` says. Over the CLEAR baseline it recovers a ride fraction —
+/// ArcaneShot's head glow, 0.1 @ 2.5 yd/s → 0.9 @ 16.7, riding the arrowhead while its three
+/// unflagged siblings hang frozen behind it. Over a SET baseline (12 emitters corpus-wide carry
+/// both) it genuinely leads, and we reproduce that literally.
+fn follow_fraction(def: &benilla_formats::ParticleEmitterDef, speed: f32) -> f32 {
     if !def.follow_emitter() {
-        return baseline;
+        return 0.0;
     }
-    baseline
-        + def.follow_line().map_or(0.0, |(slope, intercept)| {
-            (slope * speed + intercept).clamp(0.0, 1.0)
-        })
-}
-
-/// The **world-frame correction** the live pool needs this frame: the law says a particle's world
-/// displacement is `keep · Δemitter` ([`world_motion_kept`]), and each storage frame already
-/// supplies part of that for free — this is the remainder.
-///
-/// Conflating the two "for free" terms is a real bug, not a rounding one:
-///
-/// - **Anchored** (`0x10` clear): positions are anchor-relative, so the pool rides the MODEL —
-///   `Δanchor`. For a standing model with an emitter orbiting an animated bone that is **zero**
-///   while `Δemitter` is not: the births already bake the bone pose and the risen stars must then
-///   hold still (decision 0396's eat sparkle). Subtracting `Δemitter` here would counter-orbit the
-///   whole cloud — 0396's helix, mirrored.
-/// - **Model mode** (`0x10` set): positions are emitter-local and the draw re-applies the live
-///   emitter matrix, so the pool already rides the full `Δemitter` — exactly the `keep = 1` the
-///   flag buys. What is left is only whatever a follow response adds on top.
-fn motion_carry(
-    def: &benilla_formats::ParticleEmitterDef,
-    anchored: bool,
-    emitter_delta: Vec3,
-    anchor_delta: Vec3,
-    dt: f32,
-) -> Vec3 {
-    let keep = world_motion_kept(def, emitter_delta.length() / dt);
-    let carried = if anchored {
-        anchor_delta
-    } else {
-        emitter_delta
-    };
-    keep * emitter_delta - carried
+    def.follow_line().map_or(0.0, |(slope, intercept)| {
+        (slope * speed + intercept).clamp(0.0, 1.0)
+    })
 }
 
 /// The velocity-inherit trigger (wow-re `part-emitter-motion.md` §1, `0x7b5230` bytes
@@ -190,7 +147,6 @@ fn drive_child(
     scale: f32,
     dt: f32,
     anchored: bool,
-    attach_inv: Quat,
     placement: &Transform,
 ) {
     let origin = Vec3::from(child.def.position);
@@ -209,10 +165,11 @@ fn drive_child(
             let (base, dir) = emit_local(&child.def, now, &mut child.rng);
             let local = base - origin;
             let speed = now.emission_speed * (1.0 + now.speed_variation * rand_s11(&mut child.rng));
+            // The parent particle's position is world in world mode (1585), so the child's
+            // offset/velocity fold is rotation+scale into WORLD — no frame is divided out.
             let fold = |v: Vec3| {
                 if anchored {
-                    attach_inv
-                        * (placement.rotation * (placement.scale * wow_to_bevy(v.to_array())))
+                    placement.rotation * (placement.scale * wow_to_bevy(v.to_array()))
                 } else {
                     v
                 }
@@ -718,8 +675,6 @@ pub(super) fn simulate_particles(
             owner,
             on_owner_loss,
             draining,
-            attach,
-            attach_rot,
             alpha_src,
             alpha,
             anchor,
@@ -727,7 +682,6 @@ pub(super) fn simulate_particles(
             particles,
             accumulator,
             emitter_prev,
-            anchor_prev,
             inherit_accum,
             inherit_vel,
             gate_prev,
@@ -813,14 +767,6 @@ pub(super) fn simulate_particles(
             commands.entity(entity).despawn();
             continue;
         }
-        // The live attach rotation `A(t)` (attached models only — see the field doc). A vanished
-        // attach entity keeps the last rotation: the pool drains in its final frame.
-        if let Some(a) = *attach {
-            if let Ok(gt) = owners.transforms.get(a) {
-                let (_, rot, _) = gt.to_scale_rotation_translation();
-                *attach_rot = rot;
-            }
-        }
         // The MODEL's render alpha for this frame (decision 0827 — the reference's per-frame
         // `emitter+0x1a8 = Model+0x19c` copy at `0x718960` @`0x719073`). Two disjoint sources, the
         // same slot the reference writes both through: an entity-owned cloud takes its OWN model
@@ -830,7 +776,6 @@ pub(super) fn simulate_particles(
         // already applies as a hard stop.
         *alpha = alpha_src.map_or(1.0, |e| model_alphas.get(e))
             * fade.map_or(1.0, |f| f.distance_alpha(cam_pos));
-        let attach_inv = attach_rot.inverse();
         // The cloud anchor (see the field doc): the model's live translation, or the last-known
         // one while the pool drains. A whole-model owner keeps anchor == owner — identical math.
         match *anchor {
@@ -857,32 +802,31 @@ pub(super) fn simulate_particles(
         let emitter_world = placement.transform_point(wow_to_bevy(def.position));
         let emitter_delta = emitter_prev.map_or(Vec3::ZERO, |prev| emitter_world - prev);
         *emitter_prev = Some(emitter_world);
-        // …and the ANCHOR's, on the same one-frame refresh. It is what the anchored store carries
-        // for free (see the carry block below), and it is NOT the emitter's: an emitter orbiting
-        // an animated bone inside a standing model has `emitter_delta ≠ 0` with the model — and so
-        // the cloud — perfectly still (0396's eat sparkle).
-        let anchor_delta = anchor_prev.map_or(Vec3::ZERO, |prev| *anchor_pos - prev);
-        *anchor_prev = Some(*anchor_pos);
         // NOTE on the R(+Z,90°) emitter-frame law (`emit_local`'s tail): we apply R at EMISSION,
         // so stored vectors are already post-R and every stored↔world fold here stays R-free —
         // unlike the reference, which stores pre-R and folds R inside its draw matrix. The two
         // compositions are equivalent; ours keeps a single application point.
-        let to_stored = |world: Vec3, attach_inv: Quat, placement: &Transform| {
+        // World → the particles' STORED frame. In world mode (`0x10` CLEAR) the store IS world,
+        // so this is the identity — the whole point of 1585: no live matrix is ever re-applied to
+        // an already-born particle, so nothing the host does afterwards (translate, turn, or play
+        // an animation that swings the emitter's bone) can reach it.
+        let to_stored = |world: Vec3, placement: &Transform| {
             if anchored {
-                attach_inv * world
+                world
             } else {
                 Vec3::from(bevy_to_wow(
                     (placement.rotation.inverse() * world) / placement.scale.max(Vec3::splat(1e-6)),
                 ))
             }
         };
-        // The per-frame world-motion carry ([`motion_carry`]), folded into the stored frame and
-        // applied to every live particle after its first integrate (the fresh-bit skip).
-        let carry = motion_carry(def, anchored, emitter_delta, anchor_delta, dt);
-        let follow = if carry == Vec3::ZERO {
-            Vec3::ZERO // nothing moved, or the store already rides exactly right
+        // The per-frame follow-delta ([`follow_fraction`]), folded into the stored frame and added
+        // to every live particle after its first integrate (the fresh-bit skip). The ride-vs-trail
+        // baseline is not here — the storage space supplies it (1585).
+        let fraction = follow_fraction(def, emitter_delta.length() / dt);
+        let follow = if fraction == 0.0 || emitter_delta == Vec3::ZERO {
+            Vec3::ZERO
         } else {
-            to_stored(carry, attach_inv, placement)
+            to_stored(fraction * emitter_delta, placement)
         };
         // VELOCITY INHERIT (file 0x40): the ~30 Hz trigger holds the inherit velocity births
         // read; the live gate (rt+0x64) zeroes it while nothing is live.
@@ -941,14 +885,14 @@ pub(super) fn simulate_particles(
         let g = now.gravity;
         let drag = def.drag;
         // Sphere KILL-OUTBOUND emitters: the emitter origin in the stored frame — `def.position`
-        // composed exactly like a birth (anchored: the live placement/attach fold; model mode:
-        // raw local). Every corpus author converges inward (negative speed); this is what stops
-        // the stream at the centre instead of spraying it out the far side.
+        // composed exactly like a birth (world mode: the live world point, which is
+        // `emitter_world` itself; model mode: raw local). Every corpus author converges inward
+        // (negative speed); this is what stops the stream at the centre instead of spraying it
+        // out the far side. This one term is read LIVE in world mode by design: it is the
+        // emitter's current origin, not a birth property of any particle.
         let kill_origin = def.kill_outbound().then(|| {
             if anchored {
-                attach_inv
-                    * (placement.translation - *anchor_pos
-                        + placement.rotation * (placement.scale * wow_to_bevy(def.position)))
+                emitter_world
             } else {
                 Vec3::from(def.position)
             }
@@ -1002,35 +946,29 @@ pub(super) fn simulate_particles(
             let (base, dir) = emit_local(def, &now, rng);
             let speed =
                 now.emission_speed * (1.0 + now.speed_variation * (rand01(rng) * 2.0 - 1.0));
-            // Anchored mode bakes the emitter's ROTATION + scale at birth (the reference's
-            // `0x7bca80`/`0x7bcb40` birth transforms) but stores relative to its position — the
-            // per-frame anchor supplies the translation at render; on an attached model the
-            // birth additionally divides out the live attach rotation (the reference's
-            // `worldMx = palette·view⁻¹·A⁻¹`, CLEAR mode), stored attach-local. Model mode
-            // stores raw local.
+            // WORLD mode (`0x10` CLEAR) bakes the birth all the way into world through the live
+            // emitter matrix — the reference's `0x7b8b0f 0x7bca80(pos, E)` (with translation) and
+            // `0x7b8acf 0x7bcb40(vel, E)` (3×3). `placement` is the emitter's BONE transform in
+            // world, so `transform_point` is that matrix. Nothing is stored relative to anything
+            // that can later move. MODEL mode (`0x10` SET) stores raw emitter-local and the draw
+            // re-applies the live matrix instead (`0x7b8aa5`/`0x7b3efb`).
             let (mut pos, vel) = if anchored {
                 (
-                    attach_inv
-                        * (placement.translation - *anchor_pos
-                            + placement.rotation
-                                * (placement.scale * wow_to_bevy(base.to_array()))),
-                    attach_inv
-                        * (placement.rotation
-                            * (placement.scale * wow_to_bevy((dir * speed).to_array()))),
+                    placement.transform_point(wow_to_bevy(base.to_array())),
+                    placement.rotation * (placement.scale * wow_to_bevy((dir * speed).to_array())),
                 )
             } else {
                 (base, dir * speed)
             };
             // GROUND SNAP (file 0x2000, [`benilla_formats::ParticleEmitterDef::ground_snap`]):
-            // at spawn only, anchored mode only, probe 20 yd straight down against
-            // terrain/WMO/doodad geometry (the walking collision audience — the reference's
-            // 0x100111 flag set); on a hit the particle stands ON the surface, lifted by its
-            // birth over-life SIZE. A miss leaves the spawn position untouched.
+            // at spawn only, world mode only, probe 20 yd straight down against terrain/WMO/
+            // doodad geometry (the walking collision audience — the reference's 0x100111 flag
+            // set); on a hit the particle stands ON the surface, lifted by its birth over-life
+            // SIZE. A miss leaves the spawn position untouched. `pos` is already world here, so
+            // the probe reads and writes it directly.
             if anchored && def.ground_snap() {
-                let world = *anchor_pos + *attach_rot * pos;
-                if let Some(hit) = spatial.cast_ray(world, Dir3::NEG_Y, 20.0, true, &snap_filter) {
-                    let lifted = world.y - hit.distance + def.over_life.sample(0.0).size;
-                    pos = attach_inv * (Vec3::new(world.x, lifted, world.z) - *anchor_pos);
+                if let Some(hit) = spatial.cast_ray(pos, Dir3::NEG_Y, 20.0, true, &snap_filter) {
+                    pos.y = pos.y - hit.distance + def.over_life.sample(0.0).size;
                 }
             }
             // VELOCITY INHERIT consumption (the shape kernels' closing block, gated on the
@@ -1038,7 +976,7 @@ pub(super) fn simulate_particles(
             // stored frame (the block runs after the reference's space fold).
             let vel = if def.inherits_emitter_motion() && *inherit_vel != Vec3::ZERO {
                 vel + (1.0 + now.speed_variation * rand_s11(rng))
-                    * to_stored(*inherit_vel, attach_inv, placement)
+                    * to_stored(*inherit_vel, placement)
             } else {
                 vel
             };
@@ -1069,7 +1007,7 @@ pub(super) fn simulate_particles(
                 // yaw appended to the frame rotation in both modes.
                 let r90 = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
                 let quat = if anchored {
-                    attach_inv * placement.rotation * r90
+                    placement.rotation * r90
                 } else {
                     r90
                 };
@@ -1110,7 +1048,6 @@ pub(super) fn simulate_particles(
                 density * dist_lod,
                 dt,
                 anchored,
-                attach_inv,
                 placement,
             );
             let c_env = StepEnv {
@@ -1146,8 +1083,6 @@ pub(super) fn simulate_particles(
         *entity_global = GlobalTransform::from(*entity_tf);
         let frame = DrawFrame {
             anchored,
-            anchor,
-            attach_rot: *attach_rot,
             alpha: *alpha,
         };
         let cam = CamBasis {
@@ -1305,8 +1240,8 @@ pub(super) fn simulate_particles(
 #[cfg(test)]
 mod tests {
     use super::{
-        booth_frozen, inherit_trigger, integrate_particle, is_above, motion_carry,
-        world_motion_kept, ChildEmitter, Particle, StepEnv, Vec3,
+        booth_frozen, follow_fraction, inherit_trigger, integrate_particle, is_above, ChildEmitter,
+        Particle, StepEnv, Vec3,
     };
     use bevy::prelude::{Quat, Transform};
 
@@ -1404,26 +1339,26 @@ mod tests {
     /// `0x4000` adds the authored response on top; a degenerate response adds nothing. The host
     /// class is not an input — the same unflagged def trails whoever carries it.
     #[test]
-    fn world_motion_kept_reads_the_file_flag_then_the_follow_response() {
+    fn follow_fraction_is_the_authored_response_and_nothing_else() {
         let plain = crate::particles::tests::plain_def(); // no flags
         assert_eq!(
-            world_motion_kept(&plain, 30.0),
+            follow_fraction(&plain, 30.0),
             0.0,
-            "unflagged: world-frozen at any speed — Sprint's sparkles and Multi-Shot's flares \
-             hang where they were born, and so does the kobold's candle (its 0.2 s life is what \
-             hides the smear)"
+            "no 0x4000: no per-frame term at any speed — ride-vs-trail is the storage space, not \
+             a correction (1585)"
         );
         let riding = benilla_formats::ParticleEmitterDef {
             flags: 0x0011, // the carried torch, Club_1H_Torch_A_01.m2
             ..crate::particles::tests::plain_def()
         };
         assert_eq!(
-            world_motion_kept(&riding, 30.0),
-            1.0,
-            "file 0x10: the rigid ride, at any speed"
+            follow_fraction(&riding, 30.0),
+            0.0,
+            "file 0x10 alone adds NO term: model mode's draw already re-applies the live emitter \
+             matrix, which is the whole 100% ride"
         );
         // ArcaneShot's authored pair: 0.1 @ 2.5 yd/s, 0.9 @ 16.667 — the head glow catching up
-        // over the unflagged (world-frozen) baseline its three siblings keep.
+        // over the world-frozen baseline its three siblings keep.
         let following = benilla_formats::ParticleEmitterDef {
             flags: 0x4000,
             follow_speed1: 2.5,
@@ -1432,25 +1367,11 @@ mod tests {
             follow_scale2: 0.9,
             ..crate::particles::tests::plain_def()
         };
-        assert!(
-            (world_motion_kept(&following, 2.5) - 0.1).abs() < 1e-3,
-            "the follow response over the world-frozen baseline IS the fraction"
-        );
+        assert!((follow_fraction(&following, 2.5) - 0.1).abs() < 1e-3);
         assert_eq!(
-            world_motion_kept(&following, 40.0),
+            follow_fraction(&following, 40.0),
             1.0,
-            "clamped at a rigid ride on a fast missile — over this baseline it never leads"
-        );
-        // Both flags (12 emitters corpus-wide): the reference reads them independently, so the
-        // follow add lands on top of a locally-stored — already riding — position and genuinely
-        // leads. Reproduced literally (§2c-E).
-        let both = benilla_formats::ParticleEmitterDef {
-            flags: 0x4010,
-            ..following.clone()
-        };
-        assert!(
-            (world_motion_kept(&both, 2.5) - 1.1).abs() < 1e-3,
-            "0x10 + 0x4000: the ride, plus the authored fraction on top"
+            "clamped: on a fast missile the head glow rides its emitter exactly"
         );
         // Equal authored speeds: the reference zeroes both, so nothing is added.
         let degenerate = benilla_formats::ParticleEmitterDef {
@@ -1459,62 +1380,66 @@ mod tests {
             follow_speed2: 4.0,
             ..crate::particles::tests::plain_def()
         };
-        assert_eq!(world_motion_kept(&degenerate, 30.0), 0.0);
-        let degenerate_riding = benilla_formats::ParticleEmitterDef {
-            flags: 0x4010,
-            ..degenerate.clone()
-        };
-        assert_eq!(world_motion_kept(&degenerate_riding, 30.0), 1.0);
+        assert_eq!(follow_fraction(&degenerate, 30.0), 0.0);
     }
 
-    /// [`motion_carry`] — the storage-frame algebra the law is served through, and the guard on
-    /// 0396: the term an ANCHORED store already carries is the MODEL's motion, never the
-    /// emitter's. An emitter orbiting an animated bone inside a standing model has a live
-    /// `Δemitter` and a zero `Δanchor`, and its risen stars must not be dragged by either.
+    /// **B154's regression, at the draw**: a world-mode particle is frozen at birth, so NOTHING
+    /// its host subsequently does — translate, turn, or swing the emitter's bone through an
+    /// animation — may move it. Decision 1578 cancelled the host's *translation* with a per-frame
+    /// correction and left its *rotation* reaching every live particle, which is what welded
+    /// Sprint's sparkle trail to the runner's chest bone (wow-re §2c-B: the CLEAR draw at
+    /// `0x7b3f48` folds `rt+0x1fc` back in NOT AT ALL).
     #[test]
-    fn motion_carry_subtracts_what_each_store_already_rides() {
-        let plain = crate::particles::tests::plain_def(); // 0x10 clear -> anchored, keep 0
-        let dt = 1.0 / 60.0;
-        // The eat sparkle: the model stands, the emitter bone orbits. Nothing to correct — the
-        // pool is already exactly where the world-frozen law wants it.
-        assert_eq!(
-            motion_carry(&plain, true, Vec3::X * 0.02, Vec3::ZERO, dt),
-            Vec3::ZERO,
-            "an orbiting bone inside a standing model moves no live particle"
-        );
-        // The sprinting rogue: model and emitter travel together, and the anchored store rides
-        // the model — so the carry cancels it exactly, leaving the sparkles in the air.
-        let step = Vec3::X * 0.175; // ~10.5 yd/s at 60 fps
-        assert_eq!(
-            motion_carry(&plain, true, step, step, dt),
-            -step,
-            "world-frozen: the store's own ride is subtracted in full"
-        );
-        // The carried torch (0x10 set, model mode): the store already re-applies the live emitter
-        // matrix, which IS the 100% ride the flag buys. Nothing to correct.
-        let riding = benilla_formats::ParticleEmitterDef {
-            flags: 0x0011,
-            ..crate::particles::tests::plain_def()
+    fn a_world_mode_particle_ignores_everything_its_host_does_after_birth() {
+        use crate::particles::quads::{particle_center, DrawFrame};
+        let born_at = Vec3::new(12.0, 3.0, -40.0);
+        let p = particle(born_at, Vec3::ZERO);
+        let frame = DrawFrame {
+            anchored: true, // 0x10 CLEAR — the world store
+            alpha: 1.0,
         };
-        assert_eq!(
-            motion_carry(&riding, false, step, step, dt),
-            Vec3::ZERO,
-            "model mode rides for free"
-        );
-        // A follow emitter over the world-frozen baseline recovers `fraction` of the motion.
-        let following = benilla_formats::ParticleEmitterDef {
-            flags: 0x4000,
-            follow_speed1: 2.5,
-            follow_scale1: 0.1,
-            follow_speed2: 16.667,
-            follow_scale2: 0.9,
-            ..crate::particles::tests::plain_def()
+        // Every host pose we can think of, including ones no bone reaches.
+        for placement in [
+            Transform::IDENTITY,
+            Transform::from_translation(Vec3::new(500.0, -20.0, 900.0)),
+            Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            Transform::from_rotation(Quat::from_euler(bevy::math::EulerRot::YXZ, 1.2, -0.7, 2.9))
+                .with_translation(Vec3::new(-7.0, 44.0, 3.0))
+                .with_scale(Vec3::splat(3.5)),
+        ] {
+            assert_eq!(
+                particle_center(&frame, &placement, &p),
+                born_at,
+                "a world-mode particle moved when its host did"
+            );
+        }
+    }
+
+    /// The other half of the same law: model mode (`0x10` SET) rides its host rigidly, rotation
+    /// included — the carried torch. Storage space is the whole discriminator, so these two tests
+    /// together are the ride/trail law at the draw.
+    #[test]
+    fn a_model_mode_particle_rides_its_host_rigidly() {
+        use crate::particles::quads::{particle_center, DrawFrame};
+        let p = particle(Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO); // WoW axes, 1 yd out on +X
+        let frame = DrawFrame {
+            anchored: false, // 0x10 SET — the emitter-local store
+            alpha: 1.0,
         };
-        let slow = Vec3::X * (2.5 * dt);
-        let carry = motion_carry(&following, true, slow, slow, dt);
+        let moved = Transform::from_translation(Vec3::new(10.0, 0.0, 0.0));
+        assert_eq!(
+            particle_center(&frame, &moved, &p) - particle_center(&frame, &Transform::IDENTITY, &p),
+            Vec3::new(10.0, 0.0, 0.0),
+            "model mode follows its host's translation in full"
+        );
+        let turned = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
         assert!(
-            (carry - (0.1 - 1.0) * slow).length() < 1e-6,
-            "keeps 0.1 of the emitter's motion over a store that rides all of it"
+            particle_center(&frame, &turned, &p).distance(particle_center(
+                &frame,
+                &Transform::IDENTITY,
+                &p
+            )) > 1.0,
+            "model mode follows its host's ROTATION too — the one thing world mode must not do"
         );
     }
 
@@ -1600,7 +1525,6 @@ mod tests {
             1.0,
             0.1,
             true,
-            Quat::IDENTITY,
             &Transform::IDENTITY,
         );
         assert_eq!(child.particles.len(), 20, "one rate·dt per live parent");
@@ -1626,7 +1550,6 @@ mod tests {
             1.0,
             0.1,
             true,
-            Quat::IDENTITY,
             &Transform::IDENTITY,
         );
         assert_eq!(child.particles.len(), n, "no parents, no births");

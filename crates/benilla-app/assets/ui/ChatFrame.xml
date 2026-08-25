@@ -269,8 +269,9 @@
 
         -- FCF_SelectDockFrame: show the selected frame, hide the other; selected tab full alpha,
         -- unselected half (both still scaled by the reveal fade below). Stops the selected tab's
-        -- whisper flash (ref FCF_SelectDockFrame → UIFrameFlashRemoveFrame). Tab getglobals are
-        -- guarded: window 2's tab is deliberately unbuilt (see the note at the tab section).
+        -- whisper flash (ref FCF_SelectDockFrame → UIFrameFlashRemoveFrame). The tab getglobal
+        -- stays guarded: both dock tabs exist (1575), but the guard also covers ChatFrame3..7,
+        -- which have no tabs at all and which the error above is what actually keeps out.
         function BenillaFCF_SelectDock(id)
             BenillaFCF.selected = id
             for i = 1, 2 do
@@ -687,21 +688,34 @@
 
     <!-- ── The dock: ChatFrame1 (General) + ChatFrame2 (Combat Log) sharing its rect ─────── -->
     <!--
-        ChatFrame1: 430×120 at BOTTOMLEFT (32, 85) — the managed-position base
-        (UIPARENT_MANAGED_FRAME_POSITIONS["ChatFrame1"]: baseY 85 + the bottom-stack offsets,
-        applied by UIParent_ManageFramePositions per decision 0272); displayDuration 120 /
-        maxLines 128 (ref ChatFrameTemplate). The background stretches -2/+2 x and +3/-6 y past
-        the frame (ref $parentBackground anchors), the 8 border slices ring it (the ref draws
-        them through its resize buttons' textures; benilla authors them as plain textures — the
-        hover LOOK without the resize mechanics). Everything starts alpha 0; BenillaFCF fades.
+        **One declaration, two windows.** The dock's two windows are the SAME widget seated
+        differently, and saying that twice is how three straight rounds of bugs got in: 1575 found
+        the Combat Log with no tab, 1579 found it with no rect and no border art, and 1588 found it
+        with no `OnUpdate` and no scroll column — each time because window 2 was a HAND-MIRRORED
+        partial copy of window 1 and the mirroring missed a part. The reference does not mirror: it
+        declares `FloatingChatFrameTemplate` `virtual="true"` and every `ChatFrameN` inherits it
+        (FloatingChatFrame.xml l.211, l.685-832). So do we, and the class of bug goes with it —
+        a part that exists for one docked window now cannot fail to exist for the other.
+
+        Per-instance is only what genuinely differs: the seat (ChatFrame1 is the managed-position
+        base — `UIPARENT_MANAGED_FRAME_POSITIONS["ChatFrame1"]`, baseY 85 + the bottom-stack
+        offsets, decision 0272 — and ChatFrame2 takes its rect from ChatFrame1's, which is what
+        being docked MEANS and why it must never carry a managed row of its own, 1579), the id,
+        and which of the two ships shown.
+
+        The chrome the template carries: displayDuration 120 / maxLines 128 (ref ChatFrameTemplate);
+        a background stretched -2/+2 x and +3/-6 y past the frame (ref $parentBackground anchors)
+        and the 8 border slices ringing it (the ref draws those through its resize buttons'
+        textures — benilla authors them as plain textures, the hover LOOK without the resize
+        mechanics); the scroll column; and the per-frame scripts. Everything starts alpha 0;
+        BenillaFCF fades it.
+
+        **`EXECUTE_CHAT_LINE` is gated to window 1 on purpose** — see the OnLoad below. It is the
+        one script here that is genuinely ChatFrame1's rather than the dock's, so the template
+        carries the gate rather than the registration.
     -->
-    <ScrollingMessageFrame name="ChatFrame1" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" id="1">
-        <Size><AbsDimension x="430" y="120"/></Size>
-        <Anchors>
-            <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT">
-                <Offset><AbsDimension x="32" y="85"/></Offset>
-            </Anchor>
-        </Anchors>
+    <ScrollingMessageFrame name="BenillaDockedChatFrameTemplate" virtual="true"
+                           frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128">
         <Layers>
             <Layer level="BACKGROUND">
                 <Texture name="$parentBackground" file="Interface\ChatFrame\ChatFrameBackground" alpha="0">
@@ -851,13 +865,12 @@
                  SubmitChatInput stands in for ChatEdit_SendText: the grammar behind it is Rust
                  (0881), which is the only part of that chain we replace. -->
             <OnLoad>
-                this:RegisterEvent("EXECUTE_CHAT_LINE")
+                if this:GetID() == 1 then this:RegisterEvent("EXECUTE_CHAT_LINE") end
             </OnLoad>
             <OnEvent>
                 if event == "EXECUTE_CHAT_LINE" then SubmitChatInput(arg1) end
             </OnEvent>
             <OnUpdate>
-                FCF_OnUpdate(arg1)
                 ChatFrame_OnUpdate(arg1)
             </OnUpdate>
             <OnMouseWheel>
@@ -874,91 +887,50 @@
         <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
 
-    <!-- ChatFrame2 "Combat Log": docked — shares ChatFrame1's rect (ref FCF_DockUpdate anchors),
-         hidden until its tab selects it. Its message-group wiring (the chat-cache combat set)
-         lands with the router (0288 P4); until then it renders what it's given: nothing. -->
-    <ScrollingMessageFrame name="ChatFrame2" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="2">
+    <ScrollingMessageFrame name="ChatFrame1" inherits="BenillaDockedChatFrameTemplate" id="1">
+        <Size><AbsDimension x="430" y="120"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT">
+                <Offset><AbsDimension x="32" y="85"/></Offset>
+            </Anchor>
+        </Anchors>
+    </ScrollingMessageFrame>
+
+    <!-- ChatFrame2 "Combat Log": docked — it takes ChatFrame1's rect from these two anchors and
+         nothing else, ships hidden, and its tab (ChatFrame2Tab, below) selects it. Its message
+         groups are the chat-cache combat set, registered app-side (`ui_chat::frames`, 1571). -->
+    <ScrollingMessageFrame name="ChatFrame2" inherits="BenillaDockedChatFrameTemplate" hidden="true" id="2">
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="ChatFrame1" relativePoint="TOPLEFT"/>
             <Anchor point="BOTTOMRIGHT" relativeTo="ChatFrame1" relativePoint="BOTTOMRIGHT"/>
         </Anchors>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentBackground" file="Interface\ChatFrame\ChatFrameBackground" alpha="0">
-                    <Anchors>
-                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="-2" y="3"/></Offset></Anchor>
-                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="2" y="-6"/></Offset></Anchor>
-                    </Anchors>
-                </Texture>
-                <!-- The ChatFrameBorder ring (ref ChatFrameBorder slices; texcoords quoted from
-                     the ref resize buttons). Corners 16×16, edges stretched between them. -->
-                <Texture name="$parentBorderTopLeft" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBackground"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor></Anchors>
-                    <TexCoords left="0" right="0.25" top="0" bottom="0.125"/>
-                </Texture>
-                <Texture name="$parentBorderTopRight" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors><Anchor point="TOPRIGHT" relativeTo="$parentBackground"><Offset><AbsDimension x="2" y="2"/></Offset></Anchor></Anchors>
-                    <TexCoords left="0.75" right="1.0" top="0" bottom="0.125"/>
-                </Texture>
-                <Texture name="$parentBorderBottomLeft" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors><Anchor point="BOTTOMLEFT" relativeTo="$parentBackground"><Offset><AbsDimension x="-2" y="-3"/></Offset></Anchor></Anchors>
-                    <TexCoords left="0" right="0.25" top="0.7265625" bottom="0.8515625"/>
-                </Texture>
-                <Texture name="$parentBorderBottomRight" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentBackground"><Offset><AbsDimension x="2" y="-3"/></Offset></Anchor></Anchors>
-                    <TexCoords left="0.75" right="1.0" top="0.7265625" bottom="0.8515625"/>
-                </Texture>
-                <Texture name="$parentBorderTop" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors>
-                        <Anchor point="LEFT" relativeTo="$parentBorderTopLeft" relativePoint="RIGHT"/>
-                        <Anchor point="RIGHT" relativeTo="$parentBorderTopRight" relativePoint="LEFT"/>
-                    </Anchors>
-                    <TexCoords left="0.25" right="0.75" top="0" bottom="0.125"/>
-                </Texture>
-                <Texture name="$parentBorderBottom" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors>
-                        <Anchor point="LEFT" relativeTo="$parentBorderBottomLeft" relativePoint="RIGHT"/>
-                        <Anchor point="RIGHT" relativeTo="$parentBorderBottomRight" relativePoint="LEFT"/>
-                    </Anchors>
-                    <TexCoords left="0.25" right="0.75" top="0.7265625" bottom="0.8515625"/>
-                </Texture>
-                <Texture name="$parentBorderLeft" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors>
-                        <Anchor point="TOP" relativeTo="$parentBorderTopLeft" relativePoint="BOTTOM"/>
-                        <Anchor point="BOTTOM" relativeTo="$parentBorderBottomLeft" relativePoint="TOP"/>
-                    </Anchors>
-                    <TexCoords left="0" right="0.25" top="0.125" bottom="0.7265625"/>
-                </Texture>
-                <Texture name="$parentBorderRight" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors>
-                        <Anchor point="TOP" relativeTo="$parentBorderTopRight" relativePoint="BOTTOM"/>
-                        <Anchor point="BOTTOM" relativeTo="$parentBorderBottomRight" relativePoint="TOP"/>
-                    </Anchors>
-                    <TexCoords left="0.75" right="1.0" top="0.125" bottom="0.7265625"/>
-                </Texture>
-            </Layer>
-        </Layers>
-        <Scripts>
-            <OnMouseWheel>
-                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
-            </OnMouseWheel>
-            <OnClick>
-                BenillaChatFrame_DismissCursor(arg1)
-            </OnClick>
-            <OnHyperlinkClick>
-                SetItemRef(arg1, arg2, arg3)
-            </OnHyperlinkClick>
-        </Scripts>
-        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
+
+    <!-- The dock's DRIVER. `FCF_OnUpdate` is dock-GLOBAL — one `reveal`, one selected tab, both
+         windows' tabs and textures — and it used to ride ChatFrame1's own OnUpdate. Selecting the
+         Combat Log hides ChatFrame1, a hidden frame gets no OnUpdate, and so the whole dock froze
+         the instant it was used: the tab alphas stuck showing General as selected (what the
+         director saw), the hover fade stuck at whatever it was, the tab-width settle stopped, and
+         the whisper flash stopped blinking. A driver must not be one of the things it drives.
+
+         So it rides a frame the dock cannot hide. Mounting it on BOTH windows instead would work
+         only while exactly one of them is ever visible — an invariant the dock happens to hold
+         today and that a second visible window would turn into a double-speed fade. The reference
+         offers no shape to copy here: 1.12.1 ships `FCF_OnUpdate` DEFINED and never referenced
+         (0 hits across all of FrameXML), because vanilla's tabs do not hover-fade at all — the
+         reveal is benilla's (0288), so its mounting point is ours to get right.
+
+         `ChatFrame_OnUpdate` stays on the windows, where it belongs: it reads `this` and blinks
+         that frame's own bottom button. -->
+    <Frame name="BenillaChatDockDriver" parent="UIParent">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnUpdate>
+                FCF_OnUpdate(arg1)
+            </OnUpdate>
+        </Scripts>
+    </Frame>
 
     <!-- ── ChatFrame3..ChatFrame7: the five undocked windows ────────────────────────────────
          The reference declares seven ScrollingMessageFrames (FloatingChatFrame.xml l.822-832,
@@ -991,10 +963,14 @@
          nothing reads them while these frames stay hidden and undocked. Outfitter.lua:3099 is
          the one addon that would touch a tab — `local vTab = getglobal("ChatFrame"..i.."Tab")`
          then `vTab:GetText()`, unguarded — but only INSIDE `if vChatFrame:IsVisible() or
-         vChatFrame.isDocked`, so a hidden, `isDocked`-less window never reaches it. That is also
-         precisely why `isDocked` is not set on ChatFrame2 either: our Combat Log tab is
-         deliberately unbuilt (see the tab section below), and marking window 2 docked — which
-         the reference does — would walk Outfitter straight into a nil tab.
+         vChatFrame.isDocked`, so a hidden, `isDocked`-less window never reaches it.
+
+         `isDocked` is not set on ChatFrame2 either, and the reason has CHANGED: it used to be
+         that window 2 had no tab for Outfitter to read, so claiming dockedness would have walked
+         it into a nil. 1575 built the tab, so that hazard is gone — what is left is that
+         `isDocked` belongs to a dock MODEL (dock/undock, FCF_DockUpdate's re-anchoring) that
+         0288 §2 holds out. Setting the flag would advertise a model we do not implement; our two
+         windows are docked by their anchors, which is the part that matters.
 
          No background/border art: the ref's own defaults put every one of these at window alpha
          0 (COLOR's fourth byte), and BenillaFCF only fades the dock's two. A shown ChatFrame5

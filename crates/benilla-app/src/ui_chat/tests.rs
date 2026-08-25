@@ -1979,6 +1979,100 @@ fn both_dock_windows_carry_the_same_chrome() {
     );
 }
 
+/// **The two dock windows must come from ONE declaration.** The structural guard that ends the
+/// class (decision 1588).
+///
+/// Three rounds of the same bug: window 2 shipped with no tab (1575), then with no rect and no
+/// border art (1579), then with no `OnUpdate` and no scroll column (1588) — each time because it
+/// was a hand-mirrored partial copy of window 1 and the mirroring missed a part. The behavioural
+/// tests each catch ONE missed part after someone notices it; this catches the mirroring itself,
+/// which is the only check that can fire before a part is missing.
+///
+/// So: both windows inherit the same virtual template (the reference's own shape —
+/// `FloatingChatFrameTemplate`), and neither declares any content of its own beyond its seat. A
+/// `<Layers>`, `<Frames>` or `<Scripts>` block on either instance is the defect, whatever is in it.
+#[test]
+fn the_two_dock_windows_are_one_declaration() {
+    use benilla_ui::framexml::TopLevel;
+    let xml = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/ChatFrame.xml"),
+    )
+    .expect("ChatFrame.xml");
+    let doc = benilla_ui::framexml::parse(&xml).expect("parse");
+
+    let mut seen = 0;
+    for item in &doc.items {
+        let TopLevel::Instance(el) = item else {
+            continue;
+        };
+        let Some(name) = el.attr("name") else {
+            continue;
+        };
+        if name != "ChatFrame1" && name != "ChatFrame2" {
+            continue;
+        }
+        seen += 1;
+        assert_eq!(
+            el.attr("inherits"),
+            Some("BenillaDockedChatFrameTemplate"),
+            "{name} must inherit the dock template, not restate it"
+        );
+        for child in &el.children {
+            assert!(
+                matches!(child.tag.as_str(), "Size" | "Anchors"),
+                "{name} declares its own <{}> — that is the mirroring this test exists to stop; \
+                 it belongs in BenillaDockedChatFrameTemplate where BOTH windows get it",
+                child.tag
+            );
+        }
+    }
+    assert_eq!(
+        seen, 2,
+        "both dock windows must be declared in ChatFrame.xml"
+    );
+}
+
+/// The dock's driver may not ride a frame the dock hides — the root cause of 1588 stated at the
+/// level it lived at. `FCF_OnUpdate` drives dock-GLOBAL state (one `reveal`, one selected tab,
+/// both windows' tabs) and it rode `ChatFrame1`'s `OnUpdate`; selecting the Combat Log hides
+/// ChatFrame1, and a hidden frame gets no `OnUpdate`, so the whole dock froze on first use.
+#[test]
+fn the_dock_driver_does_not_ride_a_dock_window() {
+    let xml = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/ChatFrame.xml"),
+    )
+    .expect("ChatFrame.xml");
+    let doc = benilla_ui::framexml::parse(&xml).expect("parse");
+
+    // The one element whose OnUpdate calls it, found by walking rather than by name.
+    fn driver<'a>(el: &'a benilla_ui::framexml::Element, out: &mut Vec<&'a str>) {
+        if el.tag == "OnUpdate" && el.body.contains("FCF_OnUpdate") {
+            out.push("hit");
+        }
+        for c in &el.children {
+            driver(c, out);
+        }
+    }
+    let mut hosts = Vec::new();
+    for item in &doc.items {
+        let el = match item {
+            benilla_ui::framexml::TopLevel::Instance(el)
+            | benilla_ui::framexml::TopLevel::Template(el) => el,
+            _ => continue,
+        };
+        let mut hits = Vec::new();
+        driver(el, &mut hits);
+        if !hits.is_empty() {
+            hosts.push(el.attr("name").unwrap_or("<unnamed>"));
+        }
+    }
+    assert_eq!(
+        hosts,
+        ["BenillaChatDockDriver"],
+        "FCF_OnUpdate is dock-global — it must ride the one frame the dock cannot hide"
+    );
+}
+
 /// **No docked chat window may appear in `UIParent.xml`'s managed-position table.**
 ///
 /// The structural guard on the root cause. That pass owns a frame's whole seat — it

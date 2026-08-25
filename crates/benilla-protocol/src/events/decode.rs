@@ -68,6 +68,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::LearnedSpell { spell_id } => vec![SessionEvent::SpellLearned {
             spell_id: u32::from(spell_id),
         }],
+        ServerPacket::RemovedSpell { spell_id } => vec![SessionEvent::SpellRemoved {
+            spell_id: u32::from(spell_id),
+        }],
         ServerPacket::SupercededSpell {
             old_spell_id,
             new_spell_id,

@@ -86,21 +86,24 @@ impl Default for ParticleTuning {
     }
 }
 
-/// One live particle. Its frame depends on the emitter's space mode (wow-re
-/// `part-simspace-fields.md` + its `1f40db0b` corrections — the reference re-anchors EVERY cloud
-/// to the emitter's current position each frame; there is no world-frozen trail mode):
-/// - **Anchored mode** (file flag 0x10 clear — every placed prop): `pos`/`vel` are **world-oriented
-///   Bevy axes, relative to the [`ParticleEmitter::anchor`]** (the MODEL, not the bone). Bone and
-///   model rotation are baked at birth; the anchor translation follows the model — a running
-///   kobold carries its candle flame, while an animated bone never drags the risen cloud.
-///   Gravity acts on Bevy `-Y` (world up). On an **attached** model ([`ParticleEmitter::attach`])
-///   the same coords are stored with the live attach rotation divided out at birth and re-applied
-///   at draw (wow-re `part-kit-effect-attach-orient.md`, byte-verified: birth folds `A(t₀)⁻¹`,
-///   draw folds the live `A(t₁)` — a turning host swings its frozen cloud by the heading change
-///   since each particle's birth; a stationary host is bit-identical to the plain path).
-/// - **Model mode** (0x10 set): `pos`/`vel` are the emitter's **local WoW model space** (Z up);
-///   rendering folds the whole live placement transform every frame (rotation and all — the
-///   chandelier's flames rigidly ride the swing).
+/// One live particle. Its frame is the emitter's storage space, which the file flag `0x10` picks
+/// — and the two spaces are the whole of the ride-vs-trail law (wow-re `part-emitter-motion.md`
+/// §2c-B, byte-settled; decision 1585):
+/// - **World mode** (flag `0x10` CLEAR — ~70 % of the corpus): `pos`/`vel` are **absolute world
+///   coordinates, Bevy axes**. The birth bakes everything — bone pose, model rotation, scale,
+///   position — through the live emitter matrix (`0x7b8acf`/`0x7b8b0f`), and the draw folds
+///   **nothing** back (`0x7b3f48` omits `rt+0x1fc`). Once a particle exists, no later act of its
+///   host can reach it: run, turn, or play any animation and the cloud hangs exactly where it was
+///   born, which is what makes a trail of length `host speed × particle lifetime`. Gravity is
+///   plain world down (Bevy `-Y`).
+/// - **Model mode** (`0x10` SET): `pos`/`vel` are the emitter's **local WoW model space** (Z up)
+///   and the draw re-applies the whole live placement transform every frame, rotation included
+///   (`0x7b8aa5`/`0x7b3efb`) — the rigid ride a carried torch (`Club_1H_Torch_A_01.m2` = `0x0011`)
+///   is flagged for, and the chandelier's flames riding its swing.
+///
+/// Storing world-relative coordinates and re-composing them against a live frame — which is what
+/// this comment described until 1585 — cannot express the CLEAR case: it can be made to cancel a
+/// host's translation, but its rotation still reaches every particle already born.
 struct Particle {
     pos: Vec3,
     vel: Vec3,
@@ -161,17 +164,6 @@ pub struct ParticleEmitter {
     /// this drain reproduces that defer-until-drained shape from the owner side; see
     /// `ribbons::RibbonTrail::owner` for the one OPEN half.
     draining: bool,
-    /// The **attach frame** for an emitter on an ATTACHED model (a spell-kit instance root, a held
-    /// item) — the entity whose live world rotation is the reference's attachment matrix `A`
-    /// (`[model+0x17c]`, wow-re `part-kit-effect-attach-orient.md`). Anchored-mode particles are
-    /// stored attach-local (birth divides `A` out) and drawn through the CURRENT `A`, so a host
-    /// that turns mid-effect fans its spray by the heading-since-birth — the Eviscerate/Feint
-    /// scatter. `None` for everything unattached (doodads, creatures' own models, missiles):
-    /// `A = identity`, the plain world-frozen path.
-    attach: Option<Entity>,
-    /// The live attach rotation (identity when [`Self::attach`] is `None` or gone) — refreshed
-    /// each frame before births/draw.
-    attach_rot: Quat,
     /// The model instance whose [`crate::model_fade::ModelAlpha`] this cloud is multiplied by —
     /// the reference's `emitter+0x1a8`, a per-frame copy of that model's `+0x19c` (`0x718960`
     /// @`0x719073`), folded into each particle's ALPHA by the over-life sampler (`0x7b9b10`
@@ -182,16 +174,12 @@ pub struct ParticleEmitter {
     alpha_src: Option<Entity>,
     /// This frame's value of that alpha (1.0 until read).
     alpha: f32,
-    /// The **cloud anchor** for anchored mode: the entity whose live translation carries the
-    /// live pool (the MODEL — a creature root, an effect-instance root, a held item's root),
-    /// NOT the emitter's bone joint. The joint composes each particle's birth (position and
-    /// rotation baked, the reference's birth transforms) and then must never move the cloud
-    /// again: an emitter riding an ANIMATED bone — the food sparkle orbits on a global-sequence
-    /// spin — would otherwise drag every risen star in a circle (the director's swirl).
-    /// `None` = anchor at the spawn placement (a placed doodad whose emitter rides a joint
-    /// anchors at the doodad, not the bone). How much of the anchor's own motion the live pool
-    /// keeps is the emitter's file flag `0x10`, not this frame — see
-    /// [`world_motion_kept`](crate::particles::sim) (decision 1578).
+    /// The **cloud anchor**: the entity whose live translation is this pool's SORT point (the
+    /// MODEL — a creature root, an effect-instance root, a held item's root), NOT the emitter's
+    /// bone joint. Since 1585 it carries no particle position — a world-mode store is frozen at
+    /// birth and a sort key is not a vertex — so this is a depth-ordering input only.
+    /// `None` = sort at the spawn placement (a placed doodad whose emitter rides a joint sorts at
+    /// the doodad, not the bone).
     anchor: Option<Entity>,
     /// The anchor's last-known world translation (kept when the entity vanishes so the pool
     /// drains in place; init = the spawn placement's translation).
@@ -202,11 +190,6 @@ pub struct ParticleEmitter {
     /// refreshed EVERY frame — `0x7b5230` @0x7b5265): the one-frame Δ source for both
     /// emitter-motion terms (follow-delta, velocity inherit). `None` until the first frame.
     emitter_prev: Option<Vec3>,
-    /// The **anchor's** last-frame world position, on the same one-frame refresh — what the
-    /// anchored store's own ride amounts to, and the term the world-motion carry subtracts (see
-    /// the carry block in [`sim`](crate::particles::sim)). Distinct from `emitter_prev`: an
-    /// emitter orbiting an animated bone moves while its model — the anchor — stands still.
-    anchor_prev: Option<Vec3>,
     /// Velocity-inherit state (file flag 0x40, wow-re `part-emitter-motion.md` §1): the ~30 Hz
     /// trigger accumulator (rt+0x254) and the held inherit velocity (rt+0x258.., world frame) —
     /// recomputed only at a trigger, births read the held value between.
@@ -330,8 +313,6 @@ pub struct EmitterFrames {
     /// path exactly). `None` for a static doodad (fixed placement, despawned by the placement's
     /// own entity list).
     pub owner: Option<(Entity, [f32; 3])>,
-    /// The attachment matrix `A` frame ([`ParticleEmitter::attach`]).
-    pub attach: Option<Entity>,
     /// The cloud anchor — the MODEL, never the bone ([`ParticleEmitter::anchor`]).
     pub anchor: Option<Entity>,
     /// The MODEL INSTANCE whose render alpha multiplies these particles
@@ -412,7 +393,7 @@ impl ParticleEmitter {
             .iter()
             .map(|p| {
                 if anchored {
-                    self.anchor_pos + self.attach_rot * p.pos
+                    p.pos
                 } else {
                     self.placement
                         .transform_point(benilla_assets::coords::wow_to_bevy([
@@ -657,8 +638,6 @@ pub fn spawn_emitter(
                     owner,
                     on_owner_loss: frames.on_owner_loss,
                     draining: false,
-                    attach: frames.attach,
-                    attach_rot: Quat::IDENTITY,
                     alpha_src: frames.alpha,
                     alpha: 1.0,
                     anchor: frames.anchor,
@@ -666,7 +645,6 @@ pub fn spawn_emitter(
                     particles: Vec::new(),
                     accumulator: 0.0,
                     emitter_prev: None,
-                    anchor_prev: None,
                     inherit_accum: 0.0,
                     inherit_vel: Vec3::ZERO,
                     gate_prev: false,

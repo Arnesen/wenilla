@@ -151,6 +151,12 @@ pub const SMSG_INITIAL_SPELLS: u16 = 0x012A; // 298
 // Bodies in [`super::spells`] (decision 0237).
 pub const SMSG_LEARNED_SPELL: u16 = 0x012B; // 299
 pub const SMSG_SUPERCEDED_SPELL: u16 = 0x012C; // 300
+
+/// The **third** member of that family and the only one that shrinks the book (VERIFIED vmangos
+/// `Opcodes_1_12_1.h`: 515; `Player::SendSpellRemoved`, the tail of `Player::RemoveSpell`). Sent
+/// once per spell the server takes away — a talent wipe sends one for every rank of every talent,
+/// which is the whole reason decision 1584 exists. Body in [`super::spellbook`]: one `u16`.
+pub const SMSG_REMOVED_SPELL: u16 = 0x0203; // 515
 pub const SMSG_CAST_RESULT: u16 = 0x0130; // 304
 
 // The pet action bar's inbound wire (decision 0982; VERIFIED vmangos `Opcodes_1_12_1.h`:

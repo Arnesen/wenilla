@@ -296,10 +296,7 @@ pub(super) fn attach_item_glows(
                 // is chained to that item root and through it to the wearer: the glow fades in
                 // with the body instead of blazing over a character that has not appeared yet,
                 // and it dies with the weapon instead of hanging in the air behind it (0833).
-                EffectHost {
-                    attached: true,
-                    parent: Some(root),
-                },
+                EffectHost { parent: Some(root) },
                 // An `ItemVisuals` glow is armed by a different leg than `PlaySpellVisualKit`
                 // (0805) and carries no kit stage — the plain single-clip arm, as before.
                 None,

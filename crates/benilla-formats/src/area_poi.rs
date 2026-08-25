@@ -60,20 +60,28 @@ pub struct AreaPoi {
     pub world_state_id: u32,
 }
 
-/// `AreaPOI.dbc` rows keyed by `ID`.
+/// `AreaPOI.dbc` — every row in **file order**, plus the id index.
+///
+/// File order is not tidiness: the reference's world-map landmark builder `0x4a67a0` walks the
+/// whole table by record (`[0xc0e054]`, count `[0xc0e058]`, stride `0x74`) and appends survivors
+/// in that order, so the landmark *index* a Lua `GetMapLandmarkInfo(i)` reads is the DBC's own
+/// order. A hash iteration would also make our landmark list a different permutation every frame,
+/// which the world map's change-diff would read as a change and repaint on.
 pub struct AreaPoiCatalog {
-    rows: HashMap<u32, AreaPoi>,
+    rows: Vec<(u32, AreaPoi)>,
+    by_id: HashMap<u32, usize>,
 }
 
 impl AreaPoiCatalog {
     pub fn get(&self, id: u32) -> Option<&AreaPoi> {
-        self.rows.get(&id)
+        self.by_id.get(&id).map(|&i| &self.rows[i].1)
     }
 
-    /// Every row, in no particular order — the nearest-3 POI selection (decision 0203 phase 3)
-    /// filters this by `continent_id` + distance itself.
+    /// Every row in **file order** — the reference builder's walk (see the type doc). The
+    /// nearest-3 minimap selection (decision 0203 phase 3) filters this by `continent_id` +
+    /// distance itself; the world map's landmark pass runs the `0x4a67a0` gate chain over it.
     pub fn rows(&self) -> impl Iterator<Item = (u32, &AreaPoi)> {
-        self.rows.iter().map(|(&id, poi)| (id, poi))
+        self.rows.iter().map(|(id, poi)| (*id, poi))
     }
 
     pub fn len(&self) -> usize {
@@ -114,7 +122,8 @@ fn schema() -> Schema {
 pub fn load_area_poi_catalog(chain: &mut Chain) -> Result<AreaPoiCatalog> {
     let bytes = chain.read_file(AREA_POI).context("reading AreaPOI.dbc")?;
     let rs = parse(&bytes, schema(), "AreaPOI")?;
-    let mut rows = HashMap::with_capacity(rs.records().len());
+    let mut rows = Vec::with_capacity(rs.records().len());
+    let mut by_id = HashMap::with_capacity(rs.records().len());
     for r in rs.records() {
         let Some(id) = u32_at(r, 0) else { continue };
         let (Some(x), Some(y), Some(z)) = (f32_at(r, 4), f32_at(r, 5), f32_at(r, 6)) else {
@@ -132,9 +141,10 @@ pub fn load_area_poi_catalog(chain: &mut Chain) -> Result<AreaPoiCatalog> {
             description: str_at(&rs, r, 19).unwrap_or_default(),
             world_state_id: u32_at(r, 28).unwrap_or(0),
         };
-        rows.insert(id, poi);
+        by_id.insert(id, rows.len());
+        rows.push((id, poi));
     }
-    Ok(AreaPoiCatalog { rows })
+    Ok(AreaPoiCatalog { rows, by_id })
 }
 
 #[cfg(test)]

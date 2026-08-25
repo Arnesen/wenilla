@@ -210,6 +210,11 @@ CastingBar.xml
 # MIRROR_TIMER_* events `crate::ui_mirror` fires. Needs only Fonts (GameFontHighlight)
 # before it; kept beside the cast bar, whose border art it shares.
 MirrorTimer.xml
+# The always-up world-state readout (decision 1586, report B190): the tower/flag/base counters an
+# outdoor-PvP zone or a battleground shows at top-centre, driven by the UPDATE_WORLD_STATES event
+# `crate::world_state_ui` fires. Needs Fonts (GameFontNormalSmall) and GameTooltip; sits beside the
+# mirror timers, which share its top-centre lane.
+WorldStateFrame.xml
 # The player buff/debuff bar (decisions 0255/0257 — the player aura arc): the HUD row of
 # aura icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`). Needs Fonts
 # (its FontStrings) and ActionBar's `BENILLA_FALLBACK_ICON` global (both already loaded).

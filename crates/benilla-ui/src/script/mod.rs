@@ -134,6 +134,7 @@ mod types;
 mod unit;
 mod weapon_enchant;
 mod worldmap;
+mod worldstate;
 mod worn_display;
 
 pub use action::{ActionSlot, ActionState};
@@ -219,6 +220,7 @@ pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
     WorldMapZoneView,
 };
+pub use worldstate::WorldStateUiView;
 pub use worn_display::WornDisplay;
 
 use mlua::Lua;
@@ -588,6 +590,7 @@ impl UiScript {
         cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
+        worldstate::install(&lua)?;
         net_stats::install(&lua)?;
         diagnostics::install(&lua)?;
 
