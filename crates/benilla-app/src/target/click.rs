@@ -728,17 +728,19 @@ pub(super) fn clear_target_requests(
 /// `"target"` → the current selection (a dedup no-op); `"partyN"`/`"raidN"` → that roster slot
 /// when its entity is in range (an out-of-range member needs the guid-only selection the phase-4
 /// out-of-range slice owns — until then the click no-ops, like the real client on a nonexistent
-/// unit); `"pet"` → the bar's cached pet guid (decision 0990, the pet frame's left click).
+/// unit); `"pet"` → the bar's cached pet guid (decision 0990, the pet frame's left click);
+/// `"targettarget"` → the selection's own `UNIT_FIELD_TARGET` (decision 1576, the ToT frame's).
 /// Everything else (mouseover/name) waits for its wire.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn target_unit_requests(
     script: Option<NonSendMut<UiScript>>,
-    mut selection: ResMut<Selection>,
-    mut seam: crate::creature_anim::AttackSeam,
-    self_q: Query<(Entity, &Guid, Has<Engaged>), With<SelfPlayer>>,
     group: Res<crate::ui_party::GroupState>,
     index: Res<crate::net::GuidIndex>,
     pet: Res<crate::ui_pet::PetBar>,
+    // The one SetSelection tail, shared with `/target` and `/assist` (decision 1583). It carries
+    // the classification too, which is why this drain no longer states one: hand-stating it here
+    // is exactly how a `false` that the binary refutes got written down.
+    mut commit: super::by_name::SelectCommit,
 ) {
     let Some(mut script) = script else {
         return;
@@ -747,13 +749,22 @@ pub(super) fn target_unit_requests(
     if requests.is_empty() {
         return;
     }
-    let me = self_q.single().ok();
-    let engaged = me.is_some_and(|(_, _, e)| e);
-    let self_guid = me.map(|(_, g, _)| g.0);
+    let me = commit.me();
+    let self_guid = me.map(|(_, g)| g);
     for token in requests {
         let resolved = match token.as_str() {
-            "player" => me.map(|(e, g, _)| (e, g.0)),
-            "target" => selection.target.zip(selection.guid),
+            "player" => me,
+            "target" => commit.selection.target.zip(commit.selection.guid),
+            // The ToT frame's left click (decision 1576) — the target's own target, one hop off
+            // `UNIT_FIELD_TARGET`, resolved exactly as the `"targettarget"` snapshot and `/assist`
+            // resolve it. An unstreamed guid no-ops like every other arm here.
+            "targettarget" => commit
+                .selection
+                .target
+                .and_then(|e| commit.stores.get(e).ok())
+                .and_then(|s| s.0.unit_target())
+                .filter(|g| *g != 0)
+                .and_then(|g| index.0.get(&g).map(|e| (*e, g))),
             // The pet resolves off the bar's cached guid, the same word `"pet"`'s snapshot and
             // `UNIT_PET` read (`crate::ui_pet::feed_pet_unit`). An unstreamed pet no-ops, exactly
             // as an out-of-range party member does.
@@ -783,19 +794,7 @@ pub(super) fn target_unit_requests(
                 .and_then(|g| index.0.get(&g).map(|e| (*e, g))),
         };
         if let Some((entity, guid)) = resolved {
-            // `new_attackable: false` on every arm, and it is correct rather than a shortcut:
-            // yourself and the current target reach the engaged-switch law's self exception and
-            // its dedup, and a party member or your own pet is a unit you cannot attack. So a
-            // switch fired from here can only ever STOP the swing — never re-point it.
-            scan::commit(
-                &mut selection,
-                &mut seam,
-                entity,
-                guid,
-                engaged,
-                self_guid,
-                false,
-            );
+            commit.commit(entity, guid);
         }
     }
 }

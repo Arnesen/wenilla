@@ -126,6 +126,7 @@ fn armed() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits
@@ -145,6 +146,7 @@ fn armed() -> UiScript {
 fn shipped_inspect_frame_loads_clean() {
     let s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     // Before InspectFrame.xml, and required rather than tidy: this window's honor page inherits

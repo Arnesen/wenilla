@@ -145,6 +145,7 @@ mod ui_shapeshift;
 mod ui_social;
 mod ui_spellbook;
 mod ui_talent;
+mod ui_talent_wipe;
 mod ui_taxi;
 mod ui_text;
 mod ui_tooltip;
@@ -211,6 +212,7 @@ use ui_shapeshift::UiShapeshiftPlugin;
 use ui_social::UiSocialPlugin;
 use ui_spellbook::UiSpellbookPlugin;
 use ui_talent::UiTalentPlugin;
+use ui_talent_wipe::UiTalentWipePlugin;
 use ui_taxi::UiTaxiPlugin;
 use ui_text::UiTextPlugin;
 use ui_tooltip::UiTooltipPlugin;
@@ -624,6 +626,11 @@ pub fn run(build: BuildId) -> AppExit {
     // talent seam, and drains learn clicks into CMSG_LEARN_TALENT. After UiActionPlugin
     // (shares its `Spells` catalog), beside the spellbook it mirrors.
     .add_plugins(UiTalentPlugin)
+    // Unlearning them again (decision 1580): the class trainer's respec question, its
+    // CONFIRM_TALENT_WIPE dialog, and the answer that is the only packet in the flow which
+    // unlearns anything. Beside UiTalentPlugin for the subject, but it is UiBinderPlugin's twin
+    // in shape — a guid-carrying question over an already-closed gossip menu.
+    .add_plugins(UiTalentWipePlugin)
     // The stance/shapeshift bar feed (wow-re shapeshift-bar-api.md): builds the form list from
     // PlayerActions.spells per the byte-verified admission/order, drives StanceBar.xml through
     // the engine's shapeshift seam, and drains its clicks (cancel-if-active else cast). After

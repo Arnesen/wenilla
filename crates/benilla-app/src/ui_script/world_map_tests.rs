@@ -14,6 +14,7 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIPanelTemplates.xml",
         "GameTooltip.xml",

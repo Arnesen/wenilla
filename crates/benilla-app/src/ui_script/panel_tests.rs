@@ -52,6 +52,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
 fn shipped_gossip_frame_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
                                          // The window + its scroll frame (bar + child) + the 32-row shared pool (quest rows and option
@@ -229,6 +230,7 @@ fn shipped_gossip_frame_drives_end_to_end() {
 fn shipped_gossip_frame_renders_quest_rows_above_options() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
@@ -344,6 +346,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
 fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
@@ -450,6 +453,7 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
 fn gossip_show_hide_plays_open_and_close_kits() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
@@ -486,6 +490,7 @@ fn gossip_show_hide_plays_open_and_close_kits() {
 fn shipped_panel_slot_replaces_gossip_with_merchant() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
@@ -567,6 +572,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
 fn displacing_an_npc_window_ends_the_displaced_session() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
@@ -613,6 +619,7 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
 fn shipped_panel_slot_pushable_promotes_to_center() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -704,6 +711,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         load_xml(&s, "Fonts.xml");
+        load_xml(&s, "MoneyFrame.xml");
         load_xml(&s, "UiPanels.xml");
         load_xml(&s, "Cooldown.xml");
         load_xml(&s, "BagFrame.xml");
@@ -775,6 +783,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
 fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "GossipFrame.xml");
@@ -920,6 +929,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
 fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "GossipFrame.xml");
@@ -992,6 +1002,7 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
 #[test]
 fn the_1507_registry_rows_match_the_reference_bytes() {
     let s = UiScript::new().unwrap();
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     for probe in [
         // ItemTextFrame — UIParent.lua l.20 (the B288 row).
@@ -1027,6 +1038,7 @@ fn the_1507_registry_rows_match_the_reference_bytes() {
 fn a_dead_player_opens_only_whiledead_windows() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     s.set_unit(
         "player",
@@ -1091,6 +1103,7 @@ fn a_dead_player_opens_only_whiledead_windows() {
 fn a_frame_arriving_at_center_puts_the_child_windows_away() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
 
     // The letter is open; two shipped-row stand-ins take the seats: MerchantFrame (pushable 0)

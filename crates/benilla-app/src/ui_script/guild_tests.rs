@@ -238,6 +238,7 @@ fn setup() -> UiScript {
     );
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "BasicControls.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "UIDropDownMenu.xml");

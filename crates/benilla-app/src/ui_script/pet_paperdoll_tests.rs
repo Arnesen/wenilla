@@ -34,6 +34,7 @@ fn load_pet_page() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     // `UIParent.xml` is the manifest's third file and this page needs one thing out of it:
     // `BuildListString`, the reference's own `UIParent.lua:1051` joiner behind the diet tooltip

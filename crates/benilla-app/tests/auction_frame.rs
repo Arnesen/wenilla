@@ -21,12 +21,12 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// `BenillaMoneyInput_*` money-entry helpers.
 const FILES: [&str; 9] = [
     "Fonts.xml",
+    "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
     "UIDropDownMenu.xml",
     "ScrollTemplates.xml",
     "UIPanelTemplates.xml",
-    "MoneyFrame.xml",
     "MerchantFrame.xml",
     "AuctionFrame.xml",
 ];

@@ -33,6 +33,7 @@ fn picker() -> UiScript {
     let mut s = UiScript::new().unwrap();
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",

@@ -451,11 +451,18 @@ pub struct ParticleEmitterDef {
 impl ParticleEmitterDef {
     /// File flag `0x10` (→ runtime `0x100` — the loader's flag word is a **non-identity remap**,
     /// wow-re `part-simspace-fields.md` corrections `1f40db0b`, byte block `0x70faf8–0x70fc44`):
-    /// the whole cloud renders through the emitter's **live bone matrix** each frame (rotation and
-    /// all — the chandelier's candle flames rigidly ride the swing). Clear ⇒ bone/model rotation is
-    /// baked at birth instead. Either way the cloud is **re-anchored to the emitter's current
-    /// position every frame** (the draw matrix rebuilds with `translate(−emitterPos)` per frame) —
-    /// a moving model carries its flame; there is NO world-frozen trail mode.
+    /// **the storage-space choice, and so the ride-vs-trail switch** (wow-re
+    /// `part-emitter-motion.md` §2c, byte-settled). SET ⇒ the spawn stores raw emitter-LOCAL
+    /// pos/vel and the draw folds the live emitter matrix back in every frame: the whole cloud
+    /// rides the emitter rigidly, rotation and all (the chandelier's candle flames ride the swing;
+    /// a carried torch is flagged for it). CLEAR ⇒ the spawn bakes pos/vel into WORLD and the draw
+    /// never re-applies the emitter matrix: each particle **hangs where it was born**, so a moving
+    /// host lays a trail `host speed × particle lifetime` long.
+    ///
+    /// This doc said the opposite until 1578 — "a moving model carries its flame; there is NO
+    /// world-frozen trail mode" was the reading two earlier RE rounds built on a null test (a
+    /// kobold's 0.2 s candle smear, too small to see), and `part-emitter-motion.md` §2c refuted it
+    /// with the spawn/draw pairing plus a 7860-emitter corpus census.
     pub fn model_space(&self) -> bool {
         self.flags & 0x10 != 0
     }

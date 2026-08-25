@@ -1116,10 +1116,34 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
 /// site that reads an `Emotes.dbc` `EmoteFlags` — called from `DoEmote` (`0x5ef560`) *before*
 /// `CMSG_TEXT_EMOTE` is built, so a suppressed emote sends no packet and plays no local anim at all
 /// (a seated `/bow` self-censors; the server round-trip never happens). Byte-verified predicate,
-/// exactly these four tests in the note's site order — the fifth flag the note decodes (`0x4000`,
-/// "requires standing still") only sets an *out* param the client acts on while fear/confuse-
-/// controlled, which benilla doesn't model, so it's deliberately not implemented here. `true` =
-/// eligible (send + play); `false` = suppress both.
+/// exactly these four tests in the note's site order. `true` = eligible (send + play); `false` =
+/// suppress both.
+///
+/// # The fifth flag, `0x4000` — NOT built, and the reason recorded here was WRONG
+///
+/// This doc used to say `0x4000` ("requires standing still") *"only sets an out param the client
+/// acts on while fear/confuse-controlled, which benilla doesn't model"*. A §5 trio carve of the
+/// neighbouring stand-state gate re-read the leg and **inverted that polarity**
+/// (wow-re `standstate-movement-trigger.md` §5.6, 2026-08-23; decision 1582). The bytes:
+///
+/// - `0x47dbab` tests `EmoteFlags & 0x4000`, and if set, `0x47dbb3` tests the live `CMovement`
+///   word against **`0x20ff`** — the four direction bits, the two turn bits, the two pitch bits and
+///   `FALLING` — writing `*out = 1`. Pointedly **not** `SWIMMING`.
+/// - `DoEmote` then reads that out-param at `0x5ef5d0` and, when `0x5fa550` returns non-zero,
+///   raises message `0x139` = **`ERR_NOEMOTEWHILERUNNING`** ("You can't do that while moving!") and
+///   **aborts**: no emote packet, no `SetStandState`.
+/// - `0x5fa550` is `IsSelfControlled`, not "is fear/confuse-controlled" — it returns **1** for an
+///   ordinary player and **0** while `UNIT_FIELD_FLAGS & 0xc00004` (DISABLE_MOVE / CONFUSED /
+///   FLEEING). So the toast fires for the **ordinary moving player** and is *suppressed* while
+///   feared. That is the exact reversal of what this comment claimed.
+///
+/// It stays unbuilt — deliberately, and as a named gap rather than a settled reading: implementing
+/// it puts a red error line on screen for every emote typed while moving, turning, pitching or
+/// falling, which is a visible behaviour change for the director to weigh rather than a bug fix to
+/// slip in. What it is **not** is a water gate: `0x20ff` carries no `SWIMMING`, so it has nothing
+/// to do with B155 and could never have covered it (`super::super::tests::
+/// the_posture_emotes_carry_no_swim_suppression_flag` is the data half of that same negative). The
+/// posture path's water refusal lives in [`crate::player::state`]'s `stand_state_refused`.
 pub(super) fn emote_send_eligible(emote_flags: u32, stand_state: u8, swimming: bool) -> bool {
     // `0x0400`: unconditional suppress (client `0x47db58`).
     if emote_flags & 0x0400 != 0 {

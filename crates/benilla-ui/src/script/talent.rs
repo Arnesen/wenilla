@@ -6,6 +6,12 @@
 //! ([`UiScript::take_talent_learns`]) into `CMSG_LEARN_TALENT`. The engine holds no talent
 //! KNOWLEDGE — grid seats, ranks, prerequisites, and availability are the app's resolve.
 //!
+//! The **respec** pair rides here too (decision 1580) and is the binder question's twin, not a
+//! talent-window affordance: `ConfirmTalentWipe()` answers a class trainer's
+//! `CONFIRM_TALENT_WIPE`, and `CheckTalentMasterDist()` is the range poll that takes the dialog
+//! away when you walk off. Both are 1.12 engine bindings (`reference/1.12-globals.tsv`), and
+//! neither reads the snapshot above — the question arrives as the event's argument.
+//!
 //! The Era tuple shapes are the 1.12 addon's own reads (`Blizzard_TalentUI.lua`, extracted from
 //! the patch chain — decision 0304's pin §3):
 //! `GetTalentTabInfo(i) → name, texture, pointsSpent, fileName`;
@@ -103,6 +109,23 @@ impl super::UiScript {
     /// Drain the queued `LearnTalent(tab, index)` clicks (both 1-based, as the Lua passed them).
     pub fn take_talent_learns(&mut self) -> Vec<(u32, u32)> {
         std::mem::take(&mut self.model_mut().talent_learns)
+    }
+
+    /// Drain the `ConfirmTalentWipe()` calls queued since the last drain — each one is an outbound
+    /// `MSG_TALENT_WIPE_CONFIRM` ([`Self::take_binder_confirms`]'s shape, and a count for the same
+    /// reason: the app holds the trainer's guid).
+    pub fn take_talent_wipe_confirms(&mut self) -> u32 {
+        std::mem::take(&mut self.model_mut().talent_wipe_confirms)
+    }
+
+    /// Push whether a trainer's respec question is live and still in range — the host's half of
+    /// `CheckTalentMasterDist()`. Idempotent; `false` covers both "no question pending" and "you
+    /// walked away", which is all the dialog's OnUpdate needs in order to decide to hide.
+    pub fn set_talent_master_pending(&mut self, pending: bool) {
+        let mut model = self.model_mut();
+        if model.talent_master_pending != pending {
+            model.talent_master_pending = pending;
+        }
     }
 }
 
@@ -210,6 +233,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.talent_learns.push((tab, i));
             Ok(())
+        })?,
+    )?;
+
+    // ConfirmTalentWipe() — the CONFIRM_TALENT_WIPE dialog's Accept, and the one call in the
+    // client that unlearns talents: the trainer's question changed nothing (decision 1580).
+    // Zero-arg because the guid it sends is one the client latched from that question — the
+    // reference's own `0xc4d7a0` (wow-re `talent-api.md` §ConfirmTalentWipe); here the app holds it.
+    g.set(
+        "ConfirmTalentWipe",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.talent_wipe_confirms += 1;
+            Ok(())
+        })?,
+    )?;
+
+    // CheckTalentMasterDist() — polled from that dialog's OnUpdate; false hides it. The reference
+    // re-runs its interact-range test against the latched trainer (`0x5df980`, the same
+    // `d² <= [0xc4c28c]` gate `CheckBinderDist` runs), so walking away takes the question off
+    // screen with no packet either way.
+    g.set(
+        "CheckTalentMasterDist",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.talent_master_pending)
         })?,
     )?;
 

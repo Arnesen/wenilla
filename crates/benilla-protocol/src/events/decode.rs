@@ -611,6 +611,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }
         ServerPacket::BindPoint { area, .. } => vec![SessionEvent::BindPoint { area }],
         ServerPacket::BinderConfirm { binder } => vec![SessionEvent::BinderConfirm { binder }],
+        ServerPacket::TalentWipeConfirm { trainer, cost } => {
+            vec![SessionEvent::TalentWipeConfirm { trainer, cost }]
+        }
         ServerPacket::PlayerBound { binder, area } => {
             vec![SessionEvent::PlayerBound { binder, area }]
         }

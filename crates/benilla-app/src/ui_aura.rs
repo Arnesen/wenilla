@@ -229,6 +229,10 @@ struct AuraFeedMemo {
     /// The pet half, same shape and same reason (decision 0990): a stable swap between two pets
     /// carrying identical auras must still re-fire, so the guid joins the key.
     pet_last: Option<(u64, Vec<AuraProjection>)>,
+    /// The target-of-target half (decision 1576) — the ToT frame's four debuff buttons. Same shape
+    /// and same reason as the two above: the guid joins the key, because your target swinging from
+    /// one identically-debuffed add to another is still a change the row has to hear.
+    tot_last: Option<(u64, Vec<AuraProjection>)>,
 }
 
 /// The `BENILLA_AURA_TRACE` period in seconds, or `None` when the trace is off. A set-but-unparsable
@@ -729,6 +733,41 @@ fn feed_auras(
         // rides on it until that arm is derived.
         .map(|store| other_unit_auras(store, catalog, true));
 
+    // The target's target's list — the ToT frame's four debuff buttons (decision 1576). Same
+    // other-unit law as the target and the pet above, resolved through the same one-hop
+    // `UNIT_FIELD_TARGET` read the unit feed's `"targettarget"` snapshot uses. The self-mirror leg
+    // is NOT dead code here the way it would be for a pet: while you tank, your target's target is
+    // YOU, and 0257 §2's player-bar law is what the row must draw then.
+    let tot_guid = selection
+        .target
+        .and_then(|e| stores.get(e).ok())
+        .and_then(|s| s.0.unit_target())
+        .filter(|g| *g != 0)
+        .unwrap_or(0);
+    let tot_list: Option<Vec<AuraState>> = (tot_guid != 0)
+        .then(|| index.0.get(&tot_guid))
+        .flatten()
+        .and_then(|&e| {
+            if tot_guid == self_guid.0 {
+                return Some(list.clone());
+            }
+            let tot_store = stores.get(e).ok()?;
+            let buffs = buffs_visible_on(
+                tot_store,
+                Some(store),
+                factions.as_deref(),
+                &reputations,
+                |owner| {
+                    index
+                        .0
+                        .get(&owner)
+                        .and_then(|&e| stores.get(e).ok())
+                        .cloned()
+                },
+            );
+            Some(other_unit_auras(tot_store, catalog, buffs))
+        });
+
     let target_cur = selection
         .guid
         .zip(target_list.as_deref())
@@ -758,11 +797,19 @@ fn feed_auras(
     let pet_changed = pet_cur.is_some() && pet_cur != memo.pet_last;
     memo.pet_last = pet_cur;
 
+    let tot_cur = (tot_guid != 0)
+        .then_some(tot_list.as_deref())
+        .flatten()
+        .map(|l| (tot_guid, projection_of(l)));
+    let tot_changed = tot_cur.is_some() && tot_cur != memo.tot_last;
+    memo.tot_last = tot_cur;
+
     script.set_auras("player", Some(list));
     // Clearing the token isn't a UNIT_* event (the frame reacts to PLAYER_TARGET_CHANGED, and the
     // pet frame to UNIT_PET) — same convention as the unit feed's snapshot clear.
     script.set_auras("target", target_list);
     script.set_auras("pet", pet_list);
+    script.set_auras("targettarget", tot_list);
     script.set_tracking(tracking);
     if changed {
         script.fire_event("UNIT_AURA", vec![ScriptValue::Str("player".into())]);
@@ -777,6 +824,9 @@ fn feed_auras(
     }
     if target_changed {
         script.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
+    }
+    if tot_changed {
+        script.fire_event("UNIT_AURA", vec![ScriptValue::Str("targettarget".into())]);
     }
 }
 
@@ -830,6 +880,7 @@ fn end_session_aura_state(
     if let Some(mut script) = script {
         script.set_auras("player", None);
         script.set_auras("target", None);
+        script.set_auras("targettarget", None);
         script.set_tracking(None);
     }
     cache.auras.clear();

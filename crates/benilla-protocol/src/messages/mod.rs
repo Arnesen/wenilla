@@ -167,7 +167,9 @@ pub use pet::{
     PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
 };
 pub use pose::{set_sheathed, stand_state_change};
-pub use progression::{learn_talent, ExplorationXp, LevelUpInfo, XpGain};
+pub use progression::{
+    learn_talent, talent_wipe_confirm, ExplorationXp, LevelUpInfo, TalentWipeConfirm, XpGain,
+};
 pub use pvp::{inspect_honor_stats, InspectHonorStats, PvpCredit};
 pub use quest::{
     dialog_status, quest_query, questgiver_accept_quest, questgiver_choose_reward,

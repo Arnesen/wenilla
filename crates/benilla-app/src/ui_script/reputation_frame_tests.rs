@@ -99,6 +99,7 @@ fn state() -> ReputationState {
 fn load_page(s: &UiScript) {
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",

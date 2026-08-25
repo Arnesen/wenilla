@@ -20,8 +20,9 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 
 /// The prefix of `benilla.toc`'s load order these templates need: the font registry, the panel kit,
 /// UIParent (the parent every addon passes), and the faux-scroll kit.
-const FILES: [&str; 4] = [
+const FILES: [&str; 5] = [
     "Fonts.xml",
+    "MoneyFrame.xml",
     "UiPanels.xml",
     "UIParent.xml",
     "ScrollTemplates.xml",

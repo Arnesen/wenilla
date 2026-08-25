@@ -14,9 +14,9 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// helpers (postage display), so a load error in either fails here.
 const FILES: [&str; 6] = [
     "Fonts.xml",
+    "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
-    "MoneyFrame.xml",
     "MerchantFrame.xml",
     "MailFrame.xml",
 ];

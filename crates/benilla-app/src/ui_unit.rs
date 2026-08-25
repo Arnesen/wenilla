@@ -7,7 +7,9 @@
 //! ([`crate::ui_script::UiInput`]), and pushes a [`UnitState`] snapshot for each unit token into the
 //! VM via [`UiScript::set_unit`]. The `"player"` token reads our own avatar's [`ObjectStore`] (tagged
 //! [`SelfPlayer`]); `"target"` reads the [`Selection`]'s entity. Both are found by their ECS entity,
-//! not by re-deriving a guid — the ECS already owns the guid↔entity map.
+//! not by re-deriving a guid — the ECS already owns the guid↔entity map. `"targettarget"` is the one
+//! token here that IS reached by a guid: the target's own `UNIT_FIELD_TARGET`, looked up in the same
+//! index (decision 1576).
 //!
 //! Names come from the [`crate::names::NameCache`] (the 1.12 wire has no descriptor names — the
 //! query-cache seam): the feed resolves each token's guid, which asks the server once on a miss and
@@ -840,6 +842,12 @@ fn feed_units(
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     selection: Res<Selection>,
     stores: Query<&ObjectStore>,
+    // The guid -> entity map the `"targettarget"` hop lands in, the same index `/assist` resolves
+    // its basis' `UNIT_FIELD_TARGET` through (`target::by_name`). `Option` because it belongs to
+    // `NetPlugin` (net.rs's `init_resource`) and this feed does not: a UI-only harness runs this
+    // system with no net stack at all, and a bare `Res` turns that into a system-validation panic
+    // rather than a token that names nobody. Same shape as `factions` below, same reason.
+    index: Option<Res<crate::net::GuidIndex>>,
     changed_stores: Query<(), Changed<ObjectStore>>,
     mut removed_stores: RemovedComponents<ObjectStore>,
     mut feed: ResMut<UnitFeedState>,
@@ -911,6 +919,15 @@ fn feed_units(
         let name = names.resolve(guid.0, &commands).map(str::to_string);
         let mut s = snapshot(store, name, 0);
         s.is_player = true;
+        // The stated `is_connected` gap, closed for every token this feed pushes — the field's own
+        // doc names the feed as what must set it ("mirroring `exists`"), and a token we push at all
+        // is one whose descriptor is streamed. It was reachable, not academic: `GREY_ROW["WHISPER"]`
+        // (UnitPopup.xml) greys on `not UnitIsConnected(unit)`, so Whisper sat greyed in the
+        // right-click menu of every player you targeted. What stays out of reach is real link-death
+        // — the only wire that carries it is the group roster's status byte, which the party feed
+        // already reads for its own tokens; a non-group player logging out lingers here as
+        // connected until that lands.
+        s.is_connected = true;
         // Identity + the raid-target board mark (decision 0434 §5's popup gating; §6's board).
         s.guid = guid.0;
         s.raid_target = group.raid_target_index(guid.0);
@@ -965,6 +982,7 @@ fn feed_units(
         ) + 1;
         let mut s = snapshot(store, name, reaction);
         s.guid = guid;
+        s.is_connected = true; // see the player leg
         s.raid_target = group.raid_target_index(guid);
         s.faction_group = faction_group(store, factions.as_deref());
         // The byte-confirmed CanAttack 0x606980 (decision 0172) — the same predicate TAB and the
@@ -990,6 +1008,53 @@ fn feed_units(
         Some(s)
     });
 
+    // `"targettarget"` — the target's own target, one hop off its `UNIT_FIELD_TARGET`. It is the
+    // same read `/assist` runs (`target::by_name`), and the same shape 1.12's own token resolver
+    // walks for the `target` SUFFIX: resolve the base unit, then follow the guid its target field
+    // carries. Only a STREAMED guid resolves — an unstreamed one leaves `UnitExists("targettarget")`
+    // false, exactly as an out-of-range party member is false.
+    //
+    // No `guild` leg, deliberately: `unit_guild` is the LAZY cache whose miss SENDS a
+    // `CMSG_GUILD_QUERY` (1257), and nothing asks a target-of-target for its guild — the party and
+    // raid tokens leave it unfilled for the same reason. Everything else here is a pure read of a
+    // descriptor we already hold.
+    let tot = selection
+        .target
+        .and_then(|e| stores.get(e).ok())
+        .and_then(|s| s.0.unit_target())
+        .filter(|guid| *guid != 0)
+        .and_then(|guid| Some((*index.as_ref()?.0.get(&guid)?, guid)))
+        .and_then(|(entity, guid)| {
+            let store = stores.get(entity).ok()?;
+            let name = names.resolve(guid, &commands).map(str::to_string);
+            let reaction = ring_reaction(
+                factions.as_deref(),
+                &reputations,
+                Some(store),
+                self_pair.map(|(s, _)| s),
+            ) + 1;
+            let mut s = snapshot(store, name, reaction);
+            s.guid = guid;
+            s.is_connected = true; // see the player leg
+            s.raid_target = group.raid_target_index(guid);
+            s.faction_group = faction_group(store, factions.as_deref());
+            s.can_attack = crate::target::can_attack(
+                Some(store),
+                factions.as_deref(),
+                &reputations,
+                self_pair.map(|(s, _)| s),
+            );
+            enrich_unit(
+                &mut s,
+                guid,
+                &names,
+                store,
+                factions.as_deref(),
+                self_pair.map(|(s, _)| s),
+            );
+            Some(s)
+        });
+
     // `"player"` is pushed only while the descriptor EXISTS: its absence is "no data source",
     // never "the player stopped existing". The two absent windows are pre-arrival at login —
     // where a `None` push would erase the roster seat (`seat_from_roster`) that addon file scopes
@@ -1014,6 +1079,17 @@ fn feed_units(
     if target_dirty {
         gate.audit("feed_units", "the target snapshot");
         script.set_unit("target", target.clone());
+    }
+    // The same "absence IS data" push as the target's above: the target dropping ITS target is a
+    // transition the frame has to hear about, and clearing the token is how it hears it.
+    let tot_dirty = match (&tot, memo.last.get("targettarget")) {
+        (Some(cur), Some(prev)) => cur != prev,
+        (None, None) => false,
+        _ => true,
+    };
+    if tot_dirty {
+        gate.audit("feed_units", "the target-of-target snapshot");
+        script.set_unit("targettarget", tot.clone());
     }
 
     // The XP bar's feed: push our own avatar's PLAYER_XP / PLAYER_NEXT_LEVEL_XP (both PRIVATE, only
@@ -1168,7 +1244,11 @@ fn feed_units(
         memo.action_bar_toggles = None;
     }
 
-    for (token, snap) in [("player", &player), ("target", &target)] {
+    for (token, snap) in [
+        ("player", &player),
+        ("target", &target),
+        ("targettarget", &tot),
+    ] {
         match snap {
             Some(cur) => {
                 let prev = memo.last.get(token);

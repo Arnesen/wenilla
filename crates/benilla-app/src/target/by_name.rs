@@ -608,25 +608,33 @@ pub(super) fn follow_requests(
 #[derive(SystemParam)]
 #[allow(clippy::type_complexity)] // one bundled system param — the app's convention for big query sets
 pub(crate) struct SelectCommit<'w, 's> {
-    selection: ResMut<'w, Selection>,
+    pub(super) selection: ResMut<'w, Selection>,
     seam: crate::creature_anim::AttackSeam<'w, 's>,
+    // `Entity` first because a caller can need our own body as a SELECTION target, not only as the
+    // comparison the classification runs against (`TargetUnit("player")`, the player frame's click).
     me: Query<
         'w,
         's,
         (
+            Entity,
             &'static Guid,
             Option<&'static ObjectStore>,
             Has<crate::creature_anim::Engaged>,
         ),
         With<SelfPlayer>,
     >,
-    stores: Query<'w, 's, &'static ObjectStore>,
+    pub(super) stores: Query<'w, 's, &'static ObjectStore>,
     factions: Option<Res<'w, super::Factions>>,
     reputations: Res<'w, crate::net::Reputations>,
 }
 
 impl SelectCommit<'_, '_> {
-    fn commit(&mut self, entity: Entity, guid: u64) {
+    /// Our own body's entity + guid, for a caller that can be asked to select it.
+    pub(super) fn me(&self) -> Option<(Entity, u64)> {
+        self.me.single().ok().map(|(e, g, _, _)| (e, g.0))
+    }
+
+    pub(super) fn commit(&mut self, entity: Entity, guid: u64) {
         let me = self.me.single().ok();
         // The new-target classification `scan::commit` expects from its callers (it does not
         // re-derive one) — the same `can_attack` the cursor and the TAB scan pass.
@@ -634,15 +642,15 @@ impl SelectCommit<'_, '_> {
             self.stores.get(entity).ok(),
             self.factions.as_deref(),
             &self.reputations,
-            me.and_then(|(_, store, _)| store),
+            me.and_then(|(_, _, store, _)| store),
         );
         scan::commit(
             &mut self.selection,
             &mut self.seam,
             entity,
             guid,
-            me.is_some_and(|(_, _, engaged)| engaged),
-            me.map(|(g, _, _)| g.0),
+            me.is_some_and(|(_, _, _, engaged)| engaged),
+            me.map(|(_, g, _, _)| g.0),
             attackable,
         );
     }

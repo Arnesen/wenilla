@@ -596,6 +596,7 @@ fn shipped_target_frame_runs_the_level_law() {
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
     // GetDifficultyColor's own load chain (the quest log window, its ref home).
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "QuestLogFrame.xml");
@@ -1135,6 +1136,7 @@ fn the_party_art_paints_over_the_bars() {
     // StaticPopupDialogs, which UiPanels.xml defines, and its per-member dropdown OnLoad walks the
     // whole popup kit.
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "UIDropDownMenu.xml");

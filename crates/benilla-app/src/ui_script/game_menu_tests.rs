@@ -23,11 +23,16 @@ use benilla_ui::script::{
 fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    let files: Vec<&str> = ["Fonts.xml", "UiPanels.xml", "UIPanelTemplates.xml"]
-        .into_iter()
-        .chain(extra.iter().copied())
-        .chain(std::iter::once("GameMenuFrame.xml"))
-        .collect();
+    let files: Vec<&str> = [
+        "Fonts.xml",
+        "MoneyFrame.xml",
+        "UiPanels.xml",
+        "UIPanelTemplates.xml",
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    .chain(std::iter::once("GameMenuFrame.xml"))
+    .collect();
     for file in files {
         let text = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

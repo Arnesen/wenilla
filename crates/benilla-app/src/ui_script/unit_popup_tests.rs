@@ -436,6 +436,7 @@ fn load_pet_menu_frames(s: &UiScript) {
     for file in [
         "Fonts.xml",
         "UIParent.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "UIDropDownMenu.xml",

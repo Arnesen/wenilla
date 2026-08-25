@@ -214,6 +214,14 @@ pub enum ServerPacket {
     BinderConfirm {
         binder: u64,
     },
+    /// `MSG_TALENT_WIPE_CONFIRM` (inbound) — a class trainer is *asking* whether to unlearn every
+    /// talent, and what it will cost (decision 1580). The twin of [`Self::BinderConfirm`] in every
+    /// respect: nothing is unlearned until the same opcode goes back out carrying `trainer`.
+    /// `trainer == 0` is vmangos's "you have no talents to reset" refusal, not a question.
+    TalentWipeConfirm {
+        trainer: u64,
+        cost: u32,
+    },
     /// `SMSG_PLAYERBOUND` — the bind took: who bound us and the AreaTable id we are now bound in.
     /// Arrives beside [`Self::BindPoint`], which carries the same area id plus the position; this
     /// one exists for the "X is now your home" acknowledgement.
@@ -1261,6 +1269,7 @@ impl ServerPacket {
             ServerPacket::BindPoint { .. } => "SMSG_BINDPOINTUPDATE".into(),
             ServerPacket::BinderConfirm { .. } => "SMSG_BINDER_CONFIRM".into(),
             ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
+            ServerPacket::TalentWipeConfirm { .. } => "MSG_TALENT_WIPE_CONFIRM".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),

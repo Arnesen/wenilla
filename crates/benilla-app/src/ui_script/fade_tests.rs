@@ -33,6 +33,7 @@ fn load_xml(s: &UiScript, file: &str) {
 fn an_idle_fade_driver_parks_itself_off_the_tick() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     s.resolve();
     s.run(
@@ -69,6 +70,7 @@ fn an_idle_fade_driver_parks_itself_off_the_tick() {
 fn a_started_fade_still_ramps_and_the_driver_reparks_after() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     s.resolve();
     s.run(r#"CreateFrame("Frame", "BenillaFadeProbe")"#)

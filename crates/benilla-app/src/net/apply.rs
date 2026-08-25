@@ -209,6 +209,11 @@ pub(super) fn apply_net_updates(
                 // parks the innkeeper's guid here and `crate::ui_binder` turns it into the
                 // CONFIRM_BINDER dialog, whose Accept is the only thing that binds anything.
                 ResMut<crate::ui_binder::BinderState>,
+                // The class trainer's pending respec question (decision 1580) — the inbound
+                // `MSG_TALENT_WIPE_CONFIRM` parks the trainer's guid + cost here and
+                // `crate::ui_talent_wipe` turns it into the CONFIRM_TALENT_WIPE dialog, whose
+                // Accept is the only thing that unlearns anything. The binder's twin above.
+                ResMut<crate::ui_talent_wipe::TalentWipeState>,
                 // The guard's directions marker (`SMSG_GOSSIP_POI`) and the map id it has to be
                 // stamped with — the wire carries no map field, so "where you were standing when
                 // the guard told you" is the client's to remember (`crate::poi_marker`).
@@ -380,6 +385,7 @@ pub(super) fn apply_net_updates(
                 mut played_time_answer,
                 mut guild,
                 mut binder,
+                mut talent_wipe,
                 mut poi_marker,
                 current_map,
                 mut inspect_honor,
@@ -704,6 +710,17 @@ pub(super) fn apply_net_updates(
                 });
             }
             SessionEvent::BinderConfirm { binder: npc } => binder.ask(npc),
+            // A zero trainer guid is vmangos's "you have no talents to reset" refusal, not a
+            // question — there is nothing to ask about, so nothing goes on screen (decision 1580;
+            // `crate::ui_talent_wipe`'s header carries why the reference instead re-sends here).
+            SessionEvent::TalentWipeConfirm { trainer, cost } => {
+                if trainer == 0 {
+                    debug!("net: talent wipe refused (no talents to reset) — no dialog");
+                } else {
+                    debug!("net: trainer {trainer:#x} asks to wipe talents for {cost} copper");
+                    talent_wipe.ask(trainer, cost);
+                }
+            }
             SessionEvent::PlayerBound { binder: npc, area } => {
                 debug!("net: bound to area {area} by {npc:#x}");
                 crate::ui_binder::apply::bound(

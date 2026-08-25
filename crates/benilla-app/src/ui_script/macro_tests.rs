@@ -44,6 +44,7 @@ fn harness() -> UiScript {
     .unwrap();
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "ScrollTemplates.xml",
         "MicroMenu.xml",

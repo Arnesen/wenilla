@@ -100,8 +100,18 @@ mod test_bake;
 /// frames, `"pet"` (decision 0990's frame), and `"npc"` — the NPC an interaction window (gossip /
 /// quest / merchant / trainer / taxi) is bound to ([`crate::ui_session::InteractNpc`]), so those
 /// windows show the creature's face instead of the `?` placeholder.
-const SLOTS: [&str; 8] = [
-    "player", "target", "pet", "npc", "party1", "party2", "party3", "party4",
+/// `"targettarget"` (decision 1576) is the ninth and the odd one: it is the only slot whose unit
+/// resolution is gated on the UI actually drawing it — see [`sync_portraits`]'s arm for why.
+const SLOTS: [&str; 9] = [
+    "player",
+    "target",
+    "targettarget",
+    "pet",
+    "npc",
+    "party1",
+    "party2",
+    "party3",
+    "party4",
 ];
 /// The character-window **paper-doll** slot (decision 0208 §5): a full-body bake of the dressed
 /// player, sampled *square* (not circular) by the character frame's model pane. Its own booth —
@@ -713,9 +723,13 @@ fn wake_booth<'a>(
 struct Booths(HashMap<String, Booth>);
 
 /// Where each booth's bake is actually being **sampled on screen this frame**: slot token → the
-/// destination region's aspect (width ÷ height). Published by the UI extract for every
-/// `BenillaSetBoothTexture` binding it emits — the *square* portrait binding (decision 0208 §5); a
-/// round `SetPortraitTexture` unit portrait is not a pane and never appears here.
+/// destination region's aspect (width ÷ height). Published by the UI extract for every portrait
+/// binding it emits — the *square* `BenillaSetBoothTexture` pane (decision 0208 §5) and, since
+/// 1576, the round `SetPortraitTexture` unit portraits beside it. The two consumers below are
+/// body-booth-only and unreachable for a round slot (`sync_body_booth` is never called with one,
+/// and `live_pane` needs a `live` booth, which only a body pane ever is), so the round rows are
+/// inert here and exist for a third reader: [`sync_portraits`]'s `"targettarget"` gate, which asks
+/// this resource whether the frame it feeds is on screen at all.
 ///
 /// Two things need it, and neither can be a constant (decision 1069):
 ///
@@ -753,7 +767,9 @@ pub(crate) struct BoothBridge<'w> {
 /// serves the party slots and the pet alike.
 ///
 /// One struct rather than five loose params because `sync_portraits` sits at Bevy's 16-parameter
-/// ceiling; it was a bare tuple until the name cache made that tuple's type unreadable.
+/// ceiling; it was a bare tuple until the name cache made that tuple's type unreadable. It has
+/// since become that system's overflow bag outright — [`BoothPanes`] is not group-facing at all,
+/// it rides here because there is no room left in the signature.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct PartyBooths<'w> {
     roster: Res<'w, crate::ui_party::GroupState>,
@@ -761,6 +777,8 @@ pub(crate) struct PartyBooths<'w> {
     palettes: ResMut<'w, benilla_world::rig_palette::RigPalettes>,
     pet_bar: Res<'w, crate::ui_pet::PetBar>,
     names: Res<'w, crate::names::NameCache>,
+    /// What the UI drew last frame ([`BoothPanes`]) — read by the `"targettarget"` slot alone.
+    panes: Res<'w, BoothPanes>,
 }
 
 /// Tags a booth camera with its slot token, so the model-sync pass can re-frame it per model.
@@ -1302,6 +1320,30 @@ fn sync_portraits(
         let unit: Option<Entity> = match token {
             "player" => self_q.single().ok(),
             "target" => selection.target,
+            // The target's own target (decision 1576) — one hop off `UNIT_FIELD_TARGET`, the same
+            // read the `"targettarget"` unit snapshot makes.
+            //
+            // **Gated on the UI actually drawing this slot**, which no other slot here is, and
+            // which this one needs. The other eight are gated by their own resolution: no pet, no
+            // party member, no interact NPC means no unit and no work. This one resolves for as
+            // long as anything you have selected is fighting anything — while the frame that
+            // draws it ships HIDDEN (1.12's `SHOW_TARGET_OF_TARGET` default is `"0"`), so
+            // ungated it would pay a descendants walk every frame and a re-bake on every mob's
+            // target switch for a circle nobody is looking at. One frame stale by construction
+            // (the extract runs after this), which costs the first bake a frame and nothing else.
+            "targettarget" => party
+                .panes
+                .0
+                .contains_key("targettarget")
+                .then(|| {
+                    selection
+                        .target
+                        .and_then(|e| stores_q.get(e).ok())
+                        .and_then(|s| s.0.unit_target())
+                        .filter(|g| *g != 0)
+                        .and_then(|g| party.index.0.get(&g).copied())
+                })
+                .flatten(),
             // The pet, off the bar's cached guid — the same word its unit token and `UNIT_PET`
             // read (`crate::ui_pet::feed_pet_unit`).
             "pet" => {

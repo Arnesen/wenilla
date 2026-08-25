@@ -34,6 +34,7 @@ fn load_xml(s: &UiScript, file: &str) {
 fn load_room(s: &UiScript) {
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",
@@ -208,6 +209,7 @@ fn the_paper_doll_slots_preview_and_post_what_you_wear() {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",
@@ -273,6 +275,7 @@ fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",

@@ -66,6 +66,7 @@ fn shown_skills_page() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "ScrollTemplates.xml",

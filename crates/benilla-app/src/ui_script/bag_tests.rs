@@ -38,6 +38,7 @@ fn bag_bar_icons_draw_above_the_action_bar_art() {
     // ExpBar dwarf art); MerchantFrame.xml is BagFrame's documented purse-helper dep.
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "MerchantFrame.xml",
         "Cooldown.xml",
@@ -82,6 +83,7 @@ fn backpack_toggle_plays_open_and_close_kits() {
     // BenillaMoney_Set (the bag's purse helper) lives in MerchantFrame.xml — the bag's documented
     // isolation dep; Fonts.xml first so both files' `inherits=` FontStrings resolve.
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -131,6 +133,7 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -217,6 +220,7 @@ fn shift_b_toggles_every_bag_at_once() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -305,6 +309,7 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -418,6 +423,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -498,6 +504,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -606,6 +613,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MerchantFrame.xml");
@@ -744,6 +752,7 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set — the bag window's money strip
@@ -820,6 +829,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // BenillaBagSlot_OnClick's :Hide() dep
@@ -909,6 +919,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -986,6 +997,7 @@ fn equipped_bag_window_snug_fits_its_row_count() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -1037,6 +1049,7 @@ fn equipped_bag_window_snug_fits_its_row_count() {
 /// the shift-click/split tests below. Returns the slot-1 button's screen center.
 fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     load_xml(s, "Fonts.xml");
+    load_xml(s, "MoneyFrame.xml");
     load_xml(s, "UiPanels.xml");
     load_xml(s, "MerchantFrame.xml");
     load_xml(s, "GameTooltip.xml");
@@ -1391,6 +1404,7 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml"); // the shared CooldownFrame_SetTimer
@@ -1459,6 +1473,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         "Fonts.xml",
         "UIParent.xml",
         "GameTooltip.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "MerchantFrame.xml",
         "Cooldown.xml",
@@ -1578,6 +1593,7 @@ fn drawn_with(s: &mut UiScript, needle: &str) -> usize {
 fn keyring_surface(s: &UiScript) {
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "MerchantFrame.xml",
         "Cooldown.xml",
@@ -1841,6 +1857,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     s.set_screen_size(1600.0, 900.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "MerchantFrame.xml",
         "Cooldown.xml",
@@ -2093,6 +2110,7 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -2149,6 +2167,7 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -2200,6 +2219,7 @@ fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "MerchantFrame.xml",
         "Cooldown.xml",

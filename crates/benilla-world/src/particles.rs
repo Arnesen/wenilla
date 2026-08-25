@@ -189,24 +189,10 @@ pub struct ParticleEmitter {
     /// again: an emitter riding an ANIMATED bone — the food sparkle orbits on a global-sequence
     /// spin — would otherwise drag every risen star in a circle (the director's swirl).
     /// `None` = anchor at the spawn placement (a placed doodad whose emitter rides a joint
-    /// anchors at the doodad, not the bone). [`Self::world_composed`] is what decides whether the
-    /// anchor's own motion carries the pool at all.
+    /// anchors at the doodad, not the bone). How much of the anchor's own motion the live pool
+    /// keeps is the emitter's file flag `0x10`, not this frame — see
+    /// [`world_motion_kept`](crate::particles::sim) (decision 1578).
     anchor: Option<Entity>,
-    /// Whether this emitter's world MOTION reaches the particles through its own **emitter
-    /// matrix** rather than through the model's device-stack transform — the reference's real
-    /// ride-vs-trail discriminator (wow-re `part-emitter-motion.md` §2b: "`rt+0x1fc` local, Δ≈0 —
-    /// creature-attached doodads" ⇒ ride, vs "folded into `rt+0x1fc` … a translating missile
-    /// whose own model IS the emitter" ⇒ the birth bakes world-absolute and the particle is
-    /// world-FROZEN at draw). Bit 0x100 is NOT that switch and neither is the follow flag: the
-    /// kobold's candle (file `0x01`) rides while Multi-Shot's FLARE emitters (file `0x0309`,
-    /// equally unflagged) hang in the air behind the arrow.
-    ///
-    /// `true` for a FREE world model — a missile, a planted ground burst — whose own transform is
-    /// its world placement; `false` for everything hung off a model that the scene graph moves (a
-    /// creature's own emitters, a kit effect on a unit, a held item's glow). It sets the
-    /// **baseline** the follow-delta term is measured against: 0 (world-frozen) here, 1 (rigid
-    /// ride) otherwise — see the follow block in [`sim`](crate::particles::sim). Decision 0986.
-    world_composed: bool,
     /// The anchor's last-known world translation (kept when the entity vanishes so the pool
     /// drains in place; init = the spawn placement's translation).
     anchor_pos: Vec3,
@@ -216,6 +202,11 @@ pub struct ParticleEmitter {
     /// refreshed EVERY frame — `0x7b5230` @0x7b5265): the one-frame Δ source for both
     /// emitter-motion terms (follow-delta, velocity inherit). `None` until the first frame.
     emitter_prev: Option<Vec3>,
+    /// The **anchor's** last-frame world position, on the same one-frame refresh — what the
+    /// anchored store's own ride amounts to, and the term the world-motion carry subtracts (see
+    /// the carry block in [`sim`](crate::particles::sim)). Distinct from `emitter_prev`: an
+    /// emitter orbiting an animated bone moves while its model — the anchor — stands still.
+    anchor_prev: Option<Vec3>,
     /// Velocity-inherit state (file flag 0x40, wow-re `part-emitter-motion.md` §1): the ~30 Hz
     /// trigger accumulator (rt+0x254) and the held inherit velocity (rt+0x258.., world frame) —
     /// recomputed only at a trigger, births read the held value between.
@@ -348,10 +339,6 @@ pub struct EmitterFrames {
     pub alpha: Option<Entity>,
     /// What losing `owner` means ([`OwnerLoss`]).
     pub on_owner_loss: OwnerLoss,
-    /// Whether the model's world motion reaches the particles through the emitter matrix — a FREE
-    /// world model like a missile ([`ParticleEmitter::world_composed`]). Defaults `false`: every
-    /// scene-graph-carried lane (creatures, doodads, kit effects, held items) rides.
-    pub world_composed: bool,
 }
 
 /// Spawn an emitter entity for one [`ModelEmitter`] at `placement`. `None` if the emitter has no
@@ -675,11 +662,11 @@ pub fn spawn_emitter(
                     alpha_src: frames.alpha,
                     alpha: 1.0,
                     anchor: frames.anchor,
-                    world_composed: frames.world_composed,
                     anchor_pos: placement.translation,
                     particles: Vec::new(),
                     accumulator: 0.0,
                     emitter_prev: None,
+                    anchor_prev: None,
                     inherit_accum: 0.0,
                     inherit_vel: Vec3::ZERO,
                     gate_prev: false,

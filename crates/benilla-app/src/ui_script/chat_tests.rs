@@ -242,6 +242,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "Cooldown.xml",

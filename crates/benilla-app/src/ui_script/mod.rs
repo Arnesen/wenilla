@@ -710,6 +710,9 @@ mod pet_bar_tests;
 mod pet_frame_tests;
 
 #[cfg(test)]
+mod tot_frame_tests;
+
+#[cfg(test)]
 mod micro_menu_tests;
 
 #[cfg(test)]
@@ -807,6 +810,9 @@ mod static_popup_tests;
 
 #[cfg(test)]
 mod binder_tests;
+
+#[cfg(test)]
+mod talent_wipe_tests;
 
 #[cfg(test)]
 mod death_tests;

@@ -19,8 +19,9 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The tradeskill window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
 /// CraftFrame.xml rides along (it loads right after TradeSkillFrame.xml in the app and shares
 /// its guarded-global utilities) so a load error in EITHER window fails here.
-const FILES: [&str; 7] = [
+const FILES: [&str; 8] = [
     "Fonts.xml",
+    "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
     "UIDropDownMenu.xml",

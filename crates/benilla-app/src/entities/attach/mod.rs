@@ -796,9 +796,6 @@ pub(super) fn attach_entity_visuals(
                             // (appear ramp, stream-out ramp, the self-avatar feather) multiplies
                             // its clouds — decision 0827.
                             alpha: Some(entity),
-                            // Scene-graph-carried: this model's world motion arrives on the reference's
-                            // device stack, so its cloud RIDES (0986's baseline).
-                            world_composed: false,
                         },
                         // The emitters' rate/enabled read this instance's PLAYING sequence — a
                         // unit's or GameObject's `AnimationPlayer` on the root. A quest object's

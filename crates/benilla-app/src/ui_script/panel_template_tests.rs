@@ -55,6 +55,7 @@ fn harness() -> UiScript {
     for file in [
         "Fonts.xml",
         "UIParent.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "ScrollTemplates.xml",

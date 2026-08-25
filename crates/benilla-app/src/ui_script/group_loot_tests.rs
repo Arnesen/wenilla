@@ -82,6 +82,7 @@ fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS + GameFontNormalSmall
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // PASS/NEED/GREED + item hovers
     load_xml(&s, "Cooldown.xml");
@@ -488,6 +489,7 @@ fn managed_positions_engage_for_the_bare_frame_name() {
     // (`ui_script::load_default_ui`): the roll file's CONFIRM_LOOT_ROLL entry indexes
     // `StaticPopupDialogs`, and indexing a nil there aborts the WHOLE inline <Script> chunk —
     // taking every BenillaGroupLootFrame_* function down with it, not just the popup.
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GroupLootFrame.xml");
 

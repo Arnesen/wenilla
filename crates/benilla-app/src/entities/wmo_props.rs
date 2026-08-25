@@ -360,9 +360,6 @@ pub(super) fn spawn_wmo_gameobject_props(
                             // A placed prop carries no fade component of its own; its emitters
                             // take the doodad distance fade in the sim instead (0827).
                             alpha: None,
-                            // Scene-graph-carried: this model's world motion arrives on the reference's
-                            // device stack, so its cloud RIDES (0986's baseline).
-                            world_composed: false,
                         },
                         // A placed prop: the doodad law — which is NOT one arm for life. It re-rolls
                         // its variation every play-window (decision 0768), so the emitter resolves

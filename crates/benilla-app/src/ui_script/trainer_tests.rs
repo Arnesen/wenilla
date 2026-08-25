@@ -42,6 +42,7 @@ fn trainer_script() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_* (the kit's MenuBackdrop), app order
     load_xml(&s, "UIDropDownMenu.xml"); // the filter dropdown's kit

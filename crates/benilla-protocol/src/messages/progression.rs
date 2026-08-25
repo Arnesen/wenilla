@@ -77,6 +77,41 @@ pub fn learn_talent(talent_id: u32, requested_rank: u32) -> Vec<u8> {
     body
 }
 
+/// One decoded **inbound** `MSG_TALENT_WIPE_CONFIRM` — a class trainer asking whether to unlearn
+/// every talent (vmangos `WorldPackets::Skill::TalentWipeConfirmResponse`,
+/// `Server/Packets/Skill.h:39-52` + `Skill.cpp:19-23`, filled by `Player::SendTalentWipeConfirm`,
+/// `Player.cpp:8338`). Decision 1580.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TalentWipeConfirm {
+    /// The trainer that asked — echoed back in the outbound answer, where it is load-bearing
+    /// (`HandleTalentWipeConfirmOpcode` resolves it to a live `UNIT_NPC_FLAG_TRAINER` in range and
+    /// drops the request otherwise), exactly like the innkeeper guid in [`super::binder`].
+    ///
+    /// **Zero means "you have no talents to reset"** — vmangos's own comment on the field, and the
+    /// value its refusal path sends (`SkillHandler.cpp:52`, after a failed `ResetTalents`). There
+    /// is no trainer to ask about, so there is nothing to put on screen.
+    pub trainer: u64,
+    /// What the reset costs, in copper — `Player::GetResetTalentsCost()`, which climbs with every
+    /// reset (the dialog's money frame, and the line "The cost will increase each time you do it").
+    pub cost: u32,
+}
+
+/// Read the inbound `MSG_TALENT_WIPE_CONFIRM`: trainer guid u64 · cost u32 (`Skill.cpp:19-23`).
+pub(super) fn read_talent_wipe_confirm(r: &mut impl Read) -> io::Result<TalentWipeConfirm> {
+    Ok(TalentWipeConfirm {
+        trainer: read_u64_le(r)?,
+        cost: read_u32_le(r)?,
+    })
+}
+
+/// Body of the **outbound** `MSG_TALENT_WIPE_CONFIRM` — the `CONFIRM_TALENT_WIPE` dialog's Accept
+/// (vmangos `WorldPackets::Skill::TalentWipeConfirm`, `Skill.cpp:14-17`: one guid, no cost). The
+/// guid is the one the question arrived with; the real client sends its own latched copy
+/// (`0xc4d7a0`, wow-re `talent-api.md`), which is the same number. Decision 1580.
+pub fn talent_wipe_confirm(trainer_guid: u64) -> Vec<u8> {
+    trainer_guid.to_le_bytes().to_vec()
+}
+
 /// One decoded `SMSG_LEVELUP_INFO` — our own ding, self-addressed only (vmangos
 /// `WorldPackets::Misc::LevelUpInfo`, `Misc.h:793-802` + `Misc.cpp:524-532`; filled by
 /// `Player::GiveLevel`, Player.cpp:3210-3218, and sent straight to the leveling session — no
@@ -115,4 +150,37 @@ pub(super) fn read_level_up_info(r: &mut impl Read) -> io::Result<LevelUpInfo> {
         powers,
         stats,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The respec pair, both directions: the question carries guid + cost, the answer carries the
+    /// guid alone. Asymmetric bodies on ONE opcode is the whole reason this is an `MSG_`.
+    #[test]
+    fn the_talent_wipe_pair_round_trips() {
+        let trainer: u64 = 0xF130_0000_0000_2A01;
+        let mut body = trainer.to_le_bytes().to_vec();
+        body.extend_from_slice(&15_000u32.to_le_bytes());
+        assert_eq!(
+            read_talent_wipe_confirm(&mut &body[..]).unwrap(),
+            TalentWipeConfirm {
+                trainer,
+                cost: 15_000
+            }
+        );
+        assert_eq!(talent_wipe_confirm(trainer), trainer.to_le_bytes().to_vec());
+    }
+
+    /// vmangos's "you have no talents to reset" reply — guid 0, and a cost that is still filled in.
+    /// It parses; what to DO with it is the app's call (decision 1580: there is no trainer to ask
+    /// about, so nothing goes on screen).
+    #[test]
+    fn a_zero_trainer_is_a_parseable_refusal() {
+        let mut body = 0u64.to_le_bytes().to_vec();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        let ask = read_talent_wipe_confirm(&mut &body[..]).unwrap();
+        assert_eq!(ask.trainer, 0);
+    }
 }

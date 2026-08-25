@@ -59,6 +59,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set, used by the bag's Update
     load_xml(&s, "LootFrame.xml");
@@ -137,6 +138,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -172,6 +174,7 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "UIDropDownMenu.xml");
@@ -216,6 +219,7 @@ fn escape_closes_an_open_stack_split_frame() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -296,6 +300,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -392,6 +397,7 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
     load_xml(&s, "Cooldown.xml");
@@ -459,6 +465,7 @@ fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameMenuFrame.xml");
 

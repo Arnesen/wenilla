@@ -41,7 +41,11 @@ impl Plugin for UiSessionPlugin {
 /// [`crate::ui_gossip::GossipState`], [`crate::ui_quest::QuestGiver`],
 /// [`crate::ui_trainer::TrainerOpen`], [`crate::ui_taxi::TaxiState`],
 /// [`crate::ui_mail::MailOpen`], [`crate::ui_trade::TradeSession`], [`crate::ui_bank::BankOpen`]
-/// and [`crate::ui_auction::AuctionOpen`]; each *NPC* window registers
+/// and [`crate::ui_auction::AuctionOpen`] — plus the two free-standing *questions*, which are
+/// sessions for the same reason a window is ([`crate::ui_binder::BinderState`],
+/// [`crate::ui_talent_wipe::TalentWipeState`]: the reference re-runs its own interact-range test
+/// against a latched guid, so "walked away" retracting the dialog is its law, not our tidiness).
+/// Each *NPC* window registers
 /// [`close_npc_session_out_of_range::<T>`] ahead of its feed so the clear turns into the window's
 /// `*_CLOSED` event the same frame — trade does **not** (its cancel is server-driven, decision 0592).
 /// [`feed_interact_npc`] collapses the portrait-bound sessions into the [`InteractNpc`] the

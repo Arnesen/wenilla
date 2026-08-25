@@ -38,6 +38,7 @@ fn harness_on(mut s: UiScript) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "UIDropDownMenu.xml",
@@ -662,9 +663,21 @@ fn interface_harness() -> UiScript {
         &s,
         &[
             "Fonts.xml",
+            "MoneyFrame.xml",
             "UiPanels.xml",
             "UIParent.xml",
+            // The target-of-target pair's definer (1576) and the three files ahead of it, all in
+            // their manifest seats. The chain is a real load-ORDER requirement rather than
+            // tidiness: `UnitFrames`' three menu hosts initialize into the dropdown kit at load
+            // (`UIDropDownMenu_Initialize` is nil without it and the OnLoad raises), and the kit's
+            // own backdrop reads `GameTooltip`'s TOOLTIP_DEFAULT_COLOR. `harness_on` loads two of
+            // these again after these — re-running a UI file is what `/reload` does, and the
+            // loader takes it.
+            "GameTooltip.xml",
+            "UIDropDownMenu.xml",
+            "UnitPopup.xml",
             "TextStatusBar.xml",
+            "UnitFrames.xml",
             "Cooldown.xml",
             "ActionBar.xml",
             "ScrollTemplates.xml",
@@ -1890,14 +1903,16 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     }
     // 22 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
     // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's; Camera Following Style
-    // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 4 (3 from
-    // 1136, Buff Durations 1139) and the Action Bars page's 2 (the lock 1136, Always Show
+    // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 6 (3 from
+    // 1136, Buff Durations 1139, the target-of-target pair 1576) and the Action Bars page's 2 (the
+    // lock 1136, Always Show
     // ActionBars 1500) + 6 API rows (the Interface page's Show Cloak / Show Helm, 1472; the Action
     // Bars page's four multibar switches, 1500) — which is the point of counting here rather than
     // per page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
-    // OPTION_TOOLTIP_CAMERA1); the other two ride the same census as the selection moves.
-    assert_eq!(checked, 48, "every tipped row carries a live 1.12 key");
+    // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
+    // their other entries ride the same census as the selection moves.
+    assert_eq!(checked, 50, "every tipped row carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec![
@@ -1996,10 +2011,11 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // 22 of the 23 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
     // Max Camera Distance 1140's; Vertical Sync 1394's; Camera Following Style 1493's; Terrain
     // Distance 1513's), plus the Combat page's 14 saved-variable rows (1134), the Interface
-    // page's 4 (1136, + Buff Durations 1139), Action Bars' 2 (the lock 1136, Always Show
+    // page's 6 (1136, + Buff Durations 1139, + the target-of-target pair 1576), Action Bars' 2
+    // (the lock 1136, Always Show
     // ActionBars 1500) and 6 API rows (Show Cloak / Show Helm, 1472; the four multibar switches,
     // 1500).
-    assert_eq!(raised, 48, "every row but Auto Loot has a 1.12 description");
+    assert_eq!(raised, 50, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2361,6 +2377,112 @@ fn the_interface_page_writes_the_three_stock_globals() {
         )
         .unwrap(),
         "these three need no apply hook"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The **target-of-target pair** (decision 1576) — the Interface page's first dependent rows and
+/// the window's first `uvar` DROPDOWN. Three things here belong to no other row:
+///
+/// * the picker is dead while the switch is off, which is 1.12's own rule for exactly this pair
+///   (`OptionsFrame_DisableDropDown`, UIOptionsFrame.lua l.694-700);
+/// * both rows carry the same `applyFunc`, and unlike the three stock globals above they NEED one
+///   — the frame's visibility is decided once and kept, and the saved chunk lands after the file
+///   that decided it, so without the re-run a saved "1" would leave the frame hidden;
+/// * the picker's five values are the reference's own strings, in its own order.
+#[test]
+fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
+    let mut s = interface_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+
+    // Ships off, at "always" — 1.12's own two defaults, read off UnitFrames.xml's file scope.
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:GetChecked() \
+             and true or false"
+        )
+        .unwrap(),
+        "the switch ships off"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Always"
+    );
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
+             :IsEnabled() and true or false"
+        )
+        .unwrap(),
+        "the picker is dead while the switch is off"
+    );
+
+    // The switch: the global moves, the CVar table is never reached, and the picker wakes.
+    let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return SHOW_TARGET_OF_TARGET").unwrap(),
+        "1"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "a uvar row must not touch the CVar table"
+    );
+    assert!(
+        s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
+             :IsEnabled() and true or false"
+        )
+        .unwrap(),
+        "and the picker wakes with it"
+    );
+    assert!(
+        s.eval::<bool>(
+            "return OptionsFrameContainerBodyInterfaceRowTargetOfTarget.applyFunc \
+                 == TargetofTarget_Update \
+             and OptionsFrameContainerBodyInterfaceRowTargetOfTargetMode.applyFunc \
+                 == TargetofTarget_Update"
+        )
+        .unwrap(),
+        "both rows re-decide the frame when they are written"
+    );
+
+    // The picker: five entries in the reference's order, the stored value checked, and a pick
+    // writes the reference's own value string.
+    s.run("OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
+        5.0
+    );
+    assert!(
+        s.eval::<bool>("return DropDownList1Button5Check:IsVisible()")
+            .unwrap(),
+        "Always is the one checked"
+    );
+    s.run("DropDownList1Button3:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return SHOW_TARGET_OF_TARGET_STATE")
+            .unwrap(),
+        "3",
+        "Solo is the reference's third value"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Solo"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "still nothing in the CVar table"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -629,8 +629,13 @@
             -- left to right: A gives Status Text (CheckButton2), B gives Show Cloak → Show Helm
             -- (31 → 20, sitting under the name toggles that live on our Nameplates page), C gives
             -- the 42 → 39 → 66 chain. Help (29) closes the page, as before.
+            -- The target-of-target pair (decision 1576) breaks that left-to-right reading, and
+            -- it has to: 1.12 keeps it in a box this window has no page for — Advanced Options'
+            -- "Raid & Party" — so there is no column order to preserve, only a neighbour to pick.
+            -- It sits under Status Text because that is the other unit-frame readout on the page.
             Interface = {
-                "RowStatusText", "RowShowCloak", "RowShowHelm",
+                "RowStatusText", "RowTargetOfTarget", "RowTargetOfTargetMode",
+                "RowShowCloak", "RowShowHelm",
                 "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch",
                 "RowNewbieTips",
             },
@@ -876,7 +881,11 @@
                 -- indexed 0/1/2, so a config or addon carrying that value means Never — and the
                 -- nearest-stop fallback below, which assumes the values are ordinal, would show
                 -- "Always" for it. A categorical dropdown says which strays are its own.
-                if e.value == v or e.alt == v then match = e end
+                -- `e.alt ~= nil` guards the nil-eats-everything case: a row whose store is not
+                -- there yet reads nil, and every entry without an `alt` would otherwise ANSWER to
+                -- it (nil == nil), leaving the capsule showing the last entry and the row wearing
+                -- its description. An entry answers to a second value only if it has one.
+                if e.value == v or (e.alt ~= nil and e.alt == v) then match = e end
             end
             if not match and tonumber(v) then
                 local best
@@ -1096,6 +1105,14 @@
                             getglobal("OptionsFrameContainerBodyCombat" .. rkey), live)
                     end
                 end
+                return
+            end
+            if key == "Interface" then
+                -- 1.12's own rule for this pair (UIOptionsFrame_UpdateDependencies l.694-700):
+                -- the mode picker is dead while the switch is unticked. It is the only
+                -- cross-row dependency on this page.
+                OptionsRow_SetEnabled(OptionsFrameContainerBodyInterfaceRowTargetOfTargetMode,
+                    SHOW_TARGET_OF_TARGET ~= "0")
                 return
             end
             if key == "ActionBars" then
@@ -2624,6 +2641,56 @@
                                                 self.cvarEvent = "STATUS_BAR_TEXT"
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- The target-of-target pair (decision 1576): the switch
+                                             and, indented under it, when the frame is allowed to
+                                             stand. Both are `uvar` rows — 1.12 keeps these two as
+                                             saved globals, not CVars (UnitFrames.xml declares and
+                                             RegisterForSave's them) — and both carry the same
+                                             applyFunc, because the saved chunk lands after the XML
+                                             that read it: without the re-run, a saved "1" would
+                                             leave the frame hidden until the next target change.
+                                             The mode row is a CHILD (indent + small font + greyed
+                                             with the switch off), which is the reference's own
+                                             relationship: its dropdown hangs off CheckButton50's
+                                             BOTTOMLEFT and OptionsFrame_DisableDropDown greys it
+                                             from the same test (UIOptionsFrame.lua l.694-700). -->
+                                        <Frame name="$parentRowTargetOfTarget" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "SHOW_TARGET_OF_TARGET",
+                                                    "Show Target of Target", "OPTION_TOOLTIP_SHOW_TARGET_OF_TARGET")
+                                                self.applyFunc = TargetofTarget_Update
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- The label is ours: the reference declares a Label
+                                             FontString for this dropdown and never sets its text,
+                                             so in 1.12 the picker sits under the checkbox with no
+                                             name at all. An indented row in this window has to say
+                                             what it picks, and the row above supplies the subject.
+                                             The five values are the reference's own strings, and
+                                             its own order (its OPTION_TOOLTIP_TARGETOFTARGET1..5
+                                             describe them in exactly this sequence). -->
+                                        <Frame name="$parentRowTargetOfTargetMode" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowTargetOfTarget" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowTargetOfTarget" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "SHOW_TARGET_OF_TARGET_STATE",
+                                                    "Show When", "OPTION_TOOLTIP_TARGETOFTARGET5", 1)
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Raid", value = "1", tip = "OPTION_TOOLTIP_TARGETOFTARGET1" },
+                                                    { text = "Party", value = "2", tip = "OPTION_TOOLTIP_TARGETOFTARGET2" },
+                                                    { text = "Solo", value = "3", tip = "OPTION_TOOLTIP_TARGETOFTARGET3" },
+                                                    { text = "Party or Raid", value = "4", tip = "OPTION_TOOLTIP_TARGETOFTARGET4" },
+                                                    { text = "Always", value = "5", tip = "OPTION_TOOLTIP_TARGETOFTARGET5" },
+                                                })
+                                                self.applyFunc = TargetofTarget_Update
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <!-- The two equipment-display toggles (decision 1472,
                                              B123). Neither has a store: the preference is a bit of
                                              this character's own server-side PLAYER_FLAGS, so the
@@ -2634,8 +2701,8 @@
                                              both, the reference's own hand-written arm. -->
                                         <Frame name="$parentRowShowCloak" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowTargetOfTargetMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowTargetOfTargetMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsFuncRow_OnLoad(self, ShowingCloak, ShowCloak, "1",

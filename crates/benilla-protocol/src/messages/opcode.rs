@@ -738,6 +738,20 @@ pub const CMSG_AUTOBANK_ITEM: u16 = 0x0283; // 643
 /// (`SMSG_LEARNED_SPELL` etc.) and the refreshed `PLAYER_CHARACTER_POINTS1`. Decision 0304.
 pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 
+/// The respec question and its answer — **one opcode, both directions** (VERIFIED vmangos
+/// `Opcodes_1_12_1.h`: 682 + `Opcodes.cpp`'s `HandleTalentWipeConfirmOpcode` registration; decision
+/// 1580). Selecting a class trainer's "I wish to unlearn my talents" line
+/// (`GOSSIP_OPTION_UNLEARNTALENTS`, `Player.cpp:12330`) makes the server close the gossip menu and
+/// send this **inbound** carrying the trainer's guid and the current cost — a QUESTION, the talent
+/// twin of [`SMSG_BINDER_CONFIRM`]. Nothing is unlearned until the client sends the same opcode
+/// **outbound** with that guid, which is the `CONFIRM_TALENT_WIPE` dialog's Accept; the server then
+/// runs `Player::ResetTalents` and has the trainer cast 14867 "Untalent Visual Effect".
+///
+/// Byte-verified client-side too (wow-re `system/ui/scratch/talent-api.md` §ConfirmTalentWipe,
+/// `0x48dc40` → `0x5df980`): both directions run through one range-gated function, whose outbound
+/// leg puts the *latched* trainer guid on the wire. Bodies in [`super::progression`].
+pub const MSG_TALENT_WIPE_CONFIRM: u16 = 0x02AA; // 682
+
 /// Unlearn (abandon) a whole skill line — the skills pane's red circle-slash (VERIFIED vmangos
 /// `Opcodes.cpp` handler registration + `Opcodes_1_9_4.h`: 514). Body in
 /// [`super::skills::unlearn_skill`]; no ack — the removal returns as a `PLAYER_SKILL_INFO`

@@ -20,9 +20,10 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// `ItemButtonTemplate.xml` is the `SetItemButton*` family the talent buttons grey through (the
 /// reference's own verb; see TalentFrame.xml's header) — it sits at .toc line 32, above every
 /// other entry here bar `Fonts.xml`.
-const FILES: [&str; 6] = [
+const FILES: [&str; 7] = [
     "Fonts.xml",
     "ItemButtonTemplate.xml",
+    "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
     "ScrollTemplates.xml",

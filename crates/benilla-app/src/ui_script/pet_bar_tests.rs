@@ -26,6 +26,7 @@ fn load_xml(s: &UiScript, file: &str) {
 /// (`CooldownFrame_SetTimer`), ActionBar (the `MainMenuBar` anchor target) — then the bar.
 fn load_pet_bar(s: &UiScript) {
     for file in [
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "Cooldown.xml",
@@ -363,6 +364,7 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "Cooldown.xml",
@@ -644,6 +646,7 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
 fn load_pet_bar_with_tooltip(s: &UiScript) {
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",

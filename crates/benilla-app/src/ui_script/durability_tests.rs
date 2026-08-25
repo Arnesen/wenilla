@@ -30,6 +30,7 @@ fn harness() -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",
@@ -386,6 +387,7 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",

@@ -627,6 +627,16 @@ pub(crate) struct Model {
     /// `LearnTalent(tab, index)` clicks queued since the app's last
     /// [`super::UiScript::take_talent_learns`] drain.
     pub(crate) talent_learns: Vec<(u32, u32)>,
+    /// `ConfirmTalentWipe()` calls queued since the app last drained them — each is one outbound
+    /// `MSG_TALENT_WIPE_CONFIRM`. A COUNT for [`Self::binder_confirms`]'s reason: the app holds
+    /// the trainer's guid, so the intent carries no payload of its own (decision 1580).
+    pub(crate) talent_wipe_confirms: u32,
+    /// Is a trainer's respec question still live and in range — the answer
+    /// `CheckTalentMasterDist()` gives, pushed by the app each frame
+    /// ([`super::UiScript::set_talent_master_pending`]). The CONFIRM_TALENT_WIPE dialog polls it
+    /// from OnUpdate and hides itself when it goes false; the binder question's twin, and the same
+    /// range gate stands behind both (decision 1580).
+    pub(crate) talent_master_pending: bool,
 
     /// The stance/shapeshift bar's form list (bar order) the app pushes — the
     /// `GetNumShapeshiftForms`/`GetShapeshiftFormInfo` family reads it ([`super::shapeshift`]).
@@ -1410,6 +1420,8 @@ impl Model {
             spell_stop_targeting: false,
             talents: super::talent::TalentUiState::default(),
             talent_learns: Vec::new(),
+            talent_wipe_confirms: 0,
+            talent_master_pending: false,
             shapeshift_forms: Vec::new(),
             shapeshift_casts: Vec::new(),
             pet_bar: super::pet::PetBarState::default(),

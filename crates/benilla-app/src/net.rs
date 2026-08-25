@@ -1088,6 +1088,12 @@ pub(crate) enum ClientCommand {
     /// the question. Answered by `SMSG_BINDPOINTUPDATE` + `SMSG_PLAYERBOUND` once the innkeeper's
     /// Bind cast lands; declining sends nothing.
     BinderActivate { binder: u64 },
+    /// Unlearn every talent (`MSG_TALENT_WIPE_CONFIRM` outbound, decision 1580): the
+    /// `CONFIRM_TALENT_WIPE` dialog's Accept, carrying the guid the trainer's question asked with.
+    /// This is the ONLY packet in the flow that resets anything — selecting the gossip line just
+    /// raises the question. Answered by the un-learn of every rank spell plus the refreshed
+    /// `PLAYER_CHARACTER_POINTS1`; declining sends nothing.
+    TalentWipeConfirm { trainer: u64 },
     /// Open the bank (`CMSG_BANKER_ACTIVATE`, decision 0604): the direct opener a right-click on
     /// a pure banker (bit 8 the lowest service bit) uses — a gossip-flagged banker routes through
     /// the gossip menu instead, whose bank option makes the server volunteer the same answer.

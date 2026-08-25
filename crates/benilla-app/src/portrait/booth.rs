@@ -246,9 +246,6 @@ pub(super) fn spawn_booth_effects(
                     // A booth bake has no appear/despawn ramp and no self-avatar feather — its
                     // riders are always opaque (0827).
                     alpha: None,
-                    // Scene-graph-carried: this model's world motion arrives on the reference's
-                    // device stack, so its cloud RIDES (0986's baseline).
-                    world_composed: false,
                 },
                 benilla_world::particles::EmitClock::Pinned, // an item's effects loop forever
             ) else {
@@ -334,8 +331,6 @@ pub(super) fn spawn_booth_own_emitters(
                 on_owner_loss: benilla_world::particles::OwnerLoss::Free,
                 // A booth bake has no appear/despawn ramp and no self-avatar feather (0827).
                 alpha: None,
-                // Scene-graph-carried: this model's motion arrives on the device stack (0986).
-                world_composed: false,
             },
             // A booth loops its one authored clip forever — the doodad law.
             benilla_world::particles::EmitClock::Pinned,

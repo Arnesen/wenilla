@@ -55,6 +55,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
     // The named virtual Font objects the re-skinned rows/title inherit through — loaded first at
     // runtime (ui_script's shipped list) so `inherits="GameFontNormalSmall"` resolves here too.
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
                                      // The window's frame census: window 1 + item rows 12 (10 merchant + the 2 buyback-only) +
@@ -335,6 +336,7 @@ fn merchant_show_hide_plays_open_and_close_kits() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -375,6 +377,7 @@ fn vendor_open_opens_the_backpack_and_layers_the_sound() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "BagFrame.xml");
@@ -419,6 +422,7 @@ fn vendor_leaves_an_already_open_backpack_alone() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "BagFrame.xml");
@@ -458,6 +462,7 @@ fn vendor_opens_and_closes_all_equipped_bags() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "BagFrame.xml");
@@ -517,6 +522,7 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -559,6 +565,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     // The quality→colour table (BENILLA_LOOT_QUALITY_COLORS) ships in LootFrame.xml; at runtime
@@ -778,6 +785,7 @@ fn money_display_shrinks_to_content_and_stays_flush() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -916,6 +924,7 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MerchantFrame.xml");
@@ -1033,6 +1042,7 @@ fn merchant_tabs_fit_their_labels() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MerchantFrame.xml");
@@ -1082,6 +1092,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MerchantFrame.xml");
@@ -1168,6 +1179,7 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MerchantFrame.xml"); // the BenillaMoney_* helpers
@@ -1224,6 +1236,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
         "GameTooltip.xml",

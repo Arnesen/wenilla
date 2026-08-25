@@ -344,6 +344,11 @@ pub enum SessionEvent {
     /// question the `CONFIRM_BINDER` dialog puts on screen. `binder` is the innkeeper's guid, and
     /// it must be echoed in `CMSG_BINDER_ACTIVATE` for the bind to happen at all (decision 1331).
     BinderConfirm { binder: u64 },
+    /// A class trainer is asking whether to unlearn every talent (`MSG_TALENT_WIPE_CONFIRM`,
+    /// inbound) — the question the `CONFIRM_TALENT_WIPE` dialog puts on screen, carrying the
+    /// `trainer` to answer with and the `cost` in copper its money frame shows. Answering means
+    /// sending the SAME opcode back with the guid; declining sends nothing (decision 1580).
+    TalentWipeConfirm { trainer: u64, cost: u32 },
     /// The bind took (`SMSG_PLAYERBOUND`): `area` is the AreaTable id we are now bound in, the
     /// same one [`Self::BindPoint`] carries in the packet beside it.
     PlayerBound { binder: u64, area: u32 },

@@ -138,6 +138,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
 fn shipped_character_frame_loads_clean() {
     let s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -154,6 +155,7 @@ fn shipped_character_frame_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -368,6 +370,7 @@ fn close_button_draws_above_the_paper_doll_page() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -412,6 +415,7 @@ fn level_line_survives_no_player_snapshot_yet() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -444,6 +448,7 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -497,6 +502,7 @@ fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -539,6 +545,7 @@ fn model_pane_click_auto_equips_a_held_bag_item() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -575,6 +582,7 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "CharacterFrame.xml");
@@ -652,6 +660,7 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "ScrollTemplates.xml");
@@ -845,6 +854,7 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     // ROTATIONS_PER_SECOND lives here (the ref's UIParent.lua:2), like it does in the real client.
@@ -937,6 +947,7 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "GameTooltip.xml");
@@ -1046,6 +1057,7 @@ fn an_addons_tab_click_selects_through_the_generic_entry_point() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "UIParent.xml");
 

@@ -159,9 +159,9 @@ fn fx_part_material(
 #[derive(Clone, Copy, Default)]
 pub(crate) struct EffectHost {
     /// Is this an **attached** model in the client's sense (`[model+0x17c] ≠ 0`)? It sets the
-    /// emitters' attach frame `A`: a kit effect on a unit and the `fxview` fixture are attached
-    /// (the cloud fans with the host's motion), a missile is not — its trail stays world-frozen
-    /// (wow-re `part-kit-effect-attach-orient.md`).
+    /// emitters' attach frame `A` — the birth orientation a kit effect fans by (wow-re
+    /// `part-kit-effect-attach-orient.md`, decision 0395). It does **not** decide ride-vs-trail:
+    /// that is the emitter's own file flag `0x10`, on every host class alike (1578).
     pub attached: bool,
     /// The model instance this one is **chained to** ([`benilla_world::model_fade::ParentModel`]): the
     /// unit a kit effect is hung on, the item root a weapon glow rides. `None` for a model that
@@ -432,12 +432,6 @@ pub(crate) fn attach_effect_visuals(
                 // This instance IS the model these particles belong to; its chain (set above)
                 // carries the host's fade down to them — decision 0833.
                 alpha: Some(root),
-                // The ride-vs-trail baseline (0986): an UNATTACHED instance is a free world model
-                // whose own transform IS its world placement, so its motion reaches the particles
-                // through the emitter matrix and each one hangs where it was born — the hunter
-                // arrow's bead trail. An attached one is carried by the model it hangs on (the
-                // reference's device-stack `S`), and its cloud rides.
-                world_composed: !host.attached,
             },
             // The emitters' rate/enabled windows ride the played sequence: a `CEffect` ADVANCES
             // (`Stand` → `Hold` → `Decay`), so it reads the live one off its own player like a

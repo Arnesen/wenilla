@@ -290,6 +290,15 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_BINDER_CONFIRM => ServerPacket::BinderConfirm {
             binder: binder::read_binder_confirm(&mut r)?,
         },
+        // The talent twin of the confirm above, on a two-way `MSG_` opcode: this direction is the
+        // question (guid + cost); the answer we send back carries the guid alone (decision 1580).
+        opcode::MSG_TALENT_WIPE_CONFIRM => {
+            let ask = progression::read_talent_wipe_confirm(&mut r)?;
+            ServerPacket::TalentWipeConfirm {
+                trainer: ask.trainer,
+                cost: ask.cost,
+            }
+        }
         opcode::SMSG_PLAYERBOUND => {
             let bound = binder::read_player_bound(&mut r)?;
             ServerPacket::PlayerBound {

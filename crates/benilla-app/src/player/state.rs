@@ -905,44 +905,62 @@ pub(super) fn autorun_cancelled(
 /// read (decision 1056) — against a per-target-state mask, and **returns before the packet is
 /// built** when any masked bit is set: no `CMSG_STANDSTATECHANGE`, no local apply, no message.
 /// Standing up is the asymmetry: `newState == 0` jumps straight to the send and never consults the
-/// word at all, so movement can always stand you (VERIFIED `0x5ed4d8`–`0x5ed501`, wow-re
-/// `object-layer/scratch/standstate-movement-trigger.md` §1).
+/// word at all, so movement can always stand you.
 ///
-/// Because the refusal lives in the **one setter**, it covers every caller at once — the `X`
-/// keybind (`SitOrStand`, Lua `0x48b920`) and the posture emotes (`/sit`, `/sleep`, `/kneel`,
-/// `/lay`, which reach the same `0x5ed430` through `DoEmote`'s `EmoteSpecProc == 1` arm). That is
-/// the only thing covering them: the emote layer's own swim suppression
-/// ([`crate::ui_chat::input::emote_send_eligible`]'s `EmoteFlags & 0x0080`) does **not** fire here
-/// — the shipped `Emotes.dbc` gives STATE_SIT (13), STATE_SLEEP (12) and STATE_STAND (26) flags
-/// `0x6202`, with that bit clear — read off the 5875 data by
-/// `ui_chat::tests::the_posture_emotes_carry_no_swim_suppression_flag`.
+/// Byte-for-byte (`0x5ed4d8`–`0x5ed501`; wow-re `object-layer/scratch/standstate-movement-trigger.md`
+/// §5.1, a §5 trio carve, decisions 1581/1582):
 ///
-/// The masks are the reference's own two:
+/// ```c
+/// if (newState != 0) {
+///     if (newState == 3 && (mov->flags & 0x30))  return;   // 0x5ed4e6, `test byte [ecx+0x40],0x30`
+///     if (mov->flags & 0x20000f)                 return;   // 0x5ed4f8, `test dword [edx+0x40],0x20000f`
+/// }
+/// ```
 ///
-/// | target state | mask | means |
+/// **SLEEP takes BOTH tests, not a different one.** `0x5ed4ec eb 04` is an unconditional `jmp`
+/// *into* the second test, not around it — an either/or would have jumped to the send at
+/// `0x5ed501`. 1581 shipped it as an alternative, off a clause §1 had recorded in passing; §5
+/// carved the block for its own sake and corrected it. The `newState == 3` test is a plain
+/// equality: `2` (SIT_CHAIR) and `8` (KNEEL) take the shared leg exactly like `1` (SIT).
+///
+/// | target state | effective mask | refused while |
 /// |---|---|---|
-/// | 0 STAND | — | never refused |
-/// | 3 SLEEP | `0x30` | refused while **turning** |
-/// | 1 SIT · 2 SIT_CHAIR · 8 KNEEL · … | `0x20000f` | refused while **translating or swimming** |
+/// | 0 STAND | — (word never read) | never |
+/// | 1 SIT · 2 SIT_CHAIR · 8 KNEEL · … | `0x20000f` | translating **or swimming** |
+/// | 3 SLEEP | `0x20003f` | that, **plus** turning |
 ///
-/// `0x20000f` is not a mask invented here: it is byte-verified at a second, unrelated site as the
-/// client's own "am I moving" test — the stationary-cast pin's `[9e8] & 0x20000f`
-/// ([`crate::creature_anim::move_flags::CAST_PIN_MOVE`]) — the four direction bits plus
-/// [`SWIMMING`](crate::creature_anim::move_flags::SWIMMING), turn bits deliberately absent. The
-/// swim bit in it is the whole of B155: a swimmer is *always* carrying it, so the press is refused
-/// for as long as they are in the water, whether or not they are stroking.
+/// Neither mask is invented here; both are byte-verified twice over, at unrelated sites, as this
+/// client's own movement tests — `0x20000f` is the stationary-cast pin's `[9e8] & 0x20000f` at
+/// `0x5fde80` ([`crate::creature_anim::move_flags::CAST_PIN_MOVE`]) and `0x20003f` is the one-shot
+/// route's `[9e8] & 0x20003f` at `0x5fe6dc` ([`ROUTE_COMMITTED_MOVE`](crate::creature_anim::move_flags::ROUTE_COMMITTED_MOVE)).
+/// The swim bit in them is the whole of B155: a swimmer is *always* carrying it, so the press is
+/// refused for as long as they are in the water, whether or not they are stroking. Note what is
+/// **absent** from both — pitch, walk-mode, ROOT, and `FALLING` (`0x2000`): a standing jump does
+/// not block a sit, while a running one does, through `FORWARD` rather than through the jump.
+///
+/// Because the refusal lives in the **one setter**, it covers every caller at once. wow-re's caller
+/// census closed that exhaustively (§5.2: six `e8` callers, no tail-jumps, no dword reference
+/// anywhere in the image, in no vtable) — the `X` keybind (`SitOrStand`, Lua `0x48b920`), the
+/// posture emotes through `DoEmote`'s `EmoteSpecProc == 1` leg, `StartAttack`, the movement-input
+/// wrapper `0x60be30`, and the five-minute AFK auto-sit in `WorldFrame::Render`.
+///
+/// The emote layer does **not** double up on the water half: the shipped `Emotes.dbc` gives
+/// STATE_SIT (13), STATE_SLEEP (12), STATE_KNEEL (68) and STATE_STAND (26) flags `0x6202`, with the
+/// swim-suppress bit `0x0080` clear — read off the 5875 data by
+/// `ui_chat::tests::the_posture_emotes_carry_no_swim_suppression_flag`. (It has a *separate*,
+/// louder gate that fires on movement rather than water — `0x4000` → `ERR_NOEMOTEWHILERUNNING` —
+/// which benilla does not model; see [`crate::ui_chat::input::emote_send_eligible`].)
 pub(super) fn stand_state_refused(move_flags: u32, new_state: u8) -> bool {
     use crate::creature_anim::move_flags as f;
-    // The stand-up asymmetry: never gated.
+    // The stand-up asymmetry: never gated (`0x5ed4f0 je 0x5ed501`).
     if new_state == 0 {
         return false;
     }
-    let mask = if new_state == 3 {
-        f::TURN_LEFT | f::TURN_RIGHT
-    } else {
-        f::ANY_MOVE | f::SWIMMING
-    };
-    move_flags & mask != 0
+    // SLEEP's extra test, which falls THROUGH into the shared one below rather than replacing it.
+    if new_state == 3 && move_flags & (f::TURN_LEFT | f::TURN_RIGHT) != 0 {
+        return true;
+    }
+    move_flags & (f::ANY_MOVE | f::SWIMMING) != 0
 }
 
 #[cfg(test)]
@@ -996,23 +1014,43 @@ mod stand_state_tests {
         }
     }
 
-    /// SLEEP (3) takes the *other* mask — the turn bits — so `/sleep` and `/sit` genuinely disagree
-    /// about which inputs block them. Asserted so the reference's odd pair is recorded rather than
-    /// quietly "corrected" into one mask.
+    /// SLEEP (3) takes the shared mask **and one more test**, not a different one — the `0x30` turn
+    /// pair falls THROUGH into `0x20000f` (`0x5ed4ec eb 04`, a jmp *into* the second test). 1581
+    /// shipped it as an alternative and this is the assertion that pins the correction: a swimmer
+    /// cannot `/sleep` any more than they can `/sit`, and turning blocks only the sleep.
     #[test]
-    fn sleep_reads_the_turn_mask_not_the_translate_mask() {
+    fn sleep_takes_both_tests_so_it_is_the_strictest_posture() {
+        // The extra test, SLEEP's alone.
         assert!(
             stand_state_refused(f::TURN_LEFT, 3),
             "turning: /sleep refused"
         );
         assert!(stand_state_refused(f::TURN_RIGHT, 3));
         assert!(
-            !stand_state_refused(f::FORWARD, 3),
-            "walking: /sleep granted"
+            !stand_state_refused(f::TURN_LEFT, 1),
+            "turning blocks ONLY the sleep — a sit is granted"
+        );
+        // …and the shared one it falls into, which 1581's either/or wrongly skipped.
+        assert!(
+            stand_state_refused(f::SWIMMING, 3),
+            "swimming: /sleep refused"
         );
         assert!(
-            !stand_state_refused(f::SWIMMING, 3),
-            "swimming: /sleep granted"
+            stand_state_refused(f::FORWARD, 3),
+            "walking: /sleep refused"
+        );
+        // So SLEEP's effective mask is exactly `0x20003f` — the one-shot route's own constant.
+        assert_eq!(
+            f::TURN_LEFT | f::TURN_RIGHT | f::ANY_MOVE | f::SWIMMING,
+            f::ROUTE_COMMITTED_MOVE,
+            "`0x20003f`, byte-verified at 0x5fe6dc as well as 0x5ed4e6+0x5ed4f8"
+        );
+        // Standing up is still ungated from SLEEP, which is what makes it escapable.
+        assert!(!stand_state_refused(f::ROUTE_COMMITTED_MOVE, 0));
+        // FALLING is in neither mask: a standing jump does not block a posture.
+        assert!(
+            !stand_state_refused(f::FALLING, 3),
+            "falling: /sleep granted"
         );
     }
 }

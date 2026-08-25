@@ -906,8 +906,13 @@
         --     SET_GUILDOFFICERNOTE, registered in FriendsFrame.xml): the 350x64 centred box
         --     replaces the narrow one, and the dialog widens to 420. See the widen arm below for
         --     the reference's own oddity — the widen is keyed on `which`, not on hasWideEditBox.
+        --   · hasMoneyFrame is live (decision 1580's CONFIRM_TALENT_WIPE is the first customer,
+        --     and the reference's other five are all price confirms): a SmallMoneyFrameTemplate
+        --     child under the text, shown per entry, with the buttons dropping to -24 to clear it
+        --     and the frame growing 16px. The AMOUNT is not the engine's — the entry's own
+        --     OnShow/the event arm calls MoneyFrame_Update, exactly as the reference does.
         --   · Accepted but v1-inert: exclusive, interruptCinematic (cinematics are acked
-        --     instantly — 0196), notClosableByLogout, preferredIndex, and the money variant.
+        --     instantly — 0196), notClosableByLogout, preferredIndex.
         --   · text_arg1/2 stash on the DIALOG frame (the ref stashes them on the Text region;
         --     our regions don't carry Lua fields).
         --   · GetText("SECONDS"/"MINUTES") localization collapses to English singular/plural.
@@ -956,18 +961,25 @@
             end
         end
 
-        -- Ref l.1428-1438, the no-money leg only (v1 has no money variant).
+        -- Ref l.1428-1438, all three legs.
         --
         -- Note the ref measures the NARROW `EditBox` for the height even when the shown box is the
         -- wide one — the wide box is 64 tall, anchored CENTER, and floats over a frame sized for a
         -- 32-tall box. Transcribed as written: the guild MOTD dialog's look is that arithmetic.
+        --
+        -- The money leg does NOT measure the coin row either: it is the plain height plus a flat
+        -- 16, which is the room the -24 button drop below leaves for it. Same arithmetic, same
+        -- reason — the ref sizes these from constants, not from what is in the frame.
         function StaticPopup_Resize(dialog, which)
             local text = getglobal(dialog:GetName() .. "Text")
             local button1 = getglobal(dialog:GetName() .. "Button1")
             local editBox = getglobal(dialog:GetName() .. "EditBox")
-            if StaticPopupDialogs[which] and StaticPopupDialogs[which].hasEditBox then
+            local info = StaticPopupDialogs[which]
+            if info and info.hasEditBox then
                 dialog:SetHeight(16 + text:GetHeight() + 8 + editBox:GetHeight() + 8
                     + button1:GetHeight() + 16)
+            elseif info and info.hasMoneyFrame then
+                dialog:SetHeight(16 + text:GetHeight() + 8 + button1:GetHeight() + 32)
             else
                 dialog:SetHeight(16 + text:GetHeight() + 8 + button1:GetHeight() + 16)
             end
@@ -1100,18 +1112,30 @@
                 wideEditBox:Hide()
             end
 
+            -- The money frame (ref l.1627-1632): shown for a hasMoneyFrame entry, hidden
+            -- otherwise. The engine never fills it — the AMOUNT belongs to whoever raised the
+            -- dialog, who calls MoneyFrame_Update on it (the ref's own division: its
+            -- CONFIRM_TALENT_WIPE arm in UIParent.lua does exactly that with the event's arg1).
+            getglobal(dialog:GetName() .. "MoneyFrame"):Hide()
+            if info.hasMoneyFrame then
+                getglobal(dialog:GetName() .. "MoneyFrame"):Show()
+            end
+
             -- The buttons (ref l.1634-1676; fixed 120 widths — header note). Button2 shows only
             -- when the entry names it AND DisplayButton2 (when present) allows it; a solo button1
             -- re-seats centered under the text. With an edit box the pair hangs off the BOX's
-            -- bottom instead of the text's (ref l.1641-1643), which is what leaves room for it.
+            -- bottom instead of the text's (ref l.1641-1643), which is what leaves room for it;
+            -- with a money frame the pair stays on the TEXT and drops 24 instead of 8, which is
+            -- what leaves room for the coins (ref l.1644-1646).
             local buttonAnchor = info.hasEditBox and (dialog:GetName() .. "EditBox")
                 or (dialog:GetName() .. "Text")
+            local buttonDrop = info.hasMoneyFrame and -24 or -8
             local button1 = getglobal(dialog:GetName() .. "Button1")
             local button2 = getglobal(dialog:GetName() .. "Button2")
             if info.button2 and (not info.DisplayButton2 or info.DisplayButton2()) then
                 button1:ClearAllPoints()
                 button2:ClearAllPoints()
-                button1:SetPoint("TOPRIGHT", buttonAnchor, "BOTTOM", -6, -8)
+                button1:SetPoint("TOPRIGHT", buttonAnchor, "BOTTOM", -6, buttonDrop)
                 button2:SetPoint("LEFT", dialog:GetName() .. "Button1", "RIGHT", 13, 0)
                 button2:SetText(info.button2)
                 button2:Show()
@@ -1932,6 +1956,20 @@
                 </Scripts>
                 <FontString inherits="ChatFontNormal"/>
             </EditBox>
+            <!-- The coin row (ref StaticPopup.xml l.203-217, verbatim seat): a
+                 SmallMoneyFrameTemplate under the text, hidden unless the entry sets
+                 hasMoneyFrame. Type "STATIC" is the money kit's "a number somebody parked on the
+                 frame" source, which is what MoneyFrame_Update(name, amount) leaves behind — so
+                 the dialog shows a cost its raiser worked out, never a live purse. First customer:
+                 the class trainer's CONFIRM_TALENT_WIPE (decision 1580). -->
+            <Frame name="$parentMoneyFrame" inherits="SmallMoneyFrameTemplate" hidden="true">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="$parentText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>SmallMoneyFrame_OnLoad(); MoneyFrame_SetType("STATIC")</OnLoad>
+                </Scripts>
+            </Frame>
             <!-- The WIDE entry box (ref StaticPopup.xml l.138-202): 350x64 at CENTER, hidden
                  unless the entry sets hasWideEditBox. Its border is the same chat-input art
                  stretched over three slices — a 256 left cap, a 75 right cap, and a 5-wide middle

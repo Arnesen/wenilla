@@ -22,9 +22,10 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The character window's load prefix, in `assets/ui/benilla.toc` order. The .toc's own entry says
 /// it "depends only on Fonts/UiPanels/GameTooltip"; `ItemButtonTemplate.xml` joins them because the
 /// doll's equipment slots are `SetItemButton*` buttons.
-const FILES: [&str; 5] = [
+const FILES: [&str; 6] = [
     "Fonts.xml",
     "ItemButtonTemplate.xml",
+    "MoneyFrame.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
     "CharacterFrame.xml",

@@ -109,6 +109,7 @@ fn shipped_loot_frame_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     // window + 4 rows + up + down + close.
     assert_eq!(
@@ -288,6 +289,7 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "LootFrame.xml");
 
@@ -327,6 +329,7 @@ fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "LootFrame.xml");
     let has_icon = |quads: &[ExtractedQuad], needle: &str| {
@@ -377,6 +380,7 @@ fn shipped_loot_frame_pages_five_items() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "LootFrame.xml");
 
@@ -461,6 +465,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "LootFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
@@ -535,6 +540,7 @@ fn the_loot_window_draws_over_the_party_frames() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     // PartyFrame's per-member dropdown OnLoad walks the whole popup kit (app manifest order).
@@ -594,6 +600,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
         "LootFrame.xml",

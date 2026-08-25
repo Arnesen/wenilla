@@ -654,9 +654,6 @@ fn spawn_slot(
                 // (`0x714000`) — so the sparkle on a pauldron fades in with the body wearing it
                 // and vanishes with the avatar in first person (0827/0833).
                 alpha: Some(root),
-                // Scene-graph-carried: this model's world motion arrives on the reference's
-                // device stack, so its cloud RIDES (0986's baseline).
-                world_composed: false,
             },
             // A held item spawns no rig; its emitters run the item model's own slot-0
             // loop on the spawn clock (the torch burns always — the doodad law).

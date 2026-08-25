@@ -767,6 +767,7 @@ fn writer_loop(
                         w.repair_item(vendor, item_guid)
                     }
                     ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
+                    ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
                     ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
                     ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
                     ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),

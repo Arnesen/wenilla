@@ -11,8 +11,9 @@ const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 /// The reader's dependency prefix, in the manifest's own order. `ScrollTemplates.xml` and
 /// `UIPanelTemplates.xml` joined it with decisions 1337/1338: the page sits in a real ScrollFrame
 /// now, whose template is in the second and whose `ScrollFrame_OnLoad` is in the first.
-const FILES: [&str; 5] = [
+const FILES: [&str; 6] = [
     "Fonts.xml",
+    "MoneyFrame.xml",
     "UiPanels.xml",
     "ScrollTemplates.xml",
     "UIPanelTemplates.xml",

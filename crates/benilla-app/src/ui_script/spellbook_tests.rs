@@ -103,6 +103,7 @@ fn click(s: &mut UiScript, name: &str, button: &str) {
 fn shipped_spellbook_loads_clean() {
     let s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     let text = std::fs::read_to_string(
@@ -133,6 +134,7 @@ fn shipped_spellbook_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
@@ -224,6 +226,7 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "Cooldown.xml",
@@ -300,6 +303,7 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(640.0, 700.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "SpellBookFrame.xml");
@@ -404,6 +408,7 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
@@ -645,6 +650,7 @@ fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
     .unwrap();
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "Cooldown.xml",

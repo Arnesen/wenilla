@@ -83,6 +83,7 @@ const RANK_GLOBALS: &str = r#"
 fn load_page(s: &UiScript) {
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",
@@ -372,6 +373,7 @@ fn shown_inspect_honor_page() -> UiScript {
     s.run(RANK_GLOBALS).unwrap();
     for file in [
         "Fonts.xml",
+        "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         // Before InspectFrame.xml — the honor page inherits this file's row templates and calls

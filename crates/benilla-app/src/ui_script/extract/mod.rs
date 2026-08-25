@@ -927,14 +927,20 @@ fn convert_entry(
             // booth yet) draws nothing rather than the run-splitter's white default.
             if let Some(token) = &portrait_unit {
                 use crate::portrait::PortraitSource;
-                // A **square** binding is a booth pane (`BenillaSetBoothTexture`, decision
-                // 0208 §5), not a round unit portrait: publish the rect's aspect so the booth
-                // can bake at the shape it will be stretched into, and know it is on screen at
-                // all (decision 1069). Recorded before the readiness `continue` below — a pane
-                // whose bake hasn't landed yet is still a pane being drawn. The region's rect
-                // is the whole answer because no pane crops its bake; a pane that grew
-                // `<TexCoords>` would have to fold that UV window in here too.
-                if !circular && rect.height() > 0.0 {
+                // Publish the rect's aspect so a booth can bake at the shape it will be
+                // stretched into, and know it is on screen at all (decision 1069). Recorded
+                // before the readiness `continue` below — a pane whose bake hasn't landed yet is
+                // still a pane being drawn, which is also what keeps the gate below from being a
+                // chicken-and-egg (nothing drawn → no bake → nothing drawn). The region's rect is
+                // the whole answer because no pane crops its bake; a pane that grew `<TexCoords>`
+                // would have to fold that UV window in here too.
+                //
+                // ROUND bindings are recorded too, since 1576. The aspect is inert for them (both
+                // of 1069's consumers are body-booth-only — see [`crate::portrait::BoothPanes`]);
+                // what the row carries for a round slot is the fact of being drawn, which is the
+                // `"targettarget"` portrait's cost gate. The `circular` flag itself still decides
+                // the draw below, and nothing else changed here.
+                if rect.height() > 0.0 {
                     booths
                         .panes
                         .0
