@@ -24,10 +24,14 @@
     flaky, and no corpus addon touches any of that surface (measured: 0 of 218 for MiniMapPing /
     Minimap_SetPing / MINIMAP_PING / PingLocation / GetPingPosition).
 
-    OUT (no wire / later arc slices, per 0203): meeting stone and battlefield buttons;
-    the ping MODEL (the reference's MiniMapPing is a <Model> on MinimapPing.mdx — ours is a flat
-    stand-in at an INTERIM size, `minimap::ping::PING_PX`); the rotate-minimap CVar. The day/night indicator now lives in
-    its own GameTime.xml (the reference's own file split), loaded right after this file. The
+    OUT (no wire / later arc slices, per 0203): meeting stone and battlefield buttons. The ping
+    MODEL is not out any more and never needed to be: the reference's MiniMapPing is a <Model> on
+    MinimapPing.mdx, and 1600 re-expresses its three drawn quads as flat animated sprites at the
+    model's own byte-measured sizes and tracks. (The "rotate-minimap CVar" this list used to name
+    does not EXIST in 5875 — a 214-site CVar::Register census found no such knob, and the address
+    it was pinned on, 0xceaa60, is the inside-a-WMO flag. Nothing to omit.) The day/night indicator
+    now lives in its own GameTime.xml (the reference's own file split), loaded right after this
+    file. The
     reference's minimapPlayerModel/.mdx arrow renders app-side from its .blp for now (0203 flags
     the simplification). The reference's <HitRectInsets> on the cluster is dropped (it only
     enlarges the mouse-blocking hull; the loader models the tag now, so restore it if it ever

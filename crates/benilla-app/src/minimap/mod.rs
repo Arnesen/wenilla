@@ -274,11 +274,10 @@ struct MinimapAssets {
     /// (`Rotating-MinimapArrow.mdx`) the reference re-animates per blip source. See
     /// [`blips::RimArrow`] for the sequence→layer table and why there are four of them.
     rim_arrows: blips::RimArrowArt,
-    /// The ping marker's art, in draw order (decision 1596). The reference's `MiniMapPing` is a
-    /// `<Model>` frame — `Interface\MiniMap\Ping\MinimapPing.mdx`, XML `scale="0.4"`, 50×50 —
-    /// so this is the flat stand-in for it: the model's own `ping2`/`ping5` textures stacked, the
-    /// same pair the paused first version shipped. Empty = no art, and the ping draws nothing.
-    ping: Vec<Handle<Image>>,
+    /// The ping marker's three drawn layers — the flat re-expression of `MinimapPing.mdx`'s
+    /// coincident additive quads, at the model's own byte-measured sizes and animation
+    /// ([`ping::PingArt`], decisions 1596/1599).
+    ping: ping::PingArt,
     /// The unit-blip atlas (`Interface\Minimap\ObjectIcons`, five 32-px dot cells) — the
     /// quest-giver dots.
     object_icons: Option<Handle<Image>>,
@@ -324,15 +323,28 @@ fn setup_minimap(
             }
             let object_icons =
                 assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
-            let ping: Vec<_> = [
-                "Interface\\Minimap\\Ping\\ping2",
-                "Interface\\Minimap\\Ping\\ping5",
-            ]
-            .into_iter()
-            .filter_map(|p| assets.sprite_texture(p, &mut images))
-            .collect();
-            if ping.is_empty() {
-                warn!("minimap: no Ping art — a minimap ping will place but draw nothing");
+            // `ping6` is deliberately absent: the model carries it on two quads whose weight
+            // track is a single key of 0, so the client culls those batches before it reads their
+            // blend mode. Loading it would be loading art that never draws.
+            let ping = ping::PingArt {
+                ping5: assets.sprite_texture("Interface\\Minimap\\Ping\\ping5", &mut images),
+                ping2: assets.sprite_texture("Interface\\Minimap\\Ping\\ping2", &mut images),
+                ping4: assets.sprite_texture("Interface\\Minimap\\Ping\\ping4", &mut images),
+            };
+            // Per layer, not just "none of them": the three do different jobs, and a silently
+            // absent `ping4` would cost the ring — the one thing the eye actually reads — while
+            // the marker still looked plausible (1203's rule, applied to art).
+            for (name, present) in [
+                ("ping5", ping.ping5.is_some()),
+                ("ping2", ping.ping2.is_some()),
+                ("ping4", ping.ping4.is_some()),
+            ] {
+                if !present {
+                    warn!(
+                        "minimap: Interface\\Minimap\\Ping\\{name} missing — the ping marker \
+                           will draw without that layer"
+                    );
+                }
             }
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");

@@ -296,7 +296,10 @@ impl CooldownState {
 /// `0x8116e8` = `{150,120,90,60,40,25}` yd). `GetZoom`/`SetZoom` read/write whichever is active, and
 /// each persists across transitions — so zooming in indoors does not disturb the outdoor zoom, and
 /// vice versa. (An earlier reading held the second index to be a rotate-minimap CVar and the interior
-/// scale to be a constant; both were wrong — superseded in wow-re.) `set_zoom` clamps to 5.
+/// scale to be a constant; both were wrong — superseded in wow-re. Stronger since the ping RE
+/// (`minimap-ping-law.md`): there is **no rotate-minimap CVar in 5875 at all** — a 214-site
+/// `CVar::Register` census plus a whole-image string scan found no such knob, so nothing on this
+/// path ever needs a rotation term.) `set_zoom` clamps to 5.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MinimapState {
     /// The **outdoor** zoom index, `0..MINIMAP_ZOOM_LEVELS` (0 = widest, 5 = tightest). `SetZoom`

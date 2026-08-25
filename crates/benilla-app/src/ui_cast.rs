@@ -95,12 +95,45 @@ pub(crate) struct PendingCast(Option<PendingCastState>);
 struct PendingCastState {
     spell_id: u32,
     deadline: Instant,
+    /// Does this record **guard** — i.e. does it refuse the next press, light the in-flight ring,
+    /// and gate the by-name walk? True for the classes benilla lets occupy the guard: ordinary
+    /// casts and item uses.
+    ///
+    /// The reference has no such flag, because it has no such split: `[0xceca88]` is written for
+    /// **every** committed cast (`0x6e5026 call 0x6e4ad0` inside TryCast) and the *gate* does the
+    /// discriminating instead, on the inflight rec's `Attributes & 0x404` at `6e4d97`. Ours grew
+    /// up the other way round — the guard is armed only for the classes it refuses on, so a
+    /// ranged shot was never recorded as committed **at all**.
+    ///
+    /// That gap is what shipped B280 broken twice: the `modalNextSpell` chain
+    /// (`crate::net::apply::spells::cast_result`) has to answer the reference's `0x6e7408 cmp
+    /// ecx,[0xceca88]` — "is this reply for the cast I just sent?" — and every hunter shot is
+    /// `Attributes & 0x2` ranged, so the answer was always no and the chain never fired in play.
+    /// The flag closes it without touching the three consumers that were right: the record is now
+    /// armed for every commit ([`PendingCast::committed`] reads it), and `guards` keeps
+    /// [`PendingCast::in_flight`] / [`PendingCast::current`] answering exactly what they did.
+    guards: bool,
 }
 
 impl PendingCast {
-    /// Whether a cast we sent is still outstanding (unresolved and inside its safety deadline).
+    /// Whether a **guarding** cast we sent is still outstanding (unresolved and inside its safety
+    /// deadline) — the refusal's own question. A ranged shot is committed but does not guard.
     pub(crate) fn in_flight(&self, now: Instant) -> bool {
-        self.0.as_ref().is_some_and(|p| now < p.deadline)
+        self.0
+            .as_ref()
+            .is_some_and(|p| p.guards && now < p.deadline)
+    }
+
+    /// **The reference's `[0xceca88]` proper** — the id of the cast we last committed and have not
+    /// yet had a resolution for, whatever its class. This is what `HandleCastResult 0x6e7330`
+    /// tests at `0x6e7408` before it reads `modalNextSpell`, and the only read that must see a
+    /// ranged shot. Everything else about the record is unchanged; see [`PendingCastState::guards`]
+    /// for why the two questions are separate fields here and one global there.
+    pub(crate) fn committed(&self, now: Instant) -> Option<u32> {
+        self.0
+            .as_ref()
+            .filter(|p| now < p.deadline)
+            .map(|p| p.spell_id)
     }
 
     /// The outstanding cast's spell id, if one is in flight — the app-side mirror of the client's
@@ -109,15 +142,18 @@ impl PendingCast {
     pub(crate) fn current(&self, now: Instant) -> Option<u32> {
         self.0
             .as_ref()
-            .filter(|p| now < p.deadline)
+            .filter(|p| p.guards && now < p.deadline)
             .map(|p| p.spell_id)
     }
 
-    /// Arm the guard on a fresh send (the optimistic `0xceca88` write at the client's cast-send).
-    pub(crate) fn arm(&mut self, spell_id: u32, now: Instant) {
+    /// Arm on a fresh send — the optimistic `0xceca88` write at the client's cast-send. `guards`
+    /// says whether this class also occupies the refusal ([`PendingCastState::guards`]): ordinary
+    /// casts do, a ranged shot is recorded and does not.
+    pub(crate) fn arm(&mut self, spell_id: u32, now: Instant, guards: bool) {
         self.0 = Some(PendingCastState {
             spell_id,
             deadline: now + SEND_PROVISIONAL,
+            guards,
         });
     }
 
@@ -133,6 +169,7 @@ impl PendingCast {
         self.0 = Some(PendingCastState {
             spell_id,
             deadline: now + ITEM_SEND_PROVISIONAL,
+            guards: true,
         });
     }
 
@@ -720,7 +757,7 @@ mod tests {
     fn arming_closes_the_guard_and_a_matching_resolution_opens_it() {
         let t0 = Instant::now();
         let mut g = PendingCast::default();
-        g.arm(FIREBALL, t0);
+        g.arm(FIREBALL, t0, true);
         assert!(
             g.in_flight(t0),
             "a cast is in flight — a second one is refused"
@@ -736,7 +773,7 @@ mod tests {
     fn a_different_spells_resolution_leaves_the_guard_closed() {
         let t0 = Instant::now();
         let mut g = PendingCast::default();
-        g.arm(FIREBALL, t0);
+        g.arm(FIREBALL, t0, true);
         g.clear_if(FIREBALL + 1); // a triggered proc's GO for some other spell mid-cast
         assert!(
             g.in_flight(t0),
@@ -750,7 +787,7 @@ mod tests {
         // model): the guard cannot wedge casting shut forever.
         let t0 = Instant::now();
         let mut g = PendingCast::default();
-        g.arm(FIREBALL, t0);
+        g.arm(FIREBALL, t0, true);
         assert!(g.in_flight(t0 + SEND_PROVISIONAL - Duration::from_secs(1)));
         assert!(!g.in_flight(t0 + SEND_PROVISIONAL + Duration::from_secs(1)));
     }
@@ -759,7 +796,7 @@ mod tests {
     fn a_pushback_extends_the_guard_so_it_holds_past_the_stretched_cast() {
         let t0 = Instant::now();
         let mut g = PendingCast::default();
-        g.arm(FIREBALL, t0);
+        g.arm(FIREBALL, t0, true);
         g.refine(1_000, t0); // a 1 s cast: deadline t0 + 1s + 2s slack = t0 + 3s
         g.delay(500, t0); // a hit at t0 pushes it +0.5s ⇒ t0 + 3.5s
         assert!(
@@ -772,7 +809,7 @@ mod tests {
     fn spell_start_tightens_the_deadline_to_the_real_cast_time() {
         let t0 = Instant::now();
         let mut g = PendingCast::default();
-        g.arm(FIREBALL, t0); // provisional 5s window
+        g.arm(FIREBALL, t0, true); // provisional 5s window
         g.refine(1_500, t0); // SMSG_SPELL_START: a 1.5s cast (+ 2s pushback slack ⇒ 3.5s)
         let at_four = t0 + Duration::from_secs(4);
         assert!(
@@ -884,7 +921,7 @@ mod tests {
             )]));
             app.world_mut()
                 .resource_mut::<PendingCast>()
-                .arm(FIREBALL, Instant::now());
+                .arm(FIREBALL, Instant::now(), true);
             mark_casting(&mut app, FIREBALL);
 
             run(&mut app, true);
@@ -939,7 +976,7 @@ mod tests {
             )]));
             app.world_mut()
                 .resource_mut::<PendingCast>()
-                .arm(FIREBALL, Instant::now());
+                .arm(FIREBALL, Instant::now(), true);
 
             run(&mut app, true);
 
@@ -961,7 +998,7 @@ mod tests {
             let (mut app, rx) = harness(HashMap::new());
             app.world_mut()
                 .resource_mut::<PendingCast>()
-                .arm(FIREBALL, Instant::now());
+                .arm(FIREBALL, Instant::now(), true);
 
             run(&mut app, true);
 
@@ -1016,7 +1053,7 @@ mod tests {
             )]));
             app.world_mut()
                 .resource_mut::<PendingCast>()
-                .arm(FIREBALL, Instant::now());
+                .arm(FIREBALL, Instant::now(), true);
 
             run(&mut app, false);
 
@@ -1074,7 +1111,7 @@ mod tests {
                 .0 = Some(AUTO_SHOT);
             app.world_mut()
                 .resource_mut::<PendingCast>()
-                .arm(FIREBALL, Instant::now());
+                .arm(FIREBALL, Instant::now(), true);
             mark_casting(&mut app, FIREBALL);
 
             // Press 1: truthy mirror (auto-repeat ∪ cast) → trigger queued → the drain stops
@@ -1234,7 +1271,7 @@ mod tests {
                 .arm(HEROIC_STRIKE);
             app.world_mut()
                 .resource_mut::<PendingCast>()
-                .arm(FIREBALL, Instant::now());
+                .arm(FIREBALL, Instant::now(), true);
             mark_casting(&mut app, FIREBALL);
 
             app.world_mut().run_system_once(feed_cast_bar).unwrap();

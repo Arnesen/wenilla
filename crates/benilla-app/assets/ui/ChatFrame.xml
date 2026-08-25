@@ -1640,10 +1640,16 @@
 
          So it rides a frame the dock cannot hide. Mounting it on BOTH windows instead would work
          only while exactly one of them is ever visible — an invariant the dock happens to hold
-         today and that a second visible window would turn into a double-speed fade. The reference
-         offers no shape to copy here: 1.12.1 ships `FCF_OnUpdate` DEFINED and never referenced
-         (0 hits across all of FrameXML), because vanilla's tabs do not hover-fade at all — the
-         reveal is benilla's (0288), so its mounting point is ours to get right.
+         today and that a second visible window would turn into a double-speed fade.
+
+         **A frame the dock cannot hide is the reference's own answer**, and this comment used to
+         claim the opposite: that 1.12.1 ships `FCF_OnUpdate` defined and never referenced, so
+         vanilla's tabs never hover-fade and the reveal was benilla's own (0288). That is wrong.
+         `UIParent.xml` l.19 calls `FCF_OnUpdate(arg1)` from **UIParent's** `<OnUpdate>`, in the
+         same list as `UIFrameFadeUpdate`/`UIFrameFlashUpdate` — never from a chat frame, for the
+         reason above. A 1x1 frame parented to UIParent is that mounting point re-expressed; the
+         reasoning was right and only its premise was invented. The hover reveal, the 0.2 s
+         stationary delay and the 1.0/0.5 selected/unselected tab alphas are all the reference's.
 
          `ChatFrame_OnUpdate` stays on the windows, where it belongs: it reads `this` and blinks
          that frame's own bottom button. -->

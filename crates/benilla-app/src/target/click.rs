@@ -196,6 +196,28 @@ pub(super) fn act_on_right_click(
     // no packet). The lock arm runs first in `0x5f3130`, and it does here too: a `Refuse` toasts
     // even when we are also out of range.
     if go_is_nearest(&hovered, &hovered_object) {
+        // **The interact chain's first link** (tag `use`). "I clicked it and nothing happened" spans
+        // three systems — this decision, the `CMSG_GAMEOBJ_USE` it sends, and the `SMSG_SPELL_GO`
+        // the server answers with — and until this line existed only the *taken* branches said
+        // anything, at `debug!`, which the hardcoded log filter keeps off. Both silent refusals are
+        // traced here: a `Point` cursor (the reference's highlightable no-op) and `unable` (the
+        // range gray, which suppresses the send with no toast). Pairs with the `fx` kit lines, so
+        // ONE run says which link is dead instead of one round-trip per link.
+        if benilla_assets::trace::enabled_for("use") {
+            let ty = hovered_object
+                .target
+                .and_then(|e| stores.get(e).ok())
+                .map_or(-1, |(s, _)| s.0.gameobject_type_id());
+            benilla_assets::trace::line(
+                "use",
+                &format!(
+                    "right-click go guid={:?} type={ty} cursor={:?} unable={}",
+                    hovered_object.guid.map(|g| format!("{g:#x}")),
+                    cursor.kind,
+                    cursor.unable
+                ),
+            );
+        }
         if cursor.kind != cursor_mode::CursorKind::Point {
             if let Some(guid) = hovered_object.guid {
                 let go = hovered_object
@@ -261,6 +283,12 @@ pub(super) fn act_on_right_click(
                     GoAction::OpenLock(_) | GoAction::OpenByKey { .. } if cursor.unable => {}
                     GoAction::Use => {
                         debug!("right-click gameobject use: {guid:#x}");
+                        if benilla_assets::trace::enabled_for("use") {
+                            benilla_assets::trace::line(
+                                "use",
+                                &format!("SEND CMSG_GAMEOBJ_USE guid={guid:#x}"),
+                            );
+                        }
                         let _ = seam.net.0.send(ClientCommand::GameObjUse { guid });
                     }
                     GoAction::OpenLock(spell_id) => {

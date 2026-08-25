@@ -119,7 +119,7 @@ pub(super) fn cast_result(
     // BEFORE either arm touches the guard, because both the failure arm's clear below and the
     // chain's own clear are the reference's ONE `0x6e741a call 0x6e4940(0x1c)` — the in-flight slot
     // is finished on either outcome, and only then is column 38 read.
-    let in_flight = pending.current(Instant::now()) == Some(spell_id);
+    let in_flight = pending.committed(Instant::now()) == Some(spell_id);
     if !success {
         // The cast-fail cooldown edges (the client's `HandleCastFailed 0x6e1a00`, wow-re
         // `wave-cooldown.md` + the 2026-07-10 §5): a plain interactive-cast failure clears ONLY
@@ -406,6 +406,23 @@ pub(super) fn spell_go(
         hits.len(),
         misses.len()
     );
+    // **The interact chain's third link** (tag `use`, the same one `target::click` writes): the cast
+    // the server answered a `CMSG_GAMEOBJ_USE` with. `caster_indexed=false` is the load-bearing
+    // case — every impact, sound and effect model below hangs off `index.0.get(&caster)`, so a
+    // caster we never streamed drops the whole visual silently. A GameObject IS the caster for a
+    // SPELLCASTER-type object (vmangos leaves `spellCaster = this` for type 22), which is why this
+    // reads the index rather than assuming a unit.
+    if benilla_assets::trace::enabled_for("use") {
+        benilla_assets::trace::line(
+            "use",
+            &format!(
+                "SPELL_GO spell={spell_id} caster={caster:#x} caster_indexed={} hits={} misses={}",
+                index.0.contains_key(&caster),
+                hits.len(),
+                misses.len()
+            ),
+        );
+    }
     // A cast that names a GameObject (an open-lock cast on a chest / locked door) hands off to the GO
     // animation driver, which gates on the open-lock effect and opens the lid on the cast going off
     // (decision 0250). Independent of the caster being streamed to us — an observed open still animates.
@@ -1846,7 +1863,10 @@ mod tests {
             if let Some(id) = in_flight {
                 app.world_mut()
                     .resource_mut::<PendingCast>()
-                    .arm(id, Instant::now());
+                    // `guards: false` — a hunter shot is `Attributes & 0x2` ranged, so it is
+                    // recorded as committed and does NOT occupy the refusal. Arming it the other
+                    // way would hide the very regression this test exists for (1601).
+                    .arm(id, Instant::now(), false);
             }
             let (tx, _rx) = crossbeam_channel::unbounded();
             let cat = spells();

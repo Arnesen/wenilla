@@ -172,7 +172,15 @@ impl CastLadder<'_, '_> {
         if commit.is_item() {
             self.pending.arm_item(spell_id, now);
         } else {
-            self.pending.arm(spell_id, now);
+            // `normal_cast`'s own predicate — a targeted-cursor commit is always an ordinary cast
+            // in practice (a ranged shot never raises the cursor), but computing it keeps this
+            // arm from drifting from the ladder's if the classes ever meet.
+            let guards = self
+                .spells
+                .as_ref()
+                .and_then(|s| s.catalog.get(spell_id))
+                .is_none_or(|d| !d.ranged_attack() && !d.on_next_swing());
+            self.pending.arm(spell_id, now, guards);
         }
         if let Some(d) = self.spells.as_ref().and_then(|s| s.catalog.get(spell_id)) {
             self.cooldowns.start_gcd(spell_id, d, now);
@@ -632,16 +640,21 @@ fn send_spell_cast(
             },
         },
     });
-    if normal_cast {
-        // One inflight id, every cast source (`0xceca88`). The item arm's provisional is shorter
-        // because `CMSG_USE_ITEM` has legs vmangos answers with `SMSG_INVENTORY_CHANGE_FAILURE`
-        // and no cast result at all — [`crate::ui_cast::PendingCast`]'s own doc, decision 0908.
-        if commit.is_item() {
-            pending.arm_item(spell_id, now);
-        } else {
-            pending.arm(spell_id, now);
-        }
-    } else if on_next_swing {
+    // **One inflight id, every cast source** (`0xceca88`, written at `0x6e5026` for every commit).
+    // The item arm's provisional is shorter because `CMSG_USE_ITEM` has legs vmangos answers with
+    // `SMSG_INVENTORY_CHANGE_FAILURE` and no cast result at all —
+    // [`crate::ui_cast::PendingCast`]'s own doc, decision 0908.
+    //
+    // **Every** class is recorded; only `normal_cast` and the item arm *guard* (1601). This used
+    // to be one thing: the record was armed only for the classes that refuse on it, so a ranged
+    // shot — every hunter shot is `Attributes & 0x2` — left no trace of having been sent, and the
+    // `modalNextSpell` chain's "is this reply mine?" test (`0x6e7408`) could never answer yes.
+    if commit.is_item() {
+        pending.arm_item(spell_id, now);
+    } else {
+        pending.arm(spell_id, now, normal_cast);
+    }
+    if on_next_swing {
         queued_melee.arm(spell_id);
     }
     // TryCast's post-send tail (`6e51b5`) — byte-verified whole by the 2026-07-14 wow-re §5
@@ -773,6 +786,7 @@ mod tests {
 
     const AUTO_SHOT: u32 = 75;
     const RAPTOR_STRIKE: u32 = 2973;
+    const SERPENT_STING: u32 = 1978;
     const MOB: u64 = 0x0000_0000_0000_00f1;
 
     /// The two combat-initiation classes exactly as the real 5875 rows classify them (the data
@@ -794,13 +808,100 @@ mod tests {
             attributes: 0x404,
             ..Default::default()
         };
+        // The third class the seam has to keep apart: an instant hunter shot. Ranged slot
+        // (`Attributes & 0x2`) like Auto Shot, but NOT auto-repeat — and it names Auto Shot in
+        // `modalNextSpell` (1597).
+        let serpent_sting = benilla_formats::SpellDisplay {
+            targets: 0x2,
+            attributes: 0x0001_0002,
+            attributes_ex2: 0x0002_0000,
+            modal_next_spell: AUTO_SHOT,
+            ..Default::default()
+        };
         Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(HashMap::from([
                 (AUTO_SHOT, auto_shot),
                 (RAPTOR_STRIKE, raptor_strike),
+                (SERPENT_STING, serpent_sting),
             ])),
             ..Spells::empty_for_tests()
         }
+    }
+
+    /// **A committed cast is recorded as committed — whatever its class** (`0xceca88` is written
+    /// at `0x6e5026` for every commit; decision 1601).
+    ///
+    /// This is the test whose absence shipped B280 broken **twice**. 1597 built the
+    /// `modalNextSpell` chain and unit-tested it by arming the in-flight record **by hand** — so
+    /// it passed while the real send path never armed it for a hunter shot at all
+    /// (`normal_cast = !ranged_attack && !on_next_swing`, and every hunter shot is
+    /// `Attributes & 0x2`). The chain's "is this reply mine?" test could not answer yes in play,
+    /// and the fix looked green and did nothing. So this goes through [`send`], the real ladder.
+    ///
+    /// The control is the other half: recorded is not the same as *guarding*. A ranged shot must
+    /// not start refusing the next press with `0x61`, which is what arming the old field for it
+    /// would have done.
+    #[test]
+    fn a_committed_ranged_shot_is_recorded_but_does_not_guard() {
+        let (mut world, _rx) = combat_world(false);
+        send_at(&mut world, SERPENT_STING, MOB);
+        let now = Instant::now();
+        let pending = world.resource::<crate::ui_cast::PendingCast>();
+        assert_eq!(
+            pending.committed(now),
+            Some(SERPENT_STING),
+            "the shot we just sent is the committed cast — this is what `0x6e7408` reads"
+        );
+        assert!(
+            !pending.in_flight(now),
+            "...and it does not occupy the refusal: a shot must not block the next press"
+        );
+        assert_eq!(
+            pending.current(now),
+            None,
+            "...nor light the in-flight ring the ordinary casts drive"
+        );
+
+        // An ordinary cast still does both, unchanged.
+        let (mut world, _rx) = combat_world(false);
+        send_at(&mut world, RAPTOR_STRIKE, MOB);
+        let pending = world.resource::<crate::ui_cast::PendingCast>();
+        assert_eq!(
+            pending.committed(Instant::now()),
+            Some(RAPTOR_STRIKE),
+            "an on-next-swing strike is committed too"
+        );
+    }
+
+    /// **The chained Auto Shot survives the ladder** — the wall after the one 1601 knocked down.
+    /// Recording the sting as committed is only half: the chain then hands 75 back through
+    /// [`CastLadder::send`], which re-runs every rung. If any of them refused it — the
+    /// auto-repeat toggle, the in-flight guard the sting just armed, the GCD the sting just
+    /// started — the chain would still end in silence, and silence is what the bug looked like.
+    ///
+    /// So: send the sting, then send what its `modalNextSpell` names, and require the wire to
+    /// carry it. The sting's own GCD is running by then (it is armed at the commit above), which
+    /// is exactly the state the real chain fires in — Auto Shot's `StartRecoveryCategory` is 0
+    /// against the GCD node's 133, so the getter's GCD leg cannot match it.
+    #[test]
+    fn the_chained_auto_shot_is_not_refused_by_the_sting_it_followed() {
+        let (mut world, rx) = combat_world(false);
+        send_at(&mut world, SERPENT_STING, MOB);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == SERPENT_STING),
+            "the sting goes out first"
+        );
+        // What `cast_result` would queue, handed to the one send path the drain uses.
+        send_at(&mut world, AUTO_SHOT, MOB);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AUTO_SHOT),
+            "and the chained Auto Shot goes out behind it — no rung eats it"
+        );
+        assert_eq!(
+            world.resource::<AutoRepeatActive>().0,
+            Some(AUTO_SHOT),
+            "...and the commit arms the repeat, which is the whole observable"
+        );
     }
 
     /// [`world`] plus the catalog and the self player the commit tail needs — `engaged` is our

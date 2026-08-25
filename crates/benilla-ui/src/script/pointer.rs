@@ -546,24 +546,22 @@ impl UiScript {
         // ── `OnMouseUp` goes to the frame that took the PRESS, not to whatever is under the
         // cursor now — the mouse CAPTURE (`root+0x80`).
         //
-        // The client's mouse-DOWN handler `0x7662c0` "resolves target = root+0x80 (existing
-        // capture) else root+0x7c (hover frame) … then title-region drag or **capture**+OnMouseDown"
-        // (wow-re ledger `0x7662c0`, VERIFIED), so a press takes the pointer.
+        // The client's mouse-DOWN handler `0x7662c0` takes the pointer: "resolves target =
+        // root+0x80 (existing capture) else root+0x7c (hover frame) … then title-region drag or
+        // **capture**+OnMouseDown" (wow-re ledger `0x7662c0`).
         //
-        // ⚠ **The release half is INFERRED, not carved.** That the capture is what the *UP*
-        // handler dispatches through is an extrapolation from the DOWN handler: the sibling
-        // `0x766420` (category `0xe`) carries only a bulk wave-classify label in wow-re's ledger,
-        // not a derivation. The inference is strong — a capture nothing consults on release would
-        // be pointless, and something has to clear `root+0x80` — but it is an inference, and this
-        // is a whole-UI change (every press-on-A-release-on-B in the client now delivers to A). A
-        // §5 is dispatched for `0x766420`'s target resolution (decision 1594); when it lands this
-        // comment says VERIFIED or this code changes.
+        // The **release** half is `0x766420`, and it is VERIFIED — wow-re
+        // `system/ui/scratch/mouseup-dispatch-law.md`, a §5 dispatched from this repo for exactly
+        // this line after it first landed on an extrapolation (decision 1599). It reads the capture
+        // and **nothing else**: `[mgr+0x80]` is snapshotted into `ebx` at entry (`0x76642b`),
+        // before anything, and `[mgr+0x7c]` — the hover frame — is **never read** anywhere in
+        // `[0x766420, 0x7664f0)`. One dispatch, `0x7664a4 call [eax+0x6c]`.
         //
-        // We already track exactly the capture
-        // — [`Model::mouse_down_on`], the press target per button, which `OnClick`'s same-frame
-        // rule reads — and firing `OnMouseUp` at the *hit* frame instead was the one place it went
-        // unused. This function's own doc has always said "on the captured frame"; the code did
-        // not.
+        // So a press on A released over B fires `OnMouseUp` on **A**, and B gets nothing on the
+        // release edge. We already track exactly that capture — [`Model::mouse_down_on`], the press
+        // target per button, which `OnClick`'s same-frame rule reads — and firing `OnMouseUp` at
+        // the *hit* frame was the one place it went unused. This function's doc always said "on the
+        // captured frame"; the code did not.
         //
         // It is not a nicety: a chat window's resize grip is a 16×16 button that the drag pulls
         // out from under the cursor the moment the size clamps at `SetMinResize`/`SetMaxResize`
@@ -572,10 +570,20 @@ impl UiScript {
         // rest of the session — the stuck-drag failure `cursor::abandon_drag` exists to prevent on
         // the other path.
         //
-        // A press that captured NOTHING (over the world, or swallowed by a title region) falls
-        // back to the hit frame, which is `root+0x7c`'s arm of the same resolve.
+        // **A press that captured NOTHING fires nothing**, and this is the half the first version
+        // of this code got wrong: it fell back to the frame under the cursor, reading the DOWN
+        // handler's `+0x80`-else-`+0x7c` precedence as if the UP handler shared it. It does not —
+        // `0x766498 test ebx,ebx / je 0x7664cd` returns with no virtual call at all. The fallback
+        // was a divergence that let a press over open space deliver a release to whatever the
+        // cursor had wandered onto.
+        //
+        // (Two things the same §5 settled that are invisible from here: the capture is cleared at
+        // `0x7664bb`, **after** the dispatch — so a C++ consumer inside `OnMouseUp` still sees it,
+        // though no Lua binding reads it, `GetMouseFocus 0x48df40` being `+0x7c`; and the clear is
+        // gated on `evt+0x18 == 0`, the button mask *after* the event, so a **chorded** release
+        // fires `OnMouseUp` and keeps the capture for the button still held.)
         let script = if down { "OnMouseDown" } else { "OnMouseUp" };
-        if let Some(id) = if down { hit_id } else { captured_id.or(hit_id) } {
+        if let Some(id) = if down { hit_id } else { captured_id } {
             if let Err(e) = event::fire_widget_handler(&self.lua, id, script, vec![btn.clone()]) {
                 self.push_error(e);
             }

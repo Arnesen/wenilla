@@ -106,6 +106,11 @@ pub(super) enum UiFixture {
     /// capture checks the header (left-flush, Say-white), the typed text past the live insets,
     /// and the three-piece input border.
     ChatEdit,
+    /// The chat dock **hovered**: revealed, the Combat Log selected, and the cursor parked on the
+    /// unselected GENERAL tab — the first capture scenario that exercises a hover state at all,
+    /// which decision 0254 recorded as the gap that left its own lane uncovered. `$WOW_TABHOVER`
+    /// swings it through the four alternate dock states (see `fixtures.rs`).
+    ChatTabHover,
     /// The social pane (`FriendsFrame`), opened through the live toggle — the instrument for B264
     /// (decision 1298). Its `BenillaFriendsDropDown` host is declared with no anchors, exactly as
     /// the reference's own `FriendsDropDown` is; while an unpositioned owner stood in a zero rect
@@ -985,6 +990,17 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::ChatEdit),
+    },
+    // The hovered chat dock — the tab plate + its ADD highlight over the world, which is the
+    // pair the UI-over-world composite space decides. Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-chat-tabhover`.
+    Scenario {
+        name: "ui-chat-tabhover",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::ChatTabHover),
     },
     // The social pane, for the stray-dropdown regression (B264, decision 1298). Run with
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-social`.

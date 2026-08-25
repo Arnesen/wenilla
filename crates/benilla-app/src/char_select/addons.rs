@@ -9,7 +9,8 @@
 //! `UI-Character-ScrollBar` track, and the four-button bottom row in the reference's own order
 //! (Disable All · Enable All ··· Okay · Cancel). Geometry constants below are the authored
 //! numbers, resolved top-down into the 640×512 plate. Behaviour is **re-expressed natively** —
-//! transcribing GlueXML is forbidden, not discouraged (the contract's FrameXML rule; 1234, 1260).
+//! written under 1234's rule, which 1602 has since retired; the native form stays as a design
+//! choice, not a law.
 //!
 //! ## What the reference does, and what we do
 //!

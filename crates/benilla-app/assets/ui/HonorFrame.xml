@@ -46,8 +46,8 @@
           1. THE GLOBALSTRINGS ARE NAMED, NEVER COPIED. Older windows here carry an
              `X = X or "<the enUS text>"` fallback so a chainless harness still paints words; this
              page ships no such copy for its own labels, because three of them are the
-             `NEWBIE_TOOLTIP_*` paragraphs and shipping Blizzard's prose is exactly what decision
-             1234 forbids. The section labels reach the player's own strings through the loader's
+             `NEWBIE_TOOLTIP_*` paragraphs and shipping Blizzard's prose was what decision 1234
+             forbade (retired by 1602; the lookup stays because it is the better design). The section labels reach the player's own strings through the loader's
              `text=` resolution (a `text=` attribute is a GlobalStrings LOOKUP, `loader::resolve_text`);
              the row labels and tooltip bodies reach them as plain globals. A harness with no
              install behind it therefore paints a key where a label goes and raises if you hover a

@@ -1218,6 +1218,67 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-chatedit seed failed: {e}");
             }
         }
+        UiFixture::ChatTabHover => {
+            let Some(script) = script.as_mut() else {
+                return;
+            };
+            // Lines so the window has content, the Combat Log selected, then the cursor parked
+            // on the GENERAL tab — the unselected-tab hover the director reported.
+            //
+            // A capture CAN hover: the app only pumps the OS cursor into the VM on a non-synthetic
+            // run (`ui_script::input`'s `.filter(|_| !ui_hidden && !synthetic)`), so a fed
+            // `mouse_move` is what the whole run then sees. That is the hover instrument decision
+            // 0254 wrote down as missing ("No capture scenario exercises a hover state, so nothing
+            // in the harness covers the very texture this decision is about") — and 0254's own
+            // named residual is exactly what this scenario turned out to show.
+            for (text, r, g, b) in [
+                ("[One] says: hello northshire", 1.0, 1.0, 1.0),
+                ("[One] says: a second line to stack", 1.0, 1.0, 1.0),
+            ] {
+                script.add_chat_message("ChatFrame1", text, r, g, b);
+            }
+            // `$WOW_TABHOVER` picks which of the five dock states to shoot. It is an A/B rig,
+            // not a setting: the four alternates are what let a change to the composite be read
+            // as a difference rather than judged from one frame. Default "1" is the reported
+            // case, so the golden is stable without the variable.
+            //   1 (default)  Combat Log selected, hovering GENERAL      — the report
+            //   3            General selected, hovering COMBAT LOG      — its mirror
+            //   2            Combat Log selected, hovering COMBAT LOG   — hover on the SELECTED tab
+            //   0            revealed, hovering neither tab             — the no-glow control
+            //   9            cursor off the dock                        — bare scene, the baseline
+            //                                                             a tab quad is measured against
+            let mode = std::env::var("WOW_TABHOVER").unwrap_or_else(|_| "1".into());
+            let select = if mode == "3" { 1 } else { 2 };
+            if let Err(e) = script.run(&format!("BenillaFCF_TabClick({select})")) {
+                warn!("capture: ui-chat-tabhover select failed: {e}");
+            }
+            script.resolve();
+            let expr = match mode.as_str() {
+                "2" | "3" => "return ChatFrame2Tab:GetCenter()",
+                "0" => {
+                    "return (ChatFrame2:GetLeft() + ChatFrame2:GetRight()) / 2, \
+                        (ChatFrame2:GetBottom() + ChatFrame2:GetTop()) / 2"
+                }
+                // 9: park far away — the dock conceals itself, so the tab band is bare scene.
+                "9" => "return 2000, 2000",
+                _ => "return ChatFrame1Tab:GetCenter()",
+            };
+            let centre: Result<(f32, f32), _> = script.eval(expr);
+            match centre {
+                Ok((x, y)) => {
+                    script.mouse_move(x, y);
+                    // Settle the reveal ramp without waiting on the app's own frames.
+                    for _ in 0..40 {
+                        if let Err(e) = script.run("FCF_OnUpdate(0.05)") {
+                            warn!("capture: ui-chat-tabhover pump failed: {e}");
+                            break;
+                        }
+                        script.resolve();
+                    }
+                }
+                Err(e) => warn!("capture: ui-chat-tabhover centre failed: {e}"),
+            }
+        }
         UiFixture::NameWater => {
             use benilla_protocol::messages::ObjectFields;
             // The synthetic self player at the eye (the reaction lookup reads its store, and the

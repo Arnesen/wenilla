@@ -718,3 +718,100 @@ fn the_repick_re_hovers_without_a_mouse_move() {
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The mouse-UP dispatch law (decision 1599) — byte-verified, wow-re `mouseup-dispatch-law.md`
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Two side-by-side frames, each recording every `OnMouseDown`/`OnMouseUp` it gets.
+fn two_frames() -> crate::script::UiScript {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        log = {}
+        local function mk(name, x)
+            local f = CreateFrame("Frame", name)
+            f:SetPoint("BOTTOMLEFT", x, 200); f:SetSize(200, 200); f:EnableMouse(true)
+            f:SetScript("OnMouseDown", function(self) table.insert(log, self:GetName()..":down") end)
+            f:SetScript("OnMouseUp", function(self) table.insert(log, self:GetName()..":up") end)
+            return f
+        end
+        mk("A", 100)
+        mk("B", 400)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s
+}
+
+fn log_of(s: &mut crate::script::UiScript) -> String {
+    s.eval::<String>("return table.concat(log, ' ')").unwrap()
+}
+
+/// **The release goes to the frame that took the press, wherever the cursor has got to.** The
+/// client's `0x766420` snapshots `[mgr+0x80]` — the capture — at entry (`0x76642b`) and dispatches
+/// through it alone; `[mgr+0x7c]`, the hover frame, is never read in the whole function. So B, which
+/// the cursor is over at release, gets nothing on that edge.
+///
+/// The concrete thing this buys: a chat window's 16×16 resize grip is pulled out from under the
+/// cursor the instant the size clamps at a resize bound, and its `OnMouseUp → FCF_StopResize` has
+/// to run anyway or the sizing drag is held for the rest of the session.
+#[test]
+fn the_release_goes_to_the_frame_that_took_the_press() {
+    let mut s = two_frames();
+    s.mouse_button(200.0, 300.0, "LeftButton", true); // press on A
+    s.mouse_move(500.0, 300.0); // ... cursor wanders onto B
+    s.mouse_button(500.0, 300.0, "LeftButton", false); // ... and releases there
+    assert_eq!(
+        log_of(&mut s),
+        "A:down A:up",
+        "the capture takes the release; B gets nothing on that edge"
+    );
+}
+
+/// **A press that captured nothing fires nothing on release** — and this is the half that is easy
+/// to get wrong, because the DOWN handler *does* have a hover fallback (`root+0x80` else
+/// `root+0x7c`) and the UP handler does **not** share it: `0x766498 test ebx,ebx / je 0x7664cd`
+/// returns with no virtual call at all.
+///
+/// This shipped briefly as `captured.or(hit)` — a press over open space then delivered its release
+/// to whatever the cursor had wandered onto, which is a frame that never saw the press.
+#[test]
+fn a_press_that_captured_nothing_delivers_no_release() {
+    let mut s = two_frames();
+    s.mouse_button(50.0, 50.0, "LeftButton", true); // press over open space
+    s.mouse_move(500.0, 300.0); // ... cursor onto B
+    s.mouse_button(500.0, 300.0, "LeftButton", false);
+    assert_eq!(
+        log_of(&mut s),
+        "",
+        "no capture, no dispatch — the UP handler has no hover arm"
+    );
+}
+
+/// The ordinary case still behaves: press and release on the same frame is down-then-up on it.
+#[test]
+fn a_press_and_release_on_one_frame_is_unchanged() {
+    let mut s = two_frames();
+    s.mouse_button(200.0, 300.0, "LeftButton", true);
+    s.mouse_button(200.0, 300.0, "LeftButton", false);
+    assert_eq!(log_of(&mut s), "A:down A:up");
+}
+
+/// The capture is **per button**, so a right-button release cannot be answered by a left-button
+/// press's capture — `Model::mouse_down_on` is keyed by button name, which is what makes this fall
+/// out rather than needing its own arm.
+#[test]
+fn the_capture_is_per_button() {
+    let mut s = two_frames();
+    s.mouse_button(200.0, 300.0, "LeftButton", true); // A holds the LEFT button
+    s.mouse_move(500.0, 300.0);
+    s.mouse_button(500.0, 300.0, "RightButton", false); // a RIGHT release, never pressed
+    assert_eq!(
+        log_of(&mut s),
+        "A:down",
+        "the right button captured nothing, so its release dispatches nothing"
+    );
+}
