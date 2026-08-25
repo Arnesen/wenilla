@@ -101,6 +101,18 @@ const FIELD_UNIT_BOUNDINGRADIUS: u16 = 129;
 const FIELD_UNIT_COMBATREACH: u16 = 130;
 const FIELD_UNIT_BASE_MANA: u16 = 162;
 const FIELD_UNIT_DISPLAYID: u16 = 131;
+/// `UNIT_FIELD_NATIVEDISPLAYID` (`OBJECT_END(6) + 0x7E` = 132, PUBLIC — vmangos
+/// `UpdateFields_1_12_1.h:77`; it is the index between DISPLAYID (131) and MOUNTDISPLAYID (133),
+/// both of which are independently pinned above). The unit's **unshifted** appearance: the server
+/// writes it once at spawn/login and leaves it alone through every transform — a druid form
+/// (`Aura::HandleAuraModShapeshift` sets DISPLAYID and restores it *from* this field), a GM
+/// `.modify morph`, a polymorph. `UNIT_FIELD_DISPLAYID` is what you see; this is what the unit is.
+///
+/// The client reads it for exactly one thing benilla cares about: the **mover collision prism**
+/// (`0x60b270` fetches its DBC row at `[unit+0x110]+0x1f8`, while its sibling `0x60ae10` uses
+/// `+0x1f4` = DISPLAYID against the same array) — so a shapeshift does *not* resize the collision
+/// box (wow-re `mover-collision-scalars.md`, `remote-swim-decision.md` §4; decision 1574).
+const FIELD_UNIT_NATIVEDISPLAYID: u16 = 132;
 /// `UNIT_FIELD_MOUNTDISPLAYID` (`OBJECT_END(6) + 0x7F` = 133, PUBLIC — vmangos
 /// `UpdateFields_1_12_1.h:78`; byte-verified client-side at `[unit+0x110]+0x1fc` = index 0x85,
 /// wow-re `rf39-field-index-map.md`/`d1.md`, HARD). A raw `CreatureDisplayInfo` id: the mount the

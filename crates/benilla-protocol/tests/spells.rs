@@ -264,6 +264,10 @@ fn spell_and_action_wire() {
                 "absorb summed across both sub-damage blocks (5 + 7)"
             );
             assert_eq!(s.blocked, 15);
+            assert_eq!(
+                s.school, 0,
+                "the wording's school is the FIRST block's (physical), not the second's frost"
+            );
         }
         _ => panic!("attacker state"),
     }

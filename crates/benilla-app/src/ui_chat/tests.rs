@@ -931,7 +931,7 @@ fn every_kind_is_in_all() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), before, "a kind is listed twice in ALL");
-    assert_eq!(before, 37, "37 kinds — update this when the kind set grows");
+    assert_eq!(before, 81, "81 kinds — update this when the kind set grows");
 }
 
 #[test]
@@ -1762,4 +1762,95 @@ fn the_talk_gesture_reads_the_plaintext_not_the_garbled_line() {
         Some(Gesture::Talk),
         "the garbled form would NOT laugh — which is why the feed must pass the plaintext"
     );
+}
+
+// ── B297: the combat log reaches addons ──────────────────────────────────────────────────────
+
+/// **The bug, stated as a test.** B297 is "benilla emits no combat-log chat events at all", and the
+/// consumer named in the report is Quiver's TranqAnnouncer, whose *only* detector is
+/// `CHAT_MSG_SPELL_SELF_DAMAGE`. So the test is an addon registering exactly that event and
+/// receiving exactly that sentence.
+///
+/// `arg1` carrying the whole formatted line is the load-bearing half: every 1.12 damage meter and
+/// announcer parses `arg1` with a Lua pattern built from its own copy of the GlobalStrings, so a
+/// fire with an empty or differently-shaped arg1 would pass a "does it fire" check and still be
+/// useless. This asserts the text.
+#[test]
+fn an_addon_sees_the_combat_log_line_it_registers_for() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    s.run(SPY).unwrap();
+    s.run(r#"BenillaChatSpy:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")"#)
+        .unwrap();
+
+    let line = "Your Fireball hits Kobold Vermin for 120 fire damage.";
+    super::frames::route(
+        &mut s,
+        &mut windows,
+        &ChatEvent::text_only(K::SpellSelfDamage, line.into()),
+    );
+
+    assert_eq!(
+        s.eval::<String>("return SpyEvent").unwrap(),
+        "CHAT_MSG_SPELL_SELF_DAMAGE",
+        "the event an addon registered is the event that fired"
+    );
+    assert_eq!(s.eval::<i64>("return SpyN").unwrap(), 1);
+    let seen: String = s.eval("return SpyLine").unwrap();
+    assert!(
+        seen.starts_with(&format!("{line}|")),
+        "arg1 must be the whole sentence, not a fragment — got {seen:?}"
+    );
+    assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+}
+
+/// The combat block is **verbatim**: the composer adds `arg1` and nothing else — no `[Name]` link,
+/// no `<AFK>` prefix, no language header. The reference says so by prefix
+/// (`ChatFrame_OnEvent` l.1397/1399, two arms that only `AddMessage(arg1, …)`), and the failure
+/// this guards against is the player/monster branch's decorations leaking onto a combat line.
+#[test]
+fn a_combat_log_line_renders_verbatim() {
+    let default_language = String::from("Common");
+    for kind in K::ALL.iter().copied().filter(|k| k.is_combat_log()) {
+        let mut e = ChatEvent::text_only(kind, "You hit Kobold Vermin for 5.".into());
+        // Deliberately populated: a combat line never carries these, and if the composer ever fell
+        // through to the player branch it would splice them in.
+        e.sender = "Somebody".into();
+        e.flag = "AFK".into();
+        e.language = "Orcish".into();
+        assert_eq!(
+            super::frames::compose(&e, kind, &default_language).as_deref(),
+            Some("You hit Kobold Vermin for 5."),
+            "{} must render verbatim",
+            super::event::event_name(kind)
+        );
+    }
+}
+
+/// Window 2 "Combat Log" receives the self-relevant block and window 1 "General" receives none of
+/// it — the chat-cache default registration, which is what makes the two docked tabs mean
+/// something. The types the default leaves unregistered (PARTY, FRIENDLYPLAYER, the two other
+/// CREATURE_VS rows) still *fire*; they just land in no window, which is the reference's own
+/// behaviour and the reason a damage meter works without touching the windows.
+#[test]
+fn the_combat_log_lands_in_window_two_only() {
+    let windows = super::frames::ChatWindows::default();
+    for kind in [
+        K::CombatSelfHits,
+        K::CombatSelfMisses,
+        K::CombatPetHits,
+        K::CombatCreatureVsSelfHits,
+        K::SpellSelfDamage,
+        K::SpellSelfBuff,
+        K::SpellPeriodicSelfDamage,
+        K::SpellDamageShieldsOnSelf,
+    ] {
+        assert!(!windows.wants(0, kind), "{kind:?} must not reach General");
+        assert!(windows.wants(1, kind), "{kind:?} must reach the Combat Log");
+    }
+    // Registered by neither, deliberately — the default is self-relevant only.
+    for kind in [K::CombatPartyHits, K::CombatCreatureVsCreatureHits] {
+        assert!(!windows.wants(0, kind));
+        assert!(!windows.wants(1, kind));
+    }
 }

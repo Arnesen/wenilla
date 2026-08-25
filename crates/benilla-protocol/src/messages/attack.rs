@@ -44,6 +44,14 @@ pub struct AttackerState {
     pub resist: i32,
     /// `BlockedAmount` — the trailing blocked-damage word.
     pub blocked: u32,
+    /// The **first** sub-damage block's school (`SpellSchools`: 0 physical … 6 arcane; vmangos
+    /// writes `GetFirstSchoolInMask(subDamage->damageSchoolMask)`), `0` when the swing carried no
+    /// sub-damage at all.
+    ///
+    /// It exists for the combat log's wording: a non-physical swing takes the `…SCHOOL` template
+    /// ("You hit X for 5 fire damage.") and physical takes the plain one. The floating text has
+    /// never needed it, which is why the field was read and dropped until B297.
+    pub school: u8,
 }
 
 /// Read `SMSG_ATTACKERSTATEUPDATE` (byte-verified order, attacker **PackGUID first** — settled by
@@ -59,9 +67,15 @@ pub(super) fn read_attacker_state(r: &mut impl Read) -> io::Result<AttackerState
     let subs = read_u8(r)?;
     let mut absorb = 0u32;
     let mut resist = 0i32;
-    for _ in 0..subs {
-        // school, damage f32, damage u32 — folded into TotalDamage above; absorb/resist summed.
-        let _school = read_u32_le(r)?;
+    let mut school = 0u8;
+    for i in 0..subs {
+        // damage f32 + damage u32 are folded into TotalDamage above; absorb/resist are summed. The
+        // school is kept from the FIRST block only — the wording takes one word, and vmangos's
+        // extra blocks are the off-school splits of the same swing.
+        let block_school = read_u32_le(r)?;
+        if i == 0 {
+            school = u8::try_from(block_school).unwrap_or(0);
+        }
         let _damage_f = read_f32_le(r)?;
         let _damage = read_u32_le(r)?;
         absorb += read_u32_le(r)?;
@@ -80,6 +94,7 @@ pub(super) fn read_attacker_state(r: &mut impl Read) -> io::Result<AttackerState
         absorb,
         resist,
         blocked,
+        school,
     })
 }
 

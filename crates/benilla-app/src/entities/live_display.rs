@@ -107,8 +107,6 @@ pub(super) fn refresh_live_display(
     mut swapped: MessageWriter<DisplaySwapped>,
 ) {
     for (entity, guid, mut net, store, applied, height, tf) in &mut entities {
-        let mut restamp = false;
-
         // ── The display-id swap ──────────────────────────────────────────────────────────────
         let live = live_display_id(net.kind, store);
         if let Some(live) = live {
@@ -118,7 +116,6 @@ pub(super) fn refresh_live_display(
                     guid.0, net.kind, applied.0, live
                 );
                 net.display_id = Some(live);
-                restamp = true;
                 swapped.write(DisplaySwapped { entity });
                 // The full visual teardown set + our own diff key: children (parts, anchors,
                 // held roots, mount child) despawn, the per-instance visual components strip, and
@@ -166,7 +163,6 @@ pub(super) fn refresh_live_display(
                     guid.0, net.scale, live
                 );
                 net.scale = live;
-                restamp = true;
                 commands.entity(entity).insert(ScaleEase {
                     from: tf.scale.x,
                     to: live,
@@ -175,19 +171,31 @@ pub(super) fn refresh_live_display(
             }
         }
 
-        // One restamp per frame however many inputs moved: both CollisionHeight inputs live here.
+        // ── The collision prism ──────────────────────────────────────────────────────────────
+        // Derived from the unit's **native** display, so the rendered swap above is NOT one of its
+        // inputs (decision 1574 — the reference reads `NATIVEDISPLAYID` at `[unit+0x110]+0x1f8`).
+        // Its two real inputs are `UNIT_FIELD_NATIVEDISPLAYID` and `SCALE_X`, and neither has a
+        // change-gate we can piggyback on, so it is recomputed and diffed against the stamped
+        // component instead: two `HashMap` lookups per attached unit per frame, the same order as
+        // the two store reads this loop already does above (~0.02 ms at 300 units — a twentieth of
+        // the standing-idler cost decision 1445 gated away, and unlike a gate it cannot miss a
+        // native-display change that moved no pixel).
+        //
         // Snapped to the TARGET scale immediately (the swim/wade/splash lines move once) — easing
         // a collision plane would drag the resolver through two seconds of intermediate depths.
-        if restamp {
-            let h = collision_height_for(creatures.as_deref(), net.display_id, net.scale);
-            if height != Some(&h) {
-                debug!(
-                    "collision height restamp: guid {:016x} {:?} -> {:.3}",
-                    guid.0,
-                    height.map(|c| c.0),
-                    h.0
-                );
-            }
+        let prism = super::collision_height::prism_display_id(Some(store), net.display_id);
+        let h = collision_height_for(creatures.as_deref(), prism, net.scale);
+        if height != Some(&h) {
+            debug!(
+                "collision height restamp: guid {:016x} {:?} -> {:.3} (native display {:?}, \
+                 rendered {:?}, scale {:.3})",
+                guid.0,
+                height.map(|c| c.0),
+                h.0,
+                prism,
+                net.display_id,
+                net.scale
+            );
             commands.entity(entity).insert(h);
         }
     }

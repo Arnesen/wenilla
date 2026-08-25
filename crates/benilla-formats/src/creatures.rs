@@ -876,6 +876,66 @@ mod tests {
         );
     }
 
+    /// **The shapeshift divergence, pinned in numbers** (decision 1574). The reference derives the
+    /// collision prism from `UNIT_FIELD_NATIVEDISPLAYID`, so a druid in a form keeps the druid's
+    /// depth lines. This asserts the two readings really differ on shipped data, and by how much —
+    /// a doc claiming "up to 0.72 yd" is worth nothing if the DBC rows drift under it.
+    ///
+    /// `h = collisionHeight × max(SCALE_X, CreatureDisplayInfo.scale)` on the row named. Player
+    /// `SCALE_X` starts at `modelScale × CDI.scale` and a shapeshift multiplies it by the form's
+    /// own factor (vmangos `GetShapeshiftDisplayInfo`: 1.0 for bear/moonkin/tree, 0.80 for
+    /// cat/travel/aquatic) — both live-confirmed by decision 0695's own probe (tauren bear
+    /// `h = 2.083 × 1.35`, tauren cat `SCALE_X 1.35 → 1.08`).
+    #[test]
+    fn a_shapeshift_moves_the_collision_prism_and_the_native_row_is_what_stops_it() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        let h = |display: u32, scale_x: f32| {
+            let col = cat.collision_height(display).expect("collision height");
+            let s = cat.display_scale(display).expect("display scale");
+            col * scale_x.max(s)
+        };
+
+        // (label, native display, form display, native SCALE_X, the form's scale factor)
+        let cases: &[(&str, u32, u32, f32, f32)] = &[
+            ("NElf M → cat", 55, 892, 1.0, 0.80),
+            ("NElf M → bear", 55, 2281, 1.0, 1.0),
+            ("Tauren M → moonkin", 59, 15375, 1.35, 1.0),
+            ("Tauren M → bear", 59, 2289, 1.35, 1.0),
+        ];
+        let mut worst: f32 = 0.0;
+        for &(label, native, form, native_scale_x, factor) in cases {
+            let scale_x = native_scale_x * factor;
+            let (reference, ours_before) = (h(native, scale_x), h(form, scale_x));
+            let swim_delta = 0.75 * (ours_before - reference);
+            assert!(
+                swim_delta.abs() > 0.05,
+                "{label}: the two readings must actually differ, else this test asserts nothing                  (reference {reference}, form-derived {ours_before})"
+            );
+            worst = worst.max(swim_delta.abs());
+        }
+        assert!(
+            (worst - 0.72).abs() < 0.02,
+            "worst swim-line divergence is {worst} yd, the doc says 0.72"
+        );
+
+        // The direction flips with the form, which is why this can't be waved off as a constant
+        // offset: a night elf cat swims too EARLY, a tauren moonkin far too LATE.
+        assert!(h(892, 0.80) < h(55, 0.80), "NElf cat: form row is shorter");
+        assert!(
+            h(15375, 1.35) > h(59, 1.35),
+            "Tauren moonkin: form row is taller"
+        );
+
+        // 0695's own live probe, reproduced from the DBCs: tauren bear h = 2.083 × 1.35.
+        assert!(
+            (h(2289, 1.35) - 2.083 * 1.35).abs() < 5e-3,
+            "tauren bear form-derived h should reproduce 0695's observed 2.812"
+        );
+    }
+
     /// **The Shore Strider, pinned** (B311, decision 1568). The reported giant's own chain and
     /// numbers, recorded so nobody re-suspects the height: display 4945 → `CreatureModelData` 35,
     /// `Creature\SeaGiant\SeaGiant.mdx`, column 2.083 over a display scale of 1.75 and a

@@ -69,9 +69,118 @@ pub(crate) enum ChatEventKind {
     BgSystemNeutral,
     BgSystemAlliance,
     BgSystemHorde,
+    // ── the combat log (B297) ──────────────────────────────────────────────────────────────
+    // The `COMBAT_*`/`SPELL_*` block 0288 §3 held back as "the combat-log content arc". All 44
+    // kinds are produced by [`super::combat`]; the rest of the reference's block (the death,
+    // dispel, enchant, tradeskill and cast-failure leaves) has no decoded wire source yet and is
+    // deliberately still absent — a kind with no producer is dead weight the sweeps cannot police.
+    CombatSelfHits,
+    CombatSelfMisses,
+    CombatPetHits,
+    CombatPetMisses,
+    CombatPartyHits,
+    CombatPartyMisses,
+    CombatFriendlyPlayerHits,
+    CombatFriendlyPlayerMisses,
+    CombatHostilePlayerHits,
+    CombatHostilePlayerMisses,
+    CombatCreatureVsSelfHits,
+    CombatCreatureVsSelfMisses,
+    CombatCreatureVsPartyHits,
+    CombatCreatureVsPartyMisses,
+    CombatCreatureVsCreatureHits,
+    CombatCreatureVsCreatureMisses,
+    SpellSelfDamage,
+    SpellSelfBuff,
+    SpellPetDamage,
+    SpellPetBuff,
+    SpellPartyDamage,
+    SpellPartyBuff,
+    SpellFriendlyPlayerDamage,
+    SpellFriendlyPlayerBuff,
+    SpellHostilePlayerDamage,
+    SpellHostilePlayerBuff,
+    SpellCreatureVsSelfDamage,
+    SpellCreatureVsSelfBuff,
+    SpellCreatureVsPartyDamage,
+    SpellCreatureVsPartyBuff,
+    SpellCreatureVsCreatureDamage,
+    SpellCreatureVsCreatureBuff,
+    SpellDamageShieldsOnSelf,
+    SpellDamageShieldsOnOthers,
+    SpellPeriodicSelfDamage,
+    SpellPeriodicSelfBuffs,
+    SpellPeriodicPartyDamage,
+    SpellPeriodicPartyBuffs,
+    SpellPeriodicFriendlyPlayerDamage,
+    SpellPeriodicFriendlyPlayerBuffs,
+    SpellPeriodicHostilePlayerDamage,
+    SpellPeriodicHostilePlayerBuffs,
+    SpellPeriodicCreatureDamage,
+    SpellPeriodicCreatureBuffs,
 }
 
 impl ChatEventKind {
+    /// The `COMBAT_*` / `SPELL_*` block — the combat log's own types.
+    ///
+    /// The reference asks this by string prefix (`ChatFrame_OnEvent` l.1397/1399:
+    /// `strsub(type,1,7) == "COMBAT_"`, `strsub(type,1,6) == "SPELL_"`), which over a typed enum is
+    /// a membership test. Both `COMBAT_XP_GAIN` and `COMBAT_HONOR_GAIN` are inside the reference's
+    /// prefix and are deliberately **outside** this one: they were already modeled by the ding and
+    /// honour arcs, already listed in the verbatim arm by name, and answer to a different composer
+    /// path — including them here would change nothing but would make the predicate lie about what
+    /// [`super::combat`] produces.
+    pub(crate) fn is_combat_log(self) -> bool {
+        use ChatEventKind as K;
+        matches!(
+            self,
+            K::CombatSelfHits
+                | K::CombatSelfMisses
+                | K::CombatPetHits
+                | K::CombatPetMisses
+                | K::CombatPartyHits
+                | K::CombatPartyMisses
+                | K::CombatFriendlyPlayerHits
+                | K::CombatFriendlyPlayerMisses
+                | K::CombatHostilePlayerHits
+                | K::CombatHostilePlayerMisses
+                | K::CombatCreatureVsSelfHits
+                | K::CombatCreatureVsSelfMisses
+                | K::CombatCreatureVsPartyHits
+                | K::CombatCreatureVsPartyMisses
+                | K::CombatCreatureVsCreatureHits
+                | K::CombatCreatureVsCreatureMisses
+                | K::SpellSelfDamage
+                | K::SpellSelfBuff
+                | K::SpellPetDamage
+                | K::SpellPetBuff
+                | K::SpellPartyDamage
+                | K::SpellPartyBuff
+                | K::SpellFriendlyPlayerDamage
+                | K::SpellFriendlyPlayerBuff
+                | K::SpellHostilePlayerDamage
+                | K::SpellHostilePlayerBuff
+                | K::SpellCreatureVsSelfDamage
+                | K::SpellCreatureVsSelfBuff
+                | K::SpellCreatureVsPartyDamage
+                | K::SpellCreatureVsPartyBuff
+                | K::SpellCreatureVsCreatureDamage
+                | K::SpellCreatureVsCreatureBuff
+                | K::SpellDamageShieldsOnSelf
+                | K::SpellDamageShieldsOnOthers
+                | K::SpellPeriodicSelfDamage
+                | K::SpellPeriodicSelfBuffs
+                | K::SpellPeriodicPartyDamage
+                | K::SpellPeriodicPartyBuffs
+                | K::SpellPeriodicFriendlyPlayerDamage
+                | K::SpellPeriodicFriendlyPlayerBuffs
+                | K::SpellPeriodicHostilePlayerDamage
+                | K::SpellPeriodicHostilePlayerBuffs
+                | K::SpellPeriodicCreatureDamage
+                | K::SpellPeriodicCreatureBuffs
+        )
+    }
+
     /// Every kind, for the sweeps that must be exhaustive to be worth anything — chiefly
     /// `ui_script::chat_tests::fired_event_names_are_all_chat_type_info_keys`, which checks each
     /// name we fire against the live `ChatTypeInfo` table rather than against a second copy of the
@@ -120,6 +229,50 @@ impl ChatEventKind {
             K::BgSystemNeutral,
             K::BgSystemAlliance,
             K::BgSystemHorde,
+            K::CombatSelfHits,
+            K::CombatSelfMisses,
+            K::CombatPetHits,
+            K::CombatPetMisses,
+            K::CombatPartyHits,
+            K::CombatPartyMisses,
+            K::CombatFriendlyPlayerHits,
+            K::CombatFriendlyPlayerMisses,
+            K::CombatHostilePlayerHits,
+            K::CombatHostilePlayerMisses,
+            K::CombatCreatureVsSelfHits,
+            K::CombatCreatureVsSelfMisses,
+            K::CombatCreatureVsPartyHits,
+            K::CombatCreatureVsPartyMisses,
+            K::CombatCreatureVsCreatureHits,
+            K::CombatCreatureVsCreatureMisses,
+            K::SpellSelfDamage,
+            K::SpellSelfBuff,
+            K::SpellPetDamage,
+            K::SpellPetBuff,
+            K::SpellPartyDamage,
+            K::SpellPartyBuff,
+            K::SpellFriendlyPlayerDamage,
+            K::SpellFriendlyPlayerBuff,
+            K::SpellHostilePlayerDamage,
+            K::SpellHostilePlayerBuff,
+            K::SpellCreatureVsSelfDamage,
+            K::SpellCreatureVsSelfBuff,
+            K::SpellCreatureVsPartyDamage,
+            K::SpellCreatureVsPartyBuff,
+            K::SpellCreatureVsCreatureDamage,
+            K::SpellCreatureVsCreatureBuff,
+            K::SpellDamageShieldsOnSelf,
+            K::SpellDamageShieldsOnOthers,
+            K::SpellPeriodicSelfDamage,
+            K::SpellPeriodicSelfBuffs,
+            K::SpellPeriodicPartyDamage,
+            K::SpellPeriodicPartyBuffs,
+            K::SpellPeriodicFriendlyPlayerDamage,
+            K::SpellPeriodicFriendlyPlayerBuffs,
+            K::SpellPeriodicHostilePlayerDamage,
+            K::SpellPeriodicHostilePlayerBuffs,
+            K::SpellPeriodicCreatureDamage,
+            K::SpellPeriodicCreatureBuffs,
         ]
     };
 }
@@ -295,6 +448,50 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
         K::BgSystemNeutral => "CHAT_MSG_BG_SYSTEM_NEUTRAL",
         K::BgSystemAlliance => "CHAT_MSG_BG_SYSTEM_ALLIANCE",
         K::BgSystemHorde => "CHAT_MSG_BG_SYSTEM_HORDE",
+        K::CombatSelfHits => "CHAT_MSG_COMBAT_SELF_HITS",
+        K::CombatSelfMisses => "CHAT_MSG_COMBAT_SELF_MISSES",
+        K::CombatPetHits => "CHAT_MSG_COMBAT_PET_HITS",
+        K::CombatPetMisses => "CHAT_MSG_COMBAT_PET_MISSES",
+        K::CombatPartyHits => "CHAT_MSG_COMBAT_PARTY_HITS",
+        K::CombatPartyMisses => "CHAT_MSG_COMBAT_PARTY_MISSES",
+        K::CombatFriendlyPlayerHits => "CHAT_MSG_COMBAT_FRIENDLYPLAYER_HITS",
+        K::CombatFriendlyPlayerMisses => "CHAT_MSG_COMBAT_FRIENDLYPLAYER_MISSES",
+        K::CombatHostilePlayerHits => "CHAT_MSG_COMBAT_HOSTILEPLAYER_HITS",
+        K::CombatHostilePlayerMisses => "CHAT_MSG_COMBAT_HOSTILEPLAYER_MISSES",
+        K::CombatCreatureVsSelfHits => "CHAT_MSG_COMBAT_CREATURE_VS_SELF_HITS",
+        K::CombatCreatureVsSelfMisses => "CHAT_MSG_COMBAT_CREATURE_VS_SELF_MISSES",
+        K::CombatCreatureVsPartyHits => "CHAT_MSG_COMBAT_CREATURE_VS_PARTY_HITS",
+        K::CombatCreatureVsPartyMisses => "CHAT_MSG_COMBAT_CREATURE_VS_PARTY_MISSES",
+        K::CombatCreatureVsCreatureHits => "CHAT_MSG_COMBAT_CREATURE_VS_CREATURE_HITS",
+        K::CombatCreatureVsCreatureMisses => "CHAT_MSG_COMBAT_CREATURE_VS_CREATURE_MISSES",
+        K::SpellSelfDamage => "CHAT_MSG_SPELL_SELF_DAMAGE",
+        K::SpellSelfBuff => "CHAT_MSG_SPELL_SELF_BUFF",
+        K::SpellPetDamage => "CHAT_MSG_SPELL_PET_DAMAGE",
+        K::SpellPetBuff => "CHAT_MSG_SPELL_PET_BUFF",
+        K::SpellPartyDamage => "CHAT_MSG_SPELL_PARTY_DAMAGE",
+        K::SpellPartyBuff => "CHAT_MSG_SPELL_PARTY_BUFF",
+        K::SpellFriendlyPlayerDamage => "CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE",
+        K::SpellFriendlyPlayerBuff => "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF",
+        K::SpellHostilePlayerDamage => "CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE",
+        K::SpellHostilePlayerBuff => "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF",
+        K::SpellCreatureVsSelfDamage => "CHAT_MSG_SPELL_CREATURE_VS_SELF_DAMAGE",
+        K::SpellCreatureVsSelfBuff => "CHAT_MSG_SPELL_CREATURE_VS_SELF_BUFF",
+        K::SpellCreatureVsPartyDamage => "CHAT_MSG_SPELL_CREATURE_VS_PARTY_DAMAGE",
+        K::SpellCreatureVsPartyBuff => "CHAT_MSG_SPELL_CREATURE_VS_PARTY_BUFF",
+        K::SpellCreatureVsCreatureDamage => "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_DAMAGE",
+        K::SpellCreatureVsCreatureBuff => "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_BUFF",
+        K::SpellDamageShieldsOnSelf => "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF",
+        K::SpellDamageShieldsOnOthers => "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS",
+        K::SpellPeriodicSelfDamage => "CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE",
+        K::SpellPeriodicSelfBuffs => "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
+        K::SpellPeriodicPartyDamage => "CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE",
+        K::SpellPeriodicPartyBuffs => "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS",
+        K::SpellPeriodicFriendlyPlayerDamage => "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE",
+        K::SpellPeriodicFriendlyPlayerBuffs => "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS",
+        K::SpellPeriodicHostilePlayerDamage => "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",
+        K::SpellPeriodicHostilePlayerBuffs => "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",
+        K::SpellPeriodicCreatureDamage => "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE",
+        K::SpellPeriodicCreatureBuffs => "CHAT_MSG_SPELL_PERIODIC_CREATURE_BUFFS",
     }
 }
 
@@ -363,8 +560,17 @@ pub(crate) fn notice_token(byte: u8) -> Option<&'static str> {
 
 /// The message groups a window registers — `ChatTypeGroup`'s keys (transcribed; the chat-cache
 /// WINDOW blocks list these names). Only the groups the current kind set can carry.
+///
+/// **Most of `ChatTypeGroup` is 1:1 with a chat type**, and the whole combat-log block is: ref
+/// `ChatFrame.lua` l.181-330 is thirty-odd `ChatTypeGroup["X"] = { "CHAT_MSG_X" }` one-liners.
+/// [`Self::Own`] is that shape, so those groups cost one variant between them instead of one each —
+/// the enum below carries only the genuinely *multi*-kind groups, which is the information a reader
+/// wants from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ChatGroup {
+    /// A group whose `ChatTypeGroup` list is exactly the one kind it is named for — every
+    /// `COMBAT_*`/`SPELL_*` group, and the two `COMBAT_*_GAIN` ones that used to be spelled out.
+    Own(ChatEventKind),
     System,
     Say,
     Yell,
@@ -376,10 +582,16 @@ pub(crate) enum ChatGroup {
     Skill,
     Loot,
     Money,
-    /// `COMBAT_XP_GAIN` — one kind, its own group (ref ChatFrame.lua l.235-237).
-    CombatXpGain,
-    /// `COMBAT_HONOR_GAIN` — one kind, its own group (ref ChatFrame.lua l.238-240).
-    CombatHonorGain,
+}
+
+/// Does this group registration subscribe a window to `kind`? The one predicate the router asks,
+/// so that [`ChatGroup::Own`] — whose "list" is its own kind and needs no slice to live in — reads
+/// the same as every multi-kind group.
+pub(crate) fn group_wants(group: ChatGroup, kind: ChatEventKind) -> bool {
+    match group {
+        ChatGroup::Own(k) => k == kind,
+        multi => group_kinds(multi).contains(&kind),
+    }
 }
 
 /// `ChatTypeGroup` transcribed (ref ChatFrame.lua l.116-174): which kinds a group registration
@@ -388,6 +600,8 @@ pub(crate) enum ChatGroup {
 pub(crate) fn group_kinds(group: ChatGroup) -> &'static [ChatEventKind] {
     use ChatEventKind as K;
     match group {
+        // Answered by [`group_wants`] without a slice — the kind is the group.
+        ChatGroup::Own(_) => &[],
         ChatGroup::System => &[
             K::System,
             K::Afk,
@@ -426,8 +640,6 @@ pub(crate) fn group_kinds(group: ChatGroup) -> &'static [ChatEventKind] {
         ChatGroup::Skill => &[K::Skill],
         ChatGroup::Loot => &[K::Loot, K::Money],
         ChatGroup::Money => &[K::Money],
-        ChatGroup::CombatXpGain => &[K::CombatXpGain],
-        ChatGroup::CombatHonorGain => &[K::CombatHonorGain],
     }
 }
 
@@ -468,6 +680,56 @@ pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
         K::BgSystemNeutral => [255, 120, 10],
         K::BgSystemAlliance => [0, 174, 239],
         K::BgSystemHorde => [255, 0, 0],
+        // ── the combat log ───────────────────────────────────────────────────────────────
+        // The shipped defaults are overwhelmingly plain white; the three that are not are the
+        // ones about YOU being hit, and they are the reason the block is grouped by colour
+        // rather than listed in table order — the exceptions are the content.
+        // Your own spell work: the one gold pair in the block.
+        K::SpellSelfDamage | K::SpellSelfBuff => [255, 255, 0],
+        // A creature hitting YOU — the red that makes incoming melee read.
+        K::CombatCreatureVsSelfHits | K::CombatCreatureVsSelfMisses => [255, 47, 47],
+        // A creature's spell landing on YOU.
+        K::SpellCreatureVsSelfDamage => [202, 76, 217],
+        // Everything else in the block: plain white.
+        K::CombatSelfHits
+        | K::CombatSelfMisses
+        | K::CombatPetHits
+        | K::CombatPetMisses
+        | K::CombatPartyHits
+        | K::CombatPartyMisses
+        | K::CombatFriendlyPlayerHits
+        | K::CombatFriendlyPlayerMisses
+        | K::CombatHostilePlayerHits
+        | K::CombatHostilePlayerMisses
+        | K::CombatCreatureVsPartyHits
+        | K::CombatCreatureVsPartyMisses
+        | K::CombatCreatureVsCreatureHits
+        | K::CombatCreatureVsCreatureMisses
+        | K::SpellPetDamage
+        | K::SpellPetBuff
+        | K::SpellPartyDamage
+        | K::SpellPartyBuff
+        | K::SpellFriendlyPlayerDamage
+        | K::SpellFriendlyPlayerBuff
+        | K::SpellHostilePlayerDamage
+        | K::SpellHostilePlayerBuff
+        | K::SpellCreatureVsSelfBuff
+        | K::SpellCreatureVsPartyDamage
+        | K::SpellCreatureVsPartyBuff
+        | K::SpellCreatureVsCreatureDamage
+        | K::SpellCreatureVsCreatureBuff
+        | K::SpellDamageShieldsOnSelf
+        | K::SpellDamageShieldsOnOthers
+        | K::SpellPeriodicSelfDamage
+        | K::SpellPeriodicSelfBuffs
+        | K::SpellPeriodicPartyDamage
+        | K::SpellPeriodicPartyBuffs
+        | K::SpellPeriodicFriendlyPlayerDamage
+        | K::SpellPeriodicFriendlyPlayerBuffs
+        | K::SpellPeriodicHostilePlayerDamage
+        | K::SpellPeriodicHostilePlayerBuffs
+        | K::SpellPeriodicCreatureDamage
+        | K::SpellPeriodicCreatureBuffs => [255, 255, 255],
     }
 }
 

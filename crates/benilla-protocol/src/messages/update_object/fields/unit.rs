@@ -56,6 +56,13 @@ impl ObjectFields {
     pub fn unit_displayid(&self) -> Option<i32> {
         self.get_i32(FIELD_UNIT_DISPLAYID)
     }
+    /// `UNIT_FIELD_NATIVEDISPLAYID` (units + players) — the unit's **unshifted** appearance, which
+    /// no transform touches. The collision prism is derived from *this*, not from
+    /// [`Self::unit_displayid`]: a druid in bear form keeps the druid's swim/splash/foam lines
+    /// (decision 1574). `None` when absent — the caller falls back to the render display.
+    pub fn unit_native_displayid(&self) -> Option<i32> {
+        self.get_i32(FIELD_UNIT_NATIVEDISPLAYID)
+    }
     /// `UNIT_FIELD_MOUNTDISPLAYID` — the `CreatureDisplayInfo` id of the mount this unit rides;
     /// `0` (or absent) = not mounted. The one and only mounted signal on the wire (decision 0441).
     pub fn unit_mount_display_id(&self) -> u32 {

@@ -126,6 +126,11 @@ enum Pending {
     /// An area discovery (`SMSG_EXPLORATION_EXPERIENCE`): the toast + conditional chat line pair
     /// (the drain fires them — the toast needs the script, which only [`feed_chat`] holds).
     Discovery { area: String, xp: u32 },
+    /// One combat-log line, classified and family-picked at the packet, waiting only on the two
+    /// endpoint names (B297). The reference's deferred-message queue `DAT_00c4e208`, whose records
+    /// carry a type tag and two guids for exactly this reason and are replayed by the name-ready
+    /// callback `0x6294b0`.
+    Combat(Box<super::combat::PendingCombat>),
     /// A ready event (client-composed lines; name-carrying notices).
     Event(ChatEvent),
 }
@@ -199,6 +204,12 @@ impl ChatLog {
     /// time — [`ChatEvent::text_only`] covers the common case).
     pub(crate) fn push_event(&mut self, event: ChatEvent) {
         self.pending.push(Pending::Event(event));
+    }
+
+    /// Queue one combat-log line ([`super::combat`] did the classification at the packet; this
+    /// only parks it for its names).
+    pub(crate) fn push_combat(&mut self, line: super::combat::PendingCombat) {
+        self.pending.push(Pending::Combat(Box::new(line)));
     }
 
     /// Queue a decoded `SMSG_CHANNEL_NOTIFY`. JOINED/LEFT become the ref's CHANNEL_JOIN/LEAVE
@@ -1023,6 +1034,41 @@ pub(super) fn feed_chat(
                 // every locale, so a vanilla `/sit` prints nothing.
                 let Some(event) = event else { continue };
                 route(&mut script, &mut windows, &event);
+            }
+            Pending::Combat(mut line) => {
+                // Both names, ask-once. The reference's queue holds the record until its
+                // creature-name DBC row is loaded and replays it then; ours holds it until the
+                // name query answers, bounded by the same `tries` budget every other pending item
+                // uses so a guid the server will never name cannot pin the queue.
+                // Guid 0 means the arm already put the name in the fills (`/chattest`); any other
+                // guid is asked for, once, and the line waits.
+                let mut wait = false;
+                for (guid, slot) in [(line.subject, 0usize), (line.object, 1usize)] {
+                    if guid == 0 {
+                        continue;
+                    }
+                    match super::combat::object_name(guid, &mut names, &commands) {
+                        Some(name) if slot == 0 => line.fills.attacker = name,
+                        Some(name) => line.fills.victim = name,
+                        None => wait = true,
+                    }
+                }
+                if wait {
+                    if line.tries < NAME_MAX_TRIES {
+                        line.tries += 1;
+                        still.push(Pending::Combat(line));
+                    }
+                    continue;
+                }
+                let composed =
+                    super::combat::compose_line(&script, line.family, line.variant, &line.fills);
+                if let Some(text) = composed {
+                    route(
+                        &mut script,
+                        &mut windows,
+                        &ChatEvent::text_only(line.kind, text),
+                    );
+                }
             }
             Pending::Discovery { area, xp } => {
                 // The toast fires every time; the chat line only rides XP (decisions 0828/0829).

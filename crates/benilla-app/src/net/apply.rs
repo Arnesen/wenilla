@@ -20,6 +20,7 @@ mod anim;
 mod auction;
 mod chat;
 mod combat;
+mod combat_chat;
 mod combat_log;
 mod death;
 mod group;
@@ -230,11 +231,16 @@ pub(super) fn apply_net_updates(
     // the container feed to pick up).
     mut ui_actions: (
         ResMut<crate::ui_action::PlayerActions>,
-        // Nested pair (the tuple is at the 16-param ceiling): the cast + mount error queues,
-        // both drained into the red error line by `ui_action::feed_actions`.
+        // Nested group (the tuple is at the 16-param ceiling): the cast + mount error queues,
+        // both drained into the red error line by `ui_action::feed_actions`, plus the
+        // FactionTemplate catalog the combat log's friend/foe split reads (B297). The catalog has
+        // nothing to do with the other two — it rides here purely because this is where the
+        // ceiling left room. Absent if the DBC failed to load, which degrades an unresolved unit
+        // to the friendly side of the classifier rather than dropping its lines.
         (
             ResMut<crate::ui_action::CastErrors>,
             ResMut<crate::ui_action::MountErrors>,
+            Option<Res<crate::target::ring::Factions>>,
         ),
         ResMut<crate::ui_items::EquipErrors>,
         ResMut<crate::ui_merchant::MerchantErrors>,
@@ -406,6 +412,23 @@ pub(super) fn apply_net_updates(
     // `UnitSpeeds` insert is a Command, so a `SMSG_FORCE_*_SPEED_CHANGE` arriving later in this
     // same drain could not land on top of it. Both stage here in packet order (decision 1478).
     let mut speed_stage = objects::SpeedStage::default();
+    // The combat log's classification inputs (B297). Built per use rather than once: the arms
+    // around these ones take `&mut` to `index`, `group` and `reputations`, so a borrow held across
+    // the whole drain would not compile. `macro_rules!` here is hygienic against the locals it
+    // names because it is defined after them, so this is one expression in seven call sites rather
+    // than seven copies of six fields.
+    macro_rules! chat_ctx {
+        () => {
+            combat_chat::ChatCtx {
+                self_guid: &self_guid,
+                group: Some(&group),
+                index: &index,
+                factions: ui_actions.1 .2.as_deref(),
+                reputations: &reputations,
+                spells: ui_actions.11.as_deref(),
+            }
+        };
+    }
     for ev in events.0.try_iter() {
         match ev {
             SessionEvent::LoginStage { stage } => session::login_stage(stage, &mut login_stages),
@@ -1067,67 +1090,98 @@ pub(super) fn apply_net_updates(
             SessionEvent::AiReaction { unit, reaction } => {
                 combat::ai_reaction(unit, reaction, &index, &mut audio.11)
             }
-            SessionEvent::AttackerState(s) => combat::attacker_state(
-                s,
-                &index,
-                &self_guid,
-                &mut audio.3,
-                &mut audio.8,
-                &mut audio.15 .1,
-                &mut audio.15 .2,
-                play_seq.next(),
-            ),
-            SessionEvent::SpellDamageLog(s) => combat_log::spell_damage_log(
-                s,
-                &index,
-                &self_guid,
-                &stores,
-                ui_actions.11.as_deref(),
-                &mut audio.7,
-                &mut audio.15 .0,
-                &mut audio.15 .1,
-            ),
-            SessionEvent::PeriodicAuraLog(s) => combat_log::periodic_aura_log(
-                s,
-                &index,
-                &self_guid,
-                &stores,
-                ui_actions.11.as_deref(),
-                &mut audio.7,
-                &mut audio.15 .0,
-                &mut audio.15 .1,
-                &mut names,
-                &net_commands,
-            ),
-            SessionEvent::SpellHealLog(s) => combat_log::spell_heal_log(
-                s,
-                &index,
-                &self_guid,
-                &mut audio.15 .0,
-                &mut audio.15 .1,
-                &mut names,
-                &net_commands,
-            ),
+            SessionEvent::AttackerState(s) => {
+                combat_chat::attacker_state(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
+                combat::attacker_state(
+                    s,
+                    &index,
+                    &self_guid,
+                    &mut audio.3,
+                    &mut audio.8,
+                    &mut audio.15 .1,
+                    &mut audio.15 .2,
+                    play_seq.next(),
+                )
+            }
+            SessionEvent::SpellDamageLog(s) => {
+                combat_chat::spell_damage_log(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
+                combat_log::spell_damage_log(
+                    s,
+                    &index,
+                    &self_guid,
+                    &stores,
+                    ui_actions.11.as_deref(),
+                    &mut audio.7,
+                    &mut audio.15 .0,
+                    &mut audio.15 .1,
+                )
+            }
+            SessionEvent::PeriodicAuraLog(s) => {
+                combat_chat::periodic_aura_log(
+                    &s,
+                    &chat_ctx!(),
+                    &stores,
+                    &transforms,
+                    &mut chat_log,
+                );
+                combat_log::periodic_aura_log(
+                    s,
+                    &index,
+                    &self_guid,
+                    &stores,
+                    ui_actions.11.as_deref(),
+                    &mut audio.7,
+                    &mut audio.15 .0,
+                    &mut audio.15 .1,
+                    &mut names,
+                    &net_commands,
+                )
+            }
+            SessionEvent::SpellHealLog(s) => {
+                combat_chat::spell_heal_log(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
+                combat_log::spell_heal_log(
+                    s,
+                    &index,
+                    &self_guid,
+                    &mut audio.15 .0,
+                    &mut audio.15 .1,
+                    &mut names,
+                    &net_commands,
+                )
+            }
             SessionEvent::SpellEnergizeLog(s) => {
+                combat_chat::spell_energize_log(
+                    s,
+                    &chat_ctx!(),
+                    &stores,
+                    &transforms,
+                    &mut chat_log,
+                );
                 combat_log::spell_energize_log(s, &self_guid, &mut audio.15 .1)
             }
-            SessionEvent::DamageShield(s) => combat_log::damage_shield(
-                s,
-                &index,
-                &self_guid,
-                &stores,
-                &mut audio.7,
-                &mut audio.15 .0,
-            ),
-            SessionEvent::SpellLogMiss(s) => combat_log::spell_log_miss(
-                s,
-                &index,
-                &self_guid,
-                &stores,
-                &mut audio.7,
-                &mut audio.15 .0,
-                &mut audio.15 .1,
-            ),
+            SessionEvent::DamageShield(s) => {
+                combat_chat::damage_shield(s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
+                combat_log::damage_shield(
+                    s,
+                    &index,
+                    &self_guid,
+                    &stores,
+                    &mut audio.7,
+                    &mut audio.15 .0,
+                )
+            }
+            SessionEvent::SpellLogMiss(s) => {
+                combat_chat::spell_log_miss(&s, &chat_ctx!(), &stores, &transforms, &mut chat_log);
+                combat_log::spell_log_miss(
+                    s,
+                    &index,
+                    &self_guid,
+                    &stores,
+                    &mut audio.7,
+                    &mut audio.15 .0,
+                    &mut audio.15 .1,
+                )
+            }
             SessionEvent::XpGain(x) => {
                 combat_log::xp_gain(x, &index, &self_guid, &mut audio.7, &mut chat_log)
             }

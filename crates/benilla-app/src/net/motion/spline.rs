@@ -674,7 +674,7 @@ fn clamp_seat_disabled() -> bool {
 
 /// What [`mark_swimming_creatures`] reads per unit: identity, kind, pose, its own collision height
 /// (`None` only on a unit's first frame, before the stamp), its `UNIT_FIELD_FLAGS` (the enter gate
-/// — [`crate::player::may_enter_swim`]), its own WMO-room claim (whose liquid may answer for it —
+/// — [`crate::player::may_swim`]), its own WMO-room claim (whose liquid may answer for it —
 /// decision 0696), and whether it is already marked.
 /// The gate: a stamped unit re-enters the query only when its `Transform` moved (spline ticks,
 /// teleports, clamp writes) or its descriptors changed (a `UNIT_FIELD_FLAGS` delta — a pet losing
@@ -718,21 +718,28 @@ const CREATURE_SWIM_EXIT_BAND: f32 = 1.0 / 36.0;
 /// the wire never carries for creatures: vmangos sets `MOVEFLAG_SWIMMING` only from player packets,
 /// and a water creature's create block + splines carry no swim marker at all (verified
 /// `vmangos-src`, 2026-07-17). The real client runs its own depth decision `0x6030c0` on **remote
-/// units and creatures too**, not only on the body it steers (wow-re
-/// `models/scratch/wmo-liquid-scoping.md` §4.5: nothing in the chain is pinned to a local-player
-/// global; `0x60df70`'s active-mover GUID compare only chooses whether the transition is
-/// additionally *reported* to the server, and its not-the-mover arm still enqueues StartSwim
-/// `0x61a030` / sets it outright `0x61a130`). So deriving it here is faithful, and always was.
+/// units and creatures too**, not only on the body it steers — VERIFIED, wow-re
+/// `collision/scratch/remote-swim-decision.md` §1. `0x6030c0` has exactly one caller and it reaches
+/// per-unit three ways: a **per-frame registry walk** (`0x616800`, a registered frame callback →
+/// `0x615b10` over the movement manager's intrusive CMovement list → `0x616620` per node, whose own
+/// active-mover GUID compare gates only the `0xee` heartbeat), the inbound move-message apply
+/// (`0x618c30`), and `CGUnit_C::Initialize` for a unit that streams in already dead. A
+/// spline-driven creature is spliced into that list by the `SMSG_MONSTER_MOVE` apply itself
+/// (`0x6018f0 → 0x6187a0 → 0x619ca0`), and `0x60df70`'s not-the-mover arm sets SWIMMING
+/// **synchronously** (`0x61a130 → 0x61a230 → 0x7c6e50`) — the GUID compare only chooses whether the
+/// transition is additionally *reported* to the server. So deriving it here is faithful, and always
+/// was. Evaluating **every streamed unit**, as this does, is a safe superset of the reference's
+/// population: the walk covers a unit only while its CMovement is linked and `+0x40 & 0x8000000`
+/// is clear.
 ///
-/// **What was missing is the gate** (B311, decision 1568). `0x6030c0` enters swim only when
-/// `depth > 0.75·h` **and** the unit's `UNIT_FIELD_FLAGS` carry one of the three bits
-/// [`crate::player::may_enter_swim`] tests — PLAYER_CONTROLLED, PET_IN_COMBAT or
-/// USE_SWIM_ANIMATION. A creature with none of them **walks the lakebed at any depth**, which is
-/// what vmangos means by *"Giant type creatures walk underwater"*: the Shore Strider off the
-/// Forgotten Coast is a sea giant with no `CREATURE_STATIC_FLAG_CAN_SWIM`, so the reference wades
-/// it chest-deep on its legs while benilla, gating on depth alone, slid it along on a swim gait.
-/// The gate is **enter-only** — the exit leg `0x6031b4` reads no flags — so a marked unit still
-/// leaves on depth.
+/// **What was missing is the gate** (B311, decisions 1568 + 1572). `0x6030c0` reads the unit's
+/// `UNIT_FIELD_FLAGS` on **both** legs of its decision ([`crate::player::may_swim`] —
+/// PLAYER_CONTROLLED, PET_IN_COMBAT, USE_SWIM_ANIMATION): a set bit permits entry, and on the exit
+/// leg a set bit *prevents* the stop, so a unit with none of them **walks the lakebed at any
+/// depth** and is driven out of swim if anything else ever put the flag on it. That is what
+/// vmangos means by *"Giant type creatures walk underwater"*: the Shore Strider off the Forgotten
+/// Coast is a sea giant with no `CREATURE_STATIC_FLAG_CAN_SWIM`, so the reference wades it
+/// chest-deep on its legs while benilla, gating on depth alone, slid it along on a swim gait.
 ///
 /// Depth is measured on the creature's **own** collision height: marked once its feet sit deeper
 /// than `0.75·h` ([`swim_enter_depth`]), unmarked once they rise a [`CREATURE_SWIM_EXIT_BAND`]
@@ -740,10 +747,14 @@ const CREATURE_SWIM_EXIT_BAND: f32 = 1.0 / 36.0;
 /// retired (0464's `collisionHeight` plumb was what it was waiting on); what stays open is the
 /// *reference point* the real client measures a creature's depth from.
 ///
-/// `0x6030c0`'s other guard — bail entirely while `MOVEFLAG_LEVITATING` (`0x400`) is set — has no
-/// creature-side expression here because a spline-walked creature carries no live move-flag word
-/// at all (`creature_anim::select::unify`'s creature leg synthesises one); the local avatar's copy
-/// of the same guard is `player::swim::update_swimming`'s first branch.
+/// `0x6030c0`'s other guard — bail entirely while `MOVEFLAG_LEVITATING` (`0x400`) is set, so
+/// neither leg runs — has no creature-side expression here, for two independent reasons: a
+/// spline-walked creature carries no live move-flag word at all (`creature_anim::select::unify`'s
+/// creature leg synthesises one), and vmangos never puts the bit on a creature anyway
+/// (`Unit::SetLevitate` has **zero callers**; the only writer is the GM-fly path on a *player*).
+/// The bail is real and ungated in the reference — its bit arrives through `0x618c30`'s wire
+/// flag-merge mask, which has no active-mover compare — so this is a "nothing to read", not a
+/// "doesn't apply". The local avatar's copy of the same guard is `update_swimming`'s first branch.
 ///
 /// Consumers: the swim-gait leg of the animation selector (`creature_anim::select::unify`), the
 /// swimming body pitch ([`sample_splines`]), and the [`ground_clamp_creatures`] exemption — which
@@ -783,19 +794,31 @@ pub(crate) struct GroundClamped {
 }
 
 /// The reference's `0x6030c0` decision for one creature, as a pure function of everything it
-/// reads — [`CreatureSwimming`]'s law in one place, so the enter/exit asymmetry is assertable
-/// without a world.
+/// reads — [`CreatureSwimming`]'s law in one place, so both asymmetries are assertable without a
+/// world. Byte-VERIFIED whole (wow-re `collision/scratch/remote-swim-decision.md` §2/§3):
 ///
-/// **Enter** needs both halves: deep enough (`depth > 0.75·h`, strictly — `0x603106 test ah,0x41`)
-/// *and* a `UNIT_FIELD_FLAGS` that permits swimming at all ([`crate::player::may_enter_swim`]).
-/// **Leave** is depth alone, a [`CREATURE_SWIM_EXIT_BAND`] lower: the exit leg `0x6031b4` reads no
-/// unit flags, so a unit that loses its swim bit mid-water still leaves properly rather than being
-/// stranded in a gait it can no longer re-enter.
+/// ```text
+/// enter iff  flags ∧ depth >  0.75·h              (0x603106 test ah,0x41 + jne — a ZF test, STRICT)
+/// stay  iff  flags ∧ depth >= 0.75·h − 1/36       (0x6031c5 test ah,5 + jnp — parity, INCLUSIVE at ==)
+/// ```
+///
+/// **The flag term is on both legs**, which is the part decision 1568 shipped wrong and 1572
+/// corrects: [`crate::player::may_swim`] is not an entry permit but the predicate *"may this unit
+/// be locally SWIMMING at all"*, and its false value forces a stop **at any depth**
+/// (`0x6031eb → 0x60dff0`), not merely a refusal to start. So a creature that loses its bit
+/// mid-water leaves the gait immediately, exactly as the reference drives it out on the next tick.
+///
+/// The two depth boundaries are deliberately different comparisons, not a rounding accident — the
+/// enter compare is strict and the stay compare is inclusive at equality, which is what makes the
+/// 1/36-yd band a band rather than a knife edge.
 fn creature_swim_state(marked: bool, depth: f32, boundary: f32, unit_flags: u32) -> bool {
+    if !crate::player::may_swim(unit_flags) {
+        return false; // both legs — a permit-less unit cannot start AND cannot stay
+    }
     if marked {
         depth >= boundary - CREATURE_SWIM_EXIT_BAND
     } else {
-        depth > boundary && crate::player::may_enter_swim(unit_flags)
+        depth > boundary
     }
 }
 
@@ -1216,28 +1239,49 @@ mod swim_gate {
         }
     }
 
-    /// The gate is **enter-only** — the reference's exit leg reads no unit flags. A unit that is
-    /// already swimming when its bit clears must still leave on depth, or it would be stranded in
-    /// a gait it can never re-enter.
+    /// Leaving keeps the 1/36-yd hysteresis, and its compare is **inclusive at equality** while
+    /// enter's is strict — `0x6031c5 test ah,5` + `jnp` is a parity test on C0|C2, so `depth ==
+    /// thr` does not stop, whereas `0x603106 test ah,0x41` + `jne` is a ZF test and `depth ==
+    /// boundary` does not start. Deliberately asymmetric; that asymmetry is the band.
     #[test]
-    fn leaving_is_depth_alone_and_keeps_its_hysteresis() {
+    fn leaving_keeps_its_hysteresis_and_is_inclusive_where_entering_is_strict() {
         let boundary = swim_enter_depth(SEA_GIANT_H);
+        let flags = USE_SWIM_ANIMATION;
         assert!(
-            creature_swim_state(true, boundary - CREATURE_SWIM_EXIT_BAND, boundary, NO_FLAGS),
-            "inside the band it holds, flags or no flags"
+            creature_swim_state(true, boundary - CREATURE_SWIM_EXIT_BAND, boundary, flags),
+            "exactly at the lower edge it holds (the stay compare is inclusive)"
         );
         assert!(
             !creature_swim_state(
                 true,
                 boundary - CREATURE_SWIM_EXIT_BAND - 1e-4,
                 boundary,
-                NO_FLAGS
+                flags
             ),
             "below the band it leaves"
         );
         assert!(
-            !creature_swim_state(true, f32::MIN, boundary, USE_SWIM_ANIMATION),
-            "no liquid at all leaves, flag or no flag"
+            !creature_swim_state(true, f32::MIN, boundary, flags),
+            "no liquid at all leaves"
+        );
+    }
+
+    /// **The correction 1572 makes to 1568.** The three bits are one predicate — *may this unit be
+    /// locally SWIMMING at all* — and `0x6030c0` tests it on the **exit** leg too, inverted: with
+    /// all three clear the exit leg falls straight through to `StopSwim` (`0x6031eb → 0x60dff0`)
+    /// however deep the water. A charm ending over deep water is the case: the creature loses
+    /// PLAYER_CONTROLLED and must drop to the seabed on the next tick, not keep swimming until it
+    /// finds a shallow.
+    #[test]
+    fn losing_the_flag_mid_water_stops_the_swim_at_any_depth() {
+        let boundary = swim_enter_depth(SEA_GIANT_H);
+        assert!(
+            creature_swim_state(true, 100.0, boundary, PLAYER_CONTROLLED),
+            "charmed and deep: swimming"
+        );
+        assert!(
+            !creature_swim_state(true, 100.0, boundary, NO_FLAGS),
+            "charm ends, still 100 yd down: the reference stops it anyway"
         );
     }
 

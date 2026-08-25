@@ -15,6 +15,9 @@ use crate::ui_script::UiInput;
 #[cfg(test)]
 mod ace_gate_tests;
 mod channels;
+/// The combat log's chat lines (B297) — classification, chat type, and the GlobalString key each
+/// combat packet's sentence is built from.
+pub(crate) mod combat;
 pub(crate) mod commands;
 mod edit;
 mod event;

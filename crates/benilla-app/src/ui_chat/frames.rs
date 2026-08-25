@@ -12,7 +12,7 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::channel_notice as notice;
 
-use super::event::{event_name, group_kinds, resolved_color, ChatEvent, ChatEventKind, ChatGroup};
+use super::event::{event_name, group_wants, resolved_color, ChatEvent, ChatEventKind, ChatGroup};
 
 /// How long after a received whisper the `TellMessage` alert stays silent
 /// (`CHAT_TELL_ALERT_TIME = 300` — ref ChatFrame.lua l.4: only a tell arriving ≥5 min after the
@@ -58,15 +58,52 @@ impl Default for ChatWindows {
                     ChatGroup::Skill,
                     ChatGroup::Loot,
                 ],
-                // WINDOW 2 "Combat Log": of its chat-cache list, MONEY, COMBAT_XP_GAIN and
-                // COMBAT_HONOR_GAIN are the groups the current kind set carries (the rest of the
-                // combat/spell block is the combat-log arc; XP joined with the ding arc, 0304,
-                // and honour with the honor arc, 1512 — the reference registers the two on the
-                // same frame one line apart, ChatFrame.lua l.2428-2429).
+                // WINDOW 2 "Combat Log" — the chat-cache WINDOW 2 MESSAGES block, in its own
+                // order (read off the reference install's own
+                // `WTF/Account/<A>/<realm>/<char>/chat-cache.txt`).
+                //
+                // **The default Combat Log is self-relevant only**, and that is a deliberate
+                // shape, not an omission: the shipped registration takes SELF, PET,
+                // HOSTILEPLAYER and CREATURE_VS_SELF and leaves PARTY, FRIENDLYPLAYER,
+                // CREATURE_VS_PARTY and CREATURE_VS_CREATURE off. Those types are still produced
+                // and still reach addons — the *event* fire is unconditional (see [`route`]) —
+                // they simply land in no window until a player registers them. A damage meter
+                // reads them either way.
+                //
+                // Five names in that block have no producer yet and so no group here:
+                // COMBAT_MISC_INFO, COMBAT_FRIENDLY_DEATH, COMBAT_HOSTILE_DEATH,
+                // COMBAT_FACTION_CHANGE, SPELL_TRADESKILLS, SPELL_AURA_GONE_SELF,
+                // SPELL_ITEM_ENCHANTMENTS and SPELL_BREAK_AURA — the leaves of the block whose
+                // wire sources are still undecoded.
                 vec![
+                    ChatGroup::Own(ChatEventKind::CombatSelfHits),
+                    ChatGroup::Own(ChatEventKind::CombatSelfMisses),
+                    ChatGroup::Own(ChatEventKind::CombatPetHits),
+                    ChatGroup::Own(ChatEventKind::CombatPetMisses),
+                    ChatGroup::Own(ChatEventKind::CombatHostilePlayerHits),
+                    ChatGroup::Own(ChatEventKind::CombatHostilePlayerMisses),
+                    ChatGroup::Own(ChatEventKind::CombatCreatureVsSelfHits),
+                    ChatGroup::Own(ChatEventKind::CombatCreatureVsSelfMisses),
+                    // XP joined with the ding arc (0304) and honour with the honor arc (1512);
+                    // the reference registers the two one line apart (ChatFrame.lua l.2428-2429).
+                    ChatGroup::Own(ChatEventKind::CombatXpGain),
+                    ChatGroup::Own(ChatEventKind::CombatHonorGain),
+                    ChatGroup::Own(ChatEventKind::SpellSelfDamage),
+                    ChatGroup::Own(ChatEventKind::SpellSelfBuff),
+                    ChatGroup::Own(ChatEventKind::SpellPetDamage),
+                    ChatGroup::Own(ChatEventKind::SpellPetBuff),
+                    ChatGroup::Own(ChatEventKind::SpellHostilePlayerDamage),
+                    ChatGroup::Own(ChatEventKind::SpellHostilePlayerBuff),
+                    ChatGroup::Own(ChatEventKind::SpellCreatureVsSelfDamage),
+                    ChatGroup::Own(ChatEventKind::SpellCreatureVsSelfBuff),
+                    ChatGroup::Own(ChatEventKind::SpellDamageShieldsOnSelf),
+                    ChatGroup::Own(ChatEventKind::SpellPeriodicSelfDamage),
+                    ChatGroup::Own(ChatEventKind::SpellPeriodicSelfBuffs),
+                    ChatGroup::Own(ChatEventKind::SpellPeriodicHostilePlayerDamage),
+                    ChatGroup::Own(ChatEventKind::SpellPeriodicHostilePlayerBuffs),
+                    ChatGroup::Own(ChatEventKind::SpellPeriodicCreatureDamage),
+                    ChatGroup::Own(ChatEventKind::SpellPeriodicCreatureBuffs),
                     ChatGroup::Money,
-                    ChatGroup::CombatXpGain,
-                    ChatGroup::CombatHonorGain,
                 ],
             ],
             tell_alert_left: 0.0,
@@ -79,13 +116,11 @@ impl ChatWindows {
     /// Whether window `idx` (0-based) subscribes to `kind`. CHANNEL speech (the numbered
     /// channels) routes by the window's channel wiring — until 0288 P6 lands those lists, it
     /// rides window 1 (the chat-cache ZONECHANNELS mask wires exactly window 1 anyway).
-    fn wants(&self, idx: usize, kind: ChatEventKind) -> bool {
+    pub(super) fn wants(&self, idx: usize, kind: ChatEventKind) -> bool {
         if kind == ChatEventKind::Channel {
             return idx == 0;
         }
-        self.groups[idx]
-            .iter()
-            .any(|&g| group_kinds(g).contains(&kind))
+        self.groups[idx].iter().any(|&g| group_wants(g, kind))
     }
 }
 
@@ -186,6 +221,12 @@ pub(crate) fn compose(
         | K::BgSystemNeutral
         | K::BgSystemAlliance
         | K::BgSystemHorde => event.text.clone(),
+        // The whole combat-log block is verbatim too, and the reference says so by PREFIX rather
+        // than by name: l.1397-1400 is two arms, `strsub(type,1,7) == "COMBAT_"` and
+        // `strsub(type,1,6) == "SPELL_"`, each doing nothing but `AddMessage(arg1, …)`. The
+        // sentence was already built by the time it became an event — that is what
+        // [`super::combat`] is — so there is nothing left for the composer to do.
+        k if k.is_combat_log() => event.text.clone(),
         // "%s is ignoring you." (CHAT_IGNORED, arg2).
         K::Ignored => format!("{} is ignoring you.", event.sender),
         // "[%s] " .. the member list (CHAT_CHANNEL_LIST_GET, l.1409) — arg4 WHOLE, see

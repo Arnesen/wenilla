@@ -941,7 +941,174 @@ fn chattest_battery(log: &mut super::feed::ChatLog) {
     for e in battery {
         log.push_event(e);
     }
+    combat_log_battery(log);
     info!("chattest: battery queued");
+}
+
+/// The combat-log half of `/chattest` (B297): one synthetic line of every family, through the real
+/// [`super::combat`] composer and the real drain — so the whole `COMBAT_*`/`SPELL_*` block's
+/// wording, colours and window routing verify in one screen without a fight.
+///
+/// It exists because the alternative is a live combat probe, and unattended ones are out (the
+/// director's standing rule). The lines are driven with **guid 0 on both endpoints and literal
+/// names in the fills**, so the drain's name resolve is a no-op and nothing here touches the wire;
+/// everything downstream of that — the family's template lookup, the slot fill, the chat type, the
+/// route, the `CHAT_MSG_*` fire an addon sees — is the production path exactly.
+///
+/// The chat TYPES are picked to show the block's spread rather than one row: your own melee and
+/// spells, your pet, a hostile player, and a creature hitting you (which is the one that is red).
+fn combat_log_battery(log: &mut super::feed::ChatLog) {
+    use super::combat::{self, Family, Fills, PendingCombat, Variant};
+    use super::event::ChatEventKind as K;
+
+    let fills = |amount: i64, school: Option<u8>, power: Option<u32>| Fills {
+        attacker: "Gnoll Brute".into(),
+        victim: "Target Dummy".into(),
+        spell: "Fireball".into(),
+        school,
+        power,
+        amount,
+        amount2: amount / 3,
+        power2: power,
+    };
+    let line = |kind: K, family: Family, variant: Variant, f: Fills| PendingCombat {
+        kind,
+        family,
+        variant,
+        subject: 0,
+        object: 0,
+        fills: f,
+        tries: 0,
+    };
+    let battery = [
+        // Your own melee, plain and crit, and the school form.
+        line(
+            K::CombatSelfHits,
+            combat::COMBATHIT,
+            Variant::SelfOther,
+            fills(120, None, None),
+        ),
+        line(
+            K::CombatSelfHits,
+            combat::COMBATHITCRIT,
+            Variant::SelfOther,
+            fills(240, None, None),
+        ),
+        line(
+            K::CombatSelfHits,
+            combat::COMBATHITSCHOOL,
+            Variant::SelfOther,
+            fills(35, Some(2), None),
+        ),
+        line(
+            K::CombatSelfMisses,
+            combat::MISSED,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        // A creature hitting you — the red rows, and the ones a player notices first.
+        line(
+            K::CombatCreatureVsSelfHits,
+            combat::COMBATHIT,
+            Variant::OtherSelf,
+            fills(87, None, None),
+        ),
+        line(
+            K::CombatCreatureVsSelfMisses,
+            combat::VSDODGE,
+            Variant::OtherSelf,
+            fills(0, None, None),
+        ),
+        line(
+            K::CombatCreatureVsSelfMisses,
+            combat::VSBLOCK,
+            Variant::OtherSelf,
+            fills(0, None, None),
+        ),
+        line(
+            K::CombatCreatureVsSelfMisses,
+            combat::VSPARRY,
+            Variant::OtherSelf,
+            fills(0, None, None),
+        ),
+        // Your own spells: the gold pair, and the outcomes that are not damage.
+        line(
+            K::SpellSelfDamage,
+            combat::SPELLLOGSCHOOL,
+            Variant::SelfOther,
+            fills(412, Some(2), None),
+        ),
+        line(
+            K::SpellSelfDamage,
+            combat::SPELLLOGCRITSCHOOL,
+            Variant::SelfOther,
+            fills(830, Some(2), None),
+        ),
+        line(
+            K::SpellSelfDamage,
+            combat::SPELLMISS,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellSelfDamage,
+            combat::SPELLRESIST,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellSelfBuff,
+            combat::HEALED,
+            Variant::SelfOther,
+            fills(560, None, None),
+        ),
+        line(
+            K::SpellSelfBuff,
+            combat::POWERGAIN,
+            Variant::SelfSelf,
+            fills(90, None, Some(0)),
+        ),
+        // Your pet, a hostile player, and the periodic + shield rows.
+        line(
+            K::CombatPetHits,
+            combat::COMBATHIT,
+            Variant::OtherOther,
+            fills(64, None, None),
+        ),
+        line(
+            K::SpellHostilePlayerDamage,
+            combat::SPELLLOGSCHOOL,
+            Variant::OtherSelf,
+            fills(305, Some(5), None),
+        ),
+        line(
+            K::SpellPeriodicSelfDamage,
+            combat::PERIODICAURADAMAGE,
+            Variant::SelfOther,
+            fills(48, Some(5), None),
+        ),
+        line(
+            K::SpellPeriodicSelfBuffs,
+            combat::PERIODICAURAHEAL,
+            Variant::SelfSelf,
+            fills(75, None, None),
+        ),
+        line(
+            K::SpellDamageShieldsOnSelf,
+            combat::DAMAGESHIELD,
+            Variant::SelfOther,
+            fills(22, Some(1), None),
+        ),
+        line(
+            K::SpellSelfBuff,
+            combat::SPELLPOWERLEECH,
+            Variant::SelfOther,
+            fills(150, None, Some(0)),
+        ),
+    ];
+    for l in battery {
+        log.push_combat(l);
+    }
 }
 
 /// The send-side emote **posture-eligibility gate** (wow-re `object-layer/scratch/emote-posture-
