@@ -115,6 +115,26 @@ fn facet_x(s: &benilla_formats::RenderSubmesh) -> Option<f32> {
     (len > 1e-9).then(|| n[0] / len)
 }
 
+/// The widest max/min axis spread a scale track ever holds — `1.0` for a uniform track (the
+/// overwhelming majority: a glow card that only pulses in size), `> 1` for one that stretches its
+/// bone along an axis. A key with an axis at or below zero contributes `1.0`: a zero axis is the
+/// reference's own "hide this" (the eyelid blink's retracted lid), not a stretch, and dividing by
+/// it would report infinity.
+fn scale_spread<T>(keys: &[(T, [f32; 3])]) -> f32 {
+    keys.iter()
+        .map(|(_, s)| {
+            let (lo, hi) = s
+                .iter()
+                .fold((f32::MAX, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            if lo > 1e-4 {
+                hi / lo
+            } else {
+                1.0
+            }
+        })
+        .fold(1.0f32, f32::max)
+}
+
 /// Sweep every `.m2` (under `prefix`, if given) and classify its billboard usage — see the
 /// `Bbscan` command doc. Output per model: the authored arms and how many vertices ride each
 /// DIRECTLY (primary bone is the billboard bone — the card path) vs INHERITED (primary bone
@@ -123,6 +143,16 @@ fn facet_x(s: &benilla_formats::RenderSubmesh) -> Option<f32> {
 /// emitter on (or under) a billboard bone has a camera-dependent origin, because the reference
 /// folds the record position through the *replaced* palette matrix
 /// (wow-re `part-anchoring-live-bone.md` §1 row 3 · `m2emitspine::particle_bone_xform`).
+///
+/// The `NONUNIF[…]` column is the third population: billboard bones whose SCALE is animated
+/// **non-uniformly** (in any sequence band, or on a global-sequence loop), listed as
+/// `bone:arm×ratio` where the ratio is the widest max/min axis spread the bone ever holds. The
+/// billboard law preserves the bone's scale under the substituted camera basis (`T·R_cam·S`), so
+/// such a bone stretches its card along one model axis — the Lightwell's lock-Z shaft
+/// (`World\Goober\G_HolyLightWell.m2` bone 0, `×4.26`) is a 0.12 yd card pulled into a 4.5 yd
+/// column of light. Any consumer that reduces the scale to one scalar renders these squat and
+/// blown-out instead (bug B169), and a `d` in the direct column is where that lands on a **card**,
+/// whose transform is rebuilt from the joint rather than skinned from it.
 pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     let names = super::m2_names(chain, prefix)?;
     let arm = |k: benilla_formats::BillboardKind| match k {
@@ -140,6 +170,10 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     let mut fx_total: HashMap<String, u32> = HashMap::new();
     // …and the seam population (see the classification below).
     let (mut seam_models, mut seam_bones) = (0u32, 0u32);
+    // …and the non-uniform-scale population: billboard bones that stretch their card along one
+    // model axis, split by whether geometry rides them DIRECTLY (the card path, where a scalar
+    // scale loses the stretch outright) or only by inheritance (the palette path).
+    let (mut nonunif_models, mut nonunif_bones, mut nonunif_direct) = (0u32, 0u32, 0u32);
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -225,6 +259,53 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             v.join(" ")
         };
         let bones: String = kinds.iter().flatten().map(|&k| arm(k)).collect();
+        // NON-UNIFORM billboard scale (see the `NONUNIF` column in the doc above).
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        let gseq = benilla_formats::parse_m2_global_sequence_bones(&bytes);
+        let mut nonunif: BTreeMap<usize, f32> = BTreeMap::new();
+        for bk in seqs.iter().flat_map(|a| &a.bones) {
+            let r = scale_spread(&bk.scale);
+            if r > 1.01 {
+                let e = nonunif.entry(bk.bone as usize).or_insert(1.0);
+                *e = e.max(r);
+            }
+        }
+        for gb in &gseq {
+            let Some(ch) = &gb.scale else { continue };
+            let r = scale_spread(&ch.keys);
+            if r > 1.01 {
+                let e = nonunif.entry(gb.bone as usize).or_insert(1.0);
+                *e = e.max(r);
+            }
+        }
+        // Only the BILLBOARD bones matter — an ordinary bone's non-uniform scale rides the joint
+        // palette like any other transform and nothing reduces it.
+        nonunif.retain(|&b, _| kinds.get(b).copied().flatten().is_some());
+        let nonunif_col = if nonunif.is_empty() {
+            String::new()
+        } else {
+            nonunif_models += 1;
+            nonunif_bones += nonunif.len() as u32;
+            // Does geometry ride this bone DIRECTLY (primary bone == it, and separable)? That is
+            // the card path — where the stretch has to survive a transform rebuild.
+            let direct_bone = |b: usize| {
+                !seam.contains(&(b as u16))
+                    && m.vertices.iter().any(|v| v.bone_indices[0] as usize == b)
+            };
+            nonunif_direct += nonunif.keys().filter(|&&b| direct_bone(b)).count() as u32;
+            format!(
+                "  NONUNIF[{}]",
+                nonunif
+                    .iter()
+                    .map(|(&b, r)| format!(
+                        "{b}:{}{}\u{00d7}{r:.2}",
+                        kinds.get(b).copied().flatten().map_or("?", arm),
+                        if direct_bone(b) { "d" } else { "i" }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         let seam_col = if seam.is_empty() {
             String::new()
         } else {
@@ -239,7 +320,7 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             )
         };
         println!(
-            "{bones:>4}  direct[{}]  inherited[{}]  fx[{fx_counts}]{seam_col}  {name}",
+            "{bones:>4}  direct[{}]  inherited[{}]  fx[{fx_counts}]{seam_col}{nonunif_col}  {name}",
             fmt_counts(&direct),
             fmt_counts(&inherited)
         );
@@ -281,7 +362,7 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         v.join(" ")
     };
     eprintln!(
-        "{scanned} models scanned, {hits} with billboard bones; models by arm — direct(card) [{}]  inherited(palette) [{}]; {fx_models} with EFFECTS on a billboard chain [{fx_tot}]; {seam_models} with SEAM billboard bones ({seam_bones} total) — geometry welded to the model, which a rigid card tears",
+        "{scanned} models scanned, {hits} with billboard bones; models by arm — direct(card) [{}]  inherited(palette) [{}]; {fx_models} with EFFECTS on a billboard chain [{fx_tot}]; {seam_models} with SEAM billboard bones ({seam_bones} total) — geometry welded to the model, which a rigid card tears; {nonunif_models} with NON-UNIFORM billboard scale ({nonunif_bones} bones, {nonunif_direct} of them ridden DIRECTLY = a card whose stretch a scalar scale would lose)",
         tot(&direct_models),
         tot(&inherited_models)
     );

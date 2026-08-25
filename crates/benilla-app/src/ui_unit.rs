@@ -181,6 +181,7 @@ impl Plugin for UiUnitPlugin {
             Update,
             (
                 feed_units,
+                feed_unit_reach,
                 melee_unit_combat,
                 fire_unit_combat,
                 fire_combat_text,
@@ -501,6 +502,185 @@ pub(crate) fn player_token_guid(
             .and_then(|n| group.party_slots().nth(n))
             .map(|m| m.guid),
     }
+}
+
+/// **The one unit-token resolver** — token → the live object it names, or `None`.
+///
+/// The reference has exactly one of these (`0x515970`, nine `_strnicmp` compares, then the object
+/// manager), and every binding that takes a unit reaches its unit through it. We had three: this
+/// one (inlined in `TargetUnit`'s drain), [`player_token_guid`]'s players-only popup map, and the
+/// per-token legs [`feed_units`] walks. They disagreed, and the disagreement was report **B304** —
+/// the range map was built from the players-only one, so a creature `"target"` never entered it and
+/// `CheckInteractDistance("target", 4)` answered a constant for every mob at every distance.
+///
+/// So: one resolver, and a caller that wants a *typemask* applies it to the resolved unit rather
+/// than narrowing the token (the same order 1564 §2 settled for the reach map's own entries, and
+/// the one `target::by_name`'s follow drain already keeps for the start gate).
+///
+/// [`Selection`] is a parameter rather than a field because [`crate::target::SelectCommit`] holds
+/// it as `ResMut`, and one system cannot take both.
+///
+/// **Not resolved:** `partypetN`/`raidpetN` (no feed holds those units at all — a token nothing
+/// pushes a `UnitState` for would answer a distance for a unit `UnitExists` denies) and `npc`
+/// (the interaction target, which we do not keep). Both are *recognised* by the grammar
+/// ([`benilla_ui::script`]'s `token_recognised`), so they stay a quiet nil, not a raise.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct UnitTokens<'w, 's> {
+    /// `Option` for [`feed_units`]' reason: a UI-only harness runs these feeds with no net stack,
+    /// and a bare `Res` turns that into a system-validation panic rather than a token that names
+    /// nobody. Same for the two below, which belong to the pet and targeting plugins.
+    index: Option<Res<'w, crate::net::GuidIndex>>,
+    pet: Option<Res<'w, crate::ui_pet::PetBar>>,
+    hovered: Option<Res<'w, crate::target::Hovered>>,
+    group: Res<'w, crate::ui_party::GroupState>,
+    pub(crate) stores: Query<'w, 's, &'static ObjectStore>,
+    me: Query<'w, 's, (Entity, &'static Guid), With<SelfPlayer>>,
+}
+
+impl UnitTokens<'_, '_> {
+    /// Our own body's entity + guid.
+    fn me(&self) -> Option<(Entity, u64)> {
+        self.me.iter().next().map(|(e, g)| (e, g.0))
+    }
+
+    /// The guid → entity map, when the net stack is present.
+    fn held(&self, guid: u64) -> Option<(Entity, u64)> {
+        Some((*self.index.as_ref()?.0.get(&guid)?, guid))
+    }
+
+    /// Resolve `token` to the live object it names. Case-folded (`_strnicmp`, 1247), and the
+    /// prefix order is the reference's: `raid` before `party` for the same reason its own resolver
+    /// puts `partypet` before `party` — the first matching compare wins.
+    pub(crate) fn resolve(&self, token: &str, selection: &Selection) -> Option<(Entity, u64)> {
+        let token = token.to_ascii_lowercase();
+        match token.as_str() {
+            "player" => self.me(),
+            "target" => selection.target.zip(selection.guid),
+            // The target's own target, one hop off `UNIT_FIELD_TARGET` — the read `/assist` and
+            // the `"targettarget"` snapshot both run (decision 1576).
+            "targettarget" => selection
+                .target
+                .and_then(|e| self.stores.get(e).ok())
+                .and_then(|s| s.0.unit_target())
+                .filter(|g| *g != 0)
+                .and_then(|g| self.held(g)),
+            // The hovered unit — the same `Hovered` pick `ui_tooltip` pushes `"mouseover"` from,
+            // so `UnitExists("mouseover")` and this can never disagree.
+            "mouseover" => {
+                let h = self.hovered.as_ref()?;
+                h.target.zip(h.guid)
+            }
+            // Off the bar's cached guid, the word `"pet"`'s snapshot and `UNIT_PET` read.
+            "pet" => {
+                let guid = self.pet.as_ref()?.spells.pet_guid;
+                (guid != 0).then(|| self.held(guid)).flatten()
+            }
+            t if t.starts_with("raid") => t
+                .strip_prefix("raid")
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|n| (1..=40).contains(n))
+                .and_then(|n| {
+                    crate::ui_party::raid_row_guid(&self.group, self.me().map(|(_, g)| g), n)
+                })
+                .and_then(|g| self.held(g)),
+            t => t
+                .strip_prefix("party")
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|n| (1..=4).contains(n))
+                .and_then(|n| self.group.party_slots().nth(n - 1).map(|m| m.guid))
+                .and_then(|g| self.held(g)),
+        }
+    }
+}
+
+/// The tokens [`feed_unit_reach`] offers the map each frame — every token [`UnitTokens`] can
+/// resolve, reusing the party feed's own two tables so this set can never name a row that feed
+/// does not push a `UnitState` for. `"player"` is in it because the reference answers it too
+/// (d² = 0, in range of everything); the popup rows that started this map need only the first few.
+fn reach_tokens() -> impl Iterator<Item = &'static str> {
+    ["player", "target", "targettarget", "mouseover", "pet"]
+        .into_iter()
+        .chain(crate::ui_party::PARTY_TOKENS)
+        .chain(crate::ui_party::RAID_TOKENS)
+}
+
+/// The squared distance between two world positions, in the binary's own accumulation shape: `f32`
+/// inputs widened to `f64`, summed `(dz² + dx²) + dy²` (wow-re's transcription of
+/// `0x48a26f..0x48a27d`, the kernel `caninspect_dist2` and `check_interact_dist2` share).
+///
+/// Our axes are Bevy's rather than the client's WoW triple. d² is invariant under that rotation, so
+/// the only conceivable divergence from the binary is a last-ulp one — which can only change the
+/// verdict for a unit standing *exactly* on a threshold. The thresholds and comparison operators,
+/// which are what actually decide each gate, are transcribed exactly at the two bindings
+/// (`benilla_ui::script::inspect`).
+fn dist_sq(q: Vec3, p: Vec3) -> f64 {
+    let dx = f64::from(q.x) - f64::from(p.x);
+    let dy = f64::from(q.y) - f64::from(p.y);
+    let dz = f64::from(q.z) - f64::from(p.z);
+    (dz * dz + dx * dx) + dy * dy
+}
+
+/// Feed the **unit reach map** — for every token that resolves to a live unit object, its squared
+/// distance from us, plus whether that unit passes inspect's own two non-distance refusals.
+///
+/// **Membership is the object lookup and nothing else** (1564 §2). An absent token is one the
+/// object manager holds no unit for, and both bindings answer `nil` there — the reference's own
+/// null-object arm. Every typemask therefore rides IN the entry:
+///
+/// - *attackable* — vmangos's inspect refusal (`IsValidAttackTarget`, `MiscHandler.cpp:945-956`).
+///   Keeping the token out of the map instead would make `CheckInteractDistance` — a pure distance
+///   test in the binary — gray Follow and Duel on an enemy player the reference leaves live (B316).
+/// - *is a player* — vmangos's other one (`sObjectMgr.GetPlayer`). This is the leg that was applied
+///   at the token and was report **B304**: a creature `"target"` never entered the map, so the
+///   30-yard rung Quiver's Dead Zone band reads answered a constant for every mob — "in range" at
+///   the published tag, "out of range" after 1564 flipped the absent default. Both are the same
+///   defect: the map was never asked about mobs at all.
+///
+/// That the *client* checks those two is INFERRED (the 348-byte `0x48a1b0`'s non-math part isn't in
+/// the RE record), but a wrong guess can only cost a request the server would drop.
+///
+/// Ungated, unlike every other feed here (1439): the numbers change whenever anything moves, so a
+/// change gate would fire every frame anyway and cost a comparison for nothing. Nothing keys an
+/// event off this map, so a re-push is invisible.
+fn feed_unit_reach(
+    script: Option<NonSendMut<UiScript>>,
+    tokens: UnitTokens,
+    selection: Res<Selection>,
+    self_q: Query<(&Transform, &ObjectStore), With<SelfPlayer>>,
+    transforms: Query<&Transform>,
+    factions: Option<Res<Factions>>,
+    reputations: Res<Reputations>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let mut reach = HashMap::new();
+    if let Some((self_tf, self_store)) = self_q.iter().next() {
+        for token in reach_tokens() {
+            let Some((entity, guid)) = tokens.resolve(token, &selection) else {
+                continue;
+            };
+            let Ok(tf) = transforms.get(entity) else {
+                continue;
+            };
+            let store = tokens.stores.get(entity).ok();
+            let inspectable = benilla_protocol::guid::is_player(guid)
+                && !crate::target::can_attack(
+                    store,
+                    factions.as_deref(),
+                    &reputations,
+                    Some(self_store),
+                );
+            reach.insert(
+                token.to_string(),
+                benilla_ui::script::UnitReach {
+                    dist_sq: dist_sq(tf.translation, self_tf.translation),
+                    inspectable,
+                },
+            );
+        }
+    }
+    script.set_unit_reach(reach);
 }
 
 /// Build a unit snapshot from a streamed object's descriptor (decision 0061's `ObjectFields`) plus
@@ -1378,6 +1558,133 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Report B304 — Quiver's range indicator read Dead Zone on a far target.**
+    ///
+    /// Its Dead Zone rung is `IsActionInRange(AutoShot) ~= 1` **and**
+    /// `CheckInteractDistance("target", 4)` truthy (`Quiver.bundle.lua:3136-3150`), i.e. "cannot
+    /// shoot, but inside 30 yards". The reach map only ever held *players*, so a creature
+    /// `"target"` never entered it and the 30-yard rung answered a **constant** for every mob at
+    /// every distance: "in range" at the published tag (the old permissive default), and — after
+    /// 1564 flipped that default for B316 — "out of range" for a mob standing next to you. Two
+    /// different wrong answers from one defect: the map was never asked about creatures at all.
+    ///
+    /// So this drives the feed with a real creature target at three distances and reads the rung
+    /// itself. The player-only leg it used to apply at the token now rides in the entry, which the
+    /// `CanInspect` assertions pin: a boar three yards away is in interact range and is still not
+    /// inspectable.
+    #[test]
+    fn a_creature_target_enters_the_reach_map_at_its_real_distance() {
+        use benilla_protocol::messages::ObjectFields;
+        use bevy::ecs::system::RunSystemOnce;
+
+        /// `UNIT_FIELD_FLAGS` bit 1 (NON_ATTACKABLE) — one of `can_attack`'s five disqualifiers,
+        /// so a unit carrying it is `inspectable` as far as the entry is concerned.
+        const NON_ATTACKABLE: u32 = 1 << 1;
+        const FIELD_UNIT_FLAGS: u16 = 46;
+        const ME: u64 = 0x0000_0000_0000_0001;
+        const BOAR: u64 = 0xF130_0000_0000_0002;
+        const FRIEND: u64 = 0x0000_0000_0000_0003;
+
+        /// Seat one target `yards` away and answer `expr` against it.
+        fn ask(guid: u64, flags: u32, yards: f32, expr: &str) -> bool {
+            let mut app = App::new();
+            app.init_resource::<crate::ui_party::GroupState>()
+                .init_resource::<Reputations>();
+            app.insert_non_send_resource(UiScript::new().unwrap());
+
+            let me = app
+                .world_mut()
+                .spawn((
+                    SelfPlayer,
+                    Guid(ME),
+                    ObjectStore(ObjectFields::default()),
+                    Transform::from_xyz(0.0, 0.0, 0.0),
+                ))
+                .id();
+            let target = app
+                .world_mut()
+                .spawn((
+                    Guid(guid),
+                    ObjectStore(ObjectFields::from_pairs(&[(FIELD_UNIT_FLAGS, flags)])),
+                    // Along one axis, so d² is exactly yards² and the thresholds are readable.
+                    Transform::from_xyz(yards, 0.0, 0.0),
+                ))
+                .id();
+            app.insert_resource(crate::net::GuidIndex(
+                [(ME, me), (guid, target)].into_iter().collect(),
+            ));
+            app.insert_resource(Selection {
+                target: Some(target),
+                guid: Some(guid),
+            });
+
+            app.world_mut().run_system_once(feed_unit_reach).unwrap();
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<bool>(expr)
+                .unwrap()
+        }
+
+        // The report itself: a mob well past 30 yards is OUT of the 30-yard row, so Quiver's
+        // "inside 30 but cannot shoot" conjunction is false and the bar reads Out of Range.
+        assert!(
+            ask(
+                BOAR,
+                0,
+                40.0,
+                r#"return CheckInteractDistance("target", 4) == nil"#
+            ),
+            "a creature 40 yards away is out of the 30-yard row"
+        );
+        // …and the same rung still says YES inside the band, which is the half a token that is
+        // simply absent can never do — before this, no mob at any distance could light it.
+        assert!(
+            ask(
+                BOAR,
+                0,
+                15.0,
+                r#"return CheckInteractDistance("target", 4) ~= nil"#
+            ),
+            "a creature 15 yards away is inside the 30-yard row"
+        );
+        assert!(
+            ask(
+                BOAR,
+                0,
+                15.0,
+                r#"return CheckInteractDistance("target", 1) == nil"#
+            ),
+            "…and outside the 10-yard one: the table is indexed, not a constant"
+        );
+
+        // The typemask moved into the entry rather than vanishing: a creature in interact range is
+        // still not something `CanInspect` says yes to.
+        assert!(
+            ask(
+                BOAR,
+                0,
+                3.0,
+                r#"return CheckInteractDistance("target", 1) ~= nil"#
+            ),
+            "a creature 3 yards away is in interact range"
+        );
+        assert!(
+            ask(BOAR, 0, 3.0, r#"return CanInspect("target") == nil"#),
+            "…and is still not inspectable — the players-only leg rides in the entry"
+        );
+        // The control: a non-attackable PLAYER at the same spot is inspectable, so the assertion
+        // above is about the guid type and not about the map having gone dark.
+        assert!(
+            ask(
+                FRIEND,
+                NON_ATTACKABLE,
+                3.0,
+                r#"return CanInspect("target") ~= nil"#
+            ),
+            "a non-attackable player 3 yards away is inspectable"
+        );
+    }
 
     /// The combo feed pushes on either half moving but speaks only for the count — the client's
     /// watch is on that byte alone (decision 0879).

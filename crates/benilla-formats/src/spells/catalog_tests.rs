@@ -711,29 +711,55 @@ fn real_spell_catalog_reads_tooltip_columns() {
     );
 }
 
-/// The combat-initiation classes on the real build-5875 `Spell.dbc` — the two accessor masks
+/// The combat-initiation classes on the real build-5875 `Spell.dbc` — the three accessor masks
 /// the cast seam's queue/attack-start logic keys on ([`SpellDisplay::on_next_swing`] `0x404`,
-/// [`SpellDisplay::initiates_auto_attack`] adding `AttributesEx & 0x200`), pinned against the
-/// vmangos `spell_template` rows read at decision time (2026-07-14). A column slip or a mask
-/// slip fails loudly. Skips without client data.
+/// [`SpellDisplay::initiates_auto_attack`] adding `AttributesEx & 0x200`, and its GO-deferred
+/// complement [`SpellDisplay::initiates_auto_attack_at_go`] on `AttributesEx2 & 0x100000`),
+/// pinned against the vmangos `spell_template` rows read at decision time (2026-07-14). A column
+/// slip or a mask slip fails loudly. Skips without client data.
+///
+/// **The bit20 column is why this test was rewritten** (decision 1593). It used to assert
+/// `attributes_ex2 & 0x100000 == 0` *for each of the ten spells listed here* and read that as
+/// "no spell carries the bit, so the deferred GO-time start is unbuilt". Ten warrior/mage rows
+/// are not a census: the real file carries it on 36. The census below is the check that claim
+/// needed, and it is now the thing that would catch the bit going dormant for real.
 #[test]
 fn real_spell_catalog_classifies_combat_initiation() {
     let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
-    // (spell, on_next_swing, initiates_auto_attack)
-    for (id, name, next_swing, initiates) in [
-        (78u32, "Heroic Strike", true, true), // Attributes 0x50014
-        (845, "Cleave", true, true),          // Attributes 0x50014, Ex 0x200
-        (2973, "Raptor Strike", true, true),  // Attributes 0x50404
-        (772, "Rend", false, true),           // Ex 0x8000200
-        (7386, "Sunder Armor", false, true),  // Ex 0x8000200
-        (1464, "Slam", false, true),          // Ex 0x8000200
-        (100, "Charge", false, false),        // Ex 0x400 — neither bit
-        (6673, "Battle Shout", false, false), // Ex 0x0
-        (6603, "Attack", false, false),       // the auto-attack pseudo-spell itself
-        (133, "Fireball", false, false),      // an ordinary cast
+    // (spell, on_next_swing, initiates_auto_attack, initiates_auto_attack_at_go)
+    for (id, name, next_swing, initiates, at_go) in [
+        (78u32, "Heroic Strike", true, true, false), // Attributes 0x50014
+        (845, "Cleave", true, true, false),          // Attributes 0x50014, Ex 0x200
+        (2973, "Raptor Strike", true, true, false),  // Attributes 0x50404
+        (772, "Rend", false, true, false),           // Ex 0x8000200
+        (7386, "Sunder Armor", false, true, false),  // Ex 0x8000200
+        (1464, "Slam", false, true, false),          // Ex 0x8000200
+        (100, "Charge", false, false, false),        // Ex 0x400 — neither bit, and bit20 CLEAR
+        (6673, "Battle Shout", false, false, false), // Ex 0x0
+        (6603, "Attack", false, false, false),       // the auto-attack pseudo-spell itself
+        (133, "Fireball", false, false, false),      // an ordinary cast
+        // The GO-deferred class: bit20 SET, so the send-time tail is suppressed and the start
+        // waits for `SMSG_SPELL_GO` (`0x6e83c0`). Every stealth opener and positional strike.
+        (53, "Backstab", false, false, true), // Attributes 0x50010, Ex 0x8000200, Ex2 0x100000
+        (703, "Garrote", false, false, true),
+        (8676, "Ambush", false, false, true),
+        (1833, "Cheap Shot", false, false, true),
+        (5221, "Shred", false, false, true),
+        (6785, "Ravage", false, false, true),
+        (9005, "Pounce", false, false, true),
+        (20271, "Judgement", false, false, true), // Ex 0x0 — bit20 is its ONLY initiation bit
+        // The hunter's instant shots (bug B280): `Attributes 0x00010002` (ranged slot),
+        // `AttributesEx 0`, `AttributesEx2 0x00020000` — bit 17, vmangos
+        // `SPELL_ATTR_EX2_DO_NOT_RESET_COMBAT_TIMERS`, the shot-weaving bit, and NOT bit 20.
+        // So no client attack-start of either kind fires for them; casting one does not begin
+        // Auto Shot, which is what 0994 §4 recorded and what this pins in data.
+        (1978, "Serpent Sting", false, false, false),
+        (3044, "Arcane Shot", false, false, false),
+        (2643, "Multi-Shot", false, false, false),
+        (75, "Auto Shot", false, false, false), // the auto-repeat itself: Ex2 0x20, not 0x100000
     ] {
         let d = cat
             .get(id)
@@ -747,23 +773,58 @@ fn real_spell_catalog_classifies_combat_initiation() {
         assert_eq!(
             d.initiates_auto_attack(),
             initiates,
-            "{name} ({id}) initiates_auto_attack (Attributes {:#x}, Ex {:#x})",
+            "{name} ({id}) initiates_auto_attack (Attributes {:#x}, Ex {:#x}, Ex2 {:#x})",
             d.attributes,
-            d.attributes_ex
-        );
-        // The §5's one DBC-owed bit (wow-re `combat-feel-law.md` @ c445713b): `AttributesEx2 &
-        // 0x100000` (INITIATE_COMBAT_POST_CAST) defers a spell's attack-start to SMSG_SPELL_GO —
-        // a client path benilla leaves unbuilt because no spell here carries the bit. This pins
-        // that from the real client DBC: in particular Charge (100) is bit20-CLEAR, so vanilla
-        // Charge starts no auto-attack through ANY client channel.
-        assert_eq!(
-            d.attributes_ex2 & 0x0010_0000,
-            0,
-            "{name} ({id}) must not carry INITIATE_COMBAT_POST_CAST (Ex2 {:#x}) — the deferred \
-             GO-time attack-start is unbuilt",
+            d.attributes_ex,
             d.attributes_ex2
         );
+        assert_eq!(
+            d.initiates_auto_attack_at_go(),
+            at_go,
+            "{name} ({id}) initiates_auto_attack_at_go (Ex2 {:#x})",
+            d.attributes_ex2
+        );
+        // The two halves are mutually exclusive by construction — bit20 suppresses the send-time
+        // tail — so no spell may ever start the attack twice.
+        assert!(
+            !(d.initiates_auto_attack() && d.initiates_auto_attack_at_go()),
+            "{name} ({id}) may not start the auto-attack at BOTH the send and the GO"
+        );
     }
+
+    // The census the old ten-row assertion stood in for. 36 rows carry bit20 in the shipped file,
+    // and every one of them is a stealth opener, a positional strike or Judgement — the class
+    // whose attack-start has to wait for the server to resolve the strike.
+    let deferred: Vec<(u32, &str)> = cat
+        .iter()
+        .filter(|(_, d)| d.initiates_auto_attack_at_go())
+        .map(|(id, d)| (id, d.name.as_str()))
+        .collect();
+    assert_eq!(
+        deferred.len(),
+        36,
+        "5875 ships 36 INITIATE_COMBAT_POST_CAST rows, got {}: {:?}",
+        deferred.len(),
+        deferred
+    );
+    let mut names: Vec<&str> = deferred.iter().map(|&(_, n)| n).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names,
+        [
+            "Ambush",
+            "Backstab",
+            "Cheap Shot",
+            "Garrote",
+            "Judgement",
+            "Pounce",
+            "Ravage",
+            "Shred",
+            "Test Stab R50",
+        ],
+        "the deferred-start class is the openers, the positional strikes and Judgement"
+    );
 }
 
 /// The crafting columns (decision 0437) on the real build-5875 `Spell.dbc`: `EffectItemType`

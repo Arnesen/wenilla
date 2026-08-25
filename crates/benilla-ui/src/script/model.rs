@@ -1157,11 +1157,12 @@ pub(crate) struct Model {
     pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
     /// The dressing-room pane's bake yaw, the fourth of those scalars.
     pub(crate) dressup_yaw: f32,
-    /// Unit token → what the app resolved about it this frame, for every popup token that named a
-    /// **live unit object** — the input to both verified range predicates (`CanInspect`,
-    /// `CheckInteractDistance`). An absent token is one the object manager holds nothing for, and
-    /// both answer `nil` there (see [`UiScript::set_inspect_reach`] and [`super::UnitReach`]).
-    pub(crate) inspect_reach: HashMap<String, super::UnitReach>,
+    /// Unit token (lowercase) → what the app resolved about it this frame, for **every** token
+    /// that named a **live unit object**, creature as readily as player — the input to both
+    /// verified range predicates (`CanInspect`, `CheckInteractDistance`). An absent token is one
+    /// the object manager holds nothing for, and both answer `nil` there (see
+    /// [`UiScript::set_unit_reach`] and [`super::UnitReach`]).
+    pub(crate) unit_reach: HashMap<String, super::UnitReach>,
 
     /// The skills-pane snapshot the app pushes ([`skills::SkillsState`], decision 0437 phase 4) and
     /// the synthesized display tree built from it ([`skills::UiScript::set_skills`]) — the skills
@@ -1615,7 +1616,7 @@ impl Model {
             pet_paperdoll_yaw: 0.0,
             dressup_intents: Vec::new(),
             dressup_yaw: 0.0,
-            inspect_reach: HashMap::new(),
+            unit_reach: HashMap::new(),
             chat_input: Vec::new(),
             skills: skills::SkillsState::default(),
             skills_groups: Vec::new(),

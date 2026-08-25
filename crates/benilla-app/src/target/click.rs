@@ -734,9 +734,10 @@ pub(super) fn clear_target_requests(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn target_unit_requests(
     script: Option<NonSendMut<UiScript>>,
-    group: Res<crate::ui_party::GroupState>,
-    index: Res<crate::net::GuidIndex>,
-    pet: Res<crate::ui_pet::PetBar>,
+    // The one unit-token resolver (`crate::ui_unit::UnitTokens`) — the arms this drain used to
+    // spell out inline. It is shared with the reach feed precisely so `TargetUnit("target")` and
+    // `CheckInteractDistance("target", …)` can never mean two different units (B304).
+    tokens: crate::ui_unit::UnitTokens,
     // The one SetSelection tail, shared with `/target` and `/assist` (decision 1583). It carries
     // the classification too, which is why this drain no longer states one: hand-stating it here
     // is exactly how a `false` that the binary refutes got written down.
@@ -749,50 +750,10 @@ pub(super) fn target_unit_requests(
     if requests.is_empty() {
         return;
     }
-    let me = commit.me();
-    let self_guid = me.map(|(_, g)| g);
     for token in requests {
-        let resolved = match token.as_str() {
-            "player" => me,
-            "target" => commit.selection.target.zip(commit.selection.guid),
-            // The ToT frame's left click (decision 1576) — the target's own target, one hop off
-            // `UNIT_FIELD_TARGET`, resolved exactly as the `"targettarget"` snapshot and `/assist`
-            // resolve it. An unstreamed guid no-ops like every other arm here.
-            "targettarget" => commit
-                .selection
-                .target
-                .and_then(|e| commit.stores.get(e).ok())
-                .and_then(|s| s.0.unit_target())
-                .filter(|g| *g != 0)
-                .and_then(|g| index.0.get(&g).map(|e| (*e, g))),
-            // The pet resolves off the bar's cached guid, the same word `"pet"`'s snapshot and
-            // `UNIT_PET` read (`crate::ui_pet::feed_pet_unit`). An unstreamed pet no-ops, exactly
-            // as an out-of-range party member does.
-            "pet" => (pet.spells.pet_guid != 0)
-                .then(|| index.0.get(&pet.spells.pet_guid))
-                .flatten()
-                .map(|&e| (e, pet.spells.pet_guid)),
-            // `raidN` before the `partyN` arm for the same reason the reference's own resolver
-            // orders `partypet` ahead of `party`: a prefix test that runs first wins. These are
-            // the RaidFrame rows' left-click (decision 1549); like a party slot, an out-of-range
-            // member no-ops until the guid-only selection lands.
-            t if t.starts_with("raid") => t
-                .strip_prefix("raid")
-                .and_then(|n| n.parse::<usize>().ok())
-                .filter(|n| (1..=40).contains(n))
-                .and_then(|n| {
-                    crate::ui_party::raid_row_guids(&group, self_guid)
-                        .get(n - 1)
-                        .copied()
-                })
-                .and_then(|g| index.0.get(&g).map(|e| (*e, g))),
-            t => t
-                .strip_prefix("party")
-                .and_then(|n| n.parse::<usize>().ok())
-                .filter(|n| (1..=4).contains(n))
-                .and_then(|n| group.party_slots().nth(n - 1).map(|m| m.guid))
-                .and_then(|g| index.0.get(&g).map(|e| (*e, g))),
-        };
+        // Resolved before the commit borrows the selection mutably. An unstreamed unit — an
+        // out-of-range party member, a despawned pet — resolves to nothing and no-ops.
+        let resolved = tokens.resolve(&token, &commit.selection);
         if let Some((entity, guid)) = resolved {
             commit.commit(entity, guid);
         }

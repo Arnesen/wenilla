@@ -29,7 +29,7 @@ use bevy::prelude::*;
 
 use crate::view::WorldCamera;
 
-/// A spawned billboard card: where its pivot sits in the world, the uniform placement scale, how
+/// A spawned billboard card: where its pivot sits in the world, its per-axis scale, how
 /// it tracks the camera (the bone-flag arm), and its optional global-sequence scale pulse. The
 /// per-frame system rewrites the entity transform from these — including `Visibility` (the
 /// hidden-owner mirror), so a card requires it rather than trusting every spawn site's `Mesh3d`
@@ -45,7 +45,16 @@ use crate::view::WorldCamera;
 #[require(Transform, Visibility, MeshTag)]
 pub struct BillboardCard {
     world_pivot: Vec3,
-    scale: f32,
+    /// The card's scale in its OWN (pre-billboard) frame — the joint's/placement's per-axis scale,
+    /// applied before the camera basis, exactly as [`billboard_joint_palette`] applies it to a
+    /// billboard JOINT (`Transform { rotation: camera_basis, scale, .. }` = `T·R_cam·S`). It is a
+    /// `Vec3` and not a scalar because real content animates a billboard bone **non-uniformly**:
+    /// the Lightwell's shaft (`World\Goober\G_HolyLightWell.m2`, bone 0, lock-Z) holds
+    /// `(8.808, 8.808, 37.560)` through its whole Stand loop, a 0.12 yd card stretched into a
+    /// 4.5 yd column of light. Collapsing that to `scale.x` and splatting it — which every lane
+    /// did until 2026-08-25 — rendered the shaft 1.06 yd tall instead: a squat, blown-out card
+    /// sitting on the well's own bowl and drowning it (bug B169, "Lightwell renders very buggy").
+    scale: Vec3,
     kind: BillboardKind,
     /// The billboard bone's looping scale animation (the lamppost glow "breathe"), sampled each frame
     /// and multiplied into [`Self::scale`]. `None` for a static card (no global-sequence scale track).
@@ -91,7 +100,7 @@ impl BillboardCard {
         let world_pivot = placement.transform_point(info.pivot);
         Self {
             world_pivot,
-            scale: placement.scale.x,
+            scale: placement.scale,
             kind: info.kind,
             scale_anim: info.scale_anim.clone(),
             arm_neg_ms: 0,
@@ -147,7 +156,7 @@ impl BillboardCard {
     pub fn frame_following(kind: BillboardKind, pivot: Vec3, owner: Entity) -> Self {
         Self {
             world_pivot: Vec3::ZERO, // re-seated from the owner before the first facing write
-            scale: 1.0,
+            scale: Vec3::ONE,
             kind,
             scale_anim: None,
             arm_neg_ms: 0,
@@ -196,7 +205,7 @@ impl BillboardCard {
     /// placement is fixed at spawn).
     pub fn re_place(&mut self, placement: Transform, local_pivot: Vec3) {
         self.world_pivot = placement.transform_point(local_pivot);
-        self.scale = placement.scale.x;
+        self.scale = placement.scale;
         self.placement_rot = placement.rotation;
     }
 }
@@ -580,7 +589,7 @@ pub(crate) fn face_billboards(
                         benilla_assets::trace::line(
                             "card",
                             &format!(
-                                "card={entity} owner={owner} scale={:.3} a={:.2} pivot={:.2?}",
+                                "card={entity} owner={owner} scale={:.3?} a={:.2} pivot={:.2?}",
                                 card.scale,
                                 tag.map_or(-1.0, |t| crate::mesh_tag::alpha_of(t.0)),
                                 card.world_pivot
@@ -617,7 +626,7 @@ pub(crate) fn face_billboards(
         let placed = Transform {
             translation: card.world_pivot + bob,
             rotation,
-            scale: Vec3::splat(card.scale) * pulse,
+            scale: card.scale * pulse,
         };
         // A parked camera over a still, track-less card recomputes bit-identical values, so the
         // write only lands on real movement: unconditional, it marked every card
@@ -827,6 +836,71 @@ mod tests {
             scale(rigless_card),
             Vec3::splat(2.0),
             "rigless lane: the card's own sampler still runs"
+        );
+    }
+
+    /// **A card keeps its bone's NON-UNIFORM scale** — bug B169, the Lightwell (2026-08-25).
+    ///
+    /// `World\Goober\G_HolyLightWell.m2` bone 0 is a lock-Z billboard carrying the well's light
+    /// shaft (batch 0, `LIGHTWELLRAY.BLP`, 12 verts all weight-1 on that bone, so the 0028 split
+    /// makes it a card). Its scale is a **sequence** track, not a global-sequence one, so nothing
+    /// in `BillboardInfo::scale_anim` carries it: the value reaches the card only through the
+    /// joint, via `re_place`. Authored (WoW axes, `m2anim`): the Spawn clamp ramps
+    /// `(1,1,1) → (8.808, 8.808, 37.560)` in 0.5 s and the 23.3 s Stand loop holds it there,
+    /// pulsing Z between 35.170 and 37.560 — a 0.18 × 0.12 yd card stretched into a
+    /// **1.59 × 4.51 yd** column of light standing out of the bowl.
+    ///
+    /// `re_place` used to keep `placement.scale.x` and splat it, so the shaft rendered
+    /// 1.59 × **1.06** yd: a squat additive card sitting exactly on the 1.09 yd bowl at the same
+    /// height, blowing it out. Every test above this one used a uniform `Vec3::splat`, which is
+    /// why the collapse survived — the numbers here are the asset's own.
+    #[test]
+    fn a_card_keeps_its_bones_non_uniform_scale() {
+        // The authored WoW-axis scale, permuted to Bevy axes exactly as the clip builder does
+        // (`benilla_assets`: `Vec3::new(s[1], s[2], s[0])` — Bevy Y is WoW Z, the shaft's long axis).
+        const WOW: [f32; 3] = [8.808, 8.808, 37.560];
+        let bevy_scale = Vec3::new(WOW[1], WOW[2], WOW[0]);
+        // The card's authored span (`m2batch`): 0.18 yd across, 0.12 yd tall, in the YZ plane.
+        const CARD_H_YD: f32 = 0.12;
+
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.add_systems(Update, face_billboards);
+        app.world_mut().spawn((
+            crate::view::WorldCamera,
+            GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
+        ));
+        let info = BillboardInfo {
+            bone: 0,
+            pivot: Vec3::ZERO,
+            kind: BillboardKind::LockZ,
+            scale_anim: None, // a SEQUENCE track — the joint is the only carrier
+            seq_translations: vec![],
+        };
+        // The joint as the rig composes it: the billboard palette preserves the full scale, so
+        // this is what `re_place` reads back.
+        let joint = app
+            .world_mut()
+            .spawn(GlobalTransform::from(Transform::from_scale(bevy_scale)))
+            .id();
+        let card = app
+            .world_mut()
+            .spawn((
+                BillboardCard::following_joint(&info, joint),
+                Transform::IDENTITY,
+            ))
+            .id();
+        app.update();
+        let tf = *app.world().entity(card).get::<Transform>().unwrap();
+        assert_eq!(
+            tf.scale, bevy_scale,
+            "the joint's per-axis scale reaches the card whole — not `splat(scale.x)`"
+        );
+        let shaft_yd = tf.scale.y * CARD_H_YD;
+        assert!(
+            (shaft_yd - 4.507).abs() < 0.01,
+            "the shaft stands 4.51 yd out of the well, not the 1.06 yd the x-collapse rendered \
+             (got {shaft_yd:.3} yd)"
         );
     }
 

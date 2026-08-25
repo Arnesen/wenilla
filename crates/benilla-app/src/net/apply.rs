@@ -309,6 +309,11 @@ pub(super) fn apply_net_updates(
             // The GO one-shot Custom play (`SMSG_GAMEOBJECT_CUSTOM_ANIM` — the bobber's bite
             // splash, decision 1086), the step-8 sibling of the `GoLidOpen` writer above.
             MessageWriter<crate::go_anim::GoCustomAnim>,
+            // Are *we* already swinging? The ref's `[player+0xc48]`, mirrored by the
+            // server-echoed [`crate::creature_anim::Engaged`] — read by the GO handler's deferred
+            // auto-attack start (`0x6e83e7`, decision 1593). Filter-only, so it conflicts with
+            // nothing else in this drain.
+            Query<(), (With<crate::creature_anim::Engaged>, With<SelfPlayer>)>,
         ),
     ),
     // The aura feed's duration side-table + the clock to stamp arrivals (decisions 0255/0257): the
@@ -1289,6 +1294,11 @@ pub(super) fn apply_net_updates(
                     &mut items,
                     &net_commands,
                     &mut pet_bar,
+                ),
+                (
+                    &mut ui_actions.12,
+                    &mut audio.15 .2,
+                    !audio.15 .4.is_empty(),
                 ),
                 play_seq.next(),
             ),

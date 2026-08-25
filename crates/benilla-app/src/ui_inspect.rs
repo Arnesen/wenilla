@@ -1,6 +1,9 @@
 //! The app-side **inspect feed** (decision 0631) — the bridge that turns another player's PUBLIC
-//! descriptor into the slot views the inspect window's Lua reads, and the one place the
-//! `CanInspect` range gate is computed.
+//! descriptor into the slot views the inspect window's Lua reads.
+//!
+//! The `CanInspect`/`CheckInteractDistance` distance map used to be fed from here too, back when it
+//! held popup tokens only and only for players. It is unit-general now (B304) and lives with the
+//! other unit-token feeds — `crate::ui_unit::feed_unit_reach`.
 //!
 //! This is [`crate::ui_char`]'s pattern turned onto a *foreign* unit, and the difference between
 //! the two is the whole reason this module exists rather than a flag on that one:
@@ -16,13 +19,8 @@
 //! rendering their gear). That is exactly why the reference's inspect paper doll shows no stack
 //! counts and no durability: the client has none either.
 //!
-//! Four jobs, each frame, before the VM ticks:
+//! Three jobs, each frame, before the VM ticks:
 //!
-//! - **Feed the reach map.** For every popup token that resolves to a live, inspectable player, its
-//!   squared distance from us — the input to both verified range predicates (`CanInspect` and
-//!   `CheckInteractDistance`), which the VM cannot compute because it holds no positions. Computed
-//!   for party tokens as well as `"target"`, which is why it can't ride `UnitState` (only
-//!   player/target/mouseover get one).
 //! - **Drain the intents.** `NotifyInspect(unit)` → resolve the token to a player guid → send
 //!   `CMSG_INSPECT` and latch the token as the inspect target. `ClearInspectPlayer()` → drop it.
 //!   The window does not wait for `SMSG_INSPECT` (it carries only the echoed guid, and the ref
@@ -50,27 +48,6 @@ use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
 use crate::portrait::InspectBooth;
 use crate::ui_script::UiInput;
-
-/// The unit tokens a UnitPopup row can name for another player — the popup menus' own set
-/// (`UnitPopupMenus["PLAYER"]` is driven by the target frame, `["PARTY"]` by the four party
-/// frames). The reach map below is computed for exactly these each frame.
-const REACH_TOKENS: [&str; 5] = ["target", "party1", "party2", "party3", "party4"];
-
-/// The squared distance between two world positions, in the binary's own accumulation shape: `f32`
-/// inputs widened to `f64`, summed `(dz² + dx²) + dy²` (wow-re's transcription of
-/// `0x48a26f..0x48a27d`, the kernel `caninspect_dist2` and `check_interact_dist2` share).
-///
-/// Our axes are Bevy's rather than the client's WoW triple. d² is invariant under that rotation, so
-/// the only conceivable divergence from the binary is a last-ulp one — which can only change the
-/// verdict for a unit standing *exactly* on a threshold. The thresholds and comparison operators,
-/// which are what actually decide each gate, are transcribed exactly at the two bindings
-/// (`benilla_ui::script::inspect`).
-fn dist_sq(q: Vec3, p: Vec3) -> f64 {
-    let dx = f64::from(q.x) - f64::from(p.x);
-    let dy = f64::from(q.y) - f64::from(p.y);
-    let dz = f64::from(q.z) - f64::from(p.z);
-    (dz * dz + dx * dx) + dy * dy
-}
 
 /// Which unit the inspect window is bound to — the ref's `InspectFrame.unit`, mirrored app-side so
 /// the feed knows whether to resolve anything. The **token** is the identity (not the guid): the
@@ -197,12 +174,6 @@ fn feed_inspect(
     stores: Query<&ObjectStore>,
     selection: Res<crate::target::Selection>,
     group: Res<crate::ui_party::GroupState>,
-    // The range gate's inputs (the same Transform distance `ui_session`'s service-range check uses)
-    // plus the faction pair `can_attack` needs.
-    self_q: Query<(&Transform, &ObjectStore), With<crate::net::SelfPlayer>>,
-    transforms: Query<&Transform>,
-    factions: Option<Res<crate::target::Factions>>,
-    reputations: Res<crate::net::Reputations>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -210,51 +181,6 @@ fn feed_inspect(
     // Resolved against THIS VM (1290/1291): a `/reload` keeps the latched token, and the fresh
     // memo re-pushes the view into the VM that replaced the one which last saw it.
     let memo = feed.vm.get(&script);
-
-    // The reach map: for every popup token that resolves to a **live unit object**, its squared
-    // distance from us plus whether it passes the two non-distance refusals vmangos makes for an
-    // inspect — the target is a player (`sObjectMgr.GetPlayer`) and is not attackable
-    // (`IsValidAttackTarget`, `MiscHandler.cpp:945-956`). That the *client* checks those two is
-    // INFERRED (the 348-byte `0x48a1b0`'s non-math part isn't in the RE record), but a wrong guess
-    // can only cost a request the server would drop.
-    //
-    // **Membership is the object lookup and nothing else** (report B316). An absent token is one
-    // the object manager holds no unit for, and the bindings answer `nil` there — the reference's
-    // own null-object arm. So the attackable refusal rides IN the entry as `inspectable` rather
-    // than keeping the token out of the map: dropping it would make `CheckInteractDistance` — a
-    // pure distance test in the binary — gray Follow and Duel on an enemy player the reference
-    // leaves live.
-    let self_pair = self_q.iter().next();
-    let mut reach = std::collections::HashMap::new();
-    if let Some((self_tf, self_store)) = self_pair {
-        for token in REACH_TOKENS {
-            let Some(guid) = crate::ui_unit::player_token_guid(token, &selection, &group) else {
-                continue;
-            };
-            // The object-manager miss: a party member outside the local area has a GUID (the
-            // roster wire carries it) and no object, which is exactly the case B316 reported.
-            let Some(&entity) = index.0.get(&guid) else {
-                continue;
-            };
-            let store = stores.get(entity).ok();
-            let inspectable = !crate::target::can_attack(
-                store,
-                factions.as_deref(),
-                &reputations,
-                Some(self_store),
-            );
-            if let Ok(tf) = transforms.get(entity) {
-                reach.insert(
-                    token.to_string(),
-                    benilla_ui::script::UnitReach {
-                        dist_sq: dist_sq(tf.translation, self_tf.translation),
-                        inspectable,
-                    },
-                );
-            }
-        }
-    }
-    script.set_inspect_reach(reach);
 
     // NotifyInspect(unit) → CMSG_INSPECT + latch the token. Resolving here (not in Lua) is what
     // lets the window bind to a token while the wire speaks guids.

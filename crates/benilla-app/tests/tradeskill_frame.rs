@@ -224,3 +224,140 @@ fn craft_collapse_tab_loads_with_text_and_stays_hidden_for_a_flat_list() {
         "zero headers → the tab hides (ref l.269-282's own scan)"
     );
 }
+
+/// **The reagent slot IS `QuestItemTemplate`** — B250's pin, in both windows.
+///
+/// The ref's `TradeSkillItemTemplate` (Blizzard_TradeSkillUI.xml l.11-35) and `CraftItemTemplate`
+/// (Blizzard_CraftUI.xml l.29-53) each inherit `QuestItemTemplate` and override **only scripts**, so
+/// the slot's whole visual is that template's: 147×41, a 39×39 icon, the `UI-QuestItemNameFrame`
+/// plate on the icon's right edge, the name centred ON the plate, and the count on the icon's own
+/// BOTTOMRIGHT.
+///
+/// Every assertion here is one the shape that shipped before B250 would fail — a 140×32 slot with a
+/// 28×28 icon, no plate at all, the name top-anchored right of the icon and the count *below* the
+/// name. It is written that way on purpose (decision 1107's "so the sibling law would fail it"): the
+/// numbers alone would let a future session drift the slot back toward a hand-rolled shape with no
+/// test going red.
+#[test]
+fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+
+    // Both windows open (a slot's anchors resolve against a laid-out parent), and the slots this
+    // test measures are shown — the ref's own SetSelection shows one per reagent.
+    s.set_trade_skill(Some(state()));
+    s.fire_event("TRADE_SKILL_SHOW", vec![]);
+    s.fire_event("CRAFT_SHOW", vec![]);
+    for w in ["BenillaTradeSkillReagent", "BenillaCraftReagent"] {
+        for i in 1..=3 {
+            s.run(&format!("{w}{i}:Show()")).unwrap();
+        }
+    }
+
+    for w in ["BenillaTradeSkillReagent", "BenillaCraftReagent"] {
+        let num = |expr: &str| {
+            s.eval::<f64>(&format!("return {expr}"))
+                .unwrap_or_else(|e| panic!("{expr}: {e}"))
+        };
+
+        // The row box: 147×41, the ref's QuestItemTemplate <Size>.
+        assert_eq!(
+            (
+                num(&format!("{w}1:GetWidth()")),
+                num(&format!("{w}1:GetHeight()"))
+            ),
+            (147.0, 41.0),
+            "{w}1 row box"
+        );
+
+        // The 2-column grid: column 2 opens exactly one row-width right (Reagent2 anchors
+        // LEFT→Reagent1's RIGHT with a zero offset, so the pitch IS the row width) …
+        assert_eq!(
+            num(&format!("{w}2:GetLeft()")) - num(&format!("{w}1:GetLeft()")),
+            147.0,
+            "{w} column pitch"
+        );
+        // … and row 2 drops one row height plus the ref's own 2px gutter.
+        assert_eq!(
+            num(&format!("{w}3:GetTop()")) - num(&format!("{w}1:GetTop()")),
+            -43.0,
+            "{w} row step"
+        );
+
+        // The icon: 39×39 flush in the row's TOPLEFT corner.
+        assert_eq!(
+            (
+                num(&format!("{w}1Icon:GetWidth()")),
+                num(&format!("{w}1Icon:GetHeight()"))
+            ),
+            (39.0, 39.0),
+            "{w}1 icon"
+        );
+        assert_eq!(
+            num(&format!("{w}1Icon:GetLeft()")),
+            num(&format!("{w}1:GetLeft()")),
+            "{w}1 icon flush left"
+        );
+        assert_eq!(
+            num(&format!("{w}1Icon:GetTop()")),
+            num(&format!("{w}1:GetTop()")),
+            "{w}1 icon flush top"
+        );
+
+        // The name plate — the piece that was missing entirely. Its 128×64 texture starts 10px
+        // inside the icon's right edge and is centred on the icon's own middle.
+        assert_eq!(
+            s.eval::<String>(&format!("return {w}1NameFrame:GetTexture()"))
+                .unwrap(),
+            "Interface\\QuestFrame\\UI-QuestItemNameFrame",
+            "{w}1 name plate art"
+        );
+        assert_eq!(
+            (
+                num(&format!("{w}1NameFrame:GetWidth()")),
+                num(&format!("{w}1NameFrame:GetHeight()"))
+            ),
+            (128.0, 64.0),
+            "{w}1 plate size"
+        );
+        assert_eq!(
+            num(&format!("{w}1NameFrame:GetLeft()")) - num(&format!("{w}1Icon:GetRight()")),
+            -10.0,
+            "{w}1 plate rides the icon's right edge"
+        );
+
+        // The name sits ON the plate (+15 from its left), vertically centred — not above-right of
+        // the icon, where the pre-B250 shape put it.
+        assert_eq!(
+            num(&format!("{w}1Name:GetLeft()")) - num(&format!("{w}1NameFrame:GetLeft()")),
+            15.0,
+            "{w}1 name inset"
+        );
+        let (nc, pc) = (
+            num(&format!("({w}1Name:GetTop() + {w}1Name:GetBottom()) / 2")),
+            num(&format!(
+                "({w}1NameFrame:GetTop() + {w}1NameFrame:GetBottom()) / 2"
+            )),
+        );
+        assert!(
+            (nc - pc).abs() < 0.01,
+            "{w}1 name is centred on the plate ({nc} vs {pc})"
+        );
+
+        // The count rides the ICON's bottom-right corner (-4, +1) — not a line below the name.
+        assert_eq!(
+            num(&format!("{w}1Count:GetRight()")) - num(&format!("{w}1Icon:GetRight()")),
+            -4.0,
+            "{w}1 count x"
+        );
+        assert_eq!(
+            num(&format!("{w}1Count:GetBottom()")) - num(&format!("{w}1Icon:GetBottom()")),
+            1.0,
+            "{w}1 count y"
+        );
+        assert!(
+            num(&format!("{w}1Count:GetBottom()")) >= num(&format!("{w}1Icon:GetBottom()")),
+            "{w}1 count sits ON the icon, not below the row"
+        );
+    }
+}

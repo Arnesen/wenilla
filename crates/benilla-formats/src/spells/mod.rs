@@ -454,9 +454,16 @@ const ATTR_EX_CHANNELED: u32 = 0x44;
 /// `AttributesEx2` bit `0x100000` — vmangos `SPELL_ATTR_EX2_INITIATE_COMBAT_POST_CAST` ("Client
 /// will send CMSG_ATTACK_SWING after SMSG_SPELL_GO"). The §5-verified send-tail predicate
 /// EXCLUDES it (`[ebp-2] = 0x6e5200 && Ex2-bit20 CLEAR`): a bit20 spell defers its attack-start
-/// to the `SMSG_SPELL_GO` handler (`0x6e83c0`) instead of starting at send. No spell benilla
-/// meets carries it (asserted against the real 5875 `Spell.dbc` in `catalog_tests.rs`), so the
-/// deferred path stays unbuilt — this bit only *suppresses* the send-time start.
+/// to the `SMSG_SPELL_GO` handler (`0x6e83c0`) instead of starting at send. Both halves are
+/// built — [`SpellDisplay::initiates_auto_attack`] is the send-time one, and
+/// [`SpellDisplay::initiates_auto_attack_at_go`] the deferred one.
+///
+/// This doc used to say "no spell benilla meets carries it, so the deferred path stays unbuilt".
+/// That was a proof by absence over the ten warrior/rogue spells `catalog_tests.rs` happened to
+/// list. The real 5875 `Spell.dbc` carries the bit on **36 rows** — every rank of Backstab,
+/// Garrote, Ambush, Cheap Shot, Shred, Ravage and Pounce, plus Judgement 20271 — i.e. every
+/// stealth opener and positional strike in the game, whose attack must wait for the server to
+/// resolve it. The census is the test beside this now (decision 1593, bug B280's sweep).
 const ATTR_EX2_INITIATE_COMBAT_POST_CAST: u32 = 0x0010_0000;
 
 /// `Attributes` bit 25 (`0x0200_0000`) — `SPELL_ATTR_COOLDOWN_ON_EVENT` (vmangos; "disabled while

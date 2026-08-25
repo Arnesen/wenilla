@@ -393,7 +393,7 @@ fn shown_inspect_honor_page() -> UiScript {
     s.set_unit("player", Some(alliance_player()));
     // 4 yards away (d² = 16), inside the verified `CanInspect` 100.0 — the window refuses to open
     // otherwise, and a silently-refused open would read as a broken pane.
-    s.set_inspect_reach(HashMap::from([("target".to_string(), reach(16.0))]));
+    s.set_unit_reach(HashMap::from([("target".to_string(), reach(16.0))]));
     s.set_inspect_honor(Some(inspect_reply()));
     s.run(r#"InspectUnit("target")"#).unwrap();
     s.run(r#"ToggleInspect("BenillaInspectHonorFrame")"#)

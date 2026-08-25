@@ -52,7 +52,7 @@ pub(super) struct FedParty {
     ready_check: u32,
 }
 
-const PARTY_TOKENS: [&str; 4] = ["party1", "party2", "party3", "party4"];
+pub(crate) const PARTY_TOKENS: [&str; 4] = ["party1", "party2", "party3", "party4"];
 
 /// **The saved-instance edge** — a new LIST *or* a new ANSWER (1561).
 ///
@@ -70,7 +70,7 @@ fn saved_instances_moved(saved: &[SavedInstanceInfo], answers: u32, fed: &FedPar
 /// and a table of forty `&'static str` costs nothing where forty `String`s per roster change
 /// would (decision 1549). `MAX_RAID_MEMBERS` is the reference's own 40.
 #[rustfmt::skip]
-const RAID_TOKENS: [&str; 40] = [
+pub(crate) const RAID_TOKENS: [&str; 40] = [
     "raid1", "raid2", "raid3", "raid4", "raid5", "raid6", "raid7", "raid8", "raid9", "raid10",
     "raid11", "raid12", "raid13", "raid14", "raid15", "raid16", "raid17", "raid18", "raid19",
     "raid20", "raid21", "raid22", "raid23", "raid24", "raid25", "raid26", "raid27", "raid28",
@@ -481,22 +481,42 @@ pub(super) struct RaidSelf {
 ///
 /// Empty outside a raid, which is what makes every raid-index verb a no-op in a plain party.
 pub(crate) fn raid_row_guids(group: &GroupState, self_guid: Option<u64>) -> Vec<u64> {
-    if group.group_type != GROUPTYPE_RAID {
-        return Vec::new();
-    }
-    self_guid
-        .into_iter()
-        .chain(group.members.iter().map(|m| m.guid))
-        .collect()
+    raid_rows(group, self_guid).collect()
+}
+
+/// **The raid row ORDER, and the one place it is decided** — us first, then the roster in wire
+/// order — as an iterator, so a caller that wants one row does not build all forty.
+///
+/// [`raid_row_guids`] collects it for the feed (which pushes every row anyway) and
+/// [`raid_row_guid`] indexes it for the resolvers, which ask per token: `crate::ui_unit`'s reach
+/// feed asks forty times a frame, and forty `Vec`s a frame for one `u64` each is the kind of cost
+/// that only shows up in a raid, i.e. exactly where it hurts.
+fn raid_rows(group: &GroupState, self_guid: Option<u64>) -> impl Iterator<Item = u64> + '_ {
+    let in_raid = group.group_type == GROUPTYPE_RAID;
+    self_guid.filter(|_| in_raid).into_iter().chain(
+        group
+            .members
+            .iter()
+            .filter(move |_| in_raid)
+            .map(|m| m.guid),
+    )
+}
+
+/// The guid at a 1-based raid row, or `None` for a row that is not there — the allocation-free
+/// [`raid_row_guids`]`[index - 1]`.
+pub(crate) fn raid_row_guid(
+    group: &GroupState,
+    self_guid: Option<u64>,
+    index: usize,
+) -> Option<u64> {
+    raid_rows(group, self_guid).nth(index.checked_sub(1)?)
 }
 
 /// A raid row index (1-based, the Lua scale) → the guid it names, or `None` for a row that is not
 /// there. Every raid-management verb goes through this, so "index 0", "index 500" and "not in a
 /// raid" all collapse to the same quiet no-op the reference's own bindings produce.
 fn raid_guid_at(group: &GroupState, self_guid: Option<u64>, index: u32) -> Option<u64> {
-    let rows = raid_row_guids(group, self_guid);
-    rows.get(usize::try_from(index).ok()?.checked_sub(1)?)
-        .copied()
+    raid_row_guid(group, self_guid, usize::try_from(index).ok()?)
 }
 
 /// A guid → the character name the wire wants for the by-name group opcodes. Ours comes from the

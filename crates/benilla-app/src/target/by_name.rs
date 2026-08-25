@@ -610,13 +610,13 @@ pub(super) fn follow_requests(
 pub(crate) struct SelectCommit<'w, 's> {
     pub(super) selection: ResMut<'w, Selection>,
     seam: crate::creature_anim::AttackSeam<'w, 's>,
-    // `Entity` first because a caller can need our own body as a SELECTION target, not only as the
-    // comparison the classification runs against (`TargetUnit("player")`, the player frame's click).
+    // Our own body, read only for what the classification needs: the guid to compare against, the
+    // store `can_attack` reads, and whether we are mid-swing. It used to carry the `Entity` too,
+    // for `TargetUnit("player")`; that resolves through `crate::ui_unit::UnitTokens` now.
     me: Query<
         'w,
         's,
         (
-            Entity,
             &'static Guid,
             Option<&'static ObjectStore>,
             Has<crate::creature_anim::Engaged>,
@@ -629,11 +629,6 @@ pub(crate) struct SelectCommit<'w, 's> {
 }
 
 impl SelectCommit<'_, '_> {
-    /// Our own body's entity + guid, for a caller that can be asked to select it.
-    pub(super) fn me(&self) -> Option<(Entity, u64)> {
-        self.me.single().ok().map(|(e, g, _, _)| (e, g.0))
-    }
-
     pub(super) fn commit(&mut self, entity: Entity, guid: u64) {
         let me = self.me.single().ok();
         // The new-target classification `scan::commit` expects from its callers (it does not
@@ -642,15 +637,15 @@ impl SelectCommit<'_, '_> {
             self.stores.get(entity).ok(),
             self.factions.as_deref(),
             &self.reputations,
-            me.and_then(|(_, _, store, _)| store),
+            me.and_then(|(_, store, _)| store),
         );
         scan::commit(
             &mut self.selection,
             &mut self.seam,
             entity,
             guid,
-            me.is_some_and(|(_, _, _, engaged)| engaged),
-            me.map(|(_, g, _, _)| g.0),
+            me.is_some_and(|(_, _, engaged)| engaged),
+            me.map(|(g, _, _)| g.0),
             attackable,
         );
     }

@@ -349,6 +349,13 @@ pub(super) fn spell_go(
         &crate::net::NetCommands,
         &mut crate::ui_pet::PetBar,
     ),
+    // The GO-deferred melee auto-attack start's write set (`0x6e83c0`, the arm below), plus the
+    // attack lock it gates on: our server-echoed `Engaged`, the ref's `[player+0xc48]`.
+    attack_ctx: (
+        &mut crate::ui_action::AutoRepeatActive,
+        &mut MessageWriter<crate::creature_anim::SheathRequest>,
+        bool,
+    ),
     seq: u64,
 ) {
     debug!(
@@ -365,6 +372,7 @@ pub(super) fn spell_go(
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
     let (cooldowns, spells, items, net_commands, pet_bar) = cooldown_ctx;
+    let (auto_repeat, sheath, engaged) = attack_ctx;
     let now = Instant::now();
     let display = spells.and_then(|s| s.catalog.get(spell_id));
     // **A chest's loot-target arm** (wow-re `loot-anim-leg.md` §6, byte-verified §5 trio; decision
@@ -422,6 +430,44 @@ pub(super) fn spell_go(
         // The queued on-next-swing strike fired on this swing — the queue (and its checked
         // ring) opens exactly here, like the ref's inflight finish on the matching GO.
         queued_melee.clear_if(spell_id);
+
+        // **The GO-deferred melee auto-attack start** (`HandleSpellGo 0x6e7a70` @ `0x6e83c0`,
+        // wow-re `combat-feel-law.md` §A3; bytes re-read for decision 1593). This is the exact
+        // complement of the send-time tail in [`crate::ui_action::cast_send`]: a spell carrying
+        // `AttributesEx2 & 0x100000` has its optimistic start *suppressed* there and armed here
+        // instead, so the swing begins only once the server confirms the strike landed. That is
+        // the whole 5875 stealth-opener class — Backstab, Garrote, Ambush, Cheap Shot, Shred,
+        // Ravage, Pounce — plus Judgement, none of which started an auto-attack in benilla at all
+        // before this (the deferred path was left unbuilt on a ten-row proof by absence; the real
+        // file carries the bit on 36 rows, censused in `benilla-formats`' `catalog_tests`).
+        //
+        // **The target** is the reference's, verbatim (`0x6e83e9`–`0x6e83fe`): `hits[0]` when the
+        // GO carries a hit list, else the null pair — which `0x612df0` resolves to the current
+        // selection and, failing that, acquires as the nearest hostile. We take the packet's own
+        // target guid as that fallback and stop there: the acquire-nearest leg is `target::scan`'s
+        // and reaching it from here would target something the player never named. A hostile
+        // single-target strike always fills the hit list, so the fallback is the quiet case.
+        //
+        // **The gate** is `[player+0xc48] == 0` (`0x6e83e7`) — already swinging, nothing happens,
+        // which is also what keeps the auto-repeat cancel in `start_attack_local`'s tail from
+        // firing on every strike of a fight.
+        if display.is_some_and(|d| d.initiates_auto_attack_at_go()) && !engaged {
+            if let (Some(&me), Some(guid)) =
+                (index.0.get(&caster), hits.first().copied().or(target))
+            {
+                debug!("net: spell go {spell_id} — deferred auto-attack start at {guid:#x}");
+                crate::creature_anim::start_attack_local(
+                    me,
+                    guid,
+                    engaged,
+                    false,
+                    auto_repeat,
+                    sheath,
+                    commands,
+                    net_commands,
+                );
+            }
+        }
 
         // Our own launch starts the cast's cooldown locally, at the GO — byte-VERIFIED (the
         // 2026-07-10 wow-re follow-up, `wave-handlers.md` ADDENDUM): `HandleSpellGo 0x6e7a70`'s
@@ -948,6 +994,7 @@ mod tests {
             .add_message::<SpellGoTargets>()
             .add_message::<CombatTextSpawn>()
             .add_message::<GoLidOpen>()
+            .add_message::<crate::creature_anim::SheathRequest>()
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<CastBarFeed>()
@@ -996,7 +1043,8 @@ mod tests {
                           mut go_lid: MessageWriter<GoLidOpen>,
                           mut cooldowns: ResMut<Cooldowns>,
                           mut pet_bar: ResMut<crate::ui_pet::PetBar>,
-                          mut items: ResMut<crate::items::Items>| {
+                          mut items: ResMut<crate::items::Items>,
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
                             10,
@@ -1028,6 +1076,11 @@ mod tests {
                                 &mut items,
                                 &net_commands,
                                 &mut pet_bar,
+                            ),
+                            (
+                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut sheath,
+                                false,
                             ),
                             1,
                         );
@@ -1108,6 +1161,7 @@ mod tests {
                 .add_message::<SpellGoTargets>()
                 .add_message::<CombatTextSpawn>()
                 .add_message::<GoLidOpen>()
+                .add_message::<crate::creature_anim::SheathRequest>()
                 .init_resource::<GuidIndex>()
                 .init_resource::<SelfGuid>()
                 .init_resource::<CastBarFeed>()
@@ -1146,7 +1200,8 @@ mod tests {
                           mut go_lid: MessageWriter<GoLidOpen>,
                           mut cooldowns: ResMut<Cooldowns>,
                           mut pet_bar: ResMut<crate::ui_pet::PetBar>,
-                          mut items: ResMut<crate::items::Items>| {
+                          mut items: ResMut<crate::items::Items>,
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
                             caster,
@@ -1178,6 +1233,11 @@ mod tests {
                                 &mut items,
                                 &net_commands,
                                 &mut pet_bar,
+                            ),
+                            (
+                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut sheath,
+                                false,
                             ),
                             1,
                         );
@@ -1233,6 +1293,7 @@ mod tests {
             .add_message::<SpellGoTargets>()
             .add_message::<CombatTextSpawn>()
             .add_message::<GoLidOpen>()
+            .add_message::<crate::creature_anim::SheathRequest>()
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<CastBarFeed>()
@@ -1282,7 +1343,8 @@ mod tests {
                       mut go_lid: MessageWriter<GoLidOpen>,
                       mut cooldowns: ResMut<Cooldowns>,
                       mut pet_bar: ResMut<crate::ui_pet::PetBar>,
-                      mut items: ResMut<crate::items::Items>| {
+                      mut items: ResMut<crate::items::Items>,
+                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
                     let net_commands = crate::net::NetCommands(tx.clone());
                     spell_go(
                         10,
@@ -1314,6 +1376,11 @@ mod tests {
                             &mut items,
                             &net_commands,
                             &mut pet_bar,
+                        ),
+                        (
+                            &mut crate::ui_action::AutoRepeatActive::default(),
+                            &mut sheath,
+                            false,
                         ),
                         1,
                     );
@@ -1475,5 +1542,182 @@ mod tests {
         actions.dirty = false;
         removed_spell(14788, &mut actions);
         assert!(!actions.dirty, "a spell we never knew is not a repaint");
+    }
+    /// **The GO-deferred auto-attack start** (`HandleSpellGo` @ `0x6e83c0`, decision 1593) — the
+    /// half of `combat-feel-law.md` §A3 benilla shipped without, because ten hand-picked warrior
+    /// rows were read as a census of `AttributesEx2 & 0x100000`. The real file carries the bit on
+    /// 36, so the class that never started an auto-attack here is every stealth opener and
+    /// positional strike: Backstab, Garrote, Ambush, Cheap Shot, Shred, Ravage, Pounce, Judgement.
+    ///
+    /// Four things, and each is a way this arm could be subtly wrong:
+    /// - a bit20 spell's own GO sends `CMSG_ATTACKSWING` **at the GO's first hit target**
+    ///   (`0x6e83e9`: `hits[0]`, not the packet's target field, and not our selection);
+    /// - a spell without the bit sends nothing — **bug B280's own control**: the hunter's instant
+    ///   shots carry Ex2 bit **17** (`DO_NOT_RESET_COMBAT_TIMERS`), not bit 20, so casting Serpent
+    ///   Sting starts no attack of either kind, which is what 0994 §4 recorded;
+    /// - already swinging sends nothing (`0x6e83e7`'s `[player+0xc48]` gate) — which is also what
+    ///   keeps the start's own auto-repeat cancel off every strike of a fight;
+    /// - somebody else's Backstab going off sends nothing (the handler's self gate).
+    #[test]
+    fn a_go_deferred_spell_swings_at_its_first_hit_and_the_hunter_shots_do_not() {
+        use crate::combat_text::CombatTextSpawn;
+        use crate::creature_anim::{Casting, Engaged};
+        use crate::go_anim::GoLidOpen;
+        use crate::net::{ClientCommand, Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const BACKSTAB: u32 = 53;
+        const SERPENT_STING: u32 = 1978;
+        let spell = |name: &str, ex2: u32| benilla_formats::SpellDisplay {
+            name: name.into(),
+            attributes_ex2: ex2,
+            ..Default::default()
+        };
+        let make_spells = || crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [
+                    // The real 5875 words for the two: Backstab Ex2 0x100000, Serpent Sting
+                    // Ex2 0x20000 (bit 17, one bit below — the whole distinction).
+                    (BACKSTAB, spell("Backstab", 0x0010_0000)),
+                    (SERPENT_STING, spell("Serpent Sting", 0x0002_0000)),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            forms: Default::default(),
+            ranges: Default::default(),
+            cast_times: Default::default(),
+            durations: Default::default(),
+            radii: Default::default(),
+        };
+
+        // `caster` casts `spell_id`, landing on 20; `engaged` is our mirror of `[+0xc48]`.
+        // Returns every command the seam put on the wire.
+        let fire = |caster: u64, spell_id: u32, engaged: bool| -> Vec<ClientCommand> {
+            let mut app = App::new();
+            app.add_message::<CastEvent>()
+                .add_message::<SpellGoTargets>()
+                .add_message::<CombatTextSpawn>()
+                .add_message::<GoLidOpen>()
+                .add_message::<crate::creature_anim::SheathRequest>()
+                .init_resource::<GuidIndex>()
+                .init_resource::<SelfGuid>()
+                .init_resource::<CastBarFeed>()
+                .init_resource::<PendingCast>()
+                .init_resource::<QueuedMeleeSpell>()
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::ui_pet::PetBar>()
+                .init_resource::<crate::items::Items>();
+            let self_e = app
+                .world_mut()
+                .spawn((Guid(10), SelfPlayer, ObjectStore::default()))
+                .id();
+            if engaged {
+                app.world_mut().entity_mut(self_e).insert(Engaged);
+            }
+            let other_e = app
+                .world_mut()
+                .spawn((Guid(11), ObjectStore::default()))
+                .id();
+            {
+                let mut index = app.world_mut().resource_mut::<GuidIndex>();
+                index.0.insert(10, self_e);
+                index.0.insert(11, other_e);
+            }
+            app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let spells = make_spells();
+            app.world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          index: Res<GuidIndex>,
+                          casting: Query<&Casting>,
+                          mut cast_events: MessageWriter<CastEvent>,
+                          mut go_targets: MessageWriter<SpellGoTargets>,
+                          self_guid: Res<SelfGuid>,
+                          stores: Query<&mut ObjectStore>,
+                          mut cast_bar: ResMut<CastBarFeed>,
+                          mut pending: ResMut<PendingCast>,
+                          mut queued_melee: ResMut<QueuedMeleeSpell>,
+                          mut text: MessageWriter<CombatTextSpawn>,
+                          mut go_lid: MessageWriter<GoLidOpen>,
+                          mut cooldowns: ResMut<Cooldowns>,
+                          mut pet_bar: ResMut<crate::ui_pet::PetBar>,
+                          mut items: ResMut<crate::items::Items>,
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                        let net_commands = crate::net::NetCommands(tx.clone());
+                        spell_go(
+                            caster,
+                            spell_id,
+                            0,
+                            vec![20],
+                            vec![],
+                            // The packet's own target field is deliberately a DIFFERENT guid: the
+                            // arm must take `hits[0]`, and this is what catches it reading here.
+                            Some(99),
+                            None,
+                            None,
+                            None,
+                            None,
+                            &mut commands,
+                            &index,
+                            &casting,
+                            &mut cast_events,
+                            &mut go_targets,
+                            &self_guid,
+                            &stores,
+                            &mut cast_bar,
+                            &mut pending,
+                            &mut queued_melee,
+                            &mut text,
+                            &mut go_lid,
+                            &mut crate::ui_loot::LootLatch::default(),
+                            (
+                                &mut cooldowns,
+                                Some(&spells),
+                                &mut items,
+                                &net_commands,
+                                &mut pet_bar,
+                            ),
+                            (
+                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut sheath,
+                                engaged,
+                            ),
+                            1,
+                        );
+                    },
+                )
+                .unwrap();
+            rx.try_iter().collect()
+        };
+
+        let swings = |cmds: &[ClientCommand]| {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    ClientCommand::AttackSwing { guid } => Some(*guid),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            swings(&fire(10, BACKSTAB, false)),
+            vec![20],
+            "a bit20 spell's own GO starts the swing at its first hit target"
+        );
+        assert!(
+            swings(&fire(10, SERPENT_STING, false)).is_empty(),
+            "Serpent Sting carries Ex2 bit 17, not bit 20 — it starts nothing (B280 / 0994 §4)"
+        );
+        assert!(
+            swings(&fire(10, BACKSTAB, true)).is_empty(),
+            "already swinging: `0x6e83e7`'s attack-lock gate refuses"
+        );
+        assert!(
+            swings(&fire(11, BACKSTAB, false)).is_empty(),
+            "somebody else's Backstab is not our attack-start"
+        );
     }
 }

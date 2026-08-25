@@ -627,6 +627,35 @@ impl SpellDisplay {
             && self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST == 0
     }
 
+    /// Whether *this spell's own `SMSG_SPELL_GO`* turns on the melee auto-attack — the **deferred**
+    /// half of the same law, [`Self::initiates_auto_attack`]'s exact complement.
+    /// `HandleSpellGo 0x6e7a70` @ `0x6e83c0` (re-read at the bytes for 1593):
+    ///
+    /// ```text
+    /// 6e83c0  call 0x6e5230(rec); test al,al; jne 6e83da   ; AttrEx2 bit20 SET -> start
+    /// 6e83cb  call 0x6e5200(rec); test al,al; je  6e8407   ; else the triad must hold
+    /// 6e83d4  test byte[rec+0x54],0x8; je 6e8407           ; ...AND rec+0x54 bit3
+    /// 6e83da  lea ecx,[esi+0xc48]; call 0x47bf60; or eax,edx; jne 6e8407  ; NOT already attacking
+    /// 6e83e9  hitCount>0 ? guid = hits[0] : (0,0)          ; [ebp-0x20] count, [ebp-0x1c] array
+    /// 6e8402  call 0x6131a0(ecx=caster, guid)              ; START MELEE AUTO-ATTACK
+    /// ```
+    ///
+    /// **Only the bit20 leg is modelled**, deliberately. The `rec+0x54 bit3` leg can only add
+    /// spells that already pass `0x6e5200` with bit20 CLEAR — and those started their attack at
+    /// the *send* (`initiates_auto_attack`), so by their GO the reference's `[+0xc48]` is set and
+    /// `0x6e83e7` refuses. It is unreachable-in-effect, and `rec+0x54`'s column is still only
+    /// INFERRED in wow-re (`combat-feel-law.md` §A3 owes it to the DBC), so building it would be
+    /// guessing at no gain. Modelling it would also be actively *wrong* here: our engaged mirror
+    /// is the server-echoed `Engaged`, not a local lock, so a leg that the reference silences
+    /// with `[+0xc48]` would fire a second `CMSG_ATTACKSWING` on our side.
+    ///
+    /// The 36 spells that reach this and nothing else are the stealth openers and positional
+    /// strikes — Backstab, Garrote, Ambush, Cheap Shot, Shred, Ravage, Pounce — plus Judgement:
+    /// exactly the class whose attack must wait for the server to say the strike landed.
+    pub fn initiates_auto_attack_at_go(&self) -> bool {
+        self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST != 0
+    }
+
     /// Hidden from the player's buff bar — the cache-builder's **display filter**
     /// (`PlayerAuras_Update 0x4e4170`'s append pass, sites `0x4e42b6`–`0x4e42c8`). The `Attributes`
     /// clause is a **byte-width** read — `mov cl,[SpellRec+0x18]; test cl,cl; js` — so it tests

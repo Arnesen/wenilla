@@ -860,28 +860,45 @@
     </Button>
 
     <!--
-        One reagent slot (ref TradeSkillItemTemplate inherits QuestItemTemplate, l.11-35 — the base
-        vanilla QuestItemTemplate isn't in the session's ref extraction, so its icon/name/count shape is
-        our own content, sized to the 2-column ~290px-wide grid the ref's own anchor chain implies):
-        a 28×28 icon, the reagent name to its right, "have /need" below the name. Gray-out + the
-        SetTradeSkillItem(sel, index) hover are the ref's own SetSelection reagent loop + OnEnter.
+        One reagent slot. The ref's `TradeSkillItemTemplate` (l.11-35) inherits `QuestItemTemplate` and
+        overrides **only scripts** — so the slot's whole visual IS QuestItemTemplate: a 39×39 icon, the
+        `UI-QuestItemNameFrame` plate riding its right edge, the name centred ON the plate, and the
+        "have /need" count on the icon's own BOTTOMRIGHT. Kept in sync by hand with QuestFrame.xml's
+        `QuestItemTemplate` and CraftFrame.xml's own copy (per-window duplication, StackSplit.xml's
+        "not a cross-file inherits" note).
+
+        This shape REPLACES a hand-rolled 28×28-icon / name-above / count-below slot that was written
+        when the session that built this window could not find the base QuestItemTemplate (bug B250,
+        decision 1595): TradeSkillFrame/CraftFrame are load-on-demand Blizzard ADDONS, so the ref lives
+        at `Interface\AddOns\Blizzard_TradeSkillUI\`, not in `Interface\FrameXML\`.
+
+        Gray-out + the SetTradeSkillItem(sel, index) hover are the ref's own SetSelection reagent loop
+        + OnEnter.
     -->
     <Button name="BenillaTradeSkillReagentTemplate" virtual="true" hidden="true">
-        <Size><AbsDimension x="140" y="32"/></Size>
+        <Size><AbsDimension x="147" y="41"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
                 <Texture name="$parentIcon">
-                    <Size><AbsDimension x="28" y="28"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                    <Size><AbsDimension x="39" y="39"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                 </Texture>
+                <!-- Declared AFTER the icon (same parent+level ⇒ z-tiebreak, this file's own note):
+                     the plate's 128×64 texture starts 10px INSIDE the icon's right edge, but its art
+                     only begins 11 texels in, so the visible plate opens 1px clear of the icon — the
+                     small gap the reference renders. -->
+                <Texture name="$parentNameFrame" file="Interface\QuestFrame\UI-QuestItemNameFrame">
+                    <Size><AbsDimension x="128" y="64"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentIcon" relativePoint="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
+                <FontString name="$parentName" inherits="GameFontHighlight" justifyH="LEFT">
+                    <Size><AbsDimension x="90" y="36"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentNameFrame"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
             </Layer>
             <Layer level="ARTWORK">
-                <FontString name="$parentName" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP">
-                    <Size><AbsDimension x="104" y="14"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentIcon" relativePoint="TOPRIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
-                </FontString>
-                <FontString name="$parentCount" inherits="GameFontNormalSmall" justifyH="LEFT">
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
+                    <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentIcon"><Offset><AbsDimension x="-4" y="1"/></Offset></Anchor></Anchors>
                 </FontString>
             </Layer>
         </Layers>

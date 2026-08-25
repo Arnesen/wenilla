@@ -137,7 +137,7 @@ fn armed() -> UiScript {
     s.set_unit("target", Some(target_unit()));
     s.set_inspect(Some(inspect_view("target")));
     // 4 yards away (d² = 16) — comfortably inside the verified 100.0.
-    s.set_inspect_reach(HashMap::from([("target".to_string(), reach(16.0))]));
+    s.set_unit_reach(HashMap::from([("target".to_string(), reach(16.0))]));
     s
 }
 
@@ -176,7 +176,7 @@ fn shipped_inspect_frame_loads_clean() {
 fn inspect_unit_refuses_out_of_range() {
     let mut s = armed();
     // 11 yards (d² = 121) — past the verified 100.0 threshold.
-    s.set_inspect_reach(HashMap::from([("target".to_string(), reach(121.0))]));
+    s.set_unit_reach(HashMap::from([("target".to_string(), reach(121.0))]));
 
     s.run(r#"InspectUnit("target")"#).unwrap();
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
@@ -191,7 +191,7 @@ fn inspect_unit_refuses_out_of_range() {
     );
 
     // Step inside the threshold: the same call now opens and requests.
-    s.set_inspect_reach(HashMap::from([("target".to_string(), reach(99.9))]));
+    s.set_unit_reach(HashMap::from([("target".to_string(), reach(99.9))]));
     s.run(r#"InspectUnit("target")"#).unwrap();
     assert!(
         s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
@@ -218,7 +218,7 @@ fn range_predicates_transcribe_the_verified_thresholds() {
         (100.0, true, false),
         (100.1, false, false),
     ] {
-        s.set_inspect_reach(HashMap::from([("target".to_string(), reach(d2))]));
+        s.set_unit_reach(HashMap::from([("target".to_string(), reach(d2))]));
         assert_eq!(
             s.eval::<bool>(r#"return CanInspect("target") ~= nil"#)
                 .unwrap(),
@@ -233,7 +233,7 @@ fn range_predicates_transcribe_the_verified_thresholds() {
         );
     }
     // Type 4 is the 30-yard row (900.0) — the table is indexed, not hardcoded to one distance.
-    s.set_inspect_reach(HashMap::from([("target".to_string(), reach(899.0))]));
+    s.set_unit_reach(HashMap::from([("target".to_string(), reach(899.0))]));
     assert!(s
         .eval::<bool>(r#"return CheckInteractDistance("target", 4) ~= nil"#)
         .unwrap());
@@ -259,7 +259,7 @@ fn range_predicates_transcribe_the_verified_thresholds() {
     );
 
     // The `type` argument's three degenerate arms, each the binary's own answer.
-    s.set_inspect_reach(HashMap::from([("target".to_string(), reach(1.0))]));
+    s.set_unit_reach(HashMap::from([("target".to_string(), reach(1.0))]));
     for bad in ["0", "5", "-1", "0.5"] {
         assert!(
             s.eval::<bool>(&format!(
@@ -280,6 +280,20 @@ fn range_predicates_transcribe_the_verified_thresholds() {
         s.eval::<bool>(r#"return CheckInteractDistance("target") ~= nil"#)
             .is_err(),
         "no distIndex is a script error"
+    );
+
+    // The token is CASE-FOLDED, like every compare in the resolver both predicates reach their
+    // unit through (`_strnicmp`, 1247) — the same fold `UnitName("Target")` already gets. An
+    // addon that capitalises must not be told the unit is out of range.
+    assert!(
+        s.eval::<bool>(r#"return CheckInteractDistance("TARGET", 1) ~= nil"#)
+            .unwrap(),
+        "an upper-case token names the same unit"
+    );
+    assert!(
+        s.eval::<bool>(r#"return CanInspect("Target") ~= nil"#)
+            .unwrap(),
+        "…for both predicates"
     );
 }
 
