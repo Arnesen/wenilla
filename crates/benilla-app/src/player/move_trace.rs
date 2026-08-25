@@ -11,6 +11,13 @@
 //!   latch are exactly the ones it drops (decision 0644).
 //! - **`mvr`** — one line per mover-claim packet ([`mover_claim`]): who we told the server we are
 //!   driving, which is what decides whether anything under `snd` is accepted.
+//! - **`sit`** — one line per **stand-state** decision ([`posture`]): every commit, and every press
+//!   the client's own sit-down gate refused, each with the movement word that decided it. B155's
+//!   reading instrument ("you can sit while swimming"): the refusal is silent in the reference and
+//!   therefore silent in ours, so without this the *whole* mechanism is invisible from a live run —
+//!   a granted sit and a refused one look identical on screen, and the granted-underwater bug and a
+//!   gate that refuses everything are the same picture. Covers the `X` key and the `/sit` family
+//!   alike, because both land on the one commit it is emitted from.
 //! - **`snd`** — one line per outbound `MSG_MOVE_*` ([`sent`]), the send-side twin of `net::motion`'s
 //!   `rly`: it makes **our own wire cadence measurable** (decision 0617), which is the only way to
 //!   compare it against the reference's — the 1.12.1 sniff's client stream is a list of exactly these
@@ -62,6 +69,35 @@ pub(super) fn sent(kind: crate::net::MoveKind, flags: u32, facing: f32, pos: [f3
         &format!(
             "{kind:?} flags={flags:#x} o={facing:.4} pos=[{:.2},{:.2},{:.2}]",
             pos[0], pos[1], pos[2]
+        ),
+    );
+}
+
+/// One `sit` line per **stand-state decision** — the commits and the refusals, with the movement
+/// word that decided each.
+///
+/// `what` is `commit` or `REFUSED`; `state` is the `UnitStandStateType` asked for (0 STAND · 1 SIT ·
+/// 2 SIT_CHAIR · 3 SLEEP · 8 KNEEL), `from` the state it was asked from, and `flags` the live
+/// `CMovement` word the client's gate reads (`[[this+0x118]+0x40]`) — with its two decisive
+/// sub-readings spelled out rather than left to be masked by eye, because "is `0x220000f` swimming?"
+/// is exactly the question a trace exists to stop anyone answering from memory.
+///
+/// Emitted for **both** outcomes on purpose. The reference refuses a sit-down silently — no error
+/// text, no sound — so a refusal has no observable of its own; and a *granted* sit is equally
+/// unreadable, since the pose that follows is identical whether the gate ran or was never there.
+/// One line per decision is what makes B155's fix falsifiable in a live run instead of assertable
+/// from a screenshot of a seated character.
+pub(super) fn posture(what: &str, state: u8, from: u8, flags: u32) {
+    if !trace::enabled() {
+        return;
+    }
+    use crate::creature_anim::move_flags as f;
+    trace::line(
+        "sit",
+        &format!(
+            "{what} state={state} from={from} flags={flags:#x} swim={} moving={}",
+            u8::from(flags & f::SWIMMING != 0),
+            u8::from(flags & f::ANY_MOVE != 0),
         ),
     );
 }

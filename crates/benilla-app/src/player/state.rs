@@ -897,6 +897,126 @@ pub(super) fn autorun_cancelled(
     fwd_down || back_down || both_engaged || lost_mover
 }
 
+/// Does the reference **refuse** this stand-state change? The sit-down gate inside the client's one
+/// `SetStandState` (`0x5ed430`) — bug B155, *"you can sit fully underwater"*.
+///
+/// The client will not seat a body the movement layer is already driving. Sitting down reads the
+/// live `CMovement` flags word `[[this+0x118]+0x40]` — the same word we stream and the cast gates
+/// read (decision 1056) — against a per-target-state mask, and **returns before the packet is
+/// built** when any masked bit is set: no `CMSG_STANDSTATECHANGE`, no local apply, no message.
+/// Standing up is the asymmetry: `newState == 0` jumps straight to the send and never consults the
+/// word at all, so movement can always stand you (VERIFIED `0x5ed4d8`–`0x5ed501`, wow-re
+/// `object-layer/scratch/standstate-movement-trigger.md` §1).
+///
+/// Because the refusal lives in the **one setter**, it covers every caller at once — the `X`
+/// keybind (`SitOrStand`, Lua `0x48b920`) and the posture emotes (`/sit`, `/sleep`, `/kneel`,
+/// `/lay`, which reach the same `0x5ed430` through `DoEmote`'s `EmoteSpecProc == 1` arm). That is
+/// the only thing covering them: the emote layer's own swim suppression
+/// ([`crate::ui_chat::input::emote_send_eligible`]'s `EmoteFlags & 0x0080`) does **not** fire here
+/// — the shipped `Emotes.dbc` gives STATE_SIT (13), STATE_SLEEP (12) and STATE_STAND (26) flags
+/// `0x6202`, with that bit clear — read off the 5875 data by
+/// `ui_chat::tests::the_posture_emotes_carry_no_swim_suppression_flag`.
+///
+/// The masks are the reference's own two:
+///
+/// | target state | mask | means |
+/// |---|---|---|
+/// | 0 STAND | — | never refused |
+/// | 3 SLEEP | `0x30` | refused while **turning** |
+/// | 1 SIT · 2 SIT_CHAIR · 8 KNEEL · … | `0x20000f` | refused while **translating or swimming** |
+///
+/// `0x20000f` is not a mask invented here: it is byte-verified at a second, unrelated site as the
+/// client's own "am I moving" test — the stationary-cast pin's `[9e8] & 0x20000f`
+/// ([`crate::creature_anim::move_flags::CAST_PIN_MOVE`]) — the four direction bits plus
+/// [`SWIMMING`](crate::creature_anim::move_flags::SWIMMING), turn bits deliberately absent. The
+/// swim bit in it is the whole of B155: a swimmer is *always* carrying it, so the press is refused
+/// for as long as they are in the water, whether or not they are stroking.
+pub(super) fn stand_state_refused(move_flags: u32, new_state: u8) -> bool {
+    use crate::creature_anim::move_flags as f;
+    // The stand-up asymmetry: never gated.
+    if new_state == 0 {
+        return false;
+    }
+    let mask = if new_state == 3 {
+        f::TURN_LEFT | f::TURN_RIGHT
+    } else {
+        f::ANY_MOVE | f::SWIMMING
+    };
+    move_flags & mask != 0
+}
+
+#[cfg(test)]
+mod stand_state_tests {
+    use super::stand_state_refused;
+    use crate::creature_anim::move_flags as f;
+
+    /// B155's exact press: swimming, X pressed, the client refuses — and the same swimmer standing
+    /// up is not refused, which is the asymmetry that makes the water escapable.
+    #[test]
+    fn a_swimmer_cannot_sit_but_can_always_stand() {
+        // Floating still, no stroke: SWIMMING alone is enough.
+        assert!(stand_state_refused(f::SWIMMING, 1), "sit refused mid-swim");
+        assert!(
+            stand_state_refused(f::SWIMMING | f::FORWARD, 1),
+            "swimming forward too"
+        );
+        // …and every seat shape the posture emotes can ask for.
+        for state in [1u8, 2, 8] {
+            assert!(
+                stand_state_refused(f::SWIMMING, state),
+                "state {state} refused mid-swim"
+            );
+        }
+        // Standing up is never gated — `newState == 0` skips the word entirely.
+        assert!(!stand_state_refused(f::SWIMMING | f::FORWARD, 0));
+        assert!(!stand_state_refused(f::ANY_MOVE | f::SWIMMING, 0));
+    }
+
+    /// On dry land the gate is the *translation* test, not a blanket "any flag": sitting while
+    /// walking is refused, sitting while turning in place is not — the turn bits are outside
+    /// `0x20000f`. (The control that says this is a real mask rather than a swim special-case.)
+    #[test]
+    fn sitting_is_refused_while_translating_and_allowed_while_merely_turning() {
+        assert!(!stand_state_refused(0, 1), "standing still: sit granted");
+        for bit in [f::FORWARD, f::BACKWARD, f::STRAFE_LEFT, f::STRAFE_RIGHT] {
+            assert!(stand_state_refused(bit, 1), "translating: sit refused");
+        }
+        for bit in [f::TURN_LEFT, f::TURN_RIGHT] {
+            assert!(
+                !stand_state_refused(bit, 1),
+                "turning in place: sit granted"
+            );
+        }
+        // Mode bits are not movement: a rooted or water-walking body may still sit.
+        for bit in [f::ROOT, f::WATER_WALKING, f::FALLING, f::WALK_MODE] {
+            assert!(
+                !stand_state_refused(bit, 1),
+                "mode bit {bit:#x} is not a move"
+            );
+        }
+    }
+
+    /// SLEEP (3) takes the *other* mask — the turn bits — so `/sleep` and `/sit` genuinely disagree
+    /// about which inputs block them. Asserted so the reference's odd pair is recorded rather than
+    /// quietly "corrected" into one mask.
+    #[test]
+    fn sleep_reads_the_turn_mask_not_the_translate_mask() {
+        assert!(
+            stand_state_refused(f::TURN_LEFT, 3),
+            "turning: /sleep refused"
+        );
+        assert!(stand_state_refused(f::TURN_RIGHT, 3));
+        assert!(
+            !stand_state_refused(f::FORWARD, 3),
+            "walking: /sleep granted"
+        );
+        assert!(
+            !stand_state_refused(f::SWIMMING, 3),
+            "swimming: /sleep granted"
+        );
+    }
+}
+
 #[cfg(test)]
 mod autorun_tests {
     use super::{autorun_cancelled, forward_axis};

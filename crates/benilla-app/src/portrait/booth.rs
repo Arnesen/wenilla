@@ -530,6 +530,20 @@ pub(super) fn spawn_booth_model(
         }
         if use_rig {
             child.insert(benilla_world::rig_palette::RigPart(root));
+            // **A skinned booth part is never frustum-culled** — the same law the world's dress
+            // path states (`entities::attach::dress`, 0648/1270/1473), and for a sharper reason
+            // here. The part's vertices are moved by the GPU joint palette; the only bound Bevy
+            // has for them is `calculate_bounds`' box over the mesh's own **bind-pose** vertices,
+            // and this camera is the artist's *portrait* camera — calibrated against the model in
+            // its **Stand** pose. On any model whose rest pose is not its Stand the two are
+            // nowhere near each other, so the bind box falls outside the frustum and every batch
+            // is culled while the posed geometry is dead centre of frame. `Creature\CarrionBird`
+            // is the case: bind-pose z tops out at 1.19, its Stand box runs 0.54..6.23, and the
+            // authored camera sits at z = 3.03 looking at z = 2.97 — nothing drew, and the
+            // portrait baked the empty booth (decision 1577, report B92). `Creature\Worm` the
+            // same. There is no cull to lose: a booth holds one model that its camera was
+            // authored to frame.
+            child.insert(bevy::camera::visibility::NoFrustumCulling);
         }
     }
     let mut booth_rig = BoothRig {
@@ -1195,6 +1209,123 @@ mod tests {
         assert!(
             (turned - sparkle).length() > 0.2,
             "…which means it MOVED — a rest-pose placement would not have"
+        );
+    }
+
+    /// **A skinned booth part is spawned exempt from the frustum test** — decision 1577, report B92.
+    ///
+    /// The part's vertices live in the GPU joint palette; the only bound Bevy can build for it is
+    /// `calculate_bounds`' box over the mesh's own **bind-pose** vertices, and the booth camera is
+    /// the artist's portrait camera, aimed at the model's **Stand**. `Creature\CarrionBird` bakes
+    /// a bind box topping out at z = 1.19 while that camera sits at z = 3.03 looking at z = 2.97:
+    /// every batch culled, an opaque-black portrait, and the posed bird dead centre of a frustum
+    /// nothing was ever tested against. The world's dress path states the same exemption
+    /// (`entities::attach::dress`); this is the booth half, and it is what the marker guards.
+    ///
+    /// The unskinned twin is the control: a static part draws its bind-pose mesh *at* bind pose, so
+    /// its own box is the truth and it keeps the ordinary test.
+    #[test]
+    fn a_skinned_booth_part_is_never_frustum_culled() {
+        let mut app = App::new();
+        app.init_resource::<benilla_world::rig_palette::RigPalettes>();
+        app.init_resource::<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>();
+
+        // A two-bone rest skeleton — enough for `RigPose::new` and a real palette slot.
+        let skeleton = benilla_assets::ModelSkeleton {
+            joints: vec![
+                benilla_assets::ModelJoint {
+                    parent: -1,
+                    local_translation: Vec3::ZERO,
+                    billboard: None,
+                    parent_arm: None,
+                },
+                benilla_assets::ModelJoint {
+                    parent: 0,
+                    local_translation: Vec3::Y,
+                    billboard: None,
+                    parent_arm: None,
+                },
+            ],
+            spine_bone: None,
+            head_bone: None,
+        };
+        let ibp = Handle::default();
+        // One skinned batch and one static one, through the same call.
+        let parts = vec![
+            BoothPart {
+                skinned: Some(Handle::default()),
+                static_mesh: Handle::default(),
+                material: Handle::default(),
+                alpha_anim: None,
+            },
+            BoothPart {
+                skinned: None,
+                static_mesh: Handle::default(),
+                material: Handle::default(),
+                alpha_anim: None,
+            },
+        ];
+
+        let root = app.world_mut().spawn(Transform::IDENTITY).id();
+        let mut palettes = app
+            .world_mut()
+            .remove_resource::<benilla_world::rig_palette::RigPalettes>()
+            .expect("just inserted");
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, app.world());
+            spawn_booth_model(
+                &mut commands,
+                &mut palettes,
+                root,
+                RenderLayers::layer(9),
+                &parts,
+                &[],
+                Some((&skeleton, &ibp, None)),
+                None,
+                BoothMotion::Frozen,
+                [false, false],
+                &[],
+            )
+            .finish(&mut commands);
+        }
+        queue.apply(app.world_mut());
+        app.world_mut().insert_resource(palettes);
+
+        let children: Vec<Entity> = app
+            .world()
+            .entity(root)
+            .get::<Children>()
+            .expect("the bake spawned its parts")
+            .iter()
+            .collect();
+        let rigged: Vec<Entity> = children
+            .iter()
+            .copied()
+            .filter(|e| {
+                app.world()
+                    .entity(*e)
+                    .contains::<benilla_world::rig_palette::RigPart>()
+            })
+            .collect();
+        assert_eq!(rigged.len(), 1, "one of the two batches skins");
+        assert!(
+            app.world()
+                .entity(rigged[0])
+                .contains::<bevy::camera::visibility::NoFrustumCulling>(),
+            "a palette-skinned booth part must not be tested against its bind-pose bound"
+        );
+        let statics: Vec<Entity> = children
+            .iter()
+            .copied()
+            .filter(|e| !rigged.contains(e))
+            .collect();
+        assert!(
+            statics.iter().all(|e| !app
+                .world()
+                .entity(*e)
+                .contains::<bevy::camera::visibility::NoFrustumCulling>()),
+            "…and the static twin keeps the ordinary test — its own box IS where it draws"
         );
     }
 

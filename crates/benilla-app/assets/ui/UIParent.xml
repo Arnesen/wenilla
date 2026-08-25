@@ -241,7 +241,15 @@
             FramerateLabel = {baseY = 64, bottomEither = 42, pet = 42, reputation = 9},
             CastingBarFrame = {baseY = 60, bottomEither = 40, pet = 40, reputation = 9},
             ChatFrame1 = {baseY = 85, bottomLeft = 17, pet = 17, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMLEFT", rpoint = "BOTTOMLEFT", xOffset = 32},
-            ChatFrame2 = {baseY = 85, bottomRight = 17, rightLeft = -88, rightRight = -43, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMRIGHT", rpoint = "BOTTOMRIGHT", xOffset = -32},
+            -- ChatFrame2 is NOT managed here, and its absence is the fix for the latent
+            -- decision 1499 flagged in the ClearAllPoints comment below. The reference's row
+            -- seats an UNDOCKED ChatFrame2 against the screen's bottom-right; ours is DOCKED to
+            -- ChatFrame1, and a docked frame takes its rect from the dock, never from this pass.
+            -- With the row present the pass cleared ChatFrame2's authored anchors and re-seated it
+            -- with a single BOTTOMRIGHT point and no size — an unresolvable rect, so the window
+            -- rendered nothing at all. That was invisible while ChatFrame2 had no tab; the moment
+            -- one existed (1575) it became "the Combat Log tab shows an empty screen".
+            -- Re-add this row the day windows can be undocked, which is chat *settings* (0288 §2).
             ShapeshiftBarFrame = {baseY = 0, bottomLeft = 45, reputation = 9, maxLevel = -5, anchorTo = "MainMenuBar", point = "BOTTOMLEFT", rpoint = "TOPLEFT", xOffset = 30},
 
             -- Globals to write

@@ -355,7 +355,12 @@
         -- (FCF_OnUpdate: MouseIsOver(chatFrame, 45, -10, -5, 5) — 45 up into the tab zone,
         -- 10 down past the edit box seam, 5 out each side).
         local function overDock(x, y)
-            local f = ChatFrame1
+            -- **The SELECTED frame, not ChatFrame1.** The two dock windows are mutually exclusive
+            -- — selecting one hides the other — so reading a fixed frame here meant that the
+            -- instant the Combat Log was selected the hover test measured a hidden window, went
+            -- false, and drove the reveal fade to 0: the tabs and the chat background disappeared
+            -- together (director-reported). The dock's rect is whichever window is up.
+            local f = getglobal("ChatFrame" .. BenillaFCF.selected) or ChatFrame1
             local left, right = f:GetLeft(), f:GetRight()
             local top, bottom = f:GetTop(), f:GetBottom()
             if not left then return false end
@@ -885,6 +890,60 @@
                         <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="2" y="-6"/></Offset></Anchor>
                     </Anchors>
                 </Texture>
+                <!-- The ChatFrameBorder ring (ref ChatFrameBorder slices; texcoords quoted from
+                     the ref resize buttons). Corners 16×16, edges stretched between them. -->
+                <Texture name="$parentBorderTopLeft" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBackground"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.25" top="0" bottom="0.125"/>
+                </Texture>
+                <Texture name="$parentBorderTopRight" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT" relativeTo="$parentBackground"><Offset><AbsDimension x="2" y="2"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.75" right="1.0" top="0" bottom="0.125"/>
+                </Texture>
+                <Texture name="$parentBorderBottomLeft" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT" relativeTo="$parentBackground"><Offset><AbsDimension x="-2" y="-3"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.25" top="0.7265625" bottom="0.8515625"/>
+                </Texture>
+                <Texture name="$parentBorderBottomRight" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentBackground"><Offset><AbsDimension x="2" y="-3"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.75" right="1.0" top="0.7265625" bottom="0.8515625"/>
+                </Texture>
+                <Texture name="$parentBorderTop" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentBorderTopLeft" relativePoint="RIGHT"/>
+                        <Anchor point="RIGHT" relativeTo="$parentBorderTopRight" relativePoint="LEFT"/>
+                    </Anchors>
+                    <TexCoords left="0.25" right="0.75" top="0" bottom="0.125"/>
+                </Texture>
+                <Texture name="$parentBorderBottom" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentBorderBottomLeft" relativePoint="RIGHT"/>
+                        <Anchor point="RIGHT" relativeTo="$parentBorderBottomRight" relativePoint="LEFT"/>
+                    </Anchors>
+                    <TexCoords left="0.25" right="0.75" top="0.7265625" bottom="0.8515625"/>
+                </Texture>
+                <Texture name="$parentBorderLeft" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="$parentBorderTopLeft" relativePoint="BOTTOM"/>
+                        <Anchor point="BOTTOM" relativeTo="$parentBorderBottomLeft" relativePoint="TOP"/>
+                    </Anchors>
+                    <TexCoords left="0" right="0.25" top="0.125" bottom="0.7265625"/>
+                </Texture>
+                <Texture name="$parentBorderRight" file="Interface\ChatFrame\ChatFrameBorder" alpha="0">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="$parentBorderTopRight" relativePoint="BOTTOM"/>
+                        <Anchor point="BOTTOM" relativeTo="$parentBorderBottomRight" relativePoint="TOP"/>
+                    </Anchors>
+                    <TexCoords left="0.75" right="1.0" top="0.125" bottom="0.7265625"/>
+                </Texture>
             </Layer>
         </Layers>
         <Scripts>
@@ -1061,7 +1120,7 @@
                 BenillaFCF_TabClick(1)
             </OnClick>
         </Scripts>
-        <ButtonText name="$parentText" text="General">
+        <ButtonText name="$parentText" text="GENERAL">
             <Anchors>
                 <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
             </Anchors>
@@ -1073,6 +1132,81 @@
              natural-size law (an unpinned axis inherits the owner's edges, decision 0068), which
              parked the glow 7 units high; the explicit height states what the ref reads from the
              file. -->
+        <HighlightTexture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
+            <Size><AbsDimension x="0" y="32"/></Size>
+            <Anchors>
+                <Anchor point="LEFT" relativeTo="$parentLeft"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
+                <Anchor point="RIGHT" relativeTo="$parentRight"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
+            </Anchors>
+        </HighlightTexture>
+    </Button>
+
+    <!--
+        ChatFrame2Tab — the "Combat Log" dock tab. **This is the tab that was missing**: every
+        piece of machinery around it already existed and was written to expect it — `BenillaFCF`'s
+        fade, resize and flash loops all run `for i = 1, 2` over
+        `getglobal("ChatFrame"..i.."Tab")`, `selected = 1` is commented "2 = Combat Log", and
+        `FCF_SelectDockFrame` errors on any id that is not 1 or 2 — but the button itself was never
+        authored, and each of those loops has an `if tab then` guard that swallowed its absence
+        without a word. ChatFrame2 was therefore reachable only from Lua: it is `hidden`, as a
+        non-selected dock frame should be, and nothing on screen could select it.
+
+        Labels are the GlobalString KEYS (`GENERAL`, `COMBAT_LOG`), resolved out of the player's own
+        `GlobalStrings.lua` by the loader's ALL-CAPS key rule — the same shape the combat log's own
+        format strings use (1571), and the reason neither word is quoted in this file.
+
+        Anchored LEFT-to-RIGHT off tab 1; `BenillaFCF_TabResize` sizes both to their measured label
+        widths, so the abutment survives a locale whose words are longer.
+    -->
+    <Button name="ChatFrame2Tab" frameStrata="LOW" alpha="0">
+        <Size><AbsDimension x="70" y="32"/></Size>
+        <Anchors>
+            <Anchor point="LEFT" relativeTo="ChatFrame1Tab" relativePoint="RIGHT"/>
+        </Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentLeft" file="Interface\ChatFrame\ChatFrameTab">
+                    <Size><AbsDimension x="16" y="32"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0.0" right="0.25" top="0.0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentMiddle" file="Interface\ChatFrame\ChatFrameTab">
+                    <Size><AbsDimension x="38" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.25" right="0.75" top="0.0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\ChatFrame\ChatFrameTab">
+                    <Size><AbsDimension x="16" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddle" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.75" right="1.0" top="0.0" bottom="1.0"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Frame name="$parentFlash" hidden="true">
+                <Size><AbsDimension x="5" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="$parentLeft"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
+                    <Anchor point="RIGHT" relativeTo="$parentRight"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnClick>
+                BenillaFCF_TabClick(2)
+            </OnClick>
+        </Scripts>
+        <ButtonText name="$parentText" text="COMBAT_LOG">
+            <Anchors>
+                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
+            </Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormalSmall"/>
         <HighlightTexture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
             <Size><AbsDimension x="0" y="32"/></Size>
             <Anchors>

@@ -1106,7 +1106,28 @@ fn control(
         {
             request_stand = Some(0);
         }
+        // The sit-down gate — the client's own, inside the ONE setter `0x5ed430`
+        // ([`state::stand_state_refused`], bug B155): a body the movement layer is already driving
+        // cannot be seated, and **swimming is one of the driving states**, so the press is refused
+        // for as long as we are in the water. Silently, and before the packet — like the reference,
+        // which returns from `SetStandState` without building `CMSG_STANDSTATECHANGE` at all.
+        // Placed on the shared commit below rather than on the X key, so it covers the posture
+        // emotes (`/sit`, `/sleep`, `/kneel`) in the same stroke — their own `Emotes.dbc` gate
+        // does NOT carry the swim bit (`ui_chat::tests::the_posture_emotes_carry_no_swim_suppression_flag`).
+        // The word is the live outbound one, a frame old — the same `[[this+0x118]+0x40]` the cast
+        // gates read (decision 1056), so all three refusals can never disagree about "am I moving".
+        if let Some(s) =
+            request_stand.filter(|&s| state::stand_state_refused(player.move_flags(), s))
+        {
+            debug!(
+                "stand state {s} refused (move flags {:#x} — the client's `0x5ed430` gate)",
+                player.move_flags()
+            );
+            move_trace::posture("REFUSED", s, stand_state, player.move_flags());
+            request_stand = None;
+        }
         if let Some(s) = request_stand.filter(|&s| s != stand_state) {
+            move_trace::posture("commit", s, stand_state, player.move_flags());
             player.stand_pending = Some(s);
             let _ = net.0 .0.send(ClientCommand::StandStateChange {
                 state: u32::from(s),

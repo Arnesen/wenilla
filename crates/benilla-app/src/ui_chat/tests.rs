@@ -1854,3 +1854,208 @@ fn the_combat_log_lands_in_window_two_only() {
         assert!(!windows.wants(1, kind));
     }
 }
+
+/// **Both dock tabs exist, and clicking one selects its window.**
+///
+/// This is the test that was missing when 1571 shipped the combat log's chat lines: the lines
+/// routed correctly into ChatFrame2 and no player could ever see them, because `ChatFrame2Tab` had
+/// never been authored. Every piece of machinery around it *did* exist and was written for two
+/// tabs — `BenillaFCF`'s fade/resize/flash loops all run `for i = 1, 2` — but each carries an
+/// `if tab then` guard, so the absence was swallowed silently for as long as it existed. The
+/// director found it by looking at the screen.
+///
+/// So the assertion is deliberately about the tab BUTTON and the selection it drives, not about
+/// routing (which `the_combat_log_lands_in_window_two_only` already covers and which was never
+/// the broken half).
+#[test]
+fn both_dock_tabs_exist_and_select_their_window() {
+    let s = chat_vm();
+    for id in [1, 2] {
+        assert!(
+            s.eval::<bool>(&format!("return ChatFrame{id}Tab ~= nil"))
+                .unwrap(),
+            "ChatFrame{id}Tab is missing — its window is unreachable from the screen"
+        );
+    }
+    // The default dock: General selected and shown, Combat Log hidden behind its tab.
+    assert_eq!(s.eval::<i64>("return BenillaFCF.selected").unwrap(), 1);
+    assert!(s.eval::<bool>("return ChatFrame1:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return ChatFrame2:IsShown()").unwrap());
+
+    // Clicking the Combat Log tab swaps them — the path a player takes to read the combat log.
+    s.run("BenillaFCF_TabClick(2)").unwrap();
+    assert_eq!(s.eval::<i64>("return BenillaFCF.selected").unwrap(), 2);
+    assert!(s.eval::<bool>("return ChatFrame2:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return ChatFrame1:IsShown()").unwrap());
+    assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+}
+
+/// The two dock tabs are labelled from the install's own `GlobalStrings.lua` (`GENERAL`,
+/// `COMBAT_LOG`) rather than from words quoted into our XML — the loader's ALL-CAPS key rule, and
+/// the same shape the combat log's format strings use (1571). Skips without client data.
+#[test]
+fn the_dock_tab_labels_come_from_the_install() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let src = chain
+        .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+        .expect("GlobalStrings.lua in the chain");
+    let s = benilla_ui::script::UiScript::new().expect("VM");
+    s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+    for key in ["GENERAL", "COMBAT_LOG"] {
+        let text: String = s.lua().globals().get(key).unwrap_or_default();
+        assert!(!text.is_empty(), "{key} is not a GlobalString");
+    }
+}
+
+/// **The Combat Log window has a real rect, and it is the dock's.**
+///
+/// This is the test whose absence let 1575 ship a tab onto a window that rendered nothing:
+/// `ChatFrame2` carries no `<Size>` and derives its whole rect from two anchors onto ChatFrame1,
+/// and every check we had asked only whether lines *routed* into it. They did — 21 of them — into a
+/// frame measuring 0×0, so `GetNumMessages()` was 21 and the screen was empty.
+///
+/// Asserting the rect (not the size attribute — `GetWidth` reports the explicit field, which is 0
+/// here by design and told us nothing) is what makes "the window exists" mean "the window has
+/// pixels".
+#[test]
+fn the_combat_log_window_has_the_docks_rect() {
+    let s = chat_vm();
+    let edge = |frame: &str, get: &str| {
+        s.eval::<Option<f64>>(&format!("return {frame}:{get}()"))
+            .unwrap()
+    };
+    for get in ["GetLeft", "GetRight", "GetTop", "GetBottom"] {
+        let one = edge("ChatFrame1", get);
+        let two = edge("ChatFrame2", get);
+        assert!(
+            one.is_some(),
+            "ChatFrame1:{get}() is nil — the dock has no rect"
+        );
+        assert_eq!(
+            two, one,
+            "ChatFrame2:{get}() must equal ChatFrame1's — a docked window shares the dock's rect"
+        );
+    }
+    assert_eq!(
+        s.eval::<i64>("return ChatFrame2:GetNumPoints()").unwrap(),
+        2,
+        "both authored anchors must survive — one alone cannot size the frame"
+    );
+}
+
+/// Both dock windows carry the SAME chrome. `BenillaFCF_Textures(id)` looks each piece up by
+/// `ChatFrame<id><suffix>`, which is the reference's own per-frame `CHAT_FRAME_TEXTURES` shape —
+/// and ChatFrame2 had only a background, no borders. Selecting it therefore hid ChatFrame1's
+/// chrome (its textures are ChatFrame1's children) and put nothing in its place: the background
+/// and border vanished, which is what the director saw.
+#[test]
+fn both_dock_windows_carry_the_same_chrome() {
+    let s = chat_vm();
+    for suffix in [
+        "Background",
+        "BorderTopLeft",
+        "BorderTopRight",
+        "BorderBottomLeft",
+        "BorderBottomRight",
+        "BorderTop",
+        "BorderBottom",
+        "BorderLeft",
+        "BorderRight",
+    ] {
+        for id in [1, 2] {
+            assert!(
+                s.eval::<bool>(&format!("return ChatFrame{id}{suffix} ~= nil"))
+                    .unwrap(),
+                "ChatFrame{id}{suffix} is missing — the dock's chrome dies when window {id} is up"
+            );
+        }
+    }
+    assert_eq!(
+        s.eval::<i64>("return table.getn(BenillaFCF_Textures(2))")
+            .unwrap(),
+        s.eval::<i64>("return table.getn(BenillaFCF_Textures(1))")
+            .unwrap(),
+    );
+}
+
+/// **No docked chat window may appear in `UIParent.xml`'s managed-position table.**
+///
+/// The structural guard on the root cause. That pass owns a frame's whole seat — it
+/// `ClearAllPoints()` first, by design (decision 1499) — so a row naming a *docked* window wipes
+/// the anchors that tie it to the dock and re-seats it with a single point and no size: an
+/// unresolvable rect. The reference's own ChatFrame2 row is for an UNDOCKED window, which is chat
+/// settings and not built (0288 §2); carrying it here cost B297 a visible fix.
+///
+/// A string check because that is the level the bug lives at — the row's mere presence is the
+/// defect, whatever it contains.
+#[test]
+fn no_docked_chat_window_is_managed_by_uiparent() {
+    let xml = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/UIParent.xml"),
+    )
+    .expect("UIParent.xml");
+    for line in xml.lines() {
+        let code = line.trim_start();
+        if code.starts_with("--") {
+            continue; // the comment explaining why the row is gone names it, deliberately
+        }
+        assert!(
+            !code.starts_with("ChatFrame2 ="),
+            "ChatFrame2 is DOCKED — a managed row clears its dock anchors: {code}"
+        );
+    }
+    assert!(
+        xml.contains("ChatFrame1 = {baseY = 85"),
+        "ChatFrame1 IS managed (it is the dock's own seat) — this test must not pass vacuously"
+    );
+}
+
+/// **What does NOT gate a `/sit` underwater** — the negative that sends B155's refusal to the
+/// stand-state setter instead of here (`player::state::stand_state_refused`).
+///
+/// [`emote_send_eligible`] carries the client's own swim suppression (`EmoteFlags & 0x0080` at
+/// `0x47db7d`), so it is the obvious suspect for "the reference won't let me `/sit` in water" — and
+/// it is the wrong one. Read off the shipped `Emotes.dbc`: every posture emote (`/sit`, `/sleep`,
+/// `/kneel`, `/stand`) carries `0x6202`, and `0x0080` is clear in it, so the emote layer passes them
+/// straight through while swimming. This asserts that on the real data, because it is the fact that
+/// decides *where* the fix belongs: if a later data read made these rows carry `0x0080`, the two
+/// gates would double up and this test is what says so. Skips without client data.
+#[test]
+fn the_posture_emotes_carry_no_swim_suppression_flag() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let cat = benilla_formats::load_emote_sound_catalog(&mut chain).expect("emote catalog");
+    // Every posture row in the shipped table, found by scanning rather than by hardcoded id.
+    let posture: Vec<(u32, u32, u32)> = (0..600u32)
+        .filter_map(|id| Some((id, cat.posture_state(id)?, cat.emote_flags(id)?)))
+        .collect();
+    let states: Vec<u32> = posture.iter().map(|&(_, s, _)| s).collect();
+    for state in [0u32, 1, 3, 8] {
+        assert!(
+            states.contains(&state),
+            "the shipped table has a posture emote for stand state {state}; found {states:?}"
+        );
+    }
+    for (id, state, flags) in posture {
+        assert_eq!(
+            flags & 0x0080,
+            0,
+            "posture emote {id} (state {state}) carries the swim-suppress bit: {flags:#x}"
+        );
+        // STATE_DEAD (7, emote 65, `0x6602`) is the one posture row the client kills outright —
+        // `0x0400`, unconditional suppress, in water or out. It is not reachable from the slash
+        // grammar and it is not what B155 is about; every posture a player can actually ask for
+        // passes the emote gate mid-swim, which is the point.
+        if flags & 0x0400 != 0 {
+            assert_eq!(state, 7, "only STATE_DEAD is unconditionally suppressed");
+            continue;
+        }
+        // …so the emote gate lets it through mid-swim. (`stand_state` here is the performer's
+        // CURRENT state; a standing swimmer pressing `/sit` is the reported case.)
+        assert!(
+            super::input::emote_send_eligible(flags, 0, true),
+            "posture emote {id} passes the emote gate while swimming"
+        );
+    }
+}

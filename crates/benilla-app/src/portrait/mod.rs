@@ -645,6 +645,54 @@ fn log_frame(token: &str, a: &PortraitAnchors, cam: &Transform) {
     }
 }
 
+/// `WOW_BOOTH_LOG=1` — where each booth's **posed skeleton** actually ended up, logged whenever it
+/// moves (quantised to a centimetre, so a still bake prints once).
+///
+/// [`log_frame`] says where the *camera* went; this says where the *model* went, and the pair is the
+/// whole diagnosis of a bake that came back empty. Decision 1577's carrion bird posed its bones up
+/// to y = 4.70 with its authored camera sitting at y = 3.03 — a camera aimed correctly at geometry
+/// Bevy was culling against a **bind-pose** bound that stopped at 1.19. Either half alone reads as
+/// "looks fine"; only the two together say the camera and the model were in the same place and the
+/// pixels still were not.
+fn log_booth_pose(
+    booths: Res<Booths>,
+    rigs: Query<&benilla_world::rig_anim::RigPose>,
+    // Last-logged extent per booth, in centimetres — `[min xyz, max xyz]`.
+    mut last: Local<HashMap<String, [i32; 6]>>,
+) {
+    if !booth_log() {
+        return;
+    }
+    for (token, booth) in &booths.0 {
+        let Ok(pose) = rigs.get(booth.root) else {
+            last.remove(token);
+            continue;
+        };
+        let (mut mn, mut mx) = (Vec3::MAX, Vec3::MIN);
+        for m in &pose.model {
+            let t = Vec3::from(m.translation);
+            mn = mn.min(t);
+            mx = mx.max(t);
+        }
+        let cm = |v: Vec3| [v.x, v.y, v.z].map(|c| (c * 100.0).round() as i32);
+        let ([a, b, c], [d, e, f]) = (cm(mn), cm(mx));
+        let key = [a, b, c, d, e, f];
+        if last.insert(token.clone(), key) == Some(key) {
+            continue;
+        }
+        eprintln!(
+            "[booth] {token} posed-bones n={} min=({:.3},{:.3},{:.3}) max=({:.3},{:.3},{:.3})",
+            pose.model.len(),
+            mn.x,
+            mn.y,
+            mn.z,
+            mx.x,
+            mx.y,
+            mx.z,
+        );
+    }
+}
+
 /// Arm `booth` after a content edge: render the settle window, plus every frame until each twin
 /// material's texture is resident. `twins` = the material handles the bake just installed.
 fn wake_booth<'a>(
@@ -863,7 +911,10 @@ impl Plugin for PortraitPlugin {
             // `WOW_BOOTH_DUMP=<token>:<path>:<secs>` — photograph a booth's render target to disk
             // (the headless eye on "what is the paperdoll actually showing right now"; the
             // first-login black-pane hunt). Inert without the env.
-            .add_systems(Update, test_bake::dump_booth_target);
+            .add_systems(Update, test_bake::dump_booth_target)
+            // `WOW_BOOTH_LOG=1` — the model half of the framing instrument (see `log_frame`).
+            // Inert without the env.
+            .add_systems(Update, log_booth_pose);
     }
 }
 
