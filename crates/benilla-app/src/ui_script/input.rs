@@ -32,6 +32,10 @@ pub(super) struct PointerFeed<'w> {
     /// TOGGLEUI ([`crate::ui_hide::UiHidden`]): a hidden UI takes no mouse at all — it rides here
     /// because that is precisely the pointer half of this pass.
     hidden: Res<'w, crate::ui_hide::UiHidden>,
+    /// A headless probe is driving the pointer itself ([`super::SyntheticPointer`]) — the real
+    /// cursor must not fight it. Same arm as `hidden` below, for the same reason: the mouse half
+    /// of this pass is not ours this frame.
+    synthetic: Res<'w, super::SyntheticPointer>,
 }
 
 impl PointerFeed<'_> {
@@ -86,6 +90,11 @@ pub(super) fn feed_ui_input(
     let (keyboard, keys, capture, clipboard) = (&mut kbd.0, &kbd.1, &mut kbd.2, &mut kbd.3);
     let world_pick = pointer.world_pick();
     let ui_hidden = pointer.hidden.0;
+    // A headless probe is driving the pointer itself this frame (the drag probe). It takes the
+    // WHOLE mouse half out — including the else-arm below, which is the half that matters: a
+    // `pointer_left_window` between the synthetic press and the synthetic release would disarm
+    // the gesture the probe is in the middle of.
+    let synthetic = pointer.synthetic.0;
     let (hover, click_consumed, payload_held) = (
         &mut pointer.hover,
         &mut pointer.click_consumed,
@@ -120,7 +129,10 @@ pub(super) fn feed_ui_input(
     // nobody can see must not eat the click or arm a tooltip, and the else-arm below is exactly the
     // "no pointer here" bookkeeping (leave the hovered frame once, disarm any press/drag every
     // frame) that keeps a stale gesture from firing when the UI comes back.
-    if let Some(cursor) = window.cursor_position().filter(|_| !ui_hidden) {
+    if let Some(cursor) = window
+        .cursor_position()
+        .filter(|_| !ui_hidden && !synthetic)
+    {
         // Window cursor is logical px, y-down from top-left; the UI is y-up 768-virtual units
         // (decisions 0582 + 0584's uiScale dial) — flip through the window height, then ÷s into
         // the VM's space (the inverse of the extract seam's ×s).
@@ -189,7 +201,7 @@ pub(super) fn feed_ui_input(
         if scroll.delta.y != 0.0 {
             script.mouse_wheel(x, y, scroll.delta.y);
         }
-    } else {
+    } else if !synthetic {
         // The OS pointer left the window: leave whatever frame was hovered (once, on the
         // Some→None transition) and — every frame it stays outside — clear any armed press/drag
         // (`UiScript::pointer_left_window`), since no release is ever fed to end it and a stale

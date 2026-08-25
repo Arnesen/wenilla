@@ -21,7 +21,9 @@ mod drag;
 mod pet;
 
 pub(crate) use bar::place_action;
-pub(crate) use drag::{arm_drag, maybe_start_drag, take_drag, DragGesture, DragRelease};
+pub(crate) use drag::{
+    abandon_drag, arm_drag, maybe_start_drag, take_drag, DragGesture, DragRelease,
+};
 
 /// The sentinel bag id that folds the player's EQUIPPED slots into the ONE payload space
 /// (decision 0216 §1, extended to the paper doll by decision 0208 phase 1b): a
@@ -620,6 +622,7 @@ mod tests {
         slots.insert(
             1,
             crate::script::container::ContainerSlot {
+                already_bound: false,
                 bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),

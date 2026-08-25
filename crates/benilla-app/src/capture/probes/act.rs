@@ -369,3 +369,205 @@ fn fire_probe_lua(
         error!("probe-lua: {e}");
     }
 }
+
+/// The PROBE DRAG driver (`WOW_PROBE_DRAG="A>B[;C>D…]"`, delay via `WOW_PROBE_DRAG_AT` seconds
+/// (default 14), one gesture step per `WOW_PROBE_DRAG_STEP` seconds (default 0.1)): drag one named
+/// frame onto another **through the real pointer path**, headlessly, in a live session.
+///
+/// **Why this exists as an instrument rather than a unit test.** The UI's own harness can already
+/// press, move and release ([`UiScript::mouse_button`]/`mouse_move`), and a drag test written
+/// there passes while the live client's drag is broken — because the harness supplies the whole
+/// world: no per-frame app feed between the press and the release, no real frames elapsing, no
+/// resolve pass, no `feed_party` re-push, no OS cursor. That gap cost a session (B310: the raid
+/// grid's second drag). This closes it by driving the SAME gesture in a real client: the press,
+/// the threshold-crossing move, the path, and the release each land on their own frame, with
+/// every app system running in between exactly as it does for a hand on the mouse.
+///
+/// It names FRAMES, not coordinates, and reads their centres out of the live layout, so a probe
+/// line survives a window moving. `WOW_PROBE_DRAG_LUA="<chunk>"` runs a chunk after each gesture —
+/// the report channel (`ProbeLog` from [`ProbeLuaPlugin`] is installed by that probe; this one
+/// prints the chunk's own returned string).
+pub(crate) struct ProbeDragPlugin;
+
+impl Plugin for ProbeDragPlugin {
+    fn build(&self, app: &mut App) {
+        let pairs = std::env::var("WOW_PROBE_DRAG")
+            .unwrap_or_default()
+            .split(';')
+            .filter_map(|p| p.split_once('>'))
+            .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()))
+            .collect();
+        let at = std::env::var("WOW_PROBE_DRAG_AT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(14.0);
+        let step = std::env::var("WOW_PROBE_DRAG_STEP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.1);
+        app.insert_resource(ProbeDrag {
+            pairs,
+            at,
+            step,
+            report: std::env::var("WOW_PROBE_DRAG_LUA").unwrap_or_default(),
+            pair: 0,
+            phase: 0,
+            next: 0.0,
+            from: (0.0, 0.0),
+            to: (0.0, 0.0),
+        })
+        .add_systems(Update, fire_probe_drag);
+    }
+}
+
+/// [`ProbeDragPlugin`]'s state machine: which pair, which step of the gesture, and when the next
+/// step is due.
+#[derive(Resource)]
+struct ProbeDrag {
+    pairs: Vec<(String, String)>,
+    at: f32,
+    step: f32,
+    report: String,
+    pair: usize,
+    /// The step within the current gesture — see [`fire_probe_drag`]'s table.
+    phase: usize,
+    next: f32,
+    from: (f32, f32),
+    to: (f32, f32),
+}
+
+/// One frame's centre in the VM's own units, read out of the live layout (`GetLeft`/`GetRight`/
+/// `GetTop`/`GetBottom` — the same space [`crate::ui_script::input`] feeds the cursor in).
+/// `None` when the frame does not exist or has no resolved rect.
+fn frame_centre(script: &benilla_ui::script::UiScript, name: &str) -> Option<(f32, f32)> {
+    let read = |edge: &str| {
+        script
+            .eval::<f32>(&format!(
+                "local f = getglobal(\"{name}\") return f and f:Get{edge}()"
+            ))
+            .ok()
+    };
+    Some((
+        (read("Left")? + read("Right")?) / 2.0,
+        (read("Top")? + read("Bottom")?) / 2.0,
+    ))
+}
+
+/// Advance the scripted drag by at most one step per `probe.step` seconds.
+///
+/// The gesture is deliberately spread across real frames rather than run in one call: a press and
+/// a release inside a single frame is a *click*, and the whole point here is to exercise what the
+/// app does BETWEEN them.
+fn fire_probe_drag(
+    mut probe: ResMut<ProbeDrag>,
+    mut synthetic: ResMut<crate::ui_script::SyntheticPointer>,
+    time: ProbeClock,
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    self_player: Query<(), With<crate::net::SelfPlayer>>,
+) {
+    if probe.pairs.is_empty() || probe.pair >= probe.pairs.len() {
+        if synthetic.0 {
+            synthetic.0 = false;
+        }
+        return;
+    }
+    let now = time.elapsed_secs();
+    if now < probe.at || self_player.is_empty() {
+        return;
+    }
+    let Some(mut script) = script else { return };
+    if now < probe.next {
+        return;
+    }
+    probe.next = now + probe.step;
+    // The probe owns the pointer from the first step of a gesture to the last, never longer.
+    synthetic.0 = true;
+
+    let (from_name, to_name) = probe.pairs[probe.pair].clone();
+    match probe.phase {
+        // Read both centres and park the cursor on the source — the hover the player makes
+        // before they press.
+        0 => {
+            let (Some(from), Some(to)) = (
+                frame_centre(&script, &from_name),
+                frame_centre(&script, &to_name),
+            ) else {
+                warn!("probe-drag: {from_name} > {to_name} — no resolved rect, skipping");
+                probe.pair += 1;
+                return;
+            };
+            probe.from = from;
+            probe.to = to;
+            info!(
+                "probe-drag: {from_name} ({:.0},{:.0}) > {to_name} ({:.0},{:.0})",
+                from.0, from.1, to.0, to.1
+            );
+            script.mouse_move(from.0, from.1);
+        }
+        1 => {
+            let (x, y) = probe.from;
+            script.mouse_button(x, y, "LeftButton", true);
+        }
+        // Past the 4-px drag threshold — this is the move that fires `OnDragStart`.
+        2 => {
+            let (x, y) = probe.from;
+            script.mouse_move(x + 8.0, y + 8.0);
+        }
+        // Two waypoints along the path, so anything that only breaks while the drag is IN FLIGHT
+        // (a repaint that re-seats the row under the cursor, say) gets frames to do it in.
+        3 | 4 => {
+            let t = if probe.phase == 3 { 0.4 } else { 0.8 };
+            let (fx, fy) = probe.from;
+            let (tx, ty) = probe.to;
+            script.mouse_move(fx + (tx - fx) * t, fy + (ty - fy) * t);
+        }
+        5 => {
+            let (x, y) = probe.to;
+            script.mouse_move(x, y);
+        }
+        6 => {
+            let (x, y) = probe.to;
+            script.mouse_button(x, y, "LeftButton", false);
+        }
+        // The self-check: hover the source where it now DRAWS and ask who the hit test says is
+        // there. A frame whose hit rect and drawn rect have parted company is invisible to any
+        // harness that presses the centre it just read — and it is exactly what "I can't grab
+        // anything any more" looks like from a hand on the mouse.
+        7 => {
+            if let Some((x, y)) = frame_centre(&script, &from_name) {
+                script.mouse_move(x, y);
+                let focus = script
+                    .eval::<String>(
+                        "return tostring(GetMouseFocus() and GetMouseFocus():GetName())",
+                    )
+                    .unwrap_or_else(|_| "<eval failed>".into());
+                if focus != from_name && !focus.starts_with(&from_name) {
+                    warn!(
+                        "probe-drag: {from_name} draws at ({x:.0},{y:.0}) but the hit test there \
+                         says {focus}"
+                    );
+                } else {
+                    info!("probe-drag: {from_name} still answers its own rect");
+                }
+            }
+        }
+        _ => {
+            if !probe.report.is_empty() {
+                match script.eval::<String>(&probe.report) {
+                    Ok(text) => info!("probe-drag: after {from_name} > {to_name}: {text}"),
+                    Err(e) => warn!("probe-drag: report chunk raised: {e}"),
+                }
+            }
+            for err in script.errors().drain(..) {
+                warn!("probe-drag: UI error during {from_name} > {to_name}: {err}");
+            }
+            probe.pair += 1;
+            probe.phase = 0;
+            // Hand the pointer back between gestures: the app's own feed runs for a frame, which
+            // is what a player's hand does too, and is where a stale hover would show up.
+            synthetic.0 = false;
+            return;
+        }
+    }
+    probe.phase += 1;
+}

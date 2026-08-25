@@ -573,6 +573,10 @@ fn slot_view(
         .filter(|&(_, max)| max > 0);
     // ITEM_FIELD_FLAGS — the broken/alert laws' wrapped (0x08) and force-red (0x10) bits.
     let flags = obj.item_flags().unwrap_or(0);
+    // `0x5da2c0` — soulbound, or carrying a binding enchant: the equipped tooltip's §6 Soulbound
+    // override (B310 — the doll is exactly where it was reported). Read off the raw descriptor,
+    // never off the enchant LINES below.
+    let already_bound = crate::items::already_bound(obj, rolls.enchants);
     // ITEM_FIELD_CREATOR → the ask-once name cache — the equipped tooltip's "<Made by %s>"
     // line (see the bag feed's twin in `ui_items::feed::resolve_slot`).
     let creator = obj
@@ -641,6 +645,7 @@ fn slot_view(
         link,
         durability,
         flags,
+        already_bound,
         locked: pending.contains(EQUIPMENT_BAG, live_id),
         equip_slots,
         bar_placeable,
@@ -711,6 +716,9 @@ fn inventory_slots(
         inv[0] = Some(InvSlotView {
             durability: None,
             flags: 0,
+            // Ammo is the one doll slot with no item OBJECT behind it (it is built from the
+            // template alone), so the runtime-bind predicate has nothing to read.
+            already_bound: false,
             item_id: ammo_id,
             icon,
             count: ammo_count(store, items, ammo_id),

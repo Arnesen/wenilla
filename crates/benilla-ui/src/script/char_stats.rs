@@ -232,6 +232,11 @@ pub struct InvSlotView {
     /// inventory-alert-law `0x4c7ee0`): `0x08` wrapped (a gift — never alerts, never broken),
     /// `0x10` force-red (alert status 4 regardless of durability).
     pub flags: u32,
+    /// `0x5da2c0` — **the instance is runtime-bound**: `ITEM_FIELD_FLAGS & 1` (soulbound), or a
+    /// live enchant slot naming a `SpellItemEnchantment` row that binds. App-resolved off the raw
+    /// descriptor (the doll twin of [`super::container::ContainerSlot::already_bound`]); the
+    /// tooltip's §6 bind line overrides to **Soulbound** on it (B310).
+    pub already_bound: bool,
     /// An `|Hitem:…|h[Name]|h` link once the name is known — the doll twin of
     /// `ContainerSlot::link`; carried onto the cursor payload so a world-drop `DELETE_ITEM_CONFIRM`
     /// off an equipped item can report its name (decision 0208 phase 1b).

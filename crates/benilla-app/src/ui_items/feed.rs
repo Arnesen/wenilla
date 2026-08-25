@@ -548,7 +548,7 @@ fn resolve_slot(
     // (both live on `Items`): one `Option<ms>` per enchant slot.
     let enchant_ms: [Option<u64>; 7] =
         std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
-    let (entry, count, durability, readable, creator, flags, roll, enchant_lines) =
+    let (entry, count, durability, readable, creator, flags, already_bound, roll, enchant_lines) =
         match items.object(guid) {
             Some(fields) => (
                 fields.object_entry().unwrap_or(0),
@@ -572,6 +572,9 @@ fn resolve_slot(
                     .and_then(|g| names.resolve(g, commands).map(str::to_string)),
                 // `ITEM_FIELD_FLAGS` — the tooltip's UNLOCKED (0x4) / WRAPPED (0x8) sub-gates.
                 fields.item_flags().unwrap_or(0),
+                // `0x5da2c0` — soulbound, or carrying a binding enchant: the §6 Soulbound
+                // override (B310). Read off the raw descriptor, not off the enchant LINES below.
+                crate::items::already_bound(fields, rolls.enchants),
                 // `ITEM_FIELD_RANDOM_PROPERTIES_ID` — the roll behind the NAME's "of the Bear"
                 // (decision 1547). Only the name: the roll's own enchants are already in the
                 // instance's slots 2..6 below, written there by the server.
@@ -609,6 +612,7 @@ fn resolve_slot(
             readable,
             creator,
             flags,
+            already_bound,
             enchants: enchant_lines,
             ..Default::default()
         });
@@ -636,6 +640,7 @@ fn resolve_slot(
         readable,
         creator,
         flags,
+        already_bound,
         enchants: enchant_lines,
         equip_slots: find_equip_slot(t.inventory_type),
         bar_placeable: t.placeable_on_action_bar(),

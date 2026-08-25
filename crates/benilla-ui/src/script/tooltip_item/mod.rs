@@ -376,6 +376,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 creator: s.creator.clone(),
                                 has_text: false,
                                 flags: s.flags,
+                                already_bound: s.already_bound,
                                 enchants: s.enchants.clone(),
                                 // `SetInventoryItem 0x532ee0` also has p6=0 legs (`0x533106`,
                                 // `0x5332ad`) — the "this binding can never emit OPENABLE" claim
@@ -462,6 +463,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 creator: s.creator.clone(),
                                 has_text: s.readable,
                                 flags: s.flags,
+                                already_bound: s.already_bound,
                                 enchants: s.enchants.clone(),
                                 // p6 == 0 ⇔ no running cooldown. A clam shows the green line; the
                                 // same clam mid-cooldown would show ITEM_COOLDOWN_TIME instead

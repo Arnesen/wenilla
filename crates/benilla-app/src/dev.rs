@@ -133,6 +133,12 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_LUA").is_ok() {
                 app.add_plugins(crate::capture::ProbeLuaPlugin);
             }
+            // The probe-drag driver: `WOW_PROBE_DRAG="RaidGroupButton7>RaidGroup6Slot1"` drags one
+            // named frame onto another through the real pointer path, one gesture step per frame —
+            // the "do what the hand on the mouse does" instrument (see `capture::ProbeDragPlugin`).
+            if std::env::var("WOW_PROBE_DRAG").is_ok() {
+                app.add_plugins(crate::capture::ProbeDragPlugin);
+            }
             // The probe-key taps: `WOW_PROBE_KEY="Space@14"` presses keys once in-world — the "press
             // space headlessly" instrument for input-gated behavior (see `capture::ProbeKeyPlugin`).
             if std::env::var("WOW_PROBE_KEY").is_ok() {

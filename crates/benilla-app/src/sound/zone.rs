@@ -729,6 +729,19 @@ fn stop_world_soundscape(zone: &mut ZoneAudio, reason: &str) {
 }
 
 /// Registration hook for [`super::SoundPlugin`].
+/// Report this module's live stream voices into the global budget (decision 1557).
+///
+/// Rewritten from the live handles every frame rather than incremented and decremented, so a
+/// fade that gets interrupted — or a slot replaced mid-crossfade — cannot leave the budget
+/// believing in a voice that stopped. The outgoing leg of an ambience crossfade is deliberately
+/// not counted: its handle is released at the swap, so we do not hold it and cannot honestly say
+/// whether it is still ringing.
+fn report_stream_voices(zone: NonSend<ZoneAudio>, mut out: NonSendMut<super::SoundOutput>) {
+    let live = |s: kira::sound::PlaybackState| s != kira::sound::PlaybackState::Stopped;
+    out.zone_streams = usize::from(zone.music.as_ref().is_some_and(|h| live(h.state())))
+        + usize::from(zone.ambience.as_ref().is_some_and(|h| live(h.state())));
+}
+
 pub(super) fn plugin(app: &mut App) {
     app.insert_non_send_resource(ZoneAudio::default())
         .add_systems(Startup, load_area_sounds.after(AssetSet::Open))
@@ -739,6 +752,9 @@ pub(super) fn plugin(app: &mut App) {
                 .run_if(super::world_audio_live)
                 .in_set(WorldStage::Present),
         )
+        // Unconditional: the budget must fall back to zero when the soundscape stops, and a
+        // system gated on `world_audio_live` would freeze the last count instead.
+        .add_systems(Update, report_stream_voices)
         .add_systems(
             OnExit(crate::char_select::ClientState::InWorld),
             leave_world,

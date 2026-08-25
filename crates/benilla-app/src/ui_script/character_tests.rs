@@ -82,6 +82,7 @@ fn combat_stats() -> UnitCombatStats {
 fn inventory_with_head_item() -> InventorySlots {
     let mut slots: InventorySlots = Default::default();
     slots[1] = Some(InvSlotView {
+        already_bound: false,
         bar_placeable: true,
         durability: None,
         flags: 0,
@@ -106,6 +107,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
     slots.insert(
         1,
         benilla_ui::script::ContainerSlot {
+            already_bound: false,
             bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Helmet_02".into()),

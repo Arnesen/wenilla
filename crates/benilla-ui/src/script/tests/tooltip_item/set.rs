@@ -60,11 +60,16 @@ fn item_set_block_counts_and_colors() {
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetItemById(6303)
-        assert(TTTextLeft3:GetText() == "" or TTTextLeft3:GetText() == nil, "blank before the header")
+        -- The spacer is the reference's own literal `0x854b2c` — a space and a newline, which is
+        -- ONE row carrying one space, not the empty string (an empty AddLine adds no line at all
+        -- in the reference: `0x530270` bails before its `inc [esi+0x31c]`).
+        assert(TTTextLeft3:GetText() == " \n", "blank before the header, got "
+               .. string.format("%q", tostring(TTTextLeft3:GetText())))
         assert(TTTextLeft4:GetText() == "Defias Leather (2/5)", "got " .. tostring(TTTextLeft4:GetText()))
         assert(TTTextLeft5:GetText() == "  Defias Mark")
         assert(TTTextLeft8:GetText() == "  Defias Boots", "in-flight member renders no line")
-        assert(TTTextLeft9:GetText() == "" or TTTextLeft9:GetText() == nil, "blank before the bonuses")
+        assert(TTTextLeft9:GetText() == " \n", "blank before the bonuses, got "
+               .. string.format("%q", tostring(TTTextLeft9:GetText())))
         assert(TTTextLeft10:GetText() == "(2) Set: Increases movement speed slightly.",
                "thresholds sort ascending, got " .. tostring(TTTextLeft10:GetText()))
         assert(TTTextLeft11:GetText() == "(4) Set: +10 Attack Power.")

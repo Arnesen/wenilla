@@ -35,6 +35,9 @@ pub(crate) struct DragRelease {
 /// press hit nothing); a press always REPLACES any leftover in-flight gesture — its matching
 /// release should already have cleared it, but a press is the one moment we know for certain no
 /// gesture should still be armed against a *different* earlier press.
+///
+/// **The replaced gesture is abandoned, not forgotten**: the caller runs [`abandon_drag`] first
+/// and fires `OnDragStop` for a started one. See that function for why a silent drop is the bug.
 pub(crate) fn arm_drag(model: &mut Model, hit: Option<FrameHandle>, button: &str, pos: (f32, f32)) {
     model.drag = hit
         .filter(|&h| {
@@ -75,6 +78,24 @@ pub(crate) fn maybe_start_drag(model: &mut Model, pos: (f32, f32)) -> Option<(u3
         .is_some()
         .then(|| model.frame_id(source))?;
     Some((id, button))
+}
+
+/// **Abandon** an in-flight gesture that will never see its release, and report whether anything
+/// has to be told. Returns the source of a gesture that had **started**, so the caller fires the
+/// same `OnDragStop` a real release would; an armed-but-unstarted press answers `None`, exactly as
+/// releasing one does.
+///
+/// Two callers, and both are situations the reference simply cannot be in: the OS captures the
+/// pointer for the whole of a button-held drag there, so the release always arrives. Ours does
+/// not — the cursor can walk out of the window, and a second button can be pressed mid-gesture —
+/// and dropping the gesture *silently* in either case is what leaves the UI stuck rather than
+/// merely cancelled: the addon's `OnDragStop → StopMovingOrSizing` never runs, so the engine's
+/// single [`Model::moving`] slot stays taken, [`super::super::object::movable::advance_move`]
+/// keeps gluing that frame to the cursor for the rest of the session, and it swallows every press
+/// aimed at anything underneath. (B310 — the raid grid, where one drag off the window edge cost
+/// every later drag.)
+pub(crate) fn abandon_drag(model: &mut Model) -> Option<FrameHandle> {
+    model.drag.take().filter(|g| g.started).map(|g| g.source)
 }
 
 /// Resolve (and clear) the in-flight drag gesture matching a mouse-button release's `button`, if
@@ -422,5 +443,99 @@ mod tests {
             "no delete popup for a spell"
         );
         assert!(s.cursor_payload().is_none(), "cleared silently");
+    }
+
+    /// **A drag the pointer carries out of the window ENDS, and the frame it was moving stops
+    /// following the cursor** (B310).
+    ///
+    /// The reference cannot reach this state — the OS holds the pointer for a button-held drag, so
+    /// the release always arrives — which is exactly why nothing in FrameXML defends against it and
+    /// why the engine has to. Abandoning the gesture *silently* (what this used to do) skips the
+    /// canonical `OnDragStop → StopMovingOrSizing`, so the single move slot stays taken and
+    /// `advance_move` glues the frame to the cursor for the rest of the session, on top of whatever
+    /// the player is trying to click next.
+    #[test]
+    fn a_gesture_the_pointer_carries_out_of_the_window_still_fires_its_stop() {
+        let mut s = drag_script();
+        s.run(
+            r#"
+            stops = 0
+            local a = CreateFrame("Frame", "A")
+            a:SetPoint("BOTTOMLEFT", 100, 100); a:SetSize(200, 100)
+            a:EnableMouse(true); a:SetMovable(true)
+            a:RegisterForDrag("LeftButton")
+            a:SetScript("OnDragStart", function() this:StartMoving() end)
+            a:SetScript("OnDragStop", function() stops = stops + 1; this:StopMovingOrSizing() end)
+            "#,
+        )
+        .unwrap();
+        s.resolve();
+
+        s.mouse_button(150.0, 150.0, "LeftButton", true);
+        s.mouse_move(200.0, 200.0); // past the threshold ⇒ OnDragStart ⇒ StartMoving
+                                    // `StartMoving` samples the cursor where it is CALLED, so the starting move moves nothing
+                                    // (`tests::movable`'s own note) — this is the one that carries the frame.
+        s.mouse_move(250.0, 250.0);
+        s.resolve();
+        let carried: f32 = s.eval("return A:GetLeft()").unwrap();
+        assert_eq!(carried, 150.0, "the frame followed the cursor's 50px");
+
+        s.pointer_left_window();
+        assert_eq!(
+            s.eval::<i64>("return stops").unwrap(),
+            1,
+            "the abandon fires the same OnDragStop a release would"
+        );
+
+        // …and the move slot is free, so nothing follows the cursor any more.
+        s.mouse_move(600.0, 500.0);
+        s.resolve();
+        assert_eq!(
+            s.eval::<f32>("return A:GetLeft()").unwrap(),
+            carried,
+            "the frame stayed where the abandoned drag left it"
+        );
+        // Fires once, not once per frame the pointer stays outside.
+        s.pointer_left_window();
+        s.pointer_left_window();
+        assert_eq!(s.eval::<i64>("return stops").unwrap(), 1);
+    }
+
+    /// The same abandon, by the other door: a fresh press REPLACES an in-flight gesture, and a
+    /// started one has to be told. Pressing a second button mid-drag is an ordinary slip of the
+    /// hand, and it used to leave the same stuck move slot.
+    #[test]
+    fn a_press_that_replaces_an_in_flight_gesture_stops_it_first() {
+        let mut s = drag_script();
+        s.run(
+            r#"
+            stops, starts = 0, 0
+            local a = CreateFrame("Frame", "A")
+            a:SetPoint("BOTTOMLEFT", 100, 100); a:SetSize(200, 100)
+            a:EnableMouse(true); a:SetMovable(true)
+            a:RegisterForDrag("LeftButton")
+            a:SetScript("OnDragStart", function() starts = starts + 1; this:StartMoving() end)
+            a:SetScript("OnDragStop", function() stops = stops + 1; this:StopMovingOrSizing() end)
+            "#,
+        )
+        .unwrap();
+        s.resolve();
+
+        s.mouse_button(150.0, 150.0, "LeftButton", true);
+        s.mouse_move(200.0, 200.0);
+        assert_eq!(s.eval::<i64>("return starts").unwrap(), 1);
+
+        s.mouse_button(200.0, 200.0, "RightButton", true);
+        assert_eq!(
+            s.eval::<i64>("return stops").unwrap(),
+            1,
+            "the left drag the right press displaced was stopped, not forgotten"
+        );
+
+        // An armed-but-UNSTARTED press fires nothing when it is replaced — the same silence a
+        // release of one gets.
+        s.mouse_button(150.0, 150.0, "LeftButton", true);
+        s.mouse_button(150.0, 150.0, "MiddleButton", true);
+        assert_eq!(s.eval::<i64>("return stops").unwrap(), 1);
     }
 }

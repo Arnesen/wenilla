@@ -209,6 +209,17 @@ fn watch_glue_music(mut music: NonSendMut<GlueMusic>, time: Res<Time>, config: R
     music.watch.feed(h, f64::from(time.delta_secs()));
 }
 
+/// Report the glue theme's voice into the global budget (decision 1557) — it rides `InWorld`
+/// since 1550, so it occupies a channel there like anything else.
+fn report_stream_voices(music: NonSend<GlueMusic>, mut out: NonSendMut<super::SoundOutput>) {
+    out.glue_streams = usize::from(
+        music
+            .handle
+            .as_ref()
+            .is_some_and(|h| h.state() != kira::sound::PlaybackState::Stopped),
+    );
+}
+
 pub(super) fn plugin(app: &mut App) {
     app.add_message::<GlueSound>()
         .insert_non_send_resource(GlueMusic::default())
@@ -227,6 +238,7 @@ pub(super) fn plugin(app: &mut App) {
                 watch_glue_music
                     .after(start_glue_music)
                     .after(hand_off_glue_music),
+                report_stream_voices,
             ),
         );
 }

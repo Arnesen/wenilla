@@ -343,10 +343,10 @@
                 -- CHARACTER window's bottom art rather than art of its own — there is no
                 -- RaidFrame-BotLeft in the patch chain, because the pane is a grid on a plain
                 -- parchment rather than a list in a frame.
-                FriendsFrameTopLeft:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-TopLeft")
-                FriendsFrameTopRight:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-TopRight")
-                FriendsFrameBottomLeft:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-BottomLeft")
-                FriendsFrameBottomRight:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-BottomRight")
+                FriendsFrameTopLeft:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-TopLeft")
+                FriendsFrameTopRight:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-TopRight")
+                FriendsFrameBottomLeft:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-BottomLeft")
+                FriendsFrameBottomRight:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-BottomRight")
                 FriendsFrameTitleText:SetText(RAID)
                 FriendsFrame_ShowSubFrame("RaidFrame")
             end

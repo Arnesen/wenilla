@@ -1315,6 +1315,7 @@ fn seed_bag_window(
             readable: false,
             creator: None,
             flags: 0,
+            already_bound: false,
             enchants: Vec::new(),
         }
     };
@@ -1404,6 +1405,7 @@ fn seed_equipped_bags(
             readable: false,
             creator: None,
             flags: 0,
+            already_bound: false,
             enchants: Vec::new(),
         };
 

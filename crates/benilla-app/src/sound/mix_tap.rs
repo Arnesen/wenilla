@@ -27,6 +27,8 @@ use kira::effect::{Effect, EffectBuilder};
 use kira::info::Info;
 use kira::Frame;
 use std::io::{Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Ring depth in seconds of stereo audio. Deep enough that only a wedged writer drops samples.
 const RING_SECONDS: usize = 8;
@@ -41,19 +43,38 @@ pub(super) fn install(
     builder: kira::track::MainTrackBuilder,
     sample_rate: Option<u32>,
 ) -> kira::track::MainTrackBuilder {
-    let Some(path) = std::env::var_os("WOW_MIX_TAP") else {
-        return builder;
-    };
-    let Some(sample_rate) = sample_rate else {
-        warn!("mix tap: device sample rate unknown — not recording");
-        return builder;
-    };
-    let path = std::path::PathBuf::from(path);
-    let file = match std::fs::File::create(&path) {
+    let mut builder = builder;
+    if let Some(path) = std::env::var_os("WOW_MIX_TAP") {
+        if let Some(rate) = sample_rate {
+            install_at(&mut builder, std::path::Path::new(&path), rate);
+        } else {
+            warn!("mix tap: device sample rate unknown — not recording");
+        }
+    }
+    builder
+}
+
+/// Install a tap writing `path`, and hand back its **frame clock**: a running count of the frames
+/// this tap has processed, i.e. the exact write position in the file it is producing.
+///
+/// The clock is what makes a capture *correlatable*. A WAV on its own answers "what did the mix
+/// sound like"; it cannot answer "…at the moment the director pressed the key", because the game
+/// clock and the device clock are different clocks that drift. Reading this counter from a game
+/// system converts a game-thread event into a sample offset in the file, so a mark, a kit start
+/// and a missed deadline all land on the waveform they belong to (decision 1556).
+///
+/// Returns `None` if the file cannot be created — a probe that cannot record says so and the run
+/// continues, rather than taking the client down over an instrument.
+pub(super) fn install_at(
+    builder: &mut kira::track::MainTrackBuilder,
+    path: &std::path::Path,
+    sample_rate: u32,
+) -> Option<Arc<AtomicU64>> {
+    let file = match std::fs::File::create(path) {
         Ok(f) => f,
         Err(e) => {
             warn!("mix tap: cannot create {}: {e}", path.display());
-            return builder;
+            return None;
         }
     };
     let (producer, consumer) = rtrb::RingBuffer::new(sample_rate as usize * 2 * RING_SECONDS);
@@ -61,14 +82,18 @@ pub(super) fn install(
         .name("mix-tap".into())
         .spawn(move || writer(file, consumer, sample_rate))
         .expect("spawn mix-tap writer");
-    info!("mix tap: recording the main mix to {}", path.display());
-    let mut builder = builder;
-    builder.add_effect(TapBuilder { producer });
-    builder
+    info!("mix tap: recording to {}", path.display());
+    let frames = Arc::new(AtomicU64::new(0));
+    builder.add_effect(TapBuilder {
+        producer,
+        frames: Arc::clone(&frames),
+    });
+    Some(frames)
 }
 
 struct TapBuilder {
     producer: rtrb::Producer<f32>,
+    frames: Arc<AtomicU64>,
 }
 
 impl EffectBuilder for TapBuilder {
@@ -77,6 +102,7 @@ impl EffectBuilder for TapBuilder {
         (
             Box::new(Tap {
                 producer: self.producer,
+                frames: self.frames,
                 dropped: 0,
             }),
             (),
@@ -88,6 +114,8 @@ impl EffectBuilder for TapBuilder {
 /// thing this must never do is block or allocate on the render path.
 struct Tap {
     producer: rtrb::Producer<f32>,
+    /// Frames pushed so far — the file's write position, published for the game thread to read.
+    frames: Arc<AtomicU64>,
     dropped: u64,
 }
 
@@ -98,6 +126,8 @@ impl Effect for Tap {
                 self.dropped += 1;
             }
         }
+        // Published after the push so a reader never names a frame the file does not yet hold.
+        self.frames.fetch_add(input.len() as u64, Ordering::Relaxed);
     }
 }
 

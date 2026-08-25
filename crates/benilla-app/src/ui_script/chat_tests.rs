@@ -310,6 +310,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            already_bound: false,
             bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),

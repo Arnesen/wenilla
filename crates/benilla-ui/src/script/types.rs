@@ -599,7 +599,11 @@ impl RegionData {
     /// same-frame `GetWidth()` served the OLD header's width, and the edit box latched its text
     /// insets on it). The layout solver's own read (layout.rs) deliberately does NOT key-check:
     /// it keeps the last-known box until the fresh measure lands, so lines never collapse for the
-    /// round-trip frame.
+    /// round-trip frame. **With one carve-out, and it is the carve-out this cache needs**: EMPTY
+    /// text is never measured at all (both measure asks filter it out), so "until the fresh
+    /// measure lands" is a promise that can never be kept for a cell that goes from text to `""`
+    /// — the solver drops the stored measure there rather than hold a dead box forever (B309: the
+    /// item tooltip's blank SET spacers drew rows the plate counted as zero).
     /// `scale` is the owner frame's `effective_scale`: it's in the key because the host measures
     /// at the drawn raster size ([`MeasureRequest::scale`]), so a `SetScale` under a cached
     /// measure must invalidate it exactly like a font-size change.

@@ -1001,9 +1001,30 @@ impl UiScript {
                 let scale = arena.frame(owner).map(|f| f.effective_scale).unwrap_or(1.0);
                 // A FontString with no explicit height takes its host-measured wrapped size
                 // (the measure round-trip — the client's layout↔font-engine seam).
+                //
+                // The stored measure is honoured WITHOUT a key check on purpose
+                // ([`RegionData::measure_key`]): it is the LAST-KNOWN box, held so a line whose
+                // text just changed does not collapse for the one frame the re-measure is in
+                // flight. **Empty text is the case where that promise cannot be kept** — nothing
+                // ever measures an empty string (`fontstrings_needing_measure` and
+                // `stale_measure_key` both filter it out), so a cell that goes from text to `""`
+                // would hold its old box FOREVER. There is no round-trip to wait for: an empty
+                // string's extent is known, and it is zero.
+                //
+                // That forever-stale box is B309. Tooltip line cells are POOLED and reused across
+                // hovers (`clear_content` keeps `measured` deliberately, for the hover re-enter
+                // loop), so the item tooltip's two blank gold SET spacers (`render.rs` §22) landed
+                // on cells that had carried real text on an earlier hover: each drew a full row
+                // out of the dead measure while the plate counted it as zero
+                // (`tooltip::cell` calls empty text `(0,0)`), and the set bonuses hung two rows
+                // below the backdrop. The Lua-visible getters never disagreed — they key-check
+                // (`region::measured_wh`) — which is why only the drawn geometry was wrong.
+                let measured = data
+                    .measured
+                    .filter(|_| data.text.as_deref().is_some_and(|t| !t.is_empty()));
                 let mut height = data.size.map_or(0.0, |s| s.1);
                 let mut width = data.size.map_or(0.0, |s| s.0);
-                if let Some(m) = &data.measured {
+                if let Some(m) = &measured {
                     if height == 0.0 {
                         height = m.h;
                     }

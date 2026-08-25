@@ -226,33 +226,27 @@ pub(crate) fn commit_item_cast_on_pick(
             );
             continue;
         };
-        let cat = enchants.as_deref().map(|e| &e.0);
+        let cat = enchants.as_deref();
         let fields = ladder.items.object(item_guid);
         let item = ClickedItem {
             class,
             subclass,
             inventory_type,
-            // `0x5da2c0`: already soulbound, or already carrying an enchant that binds.
-            already_bound: fields.is_some_and(|f| {
-                f.item_flags().is_some_and(|flags| flags & 0x1 != 0)
-                    || (0..7).any(|slot| {
-                        live_enchant(f, slot, cat).is_some_and(|id| {
-                            cat.is_some_and(|c: &benilla_formats::EnchantCatalog| {
-                                c.binds_the_item(id)
-                            })
-                        })
-                    })
-            }),
-            existing_enchant: [0u8, 1].map(|slot| fields.and_then(|f| live_enchant(f, slot, cat))),
+            // `0x5da2c0`: already soulbound, or already carrying an enchant that binds. The
+            // item tooltip's §6 Soulbound override reads the SAME predicate — see
+            // [`crate::items::already_bound`].
+            already_bound: fields.is_some_and(|f| crate::items::already_bound(f, cat)),
+            existing_enchant: [0u8, 1]
+                .map(|slot| fields.and_then(|f| crate::items::live_enchant(f, slot, cat))),
         };
         // `495e93` — the enchant this cast would apply, resolved once and read by both confirms.
         // `EffectMiscValue` is signed and the ref tests `jl` before its range compare.
         let new = u32::try_from(def.effect_misc_value[0])
             .ok()
-            .filter(|&id| cat.is_some_and(|c| c.has_row(id)))
+            .filter(|&id| cat.is_some_and(|c| c.0.has_row(id)))
             .map(|id| NewEnchant {
                 id,
-                binds: cat.is_some_and(|c| c.binds_the_item(id)),
+                binds: crate::items::binds(id, cat),
             });
         match item_bind_verdict(def, &item, new, confirmed) {
             ItemBind::Refuse(reason) => {
@@ -270,7 +264,11 @@ pub(crate) fn commit_item_cast_on_pick(
             ItemBind::ConfirmReplace { existing, new } => {
                 // `4960d0`/`4960d4` read both names off the rows with no suppression gate — the
                 // OLD one first, then the NEW, matching `"Do you want to replace %s with %s?"`.
-                let name = |id: u32| cat.and_then(|c| c.name(id)).unwrap_or_default().to_string();
+                let name = |id: u32| {
+                    cat.and_then(|c| c.0.name(id))
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 debug!("ui_action: replace-enchant confirm {existing} -> {new} on {item_guid:#x}");
                 parked.0 = Some(item_guid);
                 script.fire_event(
@@ -305,18 +303,6 @@ pub(crate) fn commit_item_cast_on_pick(
             crate::ui_action::cast_send::TargetedBind::Item(item_guid),
         );
     }
-}
-
-/// One `ITEM_FIELD_ENCHANTMENT` slot as the confirms read it: the raw id must be **positive** (the
-/// ref's `jl` skip at `495ef4`/`5da306`) and must name a real `SpellItemEnchantment` row (its
-/// `testl %eax,%eax` after the table load). Anything else is "no enchant here".
-fn live_enchant(
-    fields: &benilla_protocol::messages::ObjectFields,
-    slot: u8,
-    cat: Option<&benilla_formats::EnchantCatalog>,
-) -> Option<u32> {
-    let id = u32::try_from(fields.item_enchant(slot)?).ok()?;
-    cat.is_some_and(|c| c.has_row(id)).then_some(id)
 }
 
 #[cfg(test)]

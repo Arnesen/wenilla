@@ -368,12 +368,13 @@ impl UiScript {
         // "<Button>ButtonDown"; a release fires it when press+release landed on the same frame AND
         // it registered "<Button>ButtonUp" — UNLESS a started drag is being resolved instead.
         #[allow(clippy::type_complexity)]
-        let (click_id, drag_release, world_dropped, slider_jump, double_id): (
+        let (click_id, drag_release, world_dropped, slider_jump, double_id, abandoned): (
             Option<u32>,
             Option<cursor::DragRelease>,
             bool,
             Option<(u32, f32)>,
             Option<u32>,
+            Option<crate::widget::FrameHandle>,
         ) = {
             let mut model = self.model_mut();
             let hit_handle = hit_id.and_then(|id| model.id_to_frame.get(&id).copied());
@@ -386,6 +387,10 @@ impl UiScript {
                         model.mouse_down_on.remove(button);
                     }
                 }
+                // A press REPLACES any in-flight gesture, so a started one has to be ended first
+                // — `abandon_drag`'s own doc carries why a silent drop is a stuck UI rather than a
+                // cancelled drag. Its `OnDragStop` fires below, outside this borrow.
+                let abandoned = cursor::abandon_drag(&mut model);
                 cursor::arm_drag(&mut model, hit_handle, button, (x, y));
                 // A left press on a Slider begins the engine drag (0250 §5): a thumb press grabs
                 // it in place; a track press seats the thumb under the cursor first (the returned
@@ -400,7 +405,7 @@ impl UiScript {
                 let click = hit_handle
                     .filter(|&h| button::wants_click(&model, h, &wants))
                     .and(hit_id);
-                (click, None, false, jump, None)
+                (click, None, false, jump, None, abandoned)
             } else {
                 let pressed = model.mouse_down_on.remove(button);
                 // A left release ends any in-flight thumb drag (decision 0250 §5).
@@ -473,7 +478,7 @@ impl UiScript {
                 let double_id = double.and_then(|h| model.frame_to_id.get(&h).copied());
                 // Exclusive, not additive — the double leg is taken *instead of* the single one.
                 let click = if double_id.is_some() { None } else { click };
-                (click, release, dropped, None, double_id)
+                (click, release, dropped, None, double_id, None)
             }
         };
         // A track press's value jump fires OnValueChanged first (outside the borrow), the same
@@ -545,24 +550,16 @@ impl UiScript {
                 editbox::drag_end(&self.lua);
             }
         }
+        // A gesture this press REPLACED gets its `OnDragStop` too, before anything the new press
+        // does: the handler on the other end has a `StopMovingOrSizing` in it, and until that runs
+        // the engine's one move slot is still held (see `cursor::abandon_drag`).
+        if let Some(source) = abandoned {
+            self.fire_drag_stop(source);
+        }
         // The drag trio's stop/receive pair, fired outside the model borrow above (only for a
         // gesture that actually started — see `cursor::DragRelease::started`).
         if let Some(release) = drag_release.filter(|r| r.started) {
-            let source_id = {
-                let model = self.model_ref();
-                model
-                    .arena
-                    .frame(release.source)
-                    .is_some()
-                    .then(|| model.frame_to_id.get(&release.source).copied())
-                    .flatten()
-            };
-            if let Some(id) = source_id {
-                if let Err(e) = event::fire_widget_handler(&self.lua, id, "OnDragStop", Vec::new())
-                {
-                    self.push_error(e);
-                }
-            }
+            self.fire_drag_stop(release.source);
             if let Some(id) = hit_id {
                 if let Err(e) =
                     event::fire_widget_handler(&self.lua, id, "OnReceiveDrag", Vec::new())
@@ -590,6 +587,26 @@ impl UiScript {
             }
         }
         hit_id.is_some() || world_dropped
+    }
+
+    /// Fire `OnDragStop` on a gesture's source — the ONE place that ends a started drag, so the
+    /// release path and the two abandon paths ([`cursor::abandon_drag`]) cannot drift apart.
+    /// A source that died between the press and here fires nothing.
+    pub(super) fn fire_drag_stop(&mut self, source: crate::widget::FrameHandle) {
+        let id = {
+            let model = self.model_ref();
+            model
+                .arena
+                .frame(source)
+                .is_some()
+                .then(|| model.frame_to_id.get(&source).copied())
+                .flatten()
+        };
+        if let Some(id) = id {
+            if let Err(e) = event::fire_widget_handler(&self.lua, id, "OnDragStop", Vec::new()) {
+                self.push_error(e);
+            }
+        }
     }
 
     /// A mouse-wheel spin at `(x, y)`: fires `OnMouseWheel(self, delta)` on the hit frame — or,

@@ -65,6 +65,19 @@ pub(crate) use manifest::{load_font_registry, load_ingame_ui};
 #[derive(Resource, Default)]
 pub(crate) struct PointerOverUi(pub(crate) bool);
 
+/// **A synthetic pointer owns the mouse this frame** — set by the headless drag probe
+/// ([`crate::capture::ProbeDragPlugin`]) while it drives a gesture through the real pointer path.
+///
+/// [`input::feed_ui_input`] skips its whole mouse half while this is set, and that is the ONLY
+/// thing it does. Without it a scripted gesture cannot exist: the OS cursor is wherever the
+/// director left it (usually outside a backgrounded probe window), so every frame between the
+/// synthetic press and the synthetic release would feed the real position — dragging the frame to
+/// the wrong place at best, and at worst calling `pointer_left_window`, which disarms the very
+/// gesture the probe just armed. The keyboard half is untouched: a probe driving the mouse has no
+/// business swallowing keys.
+#[derive(Resource, Default)]
+pub(crate) struct SyntheticPointer(pub(crate) bool);
+
 /// The egui dev overlay's half of the pointer arbitration, written each egui pass by the debug
 /// panel's `track_pointer_over_ui`. **Defined here, with the arbiter that reads it** (decision
 /// 1174 finishing 0026): the type has to exist in a build with no dev overlays compiled in, and
@@ -277,6 +290,7 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<UiFrameCost>()
             .init_resource::<UiCostWanted>()
             .init_resource::<PointerOverUi>()
+            .init_resource::<SyntheticPointer>()
             .init_resource::<EguiPointerOver>()
             .init_resource::<InspectMode>()
             .init_resource::<PlayerUiHover>()

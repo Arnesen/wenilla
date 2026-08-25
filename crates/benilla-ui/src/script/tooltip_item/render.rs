@@ -36,6 +36,13 @@ pub(super) struct ItemInstance {
     /// Instance `ITEM_FIELD_FLAGS` — the openable lock sub-gate reads UNLOCKED `0x4`
     /// (`0x52e30c`) and the wrapped-gift arm WRAPPED `0x8` (`0x52e31d`).
     pub flags: u32,
+    /// `0x5da2c0` — **this instance is runtime-bound**: `ITEM_FIELD_FLAGS & 1`, or a live
+    /// enchant slot naming a `SpellItemEnchantment` row that binds. The binding half needs a DBC
+    /// join, so the whole predicate arrives app-resolved
+    /// ([`crate::script::ContainerSlot::already_bound`]) rather than being re-derived here off
+    /// [`Self::enchants`] — that list is a *display* view and drops rows the line law hides.
+    /// Drives §6's Soulbound override; `false` on every template/link source.
+    pub already_bound: bool,
     /// The instance's enchant slots, app-resolved and in slot order (law line 17 / §1-ENCHANT,
     /// decisions 0915/0920) — see [`crate::script::EnchantView`]. Empty on an unenchanted item and
     /// on every template/link source (no instance, nothing enchanted).
@@ -61,6 +68,25 @@ pub(super) struct ItemInstance {
     /// Decision 0896.
     pub openable_source: bool,
 }
+
+/// The SET block's blank gold spacer — the reference's own literal `0x854b2c`, and it is **not**
+/// the empty string. It is a SPACE followed by a newline, and the difference is a whole row.
+///
+/// Both halves are byte-verified (wow-re, `tooltip-content-law.md` §22 + this arc's re-derivation):
+/// `AddLine`'s core `0x530270` takes an empty left text with no right text and **bails before it
+/// ever increments the line count** (`5302a9: test ebx,ebx; 5302ab: je 0x530378`, the shared exit,
+/// which never reaches the `inc [esi+0x31c]` at `0x530372`) — an empty string here is silently
+/// dropped, not even a zero-height slot. So the reference cannot spell this line `""`, and it
+/// doesn't: `" \n"` is one real line carrying one space. It measures as ONE row, not two, because
+/// the width-based stepper `0x5c7470` consumes the trailing break inside the same call that
+/// scanned the space (`5c7659: add esi,ecx`) and the kernel's next top-of-loop read hits the NUL.
+///
+/// benilla lands on the same row count from the same law: the app's `fontstring_lines`
+/// trailing-break rule (decision 1343) drops the empty segment a plain split would leave, so
+/// `" \n"` is one line here too. We wrote `String::new()`, which our own engine calls zero lines
+/// of zero height — so the set block's two spacers were invisible where the reference shows two
+/// blank rows.
+const SET_SPACER: &str = " \n";
 
 /// Render one item template into the tooltip — the BYTE-VERIFIED emission law of the shared
 /// renderer `0x52b650` (wow-re `ui/scratch/tooltip-content-law.md`, §5-cross-checked 2026-07-10;
@@ -132,12 +158,22 @@ pub(super) fn render_view(
     if v.flags & 0x2 != 0 {
         add(("Conjured Item".into(), WHITE))?;
     }
-    // The bind line (template bonding; the instance Soulbound override is a later feed).
+    // The bind line (§6, white, one line). Bonding `[record+0x194]` ∈ {1..5} is what decides
+    // whether a line prints at ALL — a Bonding-0 item says nothing here however it is held.
+    // Within that, a **runtime-bound instance** (`0x5da2c0` — [`ItemInstance::already_bound`])
+    // overrides the whole line to ITEM_SOULBOUND, and to ITEM_BIND_QUEST for the two quest
+    // kinds, which is the same text 4|5 print anyway; only then does the jump table `0x52e4fc`
+    // pick 1→picked up · 2→equipped · 3→used · 4/5→Quest Item.
+    //
+    // Before this arm an equipped Binds-when-equipped piece kept saying *Binds when equipped*
+    // forever (B310, Frostshake): the template's `bonding` never changes when the item binds —
+    // the instance's flag is the only thing that does.
     match v.bonding {
+        4 | 5 => add(("Quest Item".into(), WHITE))?,
+        1..=3 if inst.is_some_and(|i| i.already_bound) => add(("Soulbound".into(), WHITE))?,
         1 => add(("Binds when picked up".into(), WHITE))?,
         2 => add(("Binds when equipped".into(), WHITE))?,
         3 => add(("Binds when used".into(), WHITE))?,
-        4 | 5 => add(("Quest Item".into(), WHITE))?,
         _ => {}
     }
     match v.max_count {
@@ -446,10 +482,10 @@ pub(super) fn render_view(
         add((charges_phrase(v.charges as u32), WHITE))?;
     }
     // The item-SET block (§22, ABOVE the compact cut), byte-read at the builder's
-    // `0x52d8a0..0x52e0f5`: a blank gold line, the gold "name (owned/total)" header, the
-    // set-level skill line (white, red when short), the member ladder ("  name" — pale-cream
-    // `0xc0d368` when equipped, gray otherwise; a member whose template is still in flight
-    // waits — the app re-pushes the view as names land), a second blank, then the threshold
+    // `0x52d8a0..0x52e0f5`: a blank gold line ([`SET_SPACER`]), the gold "name (owned/total)"
+    // header, the set-level skill line (white, red when short), the member ladder ("  name" —
+    // pale-cream `0xc0d368` when equipped, gray otherwise; a member whose template is still in
+    // flight waits — the app re-pushes the view as names land), a second blank, then the threshold
     // bonuses "(N) Set: text" sorted THRESHOLD-ASCENDING (the builder qsorts the slot indices
     // via `0x52e5c0` — never the DBC's stored order), green only when the skill requirement
     // is met (`0x5eaae0`) AND owned ≥ threshold. "Owned" counts EQUIPPED members on both
@@ -460,7 +496,7 @@ pub(super) fn render_view(
             .iter()
             .filter(|(id, _)| equipped.contains(id))
             .count();
-        addw((String::new(), GOLD))?;
+        addw((SET_SPACER.into(), GOLD))?;
         add((
             format!("{} ({}/{})", set.name, owned, set.members.len()),
             GOLD,
@@ -482,7 +518,7 @@ pub(super) fn render_view(
             let color = if equipped.contains(id) { CREAM } else { GRAY };
             add((format!("  {name}"), color))?;
         }
-        addw((String::new(), GOLD))?;
+        addw((SET_SPACER.into(), GOLD))?;
         let mut bonuses: Vec<&(u32, String)> = set.bonuses.iter().collect();
         bonuses.sort_by_key(|&&(threshold, _)| threshold);
         for &(threshold, ref text) in bonuses {

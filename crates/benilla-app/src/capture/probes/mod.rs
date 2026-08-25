@@ -13,7 +13,7 @@ use bevy::prelude::*;
 mod fx_draw_census;
 pub(crate) use fx_draw_census::plugin as fx_draw_census_plugin;
 mod act;
-pub(crate) use act::{ProbeChatPlugin, ProbeKeyPlugin, ProbeLuaPlugin};
+pub(crate) use act::{ProbeChatPlugin, ProbeDragPlugin, ProbeKeyPlugin, ProbeLuaPlugin};
 
 /// The probe **run** itself — its bounded lifetime, and the window it lives in (level,
 /// parking, size). Nothing here measures anything; it is the shell every other probe rides.

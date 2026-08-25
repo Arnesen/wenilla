@@ -553,3 +553,91 @@ fn instance_tail_creator_and_readable() {
     );
     assert!(s.take_errors().is_empty());
 }
+
+/// **§6's Soulbound override** — the bind line reads the INSTANCE, not only the template
+/// (B310, Frostshake: an equipped Maiden's Circle still said *Binds when equipped*, and B309's
+/// own shot showed *Binds when picked up* on the equipped pants).
+///
+/// The law (wow-re `tooltip-content-law.md` §6, byte-verified): Bonding `[record+0x194]` ∈ {1..5}
+/// decides whether a line prints at all; a **runtime-bound instance** (`0x5da2c0` — soulbound
+/// flag, or a live enchant slot that binds) overrides it to `ITEM_SOULBOUND`, and to
+/// `ITEM_BIND_QUEST` for the quest kinds; only then does the jump table `0x52e4fc` pick
+/// 1→picked up · 2→equipped · 3→used · 4/5→Quest Item.
+///
+/// Four claims, three of them controls: the override fires on a bound instance, an UNbound
+/// instance of the same item still reads *Binds when equipped*, a template hover (no instance at
+/// all) still reads *Binds when equipped*, and a bound QUEST item stays *Quest Item* — the
+/// override's other arm is the same text 4|5 print anyway.
+#[test]
+fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_item_template(871, axe()); // bonding 2 — Binds when equipped
+    let ring = ItemTemplateView {
+        name: "Maiden's Circle".into(),
+        quality: 2,
+        class: 4,
+        subclass: 0,
+        inventory_type: 11,
+        bonding: 2,
+        ..Default::default()
+    };
+    s.set_item_template(942, ring);
+    let quest_item = ItemTemplateView {
+        name: "Fresh Fish".into(),
+        quality: 1,
+        bonding: 4,
+        ..Default::default()
+    };
+    s.set_item_template(4913, quest_item);
+    let slot = |item_id: u32, already_bound: bool| ContainerSlot {
+        count: 1,
+        quality: Some(2),
+        item_id,
+        already_bound,
+        ..Default::default()
+    };
+    let mut slots = HashMap::new();
+    slots.insert(1, slot(942, true)); // bound: the reported case
+    slots.insert(2, slot(942, false)); // the same ring, not yet bound
+    slots.insert(3, slot(4913, true)); // a bound QUEST item
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetBagItem(0, 1)
+    "#,
+    )
+    .unwrap();
+    let bind_line = |s: &mut UiScript| {
+        lines_of(s)
+            .into_iter()
+            .find(|(t, _)| t == "Soulbound" || t.starts_with("Binds when") || t == "Quest Item")
+            .unwrap_or_else(|| panic!("no bind line at all"))
+    };
+    let (text, color) = bind_line(&mut s);
+    assert_eq!(text, "Soulbound", "a runtime-bound instance overrides §6");
+    assert_eq!(color, [1.0, 1.0, 1.0, 1.0], "§6 is white");
+
+    // Control 1: the SAME item, instance not bound — the template's bonding stands.
+    s.run(r#"TT:SetBagItem(0, 2)"#).unwrap();
+    assert_eq!(bind_line(&mut s).0, "Binds when equipped");
+
+    // Control 2: a TEMPLATE hover carries no instance at all, so nothing can override.
+    s.run(r#"TT:SetItemById(871)"#).unwrap();
+    assert_eq!(bind_line(&mut s).0, "Binds when equipped");
+
+    // Control 3: the override's other arm is ITEM_BIND_QUEST — the same text 4|5 already print.
+    s.run(r#"TT:SetBagItem(0, 3)"#).unwrap();
+    assert_eq!(bind_line(&mut s).0, "Quest Item");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

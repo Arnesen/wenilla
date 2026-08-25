@@ -66,6 +66,13 @@ pub struct ContainerSlot {
     /// UNLOCKED `0x4`, the wrapped-gift arm WRAPPED `0x8` (see
     /// [`super::char_stats::InvSlotView::flags`], the doll twin).
     pub flags: u32,
+    /// `0x5da2c0` — **the instance is runtime-bound**: `ITEM_FIELD_FLAGS & 1` (soulbound), or a
+    /// live enchant slot naming a `SpellItemEnchantment` row that binds. App-resolved off the raw
+    /// descriptor ([`crate::items::already_bound`] in benilla-app — the same predicate the enchant
+    /// cursor's bind question asks), because the binding half needs a DBC join and the engine
+    /// holds no item knowledge of its own. The tooltip's §6 bind line overrides to **Soulbound**
+    /// on it (B310); `false` on any source with no streamed item object.
+    pub already_bound: bool,
     /// The instance's enchant slots, resolved by the app ([`super::EnchantView`]) and in
     /// enchant-slot order: it joins the id through `SpellItemEnchantment.dbc`'s name column and
     /// hands over the row's name plus the three facts the line law needs to place and paint it.
@@ -708,6 +715,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                already_bound: false,
                 bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
@@ -872,6 +880,7 @@ mod tests {
         state.slots.insert(
             5,
             ContainerSlot {
+                already_bound: false,
                 bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Gem_01".into()),

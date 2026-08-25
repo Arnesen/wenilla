@@ -845,3 +845,150 @@ fn the_geometry_matches_both_reference_files() {
         10,
     );
 }
+
+/// **A drag the cursor carries off the window edge ENDS — it does not glue the row to the mouse
+/// for the rest of the session** (B310).
+///
+/// The defect this pins is not in this file at all; it is the engine's, and the raid grid is
+/// simply where it bites hardest. No release is fed once the OS pointer is outside the window, so
+/// `UiScript::pointer_left_window` used to drop the gesture silently: `OnDragStop` never ran, this
+/// pane's `MOVING_RAID_MEMBER` stayed set, the engine's one `StartMoving` slot stayed taken, and
+/// the row followed the cursor around the screen from then on — swallowing every press aimed at
+/// any row underneath it. "I moved one member and then could not move any other" is what that
+/// looks like from a hand on the mouse.
+///
+/// The three things this asserts are the three the bug broke, in order of how visible they are:
+/// the row goes home, the pane forgets it, and the next row still drags.
+#[test]
+fn a_drag_carried_off_the_window_edge_ends_instead_of_gluing_the_row_to_the_cursor() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+
+    let left_of =
+        |s: &UiScript, f: &str| -> f32 { s.eval(&format!("return {f}:GetLeft()")).unwrap() };
+    let centre = |s: &UiScript, f: &str| -> (f32, f32) {
+        let l: f32 = s.eval(&format!("return {f}:GetLeft()")).unwrap();
+        let r: f32 = s.eval(&format!("return {f}:GetRight()")).unwrap();
+        let t: f32 = s.eval(&format!("return {f}:GetTop()")).unwrap();
+        let b: f32 = s.eval(&format!("return {f}:GetBottom()")).unwrap();
+        ((l + r) / 2.0, (t + b) / 2.0)
+    };
+
+    let home = left_of(&s, "RaidGroupButton7");
+    let (fx, fy) = centre(&s, "RaidGroupButton7");
+    s.mouse_button(fx, fy, "LeftButton", true);
+    s.mouse_move(fx + 40.0, fy + 40.0); // past the threshold ⇒ OnDragStart ⇒ StartMoving
+    s.tick(0.016);
+    assert_eq!(
+        s.eval::<String>("return MOVING_RAID_MEMBER:GetName()")
+            .unwrap(),
+        "RaidGroupButton7",
+        "the drag is in flight"
+    );
+
+    s.pointer_left_window();
+    s.tick(0.016);
+    assert!(
+        s.eval::<bool>("return MOVING_RAID_MEMBER == nil").unwrap(),
+        "the pane's own drag state is cleared by the OnDragStop the abandon fires"
+    );
+    assert_eq!(
+        left_of(&s, "RaidGroupButton7"),
+        home,
+        "the row springs back to its slot — a drop on nothing is not a move"
+    );
+
+    // The row is no longer following anything.
+    s.mouse_move(400.0, 300.0);
+    s.tick(0.016);
+    s.mouse_move(500.0, 200.0);
+    s.tick(0.016);
+    assert_eq!(
+        left_of(&s, "RaidGroupButton7"),
+        home,
+        "…and it stays there however far the cursor travels"
+    );
+
+    // And the next row drags normally, which is the thing the director actually lost.
+    let (gx, gy) = centre(&s, "RaidGroupButton8");
+    let (tx, ty) = centre(&s, "RaidGroup5Slot1");
+    s.mouse_button(gx, gy, "LeftButton", true);
+    s.mouse_move(gx + 10.0, gy + 10.0);
+    s.tick(0.016);
+    s.mouse_move(tx, ty);
+    s.tick(0.016);
+    s.mouse_button(tx, ty, "LeftButton", false);
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::SetSubgroup { index: 8, group: 5 }],
+        "the row after the abandoned one still moves"
+    );
+    assert!(
+        s.errors().is_empty(),
+        "and nothing raised: {:?}",
+        s.errors()
+    );
+}
+
+/// The whole gesture, through the REAL pointer path, three times over — press, cross the
+/// threshold, travel, release — with the roster echo in between, exactly as `/partytest raid`
+/// feeds it.
+///
+/// Its sibling `dragging_a_row_moves_swaps_or_springs_back` calls `RaidGroupButton_OnDragStop`
+/// with the globals set by hand, which is the *landing* logic and nothing else: it never fires
+/// `OnDragStart`, never calls `StartMoving`, never runs the hover sweep, and — the part that
+/// mattered — never drags a SECOND row. This one does all four.
+#[test]
+fn one_drag_does_not_cost_the_next_one() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    let mut raid = vec![row("Me", 2, 1, "Warrior", true, false)];
+    for i in 1..25u32 {
+        raid.push(row(
+            &format!("Member{i}"),
+            0,
+            i / 5 + 1,
+            "Priest",
+            true,
+            false,
+        ));
+    }
+    push_raid(&mut s, raid.clone());
+
+    let centre = |s: &UiScript, f: &str| -> (f32, f32) {
+        let l: f32 = s.eval(&format!("return {f}:GetLeft()")).unwrap();
+        let r: f32 = s.eval(&format!("return {f}:GetRight()")).unwrap();
+        let t: f32 = s.eval(&format!("return {f}:GetTop()")).unwrap();
+        let b: f32 = s.eval(&format!("return {f}:GetBottom()")).unwrap();
+        ((l + r) / 2.0, (t + b) / 2.0)
+    };
+
+    for (row_index, group) in [(7u32, 6u32), (8, 6), (9, 7)] {
+        let from = format!("RaidGroupButton{row_index}");
+        let seat = if group == 6 && row_index == 8 { 2 } else { 1 };
+        let to = format!("RaidGroup{group}Slot{seat}");
+        let (fx, fy) = centre(&s, &from);
+        let (tx, ty) = centre(&s, &to);
+        s.mouse_button(fx, fy, "LeftButton", true);
+        s.mouse_move(fx + 10.0, fy + 10.0);
+        s.tick(0.016);
+        s.mouse_move(tx, ty);
+        s.tick(0.016);
+        s.mouse_button(tx, ty, "LeftButton", false);
+        s.tick(0.016);
+        assert_eq!(
+            s.take_party_requests(),
+            vec![PartyRequest::SetSubgroup {
+                index: row_index,
+                group
+            }],
+            "drag {row_index} onto group {group}"
+        );
+        assert!(s.errors().is_empty(), "{from}: {:?}", s.errors());
+        // The sandbox echo `/partytest raid` supplies, so the next drag starts from a repainted
+        // grid rather than a frozen one.
+        raid[row_index as usize - 1].subgroup = group - 1;
+        push_raid(&mut s, raid.clone());
+    }
+}

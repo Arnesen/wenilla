@@ -90,6 +90,44 @@ pub(crate) fn enchant_lines(
     lines
 }
 
+/// `0x5da2c0` — **"has this item already been through the bind question?"**: the instance's
+/// `ITEM_FIELD_FLAGS & 1` (already soulbound), **or** any of its seven live
+/// `ITEM_FIELD_ENCHANTMENT` slots naming a `SpellItemEnchantment` row that binds the item
+/// ([`benilla_formats::EnchantCatalog::binds_the_item`], the ref's `5da300`–`5da320` walk).
+///
+/// One predicate, two consumers — the enchant cursor's bind question
+/// ([`crate::ui_action`]'s `ClickedItem::already_bound`, the `0x495d60` gate) and the item
+/// tooltip's §6 **Soulbound** override (B310). They must agree: an item the cursor considers
+/// already bound is exactly an item whose tooltip says *Soulbound*.
+///
+/// Read off the RAW descriptor, never off the rendered [`enchant_lines`] list. That list is a
+/// *display* view: it drops rows the catalog cannot name, and it drops every
+/// `Flags & 0x2` row outright (the line the reference refuses to print — decision 0928). The two
+/// flag sets **overlap**, so this is not a hypothetical: **Firestone 1-4 and Orb of Fire carry
+/// both bits** — they bind the item AND print no line — so an imbued weapon would read back as
+/// "not bound" from the lines while the reference calls it bound.
+pub(crate) fn already_bound(fields: &ObjectFields, cat: Option<&Enchants>) -> bool {
+    fields.item_flags().is_some_and(|f| f & 0x1 != 0)
+        || (0..7).any(|slot| live_enchant(fields, slot, cat).is_some_and(|id| binds(id, cat)))
+}
+
+/// One `ITEM_FIELD_ENCHANTMENT` slot as the bind checks read it (`495eec:
+/// movl 0x40(%ecx,%eax,4)` with `eax = 3*slot`): the raw id must be **positive** (the ref's `jl`
+/// skip at `495ef4`/`5da306`) and must name a real `SpellItemEnchantment` row (its
+/// `testl %eax,%eax` after the table load). Anything else is "no enchant here".
+///
+/// NB this is the *bind-question* reading, not the *line* reading — the line law names its row
+/// off `abs(id)` and keeps the sign only for the colour ([`enchant_lines`], wow-re §E3).
+pub(crate) fn live_enchant(fields: &ObjectFields, slot: u8, cat: Option<&Enchants>) -> Option<u32> {
+    let id = u32::try_from(fields.item_enchant(slot)?).ok()?;
+    cat.is_some_and(|c| c.0.has_row(id)).then_some(id)
+}
+
+/// `SpellItemEnchantment.Flags & 1` — this enchant soulbinds the item it lands on.
+pub(crate) fn binds(id: u32, cat: Option<&Enchants>) -> bool {
+    cat.is_some_and(|c| c.0.binds_the_item(id))
+}
+
 /// [`enchant_lines`] without the breadcrumb — the same gate and the same naming, for the one
 /// caller that is not a live item: the startup resolve of the whole `ItemRandomProperties` table
 /// ([`random_property_views`]). Routing that through the loud one would fire "the first enchant
@@ -605,6 +643,7 @@ mod tests {
         ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER,
     };
     use crossbeam_channel::TryRecvError;
+    use std::collections::HashMap;
 
     fn commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -845,5 +884,69 @@ mod tests {
         assert!(enchant_lines([(0, 999_999, 0, None)], Some(&cat)).is_empty());
         // No DBC → no lines, the pre-0915 tooltip.
         assert!(enchant_lines([(0, 2564, 0, None)], None).is_empty());
+    }
+
+    /// `SpellItemEnchantment` field 23 for three synthetic rows: one that binds, one that binds
+    /// AND hides its tooltip line (the Firestone shape), one that does neither.
+    fn catalog() -> Enchants {
+        Enchants(benilla_formats::EnchantCatalog::from_rows(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([(11, 0x1), (12, 0x1 | 0x2), (13, 0x0)]),
+        ))
+    }
+
+    /// One item object with the given `ITEM_FIELD_FLAGS` and enchant slot 0.
+    fn item(flags: u32, slot0: u32) -> ObjectFields {
+        ObjectFields::from_pairs(&[(21, flags), (22, slot0)])
+    }
+
+    /// **`0x5da2c0` — the bind question's predicate**, and the reason it reads the raw descriptor.
+    ///
+    /// Two halves, `||`: the instance's soulbound bit, or any live enchant slot naming a row with
+    /// `Flags & 1`. The last case is the one that decides the shape: the Firestone family carries
+    /// BOTH the binding bit and the tooltip-suppression bit, so the same item is bound *and*
+    /// prints no enchant line — a predicate read off [`enchant_lines`] would call it unbound.
+    #[test]
+    fn the_bind_predicate_reads_the_descriptor_not_the_rendered_lines() {
+        let cat = catalog();
+        let cat = Some(&cat);
+        assert!(
+            already_bound(&item(0x1, 0), cat),
+            "ITEM_FIELD_FLAGS & 1 — already soulbound"
+        );
+        assert!(
+            !already_bound(&item(0x0, 0), cat),
+            "no flag, no enchant — the plain BoE"
+        );
+        assert!(
+            !already_bound(&item(0x8, 0), cat),
+            "a WRAPPED gift is not a bound item — the bit is 0x1, not any bit"
+        );
+        assert!(
+            already_bound(&item(0x0, 11), cat),
+            "a live enchant slot naming a binding row"
+        );
+        assert!(
+            !already_bound(&item(0x0, 13), cat),
+            "a non-binding enchant leaves the item unbound"
+        );
+        assert!(
+            !already_bound(&item(0x0, 99), cat),
+            "an id that names no row binds nothing (the ref's `testl` after the table load)"
+        );
+        assert!(
+            !already_bound(&item(0x0, 11), None),
+            "no catalog loaded — the enchant half cannot answer, and does not guess"
+        );
+        // The one that pins the design: bound, and invisible to the line law.
+        assert!(
+            already_bound(&item(0x0, 12), cat),
+            "the Firestone shape — binds AND hides its line"
+        );
+        assert!(
+            enchant_lines_quiet([(0u8, 12i32, 0u32, None)], cat).is_empty(),
+            "…and the rendered lines are empty for it, which is why they are not the source"
+        );
     }
 }

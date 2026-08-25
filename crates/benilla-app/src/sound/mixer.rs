@@ -15,7 +15,8 @@
 //! is the WoW↔FMOD convention pair; ours is Bevy↔kira, already unified by the decision-0002
 //! world transform upstream.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -137,6 +138,8 @@ pub(crate) struct Mixer {
     level: Arc<MixLevel>,
     /// The `SoundOutputLimiter` CVar cell the limiter reads each block.
     limiter_on: Arc<AtomicBool>,
+    /// The pre-limiter tap's frame clock while a probing run records; `None` otherwise.
+    audio_pos: Option<Arc<AtomicU64>>,
     /// The device's negotiated sample rate — what turns a count of over-scale samples into a
     /// duration in the health report. `None` on a device we could not probe.
     sample_rate: Option<u32>,
@@ -145,13 +148,15 @@ pub(crate) struct Mixer {
 impl Mixer {
     /// Open the default audio device. Fails cleanly when there is none (headless/CI) — the caller
     /// runs silent with `None` (mirrors the client's `-nosound` gate).
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(probe_dir: Option<&Path>) -> Result<Self> {
         let (backend_settings, sample_rate) = backend_settings();
         let level = Arc::new(MixLevel::default());
         let limiter_on = Arc::new(AtomicBool::new(true));
+        let (main_track_builder, audio_pos) =
+            main_track(&level, &limiter_on, sample_rate, probe_dir);
         let settings = AudioManagerSettings::<DefaultBackend> {
             backend_settings,
-            main_track_builder: main_track(&level, &limiter_on, sample_rate),
+            main_track_builder,
             capacities: kira::Capacities {
                 sub_track_capacity: SPATIAL_VOICE_CAPACITY,
                 ..Default::default()
@@ -198,7 +203,14 @@ impl Mixer {
             level,
             limiter_on,
             sample_rate,
+            audio_pos,
         })
+    }
+
+    /// The probing run's shared time axis — the pre-limiter tap's frame clock
+    /// ([`super::probe`]). `None` when not probing.
+    pub(super) fn audio_pos(&self) -> Option<Arc<AtomicU64>> {
+        self.audio_pos.clone()
     }
 
     /// Apply a zone reverb preset — the seam mirror of `FSOUND_Reverb_SetProperties` (the real
@@ -392,15 +404,24 @@ fn main_track(
     level: &Arc<MixLevel>,
     limiter_on: &Arc<AtomicBool>,
     sample_rate: Option<u32>,
-) -> kira::track::MainTrackBuilder {
+    probe_dir: Option<&Path>,
+) -> (kira::track::MainTrackBuilder, Option<Arc<AtomicU64>>) {
     let mut main = kira::track::MainTrackBuilder::new();
     meter::install(&mut main, level);
+    // A probing run brackets the limiter with two taps (decision 1556). One tap can only ever
+    // say what was heard; two say whether the limiter is the thing that changed it — which is
+    // precisely the question a "your fix changed nothing" report asks, and one the post-limiter
+    // tap alone provably cannot answer.
+    let probe = probe_dir.zip(sample_rate);
+    let audio_pos = probe
+        .and_then(|(dir, rate)| super::mix_tap::install_at(&mut main, &dir.join("pre.wav"), rate));
     limiter::install(&mut main, level, limiter_on);
-    super::mix_tap::install(main, sample_rate)
+    if let Some((dir, rate)) = probe {
+        super::mix_tap::install_at(&mut main, &dir.join("post.wav"), rate);
+    }
+    (super::mix_tap::install(main, sample_rate), audio_pos)
 }
 
-/// The device buffer we ask for, in frames — the underrun margin (decision 1026).
-///
 /// kira's cpal backend takes `device.default_output_config().config()` when handed no config of
 /// its own, and that carries `BufferSize::Default` — whatever CoreAudio happens to hand us. On
 /// macOS the buffer size is a *shared, per-device* property, so another app (an OBS capture, a
@@ -814,7 +835,7 @@ mod tests {
         let heard = Arc::new(MixLevel::default());
         let limiter_on = Arc::new(AtomicBool::new(limiter));
         // The client's own chain, plus one probe meter appended to read the limiter's output.
-        let mut main = main_track(&asked, &limiter_on, Some(RATE));
+        let (mut main, _) = main_track(&asked, &limiter_on, Some(RATE), None);
         meter::install(&mut main, &heard);
         let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
             backend_settings: MockBackendSettings { sample_rate: RATE },
@@ -846,6 +867,117 @@ mod tests {
             heard.over,
         );
         (asked, heard.peak, heard.over)
+    }
+
+    /// The probe's two taps must **bracket** the limiter (decision 1556) — and this is the test
+    /// that the capture handed to the director can actually tell the mechanisms apart.
+    ///
+    /// The whole reason for a second tap is that `post.wav` alone cannot distinguish "the mix
+    /// never clipped" from "the limiter failed to hold it". Both produce a clean post file for
+    /// entirely different reasons, and only the pre file separates them. So: render an
+    /// over-scale mix through the real chain with the probe armed, and assert the two files
+    /// disagree in exactly the way the diagnosis depends on — `pre.wav` far past full scale,
+    /// `post.wav` held under it. If these two ever agree, the instrument has gone blind and every
+    /// verdict it prints is worthless.
+    ///
+    /// Writes into the OS temp dir (never the install, never `benilla-config`) and leaves the
+    /// capture behind on purpose: `scripts/soundprobe.py $TMPDIR/benilla-probe-selftest` is then
+    /// a live check of the analyser against a capture with a known answer.
+    #[test]
+    fn the_probe_taps_bracket_the_limiter() {
+        use kira::backend::mock::{MockBackend, MockBackendSettings};
+
+        const RATE: u32 = 44_100;
+        const COPIES: usize = 5;
+
+        let dir = std::env::temp_dir().join("benilla-probe-selftest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp capture dir");
+
+        // A 0 dBFS tone, in memory — the shape every WoW SFX ships in (mastered to full scale),
+        // without needing the gitignored install for a test about the *chain*.
+        let frames = RATE as usize / 4;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames as u32 * 8).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&RATE.to_le_bytes());
+        wav.extend_from_slice(&(RATE * 8).to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
+        wav.extend_from_slice(&32u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames as u32 * 8).to_le_bytes());
+        for i in 0..frames {
+            let v = (i as f32 * 440.0 * std::f32::consts::TAU / RATE as f32).sin();
+            wav.extend_from_slice(&v.to_le_bytes());
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+
+        {
+            let level = Arc::new(MixLevel::default());
+            let limiter_on = Arc::new(AtomicBool::new(true));
+            let (main, audio_pos) = main_track(&level, &limiter_on, Some(RATE), Some(&dir));
+            let audio_pos = audio_pos.expect("the pre-tap publishes a frame clock");
+            let mut manager = AudioManager::<MockBackend>::new(AudioManagerSettings {
+                backend_settings: MockBackendSettings { sample_rate: RATE },
+                main_track_builder: main,
+                ..Default::default()
+            })
+            .expect("mock backend");
+
+            let data = sfx_from_bytes(wav).expect("tone decodes");
+            for _ in 0..COPIES {
+                manager.play(data.clone()).expect("play");
+            }
+            let blocks = (data.duration().as_secs_f64() + 0.1) * f64::from(RATE) / 128.0;
+            let backend = manager.backend_mut();
+            for _ in 0..(blocks.ceil() as usize) {
+                backend.on_start_processing();
+                backend.process();
+            }
+            assert!(
+                audio_pos.load(Ordering::Relaxed) > 0,
+                "the shared clock must advance — a capture with a dead clock cannot place a mark"
+            );
+        } // manager dropped: the tap producers abandon, the writers do their final flush.
+
+        // The writers wake on a 250 ms cadence; give them room to drain and exit.
+        std::thread::sleep(std::time::Duration::from_millis(900));
+
+        let peak = |name: &str| -> (f32, u64) {
+            let bytes = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(bytes.len() > 44, "{name} has no audio");
+            let (mut peak, mut over) = (0.0f32, 0u64);
+            for c in bytes[44..].chunks_exact(4) {
+                let v = f32::from_le_bytes(c.try_into().unwrap()).abs();
+                peak = peak.max(v);
+                over += u64::from(v > 1.0);
+            }
+            (peak, over)
+        };
+        let (pre_peak, pre_over) = peak("pre.wav");
+        let (post_peak, post_over) = peak("post.wav");
+        eprintln!(
+            "probe self-test: pre {pre_peak:.2}x ({pre_over} over) -> post {post_peak:.2}x \
+             ({post_over} over); capture left at {}",
+            dir.display()
+        );
+
+        assert!(
+            pre_peak > 3.0,
+            "pre.wav must record what the game ASKED for — {COPIES} full-scale copies, got \
+             {pre_peak:.2}x. A pre tap that already shows a limited signal is measuring the \
+             wrong side of the chain."
+        );
+        assert!(pre_over > 0, "and it must show the over-scale samples");
+        assert!(
+            post_peak <= 1.0 && post_over == 0,
+            "post.wav must record what was HEARD — held under full scale, got {post_peak:.2}x \
+             with {post_over} over"
+        );
     }
 
     /// The **voice ceiling is real, and it is ours** (decision 1551): a spatial-track arena

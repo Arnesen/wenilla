@@ -347,6 +347,212 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
     );
 }
 
+/// **Every archive path a shipped LUA chunk names survives its own escaping** — the mirror image
+/// of the doubled-separator check above, and the tripwire for the defect that left the raid tab
+/// with no window art at all (the `FriendsFrame_Update` arm was written
+/// `"Interface\PaperDollInfoFrame\…"`, one backslash, so Lua ate both separators and
+/// `SetTexture` was handed `InterfacePaperDollInfoFrameUI-Character-General-TopLeft`).
+///
+/// The two halves of the same trap, and they pull in OPPOSITE directions, which is exactly why
+/// neither check can stand in for the other:
+///
+/// - an **XML attribute** is not a Lua string, so `file="Interface\Buttons\X"` is right and a
+///   doubled separator there is the bug (the sweep above);
+/// - a **Lua literal** is, so `SetTexture("Interface\\Buttons\\X")` is right and a single
+///   separator here is the bug — and it fails SILENTLY: `\P` is not an escape Lua rejects, it is
+///   one Lua drops the backslash from, so the string is well-formed, the call succeeds, and the
+///   only symptom is a texture that never appears.
+///
+/// The shape half runs without client data; the resolution half needs the archives and skips
+/// without them, the same posture as its sibling.
+#[test]
+fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
+    use benilla_ui::framexml::{Element, ScriptRef, TopLevel};
+
+    // The archive roots a path literal can start with. A prefix list rather than "has a
+    // backslash", because Lua strings legitimately carry `\n`/`\124` and those are not paths.
+    const ROOTS: [&str; 7] = [
+        "interface",
+        "textures",
+        "world",
+        "sound",
+        "character",
+        "item",
+        "spells",
+    ];
+
+    /// Every `"…"`/`'…'` literal in one Lua chunk, as its RAW source text (escapes uninterpreted —
+    /// what this sweep is looking for is an escape Lua would have eaten, so interpreting them
+    /// first would destroy the evidence).
+    ///
+    /// **Comments and long strings are skipped, not scanned.** A `--` line quoting a path (this
+    /// house writes plenty: "the file is `Interface\\Foo\\Bar`") is prose, and a prose backslash
+    /// is nobody's bug — flagging one would train the next session to weaken this test rather
+    /// than read it.
+    fn literals(chunk: &str) -> Vec<(String, bool)> {
+        let src: Vec<char> = chunk.chars().collect();
+        let at = |i: usize, s: &str| src[i..].starts_with(&s.chars().collect::<Vec<_>>()[..]);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < src.len() {
+            if at(i, "--") {
+                i = if at(i + 2, "[[") {
+                    src[i..]
+                        .windows(2)
+                        .position(|w| w == [']', ']'])
+                        .map_or(src.len(), |k| i + k + 2)
+                } else {
+                    src[i..]
+                        .iter()
+                        .position(|&c| c == '\n')
+                        .map_or(src.len(), |k| i + k + 1)
+                };
+                continue;
+            }
+            if at(i, "[[") {
+                i = src[i + 2..]
+                    .windows(2)
+                    .position(|w| w == [']', ']'])
+                    .map_or(src.len(), |k| i + 2 + k + 2);
+                continue;
+            }
+            let quote = src[i];
+            if quote != '"' && quote != '\'' {
+                i += 1;
+                continue;
+            }
+            let (mut raw, mut j, mut closed) = (String::new(), i + 1, false);
+            while j < src.len() {
+                let c = src[j];
+                if c == '\\' && j + 1 < src.len() {
+                    raw.push(c);
+                    raw.push(src[j + 1]);
+                    j += 2;
+                    continue;
+                }
+                // A newline before the closing quote means this was never a literal (an
+                // apostrophe in a comment, most often) — drop it and resume at the next char.
+                if c == '\n' {
+                    break;
+                }
+                if c == quote {
+                    closed = true;
+                    break;
+                }
+                raw.push(c);
+                j += 1;
+            }
+            if closed {
+                // Is this the WHOLE path, or a fragment? A literal with `..` against either side
+                // is being concatenated onto, and one carrying a `%` spec is a `format` template —
+                // in both cases the string in the source is a prefix and resolving it would fail
+                // by construction. Read off the SITE rather than guessed from the text (a
+                // "ends with a dash" rule would be a list to feed forever), so a fragment that
+                // later becomes whole starts being resolved on its own.
+                let before = src[..i].iter().rposition(|c| !c.is_whitespace());
+                let after = src[j + 1..].iter().position(|c| !c.is_whitespace());
+                let joined = before.is_some_and(|k| k >= 1 && src[k] == '.' && src[k - 1] == '.')
+                    || after.is_some_and(|k| {
+                        src.get(j + 1 + k) == Some(&'.') && src.get(j + 2 + k) == Some(&'.')
+                    });
+                // …and the two fragments a `..` cannot see, because they are assigned to a
+                // variable first and joined somewhere else: a literal ending in the SEPARATOR is a
+                // directory, and one ending in a DASH is a family prefix (`"…\\MageFire-"` .. rank).
+                // Neither is a file name — no texture in the chain ends in either character — so
+                // this excludes fragments without excluding anything real.
+                let fragment = raw.ends_with('\\') || raw.ends_with('-');
+                let whole = !joined && !fragment && !raw.contains('%');
+                out.push((raw, whole));
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    // Every Lua chunk in the file: the top-level `<Script>` blocks and every element body (the
+    // `<OnLoad>`-family handlers). Through the PARSER, not a text scan — an attribute value is
+    // also inside double quotes, and a text scan cannot tell the two apart, which is the whole
+    // distinction this test exists to make.
+    fn bodies(el: &Element, out: &mut Vec<String>) {
+        if !el.body.trim().is_empty() {
+            out.push(el.body.clone());
+        }
+        for child in &el.children {
+            bodies(child, out);
+        }
+    }
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut paths: Vec<(String, String, bool)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "xml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        let mut chunks = Vec::new();
+        for item in &benilla_ui::framexml::parse(&text).expect("parses").items {
+            match item {
+                TopLevel::Script(ScriptRef::Inline { body, .. }) => chunks.push(body.clone()),
+                TopLevel::Font(el) | TopLevel::Template(el) | TopLevel::Instance(el) => {
+                    bodies(el, &mut chunks);
+                }
+                TopLevel::Script(ScriptRef::File(_)) | TopLevel::Include(_) => {}
+            }
+        }
+        for (raw, whole) in chunks.iter().flat_map(|c| literals(c)) {
+            let lower = raw.to_ascii_lowercase();
+            if ROOTS.iter().any(|r| lower.starts_with(r)) && raw.contains('\\') {
+                paths.push((file.to_string(), raw, whole));
+            }
+        }
+    }
+    // Never let the sweep pass by matching nothing.
+    assert!(
+        paths.len() >= 20,
+        "only {} archive paths swept out of the shipped Lua",
+        paths.len()
+    );
+
+    // The shape half: after collapsing every `\\` pair, no backslash may remain — one that does
+    // is a separator Lua is about to eat.
+    for (file, raw, _) in &paths {
+        assert!(
+            !raw.replace("\\\\", "").contains('\\'),
+            "{file}: the Lua literal \"{raw}\" has SINGLE separators — Lua drops the backslash \
+             from every one of them, so the path arrives with its folders run together, the \
+             archive lookup misses, and the texture silently never appears. Double them."
+        );
+    }
+
+    let data = benilla_formats::wow_data_or_skip!();
+    let chain = benilla_formats::open_chain(&data).expect("open chain");
+    let missing: Vec<String> = paths
+        .iter()
+        // `sprite_candidates` answers for TEXTURES; a sound or a model path is a different
+        // resolver's business, so only the two texture roots take the resolution half — and only
+        // a WHOLE path, never a concatenation fragment.
+        .filter(|(_, raw, whole)| {
+            let lower = raw.to_ascii_lowercase();
+            *whole && (lower.starts_with("interface") || lower.starts_with("textures"))
+        })
+        .filter(|(_, raw, _)| {
+            let real = raw.replace("\\\\", "\\");
+            !benilla_assets::sprite_candidates(&real)
+                .iter()
+                .any(|c| chain.contains(c))
+        })
+        .map(|(file, raw, _)| format!("{file}: \"{raw}\""))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "archive paths a shipped Lua chunk names that resolve to nothing: {missing:#?}"
+    );
+}
+
 /// **Every `text=` in the shipped UI is answerable against the REAL `GlobalStrings.lua`** — the
 /// tripwire for the defect that put "CREATE_MACROS" across the macro window's title bar (0991).
 ///

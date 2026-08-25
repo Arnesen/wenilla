@@ -1045,8 +1045,24 @@ impl UiScript {
     /// `OnClick` if the pointer re-enters and releases over the very frame it left from. The app
     /// calls this from the same branch that fires the synthetic `OnLeave` (`ui_script/input.rs`).
     pub fn pointer_left_window(&mut self) {
+        // **A started drag ENDS here, it is not merely forgotten.** The reference cannot reach
+        // this state at all — the OS holds the pointer for the whole of a button-held drag, so its
+        // release always arrives and `OnDragStop` always runs. Ours has no such capture: walk the
+        // cursor off the window edge mid-drag and no release is ever fed. Dropping the gesture
+        // silently (what this did) leaves the addon's `OnDragStop → StopMovingOrSizing` unrun, so
+        // the engine's single `Model::moving` slot stays taken and `object::movable::advance_move`
+        // glues that frame to the cursor for the rest of the session — where it also swallows
+        // every press aimed at whatever is underneath. That is B310: one raid row dragged off the
+        // window edge, and no row could be dragged again. Firing the stop is the faithful end,
+        // because it is the same end the reference's own release gives the handler.
+        let abandoned = {
+            let mut model = self.model_mut();
+            cursor::abandon_drag(&mut model)
+        };
+        if let Some(source) = abandoned {
+            self.fire_drag_stop(source);
+        }
         let mut model = self.model_mut();
-        model.drag = None;
         model.mouse_down_on.clear();
         // [`Model::last_click`] is deliberately NOT cleared here. It looks like it belongs in this
         // list, and the binary says otherwise: `[CButton+0x334]` has exactly three writers

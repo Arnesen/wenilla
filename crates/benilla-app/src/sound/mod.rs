@@ -34,6 +34,7 @@ mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+mod probe;
 mod reverb;
 mod sheathe;
 mod spell;
@@ -187,6 +188,34 @@ pub(crate) struct SoundOutput {
     pub(crate) mixer: Option<Mixer>,
     /// Live kit channels, owned and pumped by [`kit::pump_channels`].
     pub(crate) channels: Vec<kit::ActiveChannel>,
+    /// The measuring-mode recorder, when `$WOW_SOUND_PROBE` armed one (decision 1556). It rides
+    /// here rather than in a resource of its own so the kit player — which already holds `out` —
+    /// can stamp every play on the capture's timeline with no new plumbing.
+    pub(crate) probe: Option<probe::Probe>,
+    /// Live **stream** voices, reported by their owners each frame ([`zone`], [`glue`]).
+    ///
+    /// These count against the same ceiling as everything else ([`kit::SOFTWARE_CHANNELS`]): the
+    /// reference's music, ambience and liquid loops all land on its uncapped bus 0 and occupy
+    /// FMOD channels exactly like a sword swing does. Two fields rather than one counter because
+    /// each owner **rewrites its own** every frame from its own live handles — a shared counter
+    /// with two writers drifts the first time a fade is interrupted, and a voice budget that
+    /// drifts is worse than none.
+    pub(crate) zone_streams: usize,
+    pub(crate) glue_streams: usize,
+    /// One-shots that lost their slot to a louder newcomer, and plays refused because nothing
+    /// live was quieter than them (decision 1557). Reported by the probe.
+    pub(crate) voices_stolen: u64,
+    pub(crate) voices_denied: u64,
+    /// Same-kit copies dropped by [`kit::SAME_KIT_MAX`] (decision 1560).
+    pub(crate) copies_dropped: u64,
+}
+
+impl SoundOutput {
+    /// Everything the device is currently mixing — kit channels plus the held streams. This is
+    /// the number [`kit::SOFTWARE_CHANNELS`] bounds.
+    pub(crate) fn live_voices(&self) -> usize {
+        self.channels.len() + self.zone_streams + self.glue_streams
+    }
 }
 
 /// The 3D-audio listener pose for this frame — the single authority every sound system reads, in
@@ -244,11 +273,19 @@ impl Plugin for SoundPlugin {
         let silent = ["WOW_NOSOUND", "WOW_CAPTURE"]
             .into_iter()
             .find(|v| std::env::var_os(v).is_some());
+        // Resolved before the mixer: the probe's taps are main-track effects and a kira main
+        // track is build-time-only, so "are we recording?" has to be answered before the device
+        // opens, not when the director presses the key.
+        let probe_dir = if silent.is_some() {
+            None
+        } else {
+            probe::output_dir()
+        };
         let mixer = if let Some(var) = silent {
             info!("${var} set — audio disabled");
             None
         } else {
-            match Mixer::new() {
+            match Mixer::new(probe_dir.as_deref()) {
                 Ok(m) => Some(m),
                 Err(e) => {
                     warn!("no audio device — running silent: {e:#}");
@@ -256,9 +293,22 @@ impl Plugin for SoundPlugin {
                 }
             }
         };
+        let probe = probe_dir.zip(mixer.as_ref()).and_then(|(dir, m)| {
+            let Some(rate) = m.sample_rate() else {
+                warn!("sound probe: device sample rate unknown — not recording");
+                return None;
+            };
+            Some(probe::Probe::start(dir, rate, m.audio_pos()))
+        });
         app.insert_non_send_resource(SoundOutput {
             mixer,
             channels: Vec::new(),
+            probe,
+            zone_streams: 0,
+            glue_streams: 0,
+            voices_stolen: 0,
+            voices_denied: 0,
+            copies_dropped: 0,
         })
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
@@ -278,6 +328,7 @@ impl Plugin for SoundPlugin {
                 hal_overload::poll,
             ),
         );
+        probe::plugin(app);
         kit::plugin(app);
         liquid_loop::plugin(app);
         zone::plugin(app);
@@ -397,6 +448,13 @@ fn poll_mix_health(
     mut last_refused: Local<u64>,
     mut peak_voices: Local<usize>,
 ) {
+    // While a probing run records, it owns the meters: [`meter::MixLevel::take`] is
+    // reset-on-read, so two consumers would each see a fraction of the truth and both would
+    // under-report. The probe says everything this says, twenty times a second and to a file
+    // (decision 1556).
+    if out.probe.is_some() {
+        return;
+    }
     *peak_voices = (*peak_voices).max(out.channels.len());
     let Some(mixer) = out.mixer.as_mut() else {
         return;
@@ -446,6 +504,17 @@ fn poll_mix_health(
 /// asked for, how long it was over, what the limiter had to pull, and how many voices were live —
 /// which together say *why* (thirty voices at once is a different bug from one voice at 4×).
 fn report_level(level: meter::LevelReading, voices: usize, rate: Option<u32>) {
+    // Ahead of the level story on purpose: a non-finite sample is not a loud mix, it is a broken
+    // one, and it is invisible to every other counter we have — including the limiter's own
+    // `peak > CEILING` test, which a NaN passes straight through into the driver (see [`meter`]).
+    if level.nonfinite > 0 {
+        error!(
+            "audio: {} non-finite (NaN/inf) sample(s) reached the mix. This is a defect upstream \
+             of the output — the limiter cannot catch it, and it is broadband noise at whatever \
+             the hardware makes of the bits.",
+            level.nonfinite,
+        );
+    }
     if level.over == 0 {
         debug!(
             "audio: mix peak {:.2} of full scale, {voices} voice(s) at most",

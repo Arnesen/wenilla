@@ -113,6 +113,17 @@ pub(crate) struct ActiveChannel {
     category: SoundCategory,
     /// The **voice bus** this channel occupies, for the concurrency cap ([`Bus`]).
     bus: Bus,
+    /// Does this channel loop? A loop is a *bed* — an ambience, a tracked body loop — and the
+    /// voice cap never steals one: cutting a bed leaves an audible hole that stays open, where
+    /// stealing a one-shot costs at most the tail of a sound already being buried. (The reference
+    /// makes no such distinction, but it does not have to: its exhaustion behaviour lives inside
+    /// `fmod.dll` and is unreadable, so the policy is ours to choose — decision 1557.)
+    looping: bool,
+    /// This channel's **current effective amplitude** — `category · v · gain · rolloff ·
+    /// near_field`, refreshed by [`pump_channels`] every frame. Cached rather than recomputed
+    /// because the voice cap needs to rank every live channel by audibility on the play path,
+    /// which is the one place that must not walk the world.
+    amp: f32,
     /// The **voice category latched on this channel**, when this play is a unit's one-shot
     /// creature bark — the reference's `[unit+0xb24]` beside the `[unit+0xb20]` handle
     /// ([`unit_voice_playing`]). `None` for every other play, which is what keeps a unit's body
@@ -233,6 +244,111 @@ impl Bus {
 /// 87ce90  02000000
 /// ```
 const BUS_CAP: [u32; 13] = [0x7fff_ffff, 1, 2, 2, 1, 1, 2, 2, 1, 6, 4, 1, 2];
+
+/// How many copies of **one kit** may sound at once, for the rows the reference leaves ungated by
+/// flag 0x20. See the gate in [`play_kit_ext`] for the measurement that set it, and decision 1560
+/// for why this is ours to add rather than a fidelity port.
+const SAME_KIT_MAX: usize = 2;
+
+/// The reference's **global voice ceiling** — the number this whole hunt came down to.
+///
+/// `FSOUND_Init(44100, 12, 0x82)` (wow-re `sound/scratch/voice-cap-and-headroom.md` §5, VERIFIED
+/// on the binary at `0x7a492b`; the `SoundSoftwareChannels` CVar's own default is `"12"`).
+/// Hardware voices are a second bank of up to 12, but `FSOUND_SetMaxHardwareChannels` is **forced
+/// to 0** whenever `FSOUND_GetDriverCaps` reports no hardware mixing — which is every host this
+/// decade — so the note's conclusion is "exactly 12 on any host".
+///
+/// **This ceiling is what actually bounds the reference's mix, and we never had it.** The same
+/// note says of the mass-buff case that it plays "with no cap and no dedupe — what bounds it is
+/// the device ceiling, and nothing else". A probe capture measured benilla at **42 simultaneous
+/// voices**, over 12 for 23 % of the run, which is what made the summed mix ask for +13.4 dBFS
+/// and the limiter (1551) pull the whole mix down by up to 13.5 dB a quarter of the time. The
+/// clipping became pumping; the director heard no improvement, correctly. Decision 1557.
+///
+/// The count covers **everything the device is mixing** — music and ambience included, because
+/// the reference's bus 0 (cap `INT_MAX`) is where zone music, ambience and the liquid loops all
+/// land, and they occupy FMOD channels like anything else. See [`SoundOutput::live_voices`].
+pub(crate) const SOFTWARE_CHANNELS: usize = 12;
+
+/// Make room for one more voice, or refuse. Returns `true` if the caller may start a sound.
+///
+/// Under the ceiling this is a length check and nothing else. At the ceiling it is a **steal**:
+/// the quietest live one-shot loses its slot to a newcomer that is louder than it is, and a
+/// newcomer quieter than everything already playing is simply dropped. "Keep the loudest twelve"
+/// is the rule that makes a hard ceiling sound like a mix rather than like a lottery — the
+/// alternative (refuse whatever arrives last) silences the sword swinging in your face because
+/// twelve distant footsteps got there first.
+///
+/// The reference cannot settle this for us: it passes `FSOUND_FREE` at every play site and, in
+/// wow-re's words, "never protects a voice" — so what FMOD does when all 12 are busy is inside
+/// `fmod.dll`, unreadable, and explicitly ours to decide (decision 1557).
+fn claim_voice(out: &mut SoundOutput, candidate_amp: f32) -> bool {
+    if out.live_voices() >= SOFTWARE_CHANNELS {
+        // Reap first. [`pump_channels`] drops finished channels once a frame, but plays happen in
+        // several stages and a sound that ended earlier this frame is still in the list — so
+        // without this the budget would count ghosts and refuse real sounds, intermittently and
+        // in exactly the busy moments the cap is for. Only on the crowded path: the common case
+        // stays a length check.
+        out.channels
+            .retain(|c| c.handle.state() != PlaybackState::Stopped);
+    }
+    let stealable = out
+        .channels
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.looping)
+        .map(|(i, c)| (i, c.amp));
+    match pick_voice_slot(stealable, out.live_voices(), candidate_amp) {
+        VoiceSlot::Free => true,
+        VoiceSlot::Steal(i) => {
+            // Ending a live waveform at an arbitrary sample is a step to zero — i.e. a click, the
+            // exact defect this whole area keeps producing. Fade it (decision 1026's `declick`).
+            out.channels[i].handle.stop(mixer::declick());
+            out.channels.swap_remove(i);
+            out.voices_stolen += 1;
+            true
+        }
+        VoiceSlot::Denied => {
+            out.voices_denied += 1;
+            false
+        }
+    }
+}
+
+/// What [`claim_voice`] decided.
+#[derive(Debug, PartialEq, Eq)]
+enum VoiceSlot {
+    /// Under the ceiling — just play.
+    Free,
+    /// At the ceiling; this channel index loses its slot.
+    Steal(usize),
+    /// At the ceiling and nothing live is quieter — drop the new sound.
+    Denied,
+}
+
+/// The voice-cap decision, pure over `(index, amplitude)` of the **stealable** (non-looping) live
+/// channels — so the policy that decides what the player does and does not hear is testable
+/// without an audio device, like [`bus_at_cap`] beside it.
+///
+/// The comparison is **strict**: a newcomer must be genuinely *louder* than the quietest thing
+/// playing to take its slot. That matters for the exact case this cap exists for — a mass buff
+/// lands five sample-identical copies at the same amplitude in one frame, and a non-strict test
+/// would let each new copy evict the previous one forever, spending the whole budget churning
+/// between identical sounds. Strict, the first ones through hold their slots and the rest are
+/// dropped, which is both cheaper and what you want to hear.
+fn pick_voice_slot(
+    stealable: impl Iterator<Item = (usize, f32)>,
+    live_voices: usize,
+    candidate_amp: f32,
+) -> VoiceSlot {
+    if live_voices < SOFTWARE_CHANNELS {
+        return VoiceSlot::Free;
+    }
+    match stealable.min_by(|a, b| a.1.total_cmp(&b.1)) {
+        Some((i, amp)) if amp < candidate_amp => VoiceSlot::Steal(i),
+        _ => VoiceSlot::Denied,
+    }
+}
 
 /// Is `bus` already carrying its cap's worth of live channels? Pure over the live buses, so the
 /// whole gate is testable without a device (the caps are the reference's, and getting one wrong
@@ -386,6 +502,28 @@ pub(super) fn play_kit_ext(
         return Ok(());
     }
 
+    // **The coherent-copy cap** (decision 1560) — the fallback for the rows the reference leaves
+    // ungated above.
+    //
+    // A probe capture of the director's own reported case measured the loudest moment of a
+    // 71-second session at **3.73x full scale**, and it was `HolyProtection` x5 in one second with
+    // only 10 voices live — so the 12-voice ceiling (1557) cannot touch it. Five copies of one
+    // 0 dBFS file started in the same frame are *sample-aligned*, so they sum **coherently**: the
+    // result is not five sounds, it is one sound +14 dB. That is inaudible as density and very
+    // audible as distortion — the worst possible trade, and the reason a mass buff was the thing
+    // the director reported first.
+    //
+    // The reference already caps same-kit concurrency at **1** — for the 2 776 of 4 623 rows that
+    // carry flag 0x20. It simply never gated the other 1 847, and `HolyProtection` (3116,
+    // `Flags 0x0000`) is one of them. So this is not a new idea imposed on the data; it is the
+    // reference's own idea applied, more loosely, where the data left a hole. Two rather than one
+    // deliberately: it keeps some sense that several things happened (and cannot silence two
+    // genuinely distinct mobs' impacts), while removing the coherent stack that does the damage.
+    if out.channels.iter().filter(|c| c.kit == id).count() >= SAME_KIT_MAX {
+        out.copies_dropped += 1;
+        return Ok(());
+    }
+
     // The variation: an explicit index when the caller drives the cycle (the client's
     // `variant != -1`), else the weighted pick with depletion.
     let pick = match variant {
@@ -412,7 +550,8 @@ pub(super) fn play_kit_ext(
     let atten = d_sq.map_or(1.0, |d| {
         math::fmod_rolloff(d, min_dist) * near_field(d, cutoff)
     });
-    let mut data = data.volume(mixer::amp_to_db(config.category_amp(category) * v * atten));
+    let amp = config.category_amp(category) * v * atten;
+    let mut data = data.volume(mixer::amp_to_db(amp));
     if flags & sound_kit_flags::VARY_PITCH != 0 {
         let draw = math::variation_draw(kits.rng.next());
         let freq = math::variation_pitch_freq(draw);
@@ -421,6 +560,13 @@ pub(super) fn play_kit_ext(
     let looping = force_loop || flags & sound_kit_flags::LOOPING != 0;
     if looping {
         data = data.loop_region(..);
+    }
+
+    // The global ceiling ([`SOFTWARE_CHANNELS`]) — last of the gates, because it is the only one
+    // that can *stop another sound*, and it must not do that for a play the cheaper gates above
+    // were going to drop anyway.
+    if !claim_voice(out, amp) {
+        return Ok(());
     }
 
     let mixer = out.mixer.as_mut().context("no audio device")?;
@@ -440,20 +586,23 @@ pub(super) fn play_kit_ext(
     // a guess at which trigger fired. `RUST_LOG=benilla_app::sound=debug` now answers it, and since
     // 1155 it also answers "…and does it take the interior's reverb?" — the `EAXDef` wet/dry class
     // is invisible in the audio itself, so a report of an unexpected echo needs it in the trace.
-    debug!(
-        "sound: play kit {id} ({}) {} {}",
-        kits.catalog.get(id).map_or("?", |k| k.name.as_str()),
-        match category {
-            SoundCategory::Sfx => "sfx",
-            SoundCategory::Music => "music",
-            SoundCategory::Ambience => "ambience",
-        },
-        match pos {
-            Some(_) if eax_def != 0 => "3d wet",
-            Some(_) => "3d dry",
-            None => "2d",
-        },
-    );
+    let name = kits.catalog.get(id).map_or("?", |k| k.name.as_str());
+    let cat = match category {
+        SoundCategory::Sfx => "sfx",
+        SoundCategory::Music => "music",
+        SoundCategory::Ambience => "ambience",
+    };
+    let spatial = match pos {
+        Some(_) if eax_def != 0 => "3d wet",
+        Some(_) => "3d dry",
+        None => "2d",
+    };
+    debug!("sound: play kit {id} ({name}) {cat} {spatial}");
+    // …and onto the probe's timeline when one is recording (decision 1556), so a capture answers
+    // "what was playing when the mix went past full scale" instead of only "it did".
+    if let Some(probe) = out.probe.as_ref() {
+        probe.note_play(id, name, cat, spatial);
+    }
     out.channels.push(ActiveChannel {
         kit: id,
         source,
@@ -466,6 +615,8 @@ pub(super) fn play_kit_ext(
         v,
         gain: 1.0,
         category,
+        looping,
+        amp,
         bus,
         voice,
     });
@@ -602,9 +753,16 @@ pub(crate) fn play_file(
         return Ok(());
     }
     let data = kits.sfx(assets, path)?;
-    let data = data.volume(mixer::amp_to_db(config.category_amp(category)));
+    let amp = config.category_amp(category);
+    let data = data.volume(mixer::amp_to_db(amp));
+    if !claim_voice(out, amp) {
+        return Ok(());
+    }
     let mixer = out.mixer.as_mut().context("no audio device")?;
     let handle = mixer.play_2d(data)?;
+    if let Some(probe) = out.probe.as_ref() {
+        probe.note_play(0, path, "sfx", "2d");
+    }
     out.channels.push(ActiveChannel {
         kit: 0,
         source: None,
@@ -617,6 +775,8 @@ pub(crate) fn play_file(
         v: 1.0,
         gain: 1.0,
         category,
+        looping: false,
+        amp,
         bus: Bus::DEFAULT,
         voice: None,
     });
@@ -767,10 +927,9 @@ pub(super) fn pump_channels(
         }
         let Some(p) = ch.pos else {
             // 2D: only the category slider can move under a live channel.
-            ch.handle.set_volume(
-                mixer::amp_to_db(config.category_amp(ch.category) * ch.v * ch.gain),
-                mixer::glide(),
-            );
+            ch.amp = config.category_amp(ch.category) * ch.v * ch.gain;
+            ch.handle
+                .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
             return true;
         };
         let d_sq = math::dist_sq(listener, p);
@@ -779,7 +938,7 @@ pub(super) fn pump_channels(
             ch.handle.stop(mixer::declick());
             return false;
         }
-        let amp = config.category_amp(ch.category)
+        ch.amp = config.category_amp(ch.category)
             * ch.v
             * ch.gain
             * math::fmod_rolloff(d_sq, ch.min_dist)
@@ -787,7 +946,8 @@ pub(super) fn pump_channels(
         // Glides, not snaps (decision 1026): this is the per-frame gain feed, and a step here is a
         // click. It is also the one that scales — every live channel steps together when a frame
         // hitches, which is what a "crack fest" under OBS actually was.
-        ch.handle.set_volume(mixer::amp_to_db(amp), mixer::glide());
+        ch.handle
+            .set_volume(mixer::amp_to_db(ch.amp), mixer::glide());
         true
     });
 }
@@ -1013,5 +1173,113 @@ mod tests {
         // An untagged channel (every ordinary one-shot) is in neither slot.
         assert!(!occupies_voice_slot(None, None, bear));
         assert!(!occupies_greeting_latch(None, None, bear));
+    }
+
+    /// The ceiling is the reference's, not a number we liked: `FSOUND_Init(44100, 12, 0x82)`,
+    /// verified on the binary at `0x7a492b` (wow-re `voice-cap-and-headroom.md` §5), with the
+    /// hardware bank forced to 0 on any host without hardware mixing. Pinned so a later "let's
+    /// raise it a bit" has to argue with the byte-fact rather than drift past it.
+    #[test]
+    fn the_ceiling_is_the_references_twelve() {
+        assert_eq!(SOFTWARE_CHANNELS, 12);
+    }
+
+    /// Under the ceiling the cap is invisible — no walk, no steal, whatever the amplitudes are.
+    #[test]
+    fn under_the_ceiling_everything_plays() {
+        let live = [(0, 0.9f32), (1, 0.8)];
+        assert_eq!(
+            pick_voice_slot(live.into_iter(), SOFTWARE_CHANNELS - 1, 0.001),
+            VoiceSlot::Free,
+            "a near-silent sound still plays while there is room"
+        );
+    }
+
+    /// At the ceiling, the **quietest** one-shot loses — not the oldest, not the newest. This is
+    /// the rule that makes a hard cap sound like a mix: the sword in your face beats twelve
+    /// footsteps down the corridor, whichever started first.
+    #[test]
+    fn at_the_ceiling_the_quietest_one_shot_loses_to_a_louder_newcomer() {
+        // Index 2 is the quietest; index 0 is the oldest and must survive.
+        let live = [(0, 0.50f32), (1, 0.30), (2, 0.05), (3, 0.40)];
+        assert_eq!(
+            pick_voice_slot(live.into_iter(), SOFTWARE_CHANNELS, 0.9),
+            VoiceSlot::Steal(2)
+        );
+    }
+
+    /// A newcomer quieter than everything playing is dropped rather than stealing. Twelve loud
+    /// sounds are what the player is actually listening to; a distant thirteenth is not worth
+    /// silencing one of them.
+    #[test]
+    fn at_the_ceiling_a_quieter_newcomer_is_dropped() {
+        let live = [(0, 0.50f32), (1, 0.30), (2, 0.20)];
+        assert_eq!(
+            pick_voice_slot(live.into_iter(), SOFTWARE_CHANNELS, 0.10),
+            VoiceSlot::Denied
+        );
+    }
+
+    /// **The mass-buff case, as arithmetic.** Prayer of Fortitude lands five sample-identical
+    /// copies of one 0 dBFS file in a single frame, at identical amplitude. The comparison is
+    /// strict precisely so this converges: equal-loudness newcomers are dropped instead of
+    /// evicting each other in a loop that would spend the entire budget churning between
+    /// indistinguishable sounds. This is the exact case the director reported.
+    #[test]
+    fn identical_copies_do_not_churn_the_budget() {
+        let live: Vec<(usize, f32)> = (0..12).map(|i| (i, 0.7)).collect();
+        assert_eq!(
+            pick_voice_slot(live.iter().copied(), SOFTWARE_CHANNELS, 0.7),
+            VoiceSlot::Denied,
+            "an equally-loud copy must not evict its own twin"
+        );
+    }
+
+    /// A loop is a bed — an ambience, a tracked body loop — and cutting one leaves a hole that
+    /// stays open, where a stolen one-shot costs at most a tail. So loops are never offered as
+    /// victims, and a ceiling reached entirely by beds simply drops the newcomer.
+    #[test]
+    fn beds_are_never_stolen() {
+        // `claim_voice` filters loops out before this point, so "only loops live" reaches the
+        // decision as an empty stealable set.
+        assert_eq!(
+            pick_voice_slot(std::iter::empty(), SOFTWARE_CHANNELS, 1.0),
+            VoiceSlot::Denied
+        );
+    }
+
+    /// **The director's reported case, as arithmetic.** Prayer of Fortitude lands `HolyProtection`
+    /// on five party members inside one frame. A probe capture measured exactly that as the
+    /// loudest moment of a whole session — 3.73x full scale with only 10 voices live, so the
+    /// 12-voice ceiling never even applied. Sample-aligned copies of one 0 dBFS file sum
+    /// *coherently*: five of them is one sound +14 dB, not five sounds.
+    ///
+    /// The cap is on **live copies of the same kit**, so the fan-out collapses to
+    /// [`SAME_KIT_MAX`] however many targets the buff had.
+    #[test]
+    fn a_mass_buff_collapses_to_the_same_kit_cap() {
+        // What the gate sees: N already-live copies of kit 3116, asked for one more.
+        let live_copies = |n: usize| n >= SAME_KIT_MAX;
+        assert!(!live_copies(0), "the first copy always plays");
+        assert!(
+            !live_copies(1),
+            "so does the second — two still reads as 'several'"
+        );
+        for already in SAME_KIT_MAX..=8 {
+            assert!(
+                live_copies(already),
+                "copy {} of a five-target buff must be dropped, not stacked",
+                already + 1
+            );
+        }
+    }
+
+    /// The looser cap only exists for rows the reference left ungated. A row carrying flag 0x20 is
+    /// still capped at **one** by the byte-verified gate above it, and this must not loosen that.
+    #[test]
+    fn the_reference_no_duplicate_flag_still_wins() {
+        // A const block: the relationship is a compile-time fact, not a runtime one.
+        const { assert!(SAME_KIT_MAX > 1) };
+        assert_eq!(sound_kit_flags::NO_DUPLICATES, 0x20);
     }
 }

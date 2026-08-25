@@ -508,3 +508,76 @@ fn the_duration_ladder_ceils_every_arm_but_seconds() {
         Some("<5 s>"),
     );
 }
+
+/// **B309 — a POOLED line cell that goes empty must not keep the box it measured last hover.**
+///
+/// `measured` is a cache the solver honours without a key check on purpose: it is the last-known
+/// box, held so a line whose text just changed does not collapse for the frame its re-measure is
+/// in flight. Empty text is the one case where that measure never comes — both measure asks
+/// filter empty strings out — so before the fix an emptied cell held its dead box FOREVER, and
+/// only the DRAWN geometry was wrong: the plate's own sum calls empty text zero
+/// (`tooltip::cell`) and the Lua getters key-check (`region::measured_wh`), so both said 0 while
+/// the solver stood a full row there.
+///
+/// Live, that is the item tooltip's SET block: `ClearLines` keeps the cache (the hover re-enter
+/// loop depends on it), so the two blank gold spacers land on cells that carried real text on an
+/// earlier hover. Each drew an uncounted row and the set bonuses hung below the backdrop —
+/// Frostshake's Field Marshal's Raiment shot, two blanks, two rows.
+#[test]
+fn an_emptied_pooled_line_drops_its_stale_box_and_the_plate_still_contains_the_chain() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    // Hover one: line 2 carries real text, and gets measured.
+    s.run(
+        r#"
+        local owner = CreateFrame("Button", "SlotR")
+        owner:SetPoint("TOPLEFT", 100, -100); owner:SetSize(40, 40)
+        local tt = CreateFrame("GameTooltip", "TTR")
+        tt:SetOwner(owner, "ANCHOR_RIGHT")
+        tt:AddLine("Marshal McBride")
+        tt:AddLine("Level 20")
+        tt:AddLine("PvP")
+        tt:Show()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let sizes = &[
+        ("Marshal McBride", 90.0, 14.0),
+        ("Level 20", 50.0, 12.0),
+        ("PvP", 24.0, 12.0),
+    ];
+    measure_all(&mut s, sizes);
+    // Hover two, SAME pooled cells: line 2 is now the blank spacer. Nothing new to measure —
+    // lines 1 and 3 re-validate against their own keys, and an empty string is never asked for.
+    s.run(
+        r#"
+        TTR:ClearLines()
+        TTR:AddLine("Marshal McBride")
+        -- WRAPPED, as the §22 spacer is (`render.rs`'s `addw`): the wrap pin writes a non-zero
+        -- width into `size`, so only the HEIGHT falls through to the measure cache.
+        TTR:AddLine("", 1, 0.82, 0, true)
+        TTR:AddLine("PvP")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    measure_all(&mut s, sizes);
+    s.run(
+        r#"
+        -- Rows 14 + 0 + 12 with two slot gaps ⇒ totalh 30, height 50: the blank costs its gap
+        -- and nothing else, exactly as it does on a cell that never held text.
+        assert(TTR:GetHeight() == 50, "auto height, got " .. tostring(TTR:GetHeight()))
+        -- The one that was wrong: the tail line sits a full pad above the plate's bottom edge.
+        -- Pre-fix it sat 12 BELOW it — line 2's dead "Level 20" box, drawn but never counted.
+        assert(TTRTextLeft3:GetBottom() == TTR:GetBottom() + 10,
+               "tail line inside the plate, got " .. tostring(TTRTextLeft3:GetBottom())
+               .. " vs plate bottom " .. tostring(TTR:GetBottom()))
+        -- And the chain is contiguous through the zero row, as on a cold cell.
+        assert(TTRTextLeft3:GetTop() == TTRTextLeft1:GetBottom() - 4,
+               "chain contiguous through the emptied row, got " .. tostring(TTRTextLeft3:GetTop()))
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}

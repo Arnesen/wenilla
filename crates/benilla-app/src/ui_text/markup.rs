@@ -416,6 +416,10 @@ mod markup_tests {
         // The three the kernel counts differently from a split.
         assert_eq!(n("\n"), 1, "a <BR/> block is ONE blank line");
         assert_eq!(n("a\n"), 1);
+        // The item tooltip's SET spacer, the reference's own literal `0x854b2c`: ONE row
+        // carrying one space. Two under a split, and then the blank gold lines above the set
+        // bonuses would each be a row taller than 1.12's.
+        assert_eq!(n(" \n"), 1, "the §22 blank gold spacer is one row");
         assert_eq!(n(""), 0, "an empty string is zero lines, height 0.0");
         // …and everything else is unchanged.
         assert_eq!(n("a"), 1);
