@@ -211,13 +211,19 @@ fn feed_inspect(
     // memo re-pushes the view into the VM that replaced the one which last saw it.
     let memo = feed.vm.get(&script);
 
-    // The reach map: for every popup token that resolves to a live, inspectable player, its squared
-    // distance from us. A token is entered ONLY if it passes the two non-distance refusals vmangos
-    // makes — the target is a player (`sObjectMgr.GetPlayer`) and is not attackable
+    // The reach map: for every popup token that resolves to a **live unit object**, its squared
+    // distance from us plus whether it passes the two non-distance refusals vmangos makes for an
+    // inspect — the target is a player (`sObjectMgr.GetPlayer`) and is not attackable
     // (`IsValidAttackTarget`, `MiscHandler.cpp:945-956`). That the *client* checks those two is
     // INFERRED (the 348-byte `0x48a1b0`'s non-math part isn't in the RE record), but a wrong guess
-    // can only cost a request the server would drop. Absent from the map = the bindings' in-range
-    // default, so a token we simply can't resolve never grays a row.
+    // can only cost a request the server would drop.
+    //
+    // **Membership is the object lookup and nothing else** (report B316). An absent token is one
+    // the object manager holds no unit for, and the bindings answer `nil` there — the reference's
+    // own null-object arm. So the attackable refusal rides IN the entry as `inspectable` rather
+    // than keeping the token out of the map: dropping it would make `CheckInteractDistance` — a
+    // pure distance test in the binary — gray Follow and Duel on an enemy player the reference
+    // leaves live.
     let self_pair = self_q.iter().next();
     let mut reach = std::collections::HashMap::new();
     if let Some((self_tf, self_store)) = self_pair {
@@ -225,18 +231,25 @@ fn feed_inspect(
             let Some(guid) = crate::ui_unit::player_token_guid(token, &selection, &group) else {
                 continue;
             };
+            // The object-manager miss: a party member outside the local area has a GUID (the
+            // roster wire carries it) and no object, which is exactly the case B316 reported.
             let Some(&entity) = index.0.get(&guid) else {
                 continue;
             };
             let store = stores.get(entity).ok();
-            if crate::target::can_attack(store, factions.as_deref(), &reputations, Some(self_store))
-            {
-                continue;
-            }
+            let inspectable = !crate::target::can_attack(
+                store,
+                factions.as_deref(),
+                &reputations,
+                Some(self_store),
+            );
             if let Ok(tf) = transforms.get(entity) {
                 reach.insert(
                     token.to_string(),
-                    dist_sq(tf.translation, self_tf.translation),
+                    benilla_ui::script::UnitReach {
+                        dist_sq: dist_sq(tf.translation, self_tf.translation),
+                        inspectable,
+                    },
                 );
             }
         }

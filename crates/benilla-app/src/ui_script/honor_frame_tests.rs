@@ -332,6 +332,14 @@ fn the_real_global_strings_name_the_rank() {
 use benilla_ui::script::InspectHonorData;
 use std::collections::HashMap;
 
+/// A live, inspectable unit at squared distance `d2` (see `inspect_tests`' twin).
+fn reach(d2: f64) -> benilla_ui::script::UnitReach {
+    benilla_ui::script::UnitReach {
+        dist_sq: d2,
+        inspectable: true,
+    }
+}
+
 /// The reply for the inspected player, carrying the same figures as [`state`] so a row that took
 /// its number from the wrong pane's feed is visible as a wrong *value*, not just a wrong layout.
 fn inspect_reply() -> InspectHonorData {
@@ -383,7 +391,7 @@ fn shown_inspect_honor_page() -> UiScript {
     s.set_unit("player", Some(alliance_player()));
     // 4 yards away (d² = 16), inside the verified `CanInspect` 100.0 — the window refuses to open
     // otherwise, and a silently-refused open would read as a broken pane.
-    s.set_inspect_reach(HashMap::from([("target".to_string(), 16.0)]));
+    s.set_inspect_reach(HashMap::from([("target".to_string(), reach(16.0))]));
     s.set_inspect_honor(Some(inspect_reply()));
     s.run(r#"InspectUnit("target")"#).unwrap();
     s.run(r#"ToggleInspect("BenillaInspectHonorFrame")"#)

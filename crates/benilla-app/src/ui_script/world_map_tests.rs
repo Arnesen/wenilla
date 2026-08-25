@@ -208,3 +208,78 @@ fn no_landmarks_draws_nothing() {
     assert_eq!(s.eval::<i64>("return NUM_WORLDMAP_POIS").unwrap(), 0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **B320 — party members are on the map.** One frame per `party1..4` slot, placed from
+/// `GetPlayerMapPosition` through the same `(0,0)`-means-hide law the player and corpse blips
+/// already obey, and hidden again the moment a slot stops answering.
+///
+/// The seating is the reference's: `CENTER` against `WorldMapDetailFrame`'s `TOPLEFT`, x scaled by
+/// its width and y by **minus** its height — UV v runs down the sheet where frame y runs up, and
+/// getting that sign wrong mirrors every blip about the top edge without failing anything else.
+#[test]
+fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
+    let mut s = harness();
+    // `IsShown`, not `IsVisible`: the map itself is closed in this harness (the POI test's own
+    // idiom), so every child would read invisible through its hidden ancestor.
+    let shown = |s: &UiScript, i: u32| -> bool {
+        s.eval::<bool>(&format!("return WorldMapParty{i}:IsShown()"))
+            .unwrap()
+    };
+
+    // Nobody in the party: every slot answers the hide sentinel.
+    s.run("WorldMapParty_Update()").unwrap();
+    for i in 1..=4 {
+        assert!(!shown(&s, i), "slot {i} hides while the party is empty");
+    }
+
+    // Two members on the displayed map, one of them off it (the None the app pushes for a member
+    // whose position projects outside the rect, or whom we hold no position for at all).
+    s.set_world_map_feed(
+        None,
+        Some((0.5, 0.5)),
+        0.0,
+        None,
+        vec![Some((0.25, 0.75)), None, Some((0.5, 0.125))],
+    );
+    s.run("WorldMapParty_Update()").unwrap();
+    let diag = s
+        .eval::<String>(
+            r#"return "p1="..tostring(GetPlayerMapPosition("party1")).." p3="..tostring(GetPlayerMapPosition("party3"))"#,
+        )
+        .unwrap();
+    assert!(
+        shown(&s, 1) && shown(&s, 3),
+        "the two placed members show ({diag})"
+    );
+    assert!(!shown(&s, 2), "a member with no position stays hidden");
+    assert!(!shown(&s, 4), "a slot past the roster's end stays hidden");
+
+    // The seating, read back against the detail frame's own box.
+    let (w, h) = s
+        .eval::<(f64, f64)>(
+            "return WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()",
+        )
+        .unwrap();
+    let (blip_x, blip_y) = s
+        .eval::<(f64, f64)>("return WorldMapParty1:GetCenter()")
+        .unwrap();
+    let (sheet_left, sheet_top) = s
+        .eval::<(f64, f64)>("return WorldMapDetailFrame:GetLeft(), WorldMapDetailFrame:GetTop()")
+        .unwrap();
+    assert!(
+        (blip_x - (sheet_left + 0.25 * w)).abs() < 0.5,
+        "u scales by the sheet's width"
+    );
+    assert!(
+        (blip_y - (sheet_top - 0.75 * h)).abs() < 0.5,
+        "v runs DOWN from the sheet's top"
+    );
+
+    // The party breaks up: the blips go with it.
+    s.set_world_map_feed(None, Some((0.5, 0.5)), 0.0, None, Vec::new());
+    s.run("WorldMapParty_Update()").unwrap();
+    for i in 1..=4 {
+        assert!(!shown(&s, i), "slot {i} hides when the party is gone");
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

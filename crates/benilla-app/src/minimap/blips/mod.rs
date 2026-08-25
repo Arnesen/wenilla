@@ -477,7 +477,7 @@ fn push_rim_arrow(
 /// A party member's blip position: the live streamed transform wins; out of visibility range the
 /// `PARTY_MEMBER_STATS` snapshot position covers (the wire truncates to i16 — yard precision,
 /// invisible at minimap scale). No source → no blip (offline members carry no position).
-fn party_member_pos(
+pub(crate) fn party_member_pos(
     m: &benilla_protocol::messages::GroupMemberEntry,
     group: &crate::ui_party::GroupState,
     guids: &GuidIndex,

@@ -28,6 +28,9 @@
 //! hover tooltip).
 
 mod blips;
+/// The party blip's position law, shared with the world map (report B320): one function decides
+/// where a member is, so the two surfaces can never disagree about it.
+pub(crate) use blips::party_member_pos;
 mod composite;
 mod interior;
 

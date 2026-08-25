@@ -61,6 +61,15 @@ pub(super) fn leader_changed(
 
 /// `SMSG_GROUP_LIST` — the roster echo (and the join/leave diff's line source). Roster changes move
 /// shared-quest availability, so the questgiver sweep re-asks from here (0654).
+///
+/// **A roster entry is a sighting** (decision 1564): every member guid is warmed into the
+/// [`NameCache`] here, the same ask-once discipline `net::apply::objects` applies the moment a unit
+/// streams in. The roster wire carries a member's *name*, so this is not asked for the name — it is
+/// asked for the `(race, class, gender)` triple that rides the same answer, and which is the ONLY
+/// source of those three for a member we never see: their descriptor never arrives. Two surfaces
+/// read them and both were empty for an out-of-area member before this — the raid grid's class
+/// column (`ui_party::feed::raid_roster`, whose own-row twin of this hole 1549 §7 found live), and
+/// the party frame's 2D portrait stand-in (`portrait::temporary_portrait`, report B315).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn list(
     group: &mut GroupState,
@@ -71,7 +80,12 @@ pub(super) fn list(
     members: Vec<GroupMemberEntry>,
     leader: u64,
     loot: Option<GroupLootInfo>,
+    names: &mut NameCache,
+    net_commands: &NetCommands,
 ) {
+    for m in &members {
+        let _ = names.resolve(m.guid, net_commands);
+    }
     let lines = group.apply_list(group_type, own_flags, members, leader, loot);
     push_group_lines(chat_log, lines);
     quest.bump_reask();
@@ -89,4 +103,89 @@ pub(super) fn command_result(
         chat_log,
         group.apply_command_result(operation, member, result),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::ClientCommand;
+    use benilla_protocol::guid;
+
+    fn member(g: u64, name: &str) -> GroupMemberEntry {
+        GroupMemberEntry {
+            name: name.into(),
+            guid: g,
+            status: 1, // ONLINE
+            flags: 0,
+        }
+    }
+
+    /// The roster edge is where a member we may never SEE becomes askable. Their descriptor is the
+    /// only other source of race/class/gender, and it never arrives while they are out of the local
+    /// area — so without this ask the raid grid's class column and the party frame's portrait
+    /// stand-in are both permanently blank for exactly the members that need them (B315).
+    ///
+    /// Ask-ONCE: a re-sent roster (every join, leave, loot-method change re-sends the whole list)
+    /// must not re-ask, or a busy group would spam a query per member per packet.
+    #[test]
+    fn the_roster_warms_every_member_into_the_name_cache_once() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let net = NetCommands(tx);
+        let (mut group, mut chat_log, mut quest) = (
+            GroupState::default(),
+            ChatLog::default(),
+            QuestGiver::default(),
+        );
+        let mut names = NameCache::default();
+        // A player guid: `counter | (high << 48)` — the shape `NameCache::resolve` routes on.
+        let player_guid = |counter: u64| counter | (u64::from(guid::HIGH_PLAYER) << 48);
+        let (leader, far) = (player_guid(7), player_guid(8));
+
+        list(
+            &mut group,
+            &mut chat_log,
+            &mut quest,
+            0,
+            0,
+            vec![member(leader, "Frostshake"), member(far, "Thalyn")],
+            leader,
+            None,
+            &mut names,
+            &net,
+        );
+
+        let asked: Vec<u64> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::NameQuery { guid } => Some(guid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            vec![leader, far],
+            "both members asked, in roster order"
+        );
+
+        // The answer lands for one of them; the re-sent roster asks for neither.
+        names.insert_player(leader, "Frostshake".into(), Some((1, 4, 1)));
+        list(
+            &mut group,
+            &mut chat_log,
+            &mut quest,
+            0,
+            0,
+            vec![member(leader, "Frostshake"), member(far, "Thalyn")],
+            leader,
+            None,
+            &mut names,
+            &net,
+        );
+        assert!(
+            rx.try_iter()
+                .all(|c| !matches!(c, ClientCommand::NameQuery { .. })),
+            "a re-sent roster re-asks nothing"
+        );
+        assert_eq!(names.player_traits(leader), Some((1, 4, 1)));
+    }
 }

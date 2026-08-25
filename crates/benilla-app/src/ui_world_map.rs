@@ -257,6 +257,11 @@ fn feed_world_map(
     areas: Option<Res<crate::area::AreaTableRes>>,
     death_net: Res<crate::death::DeathNet>,
     poi_marker: Res<crate::poi_marker::PoiMarker>,
+    // The party blips' two position sources (B320): the roster + the wire's per-member stats, and
+    // the streamed-entity index that beats them when a member is actually in the world with us.
+    group: Res<crate::ui_party::GroupState>,
+    guids: Res<crate::net::GuidIndex>,
+    unit_pos: Query<&GlobalTransform, With<crate::net::NetEntity>>,
     mut last_explored: Local<crate::ui_script::VmMemo<Option<Vec<u32>>>>,
 ) {
     let (Some(mut script), Some(data), Some(map), Some(areas)) = (script, data, map, areas) else {
@@ -352,7 +357,39 @@ fn feed_world_map(
         .collect();
     script.set_world_map_landmarks(landmarks);
 
-    script.set_world_map_feed(player_zone, uv, player.facing(), corpse_uv);
+    // The party slots' blips (report B320) — `party1..4` in the same order the frames and the
+    // unit tokens use (`GroupState::party_slots`).
+    //
+    // Two position sources, the minimap's own law (`minimap::blips::party_member_pos`): a member
+    // who is STREAMED has a real transform, and anyone else has the `(x, y)` their
+    // `SMSG_PARTY_MEMBER_STATS` carried — an `i16` pair, so a far member's blip is yard-accurate
+    // and no better, which is all the reference has for them either.
+    //
+    // Which MAP that position belongs to is the part the stats packet does not say: it carries a
+    // zone, not a map id. So the member's zone is looked up in the catalog and the continent that
+    // owns it supplies the map; a zone we cannot place (an instance, a zone missing from the
+    // catalog) falls back to ours, which is right for the overwhelmingly common case of a party
+    // spread across one continent and merely projects off-rect — the (0,0) hide — when it is not.
+    let party_uv: Vec<Option<(f32, f32)>> = group
+        .party_slots()
+        .map(|m| {
+            let (px, py) = crate::minimap::party_member_pos(m, &group, &guids, &unit_pos)?;
+            let member_map = group
+                .stats
+                .get(&m.guid)
+                .and_then(|st| st.zone)
+                .and_then(|zone| {
+                    data.continents
+                        .iter()
+                        .find(|cont| cont.zones.iter().any(|z| z.area_id == u32::from(zone)))
+                        .map(|cont| cont.map_id)
+                })
+                .unwrap_or(map.0);
+            project(member_map, px, py).filter(|uv| *uv != (0.0, 0.0))
+        })
+        .collect();
+
+    script.set_world_map_feed(player_zone, uv, player.facing(), corpse_uv, party_uv);
 }
 
 /// **Alt+click the world map to go there** — the dev jump.

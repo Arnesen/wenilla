@@ -208,6 +208,14 @@ pub struct WorldMapState {
     /// `GetPlayerMapPosition("player")` for the CURRENT selection — projected app-side each frame
     /// (`map_proj`), `None`/(0,0) = off this map (the reference hides the blip).
     pub player_uv: Option<(f32, f32)>,
+    /// `GetPlayerMapPosition("party1".."party4")` for the CURRENT selection, in `party_slots`
+    /// order — projected app-side through the same law as [`Self::player_uv`] (report B320).
+    /// A slot is `None` when there is no member there, when we hold no position for them, or when
+    /// that position is off the displayed map; all three read as the reference's `(0,0)` hide
+    /// sentinel at the binding, which is the only answer its FrameXML consumer knows.
+    ///
+    /// Shorter than 4 whenever the party is: a missing index is a `None`.
+    pub party_uv: Vec<Option<(f32, f32)>>,
     /// `GetPlayerFacing()` — wow orientation radians (0 = north, counterclockwise-positive). Our
     /// transcribed frame spins its arrow texture with it (`SetRotation`); the reference rotates
     /// an engine-rendered arrow model instead (0203 flags the stand-in).
@@ -297,19 +305,22 @@ impl super::UiScript {
         }
     }
 
-    /// Push the per-frame feed (player zone/projection/facing — see [`WorldMapState`]).
+    /// Push the per-frame feed (player zone/projection/facing, the corpse marker, and the party
+    /// slots' projections — see [`WorldMapState`]).
     pub fn set_world_map_feed(
         &mut self,
         player_zone: Option<(u32, u32)>,
         player_uv: Option<(f32, f32)>,
         player_facing: f32,
         corpse_uv: Option<(f32, f32)>,
+        party_uv: Vec<Option<(f32, f32)>>,
     ) {
         let mut model = self.model_mut();
         model.worldmap.player_zone = player_zone;
         model.worldmap.player_uv = player_uv;
         model.worldmap.player_facing = player_facing;
         model.worldmap.corpse_uv = corpse_uv;
+        model.worldmap.party_uv = party_uv;
     }
 
     /// The engine-owned selection `(continent, zone)` — the app reads it each frame to project
@@ -471,14 +482,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetPlayerMapPosition(unit) → x, y in [0,1] map UV; (0,0) = not on this map (hide the
-    // blip). Only "player" resolves — party/raid are the party arc's, not this one's (0203).
+    // blip). `"player"` and `"party1".."party4"` resolve (report B320); `"raid1".."raid40"` do
+    // not yet — the reference's raid arm draws a 25-frame pool this map has no children for, and
+    // its party arm is the one a five-man actually takes.
     g.set(
         "GetPlayerMapPosition",
         lua.create_function(|lua, unit: String| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let (x, y) = match unit.as_str() {
                 "player" => model.worldmap.player_uv.unwrap_or((0.0, 0.0)),
-                _ => (0.0, 0.0),
+                u => u
+                    .strip_prefix("party")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .filter(|n| *n >= 1)
+                    .and_then(|n| model.worldmap.party_uv.get(n - 1).copied().flatten())
+                    .unwrap_or((0.0, 0.0)),
             };
             Ok((f64::from(x), f64::from(y)))
         })?,

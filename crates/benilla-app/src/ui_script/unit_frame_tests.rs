@@ -1743,3 +1743,86 @@ fn the_raid_mark_helper_maps_each_index_to_its_cell() {
     }
     assert!(s.errors().is_empty(), "no errors: {:?}", s.errors());
 }
+
+/// B317 — the player's OWN frame wears the leader and master-looter icons. Every other frame that
+/// can wear them has since 0434 phase 2; the player frame predated the party wire and listed them
+/// OUT, so the one person who could not see who was leading was the leader.
+///
+/// The two predicates differ, and the asymmetry is the reference's (`PlayerFrame_UpdatePartyLeader`):
+/// the leader icon asks `IsPartyLeader()`, the master icon asks whether `GetLootMethod`'s party
+/// index is `0` — the player's own seat on that scale — *and* that we are grouped at all.
+#[test]
+fn the_player_frame_wears_the_leader_and_master_looter_icons() {
+    use benilla_ui::script::{PartyMemberInfo, PartyState};
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Frostshake".into()),
+            health: 100,
+            max_health: 100,
+            level: 60,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+
+    let shown = |s: &UiScript, region: &str| -> bool {
+        s.eval::<bool>(&format!("return {region}:IsVisible()"))
+            .unwrap()
+    };
+    let leader = "PlayerFrameTextureFrameLeaderIcon";
+    let master = "PlayerFrameTextureFrameMasterIcon";
+
+    // Solo: neither. A solo player "leads" nothing — `IsPartyLeader()` is nil without a group.
+    assert!(!shown(&s, leader), "solo: no leader icon");
+    assert!(!shown(&s, master), "solo: no master-looter icon");
+
+    let party = |leader_index: u32, master_looter: Option<u32>, method: &str| PartyState {
+        members: vec![PartyMemberInfo {
+            name: "Thalyn".into(),
+            guid: 0x7A17,
+        }],
+        leader_index,
+        raid: Vec::new(),
+        loot_method: method.into(),
+        master_looter,
+        loot_threshold: 2,
+    };
+
+    // Grouped, we lead, group loot: leader icon only.
+    s.set_party(party(0, None, "group"));
+    s.fire_event("PARTY_LEADER_CHANGED", vec![]);
+    assert!(shown(&s, leader), "we lead: the leader icon shows");
+    assert!(!shown(&s, master), "group loot: no master-looter icon");
+
+    // Master loot, and we are the master (index 0 — the player's own seat).
+    s.set_party(party(0, Some(0), "master"));
+    s.fire_event("PARTY_LOOT_METHOD_CHANGED", vec![]);
+    assert!(shown(&s, master), "we are master looter: the icon shows");
+
+    // The master looter is party1 instead: the icon is theirs, not ours.
+    s.set_party(party(0, Some(1), "master"));
+    s.fire_event("PARTY_LOOT_METHOD_CHANGED", vec![]);
+    assert!(!shown(&s, master), "somebody else masters: our icon hides");
+    assert!(shown(&s, leader), "…and we still lead");
+
+    // Leadership passes to party1: the crown goes with it.
+    s.set_party(party(1, Some(1), "master"));
+    s.fire_event("PARTY_LEADER_CHANGED", vec![]);
+    assert!(!shown(&s, leader), "we no longer lead: the crown hides");
+
+    // Leaving the group clears both, through PARTY_MEMBERS_CHANGED alone.
+    s.set_party(PartyState::default());
+    s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
+    assert!(
+        !shown(&s, leader) && !shown(&s, master),
+        "ungrouped: both hide"
+    );
+
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

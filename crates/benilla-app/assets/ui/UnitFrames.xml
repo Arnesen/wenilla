@@ -79,8 +79,11 @@
           RE-VERIFIED in 0652, both legs: ref-GameTooltip.lua l.107-123 takes the `not noNormalText`
           branch when tips are off (so `noNormalText=1` → nothing), and "newbie" does not appear
           anywhere in WoW.exe's strings, so SHOW_NEWBIE_TIPS has no cvar producer to be on.
-        - OUT (no wire / future arcs): leader/master/rest/attack icons, group indicator,
-          hit indicators, raid target icon, playtime, target-of-target.
+        - The rest/attack state icons landed with decision 1082, the hit indicator with 0576, and
+          the leader / master-looter pair with report B317 — the wire those three waited on has
+          existed since 0434/0453, and the list below is what is still genuinely unbuilt.
+        - OUT (no wire / future arcs): group indicator, raid target icon, playtime,
+          target-of-target.
 
         TARGET AURA ROWS (0255's deferred slice): 5 buffs / 16 debuffs under the frame, geometry +
         law QUOTED from ref-TargetFrame.xml (button templates l.26-87, instances l.293-481) and
@@ -309,6 +312,17 @@
                 frame:RegisterEvent("PLAYER_REGEN_DISABLED")
                 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
                 frame:RegisterEvent("PLAYER_UPDATE_RESTING")
+                -- The leader / master-looter icons and their four group wires (ref
+                -- PlayerFrame_OnLoad's remaining registrations; report B317). Handle-gated in the
+                -- shared Update exactly like statusTexture above — the target frame declares
+                -- neither texture, so it never runs the law, and the party member frames run
+                -- their own (PartyFrame.xml, a different predicate: an INDEX comparison).
+                frame.leaderIcon = getglobal(tf .. "LeaderIcon")
+                frame.masterIcon = getglobal(tf .. "MasterIcon")
+                frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+                frame:RegisterEvent("PARTY_LEADER_CHANGED")
+                frame:RegisterEvent("PARTY_LOOT_METHOD_CHANGED")
+                frame:RegisterEvent("RAID_ROSTER_UPDATE")
             end
             -- A plain Frame isn't mouse-enabled by construction (only Button/EditBox are); enable it so
             -- the hover tooltip fires (the real client's unit frames take the mouse to target/tooltip).
@@ -792,6 +806,11 @@
                 PlayerFrame_UpdateStatus()
             end
 
+            -- The leader / master-looter icons, player frame only (report B317).
+            if frame.leaderIcon then
+                BenillaPlayerFrame_UpdatePartyLeader(frame)
+            end
+
             -- The aura rows (target only) — the ref's TargetFrame_Update →
             -- TargetDebuffButton_Update: repainted on PLAYER_TARGET_CHANGED and UNIT_AURA alike.
             if unit == "target" then
@@ -947,6 +966,31 @@
                 frame.attackIcon:Hide()
                 frame.statusGlow:Hide()
                 frame.attackBackground:Hide()
+            end
+        end
+
+        -- The leader / master-looter icons on the player's own frame (ref
+        -- PlayerFrame_UpdatePartyLeader, re-expressed onto frame-param style; report B317).
+        --
+        -- Two DIFFERENT predicates, and the asymmetry is the reference's own. The leader icon asks
+        -- IsPartyLeader() — a boolean about us — where the member frames ask whether the leader
+        -- INDEX equals their id, because the player has no index on that scale (0 is "the player
+        -- leads", not "party0"). The master icon then asks whether GetLootMethod's second return
+        -- is 0, which is that same scale reading "the player is master looter"; the group test
+        -- beside it is the reference's own guard, and it is not redundant with ours — a solo
+        -- player's master_looter is None, so `masterId == 0` is already false, but reproducing the
+        -- expression keeps us honest if that ever stops being true.
+        function BenillaPlayerFrame_UpdatePartyLeader(frame)
+            if IsPartyLeader() then
+                frame.leaderIcon:Show()
+            else
+                frame.leaderIcon:Hide()
+            end
+            local lootMethod, masterId = GetLootMethod()
+            if masterId == 0 and (GetNumPartyMembers() > 0 or GetNumRaidMembers() > 0) then
+                frame.masterIcon:Show()
+            else
+                frame.masterIcon:Hide()
             end
         end
 
@@ -1259,6 +1303,26 @@
                                 <Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="73" y="-42"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
+                        <!-- Leader + master-looter icons (ref PlayerLeaderIcon / PlayerMasterIcon,
+                             ref-PlayerFrame.xml l.147-170): 16×16 at the frame's TOPLEFT (44,-10)
+                             and (80,-10) — above the portrait ring, left to right. The reference
+                             seats them in this same OVERLAY layer and in the same frame-filling
+                             child the state icons use, so the offsets are directly comparable to
+                             $parentRestIcon's below. Shown by BenillaPlayerFrame_UpdatePartyLeader.
+                             Report B317: the member frames have carried these since 0434 phase 2;
+                             the player frame was built before the party wire and listed them OUT. -->
+                        <Texture name="$parentLeaderIcon" file="Interface\GroupFrame\UI-Group-LeaderIcon" hidden="true">
+                            <Size><AbsDimension x="16" y="16"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="44" y="-10"/></Offset></Anchor>
+                            </Anchors>
+                        </Texture>
+                        <Texture name="$parentMasterIcon" file="Interface\GroupFrame\UI-Group-MasterLooter" hidden="true">
+                            <Size><AbsDimension x="16" y="16"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="80" y="-10"/></Offset></Anchor>
+                            </Anchors>
+                        </Texture>
                         <!-- The state icon pair under the portrait (ref PlayerRestIcon /
                              PlayerAttackIcon, ref-PlayerFrame.xml l.171-201): the two halves of
                              UI-StateIcon — zzz left, crossed swords right (decision 1082). -->

@@ -66,6 +66,13 @@ pub(super) enum UiFixture {
     /// render): slot icons, the attribute/resistance panes with buff coloring, melee + ranged
     /// blocks, the ammo count, the level line.
     Character,
+    /// The shared **StaticPopup** plate, shown as the group-invite dialog (`PARTY_INVITE`).
+    ///
+    /// Every other StaticPopup customer in the tree raises its dialog over another window's opaque
+    /// art, where a missing backdrop is invisible; the invite is the one that floats over the
+    /// WORLD, which is exactly why its interior is where the plate's presence can be read at all
+    /// (report B319). Nothing captured the StaticPopup plate before this.
+    PartyInvite,
     /// A V-key nameplate over a synthetic Timber Wolf (the reference client's own screenshot
     /// subject: entry 69, level 2, faction 32, display 604) — the plate look-pass instrument.
     /// At the 1024×768 window this scenario forces, one gx unit = 1280 px, so the 0.1 × 0.025
@@ -883,6 +890,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: None,
+    },
+    // The group-invite dialog over open world — the shared StaticPopup plate's only look-pass.
+    // Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-partyinvite`.
+    Scenario {
+        name: "ui-partyinvite",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::PartyInvite),
     },
     // The re-skinned main action bar (no window fixture — the bar loads by default under
     // WOW_CAPTURE_UI=1, and `demo_unit_feed` seeds the action slots + player XP). The bar is 1024

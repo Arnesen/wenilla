@@ -22,7 +22,8 @@
 
     OUT (later slices, per 0203): the AreaPOI.dbc landmarks (the POI pool IS here — the guard's
     directions marker fills it today, and the DBC rows join through the same GetNumMapLandmarks);
-    party/raid/battlefield/ping children (no group wire); the magnifying-glass zoom-out
+    raid/battlefield/ping children (the PARTY blips landed with report B320 — the raid pool
+    waits on `GetPlayerMapPosition` answering a `raid` token); the magnifying-glass zoom-out
     shortcut (redundant with the button); SetupFullscreenScale (the map renders at its native
     1024×768 centered; a scale pass is a taste knob); WorldMapTooltip (only unit blips used it).
 
@@ -190,6 +191,37 @@
         -- and every one of them wants the plate opening AWAY from the edge it sits nearest, so the
         -- side pick lives here once instead of in each OnEnter. `subtitle` is the second line the
         -- landmarks that carry a live status use; the rest pass nothing.
+        -- The party blips (ref WorldMapFrame.lua:391-403's party arm, report B320): the same
+        -- (0,0)-means-hide law as the player and the corpse, one frame per slot.
+        --
+        -- It rides the per-frame pass beside those two rather than WorldMapFrame_Update, where the
+        -- reference keeps it: a member's position moves continuously and the map has no event that
+        -- fires when it does, so placing it on the repaint alone would freeze every blip between
+        -- roster changes. Its own function so the live pass and the tests enter it identically.
+        --
+        -- The reference's RAID arm is not taken — see the blip frames' note.
+        function WorldMapParty_Update()
+            for i = 1, 4 do
+                local blip = getglobal("WorldMapParty" .. i)
+                local px, py = GetPlayerMapPosition("party" .. i)
+                if ( px == 0 and py == 0 ) then
+                    blip:Hide()
+                else
+                    px = px * WorldMapDetailFrame:GetWidth()
+                    py = -py * WorldMapDetailFrame:GetHeight()
+                    blip:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", px, py)
+                    blip:Show()
+                end
+            end
+        end
+
+        -- A party blip's hover names the member (ref WorldMapUnit_OnEnter, which reads the
+        -- frame's own `unit`). The frame id IS the party slot, so the token needs no bookkeeping.
+        function WorldMapParty_OnEnter(blip)
+            local unit = "party" .. blip:GetID()
+            WorldMapMarker_ShowTooltip(blip, UnitName(unit) or UNKNOWN)
+        end
+
         function WorldMapMarker_ShowTooltip(marker, title, subtitle)
             local markerX = marker:GetCenter();
             local sheetX = marker:GetParent():GetCenter();
@@ -312,7 +344,8 @@
         end
 
         -- The per-frame hover pass (spec: ref WorldMapButton_OnUpdate), reduced to the area
-        -- highlight + the player blip (party/raid/flags/ping are deferred with their wire).
+        -- highlight + the player blip (raid/flags/ping are still deferred; the party blips
+        -- landed with B320 and ride WorldMapFrame_Update, not this pass).
         -- UpdateMapHighlight is a stub until the area-bitmap source lands (wow-re dispatch) — a
         -- nil area/art takes the hide paths.
         function WorldMapButton_OnUpdate(elapsed)
@@ -351,6 +384,7 @@
                 WorldMapPlayer:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", playerX, playerY);
                 WorldMapPlayer:Show();
             end
+            WorldMapParty_Update()
             -- Position corpse (ref WorldMapFrame.lua:443-452 — the law is that (0,0) means hide).
             local corpseX, corpseY = GetCorpseMapPosition();
             if ( corpseX == 0 and corpseY == 0 ) then
@@ -651,6 +685,70 @@
                             <OnLeave>
                                 GameTooltip:Hide()
                             </OnLeave>
+                        </Scripts>
+                    </Frame>
+                    <!-- The party blips (report B320) — ref WorldMapUnitTemplate
+                         (WorldMapFrameTemplates.xml l.3-28) re-expressed: 16x16 centered,
+                         WorldMapPartyIcon art, one frame per `party1..4` slot, placed by
+                         GetPlayerMapPosition in the Update above. The reference hovers them into
+                         its own WorldMapTooltip; this map ships none (header note), so they take
+                         the shared GameTooltip through WorldMapMarker_ShowTooltip exactly as the
+                         corpse marker beside them does.
+
+                         The reference's RAID pool (25 more frames, its `GetNumRaidMembers() > 0`
+                         arm) is NOT here: `GetPlayerMapPosition` answers no `raid` token yet, so
+                         a raid would show these four filled from its own subgroup and nothing
+                         else. That is the honest half-step, and it is named in the OUT list. -->
+                    <Frame name="WorldMapParty1" hidden="true" enableMouse="true" id="1">
+                        <Size><AbsDimension x="16" y="16"/></Size>
+                        <Anchors><Anchor point="CENTER"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                    </Frame>
+                    <Frame name="WorldMapParty2" hidden="true" enableMouse="true" id="2">
+                        <Size><AbsDimension x="16" y="16"/></Size>
+                        <Anchors><Anchor point="CENTER"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                    </Frame>
+                    <Frame name="WorldMapParty3" hidden="true" enableMouse="true" id="3">
+                        <Size><AbsDimension x="16" y="16"/></Size>
+                        <Anchors><Anchor point="CENTER"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                    </Frame>
+                    <Frame name="WorldMapParty4" hidden="true" enableMouse="true" id="4">
+                        <Size><AbsDimension x="16" y="16"/></Size>
+                        <Anchors><Anchor point="CENTER"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture file="Interface\WorldMap\WorldMapPartyIcon" setAllPoints="true"/>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEnter>WorldMapParty_OnEnter(this)</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
                     <Frame name="WorldMapFrameAreaFrame">

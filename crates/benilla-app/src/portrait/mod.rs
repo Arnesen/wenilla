@@ -649,6 +649,23 @@ pub(crate) struct BoothBridge<'w> {
     pub(crate) panes: ResMut<'w, BoothPanes>,
 }
 
+/// The group-facing inputs [`sync_portraits`] needs, in one param: who is in the party
+/// ([`crate::ui_party::GroupState`]), the guid→entity index that says which of them are actually
+/// STREAMED, the skin-palette table (decision 0720), the pet bar (0990), and the name cache — the
+/// only place a member we hold no object for has a race and sex at all (report B315). The index
+/// serves the party slots and the pet alike.
+///
+/// One struct rather than five loose params because `sync_portraits` sits at Bevy's 16-parameter
+/// ceiling; it was a bare tuple until the name cache made that tuple's type unreadable.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct PartyBooths<'w> {
+    roster: Res<'w, crate::ui_party::GroupState>,
+    index: Res<'w, crate::net::GuidIndex>,
+    palettes: ResMut<'w, benilla_world::rig_palette::RigPalettes>,
+    pet_bar: Res<'w, crate::ui_pet::PetBar>,
+    names: Res<'w, crate::names::NameCache>,
+}
+
 /// Tags a booth camera with its slot token, so the model-sync pass can re-frame it per model.
 /// (`BoothCam`, not `PortraitCamera` — that name is the authored M2 rig, `benilla_assets::PortraitCamera`.)
 /// (`pub(crate)` for the particle census, which reports draws per booth token — decision 0775.)
@@ -1169,42 +1186,59 @@ fn sync_portraits(
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     interact_npc: Res<crate::ui_session::InteractNpc>,
-    // The party slots' roster + entity index + the skin-palette table (decision 0720), and the pet
-    // bar (0990) — one tuple param (the 16-SystemParam ceiling). The index serves both.
-    party: (
-        Res<crate::ui_party::GroupState>,
-        Res<crate::net::GuidIndex>,
-        ResMut<benilla_world::rig_palette::RigPalettes>,
-        Res<crate::ui_pet::PetBar>,
-    ),
+    mut party: PartyBooths,
 ) {
     if test_mode(&mut env_cache) {
         return; // the test bake owns the booths
     }
-    let (party_roster, party_index, mut palettes, pet_bar) = party;
     for token in SLOTS {
+        // A token can name a unit the object manager does not hold: a party member outside the
+        // local area, a pet whose object hasn't streamed yet. The reference does NOT leave that
+        // circle empty — RE C5 (`portrait-render.md`, CONFIRMED taxonomy) is explicit that a unit
+        // not held as a live UNIT object draws the 2D stand-in, and only "model/subsystem not
+        // ready" draws the blank. `unseen` carries that art for exactly those tokens; a token that
+        // names nobody at all leaves it `None` and the booth empties as before (report B315).
+        let mut unseen: Option<String> = None;
         let unit: Option<Entity> = match token {
             "player" => self_q.single().ok(),
             "target" => selection.target,
             // The pet, off the bar's cached guid — the same word its unit token and `UNIT_PET`
-            // read (`crate::ui_pet::feed_pet_unit`). An unstreamed pet empties the booth, exactly
-            // as an out-of-range party member does.
-            "pet" => (pet_bar.spells.pet_guid != 0)
-                .then(|| party_index.0.get(&pet_bar.spells.pet_guid))
-                .flatten()
-                .copied(),
+            // read (`crate::ui_pet::feed_pet_unit`).
+            "pet" => {
+                let guid = party.pet_bar.spells.pet_guid;
+                let entity = (guid != 0)
+                    .then(|| party.index.0.get(&guid))
+                    .flatten()
+                    .copied();
+                if entity.is_none() && guid != 0 {
+                    unseen = Some(creature_temporary_portrait());
+                }
+                entity
+            }
             // The NPC an interaction window is bound to (gossip / quest / merchant / trainer),
             // resolved to its live entity by `feed_interact_npc` — the same bake path as "target".
             "npc" => interact_npc.0,
-            // A party member's slot bakes only while the member is streamed (in range); out of
-            // range there's no model to pose and the frame's circle stays empty (0434 phase 2 —
-            // whether the reference substitutes anything there is a phase-4 look question).
-            tok => tok
-                .strip_prefix("party")
-                .and_then(|n| n.parse::<usize>().ok())
-                .and_then(|n| party_roster.party_slots().nth(n - 1))
-                .and_then(|m| party_index.0.get(&m.guid))
-                .copied(),
+            // A party member's slot bakes only while the member is streamed (in range). Out of
+            // range there is no model to pose — and no descriptor either, so the stand-in's
+            // race/sex come from the name cache's `SMSG_NAME_QUERY_RESPONSE` triple, warmed for
+            // every roster entry by `net::apply::group::list`.
+            tok => {
+                let member = tok
+                    .strip_prefix("party")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| party.roster.party_slots().nth(n - 1));
+                let entity = member.and_then(|m| party.index.0.get(&m.guid)).copied();
+                if entity.is_none() {
+                    unseen = member.map(|m| {
+                        let traits = party.names.player_traits(m.guid);
+                        player_temporary_portrait(
+                            traits.map(|(race, _, _)| race),
+                            traits.map(|(_, _, sex)| sex),
+                        )
+                    });
+                }
+                entity
+            }
         };
         let Some(booth) = booths.0.get_mut(token) else {
             continue;
@@ -1226,9 +1260,14 @@ fn sync_portraits(
                 booth.rigged = false;
                 booth.parked = false;
             }
-            let live = PortraitSource::Live(booth.target.clone());
-            if portraits.0.get(token) != Some(&live) {
-                portraits.0.insert(token.to_string(), live);
+            // A unit we simply hold no object for takes the ref's 2D stand-in; only a token that
+            // names nobody falls to the emptied render target.
+            let src = match unseen {
+                Some(file) => PortraitSource::File(file),
+                None => PortraitSource::Live(booth.target.clone()),
+            };
+            if portraits.0.get(token) != Some(&src) {
+                portraits.0.insert(token.to_string(), src);
             }
             continue;
         };
@@ -1318,7 +1357,7 @@ fn sync_portraits(
             commands.entity(booth.root).despawn_related::<Children>();
             let booth_rig = spawn_booth_model(
                 &mut commands,
-                &mut palettes,
+                &mut party.palettes,
                 booth.root,
                 booth.layer.clone(),
                 &booth_parts,
@@ -1905,33 +1944,52 @@ fn gate_booth_cameras(
     }
 }
 
+/// The stand-in art's folder + stem, shared by the three arms below.
+const TEMPORARY_PORTRAIT: &str = "Interface\\CharacterFrame\\TemporaryPortrait";
+
 /// The ref's 2D portrait stand-in for a not-yet-renderable unit (RE C5):
 /// `TemporaryPortrait-{Male|Female}-{Race}` for a player body, `-Monster` otherwise.
 fn temporary_portrait(net: Option<&NetEntity>, store: Option<&crate::net::ObjectStore>) -> String {
     use benilla_protocol::EntityKind;
-    let base = "Interface\\CharacterFrame\\TemporaryPortrait";
     if net.map(|n| n.kind) == Some(EntityKind::Player) {
-        if let Some(s) = store {
-            let sex = match s.0.unit_gender() {
-                Some(1) => "Female",
-                _ => "Male",
-            };
-            let race = match s.0.unit_race() {
-                Some(1) => "Human",
-                Some(2) => "Orc",
-                Some(3) => "Dwarf",
-                Some(4) => "NightElf",
-                Some(5) => "Scourge",
-                Some(6) => "Tauren",
-                Some(7) => "Gnome",
-                Some(8) => "Troll",
-                _ => return format!("{base}.blp"),
-            };
-            return format!("{base}-{sex}-{race}.blp");
-        }
-        return format!("{base}.blp");
+        return match store {
+            Some(s) => player_temporary_portrait(s.0.unit_race(), s.0.unit_gender()),
+            None => format!("{TEMPORARY_PORTRAIT}.blp"),
+        };
     }
-    format!("{base}-Monster.blp")
+    creature_temporary_portrait()
+}
+
+/// The player half of [`temporary_portrait`], taking the two bytes rather than a descriptor — a
+/// party member outside the local area HAS no descriptor, and reaches the same art through the
+/// name cache's `SMSG_NAME_QUERY_RESPONSE` triple instead (report B315).
+///
+/// An unknown race falls to the plain `TemporaryPortrait.blp`, which is the ref's own behaviour
+/// when its `%s-%s` format has no race string to substitute; an unknown sex reads Male, the
+/// zero-byte default.
+fn player_temporary_portrait(race: Option<u8>, sex: Option<u8>) -> String {
+    let sex = match sex {
+        Some(1) => "Female",
+        _ => "Male",
+    };
+    let race = match race {
+        Some(1) => "Human",
+        Some(2) => "Orc",
+        Some(3) => "Dwarf",
+        Some(4) => "NightElf",
+        Some(5) => "Scourge",
+        Some(6) => "Tauren",
+        Some(7) => "Gnome",
+        Some(8) => "Troll",
+        _ => return format!("{TEMPORARY_PORTRAIT}.blp"),
+    };
+    format!("{TEMPORARY_PORTRAIT}-{sex}-{race}.blp")
+}
+
+/// The creature stand-in — the Monster art rather than the ref's `-Pet` file (our pick; see
+/// [`sync_portraits`]'s not-attached-yet arm).
+fn creature_temporary_portrait() -> String {
+    format!("{TEMPORARY_PORTRAIT}-Monster.blp")
 }
 
 /// Set the named slot's camera to the rig `frame` built — transform AND projection (the authored
@@ -2127,5 +2185,32 @@ mod tests {
         );
         // The same look twice is the same key — the compare must not re-bake every frame.
         assert!(LookKey::build(&parts, &riders, &[], &[&glow]) == after);
+    }
+
+    /// RE C5's player arm (`portrait-render.md`, CONFIRMED taxonomy): a unit the object manager
+    /// does not hold draws `TemporaryPortrait-{Sex}-{Race}`. The out-of-area party member reaches
+    /// it through the name cache's triple rather than a descriptor — same art, other source
+    /// (report B315).
+    #[test]
+    fn the_stand_in_names_the_sex_and_race_and_falls_back_without_them() {
+        assert_eq!(
+            player_temporary_portrait(Some(4), Some(1)),
+            "Interface\\CharacterFrame\\TemporaryPortrait-Female-NightElf.blp",
+        );
+        // Sex 0 is Male, and so is anything else the byte could hold.
+        assert_eq!(
+            player_temporary_portrait(Some(6), Some(0)),
+            "Interface\\CharacterFrame\\TemporaryPortrait-Male-Tauren.blp",
+        );
+        // No name answer yet (or a race id the client has no string for): the plain file, which is
+        // what the ref's `%s-%s` format degenerates to — NOT an empty circle, which is the bug.
+        assert_eq!(
+            player_temporary_portrait(None, None),
+            "Interface\\CharacterFrame\\TemporaryPortrait.blp",
+        );
+        assert_eq!(
+            player_temporary_portrait(Some(9), Some(1)),
+            "Interface\\CharacterFrame\\TemporaryPortrait.blp",
+        );
     }
 }

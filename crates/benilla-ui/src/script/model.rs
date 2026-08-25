@@ -1138,11 +1138,11 @@ pub(crate) struct Model {
     pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
     /// The dressing-room pane's bake yaw, the fourth of those scalars.
     pub(crate) dressup_yaw: f32,
-    /// Unit token → squared distance from the player, for every popup token the app resolved to a
-    /// live inspectable player this frame — the input to both verified range predicates
-    /// (`CanInspect`, `CheckInteractDistance`). Absent token = in range (see
-    /// [`UiScript::set_inspect_reach`]).
-    pub(crate) inspect_reach: HashMap<String, f64>,
+    /// Unit token → what the app resolved about it this frame, for every popup token that named a
+    /// **live unit object** — the input to both verified range predicates (`CanInspect`,
+    /// `CheckInteractDistance`). An absent token is one the object manager holds nothing for, and
+    /// both answer `nil` there (see [`UiScript::set_inspect_reach`] and [`super::UnitReach`]).
+    pub(crate) inspect_reach: HashMap<String, super::UnitReach>,
 
     /// The skills-pane snapshot the app pushes ([`skills::SkillsState`], decision 0437 phase 4) and
     /// the synthesized display tree built from it ([`skills::UiScript::set_skills`]) — the skills

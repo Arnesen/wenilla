@@ -889,6 +889,8 @@ pub(super) fn apply_net_updates(
                 members,
                 leader,
                 loot,
+                &mut names,
+                &net_commands,
             ),
             SessionEvent::PartyCommandResult {
                 operation,

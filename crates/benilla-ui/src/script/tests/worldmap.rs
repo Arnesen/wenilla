@@ -150,13 +150,20 @@ fn worldmap_navigation_and_map_info() {
 }
 
 /// SetMapToCurrentZone lands on the app-fed player zone; the feed's projection + facing surface
-/// through GetPlayerMapPosition/GetPlayerFacing (and only for "player" — party is a later arc).
+/// through GetPlayerMapPosition/GetPlayerFacing — for `"player"` and, since report B320, for the
+/// `party1..4` slots too. A `raid` token still answers the off-map sentinel.
 #[test]
 fn worldmap_current_zone_and_player_feed() {
     let mut s = script();
     push_catalog(&mut s);
 
-    s.set_world_map_feed(Some((1, 2)), Some((0.25, 0.75)), 1.5, None);
+    s.set_world_map_feed(
+        Some((1, 2)),
+        Some((0.25, 0.75)),
+        1.5,
+        None,
+        vec![Some((0.1, 0.2)), None],
+    );
     s.run("SetMapToCurrentZone()").unwrap();
     assert_eq!(
         s.eval::<(i64, i64)>("return GetCurrentMapContinent(), GetCurrentMapZone()")
@@ -168,15 +175,24 @@ fn worldmap_current_zone_and_player_feed() {
         .unwrap();
     assert!((x - 0.25).abs() < 1e-6 && (y - 0.75).abs() < 1e-6);
     assert!((s.eval::<f64>("return GetPlayerFacing()").unwrap() - 1.5).abs() < 1e-6);
-    assert_eq!(
-        s.eval::<(f64, f64)>(r#"return GetPlayerMapPosition("party1")"#)
-            .unwrap(),
-        (0.0, 0.0),
-        "non-player units are off-map until the party arc"
+    let (px, py) = s
+        .eval::<(f64, f64)>(r#"return GetPlayerMapPosition("party1")"#)
+        .unwrap();
+    assert!(
+        (px - 0.1).abs() < 1e-6 && (py - 0.2).abs() < 1e-6,
+        "a party slot reads its own projection (B320)"
     );
+    for token in ["party2", "party5", "party0", "raid1", "nonsense"] {
+        assert_eq!(
+            s.eval::<(f64, f64)>(&format!(r#"return GetPlayerMapPosition("{token}")"#))
+                .unwrap(),
+            (0.0, 0.0),
+            "{token} answers the off-map sentinel"
+        );
+    }
 
     // No feed → the world sheet (never an error).
-    s.set_world_map_feed(None, None, 0.0, None);
+    s.set_world_map_feed(None, None, 0.0, None, Vec::new());
     s.run("SetMapToCurrentZone()").unwrap();
     assert_eq!(s.eval::<i64>("return GetCurrentMapContinent()").unwrap(), 0);
 }
