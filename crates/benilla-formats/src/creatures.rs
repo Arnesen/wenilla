@@ -127,6 +127,10 @@ struct ModelRow {
     footprint_width: f32,
     /// `collisionHeight` (field 15), raw model units — see [`CreatureCatalog::collision_height`].
     collision_height: f32,
+    /// `FoleyMaterialID` (field 10) — a `Material.dbc` id, and the whole of a *creature's* armor
+    /// foley (see [`CreatureCatalog::foley_material`]). `[unit+0xb3c]` is this row, and the
+    /// reference reads it at `+0x28`, which is field 10 on the 16-field 5875 record.
+    foley_material: u32,
     /// `FootstepShakeSize` (field 11) and `DeathThudShakeSize` (field 12) — **`CameraShakes.dbc`
     /// row ids**, 0 on a model that shakes nothing. Only 25 of the 430 shipped rows carry a
     /// footstep shake, and the set is exactly the thumping-giant list (Ancients, kodos, sea and
@@ -241,6 +245,27 @@ impl CreatureCatalog {
     pub fn collision_height(&self, display_id: u32) -> Option<f32> {
         let row = self.display.get(&display_id)?;
         Some(self.models.get(&row.model_id)?.collision_height)
+    }
+
+    /// The display's **foley material** — a `Material.dbc` id, the creature half of the footfall
+    /// rustle (`0x623610`: `[[unit+0xb3c]+0x28]` handed straight to `0x4584e0`). A *player* does
+    /// not come through here at all: its own override reads the equipped chest instead
+    /// (`0x62fa30`), so this is the answer for creatures — and, for a player wearing a
+    /// non-character display, the body it is actually wearing.
+    ///
+    /// `None` when either DBC lookup misses. `Some(0)` is the real "no material" the data
+    /// carries, and resolves to silence at [`crate::MaterialCatalog::foley_kit`].
+    ///
+    /// **In shipped 5875 data this column is 0 in every one of the 430 rows**, in both the base
+    /// archive's 333-row copy and the patched 430 (`tests::no_shipped_model_carries_a_foley`).
+    /// The creature branch of the foley is therefore inert against the real client's own files:
+    /// the armor rustle you hear is the *player* override's, and no NPC has one. Kept because it
+    /// is the reference's own path and one map lookup, and because a server shipping patched
+    /// DBCs would light it up — not because it does anything today. A future reader finding this
+    /// silent has found the data, not a bug.
+    pub fn foley_material(&self, display_id: u32) -> Option<u32> {
+        let row = self.display.get(&display_id)?;
+        Some(self.models.get(&row.model_id)?.foley_material)
     }
 
     /// Does this display's model **breathe** — i.e. may it wear the `$BTH` hardcoded effects
@@ -416,6 +441,7 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                         footprint_length: f32_at(r, 7).unwrap_or(0.0),
                         footprint_width: f32_at(r, 8).unwrap_or(0.0),
                         collision_height: f32_at(r, 15).unwrap_or(0.0),
+                        foley_material: u32_at(r, 10).unwrap_or(0),
                         footstep_shake: u32_at(r, 11).unwrap_or(0),
                         death_thud_shake: u32_at(r, 12).unwrap_or(0),
                     },
@@ -719,6 +745,44 @@ mod tests {
             cat.breathes(0),
             "an unknown display falls to the common case"
         );
+    }
+
+    /// **The creature foley is dead data in 5875.** Every `CreatureModelData` row ships
+    /// `FoleyMaterialID = 0`, so `0x623610`'s branch resolves to silence for every NPC in the
+    /// game and the armor rustle is the player override's alone. Pinned as a test rather than a
+    /// comment because it is a *negative* that a future reader will otherwise re-derive by
+    /// wondering why NPCs are quiet — and because a shipped file that ever grows a nonzero here
+    /// should make this fail loudly rather than change the soundscape silently.
+    ///
+    /// The row alignment this rests on is checked in the same pass: field 11 (footstep shake)
+    /// is nonzero on exactly the 25 thumping-giant rows [`ModelRow`] documents, which would not
+    /// hold if the schema had slipped a column. Skips without client data.
+    #[test]
+    fn no_shipped_model_carries_a_foley() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("creature catalog");
+
+        assert!(!cat.models.is_empty(), "models loaded");
+        let foleyed: Vec<u32> = cat
+            .models
+            .iter()
+            .filter(|(_, m)| m.foley_material != 0)
+            .map(|(&id, _)| id)
+            .collect();
+        assert!(
+            foleyed.is_empty(),
+            "shipped data grew a creature foley material: models {foleyed:?}"
+        );
+
+        // The alignment guard: the neighbouring column is NOT uniformly zero, so a zero at
+        // field 10 is the data's own answer and not a schema that slid.
+        let shakers = cat
+            .models
+            .values()
+            .filter(|m| m.footstep_shake != 0)
+            .count();
+        assert_eq!(shakers, 25, "footstep-shake rows (schema alignment guard)");
     }
 
     #[test]

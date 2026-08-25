@@ -906,7 +906,7 @@ pub(super) fn wound_weight(remaining_frac: f32, others: f32) -> f32 {
 /// `0x7123af`: `+0x104 = 1/150`, amplitude `+0x108 = 1.0`) and the blended re-arm that cross-fades
 /// a new masked clip in over the *incoming* sequence's own blendTime (`0x7125f2`). The wound's
 /// twin ([`wound_weight`]) is the same curve at amplitude 0.75.
-pub(super) fn blend_lambda(remaining_frac: f32) -> f32 {
+pub(crate) fn blend_lambda(remaining_frac: f32) -> f32 {
     let t = remaining_frac.clamp(0.0, 1.0);
     (3.0 - 2.0 * t) * t * t
 }

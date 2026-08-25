@@ -247,8 +247,9 @@ pub(super) struct Bus(pub(super) u8);
 impl Bus {
     /// Bus 0 — cap `0x7FFFFFFF`, i.e. **uncapped**. Where spell impacts, UI, music and ambience
     /// all live in the reference, so it is also benilla's default and the honest answer for any
-    /// play whose bus we have not pinned. The `$CSS` **miss** whoosh is here too (bus 0, uncapped)
-    /// — only a *connecting* swing takes the capped bus 6, which benilla does not yet voice.
+    /// play whose bus we have not pinned. The `$CSS` **miss** whoosh is here too (bus 0,
+    /// uncapped) — only a *connecting* swing takes the capped [`Self::WEAPON_SWING`]. The armor
+    /// foley off `$FSD` is here as well, uncapped beside the capped step it accompanies.
     pub(super) const DEFAULT: Bus = Bus(0);
 
     /// Bus 5 — **cap 1**. The attacker's exertion vocal (`CreatureSoundData.Exertion` = class 0,
@@ -259,6 +260,12 @@ impl Bus {
     /// there is also 1, so it buys a private pool of the same size and never changes the answer —
     /// which is why benilla can route by column without resolving that bit.)
     pub(super) const EXERTION: Bus = Bus(5);
+
+    /// Bus 6 — **cap 2**. The *connecting* swing's whoosh (`WeaponSwingSounds2`, `0x624c81` →
+    /// `0x457f60` → `0x458890` with `ecx = 6`) — the sound a landed or defended melee swing
+    /// makes as the weapon travels, which the **miss** whoosh on [`Self::DEFAULT`] replaces
+    /// rather than joins: `0x624ca0` picks exactly one of the two by victimState.
+    pub(super) const WEAPON_SWING: Bus = Bus(6);
 
     /// Bus 7 — **cap 2**. The victim's wound vocal (`Injury` = class 2, `InjuryCritical` = 3,
     /// `InjuryCrushingBlow` = 9, which is dead in shipped data: 0 of 406 rows populate it).
@@ -271,10 +278,10 @@ impl Bus {
     /// injury half only — your exertion still competes on [`Self::EXERTION`].
     pub(super) const SELF_INJURY: Bus = Bus(8);
 
-    /// Bus 9 — **cap 6**. The terrain footstep off `$FSD` (`0x62342a` → `0x458380`). Note the
-    /// same `$FSD` also fires a *material foley* on bus 0 in the reference (`[vt+0x8c]` →
-    /// `0x4584e0`), which benilla does not voice — benilla plays one sound per footstep, so the
-    /// one it plays is this one.
+    /// Bus 9 — **cap 6**. The terrain footstep off `$FSD` (`0x62342a` → `0x458380`) — one half
+    /// of a footfall. The same `$FSD` fires the *armor foley* on the uncapped [`Self::DEFAULT`]
+    /// first (`[vt+0x8c]` → `0x4584e0`), ahead of every gate below this one, so a creature with
+    /// no footstep class still rustles.
     pub(super) const FOOTSTEP: Bus = Bus(9);
 
     /// Bus 10 — **cap 4**. The whole melee-contact family, which all contends for the same four
@@ -465,6 +472,24 @@ pub(super) struct PlayExtras {
     pub(super) latch: Latch,
     /// The **voice bus** this play competes on ([`Bus`]). Defaults to the uncapped bus 0.
     pub(super) bus: Bus,
+    /// The caller's **per-shot volume multiplier** — `0x458890`'s own last argument, which every
+    /// site but one passes as `1.0`. It lands where the reference puts it: inside
+    /// [`math::variation_volume`]'s `mult`, i.e. *before* the `[0,1]` clamp and ahead of distance
+    /// attenuation, so it scales the kit's authored volume rather than the final amplitude.
+    /// [`Volume::default`] is that `1.0`.
+    pub(super) volume_mult: Volume,
+}
+
+/// A per-shot volume multiplier that defaults to unity — [`PlayExtras::volume_mult`]'s type.
+/// A newtype only so `PlayExtras` can keep deriving `Default`, which a bare `f32` field would
+/// silence at 0.0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Volume(pub(super) f32);
+
+impl Default for Volume {
+    fn default() -> Self {
+        Self(1.0)
+    }
 }
 
 /// A kit to play, by id or by `PlaySoundByName` name.
@@ -530,6 +555,7 @@ pub(super) fn play_kit_ext(
         force_loop,
         latch,
         bus,
+        volume_mult: Volume(mult),
     } = extras;
     // The cover's audio hold ([`SoundConfig::world_hold`]): while the loading screen is up, no
     // new sound starts — checked before anything allocates, so the per-frame retry drivers (the
@@ -627,9 +653,9 @@ pub(super) fn play_kit_ext(
     // sets 0x800, so volume variation is dormant in this build's data — the gate is faithful).
     let v = if flags & sound_kit_flags::VARY_VOLUME != 0 {
         let draw = math::variation_draw(kits.rng.next());
-        math::variation_volume(Some(draw), volume, 1.0)
+        math::variation_volume(Some(draw), volume, mult)
     } else {
-        math::variation_volume(None, volume, 1.0)
+        math::variation_volume(None, volume, mult)
     };
 
     let atten = d_sq.map_or(1.0, |d| {

@@ -480,10 +480,59 @@ struct Turn {
     /// The shuffle currently stepping — its `AnimationData` id and the wall-clock second it
     /// expires at. `None` = the doll is back on Stand.
     shuffle: Option<(u16, f64)>,
-    /// The graph node that shuffle is actually running, kept because the reference arms a
-    /// **frequency-weighted random variation** (`0x7121a0`'s `-1`), so the node playing is not
-    /// recoverable from the id alone.
+    /// The graph node the turn's **primary** is running — the shuffle while one steps, the Stand
+    /// variation it settled into otherwise. Kept because every arm rolls a **frequency-weighted
+    /// random variation** (`0x7121a0`'s `-1`), so the node playing is not recoverable from the id
+    /// alone. `None` before the first arm, where the bake's own Stand is the pose in flight.
     playing: Option<bevy::animation::graph::AnimationNodeIndex>,
+    /// The cross-fade out of the pose the last arm replaced ([`Fade`]) — `None` between turns.
+    fade: Option<Fade>,
+}
+
+impl Turn {
+    /// **The bake replaced this booth's `AnimationPlayer`** — drop every node reference the turn was
+    /// holding, because they name `ActiveAnimation`s in a player that no longer exists (the bake
+    /// `insert`s a fresh one on the same root). Without this a re-bake mid-turn — an equipment
+    /// change while the arrow is held, the pane's aspect settling — leaves
+    /// [`booth::drive_booth_turn`] naming a node the new player never played, and the next weight
+    /// write **starts** it: a phantom shuffle at full weight over the doll's idle.
+    ///
+    /// [`Self::faced`] survives, and must: the yaw is the bake's own (`sync_body_booth` re-poses
+    /// the root to it), so a re-bake is not a rotation and must not step the feet. That is the
+    /// reference's `RefreshUnit`, which re-snapshots the unit without ever calling `SetRotation`.
+    fn rebaked(&mut self) {
+        *self = Turn {
+            faced: self.faced,
+            ..Default::default()
+        };
+    }
+}
+
+/// The **cross-fade out of the pose an arm replaced** — the reference's per-bone SECONDARY blend
+/// slot, seeded by every arm the turn makes (decision 1565, director report B321).
+///
+/// `0x7121a0`'s sixth argument is `1` at both of the turn's call sites (`0x505c23` the rotation,
+/// `0x505c98` the 100 ms expiry — wow-re `modelframe-camera-law.md` §13.4). A non-zero there is
+/// `0x7125d6`: `rep movsd` copies the live primary track into the secondary sub-record `[blk+0xc4]`
+/// — the outgoing clip, **still on its own clock**, not a frozen pose — then writes the window end
+/// `[blk+0x100]`, the rate `[blk+0x104] = 1/blendTime` and the amplitude `[blk+0x108] = 1.0f`. The
+/// kernel at `0x714880` decays λ = smoothstep across it and blends `out = primary + (secondary −
+/// primary)·λ` ([`crate::creature_anim::select::blend_lambda`], the same curve the world lane's
+/// key-bone slot already runs — decision 0878).
+///
+/// **One slot, not a list**, exactly as the client keeps one: an arm inside a running window
+/// overwrites `[blk+0xc4]`, and the pose it was fading out is dropped there and then.
+#[derive(Clone, Copy)]
+struct Fade {
+    /// The outgoing graph node. Its clock is left running — the `rep movsd` copies the live
+    /// track's window base and rate, so the client fades out of a clip that is still stepping.
+    node: bevy::animation::graph::AnimationNodeIndex,
+    /// The wall-clock second λ reaches 0 at (`[blk+0x100]`).
+    until: f64,
+    /// The window's full width — the **incoming** clip's own `M2Sequence.blendTime` (`0x7125f2`),
+    /// which is why a release settles so much more slowly than a turn starts: HumanMale authors
+    /// 0.25 s on ShuffleLeft/Right and **0.5 s** on Stand (`benilla-extract m2seq`).
+    span: f32,
 }
 
 /// How many frames a content edge keeps a booth camera rendering ([`Booth::wake`]): covers the
@@ -1725,6 +1774,8 @@ fn sync_body_booth(
             booth_light.pane.buffer.as_ref(),
             &booth_effects,
         );
+        // The turn's node bookkeeping named the player this bake just replaced.
+        booth.turn.rebaked();
         // So the whole bake is live, emitters or not — `wake` can't gate a looping animation.
         // `gate_booth_cameras` renders it every frame its pane is on screen, and none when it isn't.
         booth.live = true;

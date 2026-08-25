@@ -158,6 +158,10 @@ pub use weapon_impact::{
 };
 mod sheathe;
 pub use sheathe::{load_sheathe_sound_catalog, SheatheSoundCatalog, SheatheSounds};
+mod weapon_swing;
+pub use weapon_swing::{load_weapon_swing_catalog, WeaponSwingCatalog};
+mod material;
+pub use material::{load_material_catalog, MaterialCatalog};
 mod wmo_area;
 pub use wmo_area::{load_wmo_area_catalog, WmoArea, WmoAreaCatalog};
 mod spells;

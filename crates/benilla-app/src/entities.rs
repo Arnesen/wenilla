@@ -267,6 +267,13 @@ pub(crate) struct Creatures {
 }
 
 impl Creatures {
+    /// A display's **foley material** (`Material.dbc` id) — the creature half of the footfall
+    /// rustle; see [`benilla_formats::CreatureCatalog::foley_material`] and
+    /// [`crate::sound::footsteps`]. `None` for an unknown display.
+    pub(crate) fn foley_material(&self, display_id: u32) -> Option<u32> {
+        self.catalog.foley_material(display_id)
+    }
+
     /// A display's collision height in **raw model units** — see [`CollisionHeight`] for the world
     /// value and everything that reads it. `None` for an unknown display.
     pub(crate) fn collision_height(&self, display_id: u32) -> Option<f32> {

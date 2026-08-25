@@ -319,6 +319,8 @@ pub(super) fn sync_dressup_booth(
         );
         // The bake animates, so its camera can't sleep — `gate_booth_cameras` runs it every frame
         // the window is drawing this pane, and none once it closes.
+        // The turn's node bookkeeping named the player this bake just replaced ([`Turn::rebaked`]).
+        booth.turn.rebaked();
         booth.live = true;
         // A fresh bake is animated by construction; the park state is the new rig's.
         booth.rigged = booth_rig.rigged();

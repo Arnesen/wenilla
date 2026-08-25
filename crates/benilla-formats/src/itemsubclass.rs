@@ -38,6 +38,11 @@ pub struct ItemSubClassInfo {
     pub postrequisite_proficiency: i32,
     /// Bit 0 = never print the type name on the slot|type line.
     pub display_flags: u32,
+    /// `WeaponSwingSize@9` — the swinging weight, 0 light · 1 medium · 2 heavy, and the sole
+    /// input to the connecting swing's whoosh ([`crate::WeaponSwingCatalog`]). Meaningful on
+    /// class 2 only; the shipped weapon rows put daggers and fist weapons at light, every
+    /// two-hander plus polearms, staves and spears at heavy, and everything else at medium.
+    pub weapon_swing_size: u32,
 }
 
 /// ItemSubClass.dbc keyed by `(class, subclass)`.
@@ -74,6 +79,15 @@ impl ItemSubClassCatalog {
             .into_iter()
             .find(|&v| v != -1)
             .map(|v| v as u32)
+    }
+
+    /// The swinging weight for `(class, subclass)` — `WeaponSwingSize`, the reference's
+    /// `0x623870` return: it reads the equipped item's class/subclass, looks the pair up in this
+    /// table and hands `[row+0x24]` straight to the swing-sound play. `None` for an unknown pair,
+    /// which is the reference's "not a weapon" answer — it returns *false* there and plays
+    /// nothing rather than defaulting to a weight.
+    pub fn weapon_swing_size(&self, class: u32, subclass: u32) -> Option<u32> {
+        Some(self.rows.get(&(class, subclass))?.weapon_swing_size)
     }
 
     /// The subclass display name (verbose-first, the wow-re `tradeskill` node's byte law) — the
@@ -277,6 +291,7 @@ pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
                 prerequisite_proficiency: i32_at(r, 2).unwrap_or(-1),
                 postrequisite_proficiency: i32_at(r, 3).unwrap_or(-1),
                 display_flags: u32_at(r, 5).unwrap_or(0),
+                weapon_swing_size: u32_at(r, 9).unwrap_or(0),
             },
         );
         // VerboseName enUS (col 19) first, DisplayName enUS (col 10) fallback — the struct doc's

@@ -11,6 +11,7 @@
 //! park is one [`AnimParked`](benilla_world::rig_anim::AnimParked) marker on the root.
 
 use benilla_formats::BillboardKind;
+use bevy::animation::RepeatAnimation;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
@@ -652,17 +653,107 @@ pub(super) fn turn_shuffle(faced: f32, angle: f32) -> u16 {
 /// last paint" latch, and a paint preceded by a `SetRotation` can never expire.
 const SHUFFLE_HOLD_SECS: f64 = 0.100;
 
-/// **Step the doll's feet round when it turns** (decision 1559, director report B313).
+/// Arm one `AnimationData` id on a booth root the way the reference's turn does — every one of its
+/// plays is `0x7121a0(bone -1, id, variation -1, offset 0, rate 1.0f, blend 1, primary 1)`
+/// (wow-re `modelframe-camera-law.md` §13.4), and all three of those trailing arguments show:
+///
+/// - **variation `-1`** — a freshly *rolled* frequency-weighted variation, not the head. HumanMale
+///   authors four Stands (frequencies 14199 / 2184 / 2184 / 14199), and the reference re-rolls on
+///   every arm including the one its expiry timer fires, so a doll does not come back from two
+///   turns into the same idle twice.
+/// - **offset `0`** — from the top of the clip, not from wherever it happened to be.
+/// - **blend `1`** — cross-faded out of the outgoing pose over the **incoming** clip's own
+///   `M2Sequence.blendTime` ([`super::Fade`]). On HumanMale that is 0.25 s entering a shuffle and
+///   **0.5 s** coming back to Stand (`benilla-extract m2seq`), and that half-second is the whole of
+///   B321: the release used to cut from a mid-stride shuffle straight onto Stand in one frame.
+///
+/// Returns whether it armed. A display that does not author the id at all — a pet's model, mostly,
+/// for the shuffles — is left standing rather than stepping whatever the resolver walked away to,
+/// so `false` says "there is no turn to run here" and no expiry is scheduled for it. (The old node
+/// compare this replaces only caught the case where the fallback landed on Stand's *head*
+/// variation, which is not where a frequency roll usually lands.)
+fn arm_turn(
+    player: &mut AnimationPlayer,
+    anims: &benilla_assets::ModelAnimations,
+    catalog: &benilla_formats::AnimDataCatalog,
+    rng: &mut u32,
+    turn: &mut super::Turn,
+    id: u16,
+    now: f64,
+) -> bool {
+    // What this arm fades *out of*: whatever the last one left playing, or — before the first turn
+    // of this bake — the Stand the bake itself armed, which is the head variation
+    // (`spawn_booth_model` plays `find(resolve(0))`).
+    let outgoing = turn
+        .playing
+        .or_else(|| anims.find(anims.resolve(STAND, catalog).id).map(|c| c.node));
+    let res = anims.resolve(id, catalog);
+    if res.id != id {
+        return false;
+    }
+    let Some(clip) = anims.pick_variation(res.id, crate::creature_anim::select::msvc_rand(rng))
+    else {
+        return false;
+    };
+    let (node, looping, blend) = (clip.node, clip.looping, clip.blend_time.max(0.0));
+    // The one secondary slot: a fade still in flight is displaced here, and its pose stops being
+    // drawn at all — except when it is the node we are about to (re)play, which a reversal *back*
+    // inside a running window makes it (hold left, flick right, flick left again). The second
+    // clause holds the invariant rather than a live case: an arm always leaves `fade.node` and
+    // `playing` distinct, so the displaced fade is never the pose the new one starts from.
+    if let Some(old) = turn.fade.take() {
+        if old.node != node && Some(old.node) != outgoing {
+            player.stop(old.node);
+        }
+    }
+    let fade = outgoing
+        .filter(|o| *o != node && blend > 0.0)
+        .map(|node| super::Fade {
+            node,
+            until: now + f64::from(blend),
+            span: blend,
+        });
+    {
+        // Explicit, not defaulted: `play` is idempotent on a live node, so a re-arm of a node
+        // some earlier turn left running would otherwise keep that turn's clock and weight.
+        let active = player.play(node);
+        active.set_repeat(if looping {
+            RepeatAnimation::Forever
+        } else {
+            RepeatAnimation::Never
+        });
+        active.set_speed(1.0);
+        active.seek_to(0.0);
+        // λ = 1 on a blended arm's first frame, so the incoming contributes nothing yet — which is
+        // exactly the point: the pose does not move on the frame the arm lands.
+        active.set_weight(if fade.is_some() { 0.0 } else { 1.0 });
+    }
+    if fade.is_none() {
+        // Either nothing was playing, or the sequence authors `blendTime = 0` — an instant cut,
+        // the client's own `[blk+0xd0] = -1` no-blend path.
+        if let Some(out) = outgoing.filter(|o| *o != node) {
+            player.stop(out);
+        }
+    }
+    turn.playing = Some(node);
+    turn.fade = fade;
+    true
+}
+
+/// **Step the doll's feet round when it turns, and settle out of the step** (decisions 1559 +
+/// 1565, director reports B313/B321).
 ///
 /// The reference's rotate arrows do not spin the model on the spot: `Model:SetRotation` queues a
 /// turn-in-place shuffle by direction *and then* writes the facing. Ours wrote only the facing
-/// (0638's bake yaw), so the doll pivoted like a turntable.
+/// (0638's bake yaw), so the doll pivoted like a turntable (B313).
 ///
-/// The pose evaluator's own gate does the switching: a node at literal weight `0.0` is skipped
-/// entirely (`rig_anim::pose`), so raising the shuffle and dropping Stand leaves exactly one
-/// contribution — committed at full value — without stopping either clock. That matters on the
-/// way back: Stand's seek kept running under the shuffle, so resuming it is a continuation of the
-/// idle loop, never a pop back to `t = 0`.
+/// Both halves of that turn are **blended** arms ([`arm_turn`]), which is the second half of the
+/// same law and the fix for B321: the reference's 100 ms expiry does not drop the shuffle, it
+/// cross-fades Stand in over half a second while the shuffle keeps stepping underneath and fades
+/// out. Ours cut, and a cut out of a mid-stride pose is the "snap back to the stop pose" the
+/// director saw. Nothing here stops a clock early: the client's `rep movsd` copies the outgoing
+/// track's clock, not a pose, so the shuffle goes on stepping underneath the whole fade — a
+/// half-second, on HumanMale, which is a further whole loop of it (decision 1566).
 ///
 /// Body panes only ([`Booth::live`]), which is the same set the reference's turn machinery sits
 /// on. The doll cannot clack while it steps: footstep keys are fired by
@@ -687,77 +778,81 @@ pub(super) fn drive_booth_turn(
             continue;
         }
         let Ok((mut player, anims)) = rigs.get_mut(booth.root) else {
-            // No rig in this booth (empty, or a boneless display): a shuffle in flight when the
-            // bake went away has nothing left to step.
-            booth.turn.shuffle = None;
-            booth.turn.spun = None;
-            booth.turn.playing = None;
+            // No rig in this booth (empty, or a boneless display): a turn in flight when the bake
+            // went away has nothing left to step or fade, and its nodes name a player that is gone.
+            booth.turn.rebaked();
             continue;
         };
-        // Every id through the model's own resolution, the same path the bake's Stand takes.
-        // `find` is the HEAD variation — the stable identity to compare and to drop back to;
-        // `pick` is the reference's own weighted roll, which is what an *arm* uses.
-        let head = |id: u16| {
-            anims
-                .find(anims.resolve(id, &anim_data.0).id)
-                .map(|c| c.node)
-        };
-        let stand = head(STAND);
-        // Arm: a rotation this frame plays its direction's sequence and re-arms the expiry. A
-        // reversal mid-step is a fresh arm — the opposite id is, by definition, not the one on the
-        // root bone — and the reference restarts the clip from t = 0 there, which a `stop` before
-        // the `play` gives us (`play` alone is idempotent, so a HELD direction arms once and lets
-        // the clip loop, exactly as the reference's id-equality test does).
-        if let Some(want) = booth.turn.spun.take() {
-            let armed = booth.turn.shuffle.map(|(id, _)| id).unwrap_or(STAND);
-            if want == STAND {
-                // Equal facings — and NaN — arm Stand outright (wow-re §13.2). Nothing is
-                // stepping after this.
-                if let (Some(stand), Some(prev)) = (stand, booth.turn.playing) {
-                    player.stop(prev);
-                    player.play(stand).set_weight(1.0);
-                }
-                booth.turn.shuffle = None;
-                booth.turn.playing = None;
-            } else if want != armed {
-                // `resolve` walks the model's own fallback chain, so a display that authors no
-                // shuffle lands back on Stand — and "switch to Stand, then drop Stand to weight
-                // 0" would freeze the doll mid-turn instead of leaving it standing.
-                let next = anims
-                    .pick_variation(
-                        anims.resolve(want, &anim_data.0).id,
-                        crate::creature_anim::select::msvc_rand(&mut rng),
-                    )
-                    .map(|c| c.node)
-                    .filter(|n| Some(*n) != stand);
-                if let Some(next) = next {
-                    if let Some(prev) = booth.turn.playing {
-                        player.stop(prev);
-                    }
-                    player.play(next).repeat().set_weight(1.0);
-                    if let Some(stand) = stand {
-                        player.play(stand).set_weight(0.0);
-                    }
-                    booth.turn.playing = Some(next);
-                    booth.turn.shuffle = Some((want, now + SHUFFLE_HOLD_SECS));
-                }
-            } else if let Some((_, until)) = booth.turn.shuffle.as_mut() {
-                // Same direction still held: only the deadline moves.
+        step_turn(
+            &mut player,
+            anims,
+            &anim_data.0,
+            &mut rng,
+            &mut booth.turn,
+            now,
+        );
+    }
+}
+
+/// One booth's turn, for one frame — [`drive_booth_turn`]'s whole rule, with the ECS shelled off so
+/// it can be stepped directly at chosen times.
+fn step_turn(
+    player: &mut AnimationPlayer,
+    anims: &benilla_assets::ModelAnimations,
+    catalog: &benilla_formats::AnimDataCatalog,
+    rng: &mut u32,
+    turn: &mut super::Turn,
+    now: f64,
+) {
+    // Arm: a rotation this frame plays its direction's sequence and re-arms the expiry. The
+    // reference's test is an id compare against what sits on the root bone (`0x712090`), so a HELD
+    // direction arms once and lets the 500 ms clip loop, while a reversal is a fresh arm — the
+    // opposite id is by definition not the armed one — restarted from `t = 0`.
+    if let Some(want) = turn.spun.take() {
+        let armed = turn.shuffle.map_or(STAND, |(id, _)| id);
+        if want == armed {
+            // Same direction still held: only the deadline moves. (An equal facing sent to an
+            // already-standing doll lands here too, and correctly does nothing — the reference's
+            // compare skips the play for exactly the same reason.)
+            if let Some((_, until)) = turn.shuffle.as_mut() {
                 *until = now + SHUFFLE_HOLD_SECS;
             }
+        } else if arm_turn(player, anims, catalog, rng, turn, want, now) {
+            // Equal facings — and NaN — arm Stand outright (wow-re §13.2), which is an *active*
+            // play, not a no-op; nothing is stepping after it, so it schedules no expiry.
+            turn.shuffle = (want != STAND).then_some((want, now + SHUFFLE_HOLD_SECS));
         }
-        // Expire: the arrow came up (nothing re-armed the deadline) — back to Stand, which never
-        // stopped running underneath, so the idle continues rather than popping to t = 0.
-        if let Some((_, until)) = booth.turn.shuffle {
-            if now > until {
-                if let Some(prev) = booth.turn.playing.take() {
-                    player.stop(prev);
-                }
-                if let Some(stand) = stand {
-                    player.play(stand).set_weight(1.0);
-                }
-                booth.turn.shuffle = None;
-            }
+    }
+    // Expire: the arrow came up (nothing re-armed the deadline) — back to Stand, re-rolled and
+    // blended, the reference's `0x505c98`. Unreachable in the same frame as an arm, which always
+    // leaves the deadline a full [`SHUFFLE_HOLD_SECS`] out.
+    if let Some((_, until)) = turn.shuffle {
+        if now > until {
+            arm_turn(player, anims, catalog, rng, turn, STAND, now);
+            turn.shuffle = None;
+        }
+    }
+    // Advance the cross-fade. λ = smoothstep of the window STILL TO RUN
+    // ([`crate::creature_anim::select::blend_lambda`], the client's `0x714880` kernel) and it
+    // weights the OUTGOING pose; the incoming takes `1 − λ`. The pair sums to 1 every frame, so
+    // under the evaluator's normalized weighted fold the mix is exactly the client's
+    // `out = primary + (secondary − primary)·λ` — and anything else on the rig (the hand-grip
+    // finger overlay the bake holds) keeps the relative weight it had throughout.
+    let Some(fade) = turn.fade else {
+        return;
+    };
+    let frac = ((fade.until - now) / f64::from(fade.span)) as f32;
+    if frac <= 0.0 {
+        turn.fade = None;
+        player.stop(fade.node);
+        if let Some(cur) = turn.playing {
+            player.play(cur).set_weight(1.0);
+        }
+    } else {
+        let lambda = crate::creature_anim::select::blend_lambda(frac);
+        player.play(fade.node).set_weight(lambda);
+        if let Some(cur) = turn.playing {
+            player.play(cur).set_weight(1.0 - lambda);
         }
     }
 }
@@ -1143,5 +1238,203 @@ mod tests {
             SHUFFLE_RIGHT,
             "clicked right"
         );
+    }
+
+    // ── The turn's cross-fades (decision 1565, B321) ────────────────────────────────────────────
+
+    /// The three ids a turn ever arms, with HumanMale's **real** authored numbers
+    /// (`benilla-extract m2seq Character\\Human\\Male\\HumanMale.m2`): the shuffles blend in over
+    /// 0.25 s and loop for 0.5 s; Stand blends in over **0.5 s** and has four variations. Two
+    /// Stands here, weighted so the frequency roll cannot land on the head — that is what makes
+    /// "did it re-roll, or did it just take `find`'s head?" a decidable question below.
+    fn turning_model() -> benilla_assets::ModelAnimations {
+        let clip = |anim_id, node, blend_time, frequency| benilla_assets::AnimClip {
+            anim_id,
+            seq_index: 0,
+            node: bevy::animation::graph::AnimationNodeIndex::new(node),
+            looping: true,
+            duration: 0.5,
+            move_speed: 0.0,
+            blend_time,
+            bounds_center: Vec3::ZERO,
+            bounds_radius: 0.0,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ZERO,
+            events: Vec::new().into(),
+            arm_nodes: None,
+            upper_node: None,
+            frequency,
+            replay: (0, 0),
+            poses_bones: true,
+        };
+        benilla_assets::ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![
+                clip(STAND, 1, 0.5, 1),         // the head — all but unreachable by the roll
+                clip(STAND, 2, 0.5, 32766),     // where a roll lands
+                clip(SHUFFLE_LEFT, 3, 0.25, 0), // the reference's 32767, i.e. the only variation
+                clip(SHUFFLE_RIGHT, 4, 0.25, 0),
+            ],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        }
+    }
+
+    fn node(n: usize) -> bevy::animation::graph::AnimationNodeIndex {
+        bevy::animation::graph::AnimationNodeIndex::new(n)
+    }
+
+    /// The bake's own arm: Stand's **head** variation, looping — what `spawn_booth_model` leaves
+    /// running, and therefore the pose the first turn of a session fades out of.
+    fn baked() -> AnimationPlayer {
+        let mut player = AnimationPlayer::default();
+        player.play(node(1)).repeat();
+        player
+    }
+
+    fn weight(player: &AnimationPlayer, n: usize) -> Option<f32> {
+        player.animation(node(n)).map(|a| a.weight())
+    }
+
+    /// **The release settles instead of snapping** — B321, and the half of the reference's turn
+    /// that decision 1559 shipped without.
+    ///
+    /// Every arm `0x505bb0`/`0x505c50` makes carries `blendFlag = 1`, so both ends of a turn are
+    /// cross-fades, and each runs for the **incoming** clip's own `blendTime`: 0.25 s into the
+    /// shuffle, 0.5 s back out of it. The frame an arm lands on must not move the doll at all
+    /// (λ = 1 ⇒ the outgoing pose, whole), and the weights must sum to 1 throughout so that the
+    /// evaluator's normalized fold lands exactly on the client's
+    /// `out = primary + (secondary − primary)·λ` — and so the hand-grip overlay riding the same rig
+    /// keeps its share.
+    #[test]
+    fn a_turn_blends_both_ways_over_the_incoming_clips_own_time() {
+        let (anims, catalog) = (
+            turning_model(),
+            benilla_formats::AnimDataCatalog::from_rows([]),
+        );
+        let (mut player, mut rng) = (baked(), 0u32);
+        let mut turn = super::super::Turn {
+            // Arrow down. The shuffle is armed but contributes NOTHING yet.
+            spun: Some(SHUFFLE_LEFT),
+            ..Default::default()
+        };
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
+        assert_eq!(turn.playing, Some(node(3)), "the shuffle is the primary");
+        assert_eq!(weight(&player, 3), Some(0.0), "and it starts at nothing");
+        assert_eq!(
+            weight(&player, 1),
+            Some(1.0),
+            "the bake's Stand still holds"
+        );
+
+        // Mid-blend: λ = smoothstep of the window still to run, on the SHUFFLE's 0.25 s.
+        turn.spun = Some(SHUFFLE_LEFT);
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.2);
+        let (out, inc) = (weight(&player, 1).unwrap(), weight(&player, 3).unwrap());
+        assert!((out + inc - 1.0).abs() < 1e-5, "{out} + {inc}");
+        assert!(inc > 0.8, "four fifths in, the shuffle dominates: {inc}");
+
+        // Past 0.25 s the fade is done and the pose it faded out of is gone from the player.
+        turn.spun = Some(SHUFFLE_LEFT);
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.3);
+        assert_eq!(weight(&player, 3), Some(1.0));
+        assert_eq!(weight(&player, 1), None, "the outgoing Stand is stopped");
+        assert!(turn.fade.is_none());
+
+        // Arrow up. 100 ms later the expiry arms Stand — and THIS frame must not move the doll.
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.41);
+        let stand = turn.playing.expect("Stand armed");
+        assert_ne!(stand, node(1), "a fresh frequency roll, not `find`'s head");
+        assert_eq!(stand, node(2));
+        assert_eq!(
+            weight(&player, 2),
+            Some(0.0),
+            "the release frame does not jump"
+        );
+        assert_eq!(
+            weight(&player, 3),
+            Some(1.0),
+            "the shuffle still holds the pose"
+        );
+        assert!(turn.shuffle.is_none());
+
+        // …and it runs for STAND's 0.5 s, not the shuffle's 0.25 s: still blending at 0.3 s in.
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.71);
+        let (out, inc) = (weight(&player, 3).unwrap(), weight(&player, 2).unwrap());
+        assert!((out + inc - 1.0).abs() < 1e-5, "{out} + {inc}");
+        assert!(
+            out > 0.0 && inc > 0.0,
+            "both still contribute: {out} / {inc}"
+        );
+
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.92);
+        assert_eq!(weight(&player, 2), Some(1.0), "settled on Stand");
+        assert_eq!(
+            weight(&player, 3),
+            None,
+            "the shuffle is stopped, not muted"
+        );
+    }
+
+    /// One secondary slot, exactly as the client keeps one (`0x7125d6` overwrites `[blk+0xc4]`): a
+    /// reversal inside a running window displaces the fade it found — the pose that was fading out
+    /// is dropped there and then, and the new fade runs from the shuffle being replaced.
+    #[test]
+    fn a_reversal_displaces_the_fade_it_found() {
+        let (anims, catalog) = (
+            turning_model(),
+            benilla_formats::AnimDataCatalog::from_rows([]),
+        );
+        let (mut player, mut rng) = (baked(), 0u32);
+        let mut turn = super::super::Turn {
+            spun: Some(SHUFFLE_LEFT),
+            ..Default::default()
+        };
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
+        turn.spun = Some(SHUFFLE_RIGHT);
+        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.1);
+
+        assert_eq!(
+            turn.playing,
+            Some(node(4)),
+            "the opposite shuffle took over"
+        );
+        assert_eq!(
+            turn.fade.map(|f| f.node),
+            Some(node(3)),
+            "…fading out of the first"
+        );
+        assert_eq!(weight(&player, 1), None, "the displaced Stand is gone");
+        assert_eq!(turn.shuffle.map(|(id, _)| id), Some(SHUFFLE_RIGHT));
+    }
+
+    /// A display that does not author the shuffles at all — most pet models — is left **standing**,
+    /// not stepping whatever the id resolver walked away to. Nothing is armed, so nothing expires.
+    #[test]
+    fn a_display_with_no_shuffle_never_leaves_stand() {
+        let mut anims = turning_model();
+        anims.clips.retain(|c| c.anim_id == STAND);
+        // The model's own baked resolution: both shuffles fall back to Stand.
+        anims.playable_animation_lookup = vec![
+            benilla_formats::PlayableAnim {
+                resolved_id: STAND,
+                dir_flags: 0,
+            };
+            usize::from(SHUFFLE_RIGHT) + 1
+        ];
+        let catalog = benilla_formats::AnimDataCatalog::from_rows([]);
+        let (mut player, mut rng) = (baked(), 0u32);
+        let mut turn = super::super::Turn::default();
+        for t in [1.0, 1.1, 1.2, 2.0] {
+            turn.spun = Some(SHUFFLE_LEFT);
+            step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, t);
+        }
+        assert!(turn.shuffle.is_none(), "no expiry was ever scheduled");
+        assert!(turn.fade.is_none(), "and nothing was cross-faded");
+        assert_eq!(weight(&player, 1), Some(1.0), "the bake's Stand, untouched");
     }
 }

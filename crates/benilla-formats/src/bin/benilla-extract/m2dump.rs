@@ -87,7 +87,9 @@ pub fn m2seq(chain: &mut Chain, internal_path: &str) -> Result<()> {
     // non-global-sequence track selects its keys from it, so it is what says whether a track is
     // actually keyed HERE or is holding a clamped value from some other sequence's band.
     // NB `idx` is this list's index, not the file's: zero-duration sequences are dropped.
-    println!("idx  anim   mode   dur(s)   mspd   band(ms)          freq  replay   bones   keys");
+    println!(
+        "idx  anim   mode   dur(s)   mspd  blend   band(ms)          freq  replay   bones   keys"
+    );
     for (i, s) in seqs.iter().enumerate() {
         // How much data the sequence's own time band actually holds: bones with any
         // keyed track, and total keys across T/R/S (clamp constants included — a bone
@@ -105,7 +107,7 @@ pub fn m2seq(chain: &mut Chain, internal_path: &str) -> Result<()> {
             .map(|b| b.translation.len() + b.rotation.len() + b.scale.len())
             .sum();
         println!(
-            "{i:>3}  {:>4}  {}  {:>7.3}  {:>5.2}  {:>7}..{:<7}  {:>5}  ({}, {})  {bones:>5}  {keys:>5}",
+            "{i:>3}  {:>4}  {}  {:>7.3}  {:>5.2}  {:>5.3}  {:>7}..{:<7}  {:>5}  ({}, {})  {bones:>5}  {keys:>5}",
             s.anim_id,
             if s.looping { "loop " } else { "clamp" },
             s.duration,
@@ -113,6 +115,11 @@ pub fn m2seq(chain: &mut Chain, internal_path: &str) -> Result<()> {
             // locomotion playback rate (`speed / (mspd · |modelScale|)`, wow-re `0x5fe2f0`
             // @0x5fe4be..0x5fe550). `0.00` ⇒ not a locomotion sequence, so it plays at rate 1×.
             s.move_speed,
+            // `blend` = the sequence's authored blend-IN time (s) — how long the client cross-fades
+            // from the outgoing pose into this one on a blended arm (op4 `blendFlag != 0`, the
+            // `+0x98 -> +0xc4` snapshot decayed over `1/blendTime`). `0.000` = an instant cut, and
+            // that is what a doll's turn looks like without it.
+            s.blend_time,
             s.start_ms,
             s.end_ms,
             s.frequency,

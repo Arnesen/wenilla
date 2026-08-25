@@ -5,9 +5,11 @@
 //! swing *animation*, decision 0073) → the attack sequence's M2 events fire mid-swing through
 //! [`AnimSoundEvent`]. Two tags route directly from that stream:
 //!
-//! - **`$CSS`** — the swing whoosh, played only when nothing was contacted (miss/dodge/evade):
-//!   kits 7080/7081 `Combat Miss 1H/2H` by weapon handedness — exactly the two ids the client
-//!   caches by name at startup (wow-re `0x4575b0`, `_DONOTRENAME_` kits).
+//! - **`$CSS`** — the swing whoosh, in **both** of its forms. Nothing contacted (miss/dodge/
+//!   evade) gets kits 7080/7081 `Combat Miss 1H/2H` by weapon handedness — exactly the two ids
+//!   the client caches by name at startup (wow-re `0x4575b0`, `_DONOTRENAME_` kits). Anything
+//!   else gets the *connecting* swing's `WeaponSwingSounds2` whoosh by weapon weight; see "The
+//!   connecting swing" below.
 //! - **`$CAH`** — **not** the attacker's exertion, which is what this module used to think.
 //!   `$CAH` drives the **victim's** injury vocal (`0x624865 je 0x624902` → `0x6249bb call
 //!   0x624530`), which benilla already fires off that crossing; there is no `call [reg+0x88]`
@@ -53,46 +55,50 @@
 //! A `text_only` flush (supersede/attack-stop) drops its sounds — only the floating number
 //! flushes (decision 0149's flush law, inherited from the shared dispatch).
 //!
-//! ## Two legs still unvoiced — and what each is actually blocked on
+//! ## The connecting swing — the other half of `$CSS` (decision 1567)
 //!
-//! Both were "pinned" by 1555 in the sense that the *route* is known. Neither is buildable from
-//! that alone, and the missing piece in each case is a specific unread function, not a judgement
-//! call. Named here so the next pass is a scoped question rather than a rediscovery.
+//! `$CSS` is **two** sounds, not one, and `0x624ca0` picks between them off the victimState
+//! alone: `{0 unaffected, 2 dodge, 6 evade}` take the by-handedness miss whoosh, and **every
+//! other outcome — a landed hit, a parry, a block, an immune, a deflect — takes
+//! `WeaponSwingSounds2` on the capped bus 6** ([`whiffed`]). benilla voiced only the first half
+//! until 1567, so every landed melee swing in the game was missing a sound.
 //!
-//! **1 · The connecting swing** — `$CSS` on any victimState outside {0, 2, 6} plays
-//! `WeaponSwingSounds2.dbc` on the capped bus 6, where benilla plays nothing and voices only the
-//! miss whoosh. So every landed melee swing is currently missing a sound the reference makes.
-//! The play itself is fully read: `0x624c81` → `0x457f60`, which bails on `swingType >= 3`
-//! (`0x457f63`), indexes the 6-slot cache `[0xb06bd4]` at `critical + swingType*2`
-//! (`0x457f8d lea eax,[eax+ecx*2]`) — kits 233–238, Light/Medium/Heavy × Normal/Critical — and
-//! plays on `ecx = 6` at volume **0.5 when `[attacker+0xd80] & 0x10` is set, else 1.0**
-//! (`0x457f74`/`0x457f7d`).
+//! What blocked it was `0x623870`, the `swingType` source, read now: it is **not a heuristic**.
+//! The function asks the swinging hand (`hitInfo & LEFTSWING` picks which) for its item, requires
+//! item class 2, and returns `ItemSubClass[(2, subclass)]` field 9 — `WeaponSwingSize`, a shipped
+//! DBC column ([`swing_weight`]). The shipped weapon rows put daggers and fist weapons at Light,
+//! every two-hander plus polearms, staves and spears at Heavy, and the rest at Medium; an **empty
+//! hand returns Light** (`0x623892` writes 0 and returns *true*) and a **non-weapon in hand
+//! returns false**, i.e. silence. The kit is then `cache[critical + weight*2]` over the six
+//! `WeaponSwingSounds2` rows — 233..238, `mWooshSmall/Medium/Large` — at volume 0.5 when the hit
+//! flags carry `HITINFO_MISS` and 1.0 otherwise (`0x457f74`/`0x457f7d`).
 //!
-//! **Blocked on `0x623870`**, which is where `swingType` comes from: the call site fills it via
-//! `0x624c55 call 0x623870(bool, &out)` and hands the result straight in. Its Light/Medium/Heavy
-//! classification rule — presumably off the equipped weapon — is unread, and so is the meaning of
-//! the two `[attacker+0xd80]` bits the site uses (`0x80` as the critical argument, `0x10` as the
-//! half-volume flag). Guessing the classification would put a *wrong* swing sound on every melee
-//! hit in the game, which is worse than the silence. `WeaponSwingSounds2.dbc` also has no loader
-//! yet (6 rows × 4 fields × 16 B: `{id, swingType, critical, SoundEntriesId}`).
+//! One benilla behaviour changed beyond the new sound: immune and deflect used to take the *miss*
+//! whoosh here, because this branch borrowed [`no_contact`] — the impact family's wider question.
+//! `0x624ca0` reads neither the hit flags nor those two states, so they now whoosh like the
+//! contacts they are.
 //!
-//! **2 · The material foley** rides the same `$FSD` as the terrain footstep — a footfall makes
-//! *two* sounds in the reference, the capped terrain step on bus 9 and an uncapped foley on bus 0
-//! (`0x6233d9 call [vt+0x8c]` → `0x623610` for CGUnit / `0x62fa30` for CGPlayer → `0x4584e0`).
-//! **Blocked on the material lookup itself**: CGUnit reads `[[unit+0xb3c]+0x28]` (a
-//! `CreatureModelData` column) and CGPlayer reads the equipped item's material, and `0x4584e0`
-//! then takes the material row's `+0x8` foley kit — but which DBC that row belongs to, and which
-//! column `+0x8` is, are unread. benilla's footstep chain resolves a different lookup
-//! (`FootstepTerrainLookup`) and cannot answer it by analogy.
+//! ## The victim dispatch's tail, read out (1567)
+//!
+//! `0x624530` past the clang is a four-way ladder, and two of its arms were silent here:
+//!
+//! - **deflect** (victimState 8) plays a fixed `(DONOTRENAME)ShieldWoodImpact`, id 3262
+//!   ([`DEFLECT_KIT`]) — not a weapon-row slot.
+//! - **absorb, resist or immune** (`hitInfo & 0x60`, or victimState 7) plays
+//!   `(DONOTRENAME)AbsorbGetHit`, id 3334 ([`ABSORB_KIT`]), **instead of** the wound vocal —
+//!   it returns before reaching it.
+//! - otherwise the wound vocal, keyed crushing → critical → (`MISS` → nothing) → injury.
+//!
+//! Both stub kits come out of the same startup name cache as the miss whooshes (`0x4575b0`), and
+//! both emit at the victim two yards up. One reading is *not* taken literally: see the wound
+//! vocal's own note on `HITINFO_AFFECTS_VICTIM` and what vmangos does with it on a parry.
 //!
 //! INTERIM readings (flagged for a wow-re pass): victims' armor lands on the flesh slot (the
 //! chain/plate slots need the armor-material chain);
 //! blocks assume a metal shield; a defended outcome suppresses block 1's generic weapon impact
 //! (the tail's latch test `0x624936` carries no victimState gate in the trace, so whether it
 //! also plays under a clang is unpinned);
-//! the injury vocal plays on every damaging hit (the client may
-//! throttle); the deflect (`0x457f20`) and immune/absorb (`0x458610`) positioned stubs' kit ids
-//! are unpinned, so those branches stay silent here; the natural-weapon column is gated on
+//! the natural-weapon column is gated on
 //! contact like the weapon impact (whether the digit block also plays on a whiff is unpinned).
 //! `$CPP`/`$CST` are pinned NON-audio (decision 0279): `$CPP` is the victim defense-anim
 //! dispatch, `$CST` re-pings the attached combat-kit list — neither belongs to this module.
@@ -111,7 +117,7 @@ use benilla_world::schedule::WorldStage;
 use super::creature::CreatureVoices;
 use super::kit::{
     bark_chance_pass, object_sound_playing, play_kit_ext, Bus, KitRef, PlayExtras, SoundCategory,
-    SoundKits, EXERTION_CHANCE_CREATURE, EXERTION_CHANCE_PLAYER,
+    SoundKits, Volume, EXERTION_CHANCE_CREATURE, EXERTION_CHANCE_PLAYER,
 };
 use super::{AudioListener, SoundConfig, SoundOutput};
 
@@ -127,10 +133,46 @@ const VICTIM_EVADE: u32 = 6;
 const VICTIM_IMMUNE: u32 = 7;
 const VICTIM_DEFLECT: u32 = 8;
 
+/// `HitInfo` bit 2 — the **offhand** swing (vmangos `HITINFO_LEFTSWING`), and the reference's own
+/// hand selector: `0x624c36` derives `slot = (hitInfo >> 2) & 1` and hands it to `0x623870`, which
+/// asks that hand for its item.
+const HITINFO_LEFTSWING: u32 = 0x4;
+
 /// The two `_DONOTRENAME_` whoosh kits the client caches by name at startup (wow-re `0x4575b0`);
 /// byte-verified ids in the 5875 SoundEntries dump.
 const COMBAT_MISS_1H: u32 = 7080;
 const COMBAT_MISS_2H: u32 = 7081;
+
+/// The two **fixed, name-cached stub kits** of the victim dispatch `0x624530`, resolved from the
+/// `(DONOTRENAME)` cache the client fills at startup (`0x4575b0`) — the same cache the miss
+/// whooshes come out of. Both play at the **victim**, two yards up, on the uncapped bus 0 at
+/// volume 1.0 (`0x458870`), and neither is weapon-row-keyed:
+///
+/// - **deflect** (`0x6245f5`, victimState 8 → `0x457f20` → `[0xb05fb8]`) →
+///   `(DONOTRENAME)ShieldWoodImpact`, id 3262, `WoodenShieldBlock1..3.wav`.
+/// - **absorb / resist / immune** (`0x62460f` `hitInfo & 0x60`, or `0x624613` victimState 7 →
+///   `0x458610` → `[0xb05fb4]`) → `(DONOTRENAME)AbsorbGetHit`, id 3334,
+///   `AbsorbGetHitA/B/C.wav`.
+///
+/// Both ids are byte-verified in the shipped `SoundEntries` dump against the exact cache strings
+/// at `0x835e8c`/`0x835eac`. These were the "unpinned stubs" the module used to leave silent.
+const DEFLECT_KIT: u32 = 3262;
+const ABSORB_KIT: u32 = 3334;
+
+/// `HitInfo & (HITINFO_ABSORB | HITINFO_RESIST)` — the reference's own `test al, 0x60`, which
+/// sends the hit to [`ABSORB_KIT`] instead of the wound vocal.
+const HITINFO_ABSORB_OR_RESIST: u32 = 0x60;
+
+/// **The stub emitters' height offset** — `0x457f4a`/`0x45863a` `fadd [0x801628]`, the same flat
+/// `2.0` the armor foley uses (`crate::sound::footsteps`). WoW Z is Bevy Y at the same scale.
+/// The weapon impact and the parry/block clang do NOT take it: they pass the caller's position
+/// straight through, so only the three `0x458870` sites that build a local vector are lifted.
+const STUB_HEIGHT: f32 = 2.0;
+
+/// `ItemClass` 2 — a weapon. `0x623870` compares the equipped item's class byte against it
+/// (`0x6238b4 cmp byte ptr [eax], 2`) and **returns false** on anything else, so a held
+/// non-weapon swings in silence rather than falling back to a weight.
+const ITEM_CLASS_WEAPON: u32 = 2;
 
 /// Weapon subclasses swung two-handed (item weapon subclass ids) — picks the 2H whoosh.
 const TWO_HANDED: [u32; 6] = [1, 5, 6, 8, 10, 17];
@@ -139,6 +181,23 @@ const TWO_HANDED: [u32; 6] = [1, 5, 6, 8, 10, 17];
 const MATERIAL_WOOD: u8 = 2;
 /// Fist/unarmed subclass — the row a weaponless swing uses (`Unarmed_Generic`).
 const UNARMED_SUBCLASS: u32 = 13;
+
+/// `WeaponSwingSounds2.dbc` as the reference's own six-slot cache — the connecting swing's kit
+/// by `(weight, critical)`. See [`benilla_formats::WeaponSwingCatalog`].
+#[derive(Resource)]
+pub(crate) struct WeaponSwings(pub(crate) benilla_formats::WeaponSwingCatalog);
+
+fn load_weapon_swings(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_weapon_swing_catalog(&mut chain)
+    };
+    match loaded {
+        Ok(cat) => commands.insert_resource(WeaponSwings(cat)),
+        Err(e) => warn!("sound: weapon swing sounds failed to load: {e:#}"),
+    }
+}
 
 #[derive(Resource)]
 pub(crate) struct WeaponImpacts(pub(crate) WeaponImpactCatalog);
@@ -179,6 +238,47 @@ fn swing_weapon(wielded: Option<&Wielded>, offhand: bool) -> (u32, bool) {
             wielded.is_some_and(|w| w.materials[usize::from(offhand)] == MATERIAL_WOOD),
         ),
         _ => (UNARMED_SUBCLASS, false),
+    }
+}
+
+/// **Which whoosh a swing gets** — `0x624ca0`, the reference's own two-way split, and the only
+/// input is the victimState. `{0 unaffected, 2 dodge, 6 evade}` take the *miss* whoosh; **every
+/// other outcome — a landed hit, a parry, a block, an immune, a deflect — takes the connecting
+/// swing's `WeaponSwingSounds2` whoosh** on the capped bus 6. The two are alternatives, never
+/// both: the call site branches on this one test (`0x624ba4 je 0x624c36`).
+///
+/// Deliberately NOT [`no_contact`], which is a wider "nothing for the weapon to strike" question
+/// asked of the *impact* family. That predicate also folds in `HITINFO_MISS` and treats immune
+/// and deflect as whiffs; `0x624ca0` reads neither the hit flags nor those two states, and
+/// sorting a deflect onto the miss whoosh was the audible consequence of borrowing it here.
+fn whiffed(victim_state: u32) -> bool {
+    matches!(victim_state, 0 | VICTIM_DODGE | VICTIM_EVADE)
+}
+
+/// The swinging weapon's **weight** — `0x623870`, verbatim, and the whole of the Light/Medium/
+/// Heavy classification benilla could not build before.
+///
+/// It is not a heuristic and never was: the function asks the swinging hand for its item, checks
+/// the class byte is 2, and returns `ItemSubClass[(2, subclass)].WeaponSwingSize` — a shipped DBC
+/// column (`[row+0x24]`, field 9) that puts daggers and fist weapons at Light, every two-hander
+/// plus polearms, staves and spears at Heavy, and the rest at Medium.
+///
+/// Three outcomes, each the reference's own:
+/// - **empty hand** → `Some(0)`, Light. `0x623892` writes 0 into the out-param and returns
+///   *true*, so an unarmed swing whooshes with the small `mWooshSmall*` samples.
+/// - **a weapon** → its row's weight, or `None` when the pair has no row.
+/// - **a non-weapon in hand** → `None`. `0x6238b7` returns false and the caller plays nothing.
+fn swing_weight(
+    wielded: Option<&Wielded>,
+    offhand: bool,
+    sub_classes: &benilla_formats::ItemSubClassCatalog,
+) -> Option<u32> {
+    match wielded.and_then(|w| if offhand { w.off } else { w.main }) {
+        None => Some(0),
+        Some((class, subclass)) if u32::from(class) == ITEM_CLASS_WEAPON => {
+            sub_classes.weapon_swing_size(ITEM_CLASS_WEAPON, u32::from(subclass))
+        }
+        Some(_) => None,
     }
 }
 
@@ -239,6 +339,11 @@ fn combat_sounds(
     mut last: Local<LastSwing>,
     units: Query<(&Transform, Option<&Wielded>, &NetEntity, Has<Embodied>)>,
     impacts: Option<Res<WeaponImpacts>>,
+    swing_sounds: Option<Res<WeaponSwings>>,
+    // One load, two consumers: the tooltip's slot|type line owns this resource
+    // ([`crate::ui_items::ItemSubClasses`]) and the swing whoosh reads the same rows' weight
+    // column. A second loader over one DBC is how a schema quietly drifts.
+    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
     voices: Option<Res<CreatureVoices>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
@@ -278,25 +383,29 @@ fn combat_sounds(
     // contends for bus 10's four voices, the vocals for their own one or two, and the miss whoosh
     // for nothing at all. A kit refused at the cap is not an error — it is the gate doing its job,
     // and `play_kit_ext` reports it as an ordinary silent success.
-    let play =
-        |kits: &mut SoundKits, out: &mut SoundOutput, kit: u32, pos: Vec3, bus: Bus, what: &str| {
-            if kit == 0 {
-                return;
-            }
-            if let Err(e) = play_kit_ext(
-                kits,
-                &assets,
-                out,
-                &config,
-                listener,
-                KitRef::Id(kit),
-                Some(pos),
-                SoundCategory::Sfx,
-                PlayExtras { bus, ..default() },
-            ) {
-                warn!("combat {what} (kit {kit}): {e:#}");
-            }
-        };
+    let play = |kits: &mut SoundKits,
+                out: &mut SoundOutput,
+                kit: u32,
+                pos: Vec3,
+                extras: PlayExtras,
+                what: &str| {
+        if kit == 0 {
+            return;
+        }
+        if let Err(e) = play_kit_ext(
+            kits,
+            &assets,
+            out,
+            &config,
+            listener,
+            KitRef::Id(kit),
+            Some(pos),
+            SoundCategory::Sfx,
+            extras,
+        ) {
+            warn!("combat {what} (kit {kit}): {e:#}");
+        }
+    };
 
     // The attacker's exertion vocal, at swing start. `force = 0` at `0x62477e`, so the class
     // chance roll applies: class 0 is 70 for a creature and 35 for a player, class 1
@@ -330,12 +439,18 @@ fn combat_sounds(
             &mut out,
             vocal,
             tr.translation,
-            Bus::EXERTION,
+            PlayExtras {
+                bus: Bus::EXERTION,
+                ..default()
+            },
             "exertion",
         );
     }
 
-    // The one tag this module still consumes: the swing whoosh.
+    // The one tag this module still consumes: the swing whoosh — **both** of them. `0x624ca0`
+    // splits the tag two ways by victimState ([`whiffed`]) and the branches are exclusive: a
+    // swing that touched nothing gets the by-handedness miss whoosh on the uncapped bus 0, and
+    // every other swing gets `WeaponSwingSounds2` by weapon weight on bus 6's cap of 2.
     for ev in events.read() {
         if ev.ident != *b"$CSS" {
             continue;
@@ -346,8 +461,8 @@ fn combat_sounds(
         let Ok((attacker_tr, wielded, _, _)) = units.get(ev.entity) else {
             continue;
         };
-        if no_contact(swing) {
-            let offhand = swing.hit_info & 0x4 != 0;
+        let offhand = swing.hit_info & HITINFO_LEFTSWING != 0;
+        if whiffed(swing.victim_state) {
             let (subclass, _) = swing_weapon(wielded, offhand);
             let kit = if TWO_HANDED.contains(&subclass) {
                 COMBAT_MISS_2H
@@ -359,10 +474,45 @@ fn combat_sounds(
                 &mut out,
                 kit,
                 attacker_tr.translation,
-                Bus::DEFAULT,
+                PlayExtras {
+                    bus: Bus::DEFAULT,
+                    ..default()
+                },
                 "miss whoosh",
             );
+            continue;
         }
+        // The connecting swing (`0x624c36`). Both catalogs are optional like every DBC-backed
+        // resource: without them this swing is silent, which is the pre-1567 behaviour.
+        let (Some(swings), Some(subs)) = (swing_sounds.as_deref(), sub_classes.as_deref()) else {
+            continue;
+        };
+        let Some(weight) = swing_weight(wielded, offhand, &subs.0) else {
+            continue; // a non-weapon in the hand: `0x623870` returns false and nothing plays
+        };
+        let Some(kit) = swings.0.kit(weight, swing.hit_info & HITINFO_CRITICAL != 0) else {
+            continue; // `0x457f63`'s `swingType >= 3` bail — silence, never a fallback weight
+        };
+        play(
+            &mut kits,
+            &mut out,
+            kit,
+            attacker_tr.translation,
+            PlayExtras {
+                bus: Bus::WEAPON_SWING,
+                // `0x457f74`/`0x457f7d`: half volume when the hit flags carry `HITINFO_MISS`,
+                // full otherwise. Structurally that arm needs a MISS *with* a connecting
+                // victimState, which vmangos does not produce — carried anyway because it is
+                // what the bytes say, and it costs one field.
+                volume_mult: Volume(if swing.hit_info & HITINFO_MISS != 0 {
+                    0.5
+                } else {
+                    1.0
+                }),
+                ..default()
+            },
+            "connecting swing",
+        );
     }
 
     // The contact family: the weapon-sound block + victim dispatch, at the impact crossing.
@@ -408,7 +558,10 @@ fn combat_sounds(
                     &mut out,
                     vocal,
                     pos,
-                    Bus::MELEE_IMPACT,
+                    PlayExtras {
+                        bus: Bus::MELEE_IMPACT,
+                        ..default()
+                    },
                     "natural impact",
                 );
             } else if !defended {
@@ -420,7 +573,17 @@ fn combat_sounds(
                         .map(|v| v.impact_type)
                         .unwrap_or(0);
                     let kit = landed_impact(row, material, crit);
-                    play(&mut kits, &mut out, kit, pos, Bus::MELEE_IMPACT, "impact");
+                    play(
+                        &mut kits,
+                        &mut out,
+                        kit,
+                        pos,
+                        PlayExtras {
+                            bus: Bus::MELEE_IMPACT,
+                            ..default()
+                        },
+                        "impact",
+                    );
                 }
             }
 
@@ -442,17 +605,60 @@ fn combat_sounds(
                     &mut out,
                     kit,
                     at,
-                    Bus::MELEE_IMPACT,
+                    PlayExtras {
+                        bus: Bus::MELEE_IMPACT,
+                        ..default()
+                    },
                     "defense clang",
                 );
             }
         }
 
-        // The victim's wound vocal rides the same dispatch (INTERIM: unthrottled). An
-        // absorbed/resisted hit reroutes the voice to the `0x458610` stub instead
-        // (`HitInfo & 0x60`, decision 0279) — stub kit unpinned, so INTERIM silence.
+        // The dispatch's two **fixed stub kits** ([`DEFLECT_KIT`] / [`ABSORB_KIT`]) — outside the
+        // contact guard above on purpose: `0x624530` reaches them on every impact, and
+        // [`no_contact`] sorts deflect and immune into the whiff family, so a guarded placement
+        // would leave exactly these two branches silent, which is what they were.
+        let stub_at = |t: &Transform| t.translation + Vec3::Y * STUB_HEIGHT;
+        if swing.victim_state == VICTIM_DEFLECT {
+            if let Some((victim_tr, ..)) = victim {
+                play(
+                    &mut kits,
+                    &mut out,
+                    DEFLECT_KIT,
+                    stub_at(victim_tr),
+                    PlayExtras::default(),
+                    "deflect",
+                );
+            }
+        }
+        if swing.hit_info & HITINFO_ABSORB_OR_RESIST != 0 || swing.victim_state == VICTIM_IMMUNE {
+            if let Some((victim_tr, ..)) = victim {
+                play(
+                    &mut kits,
+                    &mut out,
+                    ABSORB_KIT,
+                    stub_at(victim_tr),
+                    PlayExtras::default(),
+                    "absorb",
+                );
+            }
+        }
+
+        // The victim's wound vocal, the tail of the same dispatch. The reference's ladder is
+        // fully read now (`0x62460c`..`0x624674`): absorb/resist/immune leave through the stub
+        // above and never reach it; then `hitInfo & AFFECTS_VICTIM (0x2)` is required, and the
+        // class is crushing `0x8000` → 9, else critical `0x80` → 3, else `MISS 0x10` → nothing,
+        // else 2.
+        //
+        // **`damage > 0` stands in for that `0x2`, deliberately** (and the parry/block
+        // suppression with it). vmangos leaves `HITINFO_AFFECTS_VICTIM` *set* on a parry and a
+        // dodge — it only clears it for immune and for zero damage with MISS|ABSORB
+        // (`Unit.cpp:1366`/`1587`), where its own comment calls the bit "no being hit animation
+        // on victim without it". Taking `0x2` literally against this server would therefore
+        // grunt on every parry, which is audibly wrong and is not what the bit meant. The
+        // reference's ladder is faithful to the reference; this gate is faithful to the sound.
         if swing.damage > 0
-            && swing.hit_info & 0x60 == 0
+            && swing.hit_info & HITINFO_ABSORB_OR_RESIST == 0
             && !matches!(swing.victim_state, VICTIM_PARRY | VICTIM_BLOCK)
         {
             // The `AISOUNDDESC` gate (`0x4591f0` from `0x6234cb`): a server-pushed object sound
@@ -489,7 +695,7 @@ fn combat_sounds(
                     &mut out,
                     vocal,
                     victim_tr.translation,
-                    bus,
+                    PlayExtras { bus, ..default() },
                     "injury",
                 );
             }
@@ -499,13 +705,152 @@ fn combat_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_weapon_impacts.after(AssetSet::Open))
-        .add_systems(Update, combat_sounds.in_set(WorldStage::Present));
+    app.add_systems(
+        Startup,
+        (load_weapon_impacts, load_weapon_swings).after(AssetSet::Open),
+    )
+    .add_systems(Update, combat_sounds.in_set(WorldStage::Present));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The `$CSS` split** — `0x624ca0`'s `{0, 2, 6}`, and only that. The two outcomes this
+    /// pins hardest are immune and deflect: benilla used to sort them onto the miss whoosh
+    /// (via [`no_contact`], which is the *impact* family's question), where the reference sends
+    /// them through the connecting swing like any other contact.
+    #[test]
+    fn only_unaffected_dodge_and_evade_take_the_miss_whoosh() {
+        for whiff in [0, VICTIM_DODGE, VICTIM_EVADE] {
+            assert!(whiffed(whiff), "victimState {whiff} whiffs");
+        }
+        for connects in [
+            1,
+            VICTIM_PARRY,
+            4,
+            VICTIM_BLOCK,
+            VICTIM_IMMUNE,
+            VICTIM_DEFLECT,
+        ] {
+            assert!(
+                !whiffed(connects),
+                "victimState {connects} takes the connecting swing"
+            );
+        }
+    }
+
+    /// `0x623870`'s three answers, on the real shipped `ItemSubClass.dbc`: an empty hand is
+    /// Light (the out-param is written 0 and the function returns *true*), a weapon is its
+    /// subclass's `WeaponSwingSize`, and a **non-weapon in hand is `None`** — the function
+    /// returns false there, so a held misc item swings in silence rather than borrowing a
+    /// weight. Skips without client data.
+    #[test]
+    fn the_swing_weight_is_the_dbc_column_not_a_guess() {
+        let Some(data) = benilla_formats::wow_data() else {
+            eprintln!("skipping: no WoW install found");
+            return;
+        };
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let subs = benilla_formats::load_item_sub_classes(&mut chain).expect("ItemSubClass.dbc");
+
+        let hand = |item: Option<(u8, u8)>| {
+            swing_weight(
+                Some(&Wielded {
+                    main: item,
+                    ..default()
+                }),
+                false,
+                &subs,
+            )
+        };
+        // Light: daggers (15) and fist weapons (13).
+        assert_eq!(hand(Some((2, 15))), Some(0), "dagger");
+        assert_eq!(hand(Some((2, 13))), Some(0), "fist weapon");
+        // Medium: the one-handers and the ranged bodies.
+        for medium in [0u8, 2, 3, 4, 7, 16, 18, 19] {
+            assert_eq!(hand(Some((2, medium))), Some(1), "subclass {medium}");
+        }
+        // Heavy: every two-hander, plus polearms, staves and spears.
+        for heavy in [1u8, 5, 6, 8, 10, 17] {
+            assert_eq!(hand(Some((2, heavy))), Some(2), "subclass {heavy}");
+        }
+        // An empty hand swings Light; a shield (class 4) or any other non-weapon is silent.
+        assert_eq!(hand(None), Some(0), "unarmed");
+        assert_eq!(hand(Some((4, 6))), None, "shield in hand");
+        assert_eq!(hand(Some((0, 0))), None, "consumable in hand");
+        // No `Wielded` component at all reads as an empty hand, like the reference's null item.
+        assert_eq!(swing_weight(None, false, &subs), Some(0));
+    }
+
+    /// The join the whole leg rests on, end to end on shipped data: the weight column picks a
+    /// row of `WeaponSwingSounds2`, and the crit bit picks its column. A dagger crit is
+    /// `LightWeaponCritical`; a two-handed sword is `HeavyWeaponNormal`; unarmed is Light.
+    /// Skips without client data.
+    #[test]
+    fn a_weapons_subclass_reaches_its_own_woosh_kit() {
+        let Some(data) = benilla_formats::wow_data() else {
+            eprintln!("skipping: no WoW install found");
+            return;
+        };
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let subs = benilla_formats::load_item_sub_classes(&mut chain).expect("ItemSubClass.dbc");
+        let swings =
+            benilla_formats::load_weapon_swing_catalog(&mut chain).expect("WeaponSwingSounds2.dbc");
+
+        let kit = |item: Option<(u8, u8)>, crit: bool| {
+            let w = swing_weight(
+                Some(&Wielded {
+                    main: item,
+                    ..default()
+                }),
+                false,
+                &subs,
+            )?;
+            swings.kit(w, crit)
+        };
+        assert_eq!(kit(Some((2, 15)), false), Some(233), "dagger");
+        assert_eq!(kit(Some((2, 15)), true), Some(234), "dagger crit");
+        assert_eq!(kit(Some((2, 7)), false), Some(235), "1H sword");
+        assert_eq!(kit(Some((2, 7)), true), Some(236), "1H sword crit");
+        assert_eq!(kit(Some((2, 8)), false), Some(237), "2H sword");
+        assert_eq!(kit(Some((2, 8)), true), Some(238), "2H sword crit");
+        assert_eq!(kit(None, false), Some(233), "unarmed swings light");
+        assert_eq!(kit(Some((4, 6)), false), None, "a shield makes no whoosh");
+    }
+
+    /// The two fixed stub kits resolve to the exact `(DONOTRENAME)` rows the client's startup
+    /// cache names — the join that used to be the "unpinned kit id" leaving both branches
+    /// silent. Skips without client data.
+    #[test]
+    fn the_deflect_and_absorb_stubs_name_real_kits() {
+        let Some(data) = benilla_formats::wow_data() else {
+            eprintln!("skipping: no WoW install found");
+            return;
+        };
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let kits = benilla_formats::load_sound_kit_catalog(&mut chain).expect("SoundEntries.dbc");
+
+        let named = |id: u32| kits.get(id).map(|k| k.name.clone());
+        assert_eq!(
+            named(DEFLECT_KIT).as_deref(),
+            Some("(DONOTRENAME)ShieldWoodImpact")
+        );
+        assert_eq!(
+            named(ABSORB_KIT).as_deref(),
+            Some("(DONOTRENAME)AbsorbGetHit")
+        );
+        // …and they are the ids the miss whooshes sit beside in the same cache, so a rename in
+        // shipped data would take all four out together rather than one silently.
+        assert_eq!(
+            named(COMBAT_MISS_1H).as_deref(),
+            Some("(DONOTRENAME)Combat Miss 1H")
+        );
+        assert_eq!(
+            named(COMBAT_MISS_2H).as_deref(),
+            Some("(DONOTRENAME)Combat Miss 2H")
+        );
+    }
 
     /// A row shaped like the real 5875 Sword1H-metal row (byte-verified ids): flesh 143/144,
     /// parry-metal 1002, parry-wood 1001, shield-metal 3263.

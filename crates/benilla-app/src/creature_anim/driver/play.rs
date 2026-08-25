@@ -319,16 +319,20 @@ pub(super) fn leave_special(
     window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
     frozen: &mut Option<bevy::animation::graph::AnimationNodeIndex>,
 ) -> Mode {
-    // The client blends OUT of a cut airborne clip from a **pose snapshot** — op4 `0x7121a0`
-    // with blendFlag≠0 copies the outgoing pose to `+0xc4` and *decays the frozen pose* under
-    // the incoming's blend-in (wow-re `swim-jump-anim-law.md`; the swim-hop §5, decision 0503).
-    // Bevy's transitions instead keep the outgoing clip RUNNING while its weight ramps down —
-    // and on an early cut (the swim re-latch ~0.24 s into the 833 ms JumpStart) the clip's
-    // remaining frames are the leg RECOVERY, so the fading kick actively retracts: the kick
-    // reads far shorter than the ref's lingering mid-kick pose (director-reported). Freezing
-    // the outgoing node reproduces the snapshot-decay. Scoped to the airborne cut, where the
-    // divergence is visible; the client's snapshot law is universal (every blended arm), and
-    // adopting it for all cross-fades is 0503's recorded follow-up.
+    // Freeze the cut airborne clip before handing off, so the incoming gait fades in over a
+    // still kick instead of one that actively retracts. On the swim re-latch (~0.24 s into the
+    // 833 ms JumpStart) the clip's remaining frames are the leg RECOVERY, and ours read far
+    // shorter than the reference's lingering mid-kick — the director's report behind 0503.
+    //
+    // **This is a symptom fix whose mechanism is open** (decision 1566). 0503 justified it with
+    // "the client blends from a pose snapshot, universally", which the bytes REFUTE: the blend
+    // source keeps running on its own clock — `0x7125ea` copies the outgoing track's base, rate
+    // and bias, and the kernel re-derives its time every frame (`0x7146b2`–`0x7147a5`). It looks
+    // still only when the source's own window has elapsed AND it is clamp-flagged, which the cut
+    // JumpStart's has not. So do NOT generalise this to other cross-fades — that was 0503's
+    // recorded follow-up and 1566 strikes it; it would freeze every gait and turn transition in
+    // the client. It stays HERE because the director saw the symptom and their eye outranks a
+    // derivation; what produces the reference's lingering kick is not yet known.
     // …and the frozen node is NAMED (decision 0906), so the per-frame rate write
     // ([`sync_base_rate`]) skips it instead of restarting the clock a line above just stopped.
     if matches!(sp, Special::Jump | Special::Fall) {
