@@ -24,7 +24,7 @@ use benilla_world::schedule::WorldStage;
 
 use super::kit::{
     bark_chance_pass, play_kit, play_kit_ext, source_kit_playing, stop_source_kit,
-    unit_voice_playing, voice_category, KitRef, SoundCategory, SoundKits, STAND_CHANCE,
+    unit_voice_playing, voice_category, KitRef, PlayExtras, SoundCategory, SoundKits, STAND_CHANCE,
     STAND_COOLDOWN,
 };
 use super::{AudioListener, SoundConfig, SoundOutput};
@@ -126,8 +126,23 @@ fn death_vocals(
 /// threshold is **100** and the compare is inclusive, so `P = 1`. (wow-re's `smsg-ai-reaction.md`
 /// calling ALERT "probabilistic" was too strong, and has been corrected at the table.) Its one
 /// real gate is a mute while a **server-pushed** object sound is live on the unit — the
-/// `SMSG_PLAY_OBJECT_SOUND` (opcode `0x278`) registry, an opcode benilla does not implement at
-/// all — so nothing is owed here until that lands. ALERT stores no latch and stays off the slot.
+/// `SMSG_PLAY_OBJECT_SOUND` (opcode `0x278`) registry. ALERT stores no latch and stays off the
+/// slot.
+///
+/// **That gate IS owed, and the note that said otherwise was wrong when it was written.** 1401
+/// recorded the opcode as one "benilla does not implement at all"; benilla has parsed, decoded
+/// and played it since well before that — `SMSG_PLAY_OBJECT_SOUND` →
+/// `net::apply::world::play_object_sound` → `ServerSoundKind::ObjectSound` →
+/// `sound::zone::server_sounds`, which even resolves the source entity to position the kit at it.
+/// What is missing is not the opcode but the **per-GUID registry** the gates consult (`0x4591f0`,
+/// tested by `0x623a40`'s gate (i) and by `0x623490`'s gate 3 for classes 0,1,2,3 and 8): the
+/// pushed channel plays untagged, so nothing can ask "is an object sound live on this unit".
+///
+/// Tagging it is one argument (`PlayExtras::source`) — but tagging it into the *shared* `source`
+/// latch would deepen the conflation `kit::source_playing` already documents, where a unit's body
+/// loop and water splash mask a greeting the reference would let through. The honest fix is the
+/// per-latch marker decision 1399 raised, and this is a second caller waiting on it, not a reason
+/// to slip a third meaning into one tag.
 #[allow(clippy::too_many_arguments)]
 fn ai_reaction_vocals(
     mut reactions: MessageReader<crate::net::AiReactionMessage>,
@@ -199,10 +214,11 @@ fn ai_reaction_vocals(
             KitRef::Id(kit),
             Some(transform.translation),
             SoundCategory::Sfx,
-            None,
-            Some(r.unit),
-            false,
-            Some(voice_category::HOSTILE),
+            PlayExtras {
+                source: Some(r.unit),
+                voice: Some(voice_category::HOSTILE),
+                ..default()
+            },
         ) {
             warn!("aggro vocal (kit {kit}): {e:#}");
         }
@@ -289,10 +305,11 @@ fn creature_body_loops(
                 KitRef::Id(desired),
                 Some(transform.translation),
                 SoundCategory::Sfx,
-                None,
-                Some(entity),
-                true,
-                None,
+                PlayExtras {
+                    source: Some(entity),
+                    force_loop: true,
+                    ..default()
+                },
             ) {
                 warn!("body loop (kit {desired}): {e:#}");
             }

@@ -21,7 +21,10 @@
     -->
     <Frame name="UIParent" setAllPoints="true" frameStrata="MEDIUM">
         <Scripts>
-            <OnLoad>this:RegisterEvent("PLAYER_ENTERING_WORLD")</OnLoad>
+            <OnLoad>
+                this:RegisterEvent("PLAYER_ENTERING_WORLD")
+                this:RegisterEvent("READY_CHECK")
+            </OnLoad>
             <OnEvent>UIParent_OnEvent(event)</OnEvent>
         </Scripts>
     </Frame>
@@ -197,6 +200,16 @@
                     SHOW_MULTI_ACTIONBAR_4 = GetActionBarToggles()
                 if ( MultiActionBar_Update ) then
                     MultiActionBar_Update()
+                end
+            end
+            -- The ready-check popup's opener (decision 1549), ref UIParent.lua l.570-572. The
+            -- event is the engine's own `0x218`, fired by the `MSG_RAID_READY_CHECK` open
+            -- handler; the frame and `ShowReadyCheck` live in RaidFrame.xml, so this is the one
+            -- place the two meet. Existence-guarded for `MultiActionBar_Update`'s reason: the
+            -- per-window harnesses load this file without the raid pane.
+            if ( event == "READY_CHECK" ) then
+                if ( ShowReadyCheck ) then
+                    ShowReadyCheck()
                 end
             end
         end
@@ -597,6 +610,27 @@
 
         function RaiseFrameLevel(frame)
             frame:SetFrameLevel(frame:GetFrameLevel() + 1)
+        end
+
+        -- ── The 1024x768 scale ratios (ref UIParent.lua l.1794-1802) ────────────────────────────
+        --
+        -- Two FrameXML helpers addons call by name (the raid pullouts and a dozen third-party
+        -- drag handlers), so they exist for the reason `MouseIsOver` and `RaiseFrameLevel` do:
+        -- missing, the caller dies on `attempt to call global`. The reference's constants are the
+        -- 1024x768 reference resolution, and its own callers multiply a `GetCursorPosition()`
+        -- reading by them to convert into pixel space.
+        --
+        -- **benilla's own drag code does NOT use them**, and that is deliberate rather than an
+        -- oversight: our UI space is 1:1 logical px and `GetCursorPosition` already reports in
+        -- the same space `SetPoint` offsets are read in (the same identity `MouseIsOver`'s
+        -- comment below records for `GetEffectiveScale`). Multiplying here would place a dragged
+        -- frame at 1.5x the cursor on a 1600-wide window. Kept for the addons, unused by us.
+        function GetScreenHeightScale()
+            return GetScreenHeight() / 768
+        end
+
+        function GetScreenWidthScale()
+            return GetScreenWidth() / 1024
         end
 
         -- ── MouseIsOver: is the cursor inside this frame, with optional per-edge padding ─────────

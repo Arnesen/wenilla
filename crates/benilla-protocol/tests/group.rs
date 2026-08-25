@@ -675,3 +675,53 @@ fn ready_check_smsg_shapes() {
         other => panic!("ready check answer decode: {other:?}"),
     }
 }
+
+/// `CMSG_REQUEST_RAID_INFO` / `SMSG_RAID_INSTANCE_INFO` (decision 1549's Raid Info panel;
+/// vmangos `Player::SendRaidInfo`): an empty request, and a `u32 count` + `count` × 12-byte rows
+/// answer. The zero-count body is the ordinary answer for a character bound to nothing, and it
+/// must decode to an EMPTY list rather than to nothing at all — the UI reads the arrival as "the
+/// server has spoken", which is what disables the Raid Info button.
+#[test]
+fn raid_instance_info_wire() {
+    assert_eq!(
+        messages::request_raid_info(),
+        Vec::<u8>::new(),
+        "CMSG_REQUEST_RAID_INFO body"
+    );
+
+    let p = messages::parse_server(opcode::SMSG_RAID_INSTANCE_INFO, &hx("00000000")).unwrap();
+    match &p {
+        ServerPacket::RaidInstanceInfo { entries } => assert!(entries.is_empty()),
+        other => panic!("expected empty RaidInstanceInfo, got {}", other.name()),
+    }
+    match decode(p).as_slice() {
+        [SessionEvent::RaidInstanceInfo { entries }] => assert!(entries.is_empty()),
+        other => panic!("empty raid info decode: {other:?}"),
+    }
+
+    // Two rows: Molten Core (map 409) resetting in 0x00015180 = 86400 s, instance 1234; and
+    // Onyxia's Lair (map 249) in 3600 s, instance 77.
+    let body = hx(concat!(
+        "02000000", // count
+        "99010000", "80510100", "d2040000", // map 409, 86400 s, instance 1234
+        "f9000000", "100e0000", "4d000000", // map 249, 3600 s, instance 77
+    ));
+    let p = messages::parse_server(opcode::SMSG_RAID_INSTANCE_INFO, &body).unwrap();
+    match &p {
+        ServerPacket::RaidInstanceInfo { entries } => {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].map, 409);
+            assert_eq!(entries[0].reset, 86_400);
+            assert_eq!(entries[0].instance, 1234);
+            assert_eq!(entries[1].map, 249);
+            assert_eq!(entries[1].reset, 3_600);
+            assert_eq!(entries[1].instance, 77);
+        }
+        other => panic!("expected RaidInstanceInfo, got {}", other.name()),
+    }
+
+    // A count the body cannot back is a parse failure, not a short list.
+    assert!(
+        messages::parse_server(opcode::SMSG_RAID_INSTANCE_INFO, &hx("0100000099010000")).is_err()
+    );
+}

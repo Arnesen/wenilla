@@ -16,7 +16,9 @@
 //!   **equipped main hand** (`6e5361`–`6e5391`): the client picks the weapon itself and binds it
 //!   as an ITEM target, so a shaman's Rockbiter / Flametongue / Frostbrand / Windfury Weapon —
 //!   22 rows, four names, the whole 5875 family — casts straight onto the weapon with no cursor
-//!   and no click. Decision 1552.
+//!   and no click (decision 1552). With the hand **empty** there is still no cursor: TryCast
+//!   tests the same bit again on ArmCast's FALSE return (`6e504b`), clears the word and says
+//!   *"Your weapon hand is empty"* (decision 1554).
 //! - a candidate that satisfies nothing falls back to the **active player** — gated on the
 //!   `autoSelfCast` CVar (name `0x870dc0`, gate `[0xceac34]+0x28` at `0x6e53d7`; registered with
 //!   engine default `"0"`). The classic "buffing with an enemy targeted casts on yourself".
@@ -70,6 +72,12 @@ const UNIT_BITS: u16 = TF_UNIT
 pub(crate) const ERR_NO_TARGET: u8 = 0x09;
 pub(crate) const ERR_INVALID_TARGET: u8 = 0x0A;
 
+/// `SPELL_FAILED_MAINHAND_EMPTY` — "Your weapon hand is empty". The reference's own refusal for
+/// an imbue pressed with nothing in the main hand, raised at `6e5050` off TryCast's bit-9 test
+/// (`6e504b`). Unlike the two stand-ins above this is a *real* reference refusal site, which is
+/// why it travels as [`CastWireTarget::RefusedAtArm`]. Decision 1554.
+pub(crate) const ERR_MAINHAND_EMPTY: u8 = 0x2d;
+
 /// The dest-location bit — the ground-cast wire mask (`BindLocation 0x6e60f0`'s bit-6 arm; the
 /// source bit 5 completes `TargetingWantsLocation 0x6e6320`'s `0x60`, still refused below).
 const TF_DEST_LOCATION: u16 = 0x0040;
@@ -120,8 +128,17 @@ pub(crate) enum CastWireTarget {
     /// the GO guid). Blizzard and Flamestrike arm the first; poisons, oils and enchants the second;
     /// Opening and Pick Lock arm the second **and** the third at once.
     Targeting(u16),
-    /// Nothing bindable — do NOT send; surface this client error instead.
+    /// Nothing bindable — do NOT send; surface this client error instead. These are the INTERIM
+    /// stand-ins for the unmodeled *unit* hand-cursor mode (module docs): the reference has no
+    /// refusal at all where these fire, it leaves the word standing and asks for a click. So they
+    /// stay where the resolver returns them.
     Refused(u8),
+    /// A refusal the **reference actually raises**, from TryCast's tail after `ArmCast 0x6e5250`
+    /// returns FALSE (`6e5045`–`6e507b`). That tail sits *below* the requirement validator
+    /// `0x6094f0`, in the same place as the targeting-cursor arm it is the sibling of — so this
+    /// one is parked and fired at the cursor-entry point, not at the resolver's return
+    /// ([`super::send_spell_cast`]). Decision 1554.
+    RefusedAtArm(u8),
 }
 
 /// The three places `ArmCast 0x6e5250` can take its candidate guid from (`6e5361`–`6e539f`),
@@ -397,18 +414,28 @@ pub(crate) fn resolve_cast_target(
     // candidates; an item candidate clears bit 4, which is precisely why Rockbiter and Windfury
     // Weapon were raising a cursor over a weapon the client already knew how to pick.
     if def.targets_main_hand_item() {
-        if let Some(item) = cand.main_hand_item {
+        match cand.main_hand_item {
             // `BindTarget`'s item arm: `6e5f1e: testl $0x4010` admits it, `6e5f2e` ORs
-            // `TARGET_FLAG_ITEM` into the wire mask, `6e5f36` clears word bits 4 and 14. A word
-            // that clears to zero commits on the spot (`6e60c1` → `SendCast 0x6e54f0`).
-            if word & ITEM_ARM_BITS != 0 && word & !ITEM_ARM_BITS == 0 {
-                return CastWireTarget::Item(item);
+            // `TARGET_FLAG_ITEM` into the wire mask, `6e5f35` clears word bits 4 and 14 (`and
+            // $0xbfef`). A word that clears to zero commits on the spot (`6e60c1` → `SendCast
+            // 0x6e54f0`).
+            Some(item) if word & ITEM_ARM_BITS != 0 && word & !ITEM_ARM_BITS == 0 => {
+                return CastWireTarget::Item(item)
             }
+            // **Nothing in the main hand — and this is NOT a cursor** (decision 1554, correcting
+            // 1552). The guid reads 0, `0x468460` resolves no object, `BindTarget` bails writing
+            // nothing, and ArmCast returns FALSE. TryCast's tail then tests the SAME attribute
+            // bit a second time (`6e504b: test ch,0x2`), **clears the flag_word outright**
+            // (`6e5057: mov WORD ds:0xcecac0,0`) and raises reason `0x2d` — jumping clean over
+            // the cursor arm at `6e50ab`. "Your weapon hand is empty", no cursor, no packet.
+            None => return CastWireTarget::RefusedAtArm(ERR_MAINHAND_EMPTY),
+            // The main hand is there but the word carries a residual the item arm cannot
+            // discharge. The ref binds the item, `BindTarget` returns TRUE, ArmCast returns TRUE
+            // — so TryCast's tail is never reached and the word waits for the rest at the cursor.
+            // Unreachable on shipped data: all 22 attribute-bearing rows are `Targets == 0x10`
+            // exactly (censused in `benilla-formats`), which is what the defer below assumes.
+            Some(_) => {}
         }
-        // No main hand — or a residual the item arm can't discharge (no shipped row: all 22
-        // attribute-bearing rows are `Targets == 0x10` exactly, censused in
-        // `benilla-formats`). The ref's bind fails, the word stands, and the press ends in the
-        // item cursor: the defer below. The selection is never consulted for these.
     }
     // Bits outside the unit family (item/gameobject/location/string) have no candidate here.
     // The DEST-location word (Blizzard's bare `Targets = 0x40`, default switch arm) is the
@@ -710,7 +737,10 @@ mod tests {
             CastWireTarget::Item(WEAPON),
             "neither the selection nor autoSelfCast has anything to do with it"
         );
-        // Unarmed: the ref's esi:edi = 0 resolves no object, the bind fails, the word stands.
+        // Unarmed: esi:edi = 0 resolves no object and the bind writes nothing, so ArmCast
+        // returns FALSE — and TryCast's SECOND test of the same bit (`6e504b`) clears the word
+        // and refuses. Emphatically **not** a cursor: that arm (`6e50ab`) is jumped over. This
+        // assertion is decision 1554 correcting 1552, which had it as the item cursor.
         assert_eq!(
             resolve_cast_target(
                 Some(&rockbiter),
@@ -718,8 +748,8 @@ mod tests {
                 true,
                 &rel_none()
             ),
-            CastWireTarget::Targeting(TF_ITEM),
-            "no main hand — the item cursor, not a guessed target"
+            CastWireTarget::RefusedAtArm(ERR_MAINHAND_EMPTY),
+            "no main hand — \"Your weapon hand is empty\", never the item cursor"
         );
         // The attribute is the whole difference: a sharpening stone / poison / oil / enchant is
         // the same `Targets 0x10` word and must still ask for its item.

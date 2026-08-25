@@ -49,7 +49,7 @@ use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::creature::CreatureVoices;
-use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
+use super::kit::{play_kit_ext, Bus, KitRef, PlayExtras, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// The loaded terrain-chain catalog. `pub(crate)`: [`crate::footprints`] reads the same chain's
@@ -168,7 +168,7 @@ fn footstep_sounds(
                 .room_group(who)
                 .map_or_else(|| "adt".to_string(), |g| format!("wmo g{g}"))
         );
-        if let Err(e) = play_kit(
+        if let Err(e) = play_kit_ext(
             &mut kits,
             &assets,
             &mut out,
@@ -177,6 +177,10 @@ fn footstep_sounds(
             KitRef::Id(kit),
             Some(transform.translation()),
             SoundCategory::Sfx,
+            PlayExtras {
+                bus: Bus::FOOTSTEP,
+                ..default()
+            },
         ) {
             warn!("footstep (kit {kit}): {e:#}");
         }

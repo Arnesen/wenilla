@@ -179,7 +179,7 @@ pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
 pub use model::TextureProbe;
-pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo};
+pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{HonorState, InspectHonorData};
 pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};

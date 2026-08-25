@@ -933,6 +933,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             }
             group::RaidTargetUpdate::List(entries) => ServerPacket::RaidTargetList { entries },
         },
+        opcode::SMSG_RAID_INSTANCE_INFO => ServerPacket::RaidInstanceInfo {
+            entries: group::read_raid_instance_info(&mut r)?,
+        },
         opcode::MSG_RAID_READY_CHECK => match group::read_ready_check(&mut r)? {
             group::ReadyCheck::Started => ServerPacket::ReadyCheckRequest,
             group::ReadyCheck::Answer { guid, ready } => {

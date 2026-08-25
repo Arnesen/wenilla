@@ -111,6 +111,8 @@ pub(crate) struct ActiveChannel {
     /// `set_volume`). Written via [`set_source_kit_gain`].
     gain: f32,
     category: SoundCategory,
+    /// The **voice bus** this channel occupies, for the concurrency cap ([`Bus`]).
+    bus: Bus,
     /// The **voice category latched on this channel**, when this play is a unit's one-shot
     /// creature bark — the reference's `[unit+0xb24]` beside the `[unit+0xb20]` handle
     /// ([`unit_voice_playing`]). `None` for every other play, which is what keeps a unit's body
@@ -163,6 +165,107 @@ pub(super) const STAND_CHANCE: u32 = 40;
 /// so a silent or distance-culled `$FDX` burns the window for everyone too.
 pub(super) const STAND_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// A **voice bus** — the reference's per-bus concurrency domain, and the index into its
+/// compile-time cap table (wow-re `sound/scratch/voice-cap-and-headroom.md`, and
+/// `creature-vocal-gates.md` §3.1/§5.3).
+///
+/// This is **not** the volume category ([`SoundCategory`]) — VERIFIED orthogonal: the bus lives at
+/// `[chan+0x84]` and takes 0..12, while the category is flag bits `0x2`/`0x8`/`0x10` in
+/// `[chan+0x38]` selecting one of three master cells. A footstep and a spell impact are both SFX
+/// and land on different buses; the music stream and a UI click are different categories on the
+/// same bus 0.
+///
+/// A play whose bus is already at its cap is **refused outright** — byte-proven: the only exits
+/// from the pre-play gate `0x7a66a0` are `mov al,1; ret` / `xor al,al; ret`, with no stop, steal,
+/// queue or priority compare anywhere on the path, and the callers do not retry (they simply fail
+/// to set their latch, so the next natural trigger tries again).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) struct Bus(pub(super) u8);
+
+impl Bus {
+    /// Bus 0 — cap `0x7FFFFFFF`, i.e. **uncapped**. Where spell impacts, UI, music and ambience
+    /// all live in the reference, so it is also benilla's default and the honest answer for any
+    /// play whose bus we have not pinned. The `$CSS` **miss** whoosh is here too (bus 0, uncapped)
+    /// — only a *connecting* swing takes the capped bus 6, which benilla does not yet voice.
+    pub(super) const DEFAULT: Bus = Bus(0);
+
+    /// Bus 5 — **cap 1**. The attacker's exertion vocal (`CreatureSoundData.Exertion` = class 0,
+    /// `ExertionCritical` = class 1), routed through `0x624786` → `0x623b10`. One exertion voice
+    /// in the whole world at a time: a pack of mobs swinging together grunts *once*.
+    ///
+    /// (`0x623b70`'s creature-classification flag routes some units to bus **11** instead. The cap
+    /// there is also 1, so it buys a private pool of the same size and never changes the answer —
+    /// which is why benilla can route by column without resolving that bit.)
+    pub(super) const EXERTION: Bus = Bus(5);
+
+    /// Bus 7 — **cap 2**. The victim's wound vocal (`Injury` = class 2, `InjuryCritical` = 3,
+    /// `InjuryCrushingBlow` = 9, which is dead in shipped data: 0 of 406 rows populate it).
+    /// Bus **12** is its classified twin, cap 2 as well.
+    pub(super) const INJURY: Bus = Bus(7);
+
+    /// Bus 8 — **cap 1**. The **local player's own** wound vocal: the CGPlayer twin substitutes
+    /// this bus for classes 2/3/9 when the unit is the active player (`0x62f8c5..0x62f8f3`), so
+    /// your own grunts get a private slot of one rather than sharing the world's two. It is the
+    /// injury half only — your exertion still competes on [`Self::EXERTION`].
+    pub(super) const SELF_INJURY: Bus = Bus(8);
+
+    /// Bus 9 — **cap 6**. The terrain footstep off `$FSD` (`0x62342a` → `0x458380`). Note the
+    /// same `$FSD` also fires a *material foley* on bus 0 in the reference (`[vt+0x8c]` →
+    /// `0x4584e0`), which benilla does not voice — benilla plays one sound per footstep, so the
+    /// one it plays is this one.
+    pub(super) const FOOTSTEP: Bus = Bus(9);
+
+    /// Bus 10 — **cap 4**. The whole melee-contact family, which all contends for the same four
+    /// voices: the generic `WeaponImpactSounds` hit (`0x624977` → `0x457ec0`), the natural-weapon
+    /// `CustomAttack[n]` column that replaces it (`0x6248ea`), and the parry/block clang
+    /// (`0x623640` → `0x457dc0`). **Not** the deflect clang, which is a fixed kit on bus 0.
+    pub(super) const MELEE_IMPACT: Bus = Bus(10);
+}
+
+/// The reference's cap table — `.data` `0x87ce60`, **13 dwords, no writer anywhere in the image**
+/// (the `cmp` at `0x7a66b5` is its only reference), so these are compile-time constants and this
+/// array is a transcription of the bytes:
+///
+/// ```text
+/// 87ce60  ffffff7f 01000000 02000000 02000000
+/// 87ce70  01000000 01000000 02000000 02000000
+/// 87ce80  01000000 06000000 04000000 01000000
+/// 87ce90  02000000
+/// ```
+const BUS_CAP: [u32; 13] = [0x7fff_ffff, 1, 2, 2, 1, 1, 2, 2, 1, 6, 4, 1, 2];
+
+/// Is `bus` already carrying its cap's worth of live channels? Pure over the live buses, so the
+/// whole gate is testable without a device (the caps are the reference's, and getting one wrong
+/// silences a class of sound outright).
+fn bus_at_cap(live: impl Iterator<Item = Bus>, bus: Bus) -> bool {
+    let cap = BUS_CAP[usize::from(bus.0)];
+    // Bus 0's cap is `0x7FFFFFFF` — reachable only in principle, so skip the walk entirely. It is
+    // also where every unpinned play lands, which makes this the common path.
+    cap != BUS_CAP[0] && live.filter(|b| *b == bus).count() as u32 >= cap
+}
+
+/// The optional half of the client's full play surface — the extras [`play_kit_ext`] carries
+/// beyond "which kit, where, which category". Grouped rather than passed as a row of positional
+/// booleans: there were already eight of them behind a `too_many_arguments` waiver, and the bus
+/// would have been the ninth.
+#[derive(Clone, Copy, Default)]
+pub(super) struct PlayExtras {
+    /// An **explicit variation index** (`Some(i)` = play `files[i]`, bypassing the depleting
+    /// random pool — the client's `variant != -1`; the NPC-greeting sequence cycler drives this).
+    pub(super) variant: Option<usize>,
+    /// A **source entity tag** — the played channel is tagged so its liveness serves as that
+    /// entity's per-unit latch ([`source_playing`]).
+    pub(super) source: Option<Entity>,
+    /// Loop regardless of the kit's own 0x200 flag, for the drivers whose *column* is the loop
+    /// authority (the creature body-loop; see [`play_kit_ext`]'s own note).
+    pub(super) force_loop: bool,
+    /// The category latched on the unit's one-shot bark slot ([`ActiveChannel::voice`]); `Some`
+    /// only for the barks the reference stores in `[unit+0xb20]`.
+    pub(super) voice: Option<u8>,
+    /// The **voice bus** this play competes on ([`Bus`]). Defaults to the uncapped bus 0.
+    pub(super) bus: Bus,
+}
+
 /// A kit to play, by id or by `PlaySoundByName` name.
 pub(crate) enum KitRef<'a> {
     Id(u32),
@@ -185,7 +288,15 @@ pub(crate) fn play_kit(
     category: SoundCategory,
 ) -> Result<()> {
     play_kit_ext(
-        kits, assets, out, config, listener, kit_ref, pos, category, None, None, false, None,
+        kits,
+        assets,
+        out,
+        config,
+        listener,
+        kit_ref,
+        pos,
+        category,
+        PlayExtras::default(),
     )
 }
 
@@ -210,11 +321,15 @@ pub(super) fn play_kit_ext(
     kit_ref: KitRef<'_>,
     pos: Option<Vec3>,
     category: SoundCategory,
-    variant: Option<usize>,
-    source: Option<Entity>,
-    force_loop: bool,
-    voice: Option<u8>,
+    extras: PlayExtras,
 ) -> Result<()> {
+    let PlayExtras {
+        variant,
+        source,
+        force_loop,
+        voice,
+        bus,
+    } = extras;
     // The cover's audio hold ([`SoundConfig::world_hold`]): while the loading screen is up, no
     // new sound starts — checked before anything allocates, so the per-frame retry drivers (the
     // creature body-loop, the liquid loops) cost one bool while held and start clean at the
@@ -250,6 +365,16 @@ pub(super) fn play_kit_ext(
     let weights: Vec<u32> = kit.files.iter().map(|(_, w)| *w).collect();
     if weights.is_empty() {
         return Ok(()); // a kit with no files is playable-as-nothing, not an error
+    }
+
+    // The **per-bus concurrency cap** — the always-on arm of the pre-play gate `0x7a66a0`, checked
+    // *before* the duplicate walk exactly as the binary does (`0x7a66ae/b5` precede `0x7a66c4`).
+    // The count is of **allocated** channels, not audible ones, which is what `out.channels` holds:
+    // the reference's `[0xcf553c + 4*bus]` keeps a paused or muted channel's slot and releases a
+    // distance-culled one only because the cull hands the channel back — and benilla's pump reaps a
+    // culled channel out of this list on the same edge.
+    if bus_at_cap(out.channels.iter().map(|c| c.bus), bus) {
+        return Ok(());
     }
 
     // Duplicate suppression — byte-verified (wow-re uisound-tables.md, corrected §5): the FMOD
@@ -341,6 +466,7 @@ pub(super) fn play_kit_ext(
         v,
         gain: 1.0,
         category,
+        bus,
         voice,
     });
     Ok(())
@@ -491,6 +617,7 @@ pub(crate) fn play_file(
         v: 1.0,
         gain: 1.0,
         category,
+        bus: Bus::DEFAULT,
         voice: None,
     });
     Ok(())
@@ -781,6 +908,43 @@ pub(super) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cap table is a transcription of `.data` `0x87ce60`, so it is pinned as bytes, not as
+    /// intent: 13 dwords, bus 0 effectively unlimited, and the four buses benilla actually routes
+    /// onto carrying the numbers the binary carries.
+    #[test]
+    fn the_cap_table_is_the_bytes_at_0x87ce60() {
+        assert_eq!(BUS_CAP.len(), 13);
+        assert_eq!(BUS_CAP, [0x7fff_ffff, 1, 2, 2, 1, 1, 2, 2, 1, 6, 4, 1, 2]);
+    }
+
+    /// The gate refuses at the cap and not before it, per bus, independently — and bus 0 never
+    /// refuses however loaded it gets, which is what keeps spell impacts, UI, music and ambience
+    /// behaving exactly as they did.
+    #[test]
+    fn a_bus_refuses_at_its_cap_and_only_its_own() {
+        let live = |bus: u8, n: usize| std::iter::repeat_n(Bus(bus), n);
+
+        // Bus 0 is uncapped: a thousand live channels still admit the next one.
+        assert!(!bus_at_cap(live(0, 1000), Bus::DEFAULT));
+
+        // A cap-1 bus (5 = exertion) admits the first and refuses the second.
+        assert!(!bus_at_cap(std::iter::empty(), Bus(5)));
+        assert!(bus_at_cap(live(5, 1), Bus(5)));
+
+        // A cap-2 bus (7 = injury) admits two.
+        assert!(!bus_at_cap(live(7, 1), Bus(7)));
+        assert!(bus_at_cap(live(7, 2), Bus(7)));
+
+        // The capped melee/footstep pair, at their own numbers.
+        assert!(!bus_at_cap(live(10, 3), Bus(10)));
+        assert!(bus_at_cap(live(10, 4), Bus(10)));
+        assert!(!bus_at_cap(live(9, 5), Bus(9)));
+        assert!(bus_at_cap(live(9, 6), Bus(9)));
+
+        // Buses are independent domains: a saturated bus 5 does not gate bus 7.
+        assert!(!bus_at_cap(live(5, 9), Bus(7)));
+    }
 
     /// The depleting pool (`0x45bb70`/`0x45bd40`): with the data's typical all-1 weights, every
     /// variation plays exactly once per cycle (no repeats until the pool empties), then the pool

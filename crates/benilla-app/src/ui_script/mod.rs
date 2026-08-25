@@ -816,6 +816,12 @@ mod friends_tests;
 #[cfg(test)]
 mod guild_tests;
 
+/// The social window's fourth tab — the raid pane and its grid (decision 1549). Its own module for
+/// `guild_tests`' reason: every test in it pushes a RAID roster first, which a file about the
+/// friends list must not be in the business of.
+#[cfg(test)]
+mod raid_tests;
+
 #[cfg(test)]
 mod quest_tests;
 

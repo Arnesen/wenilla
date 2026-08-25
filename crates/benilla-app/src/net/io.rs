@@ -972,6 +972,18 @@ fn writer_loop(
                         threshold,
                     } => w.loot_method(method, master, threshold),
                     ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
+                    ClientCommand::GroupChangeSubGroup { name, group } => {
+                        w.group_change_sub_group(&name, group)
+                    }
+                    ClientCommand::GroupSwapSubGroup { name, other } => {
+                        w.group_swap_sub_group(&name, &other)
+                    }
+                    ClientCommand::GroupAssistantLeader { guid, grant } => {
+                        w.group_assistant_leader(guid, grant)
+                    }
+                    ClientCommand::ReadyCheckStart => w.ready_check_start(),
+                    ClientCommand::ReadyCheckAnswer { ready } => w.ready_check_answer(ready),
+                    ClientCommand::RequestRaidInfo => w.request_raid_info(),
                     ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
                     ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
                     ClientCommand::TogglePvp => w.toggle_pvp(),

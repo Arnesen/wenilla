@@ -1,0 +1,847 @@
+//! The social window's fourth tab — the raid pane (decision 1549, `RaidFrame.xml`): the tab, the
+//! two states the pane has, the 8x5 grid's seating and colouring, the drag's three landings, the
+//! row menu, the ready-check popup and the saved-instance panel.
+//!
+//! Its own module rather than more of `friends_tests` for `guild_tests`' reason: the pane is Lua
+//! over a **raid** roster, so every test here has to push one first, and a file about the friends
+//! list must not be in that business.
+//!
+//! What these guard that `ui_party`'s Rust tests structurally cannot: the pane is Lua over a
+//! snapshot, so a row seated in the wrong slot, a colour rule inverted, a drag wired to the wrong
+//! verb, or a menu row shown to the wrong person are all invisible there and green in the parse
+//! sweep. Each test below fails on exactly one of those.
+
+use benilla_ui::script::{
+    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo, UiScript,
+};
+
+/// Load one shipped `assets/ui/<file>`, panicking on any loader error **or unknown-template
+/// warning** — `friends_tests::load_xml`'s reason verbatim: `inherits=` a template this house does
+/// not ship is a warning, the frame still loads, and every behavioural test stays green while the
+/// art is missing.
+fn load_xml(s: &UiScript, file: &str) {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/ui")
+            .join(file),
+    )
+    .unwrap();
+    let doc = benilla_ui::framexml::parse(&text).unwrap();
+    let report = benilla_ui::loader::load(s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty(),
+        "{file}: loader errors: {:?}",
+        report.errors
+    );
+    let missing: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|w| w.contains("unknown template"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{file}: inherits a template this house does not ship (the frame loads, its ART does \
+         not): {missing:?}"
+    );
+}
+
+/// The window's slice of the manifest, in `load_default_ui` order. `UIParent.xml` is in it for
+/// two functions the pane really calls — `MouseIsOver` (the drag's hover sweep) and
+/// `SecondsToTime` (the lockout rows) — and for the `READY_CHECK` arm that opens the popup.
+fn setup() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "UnitPopup.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, "FriendsFrame.xml");
+    load_xml(&s, "RaidFrame.xml");
+    s
+}
+
+fn visible(s: &UiScript, frame: &str) -> bool {
+    s.eval::<bool>(&format!("return {frame}:IsVisible()"))
+        .unwrap()
+}
+
+fn text_of(s: &UiScript, region: &str) -> String {
+    s.eval::<String>(&format!("return {region}:GetText() or \"\""))
+        .unwrap()
+}
+
+/// One raid row. `rank` is 2 leader / 1 assistant / 0 member; `subgroup` is the **1-based** number
+/// the pane shows, which the record stores 0-based — the binding is what adds the one
+/// (`RaidMemberInfo::subgroup`'s own doc, the reference's `0x4bb61a inc`). Converting here rather
+/// than at every call site is the point: a fixture that hands the record a 1-based number seats
+/// every row one group to the right, which looks exactly like a seating bug in the pane.
+fn row(
+    name: &str,
+    rank: u32,
+    subgroup: u32,
+    class: &str,
+    online: bool,
+    dead: bool,
+) -> RaidMemberInfo {
+    RaidMemberInfo {
+        name: name.to_string(),
+        guid: 0xF000 + u64::from(subgroup) * 16 + name.len() as u64,
+        rank,
+        subgroup: subgroup - 1,
+        level: 60,
+        class: Some(class.to_string()),
+        class_file: Some(class.to_uppercase()),
+        zone: Some("Molten Core".to_string()),
+        online,
+        ninth: dead,
+    }
+}
+
+/// Push a roster and fire the event that follows it, exactly as `ui_party::feed_party` does.
+fn push_raid(s: &mut UiScript, raid: Vec<RaidMemberInfo>) {
+    // `members` is our own SUBGROUP's slice — non-empty is what makes `IsPartyLeader()`/
+    // `IsRaidLeader()` answer 1 for leader_index 0 (the shared `leads_the_group` predicate).
+    let members = raid
+        .iter()
+        .skip(1)
+        .take(4)
+        .map(|r| PartyMemberInfo {
+            name: r.name.clone(),
+            guid: r.guid,
+        })
+        .collect();
+    s.set_party(PartyState {
+        members,
+        leader_index: 0,
+        raid,
+        loot_method: "group".into(),
+        master_looter: None,
+        loot_threshold: 2,
+    });
+    s.fire_event("RAID_ROSTER_UPDATE", Vec::new());
+}
+
+/// A 12-member raid across three subgroups, us leading — the shape most tests want.
+fn twelve() -> Vec<RaidMemberInfo> {
+    let mut raid = vec![row("Me", 2, 1, "Warrior", true, false)];
+    for i in 1..12u32 {
+        let subgroup = i / 4 + 1;
+        raid.push(row(
+            &format!("Member{i}"),
+            if i == 1 { 1 } else { 0 },
+            subgroup,
+            "Priest",
+            true,
+            false,
+        ));
+    }
+    raid
+}
+
+/// Open the tab **and drain what opening it queues**. `RaidFrame`'s OnShow calls
+/// `RequestRaidInfo()` — the reference's own, and the reason the Raid Info button can ever be
+/// right — so every `take_party_requests` after this would otherwise start with that ask and no
+/// test about a button would be about that button.
+fn open_raid_tab(s: &mut UiScript) {
+    s.run("ToggleFriendsFrame(4)").unwrap();
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::RequestRaidInfo],
+        "showing the pane asks the server for our lockouts"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The tab
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Tab 4 exists, opens the pane, titles the window RAID, and puts every other subframe away.
+///
+/// This is the test the whole decision exists for: `FriendsFrame.xml` shipped three tabs and said
+/// so in its header, and the tab strip is the one place a missing pane is visible without a raid.
+#[test]
+fn the_fourth_tab_opens_the_raid_pane() {
+    let mut s = setup();
+    assert_eq!(
+        s.eval::<i64>("return FriendsFrame.numTabs").unwrap(),
+        4,
+        "PanelTemplates_SetNumTabs says four now — it said three while the pane did not exist"
+    );
+    open_raid_tab(&mut s);
+    assert!(visible(&s, "RaidFrame"), "the pane opens");
+    assert_eq!(text_of(&s, "FriendsFrameTitleText"), "Raid");
+    for other in [
+        "FriendsListFrame",
+        "IgnoreListFrame",
+        "WhoFrame",
+        "GuildFrame",
+    ] {
+        assert!(!visible(&s, other), "{other} goes away");
+    }
+    // And the tab's own OnClick is wired — a tab that PanelTemplates enables but that does
+    // nothing when clicked is exactly the dead tab the guild arc had to fix.
+    s.run("FriendsFrameTab1:Click()").unwrap();
+    assert!(!visible(&s, "RaidFrame"));
+    s.run("FriendsFrameTab4:Click()").unwrap();
+    assert!(visible(&s, "RaidFrame"), "the tab button opens it too");
+}
+
+/// Closing the window closes the Raid Info flyout with it — the ref's fourth satellite.
+#[test]
+fn hiding_the_window_closes_the_raid_info_panel() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    s.run("RaidInfoFrame:Show()").unwrap();
+    assert!(visible(&s, "RaidInfoFrame"));
+    s.run("HideUIPanel(FriendsFrame)").unwrap();
+    assert!(
+        !visible(&s, "RaidInfoFrame"),
+        "the flyout goes with the window"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The not-in-a-raid state
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Out of a raid the pane is the blurb plus Convert To Raid, and the button is live only for the
+/// leader of an actual party — the three states, in order.
+#[test]
+fn convert_to_raid_is_live_only_for_a_party_leader() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    assert!(visible(&s, "RaidFrameRaidDescription"), "solo: the blurb");
+    assert!(visible(&s, "RaidFrameConvertToRaidButton"));
+    assert_eq!(
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+            .unwrap(),
+        0,
+        "solo there is no party to convert"
+    );
+    assert!(
+        !visible(&s, "RaidFrameReadyCheckButton"),
+        "and no raid verbs"
+    );
+    assert!(!visible(&s, "RaidFrameAddMemberButton"));
+
+    // A party we lead: `leader_index == 0` with members is the shared leads-the-group predicate.
+    s.set_party(PartyState {
+        members: vec![PartyMemberInfo {
+            name: "Alice".into(),
+            guid: 0xA,
+        }],
+        leader_index: 0,
+        ..Default::default()
+    });
+    s.fire_event("PARTY_MEMBERS_CHANGED", Vec::new());
+    assert_eq!(
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+            .unwrap(),
+        1,
+        "a party leader can convert"
+    );
+    s.run("RaidFrameConvertToRaidButton:Click()").unwrap();
+    assert!(
+        s.take_party_requests()
+            .contains(&PartyRequest::ConvertToRaid),
+        "and the button really sends it"
+    );
+
+    // A party we do NOT lead.
+    s.set_party(PartyState {
+        members: vec![PartyMemberInfo {
+            name: "Alice".into(),
+            guid: 0xA,
+        }],
+        leader_index: 1,
+        ..Default::default()
+    });
+    s.fire_event("PARTY_LEADER_CHANGED", Vec::new());
+    assert_eq!(
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+            .unwrap(),
+        0,
+        "a party member cannot"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The grid
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The roster paints: each row lands in ITS SUBGROUP's next free slot, carries its rank token, and
+/// rows past the roster stay hidden.
+///
+/// The seating is the assertion with teeth. Row order and slot order are different orders — row 5
+/// of a raid whose first four are in group 1 is group 2's *first* slot — and every drag, kick and
+/// menu action downstream addresses a row by the index this seating implies.
+#[test]
+fn the_grid_seats_each_row_in_its_own_subgroups_next_free_slot() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+
+    // Groups 1-3 hold 4/4/4; the roster is 12 with us at row 1 in group 1.
+    assert_eq!(
+        s.eval::<String>("return RaidGroupButton1.slot").unwrap(),
+        "RaidGroup1Slot1",
+        "row 1 (us) takes group 1's first seat"
+    );
+    assert_eq!(
+        s.eval::<String>("return RaidGroupButton5.slot").unwrap(),
+        "RaidGroup2Slot1",
+        "row 5 is the first of group 2 — NOT group 1's fifth seat"
+    );
+    assert_eq!(
+        s.eval::<String>("return RaidGroupButton12.slot").unwrap(),
+        "RaidGroup3Slot4"
+    );
+    // The slot knows its occupant too — the link the drop code reads to decide move-vs-swap.
+    assert_eq!(
+        s.eval::<String>("return RaidGroup2Slot1.button").unwrap(),
+        "RaidGroupButton5"
+    );
+
+    assert_eq!(text_of(&s, "RaidGroupButton1Name"), "Me");
+    assert_eq!(
+        text_of(&s, "RaidGroupButton1Rank"),
+        "(L)",
+        "the leader token"
+    );
+    assert_eq!(
+        text_of(&s, "RaidGroupButton2Rank"),
+        "(A)",
+        "the assistant token"
+    );
+    assert_eq!(
+        text_of(&s, "RaidGroupButton3Rank"),
+        "",
+        "and a plain member has none"
+    );
+    assert_eq!(text_of(&s, "RaidGroupButton1Level"), "60");
+
+    assert!(visible(&s, "RaidGroupButton12"), "the last real row shows");
+    assert!(
+        !visible(&s, "RaidGroupButton13"),
+        "and the first empty one does not"
+    );
+    assert!(
+        visible(&s, "RaidGroup8"),
+        "all eight groups show while in a raid"
+    );
+
+    // Leaving the raid puts the whole grid away and brings the blurb back.
+    push_raid(&mut s, Vec::new());
+    assert!(!visible(&s, "RaidGroup1"));
+    assert!(!visible(&s, "RaidGroupButton1"));
+    assert!(visible(&s, "RaidFrameRaidDescription"));
+}
+
+/// The colour ladder: offline grey beats everything, then dead red, then the class colour — and
+/// all three columns take it together.
+///
+/// Inverting any two of these is invisible to every other test in this file: the rows still seat,
+/// the names still read, the clicks still fire.
+#[test]
+fn a_rows_colour_is_offline_then_dead_then_class() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(
+        &mut s,
+        vec![
+            row("Me", 2, 1, "Warrior", true, false),
+            row("Corpse", 0, 1, "Mage", true, true),
+            row("Gone", 0, 1, "Mage", false, false),
+            // Offline AND dead: grey wins, because a disconnected member's health is not news.
+            row("GoneDead", 0, 1, "Mage", false, true),
+        ],
+    );
+    let color = |button: &str| {
+        s.eval::<(f32, f32, f32)>(&format!(
+            "local r, g, b = {button}Name:GetTextColor() return r, g, b"
+        ))
+        .unwrap()
+    };
+    let round = |(r, g, b): (f32, f32, f32)| {
+        (
+            (r * 100.0).round() / 100.0,
+            (g * 100.0).round() / 100.0,
+            (b * 100.0).round() / 100.0,
+        )
+    };
+    // WARRIOR = 0.78, 0.61, 0.43 (Fonts.xml's RAID_CLASS_COLORS, the reference's own values).
+    let warrior: (f32, f32, f32) = s
+        .eval("return RAID_CLASS_COLORS.WARRIOR.r, RAID_CLASS_COLORS.WARRIOR.g, RAID_CLASS_COLORS.WARRIOR.b")
+        .unwrap();
+    assert_eq!(
+        round(color("RaidGroupButton1")),
+        round(warrior),
+        "alive: class colour"
+    );
+    assert_eq!(
+        round(color("RaidGroupButton2")),
+        (1.0, 0.1, 0.1),
+        "dead: RED_FONT_COLOR"
+    );
+    assert_eq!(
+        round(color("RaidGroupButton3")),
+        (0.5, 0.5, 0.5),
+        "offline: GRAY_FONT_COLOR"
+    );
+    assert_eq!(
+        round(color("RaidGroupButton4")),
+        (0.5, 0.5, 0.5),
+        "offline AND dead is grey — offline is tested first"
+    );
+    // The level column takes the same colour as the name, never a different one. (The CLASS
+    // column is a Button rather than a FontString — the reference makes it one because it is the
+    // class pullout's drag handle — and a Button in this engine has `SetTextColor` but no getter,
+    // so it cannot be read back here. `RaidGroupButton_SetRowColor` writes all three from one
+    // colour in three adjacent lines; these two are the readable half of that.)
+    assert_eq!(
+        round(color("RaidGroupButton2")),
+        round(
+            s.eval::<(f32, f32, f32)>(
+                "local r, g, b = RaidGroupButton2Level:GetTextColor() return r, g, b"
+            )
+            .unwrap()
+        ),
+        "name and level share the row's colour"
+    );
+}
+
+/// `UNIT_HEALTH`/`UNIT_LEVEL` repaint ONE row and do not go through the roster event.
+///
+/// This is the reason `RAID_ROSTER_UPDATE` is fired on the roster's identity rather than on every
+/// field: a 40-row rebuild per point of damage taken is what the other choice costs.
+#[test]
+fn a_units_health_and_level_repaint_only_that_row() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    let mut raid = twelve();
+    push_raid(&mut s, raid.clone());
+    assert_eq!(text_of(&s, "RaidGroupButton3Level"), "60");
+
+    // The row dies. Only the per-unit event is fired — no RAID_ROSTER_UPDATE.
+    raid[2].ninth = true;
+    s.set_party(PartyState {
+        members: vec![PartyMemberInfo {
+            name: "Member1".into(),
+            guid: raid[1].guid,
+        }],
+        leader_index: 0,
+        raid: raid.clone(),
+        ..Default::default()
+    });
+    s.fire_event(
+        "UNIT_HEALTH",
+        vec![benilla_ui::script::ScriptValue::Str("raid3".into())],
+    );
+    let red = s
+        .eval::<f32>("local r, g = RaidGroupButton3Name:GetTextColor() return g")
+        .unwrap();
+    assert!(red < 0.2, "row 3 went red without a roster rebuild ({red})");
+
+    // A unit event for something that is not a raid token is ignored rather than mis-parsed.
+    s.fire_event(
+        "UNIT_HEALTH",
+        vec![benilla_ui::script::ScriptValue::Str("target".into())],
+    );
+    s.fire_event(
+        "UNIT_LEVEL",
+        vec![benilla_ui::script::ScriptValue::Str("player".into())],
+    );
+    assert_eq!(
+        text_of(&s, "RaidGroupButton3Level"),
+        "60",
+        "and nothing else moved"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The management buttons
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Ready Check is the leader's alone; Add Member shows for everyone in a raid. Both are hidden
+/// outright out of one — they share their seat with Convert To Raid.
+#[test]
+fn ready_check_is_the_leaders_and_add_member_is_everyones() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+    assert!(
+        visible(&s, "RaidFrameReadyCheckButton"),
+        "we lead, so we may ask"
+    );
+    assert!(visible(&s, "RaidFrameAddMemberButton"));
+    assert!(
+        !visible(&s, "RaidFrameConvertToRaidButton"),
+        "already a raid"
+    );
+    assert!(!visible(&s, "RaidFrameRaidDescription"));
+
+    s.run("RaidFrameReadyCheckButton:Click()").unwrap();
+    assert!(s
+        .take_party_requests()
+        .contains(&PartyRequest::ReadyCheckStart));
+
+    // A member, not the leader: no Ready Check button at all.
+    let raid = twelve();
+    s.set_party(PartyState {
+        members: vec![PartyMemberInfo {
+            name: "Member1".into(),
+            guid: raid[1].guid,
+        }],
+        leader_index: 1,
+        raid,
+        ..Default::default()
+    });
+    s.fire_event("RAID_ROSTER_UPDATE", Vec::new());
+    assert!(!visible(&s, "RaidFrameReadyCheckButton"));
+    assert!(
+        visible(&s, "RaidFrameAddMemberButton"),
+        "but Add Member still shows"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The drag
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The drag's three landings: an empty slot in another group MOVES, an occupied one SWAPS, and
+/// anything else — including this row's own group — sends nothing and springs the row home.
+///
+/// Driven through the real handlers with `TARGET_RAID_SLOT` standing in for the hover sweep, which
+/// needs a live cursor this harness has no way to place.
+#[test]
+fn dragging_a_row_moves_swaps_or_springs_back() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+
+    let drag = |s: &UiScript, button: &str, onto: &str| {
+        s.run(&format!(
+            "MOVING_RAID_MEMBER = {button}; TARGET_RAID_SLOT = {onto}; \
+             RaidGroupButton_OnDragStop({button})"
+        ))
+        .unwrap();
+    };
+
+    // Row 12 (group 3, seat 4) onto group 3's fifth seat — its OWN group. Nothing goes out.
+    drag(&s, "RaidGroupButton12", "RaidGroup3Slot5");
+    assert!(
+        s.take_party_requests().is_empty(),
+        "a drop inside the row's own group is not a move"
+    );
+
+    // Row 12 onto group 5's empty first seat — a MOVE, and the subgroup is the Lua 1-based one.
+    drag(&s, "RaidGroupButton12", "RaidGroup5Slot1");
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::SetSubgroup {
+            index: 12,
+            group: 5
+        }]
+    );
+
+    // Row 12 onto group 1's second seat, which row 2 is in — a SWAP, by the two ROW indices.
+    drag(&s, "RaidGroupButton12", "RaidGroup1Slot2");
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::SwapSubgroup {
+            index: 12,
+            other: 2
+        }]
+    );
+}
+
+/// A non-leader cannot drag at all — the gate is on both ends, so a drag that never started also
+/// never stops.
+#[test]
+fn only_the_leader_may_drag() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    let raid = twelve();
+    s.set_party(PartyState {
+        members: vec![PartyMemberInfo {
+            name: "Member1".into(),
+            guid: raid[1].guid,
+        }],
+        leader_index: 1,
+        raid,
+        ..Default::default()
+    });
+    s.fire_event("RAID_ROSTER_UPDATE", Vec::new());
+    s.run(
+        "MOVING_RAID_MEMBER = RaidGroupButton12; TARGET_RAID_SLOT = RaidGroup5Slot1; \
+         RaidGroupButton_OnDragStop(RaidGroupButton12)",
+    )
+    .unwrap();
+    assert!(
+        s.take_party_requests().is_empty(),
+        "a member's drag sends nothing"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The row's click and menu
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Left-clicking a row targets that row's `raidN` token — the same token the tooltip reads.
+#[test]
+fn left_clicking_a_row_targets_its_raid_token() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+    s.run("RaidGroupButton7:Click(\"LeftButton\")").unwrap();
+    assert_eq!(s.take_target_requests(), vec!["raid7".to_string()]);
+}
+
+/// Right-clicking a row opens the RAID menu, and each of its four rows appears for exactly the
+/// person the reference shows it to.
+///
+/// The menu is addressed by ROW INDEX, and every rank rule re-reads that row's rank — so a menu
+/// opened on the wrong index would offer Promote on somebody who is already an assistant.
+#[test]
+fn the_row_menu_offers_the_rank_verbs_by_rank() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+
+    // Row 3 is a plain member: as the leader we may promote it, not demote it, and may kick it.
+    s.run("RaidGroupButton3:Click(\"RightButton\")").unwrap();
+    assert!(
+        s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
+        "the menu opens"
+    );
+    let shown = |s: &UiScript, key: &str| {
+        s.eval::<bool>(&format!(
+            "for i = 1, UIDROPDOWNMENU_MAXBUTTONS do \
+                 local b = getglobal(\"DropDownList1Button\"..i) \
+                 if b and b:IsShown() and b.value == \"{key}\" then return true end \
+             end return false"
+        ))
+        .unwrap()
+    };
+    assert!(
+        shown(&s, "RAID_PROMOTE"),
+        "a plain member can be made an assistant"
+    );
+    assert!(!shown(&s, "RAID_DEMOTE"), "and cannot be demoted from one");
+    assert!(shown(&s, "RAID_LEADER"), "and can be handed the lead");
+    assert!(shown(&s, "RAID_REMOVE"));
+
+    // Row 2 is the assistant: demote, not promote.
+    s.run("HideDropDownMenu(1) RaidGroupButton2:Click(\"RightButton\")")
+        .unwrap();
+    assert!(shown(&s, "RAID_DEMOTE"));
+    assert!(!shown(&s, "RAID_PROMOTE"));
+
+    // Row 1 is the leader — us. Nothing may be done to the leader.
+    s.run("HideDropDownMenu(1) RaidGroupButton1:Click(\"RightButton\")")
+        .unwrap();
+    assert!(!shown(&s, "RAID_LEADER"));
+    assert!(
+        !shown(&s, "RAID_REMOVE"),
+        "the leader cannot be kicked, not even by themself"
+    );
+}
+
+/// The menu's verbs reach the engine addressed the way the wire wants them — three by name, and
+/// the kick by the row index.
+#[test]
+fn the_menu_verbs_queue_the_right_requests() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+    let click = |s: &UiScript, key: &str| {
+        s.run(&format!(
+            "for i = 1, UIDROPDOWNMENU_MAXBUTTONS do \
+                 local b = getglobal(\"DropDownList1Button\"..i) \
+                 if b and b:IsShown() and b.value == \"{key}\" then b:Click() return end \
+             end error(\"{key} not shown\")"
+        ))
+        .unwrap();
+    };
+    s.run("RaidGroupButton3:Click(\"RightButton\")").unwrap();
+    click(&s, "RAID_PROMOTE");
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::AssistantLeader {
+            name: "Member2".into(),
+            grant: true
+        }]
+    );
+
+    s.run("HideDropDownMenu(1) RaidGroupButton3:Click(\"RightButton\")")
+        .unwrap();
+    click(&s, "RAID_REMOVE");
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::UninviteRaid(3)],
+        "the kick goes by ROW INDEX, which is what the reference passes"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Raid Info
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The saved-instance panel fills from `GetSavedInstanceInfo`, and its button is live only once
+/// the server has answered with something.
+#[test]
+fn the_raid_info_panel_lists_the_saved_lockouts() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    // The first UPDATE_INSTANCE_INFO only arms the ref's latch (`RaidFrame.hasRaidInfo`).
+    s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
+    s.set_saved_instances(vec![
+        SavedInstanceInfo {
+            name: "Molten Core".into(),
+            instance: 1234,
+            reset: 3 * 86_400,
+        },
+        SavedInstanceInfo {
+            name: "Onyxia's Lair".into(),
+            instance: 77,
+            reset: 3_600,
+        },
+    ]);
+    s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
+    assert_eq!(
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+            .unwrap(),
+        1
+    );
+    // The rows live inside the flyout, so `IsVisible` is false until it is open — open it, which
+    // is what the button does, and then ask.
+    s.run("RaidInfoFrame:Show()").unwrap();
+    assert!(visible(&s, "RaidInfoInstance1"));
+    assert!(visible(&s, "RaidInfoInstance2"));
+    assert!(
+        !visible(&s, "RaidInfoInstance3"),
+        "rows past the list stay away"
+    );
+    assert_eq!(text_of(&s, "RaidInfoInstance1Name"), "Molten Core");
+    assert_eq!(text_of(&s, "RaidInfoInstance1ID"), "1234");
+    assert!(
+        text_of(&s, "RaidInfoInstance1Reset").starts_with("Resets in 3 Days"),
+        "the reset is a REMAINING duration through SecondsToTime, not a timestamp: {:?}",
+        text_of(&s, "RaidInfoInstance1Reset")
+    );
+    assert!(
+        !visible(&s, "RaidInfoScrollFrameScrollBar"),
+        "four rows fit, so two need no bar"
+    );
+
+    // Bound to nothing: the button dies, and the panel does not keep a stale bar standing.
+    s.set_saved_instances(Vec::new());
+    s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
+    assert_eq!(
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+            .unwrap(),
+        0
+    );
+    assert!(!visible(&s, "RaidInfoInstance1"));
+
+    // The button toggles the flyout.
+    assert!(visible(&s, "RaidInfoFrame"));
+    s.run("RaidFrameRaidInfoButton:GetScript(\"OnClick\")()")
+        .unwrap();
+    assert!(!visible(&s, "RaidInfoFrame"), "and closes it again");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The ready check
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// `READY_CHECK` opens the popup naming the leader, and the two buttons answer opposite ways —
+/// including the No button's argument-less call, which is the reference's own spelling.
+#[test]
+fn the_ready_check_popup_opens_and_answers() {
+    let mut s = setup();
+    open_raid_tab(&mut s);
+    push_raid(&mut s, twelve());
+    assert!(!visible(&s, "ReadyCheckFrame"), "nothing to answer yet");
+
+    s.fire_event("READY_CHECK", Vec::new());
+    assert!(visible(&s, "ReadyCheckFrame"), "UIParent's arm opens it");
+    assert!(
+        text_of(&s, "ReadyCheckFrameText").starts_with("Me has initiated a ready check."),
+        "named for the rank-2 row: {:?}",
+        text_of(&s, "ReadyCheckFrameText")
+    );
+
+    s.run("ReadyCheckFrameYesButton:Click()").unwrap();
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::ReadyCheckAnswer(true)]
+    );
+    assert!(!visible(&s, "ReadyCheckFrame"));
+
+    s.fire_event("READY_CHECK", Vec::new());
+    s.run("ReadyCheckFrameNoButton:Click()").unwrap();
+    assert_eq!(
+        s.take_party_requests(),
+        vec![PartyRequest::ReadyCheckAnswer(false)],
+        "No passes no argument at all, and absent must mean not-ready"
+    );
+
+    // The raid ending ends the question.
+    s.fire_event("READY_CHECK", Vec::new());
+    assert!(visible(&s, "ReadyCheckFrame"));
+    push_raid(&mut s, Vec::new());
+    assert!(
+        !visible(&s, "ReadyCheckFrame"),
+        "the raid went, so the question went"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The reference-geometry diff (decision 0675's discipline)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Every element this file shares with the reference carries the reference's numbers.
+///
+/// The pane's specification is TWO reference files — `RaidFrame.xml` from FrameXML and
+/// `Blizzard_RaidUI.xml` from the load-on-demand addon — so this runs twice. The addon half is
+/// read straight out of the patch chain rather than from an extraction on disk: `_extracted_framexml/`
+/// holds FrameXML only, and requiring someone to have extracted the addon first would leave half
+/// the window's geometry guarded by nothing.
+#[test]
+fn the_geometry_matches_both_reference_files() {
+    // The FrameXML half: the pane, its two buttons, the info flyout and the lockout row template.
+    if let Some(reference) = super::framexml_diff::reference("RaidFrame.xml") {
+        super::framexml_diff::assert_geometry_matches(
+            "RaidFrame.xml",
+            &reference,
+            &[
+                // The reference's close button inherits `UIPanelCloseButton`, which carries the
+                // 32x32; no such template ships in this house (FriendsFrame's own close button
+                // says the same), so ours states the size the template would have given it. The
+                // ANCHOR offsets match; only the extra size pair differs.
+                "RaidInfoCloseButton",
+            ],
+            10,
+        );
+    }
+
+    // The addon half: the row, the slot, the group frame and the ready-check popup.
+    let Some(data) = benilla_formats::wow_data() else {
+        return;
+    };
+    let chain = benilla_formats::open_chain(&data).expect("open chain");
+    let bytes = chain
+        .read("Interface\\AddOns\\Blizzard_RaidUI\\Blizzard_RaidUI.xml")
+        .expect("Blizzard_RaidUI.xml is in the patch chain");
+    super::framexml_diff::assert_geometry_matches_text(
+        "RaidFrame.xml",
+        &String::from_utf8_lossy(&bytes),
+        &[],
+        10,
+    );
+}

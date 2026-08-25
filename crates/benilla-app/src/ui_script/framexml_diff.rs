@@ -116,16 +116,35 @@ pub(super) fn assert_geometry_matches(
     expected: &[&str],
     min_compared: usize,
 ) {
+    assert_geometry_matches_text(
+        ours,
+        &std::fs::read_to_string(reference).unwrap(),
+        expected,
+        min_compared,
+    );
+}
+
+/// [`assert_geometry_matches`] against reference TEXT rather than a file on disk.
+///
+/// The split exists because not every reference file is *on* disk: `_extracted_framexml/` holds
+/// FrameXML only, and a window whose specification is partly a `Blizzard_*` **addon** — the raid
+/// grid is the first, decision 1549 — has to read its half straight out of the patch chain
+/// (`benilla_formats::open_chain`, the same door `mpqx` uses). Reading it rather than requiring
+/// someone to have extracted it first is what keeps that half of the diff ARMED instead of
+/// skipped, and it writes nothing into the install.
+pub(super) fn assert_geometry_matches_text(
+    ours: &str,
+    reference_text: &str,
+    expected: &[&str],
+    min_compared: usize,
+) {
     let ours_text = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets/ui")
             .join(ours),
     )
     .unwrap();
-    let theirs: HashMap<String, Vec<(f32, f32)>> =
-        scrape(&std::fs::read_to_string(reference).unwrap())
-            .into_iter()
-            .collect();
+    let theirs: HashMap<String, Vec<(f32, f32)>> = scrape(reference_text).into_iter().collect();
 
     let mut compared = 0;
     let mut drifted = Vec::new();

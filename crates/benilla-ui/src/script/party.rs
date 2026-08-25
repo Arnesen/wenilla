@@ -21,7 +21,20 @@
 //! array `0xb712a8` bounded by the count `0xb713e0`, and two of the three bindings walk exactly
 //! that pair, so a client whose count and array can disagree hands an addon looping
 //! `for i = 1, GetNumRaidMembers()` a miss tuple it will then index. The per-member grid/UI is
-//! still a later arc (decision 0434 §6); the *data* is not.
+//! the RaidFrame (decision 1549), which reads exactly this array.
+//!
+//! The **raid management verbs** (decision 1549) are the outbound half again, and they address
+//! members three different ways because the reference's own bindings do: by **raid index**
+//! (`SetRaidSubgroup`, `SwapRaidSubgroup`, `UninviteFromRaid` — the RaidFrame has the index in
+//! hand), by **name** (`PromoteByName`, `PromoteToAssistant`, `DemoteAssistant` — UnitPopup
+//! carries a name, never an index), and by **nothing at all** (`ConvertToRaid`, `DoReadyCheck`,
+//! `RequestRaidInfo`). Resolving index/name to whatever the wire wants is the app's job at the
+//! drain, exactly as `InviteToParty`'s token resolution already is: this side stays plain data.
+//!
+//! The **saved-instance list** ([`SavedInstanceInfo`]) is a second app-pushed snapshot, separate
+//! from [`PartyState`] because it arrives on its own packet (`SMSG_RAID_INSTANCE_INFO`) and
+//! outlives every roster change — folding it into the roster push would clear it every time the
+//! group moved.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -36,6 +49,19 @@ pub struct PartyMemberInfo {
     /// The member's GUID — the identity `UnitInParty` matches arbitrary tokens (the target)
     /// against (decision 0434 §5's popup menu pick). `0` = unknown, never matches.
     pub guid: u64,
+}
+
+/// One saved raid lockout — `GetSavedInstanceInfo`'s three returns (decision 1549). Pushed whole
+/// by the app ([`UiScript::set_saved_instances`]) from `SMSG_RAID_INSTANCE_INFO`, with the map
+/// **name** already resolved: the wire carries a `Map.dbc` id and the DBC is the app's to read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SavedInstanceInfo {
+    /// The instance's display name (`Map.dbc`'s own), e.g. `"Molten Core"`.
+    pub name: String,
+    /// The instance id — what the panel prints in its ID column.
+    pub instance: u32,
+    /// Seconds remaining until the lockout resets; the panel runs it through `SecondsToTime`.
+    pub reset: u32,
 }
 
 /// One **raid roster** row — `GetRaidRosterInfo`'s nine returns, as the app resolved them
@@ -163,6 +189,34 @@ pub enum PartyRequest {
     /// unit, addressed by token; the app resolves the token to a guid for the
     /// `MSG_RAID_TARGET_UPDATE` send (decision 0434 §5's submenu, §6's board law).
     SetRaidTarget { unit: String, index: u8 },
+    // ── The raid-management verbs (decision 1549's RaidFrame) ───────────────────────────────
+    /// `ConvertToRaid()` — the Raid tab's own button (`CMSG_GROUP_RAID_CONVERT`, leader only).
+    ConvertToRaid,
+    /// `SetRaidSubgroup(index, group)` — move raid row `index` (1-based) into subgroup `group`
+    /// (1-based). The wire (`CMSG_GROUP_CHANGE_SUB_GROUP`) takes a NAME and a 0-based subgroup;
+    /// resolving both is the app's, because only it holds the roster the index means.
+    SetSubgroup { index: u32, group: u32 },
+    /// `SwapRaidSubgroup(index, other)` — trade two raid rows' subgroups
+    /// (`CMSG_GROUP_SWAP_SUB_GROUP`, two names on the wire). The drag's "dropped on an occupied
+    /// slot" arm; [`Self::SetSubgroup`] is its "dropped on an empty one".
+    SwapSubgroup { index: u32, other: u32 },
+    /// `PromoteByName(name)` — hand leadership over, addressed by name rather than by token
+    /// (`CMSG_GROUP_SET_LEADER`, whose body is a guid — the app resolves it). UnitPopup's
+    /// RAID_LEADER row; [`Self::PromoteUnit`] is the same send from a party token.
+    PromoteName(String),
+    /// `PromoteToAssistant(name)` / `DemoteAssistant(name)` — the raid assistant flag
+    /// (`CMSG_GROUP_ASSISTANT_LEADER`: guid + grant byte).
+    AssistantLeader { name: String, grant: bool },
+    /// `UninviteFromRaid(index)` — kick raid row `index` (1-based). The reference's own row-index
+    /// form; `CMSG_GROUP_UNINVITE` takes a name, which the app resolves from the same roster the
+    /// index addresses.
+    UninviteRaid(u32),
+    /// `DoReadyCheck()` — start one (`MSG_RAID_READY_CHECK`, empty body; leader only).
+    ReadyCheckStart,
+    /// `ConfirmReadyCheck(ready)` — answer one (`MSG_RAID_READY_CHECK`, one byte).
+    ReadyCheckAnswer(bool),
+    /// `RequestRaidInfo()` — ask for the saved-instance list (`CMSG_REQUEST_RAID_INFO`).
+    RequestRaidInfo,
 }
 
 impl super::UiScript {
@@ -176,6 +230,13 @@ impl super::UiScript {
     /// Drain the party/loot intents queued since the last call.
     pub fn take_party_requests(&mut self) -> Vec<PartyRequest> {
         std::mem::take(&mut self.model_mut().party_requests)
+    }
+
+    /// Push the saved raid-lockout list, replacing whatever was there (decision 1549). A bare
+    /// setter like [`Self::set_party`] — firing `UPDATE_INSTANCE_INFO` is the app's diff-and-fire
+    /// job, never auto-fired here.
+    pub fn set_saved_instances(&mut self, saved: Vec<SavedInstanceInfo>) {
+        self.model_mut().saved_instances = saved;
     }
 
     /// Drain the whisper targets `ChatFrame_SendTell` queued since the last call — the app opens
@@ -494,6 +555,169 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsRaidOfficer",
         lua.create_function(|_, ()| Ok(Value::Nil))?,
+    )?;
+
+    // ── The raid-management verbs (decision 1549) ────────────────────────────────────────────
+    //
+    // All nine are `ORCHESTRATION` in wow-re's own classification (`ui/scratch/bindings.md`:
+    // `ConvertToRaid 0x4bbc90`, `SetRaidSubgroup 0x4bb990`, `SwapRaidSubgroup 0x4bbb00`,
+    // `PromoteToAssistant 0x4bbd20`, `RequestRaidInfo 0x4a1850`, `GetSavedInstanceInfo 0x4a1920`;
+    // `UninviteFromRaid 0x48a580` and `SetRaidRosterSelection 0x4bb820` in
+    // `item17-frameapi-fullcarve.md`) — "marshals + delegates to a C++ method/net-send; no inline
+    // fidelity math". So the *binding* has no law of its own to reproduce: the law is the wire's,
+    // which `benilla-protocol`'s `group` family already carries byte-golden, and the marshalling
+    // is the queue below. Nothing here is a guess about a body nobody has read.
+    //
+    // They queue rather than send for the module doc's reason: this crate cannot reach the net.
+    g.set(
+        "ConvertToRaid",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.party_requests.push(PartyRequest::ConvertToRaid);
+            Ok(())
+        })?,
+    )?;
+    // SetRaidSubgroup(index, group) / SwapRaidSubgroup(index, other) — the drag's two landings.
+    // Both take numbers through the shared argument gate, so a non-number raises the reference's
+    // usage error rather than silently queueing a zero.
+    g.set(
+        "SetRaidSubgroup",
+        lua.create_function(|lua, (index, group): (Value, Value)| {
+            let index = number_arg(lua, index, "Usage: SetRaidSubgroup(index, group)")?;
+            let group = number_arg(lua, group, "Usage: SetRaidSubgroup(index, group)")?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.party_requests.push(PartyRequest::SetSubgroup {
+                index: index.max(0) as u32,
+                group: group.max(0) as u32,
+            });
+            Ok(())
+        })?,
+    )?;
+    g.set(
+        "SwapRaidSubgroup",
+        lua.create_function(|lua, (index, other): (Value, Value)| {
+            let index = number_arg(lua, index, "Usage: SwapRaidSubgroup(index1, index2)")?;
+            let other = number_arg(lua, other, "Usage: SwapRaidSubgroup(index1, index2)")?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.party_requests.push(PartyRequest::SwapSubgroup {
+                index: index.max(0) as u32,
+                other: other.max(0) as u32,
+            });
+            Ok(())
+        })?,
+    )?;
+    g.set(
+        "PromoteByName",
+        lua.create_function(|lua, name: String| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.party_requests.push(PartyRequest::PromoteName(name));
+            Ok(())
+        })?,
+    )?;
+    for (binding, grant) in [("PromoteToAssistant", true), ("DemoteAssistant", false)] {
+        g.set(
+            binding,
+            lua.create_function(move |lua, name: String| {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model
+                    .party_requests
+                    .push(PartyRequest::AssistantLeader { name, grant });
+                Ok(())
+            })?,
+        )?;
+    }
+    g.set(
+        "UninviteFromRaid",
+        lua.create_function(|lua, index: Value| {
+            let index = number_arg(lua, index, "Usage: UninviteFromRaid(index)")?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model
+                .party_requests
+                .push(PartyRequest::UninviteRaid(index.max(0) as u32));
+            Ok(())
+        })?,
+    )?;
+    g.set(
+        "DoReadyCheck",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.party_requests.push(PartyRequest::ReadyCheckStart);
+            Ok(())
+        })?,
+    )?;
+    // ConfirmReadyCheck(ready) — the popup's two buttons, and the argument is read for TRUTH, not
+    // for a number: the reference's own No button calls it with no argument at all
+    // (`ConfirmReadyCheck()`) while Yes passes `1`, so "absent" has to mean "not ready".
+    g.set(
+        "ConfirmReadyCheck",
+        lua.create_function(|lua, ready: Value| {
+            let ready = !matches!(ready, Value::Nil | Value::Boolean(false));
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model
+                .party_requests
+                .push(PartyRequest::ReadyCheckAnswer(ready));
+            Ok(())
+        })?,
+    )?;
+    g.set(
+        "RequestRaidInfo",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.party_requests.push(PartyRequest::RequestRaidInfo);
+            Ok(())
+        })?,
+    )?;
+
+    // GetNumSavedInstances() / GetSavedInstanceInfo(index) — the Raid Info panel's pair, over the
+    // app-pushed list. 1-based like every other indexed getter here, and a miss answers a plain
+    // `nil` (the panel's own loop only ever indexes inside the count it just read).
+    g.set(
+        "GetNumSavedInstances",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.saved_instances.len() as i64)
+        })?,
+    )?;
+    g.set(
+        "GetSavedInstanceInfo",
+        lua.create_function(|lua, index: Value| {
+            let index = number_arg(lua, index, "Usage: GetSavedInstanceInfo(index)")?;
+            let row = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                usize::try_from(index.wrapping_sub(1))
+                    .ok()
+                    .and_then(|i| model.saved_instances.get(i))
+                    .cloned()
+            };
+            Ok(match row {
+                Some(r) => MultiValue::from_vec(vec![
+                    Value::String(lua.create_string(&r.name)?),
+                    Value::Integer(i64::from(r.instance)),
+                    Value::Integer(i64::from(r.reset)),
+                ]),
+                None => MultiValue::new(),
+            })
+        })?,
+    )?;
+
+    // SetRaidRosterSelection(index) / GetRaidRosterSelection() — a purely CLIENT-SIDE cursor (the
+    // reference's `0x4bb820` writes a global; nothing is sent). The RaidFrame sets it when a row
+    // is picked up so the menu and the drag agree on who is being acted on.
+    g.set(
+        "SetRaidRosterSelection",
+        lua.create_function(|lua, index: Value| {
+            let index = number_arg(lua, index, "Usage: SetRaidRosterSelection(index)")?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.raid_selection = i64::from(index);
+            Ok(())
+        })?,
+    )?;
+    g.set(
+        "GetRaidRosterSelection",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.raid_selection)
+        })?,
     )?;
 
     // ChatFrame_SendTell(name) — the popup's WHISPER action. In the ref this is ChatFrame.lua
@@ -909,8 +1133,15 @@ mod tests {
         );
     }
 
+    /// `IsRaidOfficer()` still answers nil, and the raid arc landing (decision 1549) did NOT
+    /// change that — it is not waiting on a feature, it is waiting on a carve of `0x4bb910`'s own
+    /// body. The binding's doc carries the refusal; this pins the behaviour so a later "surely it
+    /// is just rank >= 1" edit has to argue with a test.
+    ///
+    /// What it costs today, stated where someone will find it: `RaidFrameAddMemberButton` is
+    /// enabled for the raid LEADER only, where the reference also enables it for an assistant.
     #[test]
-    fn is_raid_officer_is_nil_until_the_raid_arc() {
+    fn is_raid_officer_is_still_nil_and_that_is_a_missing_carve_not_a_missing_feature() {
         let s = UiScript::new().unwrap();
         assert!(s.eval::<bool>("return IsRaidOfficer() == nil").unwrap());
     }
@@ -1013,6 +1244,128 @@ mod tests {
         assert!(s
             .eval::<bool>(r#"return UnitCanCooperate("player", "target") == nil"#)
             .unwrap());
+    }
+
+    /// Every raid-management verb queues the request it names, with its arguments in the order
+    /// the reference's binding takes them — the seam the whole pane acts through (decision 1549).
+    #[test]
+    fn the_raid_verbs_queue_what_they_name() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            ConvertToRaid()
+            SetRaidSubgroup(7, 3)
+            SwapRaidSubgroup(7, 12)
+            PromoteByName("Alice")
+            PromoteToAssistant("Bob")
+            DemoteAssistant("Bob")
+            UninviteFromRaid(9)
+            DoReadyCheck()
+            RequestRaidInfo()
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.take_party_requests(),
+            vec![
+                PartyRequest::ConvertToRaid,
+                PartyRequest::SetSubgroup { index: 7, group: 3 },
+                PartyRequest::SwapSubgroup {
+                    index: 7,
+                    other: 12
+                },
+                PartyRequest::PromoteName("Alice".into()),
+                PartyRequest::AssistantLeader {
+                    name: "Bob".into(),
+                    grant: true
+                },
+                PartyRequest::AssistantLeader {
+                    name: "Bob".into(),
+                    grant: false
+                },
+                PartyRequest::UninviteRaid(9),
+                PartyRequest::ReadyCheckStart,
+                PartyRequest::RequestRaidInfo,
+            ]
+        );
+        assert!(s.take_party_requests().is_empty(), "the drain empties");
+    }
+
+    /// `ConfirmReadyCheck` reads its argument for TRUTH, not for a number — the reference's No
+    /// button calls it with **no argument at all** while Yes passes `1`, so "absent" has to be the
+    /// not-ready answer or every declined ready check reads as accepted.
+    #[test]
+    fn confirm_ready_check_treats_an_absent_argument_as_not_ready() {
+        let mut s = UiScript::new().unwrap();
+        s.run("ConfirmReadyCheck(1) ConfirmReadyCheck() ConfirmReadyCheck(false) ConfirmReadyCheck(0)")
+            .unwrap();
+        assert_eq!(
+            s.take_party_requests(),
+            vec![
+                PartyRequest::ReadyCheckAnswer(true),
+                PartyRequest::ReadyCheckAnswer(false),
+                PartyRequest::ReadyCheckAnswer(false),
+                // `0` is TRUTHY in Lua, and the binding is a truth test — so this is ready.
+                PartyRequest::ReadyCheckAnswer(true),
+            ]
+        );
+    }
+
+    /// The saved-lockout pair: 1-based, three returns, and a miss is a plain nothing (the panel's
+    /// own loop only ever indexes inside the count it just read).
+    #[test]
+    fn saved_instance_info_reads_the_pushed_list() {
+        use crate::script::SavedInstanceInfo;
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(s.eval::<i64>("return GetNumSavedInstances()").unwrap(), 0);
+        s.set_saved_instances(vec![
+            SavedInstanceInfo {
+                name: "Molten Core".into(),
+                instance: 1234,
+                reset: 86_400,
+            },
+            SavedInstanceInfo {
+                name: "Onyxia's Lair".into(),
+                instance: 77,
+                reset: 3_600,
+            },
+        ]);
+        assert_eq!(s.eval::<i64>("return GetNumSavedInstances()").unwrap(), 2);
+        let (name, id, reset) = s
+            .eval::<(String, i64, i64)>("return GetSavedInstanceInfo(1)")
+            .unwrap();
+        assert_eq!((name.as_str(), id, reset), ("Molten Core", 1234, 86_400));
+        assert_eq!(
+            s.eval::<String>("return GetSavedInstanceInfo(2)").unwrap(),
+            "Onyxia's Lair"
+        );
+        for miss in ["0", "3", "-1"] {
+            assert!(
+                s.eval::<bool>(&format!("return GetSavedInstanceInfo({miss}) == nil"))
+                    .unwrap(),
+                "index {miss} is a miss"
+            );
+        }
+        // A non-number still raises, like every other indexed getter here.
+        assert!(s
+            .eval::<i64>(r#"return GetSavedInstanceInfo("x")"#)
+            .is_err());
+    }
+
+    /// `SetRaidRosterSelection` is purely client-side: it moves a cursor and sends nothing.
+    #[test]
+    fn the_raid_roster_selection_is_a_local_cursor() {
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(s.eval::<i64>("return GetRaidRosterSelection()").unwrap(), 0);
+        s.run("SetRaidRosterSelection(11)").unwrap();
+        assert_eq!(
+            s.eval::<i64>("return GetRaidRosterSelection()").unwrap(),
+            11
+        );
+        assert!(
+            s.take_party_requests().is_empty(),
+            "nothing about a selection goes on the wire"
+        );
     }
 
     #[test]

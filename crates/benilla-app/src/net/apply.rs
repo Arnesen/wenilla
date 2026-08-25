@@ -900,11 +900,16 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::RaidTargetSet { icon, guid } => group.apply_raid_target(icon, guid),
             SessionEvent::RaidTargetList { entries } => group.apply_raid_target_list(&entries),
-            // Ping + ready-check are removed for now (decision 0460); the protocol still decodes
-            // the wire, but the client ignores it until those features return.
-            SessionEvent::MinimapPing { .. }
-            | SessionEvent::ReadyCheckRequest
-            | SessionEvent::ReadyCheckAnswer { .. } => {}
+            // The ready check came back with the Raid tab (decision 1549): the open form bumps
+            // the ticket the feed turns into a `READY_CHECK` edge. The ANSWER form is still
+            // ignored — the reference has no per-member answer surface in 1.12 (the raid pane
+            // shows no ready column; only later clients do), so there is nothing to show and
+            // storing it would be state with no reader.
+            SessionEvent::ReadyCheckRequest => group.apply_ready_check(),
+            SessionEvent::RaidInstanceInfo { entries } => group.apply_raid_instance_info(entries),
+            // Ping is still removed (decision 0460); the protocol decodes the wire, the client
+            // ignores it until that feature returns.
+            SessionEvent::MinimapPing { .. } | SessionEvent::ReadyCheckAnswer { .. } => {}
             // ── The duel family (decision 0633): the session mirror + the two DisplayError
             // lines the handlers emit inline; the Era events fire off the mirror's edges in
             // `ui_duel::feed_duel`, and the countdown ticks in its own system ──

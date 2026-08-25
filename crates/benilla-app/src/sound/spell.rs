@@ -16,7 +16,9 @@ use crate::net::NetEntity;
 use benilla_assets::WorldAssets;
 use benilla_world::schedule::WorldStage;
 
-use super::kit::{kit_looping, play_kit, play_kit_ext, KitRef, SoundCategory, SoundKits};
+use super::kit::{
+    kit_looping, play_kit, play_kit_ext, KitRef, PlayExtras, SoundCategory, SoundKits,
+};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 #[allow(clippy::too_many_arguments)] // the standard sound-route param set + the hold ledger
@@ -71,10 +73,10 @@ fn route_spell_kit_sounds(
                         KitRef::Id(kit_sound),
                         pos,
                         SoundCategory::Sfx,
-                        None,
-                        Some(entity),
-                        false,
-                        None,
+                        PlayExtras {
+                            source: Some(entity),
+                            ..default()
+                        },
                     )
                 } else {
                     play_kit(

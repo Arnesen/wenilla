@@ -303,6 +303,10 @@ TalentFrame.xml
 # GameTooltip (the newbie tips) and UIDropDownMenu (the who list's variable column) —
 # all loaded above.
 FriendsFrame.xml
+# The social window's fourth tab, in its own file because RaidFrame is a child of FriendsFrame and
+# a child cannot be declared before its parent — the reference splits it the same way and for the
+# same reason (its FrameXML.toc has RaidFrame.xml on the very next line). Decision 1549.
+RaidFrame.xml
 GossipFrame.xml
 MerchantFrame.xml
 # The mail window (decision 0544 P1/P2): the mailbox inbox, open-letter, and send tab over

@@ -934,6 +934,14 @@ pub const MSG_RAID_TARGET_UPDATE: u16 = 0x0321; // 801
 /// Same opcode both directions — an empty body starts/requests, a non-empty one answers (VERIFIED
 /// vmangos `Server/Packets/Group.cpp:84-96`, `:126-130`; see [`super::group::ReadyCheck`]).
 pub const MSG_RAID_READY_CHECK: u16 = 0x0322; // 802
+/// Ask the server for our saved-instance (raid lockout) list — empty body (VERIFIED vmangos
+/// `Server/Protocol/Opcodes.cpp` registers it against `HandleRequestRaidInfoOpcode`, which is a
+/// bare `SendRaidInfo()`). The RaidFrame's `RequestRaidInfo()` on every OnShow (decision 1549).
+pub const CMSG_REQUEST_RAID_INFO: u16 = 0x02CD; // 717
+/// The answer: `u32 count` then `count` × `{u32 mapId, u32 secondsUntilReset, u32 instanceId}`
+/// (VERIFIED vmangos `Objects/Player.cpp::Player::SendRaidInfo`, permanent binds only; see
+/// [`super::group::read_raid_instance_info`]).
+pub const SMSG_RAID_INSTANCE_INFO: u16 = 0x02CC; // 716
 
 // The duel family (decision 0633) — the six inbound handlers WoW.exe registers in
 // `Ui/DuelInfo.cpp` at `0x4d4710` plus the two it sends from `AcceptDuel 0x4d4830` /

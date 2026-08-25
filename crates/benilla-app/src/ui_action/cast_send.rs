@@ -7,7 +7,8 @@
 //! below is that function's order, gate for gate (re-pinned end to end by the 0948 §5,
 //! `gcd-power-gate.md`) — profession intercept, auto-repeat toggle, targeting abort, in-flight,
 //! reagents/totems, target binding + range, then the validator `0x6094f0`'s opening rungs
-//! (not-ready/GCD, power), mounted, moving, form, the deferred targeting-cursor entry — followed
+//! (not-ready/GCD, power), mounted, moving, form, the deferred cast-arm refusal and
+//! targeting-cursor entry — followed
 //! by the commit's own tail (ranged stance, auto-repeat arm, the send, the auto-attack start, the
 //! GCD arm).
 //!
@@ -313,6 +314,7 @@ fn send_spell_cast(
     // chain calls `CGItem::Use` with the lock's guid, the bag click with zero (decision 0769).
     let mut pending_word = None;
     let mut item_target = None;
+    let mut deferred_refusal = None;
     let explicit_object = match commit {
         CastCommit::Item { on_object, .. } => on_object,
         CastCommit::Spell => None,
@@ -361,6 +363,16 @@ fn send_spell_cast(
                 );
                     cast_errors.push_local(spell_id, reason);
                     return;
+                }
+                // TryCast's own tail after ArmCast returns FALSE (`6e5045`–`6e507b`) — the
+                // SIBLING of the targeting-cursor arm, reached from the same place, which is
+                // *below* the requirement validator. So it parks here and fires where the cursor
+                // would come up (decision 1554): a mounted or shapeshifted press with an empty
+                // weapon hand reads the ref's "You are mounted" / "Can't do that while
+                // shapeshifted" first, exactly as 0948 established for the cursor.
+                cast_target::CastWireTarget::RefusedAtArm(reason) => {
+                    deferred_refusal = Some(reason);
+                    None
                 }
             }
         }
@@ -527,6 +539,14 @@ fn send_spell_cast(
             cast_errors.push_local(spell_id, reason);
             return;
         }
+    }
+    // The deferred ArmCast-FALSE refusal (`6e5050`), the cursor arm's sibling: every validator
+    // rung above has passed and the bind still found nothing bindable, so the reference's own
+    // red line goes out here — no packet, no GCD, no pending arm (decision 1554).
+    if let Some(reason) = deferred_refusal {
+        debug!("ui_action: cast {spell_id} refused locally — the cast-arm tail ({reason:#x})");
+        cast_errors.push_local(spell_id, reason);
+        return;
     }
     // The deferred targeting-cursor entry (the ref's cast-arm position `6e50c8`): every
     // validator rung above has passed — NOW the cursor comes up and waits for its click.

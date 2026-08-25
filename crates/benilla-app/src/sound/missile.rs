@@ -15,7 +15,7 @@ use crate::entities::MissileSound;
 use benilla_assets::WorldAssets;
 use benilla_world::schedule::WorldStage;
 
-use super::kit::{play_kit_ext, stop_source, KitRef, SoundCategory, SoundKits};
+use super::kit::{play_kit_ext, stop_source, KitRef, PlayExtras, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 fn route_missile_sounds(
@@ -49,10 +49,13 @@ fn route_missile_sounds(
                     KitRef::Id(kit_sound),
                     Some(pos),
                     SoundCategory::Sfx,
-                    None,
-                    Some(entity), // tag the loop to the missile — the pump follows it in flight
-                    true,         // the missile loop is looping by construction, not by the flag
-                    None,
+                    PlayExtras {
+                        // tag the loop to the missile — the pump follows it in flight, and the
+                        // loop is looping by construction rather than by the kit's own flag
+                        source: Some(entity),
+                        force_loop: true,
+                        ..default()
+                    },
                 ) {
                     warn!("missile flight sound {kit_sound}: {e:#}");
                 }

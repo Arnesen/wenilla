@@ -401,6 +401,12 @@ pub(crate) struct Model {
     /// Party/loot intents (`AcceptGroup`/`InviteToParty`/`SetLootMethod`/…) queued since the
     /// app's last [`super::UiScript::take_party_requests`] drain — the outbound seam ([`party`]).
     pub(crate) party_requests: Vec<party::PartyRequest>,
+    /// The saved raid lockouts the Raid tab's info panel reads (decision 1549), pushed by the app
+    /// from `SMSG_RAID_INSTANCE_INFO`. Its own field rather than a [`party::PartyState`] member
+    /// because it arrives on its own packet and survives every roster change.
+    pub(crate) saved_instances: Vec<party::SavedInstanceInfo>,
+    /// `SetRaidRosterSelection`'s cursor — a client-side raid row index, never sent anywhere.
+    pub(crate) raid_selection: i64,
     /// The social snapshot the app pushes (friends, ignores, the last `/who` — decision 0668):
     /// `GetNumFriends`/`GetFriendInfo`/`GetWhoInfo`/… read it ([`social`]). Already
     /// display-resolved (names, class/zone names) because the reference resolves them
@@ -1352,6 +1358,8 @@ impl Model {
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
             party_requests: Vec::new(),
+            saved_instances: Vec::new(),
+            raid_selection: 0,
             social: social::SocialState::default(),
             social_requests: Vec::new(),
             guild: guild::GuildState::default(),

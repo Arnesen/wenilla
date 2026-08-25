@@ -48,7 +48,7 @@ use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
 
-use super::kit::{self, play_kit_ext, KitRef, SoundCategory, SoundKits};
+use super::kit::{self, play_kit_ext, KitRef, PlayExtras, SoundCategory, SoundKits};
 use super::{SoundConfig, SoundOutput};
 
 /// The number of HELLO takes the select greeter plays before it steps into the pissed kit
@@ -206,10 +206,11 @@ fn play_line(
         KitRef::Id(kit_id),
         Some(pos),
         SoundCategory::Sfx,
-        variant,
-        Some(npc),
-        false,
-        None,
+        PlayExtras {
+            variant,
+            source: Some(npc),
+            ..default()
+        },
     ) {
         warn!("npc vocal (kit {kit_id}): {e:#}");
     }

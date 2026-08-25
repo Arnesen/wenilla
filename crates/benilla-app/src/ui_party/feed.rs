@@ -7,7 +7,8 @@ use benilla_protocol::messages::{
     member_status, GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo, GROUP_MEMBER_ASSISTANT,
 };
 use benilla_ui::script::{
-    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, ScriptValue, UiScript, UnitState,
+    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo, ScriptValue,
+    UiScript, UnitState,
 };
 use bevy::prelude::*;
 
@@ -36,9 +37,35 @@ pub(super) struct FedParty {
     /// own raid row's zone — a plain value watched as a counter).
     names_generation: gate::Watch,
     area: gate::Watch,
+    /// The `raid1..raid40` snapshots, same per-token diff as [`Self::units`] (decision 1549).
+    /// A `Vec` rather than a `[_; 40]`: `UnitState` is not `Copy`, and forty of them in a `Local`
+    /// that a solo player never fills is worth the one allocation a raid pays.
+    raid_units: Vec<Option<UnitState>>,
+    /// The raid roster's IDENTITY, which is what `RAID_ROSTER_UPDATE` fires on — see the fire
+    /// site for why it is these four fields and not the whole row.
+    raid_key: Vec<(u64, u32, u32, bool)>,
+    /// The saved-instance list last pushed, and whether the server had answered — the pair
+    /// `UPDATE_INSTANCE_INFO` fires on.
+    saved: Vec<SavedInstanceInfo>,
+    saved_seen: bool,
+    /// The ready-check ticket last seen ([`GroupState::ready_check`]).
+    ready_check: u32,
 }
 
 const PARTY_TOKENS: [&str; 4] = ["party1", "party2", "party3", "party4"];
+
+/// `raid1`..`raid40` — the unit tokens the RaidFrame's rows target, tooltip and re-read levels
+/// through. Spelled out rather than `format!`ed per push: [`UiScript::set_unit`] wants a `&str`,
+/// and a table of forty `&'static str` costs nothing where forty `String`s per roster change
+/// would (decision 1549). `MAX_RAID_MEMBERS` is the reference's own 40.
+#[rustfmt::skip]
+const RAID_TOKENS: [&str; 40] = [
+    "raid1", "raid2", "raid3", "raid4", "raid5", "raid6", "raid7", "raid8", "raid9", "raid10",
+    "raid11", "raid12", "raid13", "raid14", "raid15", "raid16", "raid17", "raid18", "raid19",
+    "raid20", "raid21", "raid22", "raid23", "raid24", "raid25", "raid26", "raid27", "raid28",
+    "raid29", "raid30", "raid31", "raid32", "raid33", "raid34", "raid35", "raid36", "raid37",
+    "raid38", "raid39", "raid40",
+];
 
 /// `GROUPTYPE_RAID` — `SMSG_GROUP_LIST`'s first byte (`0` party, `1` raid; vmangos `Group.h:116`).
 const GROUPTYPE_RAID: u8 = 1;
@@ -69,6 +96,10 @@ pub(super) fn feed_party(
     // the instruments, and naming it from a game module would push it across the world-API wall
     // (`tests/world_api_wall.rs`, decision 1164) for a value this already answers.
     here: benilla_world::world_point::WorldPoint,
+    // `Map.dbc`'s display names — `SMSG_RAID_INSTANCE_INFO` carries a map id and the Raid Info
+    // panel shows a name (decision 1549). `Option` like every other catalog here: an engine-less
+    // harness has none, and a lockout then shows its map id, never a blank row.
+    map_catalog: Option<Res<benilla_assets::MapCatalogRes>>,
     mut fed: Local<crate::ui_script::VmMemo<FedParty>>,
 ) {
     let Some(mut script) = script else {
@@ -87,6 +118,7 @@ pub(super) fn feed_party(
     let stores_removed = !removed_stores.is_empty();
     let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
     let areas_changed = areas.as_ref().is_some_and(|r| r.is_changed());
+    let maps_changed = map_catalog.as_ref().is_some_and(|r| r.is_changed());
     gate::trace(
         "feed_party",
         &[
@@ -99,6 +131,7 @@ pub(super) fn feed_party(
             ("removed", stores_removed),
             ("factions", factions_changed),
             ("areas", areas_changed),
+            ("maps", maps_changed),
         ],
     );
     let gate = gate::Gate::new(
@@ -110,7 +143,8 @@ pub(super) fn feed_party(
             || stores_changed
             || stores_removed
             || factions_changed
-            || areas_changed,
+            || areas_changed
+            || maps_changed,
     );
     removed_stores.clear();
     if gate.skip() {
@@ -178,6 +212,7 @@ pub(super) fn feed_party(
         level: store.0.unit_level().unwrap_or(0),
         area: here.area(),
         dead: store.0.unit_is_dead(),
+        class: store.0.unit_class(),
     });
     let zone_name = |area: u32| {
         let areas = areas.as_ref()?;
@@ -190,6 +225,12 @@ pub(super) fn feed_party(
             .map(str::to_string)
     };
     let raid = raid_roster(&group, me.as_ref(), &names, &zone_name);
+    // The `RAID_ROSTER_UPDATE` key, taken before the roster moves into the snapshot below (the
+    // fire site further down carries why it is these four fields).
+    let raid_key: Vec<(u64, u32, u32, bool)> = raid
+        .iter()
+        .map(|r| (r.guid, r.rank, r.subgroup, r.online))
+        .collect();
 
     let fresh = PartyState {
         members,
@@ -228,6 +269,60 @@ pub(super) fn feed_party(
         }
     }
 
+    // ── raid1..raid40 (decision 1549) ──────────────────────────────────────────────────────
+    //
+    // The RaidFrame's rows carry a `raid<N>` token and use it for everything a party row uses a
+    // `party<N>` token for: left-click targets it, the tooltip reads it, and the reference's own
+    // `UNIT_LEVEL`/`UNIT_HEALTH` handlers re-read the row it names. The token index is the
+    // GetRaidRosterInfo row index — `raid_row_guids`' order, the one place that is decided — so
+    // `raid7` and `GetRaidRosterInfo(7)` can never be two different people.
+    //
+    // Row 1 is US, and our snapshot comes off our own descriptor rather than the roster: the wire
+    // list never contains the recipient, so there is no `GroupMemberEntry` to build it from.
+    let raid_guids = raid_row_guids(&group, self_guid);
+    fed.raid_units.resize(RAID_TOKENS.len(), None);
+    for (i, token) in RAID_TOKENS.iter().enumerate() {
+        let snap = raid_guids.get(i).and_then(|guid| {
+            if Some(*guid) == self_guid {
+                let (_, store) = self_pair?;
+                let name = names.peek(*guid).map(str::to_string);
+                let mut s = crate::ui_unit::snapshot(store, name, 0);
+                s.is_player = true;
+                s.guid = *guid;
+                s.raid_target = group.raid_target_index(*guid);
+                s.faction_group = own_group.clone();
+                // A raid member is a same-faction friendly player, exactly as `member_unit_state`
+                // holds for the others — the popup's cooperate gates read it.
+                s.reaction = 5;
+                s.is_connected = true;
+                Some(s)
+            } else {
+                let m = group.members.iter().find(|m| m.guid == *guid)?;
+                Some(member_unit_state(
+                    m,
+                    group.stats.get(guid),
+                    &group,
+                    &index,
+                    &stores,
+                    own_group.clone(),
+                ))
+            }
+        });
+        if fed.raid_units[i] != snap {
+            gate.audit("feed_party", "a raid-token snapshot");
+            script.set_unit(token, snap.clone());
+            if let Some(cur) = &snap {
+                crate::ui_unit::fire_transitions(
+                    &mut script,
+                    token,
+                    fed.raid_units[i].as_ref(),
+                    cur,
+                );
+            }
+            fed.raid_units[i] = snap;
+        }
+    }
+
     // The party events, on edges.
     let roster: Vec<u64> = group.members.iter().map(|m| m.guid).collect();
     if roster != fed.roster {
@@ -245,6 +340,72 @@ pub(super) fn feed_party(
         script.fire_event("PARTY_LOOT_METHOD_CHANGED", vec![]);
         fed.loot = group.loot;
     }
+    // ── RAID_ROSTER_UPDATE (decision 1549) ──────────────────────────────────────────────────
+    //
+    // Fired on the roster's IDENTITY moving — who is in it, in what order, at what rank, in which
+    // subgroup, online or not — and NOT on the whole row. That split is the reference's own, read
+    // off its consumers rather than guessed: `RaidGroupFrame_OnEvent` re-reads a member's LEVEL
+    // from `UNIT_LEVEL` and their dead colour from `UNIT_HEALTH`, so those two fields are
+    // expected to move *without* this event, and firing on them would make the whole raid pane
+    // repaint every time somebody took damage.
+    //
+    // The exact fire SITE is not pinned to bytes. wow-re has the event (FrameScript id `0x1f3`,
+    // its name slot `0xbe1964`) and the raid-roster TU that owns the neighbouring lines
+    // (`0x4ba220`/`0x4ba550`, `object-layer/scratch/party-group-wire.md`), but nobody has carved
+    // which of that TU's arms signal it. What IS constrained: `SMSG_GROUP_LIST` is the only
+    // packet that can move any of these four fields, and the reference's RaidFrame repaints on
+    // this event and on `PARTY_MEMBERS_CHANGED` alike — so a client that fires it on every
+    // identity change of the roster cannot show a stale pane, whatever the extra arms turn out to
+    // be. INFERRED, and named as such rather than left to be discovered from a bug.
+    if raid_key != fed.raid_key {
+        gate.audit("feed_party", "the raid-roster edge");
+        fed.raid_key = raid_key;
+        script.fire_event("RAID_ROSTER_UPDATE", vec![]);
+    }
+
+    // ── READY_CHECK (decision 1549) ─────────────────────────────────────────────────────────
+    //
+    // The reference's event `0x218`, fired by the `MSG_RAID_READY_CHECK` open handler
+    // (`0x4ba360` — wow-re `system/ui/ui.md`, "Raid target icons + ready check"), which is also
+    // where its 30 s deadline is armed (`0xb713f4 = clock + 0x7530`). UIParent registers it and
+    // calls `ShowReadyCheck()`; the countdown itself is the popup's own OnUpdate, so the deadline
+    // is Lua-side here rather than a second clock in Rust.
+    if group.ready_check != fed.ready_check {
+        gate.audit("feed_party", "the ready-check edge");
+        fed.ready_check = group.ready_check;
+        // Not on the first observation after a VM reset: `ready_check` is a session counter and a
+        // fresh VM starting at 0 against a live 3 would pop a popup for a check that ended.
+        if !vm_reset {
+            script.fire_event("READY_CHECK", vec![]);
+        }
+    }
+
+    // ── UPDATE_INSTANCE_INFO (decision 1549) ────────────────────────────────────────────────
+    //
+    // The saved-lockout list, pushed with its map names already resolved (the wire carries
+    // `Map.dbc` ids; a missing catalog degrades to the id rather than to a blank row). The event
+    // fires on the list OR on the "server has answered" flag moving, because the reference's
+    // Raid Info button is enabled off exactly that second fact.
+    let saved: Vec<SavedInstanceInfo> = group
+        .saved_instances
+        .iter()
+        .map(|e| SavedInstanceInfo {
+            name: map_catalog
+                .as_ref()
+                .and_then(|c| c.0.name(e.map))
+                .map_or_else(|| e.map.to_string(), str::to_string),
+            instance: e.instance,
+            reset: e.reset,
+        })
+        .collect();
+    if saved != fed.saved || group.saved_instances_seen != fed.saved_seen {
+        gate.audit("feed_party", "the saved-instance edge");
+        fed.saved = saved.clone();
+        fed.saved_seen = group.saved_instances_seen;
+        script.set_saved_instances(saved);
+        script.fire_event("UPDATE_INSTANCE_INFO", vec![]);
+    }
+
     if group.pending_invite != fed.invite {
         gate.audit("feed_party", "the invite edge");
         match &group.pending_invite {
@@ -274,6 +435,87 @@ pub(super) struct RaidSelf {
     /// deliberately `unit_is_dead` rather than `unit_reads_dead`, so a feigning hunter does not
     /// take the arm a health test would not.
     pub(super) dead: bool,
+    /// **Our own `UNIT_FIELD_BYTES_0` class byte**, and it has to come from the descriptor rather
+    /// than from the name cache the way everyone else's does (decision 1549).
+    ///
+    /// `NameCache::player_traits` is filled by `SMSG_NAME_QUERY_RESPONSE`, and **we never query
+    /// ourselves**: the login seeds our own name with `traits: None` precisely so `"player"` needs
+    /// no round trip (`net::apply::session::connected`). So for our own row that lookup is `None`
+    /// *forever*, which painted the local player's raid row with no class column and the plain
+    /// font colour instead of their class's — caught in a live `/partytest raid` run, invisible to
+    /// every unit test because the fixtures seed the traits by hand.
+    ///
+    /// The descriptor is the right source anyway: it is where `"player"`'s own snapshot reads
+    /// class from (`ui_unit::snapshot`), and it is correct the instant the object lands.
+    pub(super) class: Option<u8>,
+}
+
+/// The raid roster's ROW ORDER, as guids — **the one place the array's shape is decided**.
+///
+/// [`raid_roster`] fills the rows and the RaidFrame's drag/kick/menu paths address them by index,
+/// and those two must never disagree about which player row 7 is: an off-by-one here kicks the
+/// wrong person. So both read this, and the ordering law lives in one function — self first (the
+/// wire's list excludes the recipient; [`raid_roster`]'s doc carries why that position is not
+/// itself derived), then the wire's own member order.
+///
+/// Empty outside a raid, which is what makes every raid-index verb a no-op in a plain party.
+pub(crate) fn raid_row_guids(group: &GroupState, self_guid: Option<u64>) -> Vec<u64> {
+    if group.group_type != GROUPTYPE_RAID {
+        return Vec::new();
+    }
+    self_guid
+        .into_iter()
+        .chain(group.members.iter().map(|m| m.guid))
+        .collect()
+}
+
+/// A raid row index (1-based, the Lua scale) → the guid it names, or `None` for a row that is not
+/// there. Every raid-management verb goes through this, so "index 0", "index 500" and "not in a
+/// raid" all collapse to the same quiet no-op the reference's own bindings produce.
+fn raid_guid_at(group: &GroupState, self_guid: Option<u64>, index: u32) -> Option<u64> {
+    let rows = raid_row_guids(group, self_guid);
+    rows.get(usize::try_from(index).ok()?.checked_sub(1)?)
+        .copied()
+}
+
+/// A guid → the character name the wire wants for the by-name group opcodes. Ours comes from the
+/// name cache (we are never in our own roster list); everyone else's is on the roster itself.
+fn raid_name_of(
+    group: &GroupState,
+    self_guid: Option<u64>,
+    names: &NameCache,
+    guid: u64,
+) -> Option<String> {
+    if Some(guid) == self_guid {
+        return names.peek(guid).map(str::to_string);
+    }
+    group
+        .members
+        .iter()
+        .find(|m| m.guid == guid)
+        .map(|m| m.name.clone())
+}
+
+/// A character name → the guid the guid-bodied opcodes want (`CMSG_GROUP_SET_LEADER`,
+/// `CMSG_GROUP_ASSISTANT_LEADER`). UnitPopup addresses raid rows by NAME, and the wire wants a
+/// guid for exactly two of the four rank verbs, so the walk back happens here rather than in Lua.
+/// Case-insensitive, like every other name compare against the roster.
+fn raid_guid_for_name(
+    group: &GroupState,
+    self_guid: Option<u64>,
+    names: &NameCache,
+    name: &str,
+) -> Option<u64> {
+    if let Some(g) = self_guid {
+        if names.peek(g).is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+            return Some(g);
+        }
+    }
+    group
+        .members
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case(name))
+        .map(|m| m.guid)
 }
 
 /// Build `GetRaidRosterInfo`'s array (decision 0434 §6's roster, wow-re
@@ -310,16 +552,18 @@ fn raid_roster(
             0
         }
     };
+    // The class BYTE, resolved to its (display name, token) pair. Two sources, because the client
+    // has two: everyone else's rides `SMSG_NAME_QUERY_RESPONSE` into the name cache, and our own
+    // comes off our descriptor ([`RaidSelf::class`] carries why).
     let row = |guid: u64,
                name: String,
                flags: u8,
                level: u32,
                zone: Option<String>,
                online: bool,
-               ninth: bool| {
-        let class = names
-            .player_traits(guid)
-            .and_then(|(_, class, _)| crate::ui_unit::class_names(class));
+               ninth: bool,
+               class_byte: Option<u8>| {
+        let class = class_byte.and_then(crate::ui_unit::class_names);
         RaidMemberInfo {
             name,
             guid,
@@ -346,6 +590,7 @@ fn raid_roster(
             me.area.and_then(zone_name),
             true,
             me.dead,
+            me.class,
         ));
     }
     for m in &group.members {
@@ -365,6 +610,7 @@ fn raid_roster(
             // is the corroboration recorded on `RaidMemberInfo::ninth` — an offline dead member
             // answers nil there, and reproducing the conjunction is the point.
             online && m.status & member_status::DEAD != 0,
+            names.player_traits(m.guid).map(|(_, class, _)| class),
         ));
     }
     roster
@@ -562,6 +808,79 @@ pub(super) fn drain_party(
                     threshold,
                 });
             }
+            // ── The raid-management verbs (decision 1549) ────────────────────────────────────
+            //
+            // Three address forms meet one wire here (see `script::party`'s module doc): the
+            // RaidFrame hands us raid ROW INDICES, UnitPopup hands us NAMES, and the wire wants
+            // whichever of name/guid vmangos declared per opcode. Every resolution failure is a
+            // quiet no-op — the reference's bindings marshal and send, and a row that is not
+            // there produces no packet rather than an error line.
+            PartyRequest::ConvertToRaid => {
+                let _ = commands.0.send(ClientCommand::GroupRaidConvert);
+            }
+            PartyRequest::SetSubgroup { index, group: sub } => {
+                // The Lua scale is 1..8 and the wire's is 0..7 (`SMSG_GROUP_LIST`'s own flag bits
+                // 0-2, vmangos `Group.cpp:158`). Out-of-range subgroups are dropped rather than
+                // wrapped: an 8-value field with a 3-bit home is exactly where a silent modulo
+                // would move somebody into the wrong raid group.
+                let Some(sub) = (1..=8).contains(&sub).then(|| (sub - 1) as u8) else {
+                    continue;
+                };
+                let Some(name) = raid_guid_at(&group, self_guid, index)
+                    .and_then(|g| raid_name_of(&group, self_guid, &names, g))
+                else {
+                    continue;
+                };
+                let _ = commands
+                    .0
+                    .send(ClientCommand::GroupChangeSubGroup { name, group: sub });
+            }
+            PartyRequest::SwapSubgroup { index, other } => {
+                let pair = raid_guid_at(&group, self_guid, index)
+                    .zip(raid_guid_at(&group, self_guid, other))
+                    .and_then(|(a, b)| {
+                        Some((
+                            raid_name_of(&group, self_guid, &names, a)?,
+                            raid_name_of(&group, self_guid, &names, b)?,
+                        ))
+                    });
+                if let Some((name, other)) = pair {
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::GroupSwapSubGroup { name, other });
+                }
+            }
+            PartyRequest::PromoteName(name) => {
+                if let Some(guid) = raid_guid_for_name(&group, self_guid, &names, &name) {
+                    let _ = commands.0.send(ClientCommand::GroupSetLeader { guid });
+                }
+            }
+            PartyRequest::AssistantLeader { name, grant } => {
+                if let Some(guid) = raid_guid_for_name(&group, self_guid, &names, &name) {
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::GroupAssistantLeader { guid, grant });
+                }
+            }
+            PartyRequest::UninviteRaid(index) => {
+                // `CMSG_GROUP_UNINVITE` takes a NAME even though a `_GUID` twin exists; the ref's
+                // party path already uses the name form, and one form for both keeps the server's
+                // "not in your party" reply meaning the same thing on either.
+                if let Some(name) = raid_guid_at(&group, self_guid, index)
+                    .and_then(|g| raid_name_of(&group, self_guid, &names, g))
+                {
+                    let _ = commands.0.send(ClientCommand::GroupUninvite { name });
+                }
+            }
+            PartyRequest::ReadyCheckStart => {
+                let _ = commands.0.send(ClientCommand::ReadyCheckStart);
+            }
+            PartyRequest::ReadyCheckAnswer(ready) => {
+                let _ = commands.0.send(ClientCommand::ReadyCheckAnswer { ready });
+            }
+            PartyRequest::RequestRaidInfo => {
+                let _ = commands.0.send(ClientCommand::RequestRaidInfo);
+            }
         }
     }
 }
@@ -658,7 +977,107 @@ fn test_apply_local(
             }
             true
         }
+        // ── The raid verbs, sandboxed (decision 1549) ─────────────────────────────────────────
+        //
+        // These are the whole reason `/raidtest` can be a look-pass instrument rather than a
+        // still photograph: the drag really moves someone, Ready Check really opens the popup,
+        // and the kick really empties a slot — through the same Lua the live client runs, with
+        // this standing in for the server echo. A raid needs 40 accounts otherwise.
+        PartyRequest::ConvertToRaid => {
+            group.group_type = 1;
+            true
+        }
+        PartyRequest::SetSubgroup { index, group: sub } => {
+            if (1..=8).contains(sub) {
+                set_test_subgroup(group, self_guid, *index, (*sub - 1) as u8);
+            }
+            true
+        }
+        PartyRequest::SwapSubgroup { index, other } => {
+            let a = test_subgroup_of(group, self_guid, *index);
+            let b = test_subgroup_of(group, self_guid, *other);
+            if let (Some(a), Some(b)) = (a, b) {
+                set_test_subgroup(group, self_guid, *index, b);
+                set_test_subgroup(group, self_guid, *other, a);
+            }
+            true
+        }
+        PartyRequest::UninviteRaid(index) => {
+            // Row 1 is us; "kick yourself" is not a thing the server would do either.
+            if let Some(guid) =
+                raid_guid_at(group, self_guid, *index).filter(|g| Some(*g) != self_guid)
+            {
+                group.members.retain(|m| m.guid != guid);
+                group.stats.remove(&guid);
+            }
+            true
+        }
+        PartyRequest::PromoteName(name) => {
+            if let Some(m) = group
+                .members
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(name))
+            {
+                group.leader = m.guid;
+            }
+            true
+        }
+        PartyRequest::AssistantLeader { name, grant } => {
+            if let Some(m) = group
+                .members
+                .iter_mut()
+                .find(|m| m.name.eq_ignore_ascii_case(name))
+            {
+                if *grant {
+                    m.flags |= GROUP_MEMBER_ASSISTANT;
+                } else {
+                    m.flags &= !GROUP_MEMBER_ASSISTANT;
+                }
+            }
+            true
+        }
+        PartyRequest::ReadyCheckStart => {
+            // The echo a real server sends back to the whole raid, us included — which is what
+            // makes the popup appear for the person who pressed the button.
+            group.apply_ready_check();
+            true
+        }
+        PartyRequest::RequestRaidInfo => {
+            // `/raidtest` seeds the lockouts up front; the ask just marks them answered.
+            group.saved_instances_seen = true;
+            true
+        }
         _ => false,
+    }
+}
+
+/// `/raidtest`'s subgroup read: the 0-based subgroup bits of the raid row `index` names (`None`
+/// for a row that is not there). Our own row lives in `own_flags`, everyone else's in their
+/// roster entry — the same split the wire has.
+fn test_subgroup_of(group: &GroupState, self_guid: Option<u64>, index: u32) -> Option<u8> {
+    let guid = raid_guid_at(group, self_guid, index)?;
+    if Some(guid) == self_guid {
+        return Some(group.own_flags & GROUP_MEMBER_SUBGROUP);
+    }
+    group
+        .members
+        .iter()
+        .find(|m| m.guid == guid)
+        .map(|m| m.flags & GROUP_MEMBER_SUBGROUP)
+}
+
+/// `/raidtest`'s subgroup write ([`test_subgroup_of`]'s twin) — bits 0-2 only, so the assistant
+/// flag riding the same byte survives a move.
+fn set_test_subgroup(group: &mut GroupState, self_guid: Option<u64>, index: u32, sub: u8) {
+    let Some(guid) = raid_guid_at(group, self_guid, index) else {
+        return;
+    };
+    let put =
+        |flags: &mut u8| *flags = (*flags & !GROUP_MEMBER_SUBGROUP) | (sub & GROUP_MEMBER_SUBGROUP);
+    if Some(guid) == self_guid {
+        put(&mut group.own_flags);
+    } else if let Some(m) = group.members.iter_mut().find(|m| m.guid == guid) {
+        put(&mut m.flags);
     }
 }
 
@@ -753,6 +1172,136 @@ pub(crate) fn synthetic_roster(
     lines
 }
 
+/// The `/partytest raid` instrument (decision 1549) — [`synthetic_roster`]'s raid twin, and the
+/// only way the Raid tab's grid is eyeballable without forty accounts.
+///
+/// 24 synthetic members across subgroups 1-5 plus us in group 1 = a 25-row raid: every colour the
+/// pane can paint is on screen at once (eight class colours, one dead member in red, one offline
+/// in grey), one assistant carries the `(A)` token and we carry `(L)`, and **we lead**, so Convert
+/// To Raid is correctly hidden, Ready Check and Add Member are live, and a drag really moves
+/// somebody (the sandbox drain applies the subgroup verbs locally — [`test_apply_local`]).
+///
+/// The names go into the NAME CACHE with race/class traits, because the raid roster resolves a
+/// member's class from there rather than from the wire ([`raid_roster`]): without that seeding the
+/// grid would paint 25 white rows with an empty class column, which is precisely the thing the
+/// instrument exists to let someone look at.
+///
+/// Two fake lockouts are seeded too, so the Raid Info panel has rows.
+pub(crate) fn synthetic_raid(
+    group: &mut GroupState,
+    names: &mut NameCache,
+    self_guid: Option<u64>,
+) -> Vec<String> {
+    // (name, class id, race id) — `benilla-formats`' own `ChrClasses`/`ChrRaces` ids, the pair
+    // `NameCache::player_traits` hands `ui_unit::class_names`. Eight classes so every colour in
+    // `RAID_CLASS_COLORS` shows; the races are Alliance-side and cosmetic here.
+    const ROSTER: [(&str, u8, u8); 24] = [
+        ("Alaric", 1, 1),  // Warrior
+        ("Brienne", 2, 1), // Paladin
+        ("Cassian", 3, 3), // Hunter
+        ("Dara", 4, 4),    // Rogue
+        ("Elowen", 5, 1),  // Priest
+        ("Fenwick", 7, 3), // Shaman — Horde-only in 1.12; the pane does not care and the
+        ("Gwendal", 8, 7), // colour is the point
+        ("Halvard", 9, 1), // Warlock
+        ("Isolde", 11, 4), // Druid
+        ("Jorund", 1, 3),
+        ("Kestrel", 4, 4),
+        ("Lysa", 5, 4),
+        ("Mordred", 9, 1),
+        ("Nessa", 8, 7),
+        ("Oswin", 2, 1),
+        ("Perrin", 3, 4),
+        ("Quilla", 11, 4),
+        ("Roderick", 1, 1),
+        ("Sable", 4, 4),
+        ("Tarrin", 5, 3),
+        ("Ulric", 2, 1),
+        ("Vesper", 8, 7),
+        ("Wystan", 9, 1),
+        ("Yorick", 3, 3),
+    ];
+    let mut members = Vec::with_capacity(ROSTER.len());
+    for (i, (name, class, race)) in ROSTER.iter().enumerate() {
+        let guid = 0xF100 + i as u64;
+        // Subgroups 1-5, five to a group — but we occupy one seat of group 1, so the first four
+        // fill it and the rest lay out five apiece. `i / 5` on 24 members lands 4/5/5/5/5.
+        let subgroup = ((i + 1) / 5) as u8 & GROUP_MEMBER_SUBGROUP;
+        let mut status = member_status::ONLINE;
+        let mut flags = subgroup;
+        match i {
+            // One assistant (the `(A)` token), one dead (red), one offline (grey), one AFK.
+            0 => flags |= GROUP_MEMBER_ASSISTANT,
+            3 => status |= member_status::DEAD,
+            7 => status = member_status::OFFLINE,
+            12 => status |= member_status::AFK,
+            _ => {}
+        }
+        names.insert_player(guid, (*name).to_string(), Some((*race, *class, 0)));
+        members.push(GroupMemberEntry {
+            name: (*name).to_string(),
+            guid,
+            status,
+            flags,
+        });
+    }
+    // groupType 1 = raid, and the leader is US: `apply_list` takes the leader guid, and passing
+    // our own makes `IsRaidLeader()` true so the leader-only surface is live.
+    let leader = self_guid.unwrap_or(0);
+    let lines = group.apply_list(
+        1,
+        0, // our own flags: subgroup 1 (0-based 0), no assistant bit — we are the leader
+        members,
+        leader,
+        Some(GroupLootInfo {
+            method: 2,
+            master: leader,
+            threshold: 3,
+        }),
+    );
+    // Levels and health, so the level column is not 25 blanks and the merged view has something
+    // to show. Every member is out of streaming range by construction (fake guids), so this is
+    // the `PARTY_MEMBER_STATS` leg — the same one a real raid spread over an instance uses.
+    for (i, _) in ROSTER.iter().enumerate() {
+        let guid = 0xF100 + i as u64;
+        let dead = i == 3;
+        group.apply_stats(
+            guid,
+            true,
+            PartyMemberStatsInfo {
+                status: None,
+                cur_hp: Some(if dead {
+                    0
+                } else {
+                    2100 + (i as u16 * 37) % 900
+                }),
+                max_hp: Some(3000),
+                level: Some(58 + (i as u16 % 3)),
+                power_type: Some(0),
+                cur_power: Some(1200),
+                max_power: Some(2400),
+                ..Default::default()
+            },
+        );
+    }
+    // Two lockouts for the Raid Info panel: Molten Core (map 409) and Onyxia's Lair (249).
+    group.apply_raid_instance_info(vec![
+        benilla_protocol::messages::RaidInstanceEntry {
+            map: 409,
+            reset: 3 * 86_400 + 7_200,
+            instance: 1234,
+        },
+        benilla_protocol::messages::RaidInstanceEntry {
+            map: 249,
+            reset: 14_400,
+            instance: 77,
+        },
+    ]);
+    // Sandbox on, after `apply_list` cleared it (the wire-wins default) — see [`synthetic_roster`].
+    group.test = true;
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,7 +1383,12 @@ mod tests {
     #[test]
     fn the_raid_roster_maps_the_wire_to_get_raid_roster_info() {
         let mut names = NameCache::default();
-        names.insert_player(0x5E1F, "Me".into(), Some((4, 11, 0))); // Night Elf DRUID
+        // **Our own row has NO traits in the cache, and that is the live shape, not a gap in the
+        // fixture** (decision 1549): the login seeds our name with `traits: None` so `"player"`
+        // never needs a name query, so `player_traits(self)` is None forever. This used to be
+        // `Some((4, 11, 0))` here, which is why the local player's raid row shipped colourless —
+        // the fixture was seeding a packet the client never sends itself.
+        names.insert_player(0x5E1F, "Me".into(), None);
         names.insert_player(0xA11CE, "Alice".into(), Some((1, 1, 1))); // Human WARRIOR
         names.insert_player(0xB0B, "Bob".into(), None); // no traits yet
 
@@ -876,12 +1430,14 @@ mod tests {
             level: 60,
             area: Some(1537),
             dead: false,
+            // Off our DESCRIPTOR, which is the only source that has it for us. 11 = Druid.
+            class: Some(11),
         };
 
         let roster = raid_roster(&group, Some(&me), &names, &zone);
         assert_eq!(roster.len(), 3, "the player is spliced back in");
 
-        // Row 1 — us. Leader (rank 2), subgroup stored 0, class from our own name-query traits.
+        // Row 1 — us. Leader (rank 2), subgroup stored 0, and the class off the DESCRIPTOR.
         assert_eq!(roster[0].name, "Me");
         assert_eq!(roster[0].rank, 2);
         assert_eq!(
@@ -910,5 +1466,150 @@ mod tests {
         // while `IsRaidLeader()` still answers 1 — the pair that surprises people.
         group.group_type = 0;
         assert!(raid_roster(&group, Some(&me), &names, &zone).is_empty());
+    }
+
+    /// The row ORDER, and the two resolutions every raid verb goes through (decision 1549).
+    ///
+    /// This is the off-by-one that kicks the wrong person, so it is asserted against the same
+    /// helper `raid_roster` fills its array from — the whole reason that helper exists rather than
+    /// each site re-deriving "self first, then the wire's order".
+    #[test]
+    fn a_raid_row_index_names_the_same_player_the_roster_array_does() {
+        let mut group = GroupState {
+            group_type: GROUPTYPE_RAID,
+            ..Default::default()
+        };
+        let wire = |name: &str, guid: u64| GroupMemberEntry {
+            name: name.into(),
+            guid,
+            status: member_status::ONLINE,
+            flags: 0,
+        };
+        group.members = vec![wire("Alice", 0xA11CE), wire("Bob", 0xB0B)];
+        let me = Some(0x5E1Fu64);
+
+        assert_eq!(raid_row_guids(&group, me), vec![0x5E1F, 0xA11CE, 0xB0B]);
+        assert_eq!(raid_guid_at(&group, me, 1), Some(0x5E1F), "row 1 is us");
+        assert_eq!(raid_guid_at(&group, me, 3), Some(0xB0B));
+        for miss in [0, 4, 500] {
+            assert_eq!(
+                raid_guid_at(&group, me, miss),
+                None,
+                "index {miss} names nobody"
+            );
+        }
+
+        // Names: ours comes from the cache (we are never in our own roster list), everyone
+        // else's from the roster row.
+        let mut names = NameCache::default();
+        names.insert_player(0x5E1F, "Sam".into(), None);
+        assert_eq!(
+            raid_name_of(&group, me, &names, 0x5E1F).as_deref(),
+            Some("Sam")
+        );
+        assert_eq!(
+            raid_name_of(&group, me, &names, 0xA11CE).as_deref(),
+            Some("Alice")
+        );
+        assert_eq!(raid_name_of(&group, me, &names, 0xDEAD), None);
+
+        // And the walk back, which the two guid-bodied opcodes need. Case-insensitive.
+        assert_eq!(
+            raid_guid_for_name(&group, me, &names, "alice"),
+            Some(0xA11CE)
+        );
+        assert_eq!(raid_guid_for_name(&group, me, &names, "SAM"), Some(0x5E1F));
+        assert_eq!(raid_guid_for_name(&group, me, &names, "Nobody"), None);
+
+        // Outside a raid every one of them is empty — which is what makes a raid verb typed in a
+        // party a quiet no-op rather than a packet about the wrong player.
+        group.group_type = 0;
+        assert!(raid_row_guids(&group, me).is_empty());
+        assert_eq!(raid_guid_at(&group, me, 1), None);
+    }
+
+    /// `/partytest raid`'s sandbox half: the subgroup verbs land on the local mirror the way the
+    /// server echo would, and the assistant bit sharing the byte survives a move.
+    #[test]
+    fn the_sandbox_moves_and_swaps_subgroups_locally() {
+        let mut group = GroupState::default();
+        let me = Some(0x5E1Fu64);
+        let mut names = NameCache::default();
+        names.insert_player(0x5E1F, "Sam".into(), None);
+        synthetic_raid(&mut group, &mut names, me);
+        assert!(group.test, "the synthetic raid arms the sandbox");
+        assert_eq!(group.group_type, GROUPTYPE_RAID);
+
+        // Row 2 is the first wire member, and `synthetic_raid` gives it the assistant bit.
+        assert_eq!(test_subgroup_of(&group, me, 2), Some(0));
+        assert!(group.members[0].flags & GROUP_MEMBER_ASSISTANT != 0);
+
+        // Move it to subgroup 8 (Lua) = 7 (wire).
+        assert!(test_apply_local(
+            &mut group,
+            &PartyRequest::SetSubgroup { index: 2, group: 8 },
+            me,
+            None
+        ));
+        assert_eq!(test_subgroup_of(&group, me, 2), Some(7));
+        assert!(
+            group.members[0].flags & GROUP_MEMBER_ASSISTANT != 0,
+            "the assistant bit rides the same byte and must survive the move"
+        );
+
+        // Swap it with row 1 — us, whose subgroup lives in `own_flags` rather than in the list.
+        let mine = test_subgroup_of(&group, me, 1).unwrap();
+        assert!(test_apply_local(
+            &mut group,
+            &PartyRequest::SwapSubgroup { index: 1, other: 2 },
+            me,
+            None
+        ));
+        assert_eq!(test_subgroup_of(&group, me, 1), Some(7));
+        assert_eq!(test_subgroup_of(&group, me, 2), Some(mine));
+
+        // An out-of-range subgroup is dropped, never wrapped into a 3-bit field.
+        assert!(test_apply_local(
+            &mut group,
+            &PartyRequest::SetSubgroup { index: 2, group: 9 },
+            me,
+            None
+        ));
+        assert_eq!(
+            test_subgroup_of(&group, me, 2),
+            Some(mine),
+            "9 is not a subgroup"
+        );
+
+        // Ready Check echoes back to us, which is what puts the popup on the asker's screen.
+        let before = group.ready_check;
+        assert!(test_apply_local(
+            &mut group,
+            &PartyRequest::ReadyCheckStart,
+            me,
+            None
+        ));
+        assert_eq!(group.ready_check, before + 1);
+
+        // And the kick empties a seat — but never our own row.
+        let n = group.members.len();
+        assert!(test_apply_local(
+            &mut group,
+            &PartyRequest::UninviteRaid(1),
+            me,
+            None
+        ));
+        assert_eq!(
+            group.members.len(),
+            n,
+            "row 1 is us; the server would refuse too"
+        );
+        assert!(test_apply_local(
+            &mut group,
+            &PartyRequest::UninviteRaid(3),
+            me,
+            None
+        ));
+        assert_eq!(group.members.len(), n - 1);
     }
 }

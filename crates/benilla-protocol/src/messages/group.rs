@@ -510,3 +510,46 @@ pub fn ready_check_start() -> Vec<u8> {
 pub fn ready_check_answer(ready: bool) -> Vec<u8> {
     vec![u8::from(ready)]
 }
+
+/// One row of `SMSG_RAID_INSTANCE_INFO` — a raid lockout the character is bound to (VERIFIED
+/// vmangos `Objects/Player.cpp::Player::SendRaidInfo`: the writer walks `m_boundInstances` and
+/// emits a row for every **permanent** bind, so a heroic-style temporary bind never appears).
+///
+/// `reset` is a REMAINING duration in seconds (`resetTime - time(nullptr)` on the server), not an
+/// absolute timestamp — the Lua binding hands it straight to `SecondsToTime`, and reading it as a
+/// timestamp would print "Resets in 57 years".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RaidInstanceEntry {
+    /// `Map.dbc` id — the *name* the UI shows is the client's own DBC lookup, never on the wire.
+    pub map: u32,
+    /// Seconds until the lockout resets.
+    pub reset: u32,
+    /// The instance id, which is what the UI shows beside the name (`GetSavedInstanceInfo`'s
+    /// second return).
+    pub instance: u32,
+}
+
+/// Read an `SMSG_RAID_INSTANCE_INFO` body (see [`RaidInstanceEntry`]): `u32 count` then that many
+/// 12-byte rows. The count is authoritative — the server writes it back over its placeholder — so
+/// a short body is a malformed packet rather than a silent truncation.
+pub(super) fn read_raid_instance_info(r: &mut &[u8]) -> io::Result<Vec<RaidInstanceEntry>> {
+    let count = read_u32_le(r)?;
+    // A cap before the allocation: `count` is attacker-controlled in the general case, and the
+    // real client's own list is `MAX_RAID_INFOS`-bounded at the UI. 1024 is far above anything a
+    // server can legitimately send and far below a memory problem.
+    let mut out = Vec::with_capacity((count as usize).min(1024));
+    for _ in 0..count {
+        out.push(RaidInstanceEntry {
+            map: read_u32_le(r)?,
+            reset: read_u32_le(r)?,
+            instance: read_u32_le(r)?,
+        });
+    }
+    Ok(out)
+}
+
+/// Body of `CMSG_REQUEST_RAID_INFO` (VERIFIED vmangos `Handlers/GroupHandler.cpp`'s
+/// `HandleRequestRaidInfoOpcode` — the handler reads nothing and answers `SendRaidInfo()`): empty.
+pub fn request_raid_info() -> Vec<u8> {
+    Vec::new()
+}

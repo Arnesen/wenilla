@@ -153,6 +153,10 @@ pub(super) struct ChatProbes<'w, 's> {
     /// The subject's [`benilla_protocol::EntityKind`] — the plate gate's own player test, so the
     /// diagnostic reports the branch the gate actually took rather than a second guess at it.
     kinds: Query<'w, 's, &'static crate::net::NetEntity>,
+    /// **`/partytest raid`** (decision 1549): the synthetic raid seats US as its leader, and
+    /// "leader" on this wire is a guid. Here rather than as a 17th drain parameter for the
+    /// reason this struct exists at all — the drain is at Bevy's 16-param ceiling.
+    self_guid: Res<'w, crate::net::SelfGuid>,
 }
 
 /// Everything the drain **queues into another subsystem's one setter** rather than applying itself,
@@ -210,6 +214,7 @@ pub(super) fn drain_chat_input(
         reputations,
         guids,
         kinds,
+        self_guid,
     } = &probes;
     let Some(mut script) = script else {
         return;
@@ -497,6 +502,16 @@ pub(super) fn drain_chat_input(
             }
             ParsedChat::PartyTest { arg } => match arg.as_str() {
                 "off" => group.clear_session(),
+                // The raid grid's instrument (decision 1549) — 25 synthetic rows, us leading.
+                "raid" => {
+                    for line in crate::ui_party::synthetic_raid(&mut group, &mut names, self_guid.0)
+                    {
+                        chat_log.push_event(super::event::ChatEvent::text_only(
+                            super::event::ChatEventKind::System,
+                            line,
+                        ));
+                    }
+                }
                 "invite" => group.pending_invite = Some("Partner".to_string()),
                 // Serverless mark eyeball: skull the current target on the LOCAL board (the
                 // real send round-trips through the server's echo, which /partytest lacks).

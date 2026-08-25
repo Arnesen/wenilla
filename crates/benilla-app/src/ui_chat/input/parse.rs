@@ -159,14 +159,17 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// opens the panel and fills its edit box, a bare `/ignore` opens the ignore list), and
     /// keeping them in the FrameXML is what stops that behaviour being re-derived here.
     Social { verb: SocialVerb, arg: String },
-    /// `/partytest [lead|invite|mark|off]` — the party-frame dev instrument (decision 0434, the
+    /// `/partytest [lead|raid|invite|mark|off]` — the party-frame dev instrument (decision 0434, the
     /// `/chattest` pattern): a synthetic roster through the real apply path (`lead` = the same
     /// roster with US leading, for the leader-only popup rows), a fake pending invite for the
     /// popup, a local skull on the current target (the mark renders without a server echo), or
     /// clear. While the roster is synthetic the drain runs in SANDBOX mode
     /// ([`crate::ui_party::GroupState::test`]): the popup's group-mutating rows — promote,
     /// kick, leave, loot settings, raid marks — apply to the local mirror, so the whole menu
-    /// surface is exercisable serverless.
+    /// surface is exercisable serverless. `raid` is the same idea one level out (decision 1549):
+    /// a synthetic 25-member RAID with us leading, which is the only way the Raid tab's 8×5 grid
+    /// is eyeballable without forty accounts — the drag, Ready Check and the kick all apply to
+    /// the local mirror there too.
     PartyTest { arg: String },
     /// `/target [name]` — select by name (`TargetByName`, decision 0886). Resolves creatures AND
     /// players, case-insensitively, by whole name or longest common prefix, with no range, cone,

@@ -958,6 +958,11 @@ pub enum ServerPacket {
         guid: u64,
         ready: u8,
     },
+    /// `SMSG_RAID_INSTANCE_INFO` — our saved raid lockouts, answering `CMSG_REQUEST_RAID_INFO`
+    /// (decision 1549). Empty is the ordinary answer for a character bound to nothing.
+    RaidInstanceInfo {
+        entries: Vec<super::group::RaidInstanceEntry>,
+    },
     /// `SMSG_DUEL_REQUESTED` — a duel challenge. Sent to challenger and challenged alike; which
     /// one we are is `challenger == our guid` (decision 0633).
     DuelRequested {
@@ -1404,6 +1409,7 @@ impl ServerPacket {
             ServerPacket::ReadyCheckRequest | ServerPacket::ReadyCheckAnswer { .. } => {
                 "MSG_RAID_READY_CHECK".into()
             }
+            ServerPacket::RaidInstanceInfo { .. } => "SMSG_RAID_INSTANCE_INFO".into(),
             ServerPacket::DuelRequested { .. } => "SMSG_DUEL_REQUESTED".into(),
             ServerPacket::DuelOutOfBounds => "SMSG_DUEL_OUTOFBOUNDS".into(),
             ServerPacket::DuelInBounds => "SMSG_DUEL_INBOUNDS".into(),

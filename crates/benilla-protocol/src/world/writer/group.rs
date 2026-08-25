@@ -154,4 +154,13 @@ impl WorldWriter {
             &messages::ready_check_answer(ready),
         )
     }
+
+    /// Ask for our saved-instance list (`CMSG_REQUEST_RAID_INFO`, empty body — decision 1549's
+    /// Raid Info panel). Answered by `SMSG_RAID_INSTANCE_INFO`.
+    pub fn request_raid_info(&mut self) -> Result<()> {
+        self.send(
+            opcode::CMSG_REQUEST_RAID_INFO,
+            &messages::request_raid_info(),
+        )
+    }
 }

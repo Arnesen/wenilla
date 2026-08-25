@@ -725,8 +725,8 @@ pub(super) fn clear_target_requests(
 /// ([`scan::commit`]) — the app half of the reference's `TargetUnit` Lua shim. Callers: the player
 /// frame's left-click (`TargetUnit("player")`) and the party frames' (`TargetUnit("partyN")`,
 /// decision 0434 phase 5). Only tokens resolving to a STREAMED unit act: `"player"` → our avatar;
-/// `"target"` → the current selection (a dedup no-op); `"partyN"` → that roster slot when its
-/// entity is in range (an out-of-range member needs the guid-only selection the phase-4
+/// `"target"` → the current selection (a dedup no-op); `"partyN"`/`"raidN"` → that roster slot
+/// when its entity is in range (an out-of-range member needs the guid-only selection the phase-4
 /// out-of-range slice owns — until then the click no-ops, like the real client on a nonexistent
 /// unit); `"pet"` → the bar's cached pet guid (decision 0990, the pet frame's left click).
 /// Everything else (mouseover/name) waits for its wire.
@@ -761,6 +761,20 @@ pub(super) fn target_unit_requests(
                 .then(|| index.0.get(&pet.spells.pet_guid))
                 .flatten()
                 .map(|&e| (e, pet.spells.pet_guid)),
+            // `raidN` before the `partyN` arm for the same reason the reference's own resolver
+            // orders `partypet` ahead of `party`: a prefix test that runs first wins. These are
+            // the RaidFrame rows' left-click (decision 1549); like a party slot, an out-of-range
+            // member no-ops until the guid-only selection lands.
+            t if t.starts_with("raid") => t
+                .strip_prefix("raid")
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|n| (1..=40).contains(n))
+                .and_then(|n| {
+                    crate::ui_party::raid_row_guids(&group, self_guid)
+                        .get(n - 1)
+                        .copied()
+                })
+                .and_then(|g| index.0.get(&g).map(|e| (*e, g))),
             t => t
                 .strip_prefix("party")
                 .and_then(|n| n.parse::<usize>().ok())

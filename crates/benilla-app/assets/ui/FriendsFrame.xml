@@ -24,11 +24,14 @@
             is the contract addons bind to — but the code is ours. It did not start that way: the
             guild landing transcribed those windows and said so here, which is the thing the hard
             rule forbids outright, so they were rewritten in our own terms (decision 1334).
-          · Tab 4 RAID is NOT built. The ref's RaidFrame is the party/raid management pane, and
-            decision 0434 §6 defers the raid UI wholesale; an empty fourth panel would read as a
-            bug, so the tab is absent until that arc lands. That is why `PanelTemplates_SetNumTabs`
-            says 3 where the ref says 4 — guild is tab 3 of 3 here, tab 3 of 4 there — and why
-            `FriendsFrame_Update`/`FRIENDSFRAME_SUBFRAMES` have no `selectedTab == 4` arm.
+          · Tab 4 RAID is LIVE (decision 1549). It lives in its own file, `RaidFrame.xml`, which
+            is the reference's own split — `RaidFrame` is a child of this window but a separate
+            FrameXML file there too — and it is loaded straight after this one, because a child
+            cannot be declared before its parent. This file owns only the tab: the button, the
+            `selectedTab == 4` arm, the subframe list entry, and the OnHide that shuts
+            RaidInfoFrame with the window. `PanelTemplates_SetNumTabs` now says 4, as the ref's
+            does. (It said 3 for as long as the pane did not exist, which was honest; the note
+            that stood here said "the tab is absent until that arc lands" — this is that arc.)
           · FOUNDING a guild is out of scope and deliberately so (1257's own boundary): no
             GuildRegistrar / PetitionFrame / TabardFrame, no charter or emblem path. Nothing in it
             is reachable until you are IN a guild, which is what this file now covers.
@@ -192,10 +195,16 @@
             { name = "Race", sortType = "race" },
         }
 
-        -- Ref FRIENDSFRAME_SUBFRAMES (l.24) less "RaidFrame", which this house does not build
-        -- (header SCOPE). Drives both `FriendsFrame_ShowSubFrame` and `FriendsFrame_OnHide`.
+        -- Ref FRIENDSFRAME_SUBFRAMES (l.24), now including "RaidFrame" (decision 1549). Drives
+        -- both `FriendsFrame_ShowSubFrame` and `FriendsFrame_OnHide`.
+        --
+        -- RaidFrame is declared in the NEXT file loaded, so at the moment this table is built the
+        -- name resolves to nothing. That is fine and is the reference's own situation twice over
+        -- (its RaidFrame.xml loads after this file; its raid GRID loads on demand, hours later):
+        -- the table holds NAMES, and every consumer resolves them through `getglobal` at call
+        -- time, by which point the window has been shown at least once and everything exists.
         BENILLA_FRIENDS_SUBFRAMES = {
-            "FriendsListFrame", "IgnoreListFrame", "WhoFrame", "GuildFrame",
+            "FriendsListFrame", "IgnoreListFrame", "WhoFrame", "GuildFrame", "RaidFrame",
         }
 
         -- Six of this window's buttons are live only while a row of the right kind is selected,
@@ -239,7 +248,10 @@
         -- The guild pane's three satellites are TOPLEVEL frames of their own rather than children
         -- of the pane, so nothing hides them implicitly — each has to be told. They are also
         -- mutually exclusive: opening any one shuts the other two, which is the same call with the
-        -- one being opened named. (RaidInfoFrame is the ref's fourth; no raid arc here.)
+        -- one being opened named. RaidInfoFrame is the ref's fourth and is NOT in this list, which
+        -- is the reference's own arrangement rather than an omission: it belongs to a different
+        -- tab, so it can never be on screen at the same time as any of these three. It is closed
+        -- by `FriendsFrame_OnHide` with everything else.
         BENILLA_GUILD_SATELLITES = {
             "GuildControlPopupFrame", "GuildMemberDetailFrame", "GuildInfoFrame",
         }
@@ -326,6 +338,17 @@
                 FriendsFrameTitleText:SetText(guildName)
                 FriendsFrame_ShowSubFrame("GuildFrame")
                 GuildStatus_Update()
+            elseif frame.selectedTab == 4 then
+                -- The raid pane (ref l.118-125, decision 1549). The only tab that reuses the
+                -- CHARACTER window's bottom art rather than art of its own — there is no
+                -- RaidFrame-BotLeft in the patch chain, because the pane is a grid on a plain
+                -- parchment rather than a list in a frame.
+                FriendsFrameTopLeft:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-TopLeft")
+                FriendsFrameTopRight:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-TopRight")
+                FriendsFrameBottomLeft:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-BottomLeft")
+                FriendsFrameBottomRight:SetTexture("Interface\PaperDollInfoFrame\UI-Character-General-BottomRight")
+                FriendsFrameTitleText:SetText(RAID)
+                FriendsFrame_ShowSubFrame("RaidFrame")
             end
         end
 
@@ -1230,7 +1253,7 @@
             -- THREE tabs, where the ref says four: benilla builds no RAID pane (header SCOPE), so
             -- guild is tab 3 of 3 here and tab 3 of 4 there. Everything else in this function is
             -- ref l.49-69.
-            PanelTemplates_SetNumTabs(this, 3)
+            PanelTemplates_SetNumTabs(this, 4)
             this.selectedTab = 1
             this.showFriendsList = 1
             this.selectedFriend = 0
@@ -1268,10 +1291,15 @@
             PlaySound("igMainMenuClose")
             -- Ref l.131-135: the three guild satellites are TOPLEVEL frames of their own, not
             -- children of the pane, so hiding the window does not hide them — each has to be told.
-            -- (RaidInfoFrame is the ref's fourth; no raid arc here.)
             SetGuildRosterSelection(0)
             GuildFrame.selectedGuildMember = 0
             BenillaGuild_HideSatellitesExcept()
+            -- RaidInfoFrame is the ref's fourth satellite (l.135, decision 1549). It is not in
+            -- BENILLA_GUILD_SATELLITES because it is not a guild one — nothing may hide it just
+            -- because a guild window opened — but the window closing does close it, and it is a
+            -- child of RaidFrame rather than a toplevel, so this is belt and braces the ref also
+            -- wears.
+            if RaidInfoFrame then RaidInfoFrame:Hide() end
             for i = 1, table.getn(BENILLA_FRIENDS_SUBFRAMES) do
                 getglobal(BENILLA_FRIENDS_SUBFRAMES[i]):Hide()
             end
@@ -3255,6 +3283,20 @@
                  un-grey a button that does nothing when clicked. Same OnClick as tabs 1 and 2. -->
             <Button name="FriendsFrameTab3" inherits="CharacterFrameTabButtonTemplate" id="3" text="Guild">
                 <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameTab2" relativePoint="RIGHT"><Offset><AbsDimension x="-14" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnClick>
+                        PanelTemplates_SetTab(FriendsFrame, this:GetID())
+                        FriendsFrame_OnShow()
+                        PlaySound("igCharacterInfoTab")
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <!-- The RAID tab (decision 1549). Unlike Guild it carries no enable/disable rule at
+                 all — the reference never greys it, because the pane means something in every
+                 state: solo it explains what a raid is, in a party it offers the conversion, in a
+                 raid it is the roster. -->
+            <Button name="FriendsFrameTab4" inherits="CharacterFrameTabButtonTemplate" id="4" text="Raid">
+                <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameTab3" relativePoint="RIGHT"><Offset><AbsDimension x="-14" y="0"/></Offset></Anchor></Anchors>
                 <Scripts>
                     <OnClick>
                         PanelTemplates_SetTab(FriendsFrame, this:GetID())

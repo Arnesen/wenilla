@@ -1457,6 +1457,21 @@ pub(crate) enum ClientCommand {
     /// submenu, decision 0434 §5): wire `icon` 0..7, `guid` 0 clears that icon's slot. Leader/
     /// assistant only server-side; echoes back as the delta form.
     SetRaidTarget { icon: u8, guid: u64 },
+    // ── The raid-management family (decision 1549's Raid tab) ─────────────────────────────────
+    /// Move a raid member to another subgroup (`CMSG_GROUP_CHANGE_SUB_GROUP`): the member's NAME
+    /// and the **0-based** subgroup the wire wants. Leader/assistant only; echoes as a fresh
+    /// `SMSG_GROUP_LIST`.
+    GroupChangeSubGroup { name: String, group: u8 },
+    /// Trade two raid members' subgroups (`CMSG_GROUP_SWAP_SUB_GROUP`, two names).
+    GroupSwapSubGroup { name: String, other: String },
+    /// Grant or revoke the raid-assistant flag (`CMSG_GROUP_ASSISTANT_LEADER`, leader only).
+    GroupAssistantLeader { guid: u64, grant: bool },
+    /// Start a ready check (`MSG_RAID_READY_CHECK`, empty body — leader only).
+    ReadyCheckStart,
+    /// Answer a ready check (`MSG_RAID_READY_CHECK`, one byte).
+    ReadyCheckAnswer { ready: bool },
+    /// Ask for our saved raid lockouts (`CMSG_REQUEST_RAID_INFO`) — the Raid Info panel.
+    RequestRaidInfo,
     // ── The duel family (decision 0633; writer bodies in benilla-protocol
     //    `world/writer/duel.rs`). Challenging is a `CastSpell` of the duel spell, not a verb here.
     /// Accept a duel challenge (`CMSG_DUEL_ACCEPTED`) — the popup's Accept, and the challenger's

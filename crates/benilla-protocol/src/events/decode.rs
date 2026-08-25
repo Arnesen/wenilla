@@ -463,6 +463,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::RaidTargetList { entries }]
         }
         ServerPacket::ReadyCheckRequest => vec![SessionEvent::ReadyCheckRequest],
+        ServerPacket::RaidInstanceInfo { entries } => {
+            vec![SessionEvent::RaidInstanceInfo { entries }]
+        }
         ServerPacket::ReadyCheckAnswer { guid, ready } => {
             vec![SessionEvent::ReadyCheckAnswer { guid, ready }]
         }

@@ -34,7 +34,7 @@ use benilla_world::schedule::WorldStage;
 
 use super::kit::{
     self, play_kit_ext, set_source_kit_gain, source_kit_playing, stop_source_kit, KitRef,
-    SoundCategory, SoundKits,
+    PlayExtras, SoundCategory, SoundKits,
 };
 use super::{SoundConfig, SoundOutput};
 
@@ -305,10 +305,11 @@ fn start_loop(
         KitRef::Id(kit_id),
         Some(pos),
         SoundCategory::Ambience,
-        None,
-        Some(emitter),
-        true,
-        None,
+        PlayExtras {
+            source: Some(emitter),
+            force_loop: true,
+            ..default()
+        },
     ) {
         warn!("liquid loop kit {kit_id}: {e:#}");
         return;

@@ -1,0 +1,1076 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!--
+        The social window's fourth tab — the RAID pane (decision 1549). `FriendsFrame.xml`'s
+        header said "Tab 4 RAID is NOT built … the tab is absent until that arc lands"; this is
+        that arc, and that note is now corrected there.
+
+        THE SPECIFICATION is TWO reference files, because the reference splits this pane in two:
+
+          · `RaidFrame.lua` / `RaidFrame.xml` (FrameXML, 115 + 357 lines) — the pane itself: the
+            RAID_DESCRIPTION blurb, Convert To Raid, Raid Info and its saved-instance panel.
+          · `Blizzard_RaidUI` (`Blizzard_RaidUI.lua` / `.xml`, 672 + 751 lines) — a **load-on-demand
+            addon** carrying the 8x5 group grid, the 40 member rows, the drag-to-subgroup, Add
+            Member, Ready Check and the ready-check popup. `RaidFrame_LoadUI()` pulls it in on the
+            first `RAID_ROSTER_UPDATE`.
+
+        We ship them as ONE always-loaded file, and that is a deliberate simplification rather than
+        an oversight: benilla has no load-on-demand Blizzard addons, so `RaidFrame_LoadUI` would be
+        a function whose only job is to be a no-op. The globals, geometry, art paths, row counts
+        and strings below are the two files' contract — what addons bind to — and the code
+        answering to it is ours. Anything an addon reaches for still resolves; only the *moment* it
+        starts existing differs, and nothing in 1.12 can observe that (the ref's own guard,
+        `if ( RaidGroupFrame_Update ) then`, is kept below for exactly the addons that test it).
+
+        SCOPE (stated, not hidden):
+          · The **raid PULLOUTS** are not built. In the reference, dragging a group's label or a
+            row's class column tears off a floating `RaidPullout` window with health/mana bars and
+            buff/debuff tracking, created on demand and stackable. That is a window family of its
+            own (its own templates, its own dropdown, its own aura refresh, `CreateFrame` pooling)
+            and it is *not part of this tab* — it lives on UIParent once torn off. The two drag
+            handles it hangs from stay declared as the reference declares them (Group N's label and
+            the class column are Buttons), minus the `OnDragStart`/`OnDragStop` pair; the day the
+            pullouts land, they are three lines each.
+          · `RaidOptionsFrame_UpdatePartyFrames` is not built: it exists to honour the
+            `HIDE_PARTY_INTERFACE` uvar, and benilla has no such option yet. Its two callers in the
+            reference (this file's OnLoad and UIOptionsFrame) would both be calling it to say
+            "show the party frames", which is what already happens.
+          · The `SHOW_DISPELLABLE_DEBUFFS` / `SHOW_CASTABLE_BUFFS` uvars go with the pullouts —
+            they are read nowhere else.
+
+        WHAT THE ENGINE OWES THIS FILE (decision 1549's Rust half): `ConvertToRaid`,
+        `SetRaidSubgroup`, `SwapRaidSubgroup`, `UninviteFromRaid`, `PromoteByName`,
+        `PromoteToAssistant`, `DemoteAssistant`, `DoReadyCheck`, `ConfirmReadyCheck`,
+        `RequestRaidInfo`, `GetNumSavedInstances`, `GetSavedInstanceInfo`,
+        `SetRaidRosterSelection`/`GetRaidRosterSelection` — all in `benilla-ui/src/script/party.rs`
+        beside `GetRaidRosterInfo`, which already existed. The events are `RAID_ROSTER_UPDATE`,
+        `READY_CHECK` and `UPDATE_INSTANCE_INFO`, fired by `ui_party::feed`; the `raid1`..`raid40`
+        unit tokens the rows target and hover are fed there too.
+    -->
+    <Script><![CDATA[
+        -- ── Strings (GlobalStrings.lua, verbatim; line numbers cited) ───────────────────────────
+        -- `X = X or "…"` throughout, FriendsFrame.xml's rule: several of these are names the real
+        -- string table already owns, and in a live session it has already run.
+        RAID = RAID or "Raid"                                                          -- l.3256
+        RAID_DESCRIPTION = RAID_DESCRIPTION or "Raids are groups of more than 5 people and are typically used to defeat unique challenges at high levels.\n\n|cffffffff- Raid members cannot earn credit toward most non-raid quests. Specifically, they will not receive non-raid quest credit for killing creatures or collecting items.\n\n- Raids grant substantially less experience for defeating monsters than normal groups.\n\n- Raids allow you to overcome challenges that might otherwise be nearly impossible.|r" -- l.3262
+        CONVERT_TO_RAID = CONVERT_TO_RAID or "Convert To Raid"                         -- l.863
+        RAID_INFO = RAID_INFO or "Raid Info"                                           -- l.3264
+        RAID_INFORMATION = RAID_INFORMATION or "Raid Information"                      -- l.3265
+        RAID_INFO_DESC = RAID_INFO_DESC or "Your saved raid instance status."          -- l.3266
+        RESETS_IN = RESETS_IN or "Resets in"                                           -- l.3341
+        INSTANCE = INSTANCE or "INSTANCE"                                              -- l.2331
+        ID = ID or "ID"                                                                -- l.2303
+        ADD_RAID_MEMBER = ADD_RAID_MEMBER or "Add Member"                              -- l.40
+        ADD_RAIDMEMBER_LABEL = ADD_RAIDMEMBER_LABEL or "Add Raid Member:"              -- l.39
+        READY_CHECK = READY_CHECK or "Ready Check"                                     -- l.3301
+        READY_CHECK_MESSAGE = READY_CHECK_MESSAGE or "%s has initiated a ready check.\n|cffffffffAre you ready?|r" -- l.3302
+        READY_CHECK_YOU_WERE_AFK = READY_CHECK_YOU_WERE_AFK or "You were AFK for a ready check" -- l.3305
+        RAID_LEADER_TOKEN = RAID_LEADER_TOKEN or "(L)"                                 -- l.3276
+        RAID_ASSISTANT_TOKEN = RAID_ASSISTANT_TOKEN or "(A)"                           -- l.3259
+        GROUP = GROUP or "Group"                                                       -- l.2029
+        EMPTY = EMPTY or "Empty"                                                       -- l.1433
+        UNKNOWN = UNKNOWN or "Unknown"                                                 -- l.4443
+
+        -- ── The counts (ref RaidFrame.lua l.2-5) ────────────────────────────────────────────────
+        -- Published globals, not local constants: `MAX_RAID_MEMBERS` alone is named by a large
+        -- slice of the raid-addon corpus, which sweeps `1, MAX_RAID_MEMBERS` rather than
+        -- `1, GetNumRaidMembers()` precisely so a shrinking roster still clears its stale rows.
+        MAX_RAID_MEMBERS = 40
+        NUM_RAID_GROUPS = 8
+        MEMBERS_PER_RAID_GROUP = 5
+        MAX_RAID_INFOS = 10
+
+        -- The drag's two pieces of state, ref-named (l.2-3): the row currently under the cursor,
+        -- and the slot it is hovering. Globals because the ref publishes them and because the
+        -- pane's OnUpdate, its OnHide and the row's own handlers all three read them.
+        MOVING_RAID_MEMBER = nil
+        TARGET_RAID_SLOT = nil
+
+        -- `RAID_SUBGROUP_LISTS[subgroupNumber]` and `[classFileName]` — the row indices in each
+        -- bucket, rebuilt on every repaint (ref l.4, filled in `RaidGroupFrame_Update`). Nothing
+        -- in this file reads them: they are the PULLOUTS' input, and the pullouts are the stated
+        -- deferral above. They are filled anyway because they are also the published surface a
+        -- raid addon reads to answer "who is in group 3 / who are the priests" without walking the
+        -- roster itself, and filling them is four lines inside a loop that already has the answer.
+        RAID_SUBGROUP_LISTS = {}
+
+        local function set_shown(widget, on)
+            if on then widget:Show() else widget:Hide() end
+        end
+
+        local function set_enabled(widget, on)
+            if on then widget:Enable() else widget:Disable() end
+        end
+
+        -- ── The pane (ref RaidFrame_OnLoad l.7-27 / RaidFrame_OnEvent l.29-58) ──────────────────
+        function RaidFrame_OnLoad()
+            this:RegisterEvent("PLAYER_LOGIN")
+            this:RegisterEvent("RAID_ROSTER_UPDATE")
+            this:RegisterEvent("UPDATE_INSTANCE_INFO")
+            this:RegisterEvent("PARTY_MEMBERS_CHANGED")
+            this:RegisterEvent("PARTY_LEADER_CHANGED")
+            this:RegisterEvent("PLAYER_ENTERING_WORLD")
+            -- The grid's two per-unit repaints (ref `RaidGroupFrame_OnLoad` l.9-10, which adds
+            -- them to this same frame once the addon loads). They are what keeps a death or a
+            -- ding off `RAID_ROSTER_UPDATE`.
+            this:RegisterEvent("UNIT_LEVEL")
+            this:RegisterEvent("UNIT_HEALTH")
+            -- Ref l.26: the button is dead until the server has answered ONCE. `hasRaidInfo` is
+            -- the ref's "the first UPDATE_INSTANCE_INFO is the seeding one" latch; see OnEvent.
+            RaidFrame.hasRaidInfo = nil
+            RaidFrame_Update()
+        end
+
+        function RaidFrame_OnEvent(event)
+            if event == "PLAYER_ENTERING_WORLD" then
+                RequestRaidInfo()
+            end
+            if event == "PLAYER_LOGIN" then
+                if GetNumRaidMembers() > 0 then
+                    RaidFrame_Update()
+                end
+            end
+            if event == "RAID_ROSTER_UPDATE" then
+                RaidFrame_Update()
+            end
+            if event == "UPDATE_INSTANCE_INFO" then
+                -- Ref l.42-48, transcribed including its shape: the FIRST answer only arms the
+                -- latch and returns, so the button's state is decided from the second onward. The
+                -- reference's reason is that its first `UPDATE_INSTANCE_INFO` fires before the
+                -- data has landed; ours fires with the data, so the latch costs one extra
+                -- `RequestRaidInfo` round trip and nothing else. Kept because an addon that
+                -- watches `RaidFrame.hasRaidInfo` — several raid-lockout addons do — is watching a
+                -- documented two-state field, and collapsing it to one state is a behaviour
+                -- change we would be making silently.
+                if not RaidFrame.hasRaidInfo then
+                    RaidFrame.hasRaidInfo = 1
+                    return
+                end
+                set_enabled(RaidFrameRaidInfoButton, GetNumSavedInstances() > 0)
+                RaidInfoFrame_Update()
+            end
+            if event == "PARTY_MEMBERS_CHANGED" or event == "PARTY_LEADER_CHANGED" then
+                RaidFrame_Update()
+            end
+        end
+
+        -- Ref RaidFrame_Update l.60-78. Out of a raid the pane is the blurb and one button; in one
+        -- it is the grid. The two are mutually exclusive, which is why nothing here reads both.
+        function RaidFrame_Update()
+            if GetNumRaidMembers() == 0 then
+                RaidFrameConvertToRaidButton:Show()
+                -- Ref l.64-68: convertible only with a party to convert AND the lead of it.
+                -- `GetPartyMember(1)` rather than `GetNumPartyMembers() > 0` is the ref's own
+                -- spelling, and they answer the same thing.
+                set_enabled(RaidFrameConvertToRaidButton, GetPartyMember(1) and IsPartyLeader())
+                RaidFrameRaidDescription:Show()
+            else
+                RaidFrameConvertToRaidButton:Hide()
+                RaidFrameRaidDescription:Hide()
+            end
+            -- Ref l.75-77 keeps this behind an existence test because the grid lives in a
+            -- load-on-demand addon there. Ours is in this file, so the test always passes — kept
+            -- verbatim anyway: an addon that replaces `RaidGroupFrame_Update` with nil to suppress
+            -- the grid is relying on this guard, and the guard costs nothing.
+            if RaidGroupFrame_Update then
+                RaidGroupFrame_Update()
+            end
+        end
+
+        -- ── The grid (ref Blizzard_RaidUI.lua RaidGroupFrame_Update l.45-176) ───────────────────
+        function RaidGroupFrame_Update()
+            local numRaidMembers = GetNumRaidMembers()
+            for i = 1, NUM_RAID_GROUPS do
+                local group = getglobal("RaidGroup" .. i)
+                set_shown(group, numRaidMembers > 0)
+                -- The fill cursor: which of this group's five slots the next member lands in.
+                group.nextIndex = 1
+            end
+
+            RaidFrameReadyCheckButton_Update()
+            RaidFrameAddMemberButton_Update()
+            -- Ref l.60-62: Raid Info shares its row with Ready Check, so it steps aside when Ready
+            -- Check is on screen. Only ever re-anchored one way — the ref never puts it back,
+            -- because Ready Check showing and the raid existing are the same condition for the
+            -- leader, and a non-leader never sees either.
+            if RaidFrameReadyCheckButton:IsShown() then
+                RaidFrameRaidInfoButton:SetPoint("LEFT", "RaidFrameReadyCheckButton", "RIGHT", 2, 0)
+            end
+
+            RaidGroup_ResetSlotButtons()
+
+            -- Rebuild the published buckets (see RAID_SUBGROUP_LISTS above). One per subgroup,
+            -- and one per CLASS token — the ref keys both into the same table, which is safe
+            -- because subgroup keys are numbers and class keys are strings.
+            RAID_SUBGROUP_LISTS = {}
+            for i = 1, NUM_RAID_GROUPS do
+                RAID_SUBGROUP_LISTS[i] = {}
+            end
+            for token in pairs(RAID_CLASS_COLORS) do
+                RAID_SUBGROUP_LISTS[token] = {}
+            end
+
+            for i = 1, MAX_RAID_MEMBERS do
+                local button = getglobal("RaidGroupButton" .. i)
+                if i <= numRaidMembers then
+                    local name, rank, subgroup, level, class, fileName, zone, online, isDead =
+                        GetRaidRosterInfo(i)
+                    local group = getglobal("RaidGroup" .. subgroup)
+                    -- Ref l.90's own comment: "To prevent errors when the server hiccups". A
+                    -- sixth member in a subgroup is not representable, so the row simply does not
+                    -- seat — better a missing row than an overlapping one.
+                    if group and group.nextIndex <= MEMBERS_PER_RAID_GROUP then
+                        button.id = i
+                        button.name = name
+                        button.unit = "raid" .. i
+                        button.class = fileName
+                        button.subgroup = subgroup
+
+                        RaidGroupButton_SetRow(button, name, rank, level, class, fileName,
+                            online, isDead)
+
+                        table.insert(RAID_SUBGROUP_LISTS[subgroup], i)
+                        if fileName and RAID_SUBGROUP_LISTS[fileName] then
+                            table.insert(RAID_SUBGROUP_LISTS[fileName], i)
+                        end
+
+                        local slotName = "RaidGroup" .. subgroup .. "Slot" .. group.nextIndex
+                        -- Ref l.160: the row being DRAGGED keeps the cursor, not its slot — the
+                        -- repaint must not yank it out from under the hand holding it.
+                        if MOVING_RAID_MEMBER ~= button then
+                            button:SetPoint("TOPLEFT", slotName, "TOPLEFT", 0, 0)
+                        end
+                        -- Both directions of the row<->slot link: the row remembers where to
+                        -- spring back to on a cancelled drag, the slot remembers who is in it so
+                        -- a drop onto an occupied slot knows to SWAP rather than to move.
+                        button.slot = slotName
+                        getglobal(slotName).button = button:GetName()
+                        group.nextIndex = group.nextIndex + 1
+                        button:SetID(i)
+                        button:Show()
+                    else
+                        button:Hide()
+                    end
+                else
+                    button:Hide()
+                end
+            end
+        end
+
+        -- One row's text and colour (ref l.96-152, lifted out of the sweep above so the two
+        -- per-unit event handlers below can reuse the colour half without repainting everything).
+        function RaidGroupButton_SetRow(button, name, rank, level, class, fileName, online, isDead)
+            local prefix = button:GetName()
+            if level == 0 then
+                level = ""
+            end
+            if not name then
+                name = UNKNOWN
+            end
+            getglobal(prefix .. "Name"):SetText(name)
+            getglobal(prefix .. "Class"):SetText(class or "")
+            getglobal(prefix .. "Level"):SetText(level or "")
+            -- The rank tokens (ref l.146-152): "(L)" for the leader, "(A)" for an assistant.
+            local token = ""
+            if rank == 2 then
+                token = RAID_LEADER_TOKEN
+            elseif rank == 1 then
+                token = RAID_ASSISTANT_TOKEN
+            end
+            getglobal(prefix .. "Rank"):SetText(token)
+            RaidGroupButton_SetRowColor(button, fileName, online, isDead)
+        end
+
+        -- The colour law, ONE function because the reference repeats it twice verbatim
+        -- (`RaidGroupFrame_Update` l.130-145 and `RaidGroupFrame_UpdateHealth` l.184-199) and the
+        -- two must never disagree: offline is grey and wins over everything, then dead is red,
+        -- then the class colour. All three columns take the same colour together.
+        function RaidGroupButton_SetRowColor(button, fileName, online, isDead)
+            local prefix = button:GetName()
+            local color
+            if not online then
+                color = GRAY_FONT_COLOR
+            elseif isDead then
+                color = RED_FONT_COLOR
+            else
+                color = RAID_CLASS_COLORS[fileName]
+            end
+            -- A class with no colour (an unresolved row) leaves the columns as they were, which is
+            -- the reference's own behaviour: its `if ( color )` guard skips the write rather than
+            -- falling back to white.
+            if not color then
+                return
+            end
+            getglobal(prefix .. "Name"):SetTextColor(color.r, color.g, color.b)
+            getglobal(prefix .. "Class"):SetTextColor(color.r, color.g, color.b)
+            getglobal(prefix .. "Level"):SetTextColor(color.r, color.g, color.b)
+        end
+
+        -- Ref l.178-181 / l.183-215: the two per-unit repaints. These exist so a level ding or a
+        -- death does NOT go through `RAID_ROSTER_UPDATE` — a 40-row rebuild per point of damage
+        -- taken is what firing the roster event on health would cost.
+        function RaidGroupFrame_UpdateLevel(id)
+            getglobal("RaidGroupButton" .. id .. "Level"):SetText(UnitLevel("raid" .. id))
+        end
+
+        function RaidGroupFrame_UpdateHealth(id)
+            local button = getglobal("RaidGroupButton" .. id)
+            local name, rank, subgroup, level, class, fileName, zone, online, isDead =
+                GetRaidRosterInfo(id)
+            RaidGroupButton_SetRowColor(button, fileName, online, isDead)
+        end
+
+        -- The `raidN` token → its row index, or nil for anything else. `UNIT_LEVEL`/`UNIT_HEALTH`
+        -- arrive for every unit in the game, so this is also the filter.
+        --
+        -- `string.find` with a capture rather than `string.match`: this VM is deliberately 5.0
+        -- (decision 1194), and `string.match` is one of the 5.1-only members that layer REMOVES —
+        -- calling it here would be the same mistake the addons that branch on `gmatch or gfind`
+        -- catch us in. The reference spells the same test as `gsub("raid([0-9]+)", "%1")` and
+        -- reads its substitution count; a capture says it once.
+        local function raid_index_of(unit)
+            if not unit then
+                return nil
+            end
+            local _, _, digits = string.find(unit, "^raid(%d+)$")
+            return tonumber(digits)
+        end
+
+        function RaidGroupFrame_OnEvent(event, unit)
+            RaidFrame_OnEvent(event)
+            if event == "UNIT_LEVEL" or event == "UNIT_HEALTH" then
+                local id = raid_index_of(unit)
+                -- Only a row that is actually on screen: an index past the roster names a hidden
+                -- button whose FontStrings still exist, and writing to it would be invisible work.
+                if id and id <= GetNumRaidMembers() then
+                    if event == "UNIT_LEVEL" then
+                        RaidGroupFrame_UpdateLevel(id)
+                    else
+                        RaidGroupFrame_UpdateHealth(id)
+                    end
+                end
+            end
+            if event == "PLAYER_ENTERING_WORLD" then
+                RaidFrameReadyCheckButton_Update()
+                RaidFrameAddMemberButton_Update()
+            end
+        end
+
+        -- Ref l.17-22: a drag in flight when the pane closes is a drag that has to be finished,
+        -- or the row stays parked under a cursor that is no longer over anything.
+        function RaidGroupFrame_OnHide()
+            if MOVING_RAID_MEMBER then
+                RaidGroupButton_OnDragStop(MOVING_RAID_MEMBER)
+            end
+        end
+
+        -- ── The drag (ref l.217-272) ────────────────────────────────────────────────────────────
+        --
+        -- Hover detection is a per-frame sweep of all 40 slots rather than the slots' own
+        -- OnEnter/OnLeave, and that is the reference's design for a reason worth keeping: the row
+        -- being dragged sits UNDER the cursor, so it — not the slot — is what the pointer is over,
+        -- and no slot would ever get an OnEnter.
+        function RaidGroupFrame_OnUpdate()
+            if not MOVING_RAID_MEMBER then
+                return
+            end
+            TARGET_RAID_SLOT = nil
+            for i = 1, NUM_RAID_GROUPS do
+                for j = 1, MEMBERS_PER_RAID_GROUP do
+                    local slot = getglobal("RaidGroup" .. i .. "Slot" .. j)
+                    if MouseIsOver(slot) then
+                        slot:LockHighlight()
+                        TARGET_RAID_SLOT = slot
+                    else
+                        slot:UnlockHighlight()
+                    end
+                end
+            end
+        end
+
+        function RaidGroupButton_OnDragStart()
+            -- Leader-only, ref l.234. A non-leader's drag never starts, so there is nothing to
+            -- cancel and nothing to send.
+            if not IsRaidLeader() then
+                return
+            end
+            local cursorX, cursorY = GetCursorPosition()
+            this:ClearAllPoints()
+            -- The ref multiplies the cursor by `GetScreenWidthScale()`/`GetScreenHeightScale()`
+            -- here because 1.12 hands Lua screen pixels against a 1024x768 reference UI. benilla's
+            -- UI space is 1:1 logical px and `GetCursorPosition` already reports in the space
+            -- `SetPoint` offsets are read in, so the multiply would place the row at ~1.5x the
+            -- cursor on a 1600-wide window. Same divergence UIParent.xml's `MouseIsOver` records
+            -- for `GetEffectiveScale`; the two scale getters exist there for the addons that call
+            -- them.
+            this:SetPoint("CENTER", "UIParent", "BOTTOMLEFT", cursorX, cursorY)
+            this:StartMoving()
+            MOVING_RAID_MEMBER = this
+            SetRaidRosterSelection(this.id)
+        end
+
+        function RaidGroupButton_OnDragStop(raidButton)
+            if not IsRaidLeader() then
+                return
+            end
+            raidButton = raidButton or this
+            raidButton:StopMovingOrSizing()
+            MOVING_RAID_MEMBER = nil
+
+            -- Three landings, ref l.256-272. Dropped on another group's slot: SWAP if somebody is
+            -- in it, MOVE if it is empty. Dropped anywhere else — including this row's own group —
+            -- the row springs back to the slot it came from and nothing goes on the wire.
+            local slot = TARGET_RAID_SLOT
+            if slot then
+                slot:UnlockHighlight()
+            end
+            if slot and slot:GetParent():GetID() ~= raidButton.subgroup then
+                if slot.button then
+                    SwapRaidSubgroup(raidButton:GetID(), getglobal(slot.button):GetID())
+                else
+                    -- Seat it optimistically in the target group's next free slot so the row does
+                    -- not visibly snap home and back while the server's echo is in flight.
+                    local parent = slot:GetParent()
+                    raidButton:SetPoint("TOPLEFT",
+                        parent:GetName() .. "Slot" .. parent.nextIndex, "TOPLEFT", 0, 0)
+                    SetRaidSubgroup(raidButton:GetID(), parent:GetID())
+                end
+            else
+                raidButton:SetPoint("TOPLEFT", raidButton.slot, "TOPLEFT", 0, 0)
+            end
+            TARGET_RAID_SLOT = nil
+        end
+
+        -- ── The row's click and hover (ref l.274-311) ───────────────────────────────────────────
+        function RaidGroupButton_OnClick(button)
+            if button == "LeftButton" then
+                local unit = "raid" .. this.id
+                if SpellIsTargeting() then
+                    SpellTargetUnit(unit)
+                elseif CursorHasItem() then
+                    DropItemOnUnit(unit)
+                else
+                    TargetUnit(unit)
+                end
+            else
+                HideDropDownMenu(1)
+                if this.id and this.name then
+                    BenillaRaidDropDown.initialize = RaidFrameDropDown_Initialize
+                    BenillaRaidDropDown.displayMode = "MENU"
+                    BenillaRaidDropDown.unit = this.unit
+                    BenillaRaidDropDown.rowName = this.name
+                    BenillaRaidDropDown.rowId = this.id
+                    ToggleDropDownMenu(1, nil, BenillaRaidDropDown, "cursor")
+                end
+            end
+        end
+
+        -- The RAID menu's fourth argument is the ROW INDEX, and it is load-bearing rather than
+        -- decorative: every one of the menu's four rows re-reads `GetRaidRosterInfo(userData)` to
+        -- decide whether to show itself, and `UninviteFromRaid` acts on it directly.
+        function RaidFrameDropDown_Initialize()
+            UnitPopup_ShowMenu(getglobal(UIDROPDOWNMENU_OPEN_MENU), "RAID",
+                BenillaRaidDropDown.unit, BenillaRaidDropDown.rowName, BenillaRaidDropDown.rowId)
+        end
+
+        function RaidGroupButton_OnEnter()
+            if SpellIsTargeting() then
+                if SpellCanTargetUnit(this.unit) then
+                    SetCursor("CAST_CURSOR")
+                else
+                    SetCursor("CAST_ERROR_CURSOR")
+                end
+            end
+            GameTooltip_SetDefaultAnchor(GameTooltip, this)
+            if GameTooltip:SetUnit(this.unit) then
+                getglobal("GameTooltipTextLeft1"):SetTextColor(GameTooltip_UnitColor(this.unit))
+            end
+        end
+
+        -- Ref l.393-399: every slot forgets its occupant before a repaint re-seats them, so a
+        -- member who left does not leave a stale name behind for the drop code to swap with.
+        function RaidGroup_ResetSlotButtons()
+            for i = 1, NUM_RAID_GROUPS do
+                for j = 1, MEMBERS_PER_RAID_GROUP do
+                    getglobal("RaidGroup" .. i .. "Slot" .. j).button = nil
+                end
+            end
+        end
+
+        -- ── The two managing buttons (ref l.646-668) ────────────────────────────────────────────
+        function RaidFrameReadyCheckButton_Update()
+            set_shown(RaidFrameReadyCheckButton, GetNumRaidMembers() > 0 and IsRaidLeader())
+        end
+
+        function RaidFrameAddMemberButton_Update()
+            local inRaid = GetNumRaidMembers() > 0
+            set_shown(RaidFrameAddMemberButton, inRaid)
+            if inRaid then
+                -- Ref l.662-666. `IsRaidOfficer()` answers nil in benilla today — the binding's
+                -- own body has not been carved (`0x4bb910`, and `script/party.rs` carries why
+                -- guessing it was refused), so an ASSISTANT sees this button disabled where the
+                -- reference enables it. Stated rather than papered over: the leader half is exact,
+                -- and the day that binding lands this line is already right.
+                set_enabled(RaidFrameAddMemberButton, IsRaidLeader() or IsRaidOfficer())
+            end
+        end
+
+        -- ── The saved-instance panel (ref RaidFrame.lua RaidInfoFrame_Update l.90-115) ──────────
+        function RaidInfoFrame_Update()
+            local savedInstances = GetNumSavedInstances()
+            for i = 1, MAX_RAID_INFOS do
+                local row = getglobal("RaidInfoInstance" .. i)
+                if i <= savedInstances then
+                    local instanceName, instanceID, instanceReset = GetSavedInstanceInfo(i)
+                    getglobal("RaidInfoInstance" .. i .. "Name"):SetText(instanceName)
+                    getglobal("RaidInfoInstance" .. i .. "ID"):SetText(instanceID)
+                    getglobal("RaidInfoInstance" .. i .. "Reset"):SetText(
+                        RESETS_IN .. " " .. SecondsToTime(instanceReset))
+                    row:Show()
+                else
+                    row:Hide()
+                end
+            end
+            -- Ref l.108-113: four rows fit, so the bar appears at five. Unlike the reference this
+            -- runs on the empty case too — its early `if ( savedInstances > 0 )` leaves a stale
+            -- scroll bar standing when the last lockout expires, which is a bug rather than a
+            -- behaviour (nothing can observe the bar's absence except by seeing it wrongly there).
+            set_shown(RaidInfoScrollFrameScrollBar, savedInstances > 4)
+            RaidInfoScrollFrame:UpdateScrollChildRect()
+        end
+
+        -- ── The ready check (ref Blizzard_RaidUI.lua l.615-645) ─────────────────────────────────
+        --
+        -- Opened by UIParent's `READY_CHECK` arm — the engine event (`0x218`) the
+        -- `MSG_RAID_READY_CHECK` handler fires. The 30 s deadline is the reference's own
+        -- (`0xb713f4 = clock + 0x7530`, wow-re `system/ui/ui.md`); it lives in the frame's
+        -- OnUpdate here because that is where the reference keeps it too.
+        function ShowReadyCheck()
+            local name, leader
+            for i = 1, MAX_RAID_MEMBERS do
+                local rowName, rank = GetRaidRosterInfo(i)
+                if rowName then
+                    name = rowName
+                    if rank == 2 then
+                        leader = "raid" .. i
+                        break
+                    end
+                end
+            end
+            -- The ref passes `leader` to SetPortraitTexture unguarded and would take a nil there
+            -- if no rank-2 row existed; ours does not, because a raid whose leader is out of the
+            -- roster (the moment after a promote, before the echo) is reachable and a raise in an
+            -- event handler is a script error the player sees.
+            if leader then
+                SetPortraitTexture(ReadyCheckPortrait, leader)
+            end
+            ReadyCheckFrameText:SetText(format(READY_CHECK_MESSAGE, name or UNKNOWN))
+            ReadyCheckFrame:Show()
+            ReadyCheckFrame.timer = 30
+            PlaySound("ReadyCheck")
+        end
+
+        function ReadyCheck_OnUpdate(elapsed)
+            if not ReadyCheckFrame.timer then
+                return
+            end
+            ReadyCheckFrame.timer = ReadyCheckFrame.timer - elapsed
+            if ReadyCheckFrame.timer < 0 then
+                -- Timing out is an answer too: you were away, and the raid is told so.
+                local info = ChatTypeInfo["SYSTEM"]
+                DEFAULT_CHAT_FRAME:AddMessage(READY_CHECK_YOU_WERE_AFK, info.r, info.g, info.b, info.id)
+                ReadyCheckFrame.timer = nil
+                ReadyCheckFrame:Hide()
+            end
+        end
+
+        -- ── Add Member's dialog (ref StaticPopup.lua l.871-895) ─────────────────────────────────
+        StaticPopupDialogs["ADD_RAIDMEMBER"] = {
+            text = ADD_RAIDMEMBER_LABEL,
+            button1 = "Accept",
+            button2 = "Cancel",
+            hasEditBox = 1,
+            maxLetters = 12,
+            timeout = 0,
+            hideOnEscape = 1,
+            OnAccept = function()
+                InviteByName(getglobal("StaticPopup1EditBox"):GetText())
+            end,
+            OnShow = function()
+                getglobal("StaticPopup1EditBox"):SetFocus()
+            end,
+            EditBoxOnEnterPressed = function()
+                InviteByName(getglobal("StaticPopup1EditBox"):GetText())
+                StaticPopup_Hide("ADD_RAIDMEMBER")
+            end,
+        }
+    ]]></Script>
+
+    <!-- ── One member row (ref Blizzard_RaidUI.xml l.4-116) ───────────────────────────────────
+         156x14 over the GroupButton art. `movable` + `clampedToScreen` are what let it be torn
+         out of its slot and dragged; the drop code puts it back. -->
+    <Button name="RaidGroupButtonTemplate" movable="true" clampedToScreen="true" virtual="true">
+        <Size><AbsDimension x="156" y="14"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentRank" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="18" y="8"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="1" y="1"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentName" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="60" y="8"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentRank" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentLevel" inherits="GameFontNormalSmall" justifyH="CENTER">
+                    <Size><AbsDimension x="22" y="8"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentName" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The class column is a Button in the reference because it is the CLASS PULLOUT's
+                 drag handle (see the header's scope note). Kept as a Button so the shape and the
+                 global are the reference's; its `RegisterForDrag` pair is what is missing. -->
+            <Button name="$parentClass">
+                <Size><AbsDimension x="50" y="8"/></Size>
+                <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="110" y="1"/></Offset></Anchor></Anchors>
+                <ButtonText>
+                    <Size><AbsDimension x="50" y="8"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                </ButtonText>
+                <NormalFont inherits="GameFontNormalSmall" justifyH="LEFT"/>
+                <HighlightFont inherits="GameFontHighlightSmall" justifyH="LEFT"/>
+            </Button>
+        </Frames>
+        <Scripts>
+            <!-- The +2 frame levels are the reference's and they are load-bearing: the row is a
+                 child of the pane while its slot is a child of a group frame one level deeper, so
+                 without the raise the row would draw UNDER the slot it sits in. -->
+            <OnLoad>
+                this:SetFrameLevel(this:GetFrameLevel() + 2)
+                getglobal(this:GetName() .. "Class"):SetFrameLevel(this:GetFrameLevel() + 2)
+                this:RegisterForDrag("LeftButton")
+                this:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            </OnLoad>
+            <OnClick>RaidGroupButton_OnClick(arg1)</OnClick>
+            <OnDragStart>RaidGroupButton_OnDragStart()</OnDragStart>
+            <OnDragStop>RaidGroupButton_OnDragStop()</OnDragStop>
+            <OnEnter>RaidGroupButton_OnEnter()</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+        <NormalTexture file="Interface\RaidFrame\UI-RaidFrame-GroupButton">
+            <TexCoords left="0" right="0.640625" top="0" bottom="0.4375"/>
+        </NormalTexture>
+        <HighlightTexture file="Interface\RaidFrame\UI-RaidFrame-GroupButton" alphaMode="ADD">
+            <TexCoords left="0" right="0.640625" top="0.46875" bottom="0.90625"/>
+        </HighlightTexture>
+    </Button>
+
+    <!-- One seat in a group (ref l.117-137). It has no click handler at all: it is a drop target
+         and an "Empty" label, and its highlight is driven by the drag sweep, never by hovering. -->
+    <Button name="RaidGroupSlotTemplate" virtual="true">
+        <Size><AbsDimension x="156" y="14"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString inherits="GameFontDarkGraySmall" text="EMPTY">
+                    <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <HighlightTexture file="Interface\RaidFrame\UI-RaidFrame-GroupButton" alphaMode="ADD">
+            <TexCoords left="0" right="0.640625" top="0.46875" bottom="0.90625"/>
+        </HighlightTexture>
+    </Button>
+
+    <!-- One of the eight subgroups (ref l.138-235): a labelled outline over five seats. -->
+    <Frame name="RaidGroupTemplate" virtual="true">
+        <Size><AbsDimension x="162" y="80"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture file="Interface\RaidFrame\UI-RaidFrame-GroupOutline">
+                    <Size><AbsDimension x="162" y="80"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.6640625" top="0" bottom="0.625"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- "Group N". A Button, and the GROUP PULLOUT's drag handle in the reference — the
+                 same deferral the class column carries. -->
+            <Button name="$parentLabel">
+                <Size><AbsDimension x="156" y="14"/></Size>
+                <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="14"/></Offset></Anchor></Anchors>
+                <NormalFont inherits="GameFontNormalSmall"/>
+                <HighlightFont inherits="GameFontHighlightSmall"/>
+            </Button>
+            <Button name="$parentSlot1" inherits="RaidGroupSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="3" y="-3"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentSlot2" inherits="RaidGroupSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentSlot3" inherits="RaidGroupSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentSlot4" inherits="RaidGroupSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentSlot5" inherits="RaidGroupSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentSlot4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>getglobal(this:GetName() .. "Label"):SetText(GROUP .. " " .. this:GetID())</OnLoad>
+        </Scripts>
+    </Frame>
+
+    <!-- One saved-lockout row (ref RaidFrame.xml l.4-42). -->
+    <Frame name="RaidInfoInstanceTemplate" virtual="true">
+        <Size><AbsDimension x="220" y="40"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentName" inherits="GameFontNormal">
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-2" y="-10"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentID" inherits="GameFontDisableSmall">
+                    <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-28" y="-12"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentReset" inherits="GameFontHighlightSmall">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+    </Frame>
+
+    <!-- ── The pane itself (ref RaidFrame.xml l.44-356 + Blizzard_RaidUI.xml's RaidFrame children)
+         Parented to FriendsFrame and filling it, exactly as the reference does — which is what
+         makes `FriendsFrame_ShowSubFrame("RaidFrame")` the only thing tab 4 has to do. -->
+    <Frame name="RaidFrame" parent="FriendsFrame" setAllPoints="true" hidden="true">
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="RaidFrameRaidDescription" inherits="GameFontNormal" text="RAID_DESCRIPTION" justifyH="LEFT">
+                    <Size><AbsDimension x="300" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="29" y="-85"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The row menu's host, the FriendsFrame's own pattern (`BenillaFriendsDropDown`). The
+                 reference reuses `FriendsDropDown` for this; ours is its own frame so the raid
+                 menu's userData cannot collide with a friends-row menu left half-open. -->
+            <Frame name="BenillaRaidDropDown" inherits="UIDropDownMenuTemplate"/>
+
+            <Button name="RaidFrameConvertToRaidButton" inherits="UIPanelButtonTemplate" text="CONVERT_TO_RAID">
+                <Size><AbsDimension x="115" y="21"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="72" y="-37"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>ConvertToRaid()</OnClick></Scripts>
+                <NormalFont inherits="GameFontNormalSmall"/>
+                <HighlightFont inherits="GameFontHighlightSmall"/>
+                <DisabledFont inherits="GameFontDisableSmall"/>
+            </Button>
+
+            <!-- Add Member sits where Convert To Raid does, because the two are never on screen
+                 together: one is the not-in-a-raid state and the other is the in-a-raid one. -->
+            <Button name="RaidFrameAddMemberButton" inherits="UIPanelButtonTemplate" text="ADD_RAID_MEMBER" hidden="true">
+                <Size><AbsDimension x="90" y="21"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="71" y="-37"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <!-- Ref: a friendly player target is invited straight away, otherwise the
+                         name-entry dialog opens — the Add Friend button's own shape. -->
+                    <OnClick>
+                        if UnitCanCooperate("player", "target") then
+                            InviteByName(UnitName("target"))
+                        else
+                            StaticPopup_Show("ADD_RAIDMEMBER")
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalFont inherits="GameFontNormalSmall"/>
+                <HighlightFont inherits="GameFontHighlightSmall"/>
+                <DisabledFont inherits="GameFontDisableSmall"/>
+            </Button>
+
+            <Button name="RaidFrameReadyCheckButton" inherits="UIPanelButtonTemplate" text="READY_CHECK" hidden="true">
+                <Size><AbsDimension x="90" y="21"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="RaidFrameAddMemberButton" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>DoReadyCheck()</OnClick></Scripts>
+                <NormalFont inherits="GameFontNormalSmall"/>
+                <HighlightFont inherits="GameFontHighlightSmall"/>
+                <DisabledFont inherits="GameFontDisableSmall"/>
+            </Button>
+
+            <Button name="RaidFrameRaidInfoButton" inherits="UIPanelButtonTemplate" text="RAID_INFO">
+                <Size><AbsDimension x="90" y="21"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="RaidFrameConvertToRaidButton" relativePoint="RIGHT"><Offset><AbsDimension x="65" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnClick>
+                        if RaidInfoFrame:IsShown() then
+                            RaidInfoFrame:Hide()
+                        else
+                            RaidInfoFrame:Show()
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalFont inherits="GameFontNormalSmall"/>
+                <HighlightFont inherits="GameFontHighlightSmall"/>
+                <DisabledFont inherits="GameFontDisableSmall"/>
+            </Button>
+
+            <!-- The lockout panel — a dialog-bordered flyout off the window's right edge. -->
+            <Frame name="RaidInfoFrame" enableMouse="true" hidden="true">
+                <Size><AbsDimension x="270" y="250"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-33" y="-28"/></Offset></Anchor></Anchors>
+                <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+                    <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+                    <TileSize><AbsValue val="32"/></TileSize>
+                    <EdgeSize><AbsValue val="32"/></EdgeSize>
+                </Backdrop>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture name="RaidInfoDetailHeader" file="Interface\RaidFrame\UI-RaidInfo-Header">
+                            <Size><AbsDimension x="250" y="64"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="11" y="-10"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                    <Layer level="OVERLAY">
+                        <Texture name="RaidInfoDetailCorner" file="Interface\DialogFrame\UI-DialogBox-Corner">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-6" y="-7"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <FontString name="RaidInfoHeader" inherits="GameFontNormal" text="RAID_INFORMATION">
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="-15"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="RaidInfoSubheader" inherits="GameFontHighlightSmall" text="RAID_INFO_DESC">
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoHeader" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="RaidInfoInstanceLabel" inherits="GameFontDisableSmall" text="INSTANCE">
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoSubheader" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-13"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="RaidInfoIDLabel" inherits="GameFontDisableSmall" text="ID">
+                            <Anchors><Anchor point="LEFT" relativeTo="RaidInfoInstanceLabel" relativePoint="RIGHT"><Offset><AbsDimension x="110" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- No UIPanelCloseButton template ships in this house (FriendsFrame's own
+                         close button says the same); the minimize-button art is the house form. -->
+                    <Button name="RaidInfoCloseButton">
+                        <Size><AbsDimension x="32" y="32"/></Size>
+                        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-3" y="-3"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                        <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                        <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                        <Scripts><OnClick>RaidInfoFrame:Hide()</OnClick></Scripts>
+                    </Button>
+                    <ScrollFrame name="RaidInfoScrollFrame" inherits="UIPanelScrollFrameTemplate">
+                        <Size><AbsDimension x="210" y="173"/></Size>
+                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-39" y="12"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture name="$parentTop" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                                    <Size><AbsDimension x="30" y="125"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="16"/></Offset></Anchor></Anchors>
+                                    <TexCoords left="0" right="0.484375" top="0" bottom="0.5"/>
+                                </Texture>
+                                <Texture name="$parentBottom" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                                    <Size><AbsDimension x="30" y="105"/></Size>
+                                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="1" y="-2"/></Offset></Anchor></Anchors>
+                                    <TexCoords left="0.515625" right="1.0" top="0" bottom="0.4140625"/>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <ScrollChild>
+                            <Frame name="RaidInfoScrollChildFrame" enableMouse="true">
+                                <Size><AbsDimension x="223" y="40"/></Size>
+                                <Frames>
+                                    <Frame name="RaidInfoInstance1" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance2" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance3" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance4" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance5" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance6" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance7" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance8" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <Frame name="RaidInfoInstance9" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                    <!-- The reference anchors this one to Instance1, which stacks
+                                         row 10 on top of row 2. That is a typo in a chain of nine
+                                         identical links, not a behaviour: reproducing it would
+                                         hide the tenth lockout behind the second. Anchored to 9,
+                                         and said out loud rather than silently "fixed". -->
+                                    <Frame name="RaidInfoInstance10" inherits="RaidInfoInstanceTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="RaidInfoInstance9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+                                    </Frame>
+                                </Frames>
+                            </Frame>
+                        </ScrollChild>
+                    </ScrollFrame>
+                </Frames>
+            </Frame>
+
+            <!-- The eight subgroups: two columns of four, ref l.533-604. -->
+            <Frame name="RaidGroup1" inherits="RaidGroupTemplate" id="1">
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="16" y="-70"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="RaidGroup2" inherits="RaidGroupTemplate" id="2">
+                <Anchors><Anchor point="LEFT" relativeTo="RaidGroup1" relativePoint="RIGHT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="RaidGroup3" inherits="RaidGroupTemplate" id="3">
+                <Anchors><Anchor point="TOP" relativeTo="RaidGroup1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="RaidGroup4" inherits="RaidGroupTemplate" id="4">
+                <Anchors><Anchor point="LEFT" relativeTo="RaidGroup3" relativePoint="RIGHT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="RaidGroup5" inherits="RaidGroupTemplate" id="5">
+                <Anchors><Anchor point="TOP" relativeTo="RaidGroup3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="RaidGroup6" inherits="RaidGroupTemplate" id="6">
+                <Anchors><Anchor point="LEFT" relativeTo="RaidGroup5" relativePoint="RIGHT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="RaidGroup7" inherits="RaidGroupTemplate" id="7">
+                <Anchors><Anchor point="TOP" relativeTo="RaidGroup5" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="RaidGroup8" inherits="RaidGroupTemplate" id="8">
+                <Anchors><Anchor point="LEFT" relativeTo="RaidGroup7" relativePoint="RIGHT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The forty rows. Unpositioned by declaration and hidden until the repaint seats
+                 them in a slot — which is the reference's own arrangement, and the reason a row
+                 can be dragged out of one group into another without re-parenting anything. -->
+            <Button name="RaidGroupButton1" inherits="RaidGroupButtonTemplate" id="1" hidden="true"/>
+            <Button name="RaidGroupButton2" inherits="RaidGroupButtonTemplate" id="2" hidden="true"/>
+            <Button name="RaidGroupButton3" inherits="RaidGroupButtonTemplate" id="3" hidden="true"/>
+            <Button name="RaidGroupButton4" inherits="RaidGroupButtonTemplate" id="4" hidden="true"/>
+            <Button name="RaidGroupButton5" inherits="RaidGroupButtonTemplate" id="5" hidden="true"/>
+            <Button name="RaidGroupButton6" inherits="RaidGroupButtonTemplate" id="6" hidden="true"/>
+            <Button name="RaidGroupButton7" inherits="RaidGroupButtonTemplate" id="7" hidden="true"/>
+            <Button name="RaidGroupButton8" inherits="RaidGroupButtonTemplate" id="8" hidden="true"/>
+            <Button name="RaidGroupButton9" inherits="RaidGroupButtonTemplate" id="9" hidden="true"/>
+            <Button name="RaidGroupButton10" inherits="RaidGroupButtonTemplate" id="10" hidden="true"/>
+            <Button name="RaidGroupButton11" inherits="RaidGroupButtonTemplate" id="11" hidden="true"/>
+            <Button name="RaidGroupButton12" inherits="RaidGroupButtonTemplate" id="12" hidden="true"/>
+            <Button name="RaidGroupButton13" inherits="RaidGroupButtonTemplate" id="13" hidden="true"/>
+            <Button name="RaidGroupButton14" inherits="RaidGroupButtonTemplate" id="14" hidden="true"/>
+            <Button name="RaidGroupButton15" inherits="RaidGroupButtonTemplate" id="15" hidden="true"/>
+            <Button name="RaidGroupButton16" inherits="RaidGroupButtonTemplate" id="16" hidden="true"/>
+            <Button name="RaidGroupButton17" inherits="RaidGroupButtonTemplate" id="17" hidden="true"/>
+            <Button name="RaidGroupButton18" inherits="RaidGroupButtonTemplate" id="18" hidden="true"/>
+            <Button name="RaidGroupButton19" inherits="RaidGroupButtonTemplate" id="19" hidden="true"/>
+            <Button name="RaidGroupButton20" inherits="RaidGroupButtonTemplate" id="20" hidden="true"/>
+            <Button name="RaidGroupButton21" inherits="RaidGroupButtonTemplate" id="21" hidden="true"/>
+            <Button name="RaidGroupButton22" inherits="RaidGroupButtonTemplate" id="22" hidden="true"/>
+            <Button name="RaidGroupButton23" inherits="RaidGroupButtonTemplate" id="23" hidden="true"/>
+            <Button name="RaidGroupButton24" inherits="RaidGroupButtonTemplate" id="24" hidden="true"/>
+            <Button name="RaidGroupButton25" inherits="RaidGroupButtonTemplate" id="25" hidden="true"/>
+            <Button name="RaidGroupButton26" inherits="RaidGroupButtonTemplate" id="26" hidden="true"/>
+            <Button name="RaidGroupButton27" inherits="RaidGroupButtonTemplate" id="27" hidden="true"/>
+            <Button name="RaidGroupButton28" inherits="RaidGroupButtonTemplate" id="28" hidden="true"/>
+            <Button name="RaidGroupButton29" inherits="RaidGroupButtonTemplate" id="29" hidden="true"/>
+            <Button name="RaidGroupButton30" inherits="RaidGroupButtonTemplate" id="30" hidden="true"/>
+            <Button name="RaidGroupButton31" inherits="RaidGroupButtonTemplate" id="31" hidden="true"/>
+            <Button name="RaidGroupButton32" inherits="RaidGroupButtonTemplate" id="32" hidden="true"/>
+            <Button name="RaidGroupButton33" inherits="RaidGroupButtonTemplate" id="33" hidden="true"/>
+            <Button name="RaidGroupButton34" inherits="RaidGroupButtonTemplate" id="34" hidden="true"/>
+            <Button name="RaidGroupButton35" inherits="RaidGroupButtonTemplate" id="35" hidden="true"/>
+            <Button name="RaidGroupButton36" inherits="RaidGroupButtonTemplate" id="36" hidden="true"/>
+            <Button name="RaidGroupButton37" inherits="RaidGroupButtonTemplate" id="37" hidden="true"/>
+            <Button name="RaidGroupButton38" inherits="RaidGroupButtonTemplate" id="38" hidden="true"/>
+            <Button name="RaidGroupButton39" inherits="RaidGroupButtonTemplate" id="39" hidden="true"/>
+            <Button name="RaidGroupButton40" inherits="RaidGroupButtonTemplate" id="40" hidden="true"/>
+        </Frames>
+        <Scripts>
+            <!-- The reference splits these across two files: RaidFrame.xml wires OnLoad/OnShow/
+                 OnEvent and Blizzard_RaidUI's `RaidGroupFrame_OnLoad` then REPLACES OnEvent,
+                 OnHide and OnUpdate with the grid's versions once the addon loads. One file means
+                 one wiring, and `RaidGroupFrame_OnEvent` (which calls `RaidFrame_OnEvent` first,
+                 exactly as the replacement does) is the merged one. -->
+            <OnLoad>RaidFrame_OnLoad()</OnLoad>
+            <OnShow>
+                RaidFrame_Update()
+                RequestRaidInfo()
+            </OnShow>
+            <OnHide>RaidGroupFrame_OnHide()</OnHide>
+            <OnEvent>RaidGroupFrame_OnEvent(event, arg1)</OnEvent>
+            <OnUpdate>RaidGroupFrame_OnUpdate()</OnUpdate>
+        </Scripts>
+    </Frame>
+
+    <!-- The ready-check popup (ref Blizzard_RaidUI.xml l.649-750). Toplevel and on UIParent, not
+         on the pane: a ready check reaches you whether or not the social window has ever been
+         opened. -->
+    <Frame name="ReadyCheckFrame" toplevel="true" parent="UIParent" hidden="true">
+        <Size><AbsDimension x="323" y="97"/></Size>
+        <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="ReadyCheckPortrait">
+                    <Size><AbsDimension x="50" y="50"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <Texture file="Interface\RaidFrame\UI-ReadyCheckFrame">
+                    <Size><AbsDimension x="323" y="97"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.630859375" top="0" bottom="0.7578125"/>
+                </Texture>
+                <FontString name="ReadyCheckFrameText" inherits="GameFontNormal">
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="15" y="-24"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="ReadyCheckFrameYesButton" inherits="UIPanelButtonTemplate" text="YES">
+                <Size><AbsDimension x="109" y="24"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="55" y="18"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnClick>
+                        ConfirmReadyCheck(1)
+                        ReadyCheckFrame.timer = nil
+                        ReadyCheckFrame:Hide()
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <!-- No passes no argument at all — the binding reads its argument for TRUTH, so
+                 "absent" is the not-ready answer. The reference's own spelling. -->
+            <Button name="ReadyCheckFrameNoButton" inherits="UIPanelButtonTemplate" text="NO">
+                <Size><AbsDimension x="109" y="24"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="ReadyCheckFrameYesButton" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnClick>
+                        ConfirmReadyCheck()
+                        ReadyCheckFrame.timer = nil
+                        ReadyCheckFrame:Hide()
+                    </OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>this:RegisterEvent("RAID_ROSTER_UPDATE")</OnLoad>
+            <OnEvent>
+                -- The raid ending ends the question with it.
+                if event == "RAID_ROSTER_UPDATE" and GetNumRaidMembers() == 0 then
+                    ReadyCheckFrame.timer = nil
+                    ReadyCheckFrame:Hide()
+                end
+            </OnEvent>
+            <OnUpdate>ReadyCheck_OnUpdate(arg1)</OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>

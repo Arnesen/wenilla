@@ -1011,6 +1011,11 @@ pub enum SessionEvent {
     /// One member's ready-check answer, forwarded to the leader only (`MSG_RAID_READY_CHECK`,
     /// non-empty body).
     ReadyCheckAnswer { guid: u64, ready: u8 },
+    /// Our saved raid lockouts (`SMSG_RAID_INSTANCE_INFO`) — the Raid tab's Raid Info panel
+    /// (decision 1549). Replaces the list wholesale; empty is the normal answer.
+    RaidInstanceInfo {
+        entries: Vec<crate::messages::RaidInstanceEntry>,
+    },
     /// A duel challenge (`SMSG_DUEL_REQUESTED`, decision 0633) — delivered to challenger and
     /// challenged alike. `arbiter` is the duel-flag GameObject that identifies the duel and is
     /// echoed on accept/cancel; `challenger` equal to our own guid means we are the one asking.

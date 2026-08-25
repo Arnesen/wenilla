@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use crate::ui_script::UiInput;
 
 mod feed;
-pub(crate) use feed::synthetic_roster;
+pub(crate) use feed::{raid_row_guids, synthetic_raid, synthetic_roster};
 
 pub(crate) struct UiPartyPlugin;
 
@@ -83,6 +83,23 @@ pub struct GroupState {
     /// instead of dispatching CMSGs into a void. Any real `SMSG_GROUP_LIST` switches it off —
     /// the wire always wins.
     pub test: bool,
+    /// Our saved raid lockouts (`SMSG_RAID_INSTANCE_INFO`) — the Raid tab's Raid Info panel
+    /// (decision 1549). The answer replaces the list wholesale, empty included.
+    ///
+    /// A lockout is per-CHARACTER, not per-group, so this is the one field here that is not a
+    /// group fact. It lives here anyway for the reason that matters: it is per-SESSION state that
+    /// must die with the socket, and [`Self::clear_session`] is that guarantee — a second
+    /// resource would be a second thing to remember to clear.
+    pub saved_instances: Vec<benilla_protocol::messages::RaidInstanceEntry>,
+    /// **Answered by the server**: has any `SMSG_RAID_INSTANCE_INFO` arrived this session? The
+    /// reference gates its Raid Info button on the SECOND `UPDATE_INSTANCE_INFO`
+    /// (`RaidFrame.hasRaidInfo`), which is the same idea by a different route — an empty list and
+    /// "we have not asked yet" are indistinguishable without this.
+    pub saved_instances_seen: bool,
+    /// A ready-check TICKET, not a flag: every `MSG_RAID_READY_CHECK` open bumps it, so the feed
+    /// fires `READY_CHECK` on a counter edge and a second check while the first popup is still up
+    /// re-arms it. A boolean could not tell the two apart.
+    pub ready_check: u32,
 }
 
 // The GlobalStrings templates, quoted verbatim from the reference client's own patch chain
@@ -333,6 +350,22 @@ impl GroupState {
     /// Session teardown (decision 0065's lifecycle): everything resets with the socket.
     pub fn clear_session(&mut self) {
         *self = GroupState::default();
+    }
+
+    /// `SMSG_RAID_INSTANCE_INFO` — our saved lockouts, replacing the list wholesale (decision
+    /// 1549). The empty answer is the ordinary one and still counts as an answer.
+    pub fn apply_raid_instance_info(
+        &mut self,
+        entries: Vec<benilla_protocol::messages::RaidInstanceEntry>,
+    ) {
+        self.saved_instances = entries;
+        self.saved_instances_seen = true;
+    }
+
+    /// `MSG_RAID_READY_CHECK` (open form) — the leader started one. Bumps the ticket the feed
+    /// turns into a `READY_CHECK` event edge.
+    pub fn apply_ready_check(&mut self) {
+        self.ready_check = self.ready_check.wrapping_add(1);
     }
 }
 

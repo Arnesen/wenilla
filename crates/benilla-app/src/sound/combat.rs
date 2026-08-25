@@ -9,10 +9,17 @@
 //!   kits 7080/7081 `Combat Miss 1H/2H` by weapon handedness — exactly the two ids the client
 //!   caches by name at startup (wow-re `0x4575b0`, `_DONOTRENAME_` kits).
 //! - **`$CAH`** — the attacker's exertion vocal (`CreatureSoundData.Exertion[Critical]`, the
-//!   same voice chain as everything else — characters resolve via the model fallback). INTERIM
-//!   (0075's pre-§5 reading): the §5s that pinned `$CAH` as the victim-dispatch trigger
-//!   (decisions 0149/0279) traced no exertion play on its byte route — where the exertion
-//!   columns actually fire is unpinned, a wow-re sliver; the audible result is accepted.
+//!   same voice chain as everything else — characters resolve via the model fallback). **INTERIM,
+//!   and now pinned wrong** (decision 1555): the sliver 0075 left open — "where the exertion
+//!   columns actually fire is unpinned" — has been answered, and it is not here. Exertion is
+//!   **packet-driven at swing start**: `SMSG_ATTACKERSTATEUPDATE` → `0x6246a0` → `0x624786` →
+//!   `0x623b10`, class `([hitrec+0x10] >> 7) & 1` (the crit bit — so the column index benilla
+//!   already computes is right), gated on `victimState != 0` and the victim's health > 0. There
+//!   is no `call [reg+0x88]` anywhere in `0x6247d0`, so `$CAH` never reaches the exertion columns
+//!   at all; what `$CAH` actually drives is `0x6249bb call 0x624530` — the **victim's** injury
+//!   vocal, which benilla already fires off that crossing. Correcting the trigger moves *when*
+//!   a grunt is heard (swing start, not mid-clip) and *whether* a clean miss grunts at all, so it
+//!   is deliberately a separate change from 1555's bus routing and is not folded in here.
 //!
 //! The **contact family** consumes [`SwingImpact`] — the victim dispatch `0x624530` + the
 //! `0x6247d0` weapon-sound block, fired at the swing clip's **`$AH0–3`/`$CAH`** crossing, or at
@@ -39,6 +46,13 @@
 //! A `text_only` flush (supersede/attack-stop) drops its sounds — only the floating number
 //! flushes (decision 0149's flush law, inherited from the shared dispatch).
 //!
+//! Two legs of the reference's melee family benilla does not voice at all, both now pinned
+//! (decision 1555): the **connecting swing** — a `$CSS` on any victimState outside {0, 2, 6}
+//! plays `WeaponSwingSounds2.dbc` (kits 233–238, Light/Medium/Heavy × Normal/Critical, index
+//! `critical + swingType*2`) on the capped bus 6, where benilla plays nothing and voices only the
+//! miss whoosh; and the **material foley** that rides the same `$FSD` as the terrain footstep
+//! (`0x6233d9 call [vt+0x8c]` → `0x4584e0`, bus 0, uncapped).
+//!
 //! INTERIM readings (flagged for a wow-re pass): victims' armor lands on the flesh slot (the
 //! chain/plate slots need the armor-material chain);
 //! blocks assume a metal shield; a defended outcome suppresses block 1's generic weapon impact
@@ -57,12 +71,12 @@ use bevy::prelude::*;
 use benilla_formats::{impact_slot, WeaponImpactCatalog};
 
 use crate::creature_anim::{AnimSoundEvent, SwingImpact, SwingMessage, Wielded};
-use crate::net::NetEntity;
+use crate::net::{Embodied, NetEntity};
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::creature::CreatureVoices;
-use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
+use super::kit::{play_kit_ext, Bus, KitRef, PlayExtras, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 // vmangos `HitInfo` bits (UnitDefines.h, 1.12 wire).
@@ -185,7 +199,7 @@ fn combat_sounds(
     mut contacts: MessageReader<SwingImpact>,
     mut events: MessageReader<AnimSoundEvent>,
     mut last: Local<LastSwing>,
-    units: Query<(&Transform, Option<&Wielded>, &NetEntity)>,
+    units: Query<(&Transform, Option<&Wielded>, &NetEntity, Has<Embodied>)>,
     impacts: Option<Res<WeaponImpacts>>,
     voices: Option<Res<CreatureVoices>>,
     kits: Option<ResMut<SoundKits>>,
@@ -211,23 +225,29 @@ fn combat_sounds(
         return;
     };
     let listener = listener.pos;
-    let play = |kits: &mut SoundKits, out: &mut SoundOutput, kit: u32, pos: Vec3, what: &str| {
-        if kit == 0 {
-            return;
-        }
-        if let Err(e) = play_kit(
-            kits,
-            &assets,
-            out,
-            &config,
-            listener,
-            KitRef::Id(kit),
-            Some(pos),
-            SoundCategory::Sfx,
-        ) {
-            warn!("combat {what} (kit {kit}): {e:#}");
-        }
-    };
+    // Every combat play carries its **voice bus** (decision 1555): the melee-contact family all
+    // contends for bus 10's four voices, the vocals for their own one or two, and the miss whoosh
+    // for nothing at all. A kit refused at the cap is not an error — it is the gate doing its job,
+    // and `play_kit_ext` reports it as an ordinary silent success.
+    let play =
+        |kits: &mut SoundKits, out: &mut SoundOutput, kit: u32, pos: Vec3, bus: Bus, what: &str| {
+            if kit == 0 {
+                return;
+            }
+            if let Err(e) = play_kit_ext(
+                kits,
+                &assets,
+                out,
+                &config,
+                listener,
+                KitRef::Id(kit),
+                Some(pos),
+                SoundCategory::Sfx,
+                PlayExtras { bus, ..default() },
+            ) {
+                warn!("combat {what} (kit {kit}): {e:#}");
+            }
+        };
 
     // The tag-driven pair: the whoosh and the exertion vocal.
     for ev in events.read() {
@@ -238,7 +258,7 @@ fn combat_sounds(
         let Some(swing) = last.0.get(&ev.entity) else {
             continue; // an attack anim without a tracked swing (e.g. spawned mid-fight)
         };
-        let Ok((attacker_tr, wielded, net)) = units.get(ev.entity) else {
+        let Ok((attacker_tr, wielded, net, _)) = units.get(ev.entity) else {
             continue;
         };
         let pos = attacker_tr.translation;
@@ -251,7 +271,7 @@ fn combat_sounds(
                 } else {
                     COMBAT_MISS_1H
                 };
-                play(&mut kits, &mut out, kit, pos, "miss whoosh");
+                play(&mut kits, &mut out, kit, pos, Bus::DEFAULT, "miss whoosh");
             }
         } else {
             let crit = swing.hit_info & HITINFO_CRITICAL != 0;
@@ -260,7 +280,7 @@ fn combat_sounds(
                 .and_then(|d| voices.0.for_display(d))
                 .map(|v| v.exertion[usize::from(crit)])
                 .unwrap_or(0);
-            play(&mut kits, &mut out, vocal, pos, "exertion");
+            play(&mut kits, &mut out, vocal, pos, Bus::EXERTION, "exertion");
         }
     }
 
@@ -285,7 +305,7 @@ fn combat_sounds(
             // The attacker's weapon row (`0x625460(attacker, leftswing)`) — shared by both
             // blocks below. `None` for a wand/thrown: no melee row, nothing to strike with.
             let offhand = swing.hit_info & 0x4 != 0;
-            let (subclass, wooden) = swing_weapon(attacker.and_then(|(_, w, _)| w), offhand);
+            let (subclass, wooden) = swing_weapon(attacker.and_then(|(_, w, ..)| w), offhand);
             let row = impacts.0.get(subclass, !wooden);
             let defended = defended(swing.victim_state);
 
@@ -298,21 +318,28 @@ fn combat_sounds(
             if let Some(n) = imp.natural {
                 // The attacker's own natural-weapon sound replaces the generic weapon impact.
                 let vocal = attacker
-                    .and_then(|(_, _, net)| net.display_id)
+                    .and_then(|(_, _, net, _)| net.display_id)
                     .and_then(|d| voices.0.for_display(d))
                     .and_then(|v| v.custom_attack.get(usize::from(n)).copied())
                     .unwrap_or(0);
-                play(&mut kits, &mut out, vocal, pos, "natural impact");
+                play(
+                    &mut kits,
+                    &mut out,
+                    vocal,
+                    pos,
+                    Bus::MELEE_IMPACT,
+                    "natural impact",
+                );
             } else if !defended {
                 if let Some(row) = row {
                     // A landed hit: the victim's material slot (players/rowless → flesh).
                     let material = victim
-                        .and_then(|(_, _, net)| net.display_id)
+                        .and_then(|(_, _, net, _)| net.display_id)
                         .and_then(|d| voices.0.for_display(d))
                         .map(|v| v.impact_type)
                         .unwrap_or(0);
                     let kit = landed_impact(row, material, crit);
-                    play(&mut kits, &mut out, kit, pos, "impact");
+                    play(&mut kits, &mut out, kit, pos, Bus::MELEE_IMPACT, "impact");
                 }
             }
 
@@ -325,11 +352,18 @@ fn combat_sounds(
             if let (true, Some(row)) = (defended, row) {
                 // The parry family by the *victim's* weapon body (INTERIM heuristic).
                 let victim_wooden = victim
-                    .map(|(_, w, _)| swing_weapon(w, false).1)
+                    .map(|(_, w, ..)| swing_weapon(w, false).1)
                     .unwrap_or(false);
                 let kit = defense_clang(row, swing.victim_state, victim_wooden);
                 let at = victim.map(|(t, ..)| t.translation).unwrap_or(pos);
-                play(&mut kits, &mut out, kit, at, "defense clang");
+                play(
+                    &mut kits,
+                    &mut out,
+                    kit,
+                    at,
+                    Bus::MELEE_IMPACT,
+                    "defense clang",
+                );
             }
         }
 
@@ -340,7 +374,7 @@ fn combat_sounds(
             && swing.hit_info & 0x60 == 0
             && !matches!(swing.victim_state, VICTIM_PARRY | VICTIM_BLOCK)
         {
-            if let Some((victim_tr, _, net)) = victim {
+            if let Some((victim_tr, _, net, victim_is_you)) = victim {
                 let crushing = swing.hit_info & HITINFO_CRUSHING != 0;
                 let vocal = net
                     .display_id
@@ -354,7 +388,21 @@ fn combat_sounds(
                             .unwrap_or(0)
                     })
                     .unwrap_or(0);
-                play(&mut kits, &mut out, vocal, victim_tr.translation, "injury");
+                // Your own wounds get the CGPlayer twin's private bus 8 (cap 1); everyone
+                // else's share the world's bus 7 (cap 2).
+                let bus = if victim_is_you {
+                    Bus::SELF_INJURY
+                } else {
+                    Bus::INJURY
+                };
+                play(
+                    &mut kits,
+                    &mut out,
+                    vocal,
+                    victim_tr.translation,
+                    bus,
+                    "injury",
+                );
             }
         }
     }

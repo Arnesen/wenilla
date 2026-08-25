@@ -28,7 +28,7 @@ use crate::net::NetEntity;
 use benilla_assets::WorldAssets;
 use benilla_world::schedule::WorldStage;
 
-use super::kit::{play_kit_ext, source_kit_playing, KitRef, SoundCategory, SoundKits};
+use super::kit::{play_kit_ext, source_kit_playing, KitRef, PlayExtras, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// SoundEntries 1096 `CharacterSplashSoundMedium` (byte-verified in the type-21 census).
@@ -96,10 +96,10 @@ fn water_splashes(
                 KitRef::Id(SPLASH_KIT),
                 Some(transform.translation),
                 SoundCategory::Sfx,
-                None,
-                Some(entity),
-                false,
-                None,
+                PlayExtras {
+                    source: Some(entity),
+                    ..default()
+                },
             ) {
                 warn!("water splash: {e:#}");
             }

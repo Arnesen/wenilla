@@ -36,8 +36,9 @@
       one predicate that forks them are below, its opener is UnitFrames.xml's PetFrameDropDown, and
       the two dialogs behind Abandon and Rename are registered in PetActionBar.xml (with the pet
       arc, like every other dialog in this codebase — this file must stay loadable without the
-      popup engine). The RAID_* rank rows stay in the tables but are unreachable (no raid roster) —
-      they carry a hide-always predicate, and no click handler at all.
+      popup engine). The RAID_* rank rows opened with decision 1549: their hide-always predicate is
+      gone, they carry the reference's own per-row rules and click handlers, and their opener is
+      RaidFrame.xml's row right-click.
     - Lua 5.1: the ref's 5.0 `for i, v in t do` iteration is ipairs/pairs here; strsub is
       string.sub. `TEXT` is kept because the reference publishes it as the localization hook every
       displayed string passes through (it is the identity, and BasicControls.xml defines the real
@@ -386,15 +387,40 @@
             return PetCanBeAbandoned();
         end
 
-        -- The raid roster (GetRaidRosterInfo) is a later arc — no raid menu opens yet, so the
-        -- four rank rows stay declared and never show.
-        local function hideAlways()
-            return true;
+        -- ── The four raid rank rows (decision 1549, ref UnitPopup.lua l.382-401) ──────────────
+        --
+        -- Every one of them re-reads the CLICKED ROW's rank through `GetRaidRosterInfo(userData)`
+        -- — which is why the RAID menu is the only one in this file opened with a fourth
+        -- argument, and why that argument is the raid ROW INDEX rather than a name. The rules,
+        -- ref-verbatim:
+        --
+        --   New Leader   leader only, and not on the leader themself (rank 2)
+        --   Promote      leader only, and only on a plain member (rank 0)
+        --   Demote       leader only, and only on an assistant (rank 1)
+        --   Remove       leader OR assistant, and never on the leader
+        --
+        -- The first three also require `menu.name`: a row whose name has not resolved cannot be
+        -- addressed by the by-name bindings behind them. Remove does not, because it acts on the
+        -- index directly.
+        local function raidRank(menu)
+            local _, rank = GetRaidRosterInfo(menu.userData);
+            return rank;
         end
-        HIDE_ROW["RAID_LEADER"] = hideAlways;
-        HIDE_ROW["RAID_PROMOTE"] = hideAlways;
-        HIDE_ROW["RAID_DEMOTE"] = hideAlways;
-        HIDE_ROW["RAID_REMOVE"] = hideAlways;
+        -- `party.isLeader` is 0/1, not a boolean, and **0 is truthy in Lua** — so these compare
+        -- against 0 rather than saying `not party.isLeader`, exactly as every other predicate in
+        -- this file does and exactly as the reference's own `(isLeader == 0)` does.
+        HIDE_ROW["RAID_LEADER"] = function(menu, party)
+            return party.isLeader == 0 or raidRank(menu) == 2 or not menu.name;
+        end
+        HIDE_ROW["RAID_PROMOTE"] = function(menu, party)
+            return party.isLeader == 0 or raidRank(menu) ~= 0 or not menu.name;
+        end
+        HIDE_ROW["RAID_DEMOTE"] = function(menu, party)
+            return party.isLeader == 0 or raidRank(menu) ~= 1 or not menu.name;
+        end
+        HIDE_ROW["RAID_REMOVE"] = function(menu, party)
+            return (party.isLeader == 0 and party.isAssistant == 0) or raidRank(menu) == 2;
+        end
 
         -- The two GUILD rows, ref UnitPopup.lua l.323-330 (decision 1257's guild arc un-defers
         -- them). Both gate on `GuildFrame:IsVisible()`, which is the whole point of them: these
@@ -659,7 +685,7 @@
         -- ── What a row does when it is clicked ─────────────────────────────────────────────
         -- One handler per row, keyed by the row's own name. A row with no handler does nothing —
         -- which is how Cancel, the nested parent rows, and every DEFERRED row are expressed
-        -- (header: TARGET, GUILD_*, RESET_INSTANCES, RAID_LEADER/PROMOTE/DEMOTE/REMOVE).
+        -- (header: TARGET, RESET_INSTANCES).
         local CLICK_ROW = { };
 
         CLICK_ROW["WHISPER"] = function(menu)
@@ -795,6 +821,23 @@
         end
         CLICK_ROW["GUILD_LEAVE"] = function()
             StaticPopup_Show("CONFIRM_GUILD_LEAVE", GetGuildInfo("player"));
+        end
+
+        -- The four raid rank verbs (ref UnitPopup_OnClick l.624-631). Three go by NAME and one by
+        -- the row index — the reference's own split, and it is the wire's: `CMSG_GROUP_UNINVITE`
+        -- would take either, but the assistant and leader opcodes need a guid the engine resolves
+        -- from a name, and the menu never had one to hand for a raid row.
+        CLICK_ROW["RAID_LEADER"] = function(menu)
+            PromoteByName(menu.name);
+        end
+        CLICK_ROW["RAID_PROMOTE"] = function(menu)
+            PromoteToAssistant(menu.name);
+        end
+        CLICK_ROW["RAID_DEMOTE"] = function(menu)
+            DemoteAssistant(menu.name);
+        end
+        CLICK_ROW["RAID_REMOVE"] = function(menu)
+            UninviteFromRaid(menu.userData);
         end
 
         function UnitPopup_OnClick()
