@@ -15,6 +15,7 @@ use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 use crate::ui_text::UiFontAtlas;
 use benilla_assets::WorldAssets;
 
+mod colorselect;
 mod cooldown;
 mod text;
 use cooldown::cooldown_quads;
@@ -571,9 +572,13 @@ pub(super) fn drive_script(
         // autocast-shine token (decision 1383) is a side-channel kind wearing a Texture's
         // clothes, so it is excluded by path.
         let simple = |eq: &benilla_ui::script::ExtractedQuad| match &eq.content {
-            QuadContent::Frame | QuadContent::Cooldown { .. } | QuadContent::Backdrop { .. } => {
-                true
-            }
+            QuadContent::Frame
+            | QuadContent::Cooldown { .. }
+            | QuadContent::Backdrop { .. }
+            // Both colour-picker arms write one quad and nothing else — and they change on every
+            // step of a drag, which is exactly the traffic the splice exists for.
+            | QuadContent::ColorWheel
+            | QuadContent::ColorValue { .. } => true,
             QuadContent::Texture {
                 portrait_unit: None,
                 path,
@@ -1067,6 +1072,43 @@ fn convert_entry(
                 // clockwise-on-screen (`UiQuad::rotation`) — negate to convert.
                 rotation: -rotation,
                 desaturated,
+                ..default()
+            });
+        }
+        // The colour picker's hue disc: a generated image (there is no BLP that is a colour
+        // wheel), tinted by the widget's value. See [`colorselect`] for why one static image
+        // covers every colour.
+        QuadContent::ColorWheel => {
+            let Some(assets) = assets.as_mut() else {
+                return;
+            };
+            let handle =
+                assets.generated_sprite(colorselect::WHEEL_KEY, images, colorselect::wheel_pixels);
+            out.push(UiQuad {
+                rect,
+                z_key: eq.z,
+                texture: Some(handle),
+                uv: UvRect::FULL,
+                color: colorselect::wheel_tint(eq.alpha),
+                clip,
+                ..default()
+            });
+        }
+        // Its brightness strip: one greyscale ramp tinted to the live hue at full value, which is
+        // exactly `rgb(h, s, v)` at every row.
+        QuadContent::ColorValue { hue, sat } => {
+            let Some(assets) = assets.as_mut() else {
+                return;
+            };
+            let handle =
+                assets.generated_sprite(colorselect::RAMP_KEY, images, colorselect::ramp_pixels);
+            out.push(UiQuad {
+                rect,
+                z_key: eq.z,
+                texture: Some(handle),
+                uv: UvRect::FULL,
+                color: colorselect::ramp_tint(hue, sat, eq.alpha),
+                clip,
                 ..default()
             });
         }

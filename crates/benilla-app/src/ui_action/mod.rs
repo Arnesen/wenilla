@@ -126,6 +126,19 @@ pub(crate) struct PlayerActions {
 #[derive(Resource, Default)]
 pub(crate) struct AutoRepeatActive(pub Option<u32>);
 
+/// **The `modalNextSpell` chain's queue** — spells the *client* casts on its own, one per
+/// `SMSG_CAST_RESULT` that names a spell with a non-zero `Spell.dbc` column 38
+/// ([`benilla_formats::SpellDisplay::modal_next_spell`]). Written by the net drain's
+/// `cast_result`, drained through the one cast path by [`drain::drain_chain_casts`].
+///
+/// It exists because the reference's chain runs *inside* `HandleCastResult 0x6e7330`
+/// (`0x6e74aa call 0x6e5a90` → `TryCast`) and ours cannot: the net-apply drain and
+/// [`CastLadder`] want the same half-dozen resources, so a direct call is a Bevy param conflict.
+/// A one-frame queue is the seam — and it keeps the rule that nothing sends a cast except the
+/// ladder.
+#[derive(Resource, Default)]
+pub(crate) struct ChainCasts(pub(crate) Vec<u32>);
+
 /// The spell display catalog + the shapeshift bonus-bar map (absent when the client data isn't —
 /// every consumer tolerates that). `pub(crate)`: the cast-visual router
 /// (`crate::creature_anim::spell_visual`) resolves spell → visual through the same catalog — one
@@ -279,6 +292,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<UiErrorKeys>()
             .init_resource::<crate::cooldowns::Cooldowns>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<ChainCasts>()
             .init_resource::<cast_target::AutoSelfCast>()
             .init_resource::<targeting::SpellTargeting>()
             .init_resource::<targeting::EnchantConfirmItem>()
@@ -310,6 +324,11 @@ impl Plugin for UiActionPlugin {
                     // The T binding (0997): the attack arm's twin door, after the dispatch wrote
                     // this frame's fires.
                     drain::attack_target_binding.after(UiInput),
+                    // The `modalNextSpell` chain (1597): a hunter shot's CAST_RESULT queues
+                    // Auto Shot, and it goes out through the same ladder every other caster
+                    // takes. After the input pass like the other drains — the queue is filled by
+                    // the net drain, which runs earlier in the frame.
+                    drain::drain_chain_casts.after(UiInput),
                     // The learned-ability latches must be current before the target chain's
                     // cursor classifier reads them; the book feed runs in `UnitFeed`, so sitting
                     // right after it is enough.

@@ -361,3 +361,109 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
         );
     }
 }
+
+/// **A row click paints the selection glow, and a row hover paints nothing** — the two things the
+/// director saw wrong in a live window, pinned in both directions (decision 1598).
+///
+/// Neither was subtle. Both survived because this suite drove the window's tabs, dropdowns and
+/// reagent slots without ever clicking or hovering a LIST ROW:
+///
+///   * `BenillaTradeSkillFrame_Update` addressed `BenillaTradeSkillHighlight` — the *texture* — for
+///     the Hide/SetPoint/Show that the reference does on `TradeSkillHighlightFrame`, the *frame*
+///     (Blizzard_TradeSkillUI.lua l.99/142-143; only l.200's `SetVertexColor` is the texture's).
+///     The frame is declared `hidden="true"`, so it never once became visible and no selection ever
+///     highlighted. `CraftFrame.xml`/`TrainerFrame.xml` both split the two correctly already.
+///   * The row template carried a `GameTooltip:SetTradeSkillItem` OnEnter that the reference has no
+///     trace of: `TradeSkillSkillButtonTemplate` overrides `OnClick` alone, and its base
+///     `ClassTrainerSkillButtonTemplate` (`Interface\FrameXML\ClassTrainerFrameTemplates.xml`) only
+///     recolours `$parentSubText` on hover. The real window's list is bare on hover.
+///
+/// The hover half asserts through the row's own script table rather than a synthetic mouse-over, so
+/// it fails on the *existence* of a hover handler — re-adding one "harmlessly" goes red here even if
+/// the tooltip it opens happens to be empty in a headless VM.
+#[test]
+fn a_row_click_shows_the_selection_glow_and_a_row_hover_shows_nothing() {
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_trade_skill(Some(state()));
+    s.fire_event("TRADE_SKILL_SHOW", vec![]);
+
+    // Row 1 is the "Mail" header, row 2 the first recipe (the two-group book `state()` builds).
+    assert_eq!(
+        s.eval::<String>("local _, t = GetTradeSkillInfo(2) return t")
+            .unwrap(),
+        "medium",
+        "row 2 is a recipe, not a header (state()'s own difficulty)"
+    );
+
+    // Opening already selects `GetFirstTradeSkill()` (the OnEvent path), so the glow is up before
+    // any click — exactly what the director's screenshot should have shown and didn't.
+    let glow_on_row = |s: &UiScript, n: i64| {
+        let (glow, row) = (
+            s.eval::<f64>("return BenillaTradeSkillHighlightFrame:GetTop()")
+                .unwrap(),
+            s.eval::<f64>(&format!("return BenillaTradeSkillSkill{n}:GetTop()"))
+                .unwrap(),
+        );
+        (glow - row).abs() < 0.01
+    };
+    assert!(
+        s.eval::<bool>("return BenillaTradeSkillHighlightFrame:IsShown()")
+            .unwrap(),
+        "the show-time auto-selection glows — the FRAME, not just its texture"
+    );
+    assert!(glow_on_row(&s, 2), "and it is parked on the first recipe");
+
+    // A click on the OTHER Mail recipe moves it, rather than leaving it at the window's TOPLEFT.
+    s.run("BenillaTradeSkillSkill3:Click()").unwrap();
+    pump(&mut s);
+    assert_eq!(
+        s.eval::<i64>("return GetTradeSkillSelectionIndex()")
+            .unwrap(),
+        3,
+        "the click selected row 3"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaTradeSkillHighlightFrame:IsShown()")
+            .unwrap()
+            && glow_on_row(&s, 3),
+        "the glow followed the click to row 3"
+    );
+
+    // Fold every group away and no recipe row is visible to carry it.
+    s.run("BenillaTradeSkillCollapseAllButton:Click()").unwrap();
+    pump(&mut s);
+    assert!(
+        !s.eval::<bool>("return BenillaTradeSkillHighlightFrame:IsShown()")
+            .unwrap(),
+        "no recipe row on screen → no glow (headers never take the selection)"
+    );
+
+    // The hover half. Positive control first, so a `GetScript` that answered nil for everything
+    // could not quietly pass the real assertions below: the reagent slot DOES tooltip on hover.
+    assert!(
+        s.eval::<bool>("return BenillaTradeSkillReagent1:GetScript(\"OnEnter\") ~= nil")
+            .unwrap(),
+        "control: a reagent slot has an OnEnter, so GetScript reports real handlers"
+    );
+    // The list row has no hover script at all, in the template or as a global.
+    for handler in ["OnEnter", "OnLeave"] {
+        assert!(
+            s.eval::<bool>(&format!(
+                "return BenillaTradeSkillSkill2:GetScript(\"{handler}\") == nil"
+            ))
+            .unwrap(),
+            "a list row must carry no {handler} — the reference's rows never tooltip"
+        );
+    }
+    for f in [
+        "BenillaTradeSkillSkillButton_OnEnter",
+        "BenillaTradeSkillSkillButton_OnLeave",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return getglobal(\"{f}\") == nil"))
+                .unwrap(),
+            "{f} must not exist"
+        );
+    }
+}

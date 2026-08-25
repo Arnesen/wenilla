@@ -273,6 +273,8 @@ pub(super) type BlipInputs<'w, 's> = (
     Option<Res<'w, crate::go_templates::Locks>>,
     Res<'w, crate::poi_marker::PoiMarker>,
     Option<Res<'w, crate::area_poi::AreaPoiRes>>,
+    ResMut<'w, super::MinimapPing>,
+    Option<NonSendMut<'w, UiScript>>,
 );
 
 /// Every streamed object the tracking classifier considers (our own avatar excluded — the
@@ -309,12 +311,17 @@ pub(super) struct BlipCtx {
     /// anchor point (the reference seats the blip tooltip at the cursor; director-verified,
     /// exact engine offset pending the anchor-law pin).
     pub(super) cursor_ui: Option<Vec2>,
+    /// THE seam scale (decision 0582): **window px per UI unit**. Everything else in this struct
+    /// is window px; anything arriving from Lua ([`Minimap:PingLocation`](super::ping)) is in UI
+    /// units, and this is the one number that crosses them. Mixing the two silently is decision
+    /// 1596's first root cause.
+    pub(super) seam: f32,
 }
 
 impl BlipCtx {
     /// A WoW world point → its screen offset from the widget centre (north-up: up = +X north,
     /// left = +Y west — the same mapping the tiles and the corpse blip use).
-    fn offset(&self, w: [f32; 3]) -> Vec2 {
+    pub(super) fn offset(&self, w: [f32; 3]) -> Vec2 {
         Vec2::new(
             (self.wy - w[1]) * self.px_per_yd,
             -(w[0] - self.wx) * self.px_per_yd,

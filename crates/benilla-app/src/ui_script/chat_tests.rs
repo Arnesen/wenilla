@@ -557,14 +557,27 @@ fn the_lazypig_window_walk_survives_all_seven_indices() {
 /// ChatFrame3..7 ship hidden and with no `isDocked`, the reference's own chat-cache state
 /// (`DOCKED 0 / SHOWN 0`). This is not cosmetic: `Outfitter.lua:3099` reaches an UNGUARDED
 /// `getglobal('ChatFrame'..i..'Tab'):GetText()` for any window that is visible *or* docked, and we
-/// build no tabs past ChatFrame1Tab. The same reason keeps `isDocked` off ChatFrame2, whose
-/// "Combat Log" tab is deliberately unbuilt.
+/// build no tabs past ChatFrame2Tab.
+///
+/// **ChatFrame1 and ChatFrame2 DO carry it**, and that is the half this test gained with the
+/// move/resize arc: the reference's own gates read `chatFrame.isDocked` — `isDocked and chatFrame
+/// ~= DEFAULT_CHAT_FRAME` is what stops the Combat Log being dragged out of the dock it is
+/// anchored into — so the flag has a consumer now rather than being an advertisement. Both have
+/// tabs (1575), so the Outfitter walk below is still safe.
 #[test]
 fn the_undocked_windows_are_hidden_and_carry_no_is_docked() {
     let s = chat_frame();
+    for i in 1..=2 {
+        let docked: bool = s
+            .eval(&format!("return ChatFrame{i}.isDocked ~= nil"))
+            .unwrap();
+        assert!(docked, "ChatFrame{i} is docked and says so");
+    }
     for i in 2..=7 {
         let shown: bool = s.eval(&format!("return ChatFrame{i}:IsShown()")).unwrap();
         assert!(!shown, "ChatFrame{i} ships hidden");
+    }
+    for i in 3..=7 {
         let docked: bool = s
             .eval(&format!("return ChatFrame{i}.isDocked ~= nil"))
             .unwrap();

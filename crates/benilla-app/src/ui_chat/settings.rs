@@ -1,6 +1,7 @@
-//! The chat windows' **saved look** — the background tint, the background alpha and the font size
+//! The chat windows' **saved state** — the background tint, the background alpha and the font size
 //! the player picks off a chat tab's right-click menu (decision 1589, fixing **B246**: *"no chat
-//! options at all — background transparency has no home, and chat can be hard to read"*).
+//! options at all — background transparency has no home, and chat can be hard to read"*), plus the
+//! window's **lock**, which joined them when the windows became movable and resizable.
 //!
 //! The state itself lives in the VM ([`benilla_ui::script::ChatWindowLook`], written by the
 //! reference's own `SetChatWindowColor`/`SetChatWindowAlpha`/`SetChatWindowSize` and read straight
@@ -15,6 +16,10 @@
 //! ```text
 //! WINDOW 1   SIZE 0  COLOR 0 0 0 0  LOCKED 1  DOCKED 1  SHOWN 1
 //! ```
+//!
+//! `LOCKED` is an `i32` in the record (`CHATWINDOW+0x8c`) but the cache writer booleanises it
+//! through `setne`, so only `{0,1}` round-trip there — which is why ours is a `bool` and writes the
+//! same two digits.
 //!
 //! `COLOR` there is **R G B A**, written from the record's packed BGRA quad and parsed straight
 //! back as bytes, so the reference's own file round-trip is bit-exact (§5,
@@ -33,10 +38,12 @@
 //! its ancestor rather than as an invention.
 //!
 //! **It is deliberately a SUBSET and says so in its header.** The reference's cache also carries
-//! `LOCKED`/`DOCKED`/`SHOWN`, the per-window `MESSAGES`/`CHANNELS` registration and the whole
-//! `COLORS` table; benilla has no rename, no undock and no per-type colour editor (0288 §2), so
-//! writing those keys would persist state nothing can move — the honest-tree rule (1134 §4) at
-//! the persistence layer. Each joins the file the day something can change it.
+//! `DOCKED`/`SHOWN`, the per-window `MESSAGES`/`CHANNELS` registration and the whole `COLORS`
+//! table; benilla has no rename, no undock and no per-type colour editor (0288 §2), so writing
+//! those keys would persist state nothing can move — the honest-tree rule (1134 §4) at the
+//! persistence layer. Each joins the file the day something can change it, **which is exactly what
+//! `LOCKED` just did**: the tab menu's *Lock/Unlock Window* row moves it, so a file that dropped it
+//! would reset the player's unlocked window at every login.
 //!
 //! ## Why per character, and not a CVar
 //!
@@ -69,10 +76,11 @@ const SAVE_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The file's header — where these values come from and where the law lives.
 const HEADER: &str = "\
-# benilla chat window looks (decision 1589) — the tint, alpha and font size a chat tab's
+# benilla chat window state (decision 1589) — the tint, alpha, font size and lock a chat tab's
 # right-click menu sets. A SUBSET of the reference's chat-cache.txt: benilla has no rename,
 # undock or per-type colour editor yet, so those keys are absent rather than invented.
-# COLOR is four bytes (0-255), the engine's own storage; SIZE is 0 for \"the font's own height\".
+# COLOR is four bytes (0-255), the engine's own storage; SIZE is 0 for \"the font's own height\";
+# LOCKED is 1 or 0, and 1 is the stock row (a fresh window cannot be dragged until you unlock it).
 ";
 
 /// Which character's file we are on, where it lives, and whether it is owed a write.
@@ -97,13 +105,14 @@ fn render(looks: &[ChatWindowLook]) -> String {
     let mut out = String::from(HEADER);
     for (i, l) in looks.iter().enumerate() {
         out.push_str(&format!(
-            "WINDOW {}  SIZE {}  COLOR {} {} {} {}\n",
+            "WINDOW {}  SIZE {}  COLOR {} {} {} {}  LOCKED {}\n",
             i + 1,
             l.font_size,
             l.r,
             l.g,
             l.b,
-            l.a
+            l.a,
+            i32::from(l.locked)
         ));
     }
     out
@@ -151,6 +160,11 @@ fn parse(text: &str) -> Vec<(usize, ChatWindowLook)> {
                 look.g = byte(it.next());
                 look.b = byte(it.next());
                 look.a = byte(it.next());
+            } else if key.eq_ignore_ascii_case("LOCKED") {
+                // Anything that is not the literal `0` is locked — the reference's own `setne`
+                // read, and the lenient half of it: a file from a build that wrote nothing here
+                // keeps the stock `LOCKED 1` default rather than silently unlocking the window.
+                look.locked = it.next().is_none_or(|v| v.trim() != "0");
             }
             // Anything else is a key from a build that knows more than this one — skip it and the
             // value it would have consumed cannot be told from the next key, so skip only the key.
@@ -291,6 +305,7 @@ mod tests {
             b,
             a,
             font_size,
+            locked: true,
         }
     }
 
@@ -325,7 +340,7 @@ mod tests {
     fn the_parse_is_permissive_the_way_the_reference_cache_is() {
         let got = parse(
             "window 1  size 16  color 10 20 30 40\n\
-             WINDOW 2  LOCKED 1  COLOR 1 2 3 4  DOCKED 2\n\
+             WINDOW 2  SHOWN 1  COLOR 1 2 3 4  DOCKED 2\n\
              WINDOW 3  SIZE 12\n",
         );
         assert_eq!(
@@ -335,6 +350,24 @@ mod tests {
                 (1, look(1, 2, 3, 4, 0)),
                 (2, look(0, 0, 0, 0, 12)),
             ]
+        );
+    }
+
+    /// `LOCKED` round-trips, and a file that never mentions it keeps the stock **locked** row —
+    /// the lenient default that matters, because reading it as "unlocked" would hand every
+    /// pre-existing player's chat window to a stray drag on their next login.
+    #[test]
+    fn the_lock_round_trips_and_an_absent_key_stays_locked() {
+        let unlocked = ChatWindowLook {
+            locked: false,
+            ..look(0, 0, 0, 64, 14)
+        };
+        assert!(render(&[unlocked]).contains("LOCKED 0"));
+        assert_eq!(parse(&render(&[unlocked])), vec![(0, unlocked)]);
+        assert_eq!(
+            parse("WINDOW 1  SIZE 14  COLOR 0 0 0 64\n"),
+            vec![(0, look(0, 0, 0, 64, 14))],
+            "no LOCKED key = the stock LOCKED 1"
         );
     }
 

@@ -4,10 +4,10 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    auction, backdrop, bank, char_stats, chat_window, container, craft, cursor, death, duel,
-    follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant, party, pvp,
-    quest, quest_log, reputation, session, simplehtml, skills, slider, social, spellbook, taxi,
-    trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject,
+    auction, backdrop, bank, char_stats, chat_window, colorselect, container, craft, cursor, death,
+    duel, follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant,
+    party, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider, social,
+    spellbook, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject,
     ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
@@ -445,6 +445,11 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_chat_window_changes`] drain — the persist cue. A set, so a slider
     /// drag costs one entry however many steps it took.
     pub(crate) chat_window_changes: HashSet<usize>,
+    /// Whether a **user-placed** frame's geometry moved since the app's last
+    /// [`super::UiScript::take_user_placed_change`] drain — the layout cache's persist cue
+    /// ([`super::layout_cache`]). One bit rather than a set of handles, because the file is
+    /// rewritten whole either way; set by the move/resize pumps and by `SetUserPlaced` itself.
+    pub(crate) user_placed_changed: bool,
     /// The player's default chat language name, app-resolved from `ChrRaces.BaseLanguage` ×
     /// `Languages.dbc` ([`super::UiScript::set_default_language`]). `None` = the reference's
     /// no-player-object state, where `GetDefaultLanguage()` returns **zero Lua values**
@@ -795,6 +800,10 @@ pub(crate) struct Model {
     /// like a scrollbar dragging in the real client, no Lua involved). `None` between drags
     /// ([`slider::SliderDrag`]).
     pub(crate) slider_drag: Option<slider::SliderDrag>,
+    /// The in-flight ColorSelect drag — the colour picker's wheel/value-strip twin of
+    /// [`Self::slider_drag`], held from press to release. The widget keeps two independent capture
+    /// flags rather than one target ([`colorselect::ColorDrag`]).
+    pub(crate) color_drag: Option<colorselect::ColorDrag>,
 
     /// The open gossip menu the app pushes (`None` = no menu), the `SelectGossipOption` intents it
     /// drains, and whether `CloseGossip` was called — the gossip seam ([`gossip`]).
@@ -1221,6 +1230,20 @@ pub(crate) struct Model {
     /// saw (UI space: logical px, y-up — the same frame `resolve` rects live in). Behind Lua's
     /// `GetCursorPosition()`; the reference world map polls it every OnUpdate for hover/click math.
     pub(crate) cursor_pos: (f32, f32),
+
+    /// A `Minimap:PingLocation(x, y)` call, parked for the app to drain **in the same frame**
+    /// ([`UiScript::take_minimap_ping_request`]): centre-relative offsets in **UI units**
+    /// (x right, y up — `GetCursorPosition`'s own space, which is NOT the window-pixel space
+    /// the app's minimap geometry lives in; the app applies the 0582 seam scale on the way in,
+    /// and getting that wrong is decision 1596's first root cause).
+    pub(crate) minimap_ping_request: Option<(f32, f32)>,
+    /// The live minimap ping's **normalized** offsets from the widget centre (fractions of the
+    /// widget side, x right / y up — the `MINIMAP_PING` event's arg2/arg3 space), republished
+    /// by the app every frame a ping is live and cleared when the ping ends. Behind
+    /// `Minimap:GetPingPosition()`. There is exactly one ping, so it lives here rather than on
+    /// each Minimap widget's [`KindState`](crate::widget::KindState) — one write, one read,
+    /// no arena walk (decision 1596).
+    pub(crate) minimap_ping: Option<(f32, f32)>,
     /// The realm this session is on, behind `GetRealmName()` (decision 1195). `""` until the app
     /// pushes one — the glue screen's own answer, and never `nil`, because the corpus idiom is
     /// `db[GetRealmName()] = …` at file scope and a nil index errors one call deeper.
@@ -1393,6 +1416,7 @@ impl Model {
             chat_window_looks: [chat_window::ChatWindowLook::DEFAULT;
                 chat_window::NUM_CHAT_WINDOWS],
             chat_window_changes: HashSet::new(),
+            user_placed_changed: false,
             default_language: None,
             duel_requests: Vec::new(),
             follow_requests: Vec::new(),
@@ -1470,6 +1494,7 @@ impl Model {
             moving: None,
             sizing: None,
             slider_drag: None,
+            color_drag: None,
             gossip: None,
             gossip_selects: Vec::new(),
             gossip_close: false,
@@ -1574,6 +1599,8 @@ impl Model {
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             cursor_pos: (0.0, 0.0),
+            minimap_ping_request: None,
+            minimap_ping: None,
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,

@@ -692,6 +692,9 @@ mod unit_frame_tests;
 mod unit_popup_tests;
 
 #[cfg(test)]
+mod chat_resize_tests;
+
+#[cfg(test)]
 mod dropdown_tests;
 
 #[cfg(test)]

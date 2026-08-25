@@ -512,6 +512,24 @@ pub(super) fn region_name_of(model: &Model, id: u32) -> Option<String> {
         .map(|(k, _)| k.clone())
 }
 
+/// Publish a region's global name into the **region-name registry** — the table a sibling's
+/// `SetPoint`/`SetAllPoints` resolves a named `relativeTo` through
+/// ([`super::object::layout_methods`]). First-wins, the same rule frames follow.
+///
+/// `CreateTexture(name)` does this for itself; the paths that *don't* are the typed widgets' own
+/// sub-textures, which are created by a setter (`SetThumbTexture`, `SetColorWheelTexture`, …) and
+/// named afterwards by the XML loader. Without this they land in `_G` and nowhere else, and a
+/// `relativeTo="ColorPickerWheel"` on a sibling silently falls back to the parent frame — which is
+/// exactly how the colour picker's value strip first ended up 224 px to the right of where the
+/// reference puts it, anchored to the window instead of to the wheel.
+pub(crate) fn publish_region_name(lua: &Lua, name: &str, region: &Table) {
+    let Ok(id) = super::object::decode_id(region) else {
+        return;
+    };
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    model.region_names.entry(name.to_string()).or_insert(id);
+}
+
 /// The string `GetObjectType()` answers for this region, and the leaf `IsObjectType` matches.
 ///
 /// The reference reads a per-class `.data` `const char*` through `vtable[+0x1c]`; ours reads the

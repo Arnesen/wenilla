@@ -8,6 +8,12 @@
 //! (decision 0203). The model attrs (`minimapPlayerModel=`/`minimapArrowModel=`) are not
 //! modeled yet — deferred with phase 3's blips.
 //!
+//! **The ping** (decision 1596) is the same split, one rung further out: the two methods here are
+//! pure seam — `PingLocation` parks a click and `GetPingPosition` reads back what the app
+//! published — because the ping's only stored form is a WORLD point the app pins it to, and the
+//! engine core has no world. Nothing here holds the ping's position, its lifetime, or its art;
+//! putting any of that in Lua is what made the first attempt flaky.
+//!
 //! **The level persists** (decision 1131). The client keeps two halves: the live indices
 //! (`0x86f698` outdoor / `0x86f69c` indoor — our [`MinimapState`]) and the two CVar objects
 //! `minimapZoom`/`minimapInsideZoom` (both registered default `"3"`), which are what `Config.wtf`
@@ -91,6 +97,44 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // Validate the receiver like every kind method (the constant is per the client's
             // `get_zoom_levels`, but a non-Minimap receiver is still a caller bug).
             with_minimap(lua, &this, |_| MINIMAP_ZOOM_LEVELS)
+        })?,
+    )?;
+    m.set(
+        "PingLocation",
+        // The minimap click (our own `Minimap_OnClick`, and any addon that replaced it): centre-
+        // relative offsets in **UI units**, x right / y up — exactly `GetCursorPosition()` minus
+        // `Minimap:GetCenter()`, both of which are UI-space. Parked, not converted: the app owns
+        // the view scale, and it drains this in the SAME frame it draws the map so the click
+        // resolves against the geometry the player actually clicked on (decision 1596).
+        //
+        // The receiver is validated but the value lives on the model — one pending click, not one
+        // per Minimap widget.
+        lua.create_function(|lua, (this, x, y): (Table, f32, f32)| {
+            with_minimap(lua, &this, |_| ())?;
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .minimap_ping_request = Some((x, y));
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "GetPingPosition",
+        // The live ping's normalized offsets from the widget centre (fractions of the widget
+        // side, x right / y up — the `MINIMAP_PING` event's own arg2/arg3 space), recomputed by
+        // the app from the ping's world point every frame one is live. So a caller polling this
+        // while walking sees the value MOVE, which is the whole point: the ping is pinned to the
+        // world, not to the map.
+        //
+        // Returns **nil, nil** when no ping is live, rather than `(0, 0)`: zero is a real answer
+        // meaning "the ping is under your feet", and handing it back for "there is no ping" is a
+        // lie a caller cannot tell from the truth (1203).
+        lua.create_function(|lua, this: Table| {
+            with_minimap(lua, &this, |_| ())?;
+            let ping = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .minimap_ping;
+            Ok(ping.map_or((None, None), |(x, y)| (Some(x), Some(y))))
         })?,
     )?;
     lua.set_named_registry_value(REG_MINIMAP_METHODS, m)?;

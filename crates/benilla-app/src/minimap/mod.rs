@@ -33,6 +33,9 @@ mod blips;
 pub(crate) use blips::party_member_pos;
 mod composite;
 mod interior;
+/// The minimap ping (decision 1596) — engine-owned and pinned to a world point.
+mod ping;
+pub(crate) use ping::MinimapPing;
 
 use std::collections::HashMap;
 
@@ -82,6 +85,21 @@ const ZOOM_CHUNKS: [f32; 6] = [14.0, 12.0, 10.0, 8.0, 6.0, 4.0];
 /// initializer*, missing the per-frame write `mov [esi+0xc], radiusTable[indoorZoom]` that reaches
 /// the field through a computed pointer. Superseded in wow-re; do not "restore" a constant here.
 const INTERIOR_ZOOM_RADIUS: [f32; 6] = [150.0, 120.0, 90.0, 60.0, 40.0, 25.0];
+
+/// **How far the map reaches, in yards** — the one function that answers it. Indoors that is the
+/// interior radius table indexed by the *indoor* zoom; outdoors the chunk-count table's half-extent
+/// indexed by the outdoor zoom. Both branches of [`emit_minimap`] and the ping's world→normalized
+/// relay go through here, so "the view radius" can only ever mean one thing (the twin of
+/// [`blips::party_member_pos`]'s reason for existing: two surfaces disagreeing about the same
+/// number is a bug you find months later).
+fn view_radius_yd(zoom: u8, inside_zoom: u8, inside: bool) -> f32 {
+    let clamp = |z: u8| usize::from(z.min(5));
+    if inside {
+        INTERIOR_ZOOM_RADIUS[clamp(inside_zoom)]
+    } else {
+        ZOOM_CHUNKS[clamp(zoom)] * 0.5 * CHUNK_YARDS
+    }
+}
 
 /// The **outer-edge bleed**: a minimap tile on the boundary of its group's grid is drawn 1.0 yd
 /// larger on that side, so a group's art extends 1 yd past its bbox all the way round and two
@@ -197,6 +215,12 @@ fn probe_minimap_widget(mut widget: ResMut<MinimapWidget>, windows: Query<&Windo
 #[derive(Resource, Default)]
 pub(crate) struct MinimapWidget(pub(crate) Option<MinimapSlot>);
 
+/// The player's WMO-containment verdict as of this frame — [`feed_minimap_inside`]'s answer, kept
+/// so anything that has to know "which zoom table is live" can read it instead of re-running the
+/// portal flood-fill. The client keeps one flag for both consumers (`0xceaa60`) and so do we.
+#[derive(Resource, Default)]
+pub(crate) struct MinimapInside(pub(crate) bool);
+
 /// The **persisted** half of the minimap zoom (decision 1131) — the client's two CVar objects
 /// `minimapZoom` / `minimapInsideZoom`, whose registered default is `"3"` in both cases (wow-re,
 /// VERIFIED at the `RegisterCVar 0x63db90` argument slot). The *live* indices are the widget's
@@ -250,6 +274,11 @@ struct MinimapAssets {
     /// (`Rotating-MinimapArrow.mdx`) the reference re-animates per blip source. See
     /// [`blips::RimArrow`] for the sequence→layer table and why there are four of them.
     rim_arrows: blips::RimArrowArt,
+    /// The ping marker's art, in draw order (decision 1596). The reference's `MiniMapPing` is a
+    /// `<Model>` frame — `Interface\MiniMap\Ping\MinimapPing.mdx`, XML `scale="0.4"`, 50×50 —
+    /// so this is the flat stand-in for it: the model's own `ping2`/`ping5` textures stacked, the
+    /// same pair the paused first version shipped. Empty = no art, and the ping draws nothing.
+    ping: Vec<Handle<Image>>,
     /// The unit-blip atlas (`Interface\Minimap\ObjectIcons`, five 32-px dot cells) — the
     /// quest-giver dots.
     object_icons: Option<Handle<Image>>,
@@ -295,6 +324,16 @@ fn setup_minimap(
             }
             let object_icons =
                 assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
+            let ping: Vec<_> = [
+                "Interface\\Minimap\\Ping\\ping2",
+                "Interface\\Minimap\\Ping\\ping5",
+            ]
+            .into_iter()
+            .filter_map(|p| assets.sprite_texture(p, &mut images))
+            .collect();
+            if ping.is_empty() {
+                warn!("minimap: no Ping art — a minimap ping will place but draw nothing");
+            }
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");
             }
@@ -315,6 +354,7 @@ fn setup_minimap(
                 poi,
                 rim_arrows,
                 object_icons,
+                ping,
                 forms,
             });
         }
@@ -410,9 +450,16 @@ fn emit_minimap(
         locks,
         poi_marker,
         pois,
+        mut ping,
+        script,
     ) = blip_inputs;
     // Hover resets every frame; the blip pass below re-establishes it while the map draws.
     *blip_hover = blips::MinimapBlipHover::None;
+    // Drain this frame's `Minimap:PingLocation` click BEFORE any early return below, so it is
+    // always spent in the frame it was made. Held across frames it would seat against geometry
+    // the player never clicked on; and a click made on a frame the map does not draw is simply
+    // not a ping (decision 1596).
+    let click = script.and_then(|mut s| s.take_minimap_ping_request());
     let (Some(slot), Some(assets), Some(map), Some(catalog)) =
         (widget.0.as_ref(), assets, map, catalog)
     else {
@@ -433,10 +480,9 @@ fn emit_minimap(
     // persisted index, so the override stands in for both.
     let zoom_override = std::env::var("WOW_MM_ZOOM")
         .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|z| z.min(5));
-    let zoom = zoom_override.unwrap_or(usize::from(slot.zoom.min(5)));
-    let inside_zoom = zoom_override.unwrap_or(usize::from(slot.inside_zoom.min(5)));
+        .and_then(|s| s.parse::<u8>().ok());
+    let zoom = zoom_override.unwrap_or(slot.zoom);
+    let inside_zoom = zoom_override.unwrap_or(slot.inside_zoom);
     let center = (slot.rect.min + slot.rect.max) * 0.5;
 
     let wow = bevy_to_wow(player.pos);
@@ -455,6 +501,9 @@ fn emit_minimap(
     // The player's containment verdict, kept as a bool for the quest-dot grey (the branch
     // below consumes `interior` itself).
     let player_indoors = interior.is_some();
+    // How far the map reaches this frame — decided once, by the one function that decides it, and
+    // used by whichever family draws below.
+    let view_radius = view_radius_yd(zoom, inside_zoom, player_indoors);
     if let Some((world_from_local, model, stem, in_group)) = interior {
         // INTERIOR: the WMO's own per-group tiles, drawn FULL WHITE (the day-night tint is outdoor-
         // only). The tiles are baked in the WMO's MODEL frame (north = model +X, sized to the model
@@ -470,7 +519,7 @@ fn emit_minimap(
         // `radiusTable[inside_zoom]` in raw yards (150 widest … 25 tightest), not the outdoor chunk
         // half-extent. The zoom buttons drive `inside_zoom` while you're inside, and it persists
         // separately from the outdoor level (wow-re finding 2 Q7 CORRECTION).
-        let radius = INTERIOR_ZOOM_RADIUS[inside_zoom];
+        let radius = view_radius;
         let px_per_yd = (side * 0.5) / radius;
         blip_px_per_yd = px_per_yd;
 
@@ -629,7 +678,7 @@ fn emit_minimap(
     } else if let Some(dir) = catalog.0.directory(map.0) {
         // OUTDOOR: the ADT terrain tiles, MODULATEd by the day-night light tint (not full white —
         // else too bright, the reference's CWorldFrame minimap draw). Absent lighting ⇒ white.
-        let half_extent = ZOOM_CHUNKS[zoom] * 0.5 * CHUNK_YARDS;
+        let half_extent = view_radius;
         let px_per_yd = (side * 0.5) / half_extent;
         blip_px_per_yd = px_per_yd;
         if cache.map_id != Some(map.0) {
@@ -716,6 +765,7 @@ fn emit_minimap(
         }
         let win = window.iter().next();
         let cursor = win.and_then(|w| w.cursor_position());
+        let seam = win.map_or(1.0, |w| crate::ui_script::seam_scale(w.height(), ui_scale.0));
         // The player's pan term, quantized to a half-logical-pixel grid (one device px at 2×):
         // every blip offset — and the rim arrows' bearing — derives from `wx`/`wy`, so the whole
         // blip layer steps together a few times a second instead of re-emitting sub-pixel-shifted
@@ -737,10 +787,10 @@ fn emit_minimap(
             cursor,
             // The same point in UI space (y-up, ÷s through the 0582/0584 seam — the tooltip's
             // anchor resolves in the VM's 768-virtual units, not window px): the cursor seat.
-            cursor_ui: cursor.zip(win).map(|(c, w)| {
-                let s = crate::ui_script::seam_scale(w.height(), ui_scale.0);
-                Vec2::new(c.x / s, (w.height() - c.y) / s)
-            }),
+            cursor_ui: cursor
+                .zip(win)
+                .map(|(c, w)| Vec2::new(c.x / seam, (w.height() - c.y) / seam)),
+            seam,
         }
     });
     let mut hover = blips::MinimapBlipHover::None;
@@ -866,6 +916,16 @@ fn emit_minimap(
             }
         }
     }
+
+    // The ping draws LAST — above the dots and the player arrow. In the reference `MiniMapPing` is
+    // a Lua Frame child of the Minimap, so it composites over everything the engine drew into the
+    // widget's hole; ours is engine-drawn but keeps that place in the order.
+    //
+    // This is also where a `Minimap:PingLocation` click is drained: the geometry it must resolve
+    // against is the geometry standing right here, this frame (decision 1596).
+    if let Some(ctx) = &blip_ctx {
+        ping::emit_ping(ctx, &mut ping, click, map.0, &assets.ping, &mut quads);
+    }
 }
 
 /// Push the player's WMO-containment state onto the Minimap widget (the client's `0xceaa60`), so the
@@ -893,11 +953,13 @@ fn feed_minimap_inside(
     instances: Query<&WmoPortalInstance>,
     wmos: Res<Assets<WmoModel>>,
     asset_server: Res<AssetServer>,
+    mut inside_res: ResMut<MinimapInside>,
     mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
     mut pushed_at: Local<crate::ui_script::VmMemo<u64>>,
 ) {
-    let Some(mut script) = script else { return };
     let inside = minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some();
+    inside_res.0 = inside;
+    let Some(mut script) = script else { return };
     let edge = *was_inside.get(&script) != Some(inside);
     let created = script.minimap_widgets_created();
     if edge || *pushed_at.get(&script) != created {
@@ -950,6 +1012,8 @@ impl Plugin for MinimapPlugin {
             .init_resource::<MinimapZoom>()
             .init_resource::<MinimapTileCache>()
             .init_resource::<blips::MinimapBlipHover>()
+            .init_resource::<MinimapInside>()
+            .init_resource::<MinimapPing>()
             .init_resource::<composite::MinimapComposite>()
             .add_systems(Startup, setup_minimap.after(AssetSet::Open))
             .add_systems(Startup, composite::setup_composite)
@@ -968,6 +1032,12 @@ impl Plugin for MinimapPlugin {
                     // Before the script tick, so a zoom button pressed this frame routes to the
                     // indoor/outdoor index that matches where the player actually is.
                     feed_minimap_inside.before(crate::ui_script::UiInput),
+                    // Before the script tick, and after the containment verdict it reads: the
+                    // `MINIMAP_PING` event and `Minimap:GetPingPosition()`'s value land in the
+                    // same tick, on a ping the renderer already drew at the end of last frame.
+                    ping::drive_minimap_ping
+                        .after(feed_minimap_inside)
+                        .before(crate::ui_script::UiInput),
                     // Before the script tick, so GameTimeFrame's OnUpdate reads this frame's
                     // minute, not last frame's.
                     feed_game_time.before(crate::ui_script::UiInput),

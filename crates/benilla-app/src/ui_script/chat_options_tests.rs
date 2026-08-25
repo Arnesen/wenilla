@@ -137,24 +137,32 @@ fn right_clicking_a_chat_tab_opens_its_options_menu() {
         s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
         "the tab's right-click opens the options menu"
     );
-    // The DISPLAY block, in the reference's own order (FloatingChatFrame.lua l.273-307).
+    // The window verb, then the DISPLAY block, in the reference's own order
+    // (FloatingChatFrame.lua l.236-307).
     assert_eq!(
         s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
-        3,
-        "Display title + Font Size + Background"
+        4,
+        "Lock Window + Display title + Font Size + Background"
     );
+    // **Unlock**, not Lock: both dock windows ship LOCKED (the stock chat-cache `LOCKED 1`), so
+    // the row offers the way out of it. `chat_resize_tests` drives the toggle itself.
     assert_eq!(
         s.eval::<String>("return DropDownList1Button1:GetText()")
             .unwrap(),
-        "Display"
+        "Unlock Window"
     );
     assert_eq!(
         s.eval::<String>("return DropDownList1Button2:GetText()")
             .unwrap(),
-        "Font Size"
+        "Display"
     );
     assert_eq!(
         s.eval::<String>("return DropDownList1Button3:GetText()")
+            .unwrap(),
+        "Font Size"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button4:GetText()")
             .unwrap(),
         "Background"
     );
@@ -209,13 +217,13 @@ fn the_background_row_opens_the_picker_and_its_opacity_slider_drives_the_window(
     );
     // …so the reversed slider is seeded at its far end.
     assert_eq!(
-        s.eval::<f64>("return DropDownList1Button3.opacity")
+        s.eval::<f64>("return DropDownList1Button4.opacity")
             .unwrap(),
         1.0,
         "info.opacity is 1 - a (the ref's own 'the slider is reversed')"
     );
 
-    left_click(&mut s, "DropDownList1Button3ColorSwatch");
+    left_click(&mut s, "DropDownList1Button4ColorSwatch");
     assert!(
         s.eval::<bool>("return ColorPickerFrame:IsVisible()")
             .unwrap(),
@@ -298,7 +306,7 @@ fn the_font_size_submenu_resizes_the_window_and_stores_the_pick() {
 
     // Open the submenu the way a player does — hover the `hasArrow` row (UIDropDownMenu.xml's
     // row OnEnter → `UIDropDownMenuRow_OpenSubmenu`).
-    hover(&mut s, "DropDownList1Button2");
+    hover(&mut s, "DropDownList1Button3");
     assert_eq!(
         s.eval::<i64>("return DropDownList2.numButtons").unwrap(),
         4,
@@ -341,7 +349,7 @@ fn each_tabs_menu_writes_its_own_window() {
         s.eval::<i64>("return FCF_GetCurrentChatFrameID()").unwrap(),
         2
     );
-    left_click(&mut s, "DropDownList1Button3ColorSwatch");
+    left_click(&mut s, "DropDownList1Button4ColorSwatch");
     s.run("OpacitySliderFrame:SetValue(0)").unwrap(); // reversed: 0 = fully opaque
     assert_eq!(
         s.eval::<f64>("local _,_,_,_,_,a = GetChatWindowInfo(2) return a")
@@ -371,7 +379,7 @@ fn cancelling_the_picker_puts_the_window_back() {
         .unwrap();
 
     right_click(&mut s, "ChatFrame1Tab");
-    left_click(&mut s, "DropDownList1Button3ColorSwatch");
+    left_click(&mut s, "DropDownList1Button4ColorSwatch");
     s.run("OpacitySliderFrame:SetValue(0)").unwrap();
     assert_eq!(
         s.eval::<f64>("local _,_,_,_,_,a = GetChatWindowInfo(1) return a")
@@ -406,6 +414,7 @@ fn the_restore_event_repaints_the_window_from_the_store() {
             b: 0,
             a: 255,
             font_size: 18,
+            locked: true,
         },
     )]);
     s.fire_event("UPDATE_CHAT_WINDOWS", vec![]);

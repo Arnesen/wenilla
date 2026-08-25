@@ -42,7 +42,7 @@ pub(super) fn id_to_lud(id: u32) -> LightUserData {
 }
 
 /// Read the id out of a wrapper table's `T[0]` lightuserdata (RF-0023).
-pub(super) fn decode_id(this: &Table) -> mlua::Result<u32> {
+pub(crate) fn decode_id(this: &Table) -> mlua::Result<u32> {
     match this.raw_get::<Value>(0)? {
         Value::LightUserData(l) => Ok(l.0 as usize as u32),
         _ => Err(mlua::Error::runtime(

@@ -1007,6 +1007,23 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-options-chat seed failed: {e}");
             }
         }
+        UiFixture::ColorPicker => {
+            let Some(script) = script else {
+                return;
+            };
+            // The corpus's own opening move (Dewdrop-2.0's colour row, `ColorPickerFrame.xml`'s
+            // header): set the colour, ask for opacity, show the window. A saturated mid-hue at
+            // three-quarter brightness puts BOTH markers off their defaults — the wheel's off
+            // centre and off the axes, the strip's a quarter down — so a mirrored axis or a
+            // swapped marker is visible in the still.
+            if let Err(e) = script.run(
+                "ColorPickerFrame.hasOpacity = 1; ColorPickerFrame.opacity = 0.3; \
+                 ColorPickerFrame:SetColorRGB(0.15, 0.55, 0.75); \
+                 ShowUIPanel(ColorPickerFrame)",
+            ) {
+                warn!("capture: ui-color-picker seed failed: {e}");
+            }
+        }
         UiFixture::OptionsWorldDetail => {
             let Some(mut script) = script else {
                 return;

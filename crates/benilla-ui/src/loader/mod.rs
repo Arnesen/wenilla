@@ -797,6 +797,7 @@ impl Loader<'_> {
         //      instead of calling SetNormalTexture on something that has no such method.
         self.apply_statusbar(el, wrapper, dbg_name);
         self.apply_slider(el, wrapper, self_name, dbg_name);
+        self.apply_colorselect(el, wrapper, self_name, dbg_name);
         self.apply_button(el, wrapper, self_name, dbg_name);
         self.apply_editbox(el, wrapper, dbg_name);
         self.apply_messageframe(el, wrapper, dbg_name);

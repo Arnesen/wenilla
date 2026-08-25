@@ -525,3 +525,161 @@ fn a_row_without_the_flag_has_no_swatch() {
         .eval::<bool>("return DropDownList1Button1ColorSwatch:IsVisible()")
         .unwrap());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The wheel (decision 1592) — the shipped window's generated art, end to end
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The four elements the reference declares are installed on the SHIPPED window, at the
+/// reference's own geometry, and `ColorPickerWheel` publishes under the reference's name — which is
+/// load-bearing twice over: `<ColorValueTexture>` anchors to it by name, and an addon re-skinning
+/// the picker addresses it by name.
+#[test]
+fn the_shipped_window_carries_the_wheel_at_the_references_geometry() {
+    let mut s = picker();
+    s.run("ShowUIPanel(ColorPickerFrame)").unwrap();
+    s.resolve();
+
+    let (wl, wb, ww, wh): (f32, f32, f32, f32) = s
+        .eval(
+            "local r = ColorPickerWheel; \
+             return r:GetLeft(), r:GetBottom(), r:GetWidth(), r:GetHeight()",
+        )
+        .unwrap();
+    assert_eq!((ww, wh), (128.0, 128.0), "ref l.186-195: a 128 square");
+    // The window is 365x200 centred on a 1024x768 screen; the wheel is TOPLEFT (16, -32) in it.
+    let (fl, ft): (f32, f32) = s
+        .eval("return ColorPickerFrame:GetLeft(), ColorPickerFrame:GetTop()")
+        .unwrap();
+    assert_eq!(wl, fl + 16.0);
+    assert_eq!(wb, ft - 32.0 - 128.0);
+
+    let (sl, sw, sh): (f32, f32, f32) = s
+        .eval(
+            "local r = ColorPickerFrame:GetColorValueTexture(); \
+             return r:GetLeft(), r:GetWidth(), r:GetHeight()",
+        )
+        .unwrap();
+    assert_eq!((sw, sh), (32.0, 128.0), "ref l.203-215");
+    assert_eq!(
+        sl,
+        wl + ww + 24.0,
+        "the strip anchors LEFT to the wheel's RIGHT at +24 — BY NAME"
+    );
+
+    // The markers: the one BLP in this window, at the reference's two crops.
+    for (getter, want_w, want_h) in [
+        ("GetColorWheelThumbTexture", 10.0, 10.0),
+        ("GetColorValueThumbTexture", 48.0, 14.0),
+    ] {
+        let (w, h): (f32, f32) = s
+            .eval(&format!(
+                "local r = ColorPickerFrame:{getter}(); return r:GetWidth(), r:GetHeight()"
+            ))
+            .unwrap();
+        assert_eq!((w, h), (want_w, want_h), "{getter}");
+        let file: String = s
+            .eval(&format!("return ColorPickerFrame:{getter}():GetTexture()"))
+            .unwrap();
+        assert!(file.contains("UI-ColorPicker-Buttons"), "{getter}: {file}");
+    }
+}
+
+/// **The window can now be used for what it is for**: Dewdrop opens it, the user clicks a hue, and
+/// the caller's `func` sees the colour under the cursor. This is the whole of B246's picker path
+/// and the thing that was impossible before 1592 — every other test in this file could pass with no
+/// wheel at all.
+///
+/// The click is at the wheel's right rim, which the pick law makes 180° — cyan.
+#[test]
+fn a_click_on_the_wheel_reaches_the_callers_func() {
+    let mut s = picker();
+    // Dewdrop-2.0.lua l.425-465's block, as transcribed in this file's other tests.
+    s.run(
+        r#"
+        picked = nil
+        ColorPickerFrame.func = function()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            picked = { r = r, g = g, b = b }
+        end
+        ColorPickerFrame.hasOpacity = nil
+        ColorPickerFrame:SetColorRGB(1, 1, 1)
+        ShowUIPanel(ColorPickerFrame)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let (l, b, w, h): (f32, f32, f32, f32) = s
+        .eval(
+            "local r = ColorPickerWheel; \
+             return r:GetLeft(), r:GetBottom(), r:GetWidth(), r:GetHeight()",
+        )
+        .unwrap();
+    s.mouse_button(l + w - 1.0, b + h * 0.5, "LeftButton", true);
+    s.mouse_button(l + w - 1.0, b + h * 0.5, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    let (r, g, bl): (f64, f64, f64) = s
+        .eval("return picked.r, picked.g, picked.b")
+        .expect("func ran with a colour");
+    assert!(
+        r < 0.05 && g > 0.95 && bl > 0.95,
+        "the right rim is 180° — cyan, got ({r:.3}, {g:.3}, {bl:.3})"
+    );
+    // And the window's own preview swatch followed, through OnColorSelect.
+    let swatch = s.extract().into_iter().any(|q| {
+        matches!(&q.content, QuadContent::Texture { color: Some(c), .. }
+            if c[0] < 0.05 && c[1] > 0.95)
+    });
+    assert!(swatch, "ColorSwatch repainted to the picked colour");
+}
+
+/// The two file-less regions reach the renderer as their own content kinds, carrying exactly what
+/// changes their pixels and nothing more: the disc carries **no colour at all** (it is drawn at a
+/// literal `V = 1`), and the strip carries hue and saturation but **not value**. Anything more
+/// would churn these quads on every step of a drag for no pixel — the extract gate is only honest
+/// if the content is (decision 1592 §4).
+#[test]
+fn the_generated_art_reaches_the_renderer_carrying_only_what_moves_a_pixel() {
+    let mut s = picker();
+    s.run("ColorPickerFrame:SetColorRGB(0.15, 0.55, 0.75); ShowUIPanel(ColorPickerFrame)")
+        .unwrap();
+    s.resolve();
+    let quads = s.extract();
+    assert!(
+        quads
+            .iter()
+            .any(|q| matches!(q.content, QuadContent::ColorWheel)),
+        "the disc draws"
+    );
+    let strip = quads
+        .iter()
+        .find_map(|q| match q.content {
+            QuadContent::ColorValue { hue, sat } => Some((hue, sat)),
+            _ => None,
+        })
+        .expect("the strip draws");
+    // (0.15, 0.55, 0.75) is a cyan-blue: hue 200°, saturation 0.80 (through the client's own
+    // quantize on the way in — `set_rgb` stores what the 8-bit lattice can hold).
+    assert!(
+        (strip.0 - 200.0).abs() < 0.5 && (strip.1 - 0.801).abs() < 0.01,
+        "the strip carries the live hue/sat, got {strip:?}"
+    );
+
+    // Dropping the brightness moves NO strip pixel — the same quad content comes back.
+    s.run("ColorPickerFrame:SetColorRGB(0.05, 0.18, 0.25)")
+        .unwrap();
+    s.resolve();
+    let after = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::ColorValue { hue, sat } => Some((hue, sat)),
+            _ => None,
+        })
+        .expect("the strip still draws");
+    assert!(
+        (after.0 - strip.0).abs() < 2.0 && (after.1 - strip.1).abs() < 0.02,
+        "a third of the brightness, the same strip: {strip:?} -> {after:?}"
+    );
+}

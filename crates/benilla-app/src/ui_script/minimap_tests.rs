@@ -230,3 +230,87 @@ fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
         "the 6-px left inset band is not hoverable"
     );
 }
+
+/// **The ping's click path, driven by a real mouse event** (decision 1596).
+///
+/// The point of the test is the *path*, not the arithmetic: `Minimap_OnClick` is only reached if
+/// the widget is mouse-enabled, hit-tests, and its `OnMouseUp` fires — and what it parks has to be
+/// centre-relative UI units, because that is the contract the app's conversion is written against.
+/// Calling `Minimap_OnClick()` from `s.run` would prove none of it (1234 §2).
+#[test]
+fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run("function GetMinimapZoneText() return '' end")
+        .unwrap();
+    s.run("function PlaySound() end").unwrap();
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "MinimapCluster.xml");
+    s.resolve();
+
+    let cx = s
+        .eval::<f32>("local x = Minimap:GetCenter(); return x")
+        .unwrap();
+    let cy = s
+        .eval::<f32>("local _, y = Minimap:GetCenter(); return y")
+        .unwrap();
+    assert!(cx > 0.0 && cy > 0.0, "the widget resolved: ({cx}, {cy})");
+
+    // Nothing is parked until somebody clicks.
+    assert_eq!(s.take_minimap_ping_request(), None);
+
+    // A click 20 UI units right and 12 up of the centre — inside the 70-unit disc.
+    s.mouse_button(cx + 20.0, cy + 12.0, "LeftButton", true);
+    s.mouse_button(cx + 20.0, cy + 12.0, "LeftButton", false);
+    let (dx, dy) = s
+        .take_minimap_ping_request()
+        .expect("OnMouseUp → Minimap_OnClick → PingLocation");
+    assert!((dx - 20.0).abs() < 0.01, "x right of centre: {dx}");
+    assert!((dy - 12.0).abs() < 0.01, "y UP from centre: {dy}");
+    // Draining is a drain: the app must not see the same click twice.
+    assert_eq!(s.take_minimap_ping_request(), None);
+
+    // A click that misses the widget entirely never reaches the handler.
+    s.mouse_button(10.0, 10.0, "LeftButton", true);
+    s.mouse_button(10.0, 10.0, "LeftButton", false);
+    assert_eq!(s.take_minimap_ping_request(), None, "off-widget is no ping");
+}
+
+/// `Minimap:GetPingPosition()` answers **nil** with no ping, and the live pair once the app
+/// publishes one — never `(0, 0)` for "there isn't one", which a caller cannot tell from a ping
+/// under its own feet.
+#[test]
+fn get_ping_position_is_nil_until_there_is_a_ping() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run("function GetMinimapZoneText() return '' end")
+        .unwrap();
+    s.run("function PlaySound() end").unwrap();
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "MinimapCluster.xml");
+
+    assert_eq!(
+        s.eval::<Option<f32>>("return (Minimap:GetPingPosition())")
+            .unwrap(),
+        None
+    );
+    s.set_minimap_ping(Some((0.25, -0.125)));
+    let x = s
+        .eval::<f32>("local x = Minimap:GetPingPosition(); return x")
+        .unwrap();
+    let y = s
+        .eval::<f32>("local _, y = Minimap:GetPingPosition(); return y")
+        .unwrap();
+    assert!(
+        (x - 0.25).abs() < 1e-6 && (y + 0.125).abs() < 1e-6,
+        "{x} {y}"
+    );
+    s.set_minimap_ping(None);
+    assert_eq!(
+        s.eval::<Option<f32>>("return (Minimap:GetPingPosition())")
+            .unwrap(),
+        None
+    );
+}

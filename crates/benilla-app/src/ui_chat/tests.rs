@@ -1960,25 +1960,52 @@ fn the_combat_log_window_has_the_docks_rect() {
 /// and ChatFrame2 had only a background, no borders. Selecting it therefore hid ChatFrame1's
 /// chrome (its textures are ChatFrame1's children) and put nothing in its place: the background
 /// and border vanished, which is what the director saw.
+///
+/// The ring is the eight **resize grips** since the move/resize arc, so the same check now covers
+/// both halves of each piece: the texture the fade paints and the button that grabs it.
 #[test]
 fn both_dock_windows_carry_the_same_chrome() {
     let s = chat_vm();
-    for suffix in [
-        "Background",
-        "BorderTopLeft",
-        "BorderTopRight",
-        "BorderBottomLeft",
-        "BorderBottomRight",
-        "BorderTop",
-        "BorderBottom",
-        "BorderLeft",
-        "BorderRight",
-    ] {
+    // The reference's own `CHAT_FRAME_TEXTURES`, which is also the list the file declares — read
+    // out of the VM rather than restated here, so a piece that leaves the list cannot leave this
+    // check with it.
+    let suffixes: Vec<String> = (1..=9)
+        .map(|i| {
+            s.eval::<String>(&format!("return CHAT_FRAME_TEXTURES[{i}]"))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        suffixes.len(),
+        9,
+        "the background plus the eight resize grips' textures"
+    );
+    for suffix in &suffixes {
         for id in [1, 2] {
             assert!(
                 s.eval::<bool>(&format!("return ChatFrame{id}{suffix} ~= nil"))
                     .unwrap(),
                 "ChatFrame{id}{suffix} is missing — the dock's chrome dies when window {id} is up"
+            );
+        }
+    }
+    // The grips themselves, not only their art: each texture's owning Button has to exist too, or
+    // the ring is painted and nothing can grab it.
+    for grip in [
+        "TopLeft",
+        "TopRight",
+        "BottomLeft",
+        "BottomRight",
+        "Top",
+        "Bottom",
+        "Left",
+        "Right",
+    ] {
+        for id in [1, 2] {
+            assert!(
+                s.eval::<bool>(&format!("return ChatFrame{id}Resize{grip} ~= nil"))
+                    .unwrap(),
+                "ChatFrame{id}Resize{grip} is missing — the window has art where a handle should be"
             );
         }
     }

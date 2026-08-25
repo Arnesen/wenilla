@@ -827,6 +827,72 @@ fn real_spell_catalog_classifies_combat_initiation() {
     );
 }
 
+/// **`modalNextSpell` — `Spell.dbc` column 38** on the real build-5875 file (decision 1597, bug
+/// B280). This is the column that makes casting a hunter shot start Auto Shot, so a column slip
+/// here is a silently-broken hunter; and the shape of the census is itself the evidence that the
+/// column is the one wow-re named — non-zero on 57 of 22357 rows, 52 of those naming spell 75.
+/// Skips without client data.
+#[test]
+fn real_spell_catalog_reads_modal_next_spell() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    // Rank 1 of each hunter shot, and the two spells that terminate the chain.
+    for (id, name, next) in [
+        (1978u32, "Serpent Sting", 75u32),
+        (3044, "Arcane Shot", 75),
+        (2643, "Multi-Shot", 75),
+        (5116, "Concussive Shot", 75),
+        (19434, "Aimed Shot", 75),
+        (3034, "Viper Sting", 75),
+        (3043, "Scorpid Sting", 75),
+        (3674, "Black Arrow", 75),
+        (14274, "Distracting Shot", 75),
+        // Auto Shot's own column 38 is 0 — the chain is one hop, and cannot loop.
+        (75, "Auto Shot", 0),
+        // A melee strike and an ordinary cast carry nothing here.
+        (78, "Heroic Strike", 0),
+        (133, "Fireball", 0),
+    ] {
+        let d = cat
+            .get(id)
+            .unwrap_or_else(|| panic!("{name} ({id}) in the catalog"));
+        assert_eq!(
+            d.modal_next_spell, next,
+            "{name} ({id}) modalNextSpell (column 38)"
+        );
+    }
+
+    // The census — and the reason to believe the column map. A wrong column would not land on a
+    // 57-row population that is 91 % one value, and that value the spell every one of those rows
+    // exists to resume.
+    let chained: Vec<(u32, u32)> = cat
+        .iter()
+        .filter(|(_, d)| d.modal_next_spell != 0)
+        .map(|(id, d)| (id, d.modal_next_spell))
+        .collect();
+    assert_eq!(
+        chained.len(),
+        57,
+        "5875 ships 57 rows with a non-zero column 38, got {}",
+        chained.len()
+    );
+    let to_auto_shot = chained.iter().filter(|&&(_, next)| next == 75).count();
+    assert_eq!(
+        to_auto_shot, 52,
+        "52 of the 57 name Auto Shot (the rest: three (TEST) bow shot rows → 59, two Minigun → 23675)"
+    );
+    // Nothing points at a spell that would chain onward — the one-hop property, in data.
+    for &(id, next) in &chained {
+        let onward = cat.get(next).map(|d| d.modal_next_spell).unwrap_or(0);
+        assert!(
+            onward == 0 || onward == next,
+            "spell {id} chains {next}, which itself chains {onward} — the chain must not walk"
+        );
+    }
+}
+
 /// The crafting columns (decision 0437) on the real build-5875 `Spell.dbc`: `EffectItemType`
 /// (103-105) and `RequiresSpellFocus` (15), cross-checked against the live vmangos
 /// `spell_template` rows queried at pin time (2963 → creates 2996, 2738 → 2845, 3920 → 8067 with

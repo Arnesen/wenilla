@@ -134,6 +134,11 @@ pub(super) enum UiFixture {
     /// variable, three CVars), which is what makes it worth a baseline of its own — the row art is
     /// the Audio page's, but the page is the first to mix stores in one column.
     OptionsChat,
+    /// The **colour picker with its wheel** (decision 1592): the hue disc and the brightness strip,
+    /// both generated art with no BLP behind them, plus the two markers riding on them. Seeded at a
+    /// known colour so the markers sit somewhere checkable rather than at the default white's
+    /// centre. The one fixture whose subject is pixels this client computes.
+    ColorPicker,
     /// The Graphics page with the Environment Detail MENU OPEN (0992) — the dropdown-list look
     /// instrument: the shared DropDownList1 at the window's effective scale (the kit's uiScale
     /// correction), three entries with High checked, the kit's dialog backdrop.
@@ -1030,6 +1035,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::OptionsChat),
+    },
+    // The colour picker, wheel and all (1592). Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-color-picker`.
+    Scenario {
+        name: "ui-color-picker",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::ColorPicker),
     },
     // The Graphics page with the Environment Detail dropdown OPEN (0992). Run with
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-worlddetail`.

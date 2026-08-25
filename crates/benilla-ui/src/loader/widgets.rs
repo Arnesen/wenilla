@@ -453,10 +453,90 @@ impl Loader<'_> {
                     self.call_region(&region, "SetTexCoord", tc, dbg);
                 }
                 if let Some(rname) = tt.name().map(|raw| framexml::resolve_name(raw, self_name)) {
+                    crate::script::region::publish_region_name(self.lua(), &rname, &region);
                     if let Err(e) = self.lua().globals().set(rname.clone(), region) {
                         self.report
                             .warnings
                             .push(format!("{dbg}: thumb-texture global '{rname}': {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// `<ColorSelect>`'s four texture sub-elements (RF-28 loader hooks `0x78b580`, `0x78b850`,
+    /// `0x78b8a0`, `0x78ba90`) — the hue wheel, the brightness strip, and a marker for each.
+    /// Structurally `apply_slider`'s `<ThumbTexture>` loop, four times over.
+    ///
+    /// The one thing that is NOT like a thumb: **two of the four carry no `file=`, and that is not
+    /// an omission.** The client generates the wheel and the strip; there is no BLP in the chain
+    /// that is a colour wheel. So the setter is still called — with nothing — because the *region*
+    /// must exist regardless: it is what layout resolves, what the press handler hit-tests, and
+    /// what the app renderer paints into. An element that skipped the setter would leave the picker
+    /// with no wheel to click.
+    pub(super) fn apply_colorselect(
+        &mut self,
+        el: &Element,
+        wrapper: &Table,
+        self_name: &str,
+        dbg: &str,
+    ) {
+        if !el.tag.eq_ignore_ascii_case("ColorSelect") {
+            return;
+        }
+        let layer = el.attr("drawLayer").map(str::to_string);
+        for (tag, setter, getter) in [
+            (
+                "ColorWheelTexture",
+                "SetColorWheelTexture",
+                "GetColorWheelTexture",
+            ),
+            (
+                "ColorWheelThumbTexture",
+                "SetColorWheelThumbTexture",
+                "GetColorWheelThumbTexture",
+            ),
+            (
+                "ColorValueTexture",
+                "SetColorValueTexture",
+                "GetColorValueTexture",
+            ),
+            (
+                "ColorValueThumbTexture",
+                "SetColorValueThumbTexture",
+                "GetColorValueThumbTexture",
+            ),
+        ] {
+            for raw in children_named(el, tag) {
+                let expanded = self.expand_region(raw);
+                let tt = &expanded;
+                if let Some(file) = tt.attr("file") {
+                    self.call(wrapper, setter, (file.to_string(), layer.clone()), dbg);
+                } else if let Some(c) = children_named(tt, "Color").next().map(color_of) {
+                    self.call(wrapper, setter, (c[0], c[1], c[2], c[3]), dbg);
+                } else {
+                    // The file-less form — create the region and leave it for the renderer.
+                    self.call(wrapper, setter, (), dbg);
+                }
+                if let Ok(region) = wrapper.call_method::<Table>(getter, ()) {
+                    if let Some(mode) = tt.attr("alphaMode") {
+                        self.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
+                    }
+                    self.apply_region_layout(tt, &region, self_name, dbg);
+                    if let Some(tc) = tex_coords_of(tt) {
+                        self.call_region(&region, "SetTexCoord", tc, dbg);
+                    }
+                    if let Some(rname) = tt.name().map(|raw| framexml::resolve_name(raw, self_name))
+                    {
+                        // Into the region-name registry as well as `_G`: `<ColorValueTexture>`
+                        // anchors to `ColorPickerWheel` BY NAME, and a name that only reaches the
+                        // globals resolves to nothing there.
+                        crate::script::region::publish_region_name(self.lua(), &rname, &region);
+                        if let Err(e) = self.lua().globals().set(rname.clone(), region) {
+                            self.report
+                                .warnings
+                                .push(format!("{dbg}: {tag} global '{rname}': {e}"));
+                        }
                     }
                 }
             }

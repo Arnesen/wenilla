@@ -135,6 +135,34 @@ pub(super) fn attack_target_binding(
     }
 }
 
+/// **The `modalNextSpell` chain** — `HandleCastResult 0x6e7330`'s tail (`0x6e7447`–`0x6e74aa`),
+/// the client casting a spell at itself with no user input. `cast_result` decides *whether*
+/// (the column read, the in-flight test, the already-running test — all of it is the packet
+/// handler's, so it stays there); this only carries the decision to the one send path.
+///
+/// The cast goes out at the **null target guid** — `0x6e74a6 push ebx; push ebx` with `ebx = 0`
+/// — so the chained Auto Shot binds through the ordinary target walk (`ArmCast 0x6e5250`:
+/// main-hand item bit, then the explicit guid, then the current selection), which is what
+/// [`cast_target::CastTargeting::context`] hands the ladder when no guid is passed.
+///
+/// And it takes **every rung**: the reference chains through `0x6e5a90` → `TryCast 0x6e4b60`, the
+/// same entry a button press uses, so a chained Auto Shot is range-checked, form-checked and
+/// GCD-checked exactly like a pressed one, and refuses with the same red line.
+pub(super) fn drain_chain_casts(
+    mut queue: ResMut<crate::ui_action::ChainCasts>,
+    targeting: cast_target::CastTargeting,
+    mut ladder: CastLadder,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    let ctx = targeting.context();
+    for spell_id in std::mem::take(&mut queue.0) {
+        debug!("ui_action: modalNextSpell chain casts {spell_id}");
+        ladder.send(spell_id, &ctx, CastCommit::Spell);
+    }
+}
+
 pub(super) fn drain_action_uses(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,

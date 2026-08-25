@@ -1463,6 +1463,10 @@ pub(crate) enum ClientCommand {
     /// submenu, decision 0434 §5): wire `icon` 0..7, `guid` 0 clears that icon's slot. Leader/
     /// assistant only server-side; echoes back as the delta form.
     SetRaidTarget { icon: u8, guid: u64 },
+    /// `MSG_MINIMAP_PING` (a minimap click, decision 1596): raw world `(x, y)`. The server relays
+    /// them verbatim to the rest of the group and does nothing at all when we are solo — which is
+    /// why the marker is drawn locally at click time rather than awaited off the wire.
+    MinimapPing { x: f32, y: f32 },
     // ── The raid-management family (decision 1549's Raid tab) ─────────────────────────────────
     /// Move a raid member to another subgroup (`CMSG_GROUP_CHANGE_SUB_GROUP`): the member's NAME
     /// and the **0-based** subgroup the wire wants. Leader/assistant only; echoes as a fresh

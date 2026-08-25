@@ -185,6 +185,17 @@ const COL_MANA_PER_SECOND: usize = 34;
 /// `GetMinMaxRange 0x6e3480` resolves (wow-re `wave-cooldown.md`). Same empirical pin (Auto
 /// Shot/Aimed Shot 114, Throw 74, Charge 95, Fireball 35).
 const COL_RANGE_INDEX: usize = 36;
+/// `modalNextSpell` — `Spell.dbc` **column 38** (`SpellRec + 0x98`): a spell the client casts **by
+/// itself**, with no user input, when the server's `SMSG_CAST_RESULT` for this spell arrives. See
+/// [`SpellDisplay::modal_next_spell`] for the whole law and the shipped-file census.
+///
+/// The column's position is chain-locked the same way the interrupt trio's is (offset = column×4,
+/// between the verified `+0x90` = 36 rangeIndex and `+0xf4` = 61 Effect[0]); the name is wow-re's
+/// (`modalnext-chain-cast.md` §3/§11) and the community's. This repo's own reason to trust it is
+/// the distribution: non-zero on 57 of 22357 rows, and 52 of those 57 name spell **75, Auto Shot**,
+/// every one of them a hunter shot. A column that fell where this one falls by accident could not
+/// look like that.
+const COL_MODAL_NEXT_SPELL: usize = 38;
 /// `StartRecoveryCategory` (`SpellRec+0x274`, `0x274/4 == 157`) / `StartRecoveryTime` (`+0x278`,
 /// 158) — the **global-cooldown** pair `StartGlobalCooldown 0x6e2de0` reads at the local
 /// cast-send (`0x6e58fb`, wow-re `wave-cast.md`, VERIFIED). Category 133 / 1500 ms for ordinary
@@ -776,6 +787,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 mana_cost_per_level: u32_at(r, COL_MANA_COST_PER_LEVEL).unwrap_or(0),
                 mana_per_second: u32_at(r, COL_MANA_PER_SECOND).unwrap_or(0),
                 range_index: u32_at(r, COL_RANGE_INDEX).unwrap_or(0),
+                modal_next_spell: u32_at(r, COL_MODAL_NEXT_SPELL).unwrap_or(0),
                 targets: u32_at(r, COL_TARGETS).unwrap_or(0),
                 implicit_target_a1: u32_at(r, COL_IMPLICIT_TARGET_A1).unwrap_or(0),
                 stances: u32_at(r, COL_STANCES).unwrap_or(0),

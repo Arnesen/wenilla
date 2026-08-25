@@ -122,6 +122,7 @@ mod ui_honor;
 mod ui_inspect;
 mod ui_item_text;
 mod ui_items;
+mod ui_layout;
 mod ui_logout;
 mod ui_loot;
 mod ui_loot_roll;
@@ -193,6 +194,7 @@ use ui_gossip::UiGossipPlugin;
 use ui_guild::UiGuildPlugin;
 use ui_item_text::UiItemTextPlugin;
 use ui_items::UiItemsPlugin;
+use ui_layout::UiLayoutPlugin;
 use ui_logout::UiLogoutPlugin;
 use ui_loot::UiLootPlugin;
 use ui_loot_roll::UiLootRollPlugin;
@@ -720,6 +722,11 @@ pub fn run(build: BuildId) -> AppExit {
     // QuestLogFrame.xml over the Era quest-log API.
     .add_plugins(UiQuestLogPlugin)
     .add_plugins(UiChatPlugin)
+    // The layout cache: the geometry of every window the player has dragged or resized, restored
+    // at world entry and written back a quiet second after the last drag
+    // (`benilla-config/layout/<realm>-<character>.txt`). The consumer of the engine's userPlaced
+    // bit, which nothing read before it.
+    .add_plugins(UiLayoutPlugin)
     // Print screen (decision 1487): the SCREENSHOT binding's engine half — one PNG per
     // `Screenshot()` call into `benilla-config/Screenshots/` (never the install — decision 1486),
     // answered to the UI as SCREENSHOT_SUCCEEDED/FAILED so the status text can never be in the

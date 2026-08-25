@@ -73,10 +73,10 @@
 //!   dragged frame before it takes the drag slot, and [`start_moving`] does the same through
 //!   [`super::toplevel::raise`]. Like every raise it is occlusion-gated and confined to the frame's
 //!   own stratum, so grabbing a movable window that overlaps nothing still changes no draw order.
-//! - **No resize drag.** `StartSizing 0x776830` and the eight resize cases are not built.
-//!   `SetResizable`/`IsResizable` are the flag only, and `StopMovingOrSizing` — which is one verb
-//!   for both halves in the reference too — already covers the stop side of a resize that does
-//!   not exist yet.
+//! - **The resize drag is built** (`StartSizing 0x776830` + [`advance_size`]), including the
+//!   min/max clamp and its rebate; what is *not* transcribed is which edges travel — the reference
+//!   collapses the frame to one planted TOPLEFT anchor at `StartSizing` and we keep the authored
+//!   anchor set, which [`advance_size`]'s own note states rather than hides.
 
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -243,11 +243,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // three that is GUARDED: `776adb: test ah,0x3` refuses unless the frame is movable OR
     // resizable, raising the third of this family's error strings.
     //
-    // benilla stores and reports the flag and **nothing consumes it yet**: persisting a frame's
-    // position belongs with the layout cache, not with the drag that moved it, and building a
-    // private position store here would put a second one beside the one that should own it. The
-    // overwhelmingly common addon shape — set the bit, then save your own coordinates — is
-    // unaffected either way.
+    // **The consumer is [`crate::script::layout_cache`]**, which is where it belongs: persisting a
+    // frame's position is the layout cache's job, not the drag's, and a private position store
+    // here would have put a second one beside the one that should own it. The bit is what that
+    // module enumerates on, so setting it is how a frame opts into being remembered — and the
+    // overwhelmingly common addon shape (set the bit, then save your own coordinates) still works
+    // either way.
     m.set(
         "SetUserPlaced",
         lua.create_function(|lua, (this, flag): (Table, bool)| {
@@ -261,7 +262,13 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 return Err(not_flagged(&model, h, "movable or resizable"));
             }
             if let Some(f) = model.arena.frame_mut(h) {
-                f.user_placed = flag;
+                if f.user_placed != flag {
+                    f.user_placed = flag;
+                    // The layout cache's persist cue ([`crate::script::layout_cache`]): a frame
+                    // that has just BECOME user-placed owes the file a row, and one that stopped
+                    // owes it the row's removal. Both are the same "rewrite it" bit.
+                    model.user_placed_changed = true;
+                }
             }
             Ok(())
         })?,
@@ -316,9 +323,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // for every `StartSizing` whatever it was handed, and only the pump's per-grip switch
             // is selective. So both happen before the grip is looked at.
             super::toplevel::raise(&mut model, h);
-            if let Some(f) = model.arena.frame_mut(h) {
-                f.user_placed = true;
-            }
+            set_user_placed(&mut model, h);
             let sample = model.cursor_pos;
             // **`StartSizing("CENTER")` is a MOVE, not a resize** — and it is a real case, not a
             // caller error. The pump's switch is on the anchor point-id, and case 4 (CENTER) is the
@@ -442,9 +447,7 @@ fn start_moving(model: &mut Model, h: FrameHandle) -> mlua::Result<()> {
     // the drag slot, which is the order kept here. Grabbing a window brings it forward; the worker
     // supplies the toplevel gate (a non-toplevel movable frame raises nothing).
     super::toplevel::raise(model, h);
-    if let Some(f) = model.arena.frame_mut(h) {
-        f.user_placed = true;
-    }
+    set_user_placed(model, h);
     model.moving = Some(FrameMove {
         frame: h,
         sample: model.cursor_pos,
@@ -472,15 +475,38 @@ pub(crate) fn start_title_move(model: &mut Model, h: FrameHandle) -> bool {
         return false;
     }
     super::toplevel::raise(model, h);
-    if let Some(f) = model.arena.frame_mut(h) {
-        f.user_placed = true;
-    }
+    set_user_placed(model, h);
     model.moving = Some(FrameMove {
         frame: h,
         sample: model.cursor_pos,
         auto_stop: true,
     });
     true
+}
+
+/// Set the userPlaced bit the way the client's drag entry `0x7652b0` does, and dirty the layout
+/// cache **only on the transition** — a press inside a title region runs this on every click, and
+/// dirtying on each would put the saver's debounce back to work for a frame nothing moved.
+fn set_user_placed(model: &mut Model, h: FrameHandle) {
+    if let Some(f) = model.arena.frame_mut(h) {
+        if !f.user_placed {
+            f.user_placed = true;
+            model.user_placed_changed = true;
+        }
+    }
+}
+
+/// A drag pump moved a frame; if that frame is **user-placed**, the layout cache owes the player's
+/// file a rewrite ([`crate::script::layout_cache`]).
+///
+/// The gate is the bit rather than "any drag" on purpose: `StartMoving`/`StartSizing` set the bit
+/// themselves, so the only frames this can miss are ones an addon moves with `SetPoint` — and those
+/// are the frames whose position the addon is saving itself, which is the reference's own division
+/// of labour (the engine's layout cache holds userPlaced frames; addons hold their own).
+fn mark_user_placed_change(model: &mut Model, h: FrameHandle) {
+    if model.arena.frame(h).is_some_and(|f| f.user_placed) {
+        model.user_placed_changed = true;
+    }
 }
 
 /// Apply a frame's `SetMinResize`/`SetMaxResize` bounds to a proposed size, per axis.
@@ -630,6 +656,7 @@ pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
         // the difference between a smooth window resize and one that re-derives 13,656 nodes on
         // every mouse-move.
         model.touch_layout_frame(sz.frame);
+        mark_user_placed_change(model, sz.frame);
     }
     model.sizing = Some(FrameSizing { sample: pos, ..sz });
 }
@@ -671,6 +698,7 @@ pub(crate) fn advance_move(model: &mut Model, pos: (f32, f32)) {
             // delta returned above, so this write always moved something). Translating every
             // anchor moves no TARGET, so the frame names itself (decision 1388).
             model.touch_layout_frame(mv.frame);
+            mark_user_placed_change(model, mv.frame);
         }
     }
     model.moving = Some(FrameMove { sample: pos, ..mv });

@@ -60,6 +60,7 @@
 //! | `SetChatWindowColor(id, r, g, b)` | `0x4a14f0` | `__ftol(x · 255.0)` per channel |
 //! | `SetChatWindowAlpha(id, a)` | `0x4a15d0` | `__ftol(a · 255.0)` |
 //! | `SetChatWindowSize(id, size)` | `0x4a1470` | the cache's `SIZE` |
+//! | `SetChatWindowLocked(id, isLocked)` | `0x4a1650` | the cache's `LOCKED` |
 //!
 //! (wow-re `system/ui/ledger.tsv:9449-9451` + `scratch/item17-frameapi-fullcarve.md` l.17-18,
 //! VERIFIED; `[0x806498]` is the 255.0 the first two multiply by.) **Bytes, not floats** — that is
@@ -92,9 +93,12 @@
 //! produce is not a thing to be faithful to. The truncation itself IS kept — `0.5` stores 127 here
 //! too.
 //!
-//! The other six values stay constants, and that is the honest tree rather than an omission:
-//! benilla has no rename, no undock, no window create/close, so `name`, `shown`, `locked` and
-//! `docked` have nothing that could move them (0288 §2 — window management is a later arc).
+//! **`locked` joined them the day the windows could move.** `SetChatWindowLocked(id, isLocked)` is
+//! the fourth setter here now: the chat tab's *Lock/Unlock Window* row is what turns the resize
+//! grips and the tab drag on, so a value that used to be a constant has a player-reachable writer
+//! and belongs in the record with the rest. The other five stay constants, and that is the honest
+//! tree rather than an omission: benilla has no rename, no undock and no window create/close, so
+//! `name`, `shown` and `docked` still have nothing that could move them (0288 §2).
 //!
 //! Measured demand: **3 of the 5 corpus addons that iterate `NUM_CHAT_WINDOWS` call this on the
 //! very next line** — `EnhTooltip/Tooltip.lua:1302`, `MikScrollingBattleText.lua:1951` and
@@ -127,9 +131,9 @@ pub(super) const NUM_CHAT_WINDOWS: usize = 7;
 
 /// `(shown, docked)` per window, 1-based, as the tuple's *Lua* values: `None` where the reference
 /// answers `nil`. Everything else in the tuple is identical across all seven windows on a stock
-/// client — name `""`, size `0`, colour `0,0,0`, alpha `0` — so only the two that differ are
-/// tabulated. `locked` is `1` for every window (the cache's `LOCKED 1`), and benilla has no unlock
-/// path at all, so it is a constant below rather than a column here.
+/// client — name `""`, size `0`, colour `0,0,0`, alpha `0`, `LOCKED 1` — so only the two that
+/// differ are tabulated. `locked` starts at that same stock `1` for every window but is no longer
+/// a constant: it lives in [`ChatWindowLook`], because the tab menu can now move it.
 const WINDOW_STATE: [(Option<i64>, Option<i64>); NUM_CHAT_WINDOWS] = [
     (Some(1), Some(1)), // 1 "General"    — shown, dock position 1
     (None, Some(2)),    // 2 "Combat Log" — docked at position 2, not shown (the dock shows one)
@@ -146,9 +150,10 @@ const WINDOW_STATE: [(Option<i64>, Option<i64>); NUM_CHAT_WINDOWS] = [
 /// `__ftol(x · 255.0)` in and `× 1/255` out); the font size is an `i32` because the engine's is
 /// (`+0x84`). See this module's docs for why that quantisation is kept rather than smoothed over.
 ///
-/// [`Self::default`] is the stock `chat-cache.txt` row — `COLOR 0 0 0 0`, `SIZE 0` — i.e. a black
-/// box at alpha 0, which is the classic "chat is text over the world until you mouse over it".
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// [`Self::default`] is the stock `chat-cache.txt` row — `COLOR 0 0 0 0`, `SIZE 0`, `LOCKED 1` —
+/// i.e. a black box at alpha 0 that cannot be dragged, which is the classic "chat is text over the
+/// world until you mouse over it".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ChatWindowLook {
     /// Background tint, `0..=255` each. The engine renormalises by 1/255 on the way out.
     pub r: u8,
@@ -163,6 +168,21 @@ pub struct ChatWindowLook {
     /// The reference's own values are `CHAT_FONT_HEIGHTS = {12, 14, 16, 18}`. An `i32` because the
     /// record's field is (`+0x84`), and never `<= 0` once set: the setter drops those.
     pub font_size: i32,
+    /// The cache's `LOCKED` — whether the window refuses to be dragged or resized.
+    ///
+    /// **`true` out of the box**, because the stock row is `LOCKED 1` for every window: a fresh
+    /// character's chat box cannot be nudged out of place by a stray drag, and unlocking it is a
+    /// deliberate trip through the tab menu (`FCF_ToggleLock`). It joined this struct with the
+    /// move/resize arc: until something could *move* a window, writing the key would have
+    /// persisted state nothing could change, which is the honest-tree rule (1134 §4) at the
+    /// persistence layer, and the reason 1589 §6 left it out.
+    pub locked: bool,
+}
+
+impl Default for ChatWindowLook {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 impl ChatWindowLook {
@@ -173,6 +193,7 @@ impl ChatWindowLook {
         b: 0,
         a: 0,
         font_size: 0,
+        locked: true,
     };
 }
 
@@ -276,9 +297,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::Number(from_byte(look.g)),
                 Value::Number(from_byte(look.b)),
                 Value::Number(from_byte(look.a)),
-                num(shown),        // 1 or nil, never 0
-                Value::Integer(1), // locked — LOCKED 1, and benilla has no unlock path
-                num(docked),       // the dock POSITION (1, 2) or nil
+                num(shown), // 1 or nil, never 0
+                // locked — the cache's LOCKED, stock `1`, moved by `SetChatWindowLocked` below.
+                // `1` or nil like `shown`, never `0`: the reference's own boolean-in-a-number.
+                if look.locked {
+                    Value::Integer(1)
+                } else {
+                    Value::Nil
+                },
+                num(docked), // the dock POSITION (1, 2) or nil
             ]))
         })?,
     )?;
@@ -329,6 +356,36 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // SetChatWindowLocked(id, isLocked) — `0x4a1650`, writing the record's `+0x8c` locked field
+    // (wow-re `system/ui/ledger.tsv:9325` + `scratch/chat-window-record.md` §2, VERIFIED:
+    // `0x4a16a2 mov [esi+0xb4fedc],eax`, initialised to **1** at `0x4984e4`, read back as
+    // `GetChatWindowInfo`'s 8th return at `0x4a0cbf`).
+    //
+    // **A `bool` is the faithful store even though the field is an `i32`**: the cache writer
+    // booleanises it through `setne` (`0x499e8b`, fmt `LOCKED %d`), so nothing outside `{0,1}`
+    // survives a file round trip — the same note records that as the difference between this field
+    // and `SIZE`, which does round-trip arbitrary values.
+    //
+    // The one value of the tuple the *player* moves rather than the layout: `FCF_SetLocked`
+    // (FloatingChatFrame.lua l.802-805) writes the frame field and this store in the same breath,
+    // and `FloatingChatFrame_Update` (l.56) seats the frame back from here at load.
+    //
+    // Lua truthiness, not a strict boolean, because the reference's callers pass `1` and `nil` —
+    // `FCF_ToggleLock`'s two arms and `FCF_OpenNewWindow`'s `SetChatWindowLocked(i, nil)`. mlua
+    // marshals both the way the reference binding's own `toboolean` does.
+    lua.globals().set(
+        "SetChatWindowLocked",
+        lua.create_function(|lua, (id, locked): (i64, bool)| {
+            let i = window_index(id)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let look = &mut model.chat_window_looks[i];
+            if locked != look.locked {
+                look.locked = locked;
+                model.chat_window_changes.insert(i);
+            }
+            Ok(())
+        })?,
+    )?;
     // SetChatWindowSize(id, fontSize) — 0x4a1470.
     //
     // FrameXML's caller is `FCF_SetChatWindowFontSize` (l.752-763), which does the visible half
@@ -621,6 +678,7 @@ mod tests {
                 b: 3,
                 a: 4,
                 font_size: 14,
+                locked: true,
             },
         )]);
         assert!(

@@ -15,8 +15,18 @@
     UPDATE_PENDING_MAIL + HasNewMail(), and the tracking icon (MiniMapTrackingFrame) driven by
     PLAYER_AURAS_CHANGED + GetTrackingTexture() (the aura rebuild's tracking-global law, `ui_aura`).
 
+    The minimap PING (decision 1596) is IN as a click entry only: `Minimap_OnClick` below, on the
+    widget's OnMouseUp, exactly where the reference puts it — because one corpus addon
+    (CleanMinimap) REPLACES that global and expects the client to call the replacement. Everything
+    past the click is the engine's: the marker is pinned to a WORLD point and drawn by
+    `minimap/ping.rs` in the same pass as the blips, so there is no `MiniMapPing` frame, no Lua
+    timer and no per-frame SetPoint here. Owning the display in Lua is what made the first attempt
+    flaky, and no corpus addon touches any of that surface (measured: 0 of 218 for MiniMapPing /
+    Minimap_SetPing / MINIMAP_PING / PingLocation / GetPingPosition).
+
     OUT (no wire / later arc slices, per 0203): meeting stone and battlefield buttons;
-    the ping model + MINIMAP_PING; the rotate-minimap CVar. The day/night indicator now lives in
+    the ping MODEL (the reference's MiniMapPing is a <Model> on MinimapPing.mdx — ours is a flat
+    stand-in at an INTERIM size, `minimap::ping::PING_PX`); the rotate-minimap CVar. The day/night indicator now lives in
     its own GameTime.xml (the reference's own file split), loaded right after this file. The
     reference's minimapPlayerModel/.mdx arrow renders app-side from its .blp for now (0203 flags
     the simplification). The reference's <HitRectInsets> on the cluster is dropped (it only
@@ -25,6 +35,18 @@
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
+        -- The minimap click (decision 1596). A global, and thin on purpose: it is the seam an
+        -- addon replaces (CleanMinimap swaps it out to make a modifier-drag move the cluster and
+        -- calls the original otherwise), so everything it could get wrong is behind the engine.
+        -- The reference's own body also range-tests the disc and divides by GetEffectiveScale
+        -- here; both belong on the far side of PingLocation, which knows the map's real geometry
+        -- this frame — in UI units the widget's radius is not a number this file can know.
+        function Minimap_OnClick()
+            local x, y = GetCursorPosition();
+            local cx, cy = Minimap:GetCenter();
+            Minimap:PingLocation(x - cx, y - cy);
+        end
+
         -- ref-Minimap.lua ToggleMinimap(), verbatim (the toggle button hides the MAP, not the chrome).
         function ToggleMinimap()
             if ( Minimap:IsVisible() ) then
@@ -557,6 +579,13 @@
                         </Frames>
                     </Frame>
                 </Frames>
+                <Scripts>
+                    <!-- ref-Minimap.xml l.498: the ping is the widget's own OnMouseUp, on any
+                         button (the reference tests no button here either). -->
+                    <OnMouseUp>
+                        Minimap_OnClick();
+                    </OnMouseUp>
+                </Scripts>
             </Minimap>
         </Frames>
         <Scripts>

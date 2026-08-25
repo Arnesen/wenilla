@@ -229,6 +229,9 @@ pub(super) fn apply_net_updates(
                 // Guild Member Alert (decision 1589) — the CVar knob the sign-on/sign-off pair's
                 // display condition reads; see `ui_guild::apply::event` for the four conjuncts.
                 Res<crate::ui_guild::GuildMemberNotify>,
+                // The minimap ping (decision 1596) — a group member's `MSG_MINIMAP_PING` seats the
+                // world point here and the minimap renderer derives everything else from it.
+                ResMut<crate::minimap::MinimapPing>,
             ),
         ),
     ),
@@ -249,6 +252,10 @@ pub(super) fn apply_net_updates(
             ResMut<crate::ui_action::CastErrors>,
             ResMut<crate::ui_action::MountErrors>,
             Option<Res<crate::target::ring::Factions>>,
+            // The `modalNextSpell` chain's outbox (1597) — `cast_result` fills it, the ui_action
+            // drain sends it through the one cast path. Rides here for the same reason the
+            // catalog does: this is where the ceiling left room.
+            ResMut<crate::ui_action::ChainCasts>,
         ),
         ResMut<crate::ui_items::EquipErrors>,
         ResMut<crate::ui_merchant::MerchantErrors>,
@@ -399,6 +406,7 @@ pub(super) fn apply_net_updates(
                 mut inspect_honor,
                 mut auction_open,
                 guild_notify,
+                mut ping,
             ),
         ),
     ) = caches;
@@ -857,6 +865,7 @@ pub(super) fn apply_net_updates(
                 &mut ui_actions.12,
                 ui_actions.11.as_deref(),
                 &net_commands,
+                &mut ui_actions.1 .3,
                 play_seq.next(),
             ),
             SessionEvent::InventoryFailure {
@@ -959,9 +968,15 @@ pub(super) fn apply_net_updates(
             // storing it would be state with no reader.
             SessionEvent::ReadyCheckRequest => group.apply_ready_check(),
             SessionEvent::RaidInstanceInfo { entries } => group.apply_raid_instance_info(entries),
-            // Ping is still removed (decision 0460); the protocol decodes the wire, the client
-            // ignores it until that feature returns.
-            SessionEvent::MinimapPing { .. } | SessionEvent::ReadyCheckAnswer { .. } => {}
+            // A group member pinged (decision 1596). The wire carries raw world floats and the
+            // relay is stateless in the reference too — we seat them as the pin and the minimap
+            // derives the rest. `map` is the map we are standing on: the server only relays a ping
+            // between people who are grouped, and a ping from another map would be dropped by the
+            // renderer's own map test anyway.
+            SessionEvent::MinimapPing { guid, x, y } => {
+                ping.seat((x, y), current_map.as_ref().map_or(0, |m| m.0), guid);
+            }
+            SessionEvent::ReadyCheckAnswer { .. } => {}
             // ── The duel family (decision 0633): the session mirror + the two DisplayError
             // lines the handlers emit inline; the Era events fire off the mirror's edges in
             // `ui_duel::feed_duel`, and the countdown ticks in its own system ──

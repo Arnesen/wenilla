@@ -17,6 +17,7 @@ use crate::creature_anim::AnimDriver;
 use crate::net::{Guid, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::CameraControl;
 use crate::ui_script::PointerOverUi;
+use benilla_world::billboard::BillboardCard;
 use benilla_world::collision::PickOccluder;
 use benilla_world::interact::{
     ray_mesh_bounds, ray_posed_mesh, CreaturePickPart, GoPickPart, PickParts,
@@ -363,6 +364,55 @@ pub(super) struct GoPickSet<'w, 's> {
     /// Last frame's GO pick, for pass 2's sticky-hover (the reference's anti-flicker cache, by
     /// net entity — the same rung the unit picker keeps).
     last_pick: Local<'s, Option<Entity>>,
+    /// Every pickable billboard card, for [`net_entity_of`]'s first hop. Bundled here rather than
+    /// taken as its own `SystemParam` because [`update_hovered_object`] is at Bevy's 16-param
+    /// function-system ceiling.
+    cards: Query<'w, 's, &'static BillboardCard>,
+}
+
+/// The number of `ChildOf` hops [`net_entity_of`] will climb before giving up — a malformed-data
+/// guard, not a real depth. The deepest real chain is a card on a nested joint (bone hierarchies
+/// in the shipped corpus are single digits deep), so this is orders of margin.
+const NET_WALK_HOPS: usize = 64;
+
+/// A picked GameObject part → the **net entity** that carries its `Guid` (the object the mouseover
+/// publishes, the cursor classifies and the right-click USEs).
+///
+/// Two shapes reach here and they attach differently. An ordinary mesh part is a direct child of
+/// the net entity — one `ChildOf` hop. A **billboard card is a world ROOT** (decision 0153: a card
+/// writes an absolute world transform and lives at the root/identity), so it has no `ChildOf` edge
+/// at all: its link to the model is [`BillboardCard::follows`] — the joint it rides on a rigged
+/// host, the mirror anchor under the net entity otherwise — and the climb continues from there.
+///
+/// Before the card hop existed a card hit resolved to the **card**, which carries no `Guid`, so
+/// [`update_hovered_object`] bailed and published the **null** mouseover: no cursor, no tooltip and
+/// a dead right-click over exactly the screen area the card covers. The Lightwell found it (B169's
+/// second half) — its light shaft is a lock-Z card standing 4.5 yd out of a 1.09 yd bowl, so the
+/// card swallowed nearly every ray and only the sliver of bowl around it ever answered.
+///
+/// The reference has no such split to reconcile: the resolve `0x7089c0`'s narrow phase walks the
+/// ONE model's render batches — *"the actual visible RENDER MESH, posed to the current animation"*,
+/// billboard batch included, skinned through the live bone matrices (wow-re `object-layer.md`) — so
+/// a hit on the shaft **is** a hit on the GameObject, which is what this restores.
+fn net_entity_of(
+    e: Entity,
+    cards: &Query<&BillboardCard>,
+    guids: &Query<&Guid>,
+    child_of: &Query<&ChildOf>,
+) -> Entity {
+    let mut cur = cards
+        .get(e)
+        .ok()
+        .and_then(BillboardCard::follows)
+        .unwrap_or(e);
+    for _ in 0..NET_WALK_HOPS {
+        if guids.contains(cur) {
+            return cur;
+        }
+        let Ok(parent) = child_of.get(cur) else { break };
+        cur = parent.parent();
+    }
+    cur
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -397,6 +447,9 @@ pub(super) fn update_hovered_object(
     let removed_parts = &mut cache.removed;
     let pickable = &mut *cache.cache;
     let last_pick = &mut *cache.last_pick;
+    let cards = &cache.cards;
+    // The hit part → its guid-bearing net entity ([`net_entity_of`]: the card hop, then the climb).
+    let resolve_net = |e: Entity| net_entity_of(e, cards, &guids, &child_of);
     // The pick set (bevy's `HashSet` — the caster's type, not the `std` one this module uses
     // elsewhere), rebuilt on GO-part stream edges ONLY — the `WaterIndex` shape. It used to be
     // collected from every streamed GO part on every cursor frame (ChildOf hop + store probe +
@@ -416,9 +469,11 @@ pub(super) fn update_hovered_object(
     if removed_parts.read().next().is_some() || !added_parts.is_empty() {
         pickable.clear();
         pickable.extend(go_parts.iter().filter(|&e| {
-            let root = child_of.get(e).map_or(e, |c| c.parent());
+            // Through the same resolver the hit uses, so a card and its mesh siblings can never
+            // disagree about which GameObject they belong to (a transport's card would otherwise
+            // stay in the set while its meshes were filtered out).
             !stores
-                .get(root)
+                .get(resolve_net(e))
                 .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 11 | 14 | 15))
         }));
     }
@@ -441,16 +496,6 @@ pub(super) fn update_hovered_object(
     }
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
-    };
-    // The hit is a mesh part; its GameObject net entity (which carries the `Guid`) is one `ChildOf`
-    // hop up — the attach convention (the same one `update_hover`'s fallback walks). Guard the rare
-    // case the pickable itself is the guid-bearing entity.
-    let resolve_net = |e: Entity| {
-        if guids.contains(e) {
-            e
-        } else {
-            child_of.get(e).map_or(e, |c| c.parent())
-        }
     };
     let self_store = self_q.single().ok();
 
@@ -559,4 +604,86 @@ pub(super) fn update_hovered_object(
     hovered.target = Some(net_entity);
     hovered.guid = Some(guid.0);
     hovered.distance = distance;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn card(bone: u16, owner: Entity) -> BillboardCard {
+        let info = benilla_assets::BillboardInfo {
+            pivot: Vec3::ZERO,
+            bone,
+            kind: benilla_formats::BillboardKind::LockZ,
+            scale_anim: None,
+            seq_translations: vec![],
+        };
+        BillboardCard::following(&info, owner)
+    }
+
+    /// **A billboard card's hit belongs to its GameObject** — bug B169's second half, the Lightwell
+    /// you could see but not click (2026-08-25).
+    ///
+    /// A card is a world ROOT, so the old one-`ChildOf`-hop resolve answered with the card itself;
+    /// the card carries no `Guid`, so `update_hovered_object` bailed and published the null
+    /// mouseover — no cursor, no tooltip, a dead right-click — over the whole screen area the card
+    /// covers. On `G_HolyLightWell.m2` that is a 4.5 yd shaft standing out of a 1.09 yd bowl, so
+    /// nearly every ray landed on the dead card and only the ring of bowl around it answered:
+    /// *"very hard to find the right position, and even when I see the cog nothing happens"*.
+    ///
+    /// Both card shapes are covered, because `spawn_billboard_part` picks between them on whether
+    /// the host is rigged: following the **mirror anchor** (a direct child of the net entity) and
+    /// following a **joint** (nested under the model root, so the climb is more than one hop).
+    #[test]
+    fn a_billboard_cards_hit_resolves_to_its_gameobject() {
+        let mut world = World::new();
+        let net = world.spawn(Guid(0xdead_beef)).id();
+        // An ordinary mesh part: the direct child the old one-hop resolve was written for.
+        let mesh_part = world.spawn(ChildOf(net)).id();
+        // The rigless shape: the card follows the mirror anchor under the net entity.
+        let anchor = world.spawn(ChildOf(net)).id();
+        let anchor_card = world.spawn(card(0, anchor)).id();
+        // The rigged shape: net → model root → root-bone joint → child joint, card on the deepest.
+        let root = world.spawn(ChildOf(net)).id();
+        let joint0 = world.spawn(ChildOf(root)).id();
+        let joint1 = world.spawn(ChildOf(joint0)).id();
+        let joint_card = world.spawn(card(1, joint1)).id();
+        // A card whose owner is gone (despawned mid-frame) must not climb into someone else's tree.
+        let orphan_card = world
+            .spawn(card(2, Entity::from_raw_u32(9999).unwrap()))
+            .id();
+
+        let resolved = world
+            .run_system_once(
+                move |cards: Query<&BillboardCard>,
+                      guids: Query<&Guid>,
+                      child_of: Query<&ChildOf>|
+                      -> Vec<Entity> {
+                    [mesh_part, anchor_card, joint_card, orphan_card, net]
+                        .into_iter()
+                        .map(|e| net_entity_of(e, &cards, &guids, &child_of))
+                        .collect()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolved[0], net,
+            "mesh part: the one-hop case still resolves"
+        );
+        assert_eq!(
+            resolved[1], net,
+            "anchor-following card: the world root hops through `follows()`, not `ChildOf`"
+        );
+        assert_eq!(
+            resolved[2], net,
+            "joint-following card: the climb continues up the joint hierarchy, not one hop"
+        );
+        assert_ne!(
+            resolved[3], net,
+            "a card whose owner is gone resolves to nothing that carries a guid"
+        );
+        assert_eq!(resolved[4], net, "the net entity resolves to itself");
+    }
 }

@@ -357,6 +357,23 @@
                         _G[index] = xOffset
                     elseif ( row.isVar ) then
                         _G[index] = yOffset
+                    elseif ( frame.IsUserPlaced and frame:IsUserPlaced() ) then
+                        -- **A frame the PLAYER placed is not this pass's to seat.** benilla's rule,
+                        -- not the reference's: 1.12 has no *movable* managed frame — its ChatFrame1
+                        -- is docked and its tab click refuses to drag a docked window — so the case
+                        -- cannot arise there. Ours does, since an unlocked chat window drags and
+                        -- resizes, and without this the next pass would `ClearAllPoints` the window
+                        -- and drop it back on the bottom-stack seat. That is not a rare path: the
+                        -- stance bar fires this on every show and hide.
+                        --
+                        -- `IsUserPlaced` is exactly the right question rather than a chat-specific
+                        -- one: the engine sets that bit at the drag that moved the frame, and the
+                        -- layout cache (`benilla_app::ui_layout`) sets it again for every frame it
+                        -- seats out of the player's file — so "the player owns this frame's
+                        -- position" and "do not manage it" are the same fact.
+                        --
+                        -- The `isVar` rows above are untouched: they write a NUMBER and seat no
+                        -- frame, so there is no position for a player to own.
                     else
                         -- ClearAllPoints first: the row states the frame's WHOLE seat, so the pass
                         -- must own it outright. `SetPoint` only replaces the same-NAMED point, so

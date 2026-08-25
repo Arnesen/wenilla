@@ -208,10 +208,14 @@ pub(crate) fn camera_character_path(realm: &str, character: &str) -> Option<Path
 /// never mentioned it). That split a player's state across two folders and — the part that
 /// actually bit — skipped [`home`]'s hermetic guard, so a **capture read the account name off
 /// whatever machine it ran on** and rendered it into the login screen it was photographing.
-/// `benilla-config/chat/<realm>-<character>.txt` — the chat windows' saved look (decision 1589):
-/// the background tint, the background alpha and the font size a chat tab's right-click menu sets.
-/// **Character-scoped**, where the reference keeps the same three inside its per-character
-/// `chat-cache.txt` — a raid alt and a questing alt want different chat boxes. See
+pub(crate) fn saved_account_path() -> Option<PathBuf> {
+    home().map(|h| h.join("account"))
+}
+
+/// `benilla-config/chat/<realm>-<character>.txt` — the chat windows' saved state (decision 1589):
+/// the background tint, the background alpha, the font size a chat tab's right-click menu sets,
+/// and the window's lock. **Character-scoped**, where the reference keeps the same four inside its
+/// per-character `chat-cache.txt` — a raid alt and a questing alt want different chat boxes. See
 /// [`crate::ui_chat`]'s `settings` module for the file's shape and why it is a subset of its
 /// ancestor.
 pub(crate) fn chat_character_path(realm: &str, character: &str) -> Option<PathBuf> {
@@ -222,8 +226,22 @@ pub(crate) fn chat_character_path(realm: &str, character: &str) -> Option<PathBu
     )))
 }
 
-pub(crate) fn saved_account_path() -> Option<PathBuf> {
-    home().map(|h| h.join("account"))
+/// `benilla-config/layout/<realm>-<character>.txt` — the **layout cache**: where every frame the
+/// player has moved or resized sits, so a dragged chat window is still there after a relog.
+///
+/// The reference's own resident is `WTF/Account/<ACC>/<REALM>/<CHAR>/layout-cache.txt`, written by
+/// the engine for exactly the frames carrying the userPlaced bit — so the scope is its scope and
+/// the name is its name, one folder flatter like every other resident here ([`home`] is already
+/// account-scoped by the binary it sits beside). Character-scoped because the state IS per
+/// character: a raid alt wants the combat log wide where a questing alt wants it out of the way.
+///
+/// The file's shape, and the seam that fills it, are [`crate::ui_layout`]'s.
+pub(crate) fn layout_character_path(realm: &str, character: &str) -> Option<PathBuf> {
+    Some(home()?.join("layout").join(format!(
+        "{}-{}.txt",
+        file_token(realm),
+        file_token(character)
+    )))
 }
 
 /// `benilla-config/shots.txt` — the framing instrument's appended camera poses (decision 0600). A dev
@@ -362,6 +380,12 @@ mod tests {
             chat_character_path("Hydraxian Waterlords", "Probeone"),
             Some(tmp.join("benilla-config/chat/Hydraxian_Waterlords-Probeone.txt"))
         );
+        // The layout cache — the userPlaced frames' geometry, character-scoped like its neighbours
+        // and like the reference's own `layout-cache.txt`.
+        assert_eq!(
+            layout_character_path("Hydraxian Waterlords", "Probeone"),
+            Some(tmp.join("benilla-config/layout/Hydraxian_Waterlords-Probeone.txt"))
+        );
 
         // The login screen's remembered account name (decision 0539 §4) and the framing
         // instrument's pose log (0600) — the two residents that computed their own path in
@@ -399,6 +423,11 @@ mod tests {
             chat_character_path("Hydraxian Waterlords", "Probeone"),
             None,
             "a capture reads no player's chat look"
+        );
+        assert_eq!(
+            layout_character_path("Hydraxian Waterlords", "Probeone"),
+            None,
+            "a capture reads no player's window layout"
         );
         std::fs::remove_dir_all(&tmp).ok();
     }

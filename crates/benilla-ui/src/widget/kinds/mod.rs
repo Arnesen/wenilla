@@ -744,6 +744,22 @@ pub struct ColorSelectState {
     /// `[hue-degrees, saturation, value]` — the widget's `+0x328`/`+0x32c`/`+0x330`. Hue is `-1.0`
     /// whenever saturation is 0 (the grey sentinel).
     pub hsv: [f32; 3],
+    /// `<ColorWheelTexture>` / `SetColorWheelTexture` (`0x78de90`), the widget's `+0x318` — the hue
+    /// disc. The **rect of this region is the wheel's hit box**: the press handler tests the cursor
+    /// against `[+0x318]+0x24`, not against the frame. Created on first set, like a Slider's thumb.
+    pub wheel: Option<RegionHandle>,
+    /// `<ColorWheelThumbTexture>` / `SetColorWheelThumbTexture` (`0x78e160`) — the little marker
+    /// that rides the disc. Its rect is *derived* from `hsv` at extract, and an anchor authored on
+    /// it in XML is **discarded**: `0x78b850` calls `ClearAllPoints 0x767ed0` and re-`SetPoint`s
+    /// from C++ on every colour change. The two thumbs are the only elements here with a `file=`
+    /// and the only ones the reference gives no `<Anchors>` — those two facts are the same fact.
+    pub wheel_thumb: Option<RegionHandle>,
+    /// `<ColorValueTexture>` / `SetColorValueTexture` (`0x78e450`), the widget's `+0x320` — the
+    /// brightness strip, and the second hit box (`[+0x320]+0x24`).
+    pub value_strip: Option<RegionHandle>,
+    /// `<ColorValueThumbTexture>` / `SetColorValueThumbTexture` (`0x78e720`) — the strip's marker,
+    /// rect derived from `hsv[2]`.
+    pub value_thumb: Option<RegionHandle>,
 }
 
 impl Default for ColorSelectState {
@@ -751,6 +767,10 @@ impl Default for ColorSelectState {
     fn default() -> ColorSelectState {
         ColorSelectState {
             hsv: [0.0, 0.0, 1.0],
+            wheel: None,
+            wheel_thumb: None,
+            value_strip: None,
+            value_thumb: None,
         }
     }
 }
@@ -861,7 +881,7 @@ impl ColorSelectState {
     /// what makes the `-1` sentinel inert on the way out. Otherwise the 6-sector decode, with the
     /// sector floored by the same magic-512 trick as quantizer B and clamped to `≤ 5`. The
     /// `f32(1/60) = 0x3c888889` on the way back is the lossy step the whole `-1` drift comes from.
-    fn hsv_to_rgb(hsv: &[f32; 3]) -> [f32; 3] {
+    pub fn hsv_to_rgb(hsv: &[f32; 3]) -> [f32; 3] {
         let f = f64::from;
         let (h, s, v) = (hsv[0], hsv[1], hsv[2]);
         if s == 0.0 {
@@ -885,6 +905,17 @@ impl ColorSelectState {
             _ if sector == 4 => [t, p, v],
             _ => [v, p, q],
         }
+    }
+
+    /// Store HSV **raw** — no clamp, no quantize, no round trip through RGB. This is what the
+    /// widget's own drag handler does (`0x78bd80`: `fstp [esi+0x328]` / `[+0x32c]` / `[+0x330]`
+    /// straight off the geometry) and what `SetColorHSV 0x78e920` does (wow-re
+    /// `colorselect-color-law.md` §4/§5). The reachable state set is therefore *strictly finer*
+    /// than [`Self::set_rgb`]'s, which can only ever land on the HSV image of the 8-bit lattice —
+    /// the picker's wheel resolves colours the Lua boundary cannot name. What Lua *reads back* is
+    /// quantized identically either way, because the quantize lives on the outbound leg.
+    pub fn set_hsv(&mut self, h: f32, s: f32, v: f32) {
+        self.hsv = [h, s, v];
     }
 
     /// `SetColorRGB`'s whole store, in the binary's order (`0x78eb7e`…`0x78ecfa`): clamp each

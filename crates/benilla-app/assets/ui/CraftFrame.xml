@@ -111,10 +111,14 @@
                region (the ref's `Craft<n>Text`/`Craft<n>SubText`, `ClassTrainerSkillButtonTemplate`'s
                auto-created text object); the persistent selection glow is the separate
                `BenillaCraftHighlightFrame` (TradeSkillFrame.xml's own selection-highlight precedent)
-               instead of Lock/UnlockHighlight — no independent hover glow beyond it, and (verified
-               against Craft's OWN ref, unlike TradeSkill's row template) `CraftButtonTemplate` never
-               overrides `OnEnter` for a tooltip either — this window's list rows carry NO hover tooltip
-               at all, faithfully (TradeSkill's own row hover IS a real ref behavior; Craft's is not).
+               instead of Lock/UnlockHighlight — no independent hover glow beyond it, and
+               `CraftButtonTemplate` never overrides `OnEnter` for a tooltip either — this window's list
+               rows carry NO hover tooltip at all, faithfully. (An earlier revision of this line added
+               "TradeSkill's own row hover IS a real ref behavior; Craft's is not" — WRONG, and never
+               checked: `TradeSkillSkillButtonTemplate` overrides `OnClick` alone, and the shared base
+               `ClassTrainerSkillButtonTemplate` (`Interface\FrameXML\ClassTrainerFrameTemplates.xml`)
+               only recolours `$parentSubText` on hover. NEITHER window's rows tooltip. TradeSkill's
+               stray OnEnter is gone; see that file's row-template comment.)
              - `Button:GetID()`/`:SetID()` have no native method (same grep) — the ref's
                `craftButton:SetID(craftIndex)` + `this:GetID()` pair becomes a plain Lua field,
                `button.craftIndex`, set in the Update loop and read by the click handler

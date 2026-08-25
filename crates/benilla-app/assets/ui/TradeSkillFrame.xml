@@ -114,10 +114,15 @@
                `benilla-ui/src/script/button.rs` ships texture-pairs/SetText/Enable/Disable/
                RegisterForClicks/SetButtonState/Click only) — row coloring routes through a named child
                FontString (`$parentName`, TrainerFrame.xml's own row-template shape) instead of the
-               button itself; the persistent selection glow is the separate `BenillaTradeSkillHighlight`
-               Frame (TrainerFrame.xml's own selection-highlight precedent) instead of Lock/
-               UnlockHighlight — no independent hover glow is added beyond it (TrainerFrame's own rows
-               carry none either).
+               button itself; the persistent selection glow is the separate
+               `BenillaTradeSkillHighlightFrame` (TrainerFrame.xml's own selection-highlight precedent)
+               instead of Lock/UnlockHighlight — no independent hover glow is added beyond it
+               (TrainerFrame's own rows carry none either). **The Frame is the thing shown, hidden and
+               positioned; `BenillaTradeSkillHighlight` is only its texture, and only ever gets
+               `SetVertexColor`** (ref l.99/142-143 vs l.200) — Update addressed the texture for all
+               four until decision 1598, which left the frame `hidden="true"` for the window's whole
+               life and meant NO selection ever painted. CraftFrame.xml/TrainerFrame.xml already split
+               the two correctly; this window was the outlier.
              - `SecondsToTime`/`BuildColoredListString` (ref `UIParent.lua`) have no engine equivalent
                (they're Lua-side FrameXML utilities, not C API) — transcribed as GUARDED GLOBALS
                (`if not X then function X(...) ... end end`), BuffFrame.xml's own
@@ -416,7 +421,11 @@
             FauxScrollFrame_Update(scrollFrame, numTradeSkills, TRADE_SKILLS_DISPLAYED, TRADE_SKILL_HEIGHT)
             local skillOffset = FauxScrollFrame_GetOffset(scrollFrame)
 
-            local highlight = getglobal("BenillaTradeSkillHighlight")
+            -- The FRAME is what shows/hides/positions (ref l.99/142-143); its texture is only ever
+            -- vertex-coloured (SetSelection, ref l.200). Addressing the texture here instead left the
+            -- glow's frame `hidden="true"` forever, so no selection ever painted (decision 1598) —
+            -- CraftFrame.xml and TrainerFrame.xml both already split the two correctly.
+            local highlight = getglobal("BenillaTradeSkillHighlightFrame")
             highlight:Hide()
 
             local selection = GetTradeSkillSelectionIndex()
@@ -513,25 +522,6 @@
             if not index then return end
             BenillaTradeSkillFrame_SetSelection(index)
             BenillaTradeSkillFrame_Update()
-        end
-
-        -- List-row hover tooltip (the product item, keyed by row index — GameTooltip:SetTradeSkillItem
-        -- with no reagent index). Guarded against a HEADER row here rather than in the engine binding
-        -- (`super::tooltip_item`'s `SetTradeSkillItem` is outside this change's file scope — see
-        -- tradeskill.rs's own module doc "KNOWN GAP" note): a header's own visible index would
-        -- otherwise misresolve through that binding's still-flat `recipes` indexing.
-        function BenillaTradeSkillSkillButton_OnEnter(button)
-            local index = button.skillIndex
-            if not index then return end
-            local _, skillType = GetTradeSkillInfo(index)
-            if skillType == "header" then return end
-            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
-            GameTooltip:SetTradeSkillItem(index)
-            GameTooltip:Show()
-        end
-
-        function BenillaTradeSkillSkillButton_OnLeave()
-            GameTooltip:Hide()
         end
 
         -- The window's wheel handler (bubbled up the parent chain from a row) → one row via the faux
@@ -821,11 +811,22 @@
         One list row (ref TradeSkillSkillButtonTemplate inherits ClassTrainerSkillButtonTemplate,
         l.343-414 for the instances): a 293×16 row — the +/- fold slot at the left (meaningful for a
         header row, blanked for a recipe row; wow-re `tradeskill` TU-B, deviation 1) + the name text.
-        `ClassTrainerSkillButtonTemplate` isn't in this session's ref extraction (only
-        `TradeSkillSkillButtonTemplate` itself, which just inherits it, is) — TrainerFrame.xml's own
-        `BenillaTrainerServiceTemplate` geometry stands in for the un-extracted base (that file's own
-        reagent-slot precedent for reconstructing one), minus its separate rank-subtext column this
-        window's rows never carry.
+        `ClassTrainerSkillButtonTemplate` lives in `Interface\FrameXML\ClassTrainerFrameTemplates.xml`
+        (LOCATED — earlier revisions of this comment said it "isn't in this session's ref extraction"
+        and reconstructed it from TrainerFrame.xml's own `BenillaTrainerServiceTemplate`; the geometry
+        that guess produced matches, so it stays). The base is 293×16 with a 16×16 NormalTexture and a
+        16×16 `$parentHighlight` both at LEFT+3, ButtonText hung off `$parentHighlight`'s RIGHT, and a
+        BACKGROUND `$parentSubText` this window never fills.
+
+        **NO ROW HOVER TOOLTIP** — the base's `OnEnter`/`OnLeave` only recolour `$parentSubText` to
+        HIGHLIGHT_FONT_COLOR and back, and `TradeSkillSkillButtonTemplate` overrides `OnClick` ALONE.
+        Nothing in the reference chain calls GameTooltip for a list row: the product tooltip is the
+        detail pane's `TradeSkillSkillIcon`, the reagent tooltips are the reagent slots, and the list
+        is bare. An earlier revision shipped a `GameTooltip:SetTradeSkillItem` OnEnter here as if it
+        were the ref's; it never was, and CraftFrame.xml's own deviation 7 repeated the claim ("TradeSkill's
+        own row hover IS a real ref behavior") on the strength of it. Both are corrected: no OnEnter.
+        Since `$parentSubText` is empty for every row of this window, the base's own hover recolour is
+        invisible here too, so the row carries no hover script at all.
     -->
     <Button name="BenillaTradeSkillSkillButtonTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="293" y="16"/></Size>
@@ -854,8 +855,6 @@
         <Scripts>
             <OnLoad>self.name = getglobal(self:GetName() .. "Name")</OnLoad>
             <OnClick>BenillaTradeSkillSkillButton_OnClick(self, arg1)</OnClick>
-            <OnEnter>BenillaTradeSkillSkillButton_OnEnter(self)</OnEnter>
-            <OnLeave>BenillaTradeSkillSkillButton_OnLeave()</OnLeave>
         </Scripts>
     </Button>
 

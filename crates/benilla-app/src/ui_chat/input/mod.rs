@@ -157,6 +157,9 @@ pub(super) struct ChatProbes<'w, 's> {
     /// "leader" on this wire is a guid. Here rather than as a 17th drain parameter for the
     /// reason this struct exists at all — the drain is at Bevy's 16-param ceiling.
     self_guid: Res<'w, crate::net::SelfGuid>,
+    /// The map `/partytest ping` stamps its synthetic ping with — a ping carries no map on the
+    /// wire either, so "the one we are standing on" is the client's answer in both paths.
+    map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
 }
 
 /// Everything the drain **queues into another subsystem's one setter** rather than applying itself,
@@ -176,6 +179,12 @@ pub(super) struct ChatOut<'w> {
     target: MessageWriter<'w, crate::target::TargetByNameRequest>,
     assist: MessageWriter<'w, crate::target::AssistRequest>,
     follow: MessageWriter<'w, crate::player::FollowRequest>,
+    /// **`/partytest ping`** (decision 1596) — the minimap ping's setter. The LOCAL leg needs no
+    /// instrument (click the map), but a *group member's* ping otherwise needs a second client
+    /// logged in and standing somewhere else; this seats one as if Alice had sent it, through the
+    /// same `seat` the wire arm calls, so the remote leg — the `partyN` token, the marker, the
+    /// pin holding while you walk — is exercisable solo.
+    ping: ResMut<'w, crate::minimap::MinimapPing>,
 }
 
 // One parameter per concern — the chat drain fans out to every command's consumer.
@@ -215,6 +224,7 @@ pub(super) fn drain_chat_input(
         guids,
         kinds,
         self_guid,
+        map,
     } = &probes;
     let Some(mut script) = script else {
         return;
@@ -513,6 +523,31 @@ pub(super) fn drain_chat_input(
                     }
                 }
                 "invite" => group.pending_invite = Some("Partner".to_string()),
+                // A group member's ping, without the group member (decision 1596). 35 yd
+                // north-east: off both axes so a mirrored sign is obvious, and inside every
+                // outdoor view radius (the tightest is 66.7 yd) — indoors at the two tightest
+                // zooms it is off the disc, which is itself worth seeing (the marker hides and
+                // the ping survives, so walking back brings it into view).
+                "ping" => {
+                    let line = if let Ok((_, _, tf)) = self_player.single() {
+                        let w = benilla_assets::coords::bevy_to_wow(tf.translation());
+                        // +x is north, −y is east (0203's north-up mapping).
+                        let at = (w[0] + 24.75, w[1] - 24.75);
+                        chat_out
+                            .ping
+                            .seat(at, map.as_ref().map_or(0, |m| m.0), 0xF001);
+                        format!(
+                            "partytest: Alice pinged ({:.0}, {:.0}) — 35 yd NE, party1, 5 s",
+                            at.0, at.1
+                        )
+                    } else {
+                        "partytest: no player position — cannot place a ping".to_string()
+                    };
+                    chat_log.push_event(super::event::ChatEvent::text_only(
+                        super::event::ChatEventKind::System,
+                        line,
+                    ));
+                }
                 // Serverless mark eyeball: skull the current target on the LOCAL board (the
                 // real send round-trips through the server's echo, which /partytest lacks).
                 "mark" => {

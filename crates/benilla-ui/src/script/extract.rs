@@ -8,7 +8,7 @@ use crate::order::{self, ZTarget};
 use crate::widget::FrameHandle;
 
 use super::clip::{effective_clip, scroll_clip_sources};
-use super::{slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript};
+use super::{colorselect, slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript};
 
 impl UiScript {
     /// **Every live draw target in the VM**, whether or not it is currently visible — each frame's
@@ -170,6 +170,44 @@ impl UiScript {
                             thumb_fill = true;
                         }
                     }
+                    // The colour picker's four sub-textures. The wheel and the strip are ordinary
+                    // authored regions — they keep their own anchors and resolve normally; all
+                    // they need from here is a content kind that says "the app paints this one".
+                    // The two markers are the opposite: their rects are DERIVED from the widget's
+                    // HSV, so the pixel you clicked is the pixel the marker lands on
+                    // (`colorselect::wheel_thumb_rect` is the exact inverse of the pick law).
+                    let mut color_art: Option<QuadContent> = None;
+                    let mut color_thumb = false;
+                    if let Some(crate::widget::KindState::ColorSelect(cs)) =
+                        owner_frame.map(|f| &f.kind_state)
+                    {
+                        let tsize = model.region_data.get(&rh).and_then(|d| d.size);
+                        if cs.wheel_thumb == Some(rh) {
+                            rect = cs
+                                .wheel
+                                .and_then(|w| model.region_resolved.get(&w).copied())
+                                .map(|w| colorselect::wheel_thumb_rect(w, tsize, cs.hsv));
+                            color_thumb = true;
+                        } else if cs.value_thumb == Some(rh) {
+                            // The strip anchors it; the WHEEL scales it (the client's own
+                            // unguarded `[this+0x318]` read — `colorselect::value_thumb_rect`).
+                            let wheel = cs
+                                .wheel
+                                .and_then(|w| model.region_resolved.get(&w).copied());
+                            rect = cs
+                                .value_strip
+                                .and_then(|v| model.region_resolved.get(&v).copied())
+                                .map(|v| colorselect::value_thumb_rect(v, wheel, tsize, cs.hsv));
+                            color_thumb = true;
+                        } else if cs.wheel == Some(rh) {
+                            color_art = Some(QuadContent::ColorWheel);
+                        } else if cs.value_strip == Some(rh) {
+                            color_art = Some(QuadContent::ColorValue {
+                                hue: cs.hsv[0],
+                                sat: cs.hsv[1],
+                            });
+                        }
+                    }
                     // A Button's state textures show by interaction state (the texture-array
                     // "current" pointer): a non-current state texture emits no quad this frame.
                     // The ButtonText additionally re-points to the current STATE's font object
@@ -309,14 +347,21 @@ impl UiScript {
                     if let Some(sb) = bar_fill {
                         data.tex_coords = Some(bar_fill_uv(data.tex_coords, sb));
                     }
-                    if bar_fill.is_none() && !thumb_fill {
+                    if bar_fill.is_none() && !thumb_fill && !color_thumb {
                         rect = model.region_resolved.get(&rh).copied();
                     }
                     let is_text = matches!(
                         region.map(|r| r.kind),
                         Some(crate::widget::RegionKind::FontString)
                     );
-                    let content = if is_text {
+                    // The generated art wins only over an EMPTY slot: an addon that sets a real
+                    // texture on the wheel region gets its texture, the way it would on any other
+                    // region. (`ColorPickerFrame.xml` sets none, which is the whole point.)
+                    let content = if let Some(art) =
+                        color_art.filter(|_| data.texture.is_none() && data.fill.is_none())
+                    {
+                        art
+                    } else if is_text {
                         QuadContent::Text {
                             text: data.text,
                             color: data.vertex_color,

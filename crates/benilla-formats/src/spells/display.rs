@@ -50,6 +50,35 @@ pub struct SpellDisplay {
     /// `AttributesEx3` (column 9, `SpellRec+0x24`) — only bit `0x8000` is consumed
     /// ([`Self::melee_white_damage`]).
     pub attributes_ex3: u32,
+    /// **`modalNextSpell`** (`Spell.dbc` column 38, `SpellRec + 0x98`) — the spell this one makes
+    /// the client cast **by itself**, one server round-trip later, with no user input and no addon.
+    /// `0` for all but 57 of the 22357 shipped rows.
+    ///
+    /// `HandleCastResult 0x6e7330` — the `SMSG_CAST_RESULT` (0x130) handler — reads it for the
+    /// spell the reply names, **on success as well as failure** (`0x6e7356 cmp [ebp+0xf],0x2` /
+    /// `0x6e735a jne` sends a non-failure straight to the same block the failure path falls into
+    /// at `0x6e73eb`), provided the reply is for the in-flight cast (`0x6e7408` vs `[0xceca88]`).
+    /// Then, at `0x6e7447`:
+    ///
+    /// - `0` → nothing happens (`0x6e744f je`);
+    /// - `== [0xceac30]`, the **running** auto-repeat → the pending-cast record is re-armed and
+    ///   nothing is cast (`0x6e745d`) — which is why a second sting does not restart Auto Shot or
+    ///   reset its swing timer;
+    /// - otherwise → the client **casts it** (`0x6e74aa call 0x6e5a90` → `TryCast`), at the null
+    ///   target guid, through the ordinary ladder.
+    ///
+    /// **This is how a hunter starts shooting.** Every rank of every hunter shot — Serpent Sting,
+    /// Arcane Shot, Multi-Shot, Concussive Shot, Aimed Shot, Viper/Scorpid Sting, Black Arrow,
+    /// Distracting Shot — carries **75 (Auto Shot)** here, and Auto Shot's own column 38 is `0`, so
+    /// the chain is exactly one hop and cannot loop. The only other non-zero values in the shipped
+    /// file are three "(TEST) bow shot" rows → 59 and two `Minigun` rows → 23675 (self-referential,
+    /// absorbed by the equal-branch).
+    ///
+    /// wow-re `spell/scratch/modalnext-chain-cast.md` (§5 round, 7 agents + orchestrator byte
+    /// arbitration); benilla decision 1597. It **corrects** the reading in 0994 §4 — the client
+    /// really does not start the repeat from the sting's *own* send, and then starts it from a
+    /// *second cast it issues itself*.
+    pub modal_next_spell: u32,
     /// `Attributes & 0x40` (`SPELL_ATTR_PASSIVE`, module docs) — the spellbook's gray-and-refuse
     /// gate (consumed by `benilla-ui/src/script/spellbook.rs`, decision 0216 §8).
     pub passive: bool,
@@ -271,6 +300,7 @@ impl Default for SpellDisplay {
             attributes: 0,
             attributes_ex: 0,
             attributes_ex2: 0,
+            modal_next_spell: 0,
             attributes_ex3: 0,
             passive: false,
             cast_ui: 0,
@@ -640,14 +670,17 @@ impl SpellDisplay {
     /// 6e8402  call 0x6131a0(ecx=caster, guid)              ; START MELEE AUTO-ATTACK
     /// ```
     ///
-    /// **Only the bit20 leg is modelled**, deliberately. The `rec+0x54 bit3` leg can only add
-    /// spells that already pass `0x6e5200` with bit20 CLEAR — and those started their attack at
-    /// the *send* (`initiates_auto_attack`), so by their GO the reference's `[+0xc48]` is set and
-    /// `0x6e83e7` refuses. It is unreachable-in-effect, and `rec+0x54`'s column is still only
-    /// INFERRED in wow-re (`combat-feel-law.md` §A3 owes it to the DBC), so building it would be
-    /// guessing at no gain. Modelling it would also be actively *wrong* here: our engaged mirror
-    /// is the server-echoed `Engaged`, not a local lock, so a leg that the reference silences
-    /// with `[+0xc48]` would fire a second `CMSG_ATTACKSWING` on our side.
+    /// **Only the bit20 leg is modelled**, deliberately — and the §5 that closed B280 measured the
+    /// other one rather than leaving it to the argument below. `rec+0x54` is `Spell.dbc` **column
+    /// 21, `InterruptFlags`** (VERIFIED position; bit 3's *semantics* stay INFERRED), which is
+    /// [`Self::interrupt_flags`] — so we could build the leg today. Its live set in the shipped
+    /// file is **8 rows, 3 names** (Slam, Shield Slam, Polymorphic Ray) and is **disjoint from the
+    /// 36** bit20 rows, so every one of them passes `0x6e5200` with bit20 CLEAR and therefore
+    /// started its attack at the *send* ([`Self::initiates_auto_attack`]); by their GO the
+    /// reference's `[+0xc48]` is set and `0x6e83e7` refuses. Unreachable-in-effect, measured, not
+    /// assumed. Modelling it would also be actively *wrong* here: our engaged mirror is the
+    /// server-echoed `Engaged`, not a local lock, so a leg the reference silences with `[+0xc48]`
+    /// would fire a second `CMSG_ATTACKSWING` on our side.
     ///
     /// The 36 spells that reach this and nothing else are the stealth openers and positional
     /// strikes — Backstab, Garrote, Ambush, Cheap Shot, Shred, Ravage, Pounce — plus Judgement:
