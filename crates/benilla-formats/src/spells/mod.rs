@@ -375,6 +375,12 @@ const ATTR_EX3_NO_CASTING_BAR_TEXT: u32 = 0x4;
 /// `Attributes` bit `0x2` — the "uses the ranged slot" attribute (mangos `SPELL_ATTR_RANGED`).
 /// One half of the client's ranged-stance gate (module docs).
 const ATTR_RANGED: u32 = 0x2;
+/// `Attributes` bit 9 (`0x200`) — **this cast targets the equipped main hand, without asking**
+/// (`SPELL_ATTR0_TARGET_MAINHAND_ITEM`). vmangos leaves the bit unnamed (`SPELL_ATTR_UNK9`)
+/// because it is a purely *client-side* targeting instruction: the server only ever sees the
+/// resolved item guid. The law is `ArmCast 0x6e5250`'s candidate leg (`6e536e`–`6e5391`), read by
+/// [`SpellDisplay::targets_main_hand_item`]; decision 1552.
+const ATTR_TARGET_MAIN_HAND_ITEM: u32 = 0x200;
 /// `AttributesEx2` bit `0x20` — the auto-repeat attribute (mangos `SPELL_ATTR_EX2_AUTO_REPEAT`);
 /// the other half of the gate. Auto Shot and wand Shoot carry it.
 const ATTR_EX2_AUTO_REPEAT: u32 = 0x20;

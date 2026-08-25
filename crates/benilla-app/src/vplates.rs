@@ -10,8 +10,11 @@
 //! - **Gate**: never the own unit; never `NOT_SELECTABLE` (UNIT_FIELD_FLAGS bit 25); the
 //!   enemy/friendly split is **`CanAttack(localPlayer → unit)`**, NOT a reaction threshold
 //!   ([`crate::target::ring::plate_is_friendly`], wow-re `nameplate-category-gate.md` §2/§3,
-//!   §5-VERIFIED 2026-08-22 — this file shipped `rank >= 4` for a year and 1530 corrects it);
-//!   **max 20 yd**, hardcoded; **no
+//!   §5-VERIFIED 2026-08-22 — this file shipped `rank >= 4` for a year and 1530 corrects it) —
+//!   and a **player** subject must additionally pass `CanCooperate`, which is nothing but the two
+//!   `FactionTemplate` faction-group masks being equal, so a player whose row carries neither
+//!   side's mask (a vmangos `.gm on` character is template 35, mask 0) is enemy-category no matter
+//!   how friendly they read; **max 20 yd**, hardcoded; **no
 //!   occlusion** (a 2-D overlay — plates draw through walls); snap, no smoothing. Anti-overlap
 //!   there *is*, since 0367 found the shared solver ([`crate::smart_rect`]) — this file's older
 //!   "no anti-overlap" was the census that missed it. And the sphere is bounded by the frustum:

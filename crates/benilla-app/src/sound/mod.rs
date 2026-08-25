@@ -25,8 +25,10 @@ mod greeting;
 mod hal_overload;
 pub(crate) mod interior;
 mod kit;
+mod limiter;
 mod liquid_loop;
 mod math;
+mod meter;
 mod missile;
 mod mix_tap;
 mod mixer;
@@ -118,6 +120,14 @@ pub(crate) struct SoundConfig {
     /// (1109) ride under the entry cover exactly as the real client's does: its amp is applied
     /// once at start, and a playing stream never passes back through the kit starters.
     pub world_hold: bool,
+    /// The **output limiter** — benilla's own `SoundOutputLimiter` CVar (decision 1551), default
+    /// **on**. Not a 1.12 CVar: the reference has no such DSP and does not need one, because it
+    /// hands its whole audible mix to FMOD 3 and carries its headroom elsewhere (the SFX-bus
+    /// auto-duck, wow-re `benilla-pins.md` B15). benilla sums into f32 and kira answers an
+    /// over-scale sum with a hard clamp, which is audible distortion the moment two full-scale
+    /// kits overlap — see [`limiter`] for the measured arithmetic. This exists so the fix can be
+    /// A/B'd against what it fixed: `/run SetCVar("SoundOutputLimiter", 0)` applies live.
+    pub limiter: bool,
 }
 
 impl SoundConfig {
@@ -148,6 +158,7 @@ impl Default for SoundConfig {
             ambience_enabled: true,
             reverb: false,
             world_hold: false,
+            limiter: true,
         }
     }
 }
@@ -340,15 +351,20 @@ fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<SoundConfig>)
 fn apply_master_volume(
     mut out: NonSendMut<SoundOutput>,
     config: Res<SoundConfig>,
-    mut last: Local<Option<(bool, f32)>>,
+    mut last: Local<Option<(bool, f32, bool)>>,
 ) {
-    let cur = (config.enabled && !config.muted, config.master);
+    let cur = (
+        config.enabled && !config.muted,
+        config.master,
+        config.limiter,
+    );
     if *last == Some(cur) {
         return;
     }
     *last = Some(cur);
     if let Some(mixer) = out.mixer.as_mut() {
         mixer.set_master(if cur.0 { cur.1 } else { 0.0 });
+        mixer.set_limiter(cur.2);
     }
 }
 
@@ -378,7 +394,10 @@ fn poll_mix_health(
     mut exit: MessageReader<bevy::app::AppExit>,
     mut since_report: Local<std::time::Duration>,
     mut last_overruns: Local<u64>,
+    mut last_refused: Local<u64>,
+    mut peak_voices: Local<usize>,
 ) {
+    *peak_voices = (*peak_voices).max(out.channels.len());
     let Some(mixer) = out.mixer.as_mut() else {
         return;
     };
@@ -394,6 +413,9 @@ fn poll_mix_health(
     }
     *since_report = std::time::Duration::ZERO;
     let peak = mixer.take_health_peak();
+    let level = mixer.take_level();
+    let rate = mixer.sample_rate();
+    let voices = std::mem::take(&mut *peak_voices);
     let new_overruns = health.overruns - *last_overruns;
     *last_overruns = health.overruns;
     if new_overruns > 0 {
@@ -406,4 +428,47 @@ fn poll_mix_health(
     } else {
         debug!("audio: mix load peak {:.0}% of budget", peak * 100.0);
     }
+    let new_refused = health.voices_refused - *last_refused;
+    *last_refused = health.voices_refused;
+    if new_refused > 0 {
+        warn!(
+            "audio: {new_refused} 3D sound(s) never played — the spatial-voice arena was full. \
+             These are sounds the player should have heard; the ceiling is ours to raise \
+             (`SPATIAL_VOICE_CAPACITY`), not the game's to work around.",
+        );
+    }
+    report_level(level, voices, rate);
+}
+
+/// The level half of the report (decision 1551) — the amplitude story none of the timing meters
+/// can tell. A mix that asks for more than full scale is not a maybe either: the sum did not fit,
+/// and without the limiter kira's `clamp` would have squared it off. The line names what the game
+/// asked for, how long it was over, what the limiter had to pull, and how many voices were live —
+/// which together say *why* (thirty voices at once is a different bug from one voice at 4×).
+fn report_level(level: meter::LevelReading, voices: usize, rate: Option<u32>) {
+    if level.over == 0 {
+        debug!(
+            "audio: mix peak {:.2} of full scale, {voices} voice(s) at most",
+            level.peak,
+        );
+        return;
+    }
+    // Two samples per frame; an unprobeable device leaves the duration out rather than guessing
+    // a time axis (the same rule the mix tap follows).
+    let over = match rate {
+        Some(r) => format!(
+            "for ~{:.0} ms",
+            level.over as f64 / 2.0 / f64::from(r) * 1000.0
+        ),
+        None => format!("across {} samples", level.over),
+    };
+    warn!(
+        "audio: the mix asked for {:.2}x full scale ({:+.1} dBFS) {over} of the last {}s, with \
+         {voices} voice(s) live at most; the limiter pulled up to {:.1} dB to hold it under. \
+         Without it that is hard clipping — the \"dirty, like a speaker breaking\" report.",
+        level.peak,
+        20.0 * level.peak.max(1e-6).log10(),
+        MIX_HEALTH_REPORT.as_secs(),
+        20.0 * level.reduction.max(1e-6).log10(),
+    );
 }

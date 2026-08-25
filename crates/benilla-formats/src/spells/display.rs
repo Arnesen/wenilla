@@ -35,8 +35,9 @@ pub struct SpellDisplay {
     /// impact (decision 0099's `Speed==0` gate — no missile phase).
     pub speed: f32,
     /// `Attributes` (column 6, module docs) — consumed by [`Self::ranged_attack`] (`0x2`),
-    /// [`Self::in_spellbook`] (`0x20`/`0x80`), [`Self::cooldown_on_event`] (bit 25), and the
-    /// aura-bar display filter [`Self::hidden_from_aura_bar`] (`0x80`).
+    /// [`Self::targets_main_hand_item`] (`0x200`), [`Self::in_spellbook`] (`0x20`/`0x80`),
+    /// [`Self::cooldown_on_event`] (bit 25), and the aura-bar display filter
+    /// [`Self::hidden_from_aura_bar`] (`0x80`).
     pub attributes: u32,
     /// `AttributesEx` (column 7, `SpellRec+0x1c`) — only bit `0x10000000` is consumed
     /// ([`Self::hidden_from_aura_bar`]'s `SPELL_ATTR_EX_NO_AURA_ICON` half).
@@ -397,6 +398,28 @@ impl SpellDisplay {
     /// site `0x6e5930`).
     pub fn ranged_attack(&self) -> bool {
         self.attributes_ex2 & ATTR_EX2_AUTO_REPEAT != 0 || self.attributes & ATTR_RANGED != 0
+    }
+
+    /// **This cast aims itself at the equipped main hand** — `Attributes & 0x200`
+    /// ([`ATTR_TARGET_MAIN_HAND_ITEM`]), the client's own auto-pick for a weapon imbue.
+    ///
+    /// `ArmCast 0x6e5250` resolves the cast's candidate guid from ONE of three places, and this
+    /// bit picks the first: for a **player** caster (`6e5361`: `[[caster+8]+8] >> 4 & 1`, the
+    /// typemask-`0x10` test) carrying the bit (`6e5371: test ah,0x2`), the candidate is the
+    /// player's inventory slot table entry 15 — `[player+0x1d3c][15]`, `EQUIPMENT_SLOT_MAINHAND`
+    /// (`6e5385`–`6e538e`, the `+0x78/+0x7c` guid pair; the table is wow-re's pinned
+    /// `[player+0x1d38]` count / `[player+0x1d3c]` array, bounds-checked at `6e5376`). Only if
+    /// the bit is clear does the walk fall to the explicit guid, then to the current selection
+    /// (`6e5393`/`6e539f`).
+    ///
+    /// So a spell carrying it never raises the item-targeting cursor over an equipped weapon:
+    /// the imbue binds and sends on the press. Exactly 22 rows of the shipped 5875 `Spell.dbc`
+    /// carry the bit, four distinct names — **Rockbiter / Flametongue / Frostbrand / Windfury
+    /// Weapon**, every rank of the shaman's weapon imbues and nothing else — and every one is
+    /// `Targets == 0x10` with an `ENCHANT_ITEM_TEMPORARY` effect (censused against the real file
+    /// in `catalog_tests.rs`, which also records why vmangos answers 28). Decision 1552.
+    pub fn targets_main_hand_item(&self) -> bool {
+        self.attributes & ATTR_TARGET_MAIN_HAND_ITEM != 0
     }
 
     /// The auto-repeat attribute **alone** (`AttributesEx2 & 0x20`) — the narrower gate on the

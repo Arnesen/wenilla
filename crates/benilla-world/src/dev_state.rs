@@ -86,6 +86,14 @@ pub struct SoundDebug {
     pub kit_query: String,
     /// One-shot: play `kit_query` through the kit player.
     pub play_kit: bool,
+    /// How many copies of `kit_query` the probe fires **in one frame** (decision 1551).
+    ///
+    /// The reported defect is an overlap defect — "a lot of mobs attacking same time, or a priest
+    /// buffing a group with mass fort" — and it needs no game state to reproduce, only N
+    /// sample-aligned copies of one kit. Five copies of kit 3116 (`HolyProtection`) *is* mass
+    /// Fortitude on a full party, arithmetically: the health line reports the peak the mix asked
+    /// for, and `SoundOutputLimiter` A/Bs what it sounds like.
+    pub play_copies: u32,
 }
 
 impl Default for SoundDebug {
@@ -94,6 +102,7 @@ impl Default for SoundDebug {
             // A UI kit with several variations — exercises the depleting weighted pick.
             kit_query: "igMiniMapZoomIn".into(),
             play_kit: false,
+            play_copies: 1,
         }
     }
 }

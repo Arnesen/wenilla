@@ -312,41 +312,58 @@ fn send_spell_cast(
     // (`6e4ef4` → `0x612df0` over the guid pair it was PASSED) takes an explicit target: the key
     // chain calls `CGItem::Use` with the lock's guid, the bag click with zero (decision 0769).
     let mut pending_word = None;
+    let mut item_target = None;
     let explicit_object = match commit {
         CastCommit::Item { on_object, .. } => on_object,
         CastCommit::Spell => None,
     };
+    let candidates = cast_target::CastCandidates {
+        selection: ctx.selection_guid,
+        caster: ctx.self_guid,
+        // The ref resolves its candidate guid through `0x468460(typemask 1)` (`6e53bc`) before
+        // handing it to the binder: a guid naming no live object binds nothing. Ours is the item
+        // cache — an equipped item whose object has not streamed yet is exactly that miss, and
+        // falls to the cursor rather than shipping a guid the server would reject.
+        main_hand_item: ctx
+            .main_hand_item
+            .filter(|guid| items.object(*guid).is_some()),
+    };
     let target = match explicit_object {
         Some(_) => None,
-        None => match cast_target::resolve_cast_target(
-            def,
-            ctx.selection_guid,
-            ctx.self_guid,
-            ctx.auto_self_cast,
-            &ctx.rel,
-        ) {
-            cast_target::CastWireTarget::SelfImplicit => None,
-            cast_target::CastWireTarget::Unit(guid) => Some(guid),
-            cast_target::CastWireTarget::Targeting(word) => {
-                // The cursor ENTRY is deferred below the validator rungs (decision 0948: the
-                // ref enters targeting at cast-arm `6e50c8`, AFTER the validator `0x6094f0` —
-                // an on-cooldown or unaffordable press refuses before the cursor ever comes
-                // up). The word parks here; nothing is sent, nothing armed either way. The
-                // COMMIT rides the word: the ref keeps the whole pending-cast block (the item
-                // guid at `0xceac48` included) across the cursor, so the click's `0x6e54f0`
-                // still emits USE_ITEM for a grenade / poison / key and CAST_SPELL for an
-                // enchant or opener. ONE arm, not one per seam (decisions 0792 / 0923 / 0939).
-                pending_word = Some(word);
-                None
-            }
-            cast_target::CastWireTarget::Refused(reason) => {
-                debug!(
+        None => {
+            match cast_target::resolve_cast_target(def, &candidates, ctx.auto_self_cast, &ctx.rel) {
+                cast_target::CastWireTarget::SelfImplicit => None,
+                cast_target::CastWireTarget::Unit(guid) => Some(guid),
+                // The main-hand auto-pick (decision 1552): `BindTarget`'s item arm ran at cast-arm
+                // time, so this press already has its target — it rides the rest of the validator
+                // ladder like any bound cast and lands in the commit's ITEM shape below. It is NOT a
+                // unit, so the range gate below skips it exactly as the ref does (`0x6e47b0` guards
+                // the `SPELLCAST+0x14 & 0x8202` unit binds only).
+                cast_target::CastWireTarget::Item(guid) => {
+                    item_target = Some(guid);
+                    None
+                }
+                cast_target::CastWireTarget::Targeting(word) => {
+                    // The cursor ENTRY is deferred below the validator rungs (decision 0948: the
+                    // ref enters targeting at cast-arm `6e50c8`, AFTER the validator `0x6094f0` —
+                    // an on-cooldown or unaffordable press refuses before the cursor ever comes
+                    // up). The word parks here; nothing is sent, nothing armed either way. The
+                    // COMMIT rides the word: the ref keeps the whole pending-cast block (the item
+                    // guid at `0xceac48` included) across the cursor, so the click's `0x6e54f0`
+                    // still emits USE_ITEM for a grenade / poison / key and CAST_SPELL for an
+                    // enchant or opener. ONE arm, not one per seam (decisions 0792 / 0923 / 0939).
+                    pending_word = Some(word);
+                    None
+                }
+                cast_target::CastWireTarget::Refused(reason) => {
+                    debug!(
                     "ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})"
                 );
-                cast_errors.push_local(spell_id, reason);
-                return;
+                    cast_errors.push_local(spell_id, reason);
+                    return;
+                }
             }
-        },
+        }
     };
     // The local range gate (the client's TryCast runs `CanTargetUnit 0x6e4440` →
     // `IsTargetInRange 0x6e47b0` BEFORE the commit `0x6e54f0`): an out-of-range / too-close
@@ -568,7 +585,15 @@ fn send_spell_cast(
     }
     // The commit's ONE branch (`SendCast 0x6e54f0`): same block, two opcodes.
     let _ = commands.0.send(match commit {
-        CastCommit::Spell => ClientCommand::CastSpell { spell_id, target },
+        CastCommit::Spell => match item_target {
+            // `SendCast 0x6e54f0`'s item leg — the same block the bag click's commit reaches, just
+            // arrived at without a click (decision 1552).
+            Some(item_guid) => ClientCommand::CastSpellItem {
+                spell_id,
+                item_guid,
+            },
+            None => ClientCommand::CastSpell { spell_id, target },
+        },
         CastCommit::Item {
             bag_index,
             slot,
@@ -579,10 +604,11 @@ fn send_spell_cast(
             bag_index,
             slot,
             spell_index,
-            target: match (on_object, target) {
-                (Some(go), _) => UseItemTarget::Object(go),
-                (None, Some(unit)) => UseItemTarget::Unit(unit),
-                (None, None) => UseItemTarget::SelfImplicit,
+            target: match (on_object, item_target, target) {
+                (Some(go), _, _) => UseItemTarget::Object(go),
+                (None, Some(item), _) => UseItemTarget::Item(item),
+                (None, None, Some(unit)) => UseItemTarget::Unit(unit),
+                (None, None, None) => UseItemTarget::SelfImplicit,
             },
         },
     });
@@ -682,6 +708,7 @@ mod tests {
                 reputations: &EMPTY_REPUTATIONS,
             },
             range: cast_target::RangeInputs::default(),
+            main_hand_item: None,
             self_move_flags: 0,
         }
     }

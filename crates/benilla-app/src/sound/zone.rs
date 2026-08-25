@@ -11,8 +11,12 @@
 //! change forces the next-start time to −1 (`0x4602e0`: `DAT_00836400 = 0xffffffff`), so `0x460040`
 //! opens the stream that tick (`0x460240`). The randomized silence interval ([`next_track_time`],
 //! `0x4601f0`) is ONLY the *same-zone* track-to-track spacing — reusing it on a change (as decision
-//! 0100 did) left a newly-entered zone silent for 3–5 min. Cold start (session's first track) waits
-//! 6 s. The incoming track starts at **full** volume, **no fade-in** — faithful (`0x460240` →
+//! 0100 did) left a newly-entered zone silent for 3–5 min. **There is no cold start**: world entry
+//! itself arms the same −1 (`0x401570` → `0x457770` → the zone-music init `0x45ffc0`, which sets
+//! `DAT_00836400 = -1` at `0x45ffdb`), so the session's FIRST track is immediate too. `0x4601f0`'s
+//! `== 0 → now + 6000 ms` branch is reachable only from the natural-end reap `0x4600b6` and only
+//! ever *replaces* the −1, so it cannot fire on an entry — the 6 s wait benilla used to serve there
+//! was that branch misapplied (wow-re §5 `glue-music-world-entry.md` §9, decision 1553). The incoming track starts at **full** volume, **no fade-in** — faithful (`0x460240` →
 //! `0x7a5dc0`; §5 B16 refuted every music-slot fade-in primitive, and the director confirmed by ear
 //! there is none). The reference's *perceived* slightly-soft onset is the delegated audio engine
 //! priming the stream to full amplitude over ~a moment (FMOD there, kira's own stream-buffering
@@ -160,10 +164,6 @@ pub(super) struct ZoneAudio {
     /// When the next zone track starts (Time::elapsed_secs_f64; None = a track is playing or
     /// no music in this zone).
     next_track_at: Option<f64>,
-    /// Whether a music track has ever started this session — the client's cold-start gate
-    /// (`0x4601f0`: `DAT_00b06cbc == 0` → the first track waits 6 s; afterwards the incoming
-    /// track follows the randomized per-phase silence interval).
-    have_played_music: bool,
     /// The looping ambience kit currently up (0 = none) + its handle and base volume. A static
     /// loop, not a stream ([`mixer::loop_from_bytes`] — streaming loop beds die at EOF).
     ambience_kit: u32,
@@ -192,7 +192,6 @@ impl Default for ZoneAudio {
             music_kit: 0,
             music_kit_vol: 1.0,
             next_track_at: None,
-            have_played_music: false,
             ambience_kit: 0,
             ambience: None,
             ambience_kit_vol: 1.0,
@@ -343,19 +342,16 @@ fn zone_audio(
                     slot_taken = true;
                 }
             }
-            // Otherwise the incoming zone track starts NOW, at full volume. The client starts it
-            // immediately on a zone-music change — `0x4602e0` forces the next-start time to −1
-            // (`DAT_00836400 = 0xffffffff`), so `0x460040` opens the stream that tick (`0x460240`)
-            // at full; the randomized silence gap ([`next_track_time`]) is only the *same-zone*
-            // track-to-track spacing. Decision 0100 wrongly reused that gap here, which left a
-            // newly-entered zone (an inn's tavern music) silent for 3–5 min. Exception: the
-            // session's very first track waits the 6 s cold-start.
+            // Otherwise the incoming zone track starts NOW, at full volume — with no exception.
+            // The client starts it immediately on a zone-music change (`0x4602e0` forces the
+            // next-start time to −1, so `0x460040` opens the stream that tick at full) AND on a
+            // fresh world entry (`0x45ffc0` arms the same −1). The randomized silence gap
+            // ([`next_track_time`]) is only the *same-zone* track-to-track spacing: decision 0100
+            // wrongly reused it on a change, leaving a newly-entered zone silent for 3–5 min, and
+            // the 6 s "cold start" that used to sit here was `0x4601f0`'s unreachable arm applied
+            // to an entry that never calls it (1553).
             if !slot_taken {
-                if !zone.have_played_music {
-                    zone.next_track_at = Some(now + 6.0);
-                } else if let Some(kit) =
-                    zone_music_row(&areas.0, music_row).map(|m| m.sounds[phase])
-                {
+                if let Some(kit) = zone_music_row(&areas.0, music_row).map(|m| m.sounds[phase]) {
                     if kit != 0 {
                         start_music_stream(zone, &mut out, &mut kits, &assets, &config, kit);
                     }
@@ -472,11 +468,12 @@ fn zone_music_row(cat: &AreaSoundCatalog, _id: u32) -> Option<&benilla_formats::
     cat.zone_music(_id)
 }
 
-/// When the incoming track should start, the client's schedule (`0x4601f0`): `None` if the new
-/// zone has no music; `now + 6 s` for the very first track of the session (cold start,
-/// `DAT_00b06cbc == 0`); otherwise `now +` the new row's randomized per-phase silence interval.
-/// (`SoundZoneMusicNoDelay`, the immediate path, is a "0" CVar we don't expose.) Shared by the
-/// zone-change transition and the end-of-track reap so the two can't drift.
+/// When the NEXT track should start after this one ends — the client's `0x4601f0`, whose sole
+/// caller is the natural-end reap `0x4600b6`: `None` if the zone has no music; otherwise `now +`
+/// the row's randomized per-phase silence interval. (`SoundZoneMusicNoDelay`, the immediate path,
+/// is a "0" CVar we don't expose.) **Not a cold start** — `0x4601f0`'s `== 0 → now + 6000 ms` arm
+/// needs a *cleared* currently-playing row, which end-of-track flow never presents, and an entry
+/// never reaches this function at all (it takes the −1 "start now" path; module docs, 1553).
 fn next_track_time(
     zone: &mut ZoneAudio,
     cat: &AreaSoundCatalog,
@@ -486,9 +483,6 @@ fn next_track_time(
 ) -> Option<f64> {
     if music_row == 0 {
         return None;
-    }
-    if !zone.have_played_music {
-        return Some(now + 6.0);
     }
     // Read the min/max out from under the catalog borrow before the rng draw (which needs `zone`).
     let interval =
@@ -550,7 +544,6 @@ fn start_music_stream(
             }
             zone.music_kit = kit_id;
             zone.music_kit_vol = kit_vol;
-            zone.have_played_music = true;
             true
         }
         Err(e) => {
@@ -696,9 +689,8 @@ fn server_sounds(
 /// not a zone change: the beds hard-stop on a short declick ramp (NOT the 4.0 s / 5.0 s musical
 /// transitions — the real client destroys the world's sound state outright and the glue theme
 /// takes over), and the scheduler resets to cold so the next login resolves fresh from its own
-/// area. Deliberately kept: `have_played_music`, `intro_last`, and the RNG — their client
-/// counterparts are process-global statics, not per-session state (the 6 s cold-start and the
-/// intro throttle survive a relog).
+/// area. Deliberately kept: `intro_last` and the RNG — their client counterparts are process-global
+/// statics, not per-session state (the intro throttle survives a relog).
 fn leave_world(mut zone: NonSendMut<ZoneAudio>) {
     stop_world_soundscape(&mut zone, "left world");
 }

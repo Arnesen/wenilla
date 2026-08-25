@@ -10,9 +10,11 @@
 //! of a sound to argue about.
 //!
 //! Two properties matter:
-//! - **Pre-clamp.** Main-track effects run before the renderer's hard clamp to ±1.0
-//!   (`backend/renderer.rs`), so output clipping shows up as samples beyond full scale in the
-//!   capture — measurable, not just audible.
+//! - **What is actually heard.** The tap is the main track's *last* effect, downstream of the
+//!   meter and the limiter (decision 1551), so the capture is the audible result — the waveform
+//!   to scan when a report survives everything upstream. The mix's raw, pre-limiter level is the
+//!   [`super::meter`]'s job and lands in the health report as a number; the tap no longer has to
+//!   double as the clipping detector it once was.
 //! - **Crash-safe file.** The writer patches the RIFF/data sizes on every flush, so the WAV is
 //!   valid up to the last second even if the app exits hard; there is no finalize step to miss.
 //!

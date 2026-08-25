@@ -841,6 +841,76 @@ fn the_tooltip_gates_read_effect_and_mask() {
     // vocabulary it reads lives — see `itemsubclass::tests` for its coverage against the real DBCs.
 }
 
+/// The **main-hand auto-pick** family (`Attributes & 0x200`, decision 1552), against the real
+/// 5875 file. `ArmCast 0x6e5250` reads this bit to skip the item-targeting cursor and bind the
+/// equipped main hand instead, so the client's behaviour rests on the family being exactly what
+/// the app assumes: a set of temporary weapon imbues, each already an item-target spell.
+///
+/// **vmangos is not the authority for this census and gets it wrong.** Its `spell_template` keeps
+/// a row per *build*: mage Feedback (13896, 19271-19275) and druid Omen of Clarity carried this
+/// exact shape — effect 54, `Targets 0x10`, `Attributes 0x50200` — at builds 4375/4449, and both
+/// had been rewritten into plain auras with the bit CLEAR by build 5302. A `GROUP BY entry` over
+/// that table hands back the early row and inflates the family to 28. The shipped file is the
+/// authority, and it says four names.
+///
+/// The app's resolver takes the shortcut of only handling a word the item arm fully discharges
+/// (`Targets` exactly `0x10`). That is byte-equivalent only while no row mixes the attribute with
+/// another target bit — which is what the `0x10` assertion below pins. If a row ever does, this
+/// fails here rather than silently sending an unbound cast.
+#[test]
+fn real_main_hand_autopick_family() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    let mut names = std::collections::BTreeSet::<String>::new();
+    let mut rows = 0usize;
+    for (id, d) in cat.iter().filter(|(_, d)| d.targets_main_hand_item()) {
+        rows += 1;
+        names.insert(d.name.clone());
+        assert_eq!(
+            d.targets, 0x10,
+            "spell {id} ({}) carries the main-hand attribute with word {:#x} — the resolver's \
+             item arm cannot discharge it",
+            d.name, d.targets
+        );
+        assert_eq!(
+            d.effects[0],
+            crate::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY,
+            "spell {id} ({}) is not a temporary weapon enchant",
+            d.name
+        );
+        // The auto-pick bypasses `0x495d60` entirely, so an equipped-item gate on one of these
+        // rows would be a gate the client never runs. None carries one.
+        assert_eq!(
+            (
+                d.equipped_item_subclass_mask,
+                d.equipped_item_inventory_type_mask
+            ),
+            (0, 0),
+            "spell {id} ({}) carries an equipped-item gate the auto-pick path never runs",
+            d.name
+        );
+    }
+    assert_eq!(rows, 22, "the whole main-hand auto-pick family");
+    assert_eq!(
+        names.iter().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "Flametongue Weapon",
+            "Frostbrand Weapon",
+            "Rockbiter Weapon",
+            "Windfury Weapon",
+        ],
+        "in 5875 the family is the four shaman weapon imbues and nothing else"
+    );
+    // Windfury TOTEM is not in it — it is a totem summon with no target word at all. Worth
+    // pinning because the report that prompted 1552 named it (ledger B308), and the fix would
+    // look wrong if it had ever needed one.
+    let wf_totem = cat.get(8512).expect("Windfury Totem");
+    assert!(!wf_totem.targets_main_hand_item());
+    assert_eq!(wf_totem.targets, 0, "a totem summon binds nothing");
+}
+
 /// The item-target family and its gate columns (decision 0923), against the real 5875 file. The
 /// reference's `TargetingWantsItem 0x6e6330` is `flag_word & 0x4010`, and on shipped data those
 /// two bits are **never** mixed with a unit bit — the whole family is `Targets` exactly `0x10`

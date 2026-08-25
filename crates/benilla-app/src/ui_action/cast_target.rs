@@ -12,6 +12,11 @@
 //!   the matching object-layer relation (assist `0x6066f0` / attack `0x606980` / corpse `0x6067d0`),
 //!   binds the guid and clears the bit; only a fully-cleared word commits (wire mask
 //!   `TARGET_FLAG_UNIT (0x2)` + the bound guid).
+//! - **`Attributes & 0x200`** ⇒ the candidate is not the selection at all but the caster's
+//!   **equipped main hand** (`6e5361`–`6e5391`): the client picks the weapon itself and binds it
+//!   as an ITEM target, so a shaman's Rockbiter / Flametongue / Frostbrand / Windfury Weapon —
+//!   22 rows, four names, the whole 5875 family — casts straight onto the weapon with no cursor
+//!   and no click. Decision 1552.
 //! - a candidate that satisfies nothing falls back to the **active player** — gated on the
 //!   `autoSelfCast` CVar (name `0x870dc0`, gate `[0xceac34]+0x28` at `0x6e53d7`; registered with
 //!   engine default `"0"`). The classic "buffing with an enemy targeted casts on yourself".
@@ -88,6 +93,10 @@ const TF_LOCKED: u16 = 0x4000;
 /// the one implicit arm 23 ORs in ([`cast_target_mask`]). A word carrying it arms the world click's
 /// GameObject leg (decision 0939).
 const TF_GAMEOBJECT: u16 = 0x0800;
+/// The bits `BindTarget 0x6e5b40`'s **item** arm admits and then clears — `6e5f1e`'s
+/// `testl $0x4010` and `6e5f36`'s `and $0xbfef` (bits 4 and 14). The same `0x4010` that
+/// `TargetingWantsItem 0x6e6330` asks the standing word; here it is the *bind* side of it.
+const ITEM_ARM_BITS: u16 = TF_ITEM | TF_LOCKED;
 
 /// What the wire's target block should carry for this cast.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +106,12 @@ pub(crate) enum CastWireTarget {
     /// A bound unit — mask `TARGET_FLAG_UNIT (0x2)` + this guid (possibly the player's own,
     /// via the autoSelfCast fallback).
     Unit(u64),
+    /// A bound **item** — mask `TARGET_FLAG_ITEM (0x10)` + this item guid, sent on the press with
+    /// no cursor in between. `BindTarget 0x6e5b40`'s non-unit item arm (`6e5f15`ff) reached
+    /// straight from the cast-arm, which is the shape only the main-hand auto-pick below produces
+    /// ([`CastCandidates::main_hand_item`]): every *other* item target in the game arrives through
+    /// the targeting cursor's click seam instead ([`super::targeting`]).
+    Item(u64),
     /// The cast awaits a click — no send yet: enter the targeting-cursor mode with **this standing
     /// flag_word** ([`super::targeting`]), which is the reference's own state (`0xcecac0` != 0 *is*
     /// `IsTargeting 0x6e48a0`). Each click seam then asks the word its own question, so one word
@@ -107,6 +122,27 @@ pub(crate) enum CastWireTarget {
     Targeting(u16),
     /// Nothing bindable — do NOT send; surface this client error instead.
     Refused(u8),
+}
+
+/// The three places `ArmCast 0x6e5250` can take its candidate guid from (`6e5361`–`6e539f`),
+/// in the reference's own priority order. Named rather than positional because they are three
+/// interchangeable `Option<u64>`s and a swap between them is silent.
+///
+/// The reference resolves **one** of these, not a sequence: the main-hand leg is taken *instead
+/// of* the selection, never before it. (Our walk still tries `caster` after `selection` — that is
+/// the autoSelfCast fallback at `6e53d7`, a separate rung further down.)
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CastCandidates {
+    /// The current selection — the ref's global `0xb4e2d8` (`6e539f`), and the explicit-guid
+    /// argument that precedes it (`6e5393`; every benilla caster passes zero there).
+    pub(crate) selection: Option<u64>,
+    /// The active player, for the autoSelfCast fallback (`6e53d7`).
+    pub(crate) caster: Option<u64>,
+    /// The equipped main hand's item guid — `[player+0x1d3c][15]`, filtered to a guid that
+    /// actually resolves to a live object (the ref's `0x468460(typemask 1)` at `6e53bc`).
+    /// `None` when the slot is empty or the item has not streamed, which is the ref's
+    /// esi:edi = 0 and ends in the item cursor exactly as it does here.
+    pub(crate) main_hand_item: Option<u64>,
 }
 
 /// Everything the binder's relation checks read. Both call sites (action bar, spellbook) bundle
@@ -129,6 +165,11 @@ pub(crate) struct CastContext<'a> {
     /// The local range gate's inputs (`IsTargetInRange 0x6e47b0` over `GetMinMaxRange
     /// 0x6e3480`) — the caster's and the selection's position + combat reach.
     pub(crate) range: RangeInputs,
+    /// The equipped main hand's item guid, straight off the player descriptor —
+    /// `PLAYER_FIELD_INV_SLOT_HEAD + 2*15`, the client's `[player+0x1d3c][15]`. `None` when the
+    /// slot is empty. The *liveness* filter (does the guid name a streamed item object?) is the
+    /// send path's, where the item cache is in scope.
+    pub(crate) main_hand_item: Option<u64>,
     /// The caster's live CMovement flags word (the client's `[unit+0x9e8]`,
     /// [`crate::creature_anim::move_flags`] layout) — what the requirement validator's moving
     /// gate reads at cast initiation.
@@ -203,10 +244,20 @@ impl CastTargeting<'_, '_> {
                     .map_or(1.5, |s| s.0.unit_combat_reach()),
                 target_reach: target_store.map(|s| s.0.unit_combat_reach()),
             },
+            main_hand_item: self
+                .self_store
+                .iter()
+                .next()
+                .and_then(|s| s.0.player_inv_slot(EQUIPMENT_SLOT_MAINHAND))
+                .filter(|&g| g != 0),
             self_move_flags: self.player.move_flags(),
         }
     }
 }
+
+/// Equipment slot 15 — `EQUIPMENT_SLOT_MAINHAND`. The client reaches it as byte offset `0x78`
+/// into the player's inventory guid table (`6e538b: mov esi,[ecx+0x78]`, `0x78 == 15 * 8`).
+const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 
 /// The `autoSelfCast` knob (the ref's CVar, default `"0"`). benilla defaults it **on** — a named
 /// deviation: with it off, an unbindable friendly cast falls into the ref's targeting-cursor
@@ -309,13 +360,12 @@ fn clear_satisfied_bits(word: u16, is_self: bool, rel: &TargetRelations) -> u16 
 /// self-implicit without one (the server still validates).
 pub(crate) fn resolve_cast_target(
     def: Option<&SpellDisplay>,
-    selection_guid: Option<u64>,
-    self_guid: Option<u64>,
+    cand: &CastCandidates,
     auto_self_cast: bool,
     rel: &TargetRelations,
 ) -> CastWireTarget {
     let Some(def) = def else {
-        return match selection_guid {
+        return match cand.selection {
             Some(guid) => CastWireTarget::Unit(guid),
             None => CastWireTarget::SelfImplicit,
         };
@@ -334,6 +384,31 @@ pub(crate) fn resolve_cast_target(
         // agree on shipped data (arm-16 rows carry `Targets & 0x40` anyway); the OR is what keeps
         // them agreeing if one ever doesn't.
         return CastWireTarget::Targeting(word | TF_DEST_LOCATION);
+    }
+    // ArmCast's FIRST candidate leg (`6e5361`–`6e5391`, decision 1552) — the one that makes a
+    // weapon imbue cast-and-done. A player caster pressing a spell with `Attributes & 0x200`
+    // takes its candidate from the equipped **main hand** (`[player+0x1d3c][15]`) rather than
+    // from the explicit guid or the selection, and hands it straight to `BindTarget 0x6e5b40`.
+    // The caster-is-a-player test at `6e5361` is structural here: this resolver only ever runs
+    // for the local player's own press.
+    //
+    // It must sit ABOVE the non-unit defer below, which is where every item word currently ends
+    // up. That defer's premise — "no candidate can clear these bits" — is true only of *unit*
+    // candidates; an item candidate clears bit 4, which is precisely why Rockbiter and Windfury
+    // Weapon were raising a cursor over a weapon the client already knew how to pick.
+    if def.targets_main_hand_item() {
+        if let Some(item) = cand.main_hand_item {
+            // `BindTarget`'s item arm: `6e5f1e: testl $0x4010` admits it, `6e5f2e` ORs
+            // `TARGET_FLAG_ITEM` into the wire mask, `6e5f36` clears word bits 4 and 14. A word
+            // that clears to zero commits on the spot (`6e60c1` → `SendCast 0x6e54f0`).
+            if word & ITEM_ARM_BITS != 0 && word & !ITEM_ARM_BITS == 0 {
+                return CastWireTarget::Item(item);
+            }
+        }
+        // No main hand — or a residual the item arm can't discharge (no shipped row: all 22
+        // attribute-bearing rows are `Targets == 0x10` exactly, censused in
+        // `benilla-formats`). The ref's bind fails, the word stands, and the press ends in the
+        // item cursor: the defer below. The selection is never consulted for these.
     }
     // Bits outside the unit family (item/gameobject/location/string) have no candidate here.
     // The DEST-location word (Blizzard's bare `Targets = 0x40`, default switch arm) is the
@@ -363,17 +438,18 @@ pub(crate) fn resolve_cast_target(
         }
         return CastWireTarget::Refused(ERR_INVALID_TARGET);
     }
-    // Candidate 1: the current selection (ArmCast's explicit-guid leg — for a player caster the
-    // `Attributes & 0x200` "caster's own target" leg resolves to the same unit).
-    if let Some(guid) = selection_guid {
-        let is_self = self_guid == Some(guid);
+    // Candidate: the current selection — ArmCast's explicit-guid leg (`6e5393`) falling through
+    // to the current-target global `0xb4e2d8` (`6e539f`). Reached only when the main-hand leg
+    // above did not claim the cast.
+    if let Some(guid) = cand.selection {
+        let is_self = cand.caster == Some(guid);
         if clear_satisfied_bits(word, is_self, rel) == 0 {
             return CastWireTarget::Unit(guid);
         }
     }
-    // Candidate 2: the active player (`0x6e53d7`), behind autoSelfCast.
+    // The fallback: the active player (`0x6e53d7`), behind autoSelfCast.
     if auto_self_cast {
-        if let Some(guid) = self_guid {
+        if let Some(guid) = cand.caster {
             let self_rel = TargetRelations {
                 target_store: rel.self_store,
                 ..*rel
@@ -384,7 +460,7 @@ pub(crate) fn resolve_cast_target(
         }
     }
     // The ref's residual-word targeting-cursor mode, refused locally (module docs).
-    CastWireTarget::Refused(if selection_guid.is_some() {
+    CastWireTarget::Refused(if cand.selection.is_some() {
         ERR_INVALID_TARGET
     } else {
         ERR_NO_TARGET
@@ -394,6 +470,16 @@ pub(crate) fn resolve_cast_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two unit-side candidates, named — the third (`main_hand_item`) is `None` for every
+    /// test that predates the imbue leg.
+    fn cands(selection: Option<u64>, caster: Option<u64>) -> CastCandidates {
+        CastCandidates {
+            selection,
+            caster,
+            main_hand_item: None,
+        }
+    }
 
     fn spell(targets: u32, implicit: u32) -> SpellDisplay {
         SpellDisplay {
@@ -444,44 +530,44 @@ mod tests {
         };
         let ice_armor = spell(0, 1);
         assert_eq!(
-            resolve_cast_target(Some(&ice_armor), Some(42), Some(1), true, &rel),
+            resolve_cast_target(Some(&ice_armor), &cands(Some(42), Some(1)), true, &rel),
             CastWireTarget::SelfImplicit,
             "a self spell ignores the selection entirely"
         );
         let fireball = spell(0, 6);
         assert_eq!(
-            resolve_cast_target(Some(&fireball), None, Some(1), true, &rel),
+            resolve_cast_target(Some(&fireball), &cands(None, Some(1)), true, &rel),
             CastWireTarget::Refused(ERR_NO_TARGET)
         );
         // Reaction defaults to neutral (3) with no stores: attackable (≤3), not assistable.
         assert_eq!(
-            resolve_cast_target(Some(&fireball), Some(42), Some(1), true, &rel),
+            resolve_cast_target(Some(&fireball), &cands(Some(42), Some(1)), true, &rel),
             CastWireTarget::Unit(42)
         );
         let intellect = spell(0, 21);
         assert_eq!(
-            resolve_cast_target(Some(&intellect), Some(42), Some(1), true, &rel),
+            resolve_cast_target(Some(&intellect), &cands(Some(42), Some(1)), true, &rel),
             CastWireTarget::Unit(1),
             "a friendly-required cast on a non-friend falls back to self"
         );
         assert_eq!(
-            resolve_cast_target(Some(&intellect), Some(42), Some(1), false, &rel),
+            resolve_cast_target(Some(&intellect), &cands(Some(42), Some(1)), false, &rel),
             CastWireTarget::Refused(ERR_INVALID_TARGET),
             "autoSelfCast off: the fallback is gated"
         );
         assert_eq!(
-            resolve_cast_target(Some(&intellect), None, Some(1), true, &rel),
+            resolve_cast_target(Some(&intellect), &cands(None, Some(1)), true, &rel),
             CastWireTarget::Unit(1),
             "no selection at all still self-falls-back"
         );
         // A hostile-required cast never self-binds: player fails CanAttack.
         assert_eq!(
-            resolve_cast_target(Some(&fireball), None, Some(1), false, &rel),
+            resolve_cast_target(Some(&fireball), &cands(None, Some(1)), false, &rel),
             CastWireTarget::Refused(ERR_NO_TARGET)
         );
         // Unknown spell: the legacy passthrough.
         assert_eq!(
-            resolve_cast_target(None, Some(42), Some(1), true, &rel),
+            resolve_cast_target(None, &cands(Some(42), Some(1)), true, &rel),
             CastWireTarget::Unit(42)
         );
     }
@@ -495,20 +581,24 @@ mod tests {
     fn ground_masks_enter_targeting_mode() {
         let flamestrike = spell(0x40, 16);
         assert_eq!(
-            resolve_cast_target(Some(&flamestrike), Some(42), Some(1), true, &rel_none()),
+            resolve_cast_target(
+                Some(&flamestrike),
+                &cands(Some(42), Some(1)),
+                true,
+                &rel_none()
+            ),
             CastWireTarget::Targeting(TF_DEST_LOCATION)
         );
         let blizzard = spell(0x40, 28);
         assert_eq!(
-            resolve_cast_target(Some(&blizzard), None, Some(1), true, &rel_none()),
+            resolve_cast_target(Some(&blizzard), &cands(None, Some(1)), true, &rel_none()),
             CastWireTarget::Targeting(TF_DEST_LOCATION)
         );
         let self_commit_with_ground_arm = spell(0, 16);
         assert_eq!(
             resolve_cast_target(
                 Some(&self_commit_with_ground_arm),
-                None,
-                Some(1),
+                &cands(None, Some(1)),
                 true,
                 &rel_none()
             ),
@@ -526,7 +616,7 @@ mod tests {
         for targets in [0x20u32, 0x2000, 0x60] {
             let s = spell(targets, 0);
             assert_eq!(
-                resolve_cast_target(Some(&s), Some(42), Some(1), true, &rel_none()),
+                resolve_cast_target(Some(&s), &cands(Some(42), Some(1)), true, &rel_none()),
                 CastWireTarget::Refused(ERR_INVALID_TARGET),
                 "Targets {targets:#x} must stay refused"
             );
@@ -562,12 +652,12 @@ mod tests {
             let s = spell(targets, implicit);
             let word = cast_target_mask(&s);
             assert_eq!(
-                resolve_cast_target(Some(&s), Some(42), Some(1), true, &rel_none()),
+                resolve_cast_target(Some(&s), &cands(Some(42), Some(1)), true, &rel_none()),
                 CastWireTarget::Targeting(word),
                 "Targets {targets:#x} + implicit arm {implicit} must raise the cursor with its word"
             );
             assert_eq!(
-                resolve_cast_target(Some(&s), None, Some(1), false, &rel_none()),
+                resolve_cast_target(Some(&s), &cands(None, Some(1)), false, &rel_none()),
                 CastWireTarget::Targeting(word),
                 "no selection and no autoSelfCast change nothing — no unit clears these bits"
             );
@@ -576,6 +666,75 @@ mod tests {
         let opening = cast_target_mask(&spell(0x4000, 23));
         assert_eq!(opening & (TF_ITEM | TF_LOCKED), TF_LOCKED);
         assert_eq!(opening & (TF_GAMEOBJECT | TF_LOCKED), opening);
+    }
+
+    /// The weapon-imbue leg (decision 1552, ledger B308): `Attributes & 0x200` makes the cast
+    /// bind the equipped main hand and send on the press — no cursor, no click on the bag.
+    ///
+    /// Rockbiter Weapon 8017's real shape: `Targets 0x10`, `Attributes 0x50200`, implicit arm 0.
+    /// The three things that must stay true around it are the interesting part: the selection is
+    /// irrelevant (a targeted enemy neither breaks the imbue nor gets it cast at them), an empty
+    /// main hand falls back to the ordinary item cursor rather than sending a guess, and the
+    /// *same word without the attribute* — every poison, oil, stone and enchant — still raises the
+    /// cursor exactly as before.
+    #[test]
+    fn the_imbue_attribute_binds_the_main_hand_without_a_cursor() {
+        let rockbiter = SpellDisplay {
+            targets: 0x10,
+            attributes: 0x0005_0200,
+            effects: [benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, 0, 0],
+            ..Default::default()
+        };
+        assert!(rockbiter.targets_main_hand_item());
+        const WEAPON: u64 = 0xdead_beef;
+        let armed = CastCandidates {
+            selection: Some(42),
+            caster: Some(1),
+            main_hand_item: Some(WEAPON),
+        };
+        assert_eq!(
+            resolve_cast_target(Some(&rockbiter), &armed, true, &rel_none()),
+            CastWireTarget::Item(WEAPON),
+            "the imbue binds the equipped weapon on the press"
+        );
+        assert_eq!(
+            resolve_cast_target(
+                Some(&rockbiter),
+                &CastCandidates {
+                    selection: None,
+                    ..armed
+                },
+                false,
+                &rel_none()
+            ),
+            CastWireTarget::Item(WEAPON),
+            "neither the selection nor autoSelfCast has anything to do with it"
+        );
+        // Unarmed: the ref's esi:edi = 0 resolves no object, the bind fails, the word stands.
+        assert_eq!(
+            resolve_cast_target(
+                Some(&rockbiter),
+                &cands(Some(42), Some(1)),
+                true,
+                &rel_none()
+            ),
+            CastWireTarget::Targeting(TF_ITEM),
+            "no main hand — the item cursor, not a guessed target"
+        );
+        // The attribute is the whole difference: a sharpening stone / poison / oil / enchant is
+        // the same `Targets 0x10` word and must still ask for its item.
+        let stone = SpellDisplay {
+            targets: 0x10,
+            attributes: 0x0004_0000,
+            effects: [benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, 0, 0],
+            ..Default::default()
+        };
+        assert!(!stone.targets_main_hand_item());
+        assert_eq!(
+            resolve_cast_target(Some(&stone), &armed, true, &rel_none()),
+            CastWireTarget::Targeting(TF_ITEM),
+            "without the attribute the cursor comes up even with a weapon equipped"
+        );
     }
 
     fn rel_none() -> TargetRelations<'static> {

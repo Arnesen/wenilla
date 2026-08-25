@@ -127,9 +127,11 @@ pub(super) fn emote_target(selection: &Selection, me: Option<Entity>) -> u64 {
 /// - `world` feeds **`/liquid`**, the swim diagnostic (decision 0634 follow-up): the interior
 ///   claim is what decides which liquid surfaces the swim query may see, and it arrives with the
 ///   query rather than beside it.
-/// - `stores`/`self_store`/`factions`/`reputations` feed **`/reaction`**, the attackability
-///   diagnostic (decision 0637): the exact inputs [`crate::target::ring_reaction`] judges on, so
-///   "why is this unit not attackable" is one command instead of a guess.
+/// - `stores`/`self_store`/`factions`/`reputations`/`kinds` feed **`/reaction`**, the
+///   attackability diagnostic (decision 0637): the exact inputs [`crate::target::ring_reaction`]
+///   judges on, so "why is this unit not attackable" is one command instead of a guess — and
+///   with them the V-plate CATEGORY, which turns on a different predicate entirely
+///   ([`crate::target::ring::plate_is_friendly`]) and so cannot be read off the rank.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct ChatProbes<'w, 's> {
     camera: Query<
@@ -148,6 +150,9 @@ pub(super) struct ChatProbes<'w, 's> {
     /// `/reaction <name>`'s resolve — so a scripted probe can ask about a player it has not
     /// clicked (the two-client duel run has no way to select the other side).
     guids: Res<'w, crate::net::GuidIndex>,
+    /// The subject's [`benilla_protocol::EntityKind`] — the plate gate's own player test, so the
+    /// diagnostic reports the branch the gate actually took rather than a second guess at it.
+    kinds: Query<'w, 's, &'static crate::net::NetEntity>,
 }
 
 /// Everything the drain **queues into another subsystem's one setter** rather than applying itself,
@@ -204,6 +209,7 @@ pub(super) fn drain_chat_input(
         factions,
         reputations,
         guids,
+        kinds,
     } = &probes;
     let Some(mut script) = script else {
         return;
@@ -385,10 +391,13 @@ pub(super) fn drain_chat_input(
                     Some(n) => crate::ui_duel::streamed_player_named(n, guids, &names),
                     None => selection.guid,
                 };
-                let target_store = subject_guid
-                    .and_then(|g| guids.0.get(&g).copied())
-                    .and_then(|e| stores.get(e).ok());
+                let subject_entity = subject_guid.and_then(|g| guids.0.get(&g).copied());
+                let target_store = subject_entity.and_then(|e| stores.get(e).ok());
                 let own_store = self_store.iter().next();
+                // The plate gate's own player test, read the same way it reads it.
+                let is_player = subject_entity
+                    .and_then(|e| kinds.get(e).ok())
+                    .is_some_and(|n| n.kind == benilla_protocol::EntityKind::Player);
                 let mut lines = Vec::new();
                 let describe = |label: &str, s: Option<&crate::net::ObjectStore>| match s {
                     Some(s) => format!(
@@ -435,6 +444,47 @@ pub(super) fn drain_chat_input(
                         reputations,
                         own_store
                     )
+                ));
+                // The V-plate CATEGORY, which is a **different predicate** from the rank above
+                // (`CanAttack` player→unit, plus `CanCooperate` for a player subject — decision
+                // 1530) and so cannot be read off it. Both legs are printed, with the faction-group
+                // masks they compare: a player in the wrong bucket is a mask disagreement roughly
+                // every time, and the mask is invisible everywhere else in the client. A GM-mode
+                // character is mask 0 on a vmangos realm (`.gm on` → faction template 35), which is
+                // exactly how a friendly player ends up with an enemy plate.
+                let mask = |s| {
+                    crate::target::ring::faction_group_mask(factions.as_deref(), s)
+                        .map_or("none".to_string(), |m| m.to_string())
+                };
+                let friendly = crate::target::ring::plate_is_friendly(
+                    factions.as_deref(),
+                    reputations,
+                    target_store,
+                    own_store,
+                    is_player,
+                );
+                lines.push(format!(
+                    "reaction: plate is_player {is_player} · faction-group mask self {} \
+                     target {} · can_cooperate {} · can_attack(player→unit) {}",
+                    mask(own_store),
+                    mask(target_store),
+                    crate::target::ring::can_cooperate_with_player(
+                        factions.as_deref(),
+                        target_store,
+                        own_store
+                    ),
+                    crate::target::ring::can_attack_from_player(
+                        factions.as_deref(),
+                        reputations,
+                        target_store,
+                        own_store,
+                        is_player,
+                    ),
+                ));
+                lines.push(format!(
+                    "reaction: PLATE CATEGORY {} — this unit plates under {}",
+                    if friendly { "FRIENDLY" } else { "ENEMY" },
+                    if friendly { "SHIFT-V" } else { "V" },
                 ));
                 for line in lines {
                     // Also to the log: a scripted two-client run reads stdout, not the feed.

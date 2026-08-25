@@ -594,9 +594,14 @@ fn debug_panel_ui(
                                 egui::Slider::new(&mut sound_cfg.ambience, 0.0..=1.0)
                                     .text("ambience"),
                             );
+                            ui.checkbox(&mut sound_cfg.limiter, "output limiter (1551)");
                             ui.separator();
                             ui.label("kit probe: a SoundEntries id or name");
                             ui.text_edit_singleline(&mut s.kit_query);
+                            ui.add(
+                                egui::Slider::new(&mut s.play_copies, 1..=16)
+                                    .text("copies, one frame"),
+                            );
                             if ui.button("Play kit").clicked() {
                                 s.play_kit = true;
                             }

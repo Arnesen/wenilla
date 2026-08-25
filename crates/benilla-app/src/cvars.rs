@@ -80,6 +80,11 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // `"1"` would ship audio the real client has never actually produced (bug B236).
     // `SoundConfig::reverb` carries the evidence.
     ("SoundReverb", "0"),
+    // The output limiter (1551) — benilla's own, not a 1.12 CVar. The reference needs no such DSP
+    // (its mix is FMOD 3's and its headroom lives in the SFX-bus auto-duck); benilla sums into f32
+    // behind a hard clamp, and every WoW SFX is mastered to full scale, so two overlapping kits
+    // clip. Registered so the fix can be A/B'd live against the defect it fixes.
+    ("SoundOutputLimiter", "1"),
     ("uiScale", "0.9"),
     ("farclip", "777"),
     // The Controls-page trio (0961). `deselectOnClick`/`mouseInvertPitch` are 1.12's own
@@ -349,6 +354,7 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "enableambience" => knobs.sound.ambience_enabled = v != 0.0,
         // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
         "soundreverb" => knobs.sound.reverb = v != 0.0,
+        "soundoutputlimiter" => knobs.sound.limiter = v != 0.0,
         "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
@@ -518,7 +524,7 @@ fn sync_cvars(
         );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 30] = [
+        let session: [(&str, String); 31] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -527,6 +533,7 @@ fn sync_cvars(
             ("EnableMusic", flag(sound.music_enabled)),
             ("EnableAmbience", flag(sound.ambience_enabled)),
             ("SoundReverb", flag(sound.reverb)),
+            ("SoundOutputLimiter", flag(sound.limiter)),
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
             ("deselectOnClick", flag(click.deselect_on_click)),
@@ -737,6 +744,8 @@ mod tests {
         assert_eq!(d["EnableAmbience"] != 0.0, sound.ambience_enabled);
         // Welded like the rest — and deliberately NOT the binary's registrar "1" (1153).
         assert_eq!(d["SoundReverb"] != 0.0, sound.reverb);
+        assert_eq!(d["SoundOutputLimiter"] != 0.0, sound.limiter);
+        assert!(sound.limiter, "the output limiter ships on (decision 1551)");
         assert!(!sound.reverb, "zone reverb ships off (decision 1153)");
         assert_eq!(d["uiScale"], DEFAULT_UI_SCALE);
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the

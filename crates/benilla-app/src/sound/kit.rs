@@ -704,19 +704,30 @@ pub(super) fn apply_kit_debug(
         Err(_) => KitRef::Name(&query),
     };
     let listener = listener.pos;
-    match play_kit(
-        &mut kits,
-        &assets,
-        &mut out,
-        &config,
-        listener,
-        kit_ref,
-        None,
-        SoundCategory::Sfx,
-    ) {
-        Ok(()) => info!("sound debug: kit \"{query}\" played"),
-        Err(e) => warn!("sound debug: kit \"{query}\" — {e:#}"),
+    // `copies` fires the kit N times in ONE frame — the overlap probe (decision 1551). Five copies
+    // of kit 3116 is mass Fortitude on a full party: same kit, same instant, sample-aligned. The
+    // per-kit gates still apply, so a kit carrying the 0x20 no-duplicate bit collapses to one
+    // however many copies are asked for — which is the honest answer for that kit.
+    let copies = s.play_copies.max(1);
+    for _ in 0..copies {
+        if let Err(e) = play_kit(
+            &mut kits,
+            &assets,
+            &mut out,
+            &config,
+            listener,
+            match kit_ref {
+                KitRef::Id(id) => KitRef::Id(id),
+                KitRef::Name(n) => KitRef::Name(n),
+            },
+            None,
+            SoundCategory::Sfx,
+        ) {
+            warn!("sound debug: kit \"{query}\" — {e:#}");
+            return;
+        }
     }
+    info!("sound debug: kit \"{query}\" played x{copies}");
 }
 
 /// `OnExit(InWorld)`: every live kit channel dies with the world — one-shots mid-flight and

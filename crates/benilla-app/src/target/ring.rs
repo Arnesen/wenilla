@@ -775,6 +775,23 @@ pub(crate) fn can_attack_from_player(
     }
 }
 
+/// The one number `CanCooperate` turns on: a unit's `FactionTemplate` **faction-group mask**
+/// (`row + 0xc`) — 3 for every Alliance race row, 5 for every Horde one, and something else
+/// entirely for a row that is neither. Exposed for `/reaction`, which prints both sides of the
+/// comparison: when a player's plate lands in the wrong bucket this is nearly always the reason,
+/// and it is not visible anywhere else in the client.
+pub(crate) fn faction_group_mask(
+    factions: Option<&Factions>,
+    store: Option<&ObjectStore>,
+) -> Option<u32> {
+    let catalog = &factions?.0;
+    Some(
+        catalog
+            .template(store?.0.unit_faction_template()?)?
+            .group_mask,
+    )
+}
+
 /// `CanCooperate(this = the local player → arg = unit)` — `0x606ba0`, byte-verified (wow-re
 /// `nameplate-category-gate.md` §2a): the two `FactionTemplate` rows' **faction-group masks**
 /// (`row + 0xc`) being equal, with neither side mind-controlled and the two not being the same
@@ -788,6 +805,13 @@ pub(crate) fn can_cooperate_with_player(
     let (Some(target), Some(own)) = (target_store, self_store) else {
         return false;
     };
+    // `606ba6 cmp B,A ; je -> 0` — the predicate's FIRST leg: a unit never cooperates with
+    // itself. The reference compares object pointers, so ours compares component identity. The
+    // plate gate can't reach it (its query is `Without<SelfPlayer>`), but the predicate is
+    // transcribed law and the leg was missing from it.
+    if std::ptr::eq(target, own) {
+        return false;
+    }
     if target.0.unit_charmed_by().is_some_and(|g| g != 0)
         || own.0.unit_charmed_by().is_some_and(|g| g != 0)
     {
@@ -896,8 +920,8 @@ pub(crate) fn duel_rung(
 #[cfg(test)]
 mod tests {
     use super::{
-        plate_is_friendly, ring_reaction, ring_variant, Factions, RingVariant,
-        UNIT_FLAG_PVP_ATTACKABLE,
+        can_attack_from_player, can_cooperate_with_player, plate_is_friendly, ring_reaction,
+        ring_variant, Factions, RingVariant, UNIT_FLAG_PVP_ATTACKABLE,
     };
 
     /// The selector's player path — the `¬X∧¬Y` split the party arc added (0434 phase 6). A
@@ -1020,6 +1044,87 @@ mod tests {
         // that agreed all along, kept so the fix cannot be read as having moved it.
         assert!(category(&unit(12), &quiet));
         assert_eq!(rank(&unit(12), &quiet), 4);
+    }
+
+    /// **The PLAYER subject** — the arm 1530 landed and left unpinned, on the real DBC.
+    ///
+    /// A player is friendly-category only if `CanCooperate` ALSO says yes, and that predicate is
+    /// pure `FactionTemplate` faction-group-mask equality (§2a). So the arm turns entirely on one
+    /// number — `group_mask` 3 for every Alliance race template, 5 for every Horde one — and the
+    /// interesting population is the templates that carry NEITHER.
+    ///
+    /// **`35` is that template, and it is what a vmangos test realm hands you**: `.gm on` calls
+    /// `Player::SetGameMaster(true)` → `SetFactionTemplateId(35)` (vmangos `Player.cpp:2656`), whose
+    /// row is `faction 31, group_mask 0`. Zero equals no player's mask, so a GM-mode character —
+    /// on either side of the pair — falls out of the friendly bucket and takes a plate under plain
+    /// V. Nothing else on screen moves, because `CanCooperate` is only ever consulted for a player
+    /// subject. That asymmetric signature is what a "players are plating and mobs look fine"
+    /// report means, and this test is where to read it. (`GM.LoginState = 2` keeps the mode across
+    /// logins, so it outlives the session that set it.)
+    #[test]
+    fn the_player_subject_category_on_the_real_dbc() {
+        use crate::net::{ObjectStore, Reputations};
+        use benilla_protocol::ObjectFields;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let factions = Factions(benilla_formats::load_faction_catalog(&mut chain).expect("dbc"));
+        let reps = Reputations::default();
+        // Every player carries `PLAYER_CONTROLLED`; the plate gate passes `is_player = true`.
+        let player = |tpl: u32| {
+            ObjectStore(ObjectFields::from_pairs(&[
+                (35, tpl),
+                (46, UNIT_FLAG_PVP_ATTACKABLE),
+            ]))
+        };
+        let category = |subject: &ObjectStore, me: &ObjectStore| {
+            plate_is_friendly(Some(&factions), &reps, Some(subject), Some(me), true)
+        };
+
+        // Us: a Human (FT 1, group_mask 3).
+        let me = player(1);
+        // Same faction group — a Gnome is FT 115, a different row with the SAME mask. Friendly
+        // category: no plate under plain V, which is the shipped behaviour this pins.
+        assert!(
+            category(&player(115), &me),
+            "an Alliance player is friendly"
+        );
+        assert!(category(&player(1), &me), "…same race, same answer");
+        // The other faction group (Orc FT 2, mask 5) is enemy-category — and that is FAITHFUL:
+        // the reference plates the opposing faction under plain V, flagged or not.
+        assert!(!category(&player(2), &me), "a Horde player is enemy");
+        // A GM-mode player (FT 35, mask 0) matches NOBODY's mask — enemy category from a normal
+        // character, while `CanAttack` still refuses (the plate is drawn over someone unattackable).
+        assert!(!category(&player(35), &me), "a GM-mode player is enemy");
+        assert!(
+            !can_attack_from_player(Some(&factions), &reps, Some(&player(35)), Some(&me), true),
+            "…and not because we can attack them",
+        );
+
+        // The mirror: a GM-mode OBSERVER loses the friendly bucket for every player at once…
+        let gm = player(35);
+        for tpl in [1u32, 3, 4, 115, 2, 5, 6, 116] {
+            assert!(
+                !category(&player(tpl), &gm),
+                "FT {tpl} is enemy-category to a GM-mode observer",
+            );
+        }
+        // …while nothing else on screen moves: `CanCooperate` is never consulted for an NPC, so a
+        // Stormwind guard stays friendly and a Monster-faction mob stays enemy. THAT asymmetry is
+        // the report's signature.
+        let npc = |tpl: u32| ObjectStore(ObjectFields::from_pairs(&[(35, tpl)]));
+        let npc_category = |subject: &ObjectStore, me: &ObjectStore| {
+            plate_is_friendly(Some(&factions), &reps, Some(subject), Some(me), false)
+        };
+        assert!(npc_category(&npc(12), &gm), "the guard keeps his bucket");
+        assert!(!npc_category(&npc(14), &gm), "and the mob keeps his");
+
+        // The predicate's first leg (§2a `606ba6`): nobody cooperates with themselves.
+        assert!(!can_cooperate_with_player(
+            Some(&factions),
+            Some(&me),
+            Some(&me)
+        ));
     }
 
     /// `CanAttack`'s flag disqualifiers put a unit in the FRIENDLY bucket **at any reaction** — the
