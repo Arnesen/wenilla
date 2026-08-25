@@ -208,8 +208,9 @@ fn glue_screen() -> Option<GlueScreen> {
 /// 1.0), `WOW_FX_AZ`/`WOW_FX_EL` (camera orbit degrees, default 0/10), `WOW_FX_DIST` (yards,
 /// default 5), `WOW_FX_FLY` (yd/s along the model's facing — a missile only trails in motion;
 /// default 0), `WOW_FX_YAW` (model facing, degrees, default 0), `WOW_FX_TURN` (deg/s the fixture
-/// keeps turning after spawn — the attached-model heading-since-birth fan, wow-re
-/// `part-kit-effect-attach-orient.md`; default 0), `WOW_FX_GROUND` (=1 seats the
+/// keeps turning after spawn — a host that changes heading mid-effect, which is how you see that
+/// a world-mode cloud does NOT swing with it (decisions 1585/1591; the "heading-since-birth fan"
+/// this knob was built for turned out not to exist); default 0), `WOW_FX_GROUND` (=1 seats the
 /// fixture ON the terrain via a down-ray — required to see a ground-anchored effect's projected
 /// surface decals, `crate::ground_fx`; default 0 = the mid-air point), `WOW_FX_HOLD` (=1 keeps
 /// the fixture alive past one sequence pass — previewing a persistent HOLD kit's steady state;

@@ -230,10 +230,53 @@
         chatType("BATTLEGROUND",                         1,  93, 255, 127,   0)
         chatType("BATTLEGROUND_LEADER",                  0,  94, 255, 219, 183)
 
-        -- ── BenillaFCF: the FloatingChatFrame behaviors, re-expressed (ref FloatingChatFrame.lua)
-        -- Quoted constants: CHAT_TAB_SHOW_DELAY=0.2, CHAT_FRAME_FADE_TIME=0.15,
-        -- DEFAULT_CHATFRAME_ALPHA=0.25, CHAT_BUTTON_FLASH_TIME=0.5,
+        -- ── The FloatingChatFrame constants, as the GLOBALS the reference declares ───────────
+        -- These were comments here until decision 1589 (B246): the Chat options page's *Remove
+        -- Chat Hover Delay* row writes the first two through `SetChatMouseOverDelay`, so they
+        -- have to be values something can move rather than numbers inlined in the fade. Names,
+        -- spellings and values are the reference's own (FloatingChatFrame.lua l.8-12), and two of
+        -- them — `CHAT_FRAME_FADE_TIME` and `CHAT_FRAME_TEXTURES` — are in the captured 1.12 `_G`
+        -- as `framexml` globals, so an addon can read them.
+        CHAT_TAB_SHOW_DELAY = 0.2
+        CHAT_FRAME_FADE_TIME = 0.15
+        DEFAULT_CHATFRAME_ALPHA = 0.25
+        DEFAULT_CHATFRAME_COLOR = { r = 0, g = 0, b = 0 }
+        -- Still quoted rather than declared (nothing writes them): CHAT_BUTTON_FLASH_TIME=0.5,
         -- MESSAGE_SCROLLBUTTON_INITIAL_DELAY=0, MESSAGE_SCROLLBUTTON_SCROLL_DELAY=0.05.
+
+        -- REMOVE_CHAT_DELAY — the Chat options page's *Remove Chat Hover Delay* row (decision
+        -- 1589), a saved variable exactly as the reference has it (`UIOptionsFrameCheckButtons`
+        -- CheckButton18, `uvar = "REMOVE_CHAT_DELAY"`, `default = "0"`). Declared HERE because
+        -- this is the file that owns what it changes — a row whose defining file was not loaded
+        -- gets a nil `applyFunc` and is skipped, which is what keeps a partial harness honest
+        -- (OptionsFrame.xml's `OptionsFrame_ApplySavedSettings`). The `RegisterForSave` sits on
+        -- the line under the assignment, per 1128's load order.
+        REMOVE_CHAT_DELAY = "0"
+        RegisterForSave("REMOVE_CHAT_DELAY")
+
+        -- The row's applyFunc. The reference has no such function because it calls
+        -- `SetChatMouseOverDelay(REMOVE_CHAT_DELAY)` inline from two places (its options load,
+        -- l.216, and the checkbox's own commit); ours needs a zero-argument name to hand the row,
+        -- and this is it — one line, in the file that owns both halves.
+        function ChatFrame_ApplyMouseOverDelay()
+            SetChatMouseOverDelay(REMOVE_CHAT_DELAY)
+        end
+
+        -- SetChatMouseOverDelay(noDelay) — ref FloatingChatFrame.lua l.1456-1464, verbatim in
+        -- effect: "1" collapses BOTH the stationary-hover delay and the fade to zero, so the box
+        -- appears the instant the cursor crosses it. The options row's `applyFunc` is the only
+        -- caller, and `UIOptionsFrame_Load` calls it at login for the same reason ours does.
+        function SetChatMouseOverDelay(noDelay)
+            if noDelay == "1" then
+                CHAT_TAB_SHOW_DELAY = 0
+                CHAT_FRAME_FADE_TIME = 0
+            else
+                CHAT_TAB_SHOW_DELAY = 0.2
+                CHAT_FRAME_FADE_TIME = 0.15
+            end
+        end
+
+        -- ── BenillaFCF: the FloatingChatFrame behaviors, re-expressed (ref FloatingChatFrame.lua)
         BenillaFCF = {
             selected = 1,           -- SELECTED_DOCK_FRAME (1 = General, 2 = Combat Log)
             hover = false,          -- cursor inside the dock's padded rect
@@ -265,6 +308,90 @@
                 if t then table.insert(list, t) end
             end
             return list
+        end
+
+        -- ── The per-window LOOK: the tint and the base alpha (decision 1589, B246) ───────────
+        -- `frame.oldAlpha` and the CHAT_FRAME_TEXTURES vertex colour in the reference; a pair of
+        -- constants here (alpha 0, black) until B246 asked for a way to change them. The store is
+        -- the engine's — `GetChatWindowInfo`/`SetChatWindowColor`/`SetChatWindowAlpha`, which is
+        -- what an addon reads too — and this table is the per-frame cache the fade reads each
+        -- frame instead of re-crossing that seam.
+        BenillaFCF_Look = {}
+
+        local function lookFor(id)
+            local l = BenillaFCF_Look[id]
+            if not l then
+                l = { r = 0, g = 0, b = 0, a = 0 }
+                BenillaFCF_Look[id] = l
+            end
+            return l
+        end
+
+        -- FCF_SetWindowColor(frame, r, g, b, doNotSave) — ref FloatingChatFrame.lua l.696-704.
+        -- The tint is applied here and now (a vertex colour is not part of the fade); the save is
+        -- what makes it outlive the session, and `doNotSave` is the reference's own flag for
+        -- "this value CAME from the store" (its `FloatingChatFrame_Update` passes it).
+        function FCF_SetWindowColor(frame, r, g, b, doNotSave)
+            local id = frame:GetID()
+            local l = lookFor(id)
+            l.r, l.g, l.b = r, g, b
+            for _, t in ipairs(BenillaFCF_Textures(id)) do
+                t:SetVertexColor(r, g, b)
+            end
+            if not doNotSave then
+                SetChatWindowColor(id, r, g, b)
+            end
+        end
+
+        -- FCF_SetWindowAlpha(frame, alpha, doNotSave) — ref l.706-716.
+        --
+        -- The reference writes the nine textures' alpha straight here; ours cannot, because the
+        -- hover fade below is the single writer of those alphas (decision 1396's latch is what
+        -- keeps an idle dock from rewriting them every frame). So this moves the BASE the fade
+        -- interpolates from and invalidates that latch, which makes the next frame's apply the
+        -- one write — the reference's own `frame.oldAlpha` bookkeeping, minus the double write.
+        function FCF_SetWindowAlpha(frame, alpha, doNotSave)
+            local id = frame:GetID()
+            lookFor(id).a = alpha
+            frame.oldAlpha = alpha       -- ref: "Remember the alpha"
+            BenillaFCF.appliedReveal = -1
+            if not doNotSave then
+                SetChatWindowAlpha(id, alpha)
+            end
+        end
+
+        -- The alpha a window's chrome actually wears at a given point in the hover fade.
+        --
+        -- **The reference only fades a window that is DIMMER than the hover value**: both the fade
+        -- in and the fade out are guarded by `chatFrame.oldAlpha < DEFAULT_CHATFRAME_ALPHA`
+        -- (FloatingChatFrame.lua l.871 / l.913). So a player who has made their chat box solid
+        -- keeps it solid when the cursor leaves — the box does not dim itself back down — while
+        -- the shipped default (alpha 0) rides the full 0 → 0.25 ramp exactly as before.
+        local function windowAlpha(id, reveal)
+            local base = lookFor(id).a
+            if base >= DEFAULT_CHATFRAME_ALPHA then
+                return base
+            end
+            return base + (DEFAULT_CHATFRAME_ALPHA - base) * reveal
+        end
+
+        -- FloatingChatFrame_Update's look half (ref l.49-57): pull every window's stored tint and
+        -- alpha out of the engine and seat them, WITHOUT saving them back (they came from there).
+        -- Runs at load and on `UPDATE_CHAT_WINDOWS`, which is the event the host fires after it
+        -- restores the player's file.
+        function BenillaFCF_LoadWindowLooks()
+            for i = 1, 2 do
+                local frame = getglobal("ChatFrame" .. i)
+                if frame then
+                    local _, fontSize, r, g, b, a = GetChatWindowInfo(i)
+                    FCF_SetWindowColor(frame, r, g, b, 1)
+                    FCF_SetWindowAlpha(frame, a, 1)
+                    -- SIZE 0 is the stock "use the font's own height" and applies nothing.
+                    if fontSize and fontSize > 0 then
+                        FCF_SetChatWindowFontSize(frame, fontSize, 1)
+                    end
+                end
+            end
         end
 
         -- FCF_SelectDockFrame: show the selected frame, hide the other; selected tab full alpha,
@@ -318,10 +445,179 @@
             BenillaFCF_SelectDock(id)
         end
 
-        function BenillaFCF_TabClick(id)
-            -- ref FCF_Tab_OnClick (docked, left click): select; UChatScrollButton per click.
+        function BenillaFCF_TabClick(id, button)
+            -- ref FCF_Tab_OnClick l.1219-1226: a RIGHT click opens the window's options menu and
+            -- returns — it does not select the tab, and it plays no click sound (the ref's sound
+            -- is on the OnClick *after* the call, which the early return skips). The ref also
+            -- calls `chatFrame:StopMovingOrSizing()` first; benilla has no drag, so there is
+            -- nothing in flight to stop.
+            if button == "RightButton" then
+                ToggleDropDownMenu(1, nil, getglobal("ChatFrame" .. id .. "TabDropDown"),
+                                   "ChatFrame" .. id .. "Tab", 0, 0)
+                return
+            end
+            -- ref FCF_Tab_OnClick (docked, left click): close any open menu, then select.
+            CloseDropDownMenus()
             BenillaFCF_SelectDock(id)
             PlaySound("UChatScrollButton")
+        end
+
+        -- ── The chat tab's options menu (decision 1589, B246) ────────────────────────────────
+        -- ref `FCFOptionsDropDown_Initialize` (FloatingChatFrame.lua l.87-393). The reference's
+        -- level-1 menu has four blocks: the window verbs (Lock/Unlock · Rename · Create New ·
+        -- Remove), a **DISPLAY** header over Font Size and Background, a **FILTERS** header over
+        -- seven message-group submenus, and Join New Channel.
+        --
+        -- benilla ships the DISPLAY block, and that is the honest tree rather than a first pass:
+        -- every window verb needs the window management 0288 §2 deliberately left out (there is
+        -- no lock, no rename, no undock, no create/close), and the FILTERS block needs a runtime
+        -- message-group editor over `ui_chat::frames`' registration, which is its own feature and
+        -- not the one B246 reports missing. Each block lands with the machinery under it.
+        --
+        -- The menu is per tab (`ChatFrame<n>TabDropDown`), because `FCF_GetCurrentChatFrameID`
+        -- reads the open menu's PARENT id — that is the reference's contract and the reason the
+        -- capsule is declared inside the tab rather than shared.
+        -- ref l.81-85 is `UIDropDownMenu_Initialize(this, …, "MENU")` plus two width setters.
+        -- Ours assigns the two fields that call would have set, and skips the widths — both
+        -- departures are about OUR kit, not about the reference:
+        --   · `UIDropDownMenu_Initialize` clears every row of both shared lists, which is work at
+        --     LOAD time for a menu nobody has opened — and it would make this file's load order
+        --     depend on the dropdown kit's, and through it on GameTooltip's
+        --     `TOOLTIP_DEFAULT_COLOR`. `ToggleDropDownMenu` runs that init on every open anyway,
+        --     which is where the reference's own re-init happens too.
+        --   · `UIDropDownMenu_SetWidth(50)` means something DIFFERENT here: our kit reads a
+        --     declared width as `noResize` + a fixed list width (UIDropDownMenu.xml l.672-679),
+        --     so transcribing it would pin the menu at 50 px and cut "Background" in half. In the
+        --     reference, MENU mode never draws the capsule at all, so its width is inert there.
+        -- `BenillaFriendsDropDown` (FriendsFrame.xml) is already this same shape.
+        function FCFOptionsDropDown_OnLoad()
+            this.initialize = FCFOptionsDropDown_Initialize
+            this.displayMode = "MENU"
+        end
+
+        function FCFOptionsDropDown_Initialize()
+            local _, _, r, g, b, a = GetChatWindowInfo(FCF_GetCurrentChatFrameID())
+            local info
+
+            -- Level 2: the font-height list.
+            if UIDROPDOWNMENU_MENU_LEVEL == 2 then
+                if UIDROPDOWNMENU_MENU_VALUE == FONT_SIZE then
+                    local _, fontHeight = FCF_GetCurrentChatFrame():GetFont()
+                    for _, value in ipairs(CHAT_FONT_HEIGHTS) do
+                        info = {}
+                        info.text = format(FONT_SIZE_TEMPLATE, value)
+                        info.value = value
+                        info.func = FCF_SetChatWindowFontSize
+                        -- ref: `value == floor(fontHeight+0.5)` — the tick follows the font the
+                        -- frame is actually wearing, not the stored SIZE (which is 0 until the
+                        -- player picks one).
+                        if fontHeight and value == floor(fontHeight + 0.5) then
+                            info.checked = 1
+                        end
+                        UIDropDownMenu_AddButton(info, UIDROPDOWNMENU_MENU_LEVEL)
+                    end
+                end
+                return
+            end
+
+            -- Display header (ref l.273-279).
+            info = {}
+            info.text = DISPLAY
+            info.notClickable = 1
+            info.isTitle = 1
+            info.notCheckable = 1
+            UIDropDownMenu_AddButton(info)
+
+            -- Font size (ref l.281-288).
+            info = {}
+            info.text = FONT_SIZE
+            info.hasArrow = 1
+            info.func = nil
+            info.notCheckable = 1
+            UIDropDownMenu_AddButton(info)
+
+            -- Background — the colour swatch plus the opacity slider (ref l.290-307). This row is
+            -- B246's actual fix: `hasOpacity` is what puts `OpacitySliderFrame` beside the colour
+            -- wheel, and `opacityFunc` is what makes the chat box follow the thumb live.
+            --
+            -- **`info.opacity = 1 - a` is the reference's own line**, comment included ("Done
+            -- because the slider is reversed"): the opacity slider reads 0 at the TOP, so the
+            -- value it is seeded with and the value read back off it are both complements. The
+            -- read-back half is `FCF_SetChatWindowOpacity` below.
+            info = {}
+            info.text = BACKGROUND
+            info.hasColorSwatch = 1
+            info.r, info.g, info.b = r, g, b
+            if a then
+                a = 1 - a
+            end
+            info.opacity = a
+            info.swatchFunc = FCF_SetChatWindowBackGroundColor
+            info.func = UIDropDownMenuButton_OpenColorPicker
+            info.hasOpacity = 1
+            info.opacityFunc = FCF_SetChatWindowOpacity
+            info.cancelFunc = FCF_CancelWindowColorSettings
+            UIDropDownMenu_AddButton(info)
+        end
+
+        -- ref l.723-733: the id/frame the open menu belongs to. The menu's capsule is a child of
+        -- the tab, and the tab's id is its window's — which is why the tabs carry `id=` at all.
+        function FCF_GetCurrentChatFrameID()
+            return UIDropDownMenu_GetCurrentDropDown():GetParent():GetID()
+        end
+
+        -- ref l.729-735, fallback included: `UIDropDownMenu_GetCurrentDropDown` answers `this`
+        -- when no menu has ever been opened, so the lookup can miss — and then the caller IS a
+        -- row of the menu, whose parent is the capsule.
+        function FCF_GetCurrentChatFrame()
+            local current = getglobal("ChatFrame"
+                .. UIDropDownMenu_GetCurrentDropDown():GetParent():GetID())
+            if not current then
+                current = getglobal("ChatFrame" .. this:GetParent():GetID())
+            end
+            return current
+        end
+
+        -- ref l.740-744. The picker drives this on every drag of the colour wheel.
+        function FCF_SetChatWindowBackGroundColor()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            FCF_SetWindowColor(FCF_GetCurrentChatFrame(), r, g, b)
+        end
+
+        -- ref l.746-749, the reversed slider's other half (see the Background row above).
+        function FCF_SetChatWindowOpacity()
+            FCF_SetWindowAlpha(FCF_GetCurrentChatFrame(), 1.0 - OpacitySliderFrame:GetValue())
+        end
+
+        -- Cancel restores what the row was opened with. The reference names this
+        -- `FCF_CancelWindowColorSettings` and hands it the pre-open r/g/b/opacity as arguments;
+        -- ours reads them off the button the picker was opened from, which is where
+        -- `UIDropDownMenuButton_OpenColorPicker` already stashes them (UIDropDownMenu.xml) — the
+        -- same values, one hop closer, and no argument contract to get wrong.
+        function FCF_CancelWindowColorSettings(prev)
+            local frame = FCF_GetCurrentChatFrame()
+            if prev and prev.r then
+                FCF_SetWindowColor(frame, prev.r, prev.g, prev.b)
+            end
+            if prev and prev.opacity then
+                FCF_SetWindowAlpha(frame, 1.0 - prev.opacity)
+            end
+        end
+
+        -- ref l.751-763: the visible half is the frame's own font, the stored half is SIZE.
+        -- `doNotSave` is ours, for the load path (the value already came from the store).
+        function FCF_SetChatWindowFontSize(chatFrame, fontSize, doNotSave)
+            if not chatFrame then
+                chatFrame = FCF_GetCurrentChatFrame()
+            end
+            if not fontSize then
+                fontSize = this.value
+            end
+            local fontFile, unused, fontFlags = chatFrame:GetFont()
+            chatFrame:SetFont(fontFile, fontSize, fontFlags)
+            if not doNotSave then
+                SetChatWindowSize(chatFrame:GetID(), fontSize)
+            end
         end
 
         -- The whisper tab flash (ref FCF_FlashTab: never the selected tab; 0.25s on/off for 60s,
@@ -387,7 +683,7 @@
                     s.hoverTime = 0
                     s.oldX, s.oldY = x, y
                 end
-                if s.hoverTime > 0.2 then s.revealTarget = 1 end
+                if s.hoverTime > CHAT_TAB_SHOW_DELAY then s.revealTarget = 1 end
             else
                 s.hover = false
                 s.hoverTime = 0
@@ -395,16 +691,26 @@
             end
             if s.flashTab ~= 0 then s.revealTarget = 1 end
 
-            -- The 0.15s linear fade toward the target (ref UIFrameFadeIn/Out over
-            -- CHAT_FRAME_FADE_TIME).
-            if s.reveal < s.revealTarget then
-                s.reveal = math.min(s.revealTarget, s.reveal + elapsed / 0.15)
+            -- The linear fade toward the target (ref UIFrameFadeIn/Out over CHAT_FRAME_FADE_TIME).
+            -- **Zero is a real setting, not a guard against nothing**: the Chat page's *Remove
+            -- Chat Hover Delay* row sets both this and the delay to 0 (ref SetChatMouseOverDelay),
+            -- and the division would be 0/0 on the frame `elapsed` is also zero. The reference
+            -- lands in the same place by a different road — `UIFrameFadeIn` with timeToFade 0
+            -- finishes on its first tick.
+            local fade = CHAT_FRAME_FADE_TIME
+            if fade <= 0 then
+                s.reveal = s.revealTarget
+            elseif s.reveal < s.revealTarget then
+                s.reveal = math.min(s.revealTarget, s.reveal + elapsed / fade)
             elseif s.reveal > s.revealTarget then
-                s.reveal = math.max(s.revealTarget, s.reveal - elapsed / 0.15)
+                s.reveal = math.max(s.revealTarget, s.reveal - elapsed / fade)
             end
 
-            -- Apply: tabs at 1.0 (selected) / 0.5 (unselected) × reveal; the selected window's
-            -- background+borders at 0.25 × reveal (ref: fade oldAlpha↔DEFAULT_CHATFRAME_ALPHA).
+            -- Apply: tabs at 1.0 (selected) / 0.5 (unselected) × reveal; each window's
+            -- background+borders at its own `windowAlpha` (ref: fade oldAlpha↔DEFAULT_CHATFRAME_
+            -- ALPHA). Until 1589 that second term was the constant `0.25 * reveal`, which is what
+            -- `windowAlpha` still computes for the shipped base of 0 — the default look is
+            -- unchanged, it is now just one case of a rule instead of the only case.
             --
             -- GATED on everything the writes below depend on — the reveal, the selected tab, and
             -- whether the label measurements have landed (decision 1396). **The reference needs
@@ -421,8 +727,9 @@
                     if tab then
                         tab:SetAlpha(((i == s.selected) and 1.0 or 0.5) * s.reveal)
                     end
+                    local a = windowAlpha(i, s.reveal)
                     for _, t in ipairs(BenillaFCF_Textures(i)) do
-                        t:SetAlpha(0.25 * s.reveal)
+                        t:SetAlpha(a)
                     end
                 end
                 s.appliedReveal = s.reveal
@@ -865,10 +1172,25 @@
                  SubmitChatInput stands in for ChatEdit_SendText: the grammar behind it is Rust
                  (0881), which is the only part of that chain we replace. -->
             <OnLoad>
-                if this:GetID() == 1 then this:RegisterEvent("EXECUTE_CHAT_LINE") end
+                <!-- UPDATE_CHAT_WINDOWS — the reference's own event for "a window's stored
+                     settings moved", and the one FloatingChatFrame_OnEvent listens for
+                     (FloatingChatFrame.lua l.34-38) to re-read GetChatWindowInfo. Ours is fired
+                     by the host once it has restored the player's per-character file
+                     (ui_chat::settings), which lands after this file has already run. It rides
+                     window 1's registration for the same reason EXECUTE_CHAT_LINE does: the
+                     template is shared by all seven, the handler re-reads EVERY window, and seven
+                     registrations would run it seven times per restore. -->
+                if this:GetID() == 1 then
+                    this:RegisterEvent("EXECUTE_CHAT_LINE")
+                    this:RegisterEvent("UPDATE_CHAT_WINDOWS")
+                end
             </OnLoad>
             <OnEvent>
-                if event == "EXECUTE_CHAT_LINE" then SubmitChatInput(arg1) end
+                if event == "EXECUTE_CHAT_LINE" then
+                    SubmitChatInput(arg1)
+                elseif event == "UPDATE_CHAT_WINDOWS" then
+                    BenillaFCF_LoadWindowLooks()
+                end
             </OnEvent>
             <OnUpdate>
                 ChatFrame_OnUpdate(arg1)
@@ -1053,7 +1375,7 @@
          line pipeline doesn't exist), so the tab just selected an empty window. ChatFrame2
          itself stays above (the router keeps feeding it) so the tab can return whole with the
          combat-log arc — director's call, 2026-07-11. The FCF loops guard the missing tab. ── -->
-    <Button name="ChatFrame1Tab" frameStrata="LOW" alpha="0">
+    <Button name="ChatFrame1Tab" frameStrata="LOW" alpha="0" id="1">
         <Size><AbsDimension x="70" y="32"/></Size>
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame1Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
@@ -1090,11 +1412,35 @@
                     </Layer>
                 </Layers>
             </Frame>
+            <!-- The window's options menu (decision 1589). A child of the TAB, because
+                 FCF_GetCurrentChatFrameID reads the open menu's parent id — the reference's own
+                 contract, and why the tab carries `id` above. -->
+            <Frame name="$parentDropDown" inherits="UIDropDownMenuTemplate" hidden="true">
+                <Scripts>
+                    <OnLoad>FCFOptionsDropDown_OnLoad()</OnLoad>
+                </Scripts>
+            </Frame>
         </Frames>
         <Scripts>
+            <!-- ref FloatingChatFrame.xml l.121: the tab takes the right button too, which is
+                 what opens the options menu. A Button's default set is LeftButtonUp only, so
+                 without this the right-click never reaches OnClick at all. -->
+            <OnLoad>
+                this:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            </OnLoad>
             <OnClick>
-                BenillaFCF_TabClick(1)
+                BenillaFCF_TabClick(1, arg1)
             </OnClick>
+            <!-- ref l.129-134. The tip is how the menu is DISCOVERABLE: nothing on screen says a
+                 chat tab has a right-click menu, which is half of why B246 read as "no chat
+                 options at all". `noNormalText` is the reference's own 6th argument. -->
+            <OnEnter>
+                BenillaTooltip_AddNewbieTipFor(this, CHAT_OPTIONS_LABEL, 1.0, 1.0, 1.0,
+                    NEWBIE_TOOLTIP_CHATOPTIONS, 1)
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide()
+            </OnLeave>
         </Scripts>
         <ButtonText name="$parentText" text="GENERAL">
             <Anchors>
@@ -1134,7 +1480,7 @@
         Anchored LEFT-to-RIGHT off tab 1; `BenillaFCF_TabResize` sizes both to their measured label
         widths, so the abutment survives a locale whose words are longer.
     -->
-    <Button name="ChatFrame2Tab" frameStrata="LOW" alpha="0">
+    <Button name="ChatFrame2Tab" frameStrata="LOW" alpha="0" id="2">
         <Size><AbsDimension x="70" y="32"/></Size>
         <Anchors>
             <Anchor point="LEFT" relativeTo="ChatFrame1Tab" relativePoint="RIGHT"/>
@@ -1171,11 +1517,35 @@
                     </Layer>
                 </Layers>
             </Frame>
+            <!-- The window's options menu (decision 1589). A child of the TAB, because
+                 FCF_GetCurrentChatFrameID reads the open menu's parent id — the reference's own
+                 contract, and why the tab carries `id` above. -->
+            <Frame name="$parentDropDown" inherits="UIDropDownMenuTemplate" hidden="true">
+                <Scripts>
+                    <OnLoad>FCFOptionsDropDown_OnLoad()</OnLoad>
+                </Scripts>
+            </Frame>
         </Frames>
         <Scripts>
+            <!-- ref FloatingChatFrame.xml l.121: the tab takes the right button too, which is
+                 what opens the options menu. A Button's default set is LeftButtonUp only, so
+                 without this the right-click never reaches OnClick at all. -->
+            <OnLoad>
+                this:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            </OnLoad>
             <OnClick>
-                BenillaFCF_TabClick(2)
+                BenillaFCF_TabClick(2, arg1)
             </OnClick>
+            <!-- ref l.129-134. The tip is how the menu is DISCOVERABLE: nothing on screen says a
+                 chat tab has a right-click menu, which is half of why B246 read as "no chat
+                 options at all". `noNormalText` is the reference's own 6th argument. -->
+            <OnEnter>
+                BenillaTooltip_AddNewbieTipFor(this, CHAT_OPTIONS_LABEL, 1.0, 1.0, 1.0,
+                    NEWBIE_TOOLTIP_CHATOPTIONS, 1)
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide()
+            </OnLeave>
         </Scripts>
         <ButtonText name="$parentText" text="COMBAT_LOG">
             <Anchors>
@@ -1405,10 +1775,12 @@
     </EditBox>
 
     <!-- The load-order hack, like the ref's own trailing FCF_DockFrame(ChatFrame1, 1): select
-         the General tab once everything above exists — and tint the window chrome BLACK
-         (FCF_SetWindowColor: the ref vertex-colors every CHAT_FRAME_TEXTURES piece with the
+         the General tab once everything above exists — and seat every window's stored LOOK
+         (FCF_SetWindowColor/Alpha: the ref vertex-colors every CHAT_FRAME_TEXTURES piece with the
          chat-cache window COLOR, which ships 0 0 0; the ChatFrameBackground art itself is
-         white, so untinted it reads as a white wash over the world). -->
+         white, so untinted it reads as a white wash over the world). Since 1589 that colour is
+         read out of the engine rather than written as a literal, because the player can now
+         change it — a fresh store still answers 0 0 0, so a first run looks exactly as before. -->
     <Script><![CDATA[
         -- `DEFAULT_CHAT_FRAME = ChatFrame1` — the reference's own line (ChatFrame.lua), and the
         -- name half of FrameXML actually prints through. It sits here rather than in the header
@@ -1419,10 +1791,6 @@
         DEFAULT_CHAT_FRAME = ChatFrame1
 
         BenillaFCF_SelectDock(1)
-        for i = 1, 2 do
-            for _, t in ipairs(BenillaFCF_Textures(i)) do
-                t:SetVertexColor(0, 0, 0)
-            end
-        end
+        BenillaFCF_LoadWindowLooks()
     ]]></Script>
 </Ui>

@@ -129,6 +129,19 @@ impl RosterUpdate {
     }
 }
 
+/// **Guild Member Alert** — 1.12's `guildMemberNotify`, the Chat options page's row (decision
+/// 1589): *"Receive notification when guild members log on/off"* (the CVar's own registered help
+/// string, `0x860320`).
+///
+/// A knob rather than a field on [`GuildState`] because it is a *setting*, not session state:
+/// GuildState is cleared on disconnect, and a CVar must not be.
+///
+/// **Off by default, and that is byte-read, not a guess**: the register site `0x5e24c7` pushes
+/// `0x82e570` = `"0"` (§5, wow-re `system/object-layer/scratch/guild-signon-cvar-gate.md`). A
+/// stock 1.12 client prints nothing when a guildmate logs in, and neither do we.
+#[derive(Resource, Default)]
+pub(crate) struct GuildMemberNotify(pub(crate) bool);
+
 /// The guild session mirror. Filled by the net drain's guild arms, read by the feed, cleared on
 /// disconnect beside the other per-login resources.
 #[derive(Resource, Default)]
@@ -522,17 +535,63 @@ pub(crate) mod apply {
         guild.apply_roster(roster);
     }
 
-    /// `SMSG_GUILD_EVENT`. The trailing guid rides only on the sign-on/sign-off pair, and the
-    /// ignore check is exactly what the reference does with it (`0x5ae810`).
+    /// `SMSG_GUILD_EVENT`. The trailing guid rides only on the sign-on/sign-off pair, and it is
+    /// there to answer that pair's **display condition** — which the reference builds out of
+    /// **four conjuncts**, all of them in the handler's `0x0c`/`0x0d` arms, each branching to the
+    /// same silent exit `0x5e74c9` (wow-re `system/object-layer/scratch/guild-signon-cvar-gate.md`,
+    /// the §5 dispatched for decision 1589; it corrects `guild-api-carve.md` §5, which recorded
+    /// these arms with only one of the four):
+    ///
+    /// 1. **there is a local player object.** Ours is "we know our own guid" — the same fact, and
+    ///    it is what conjunct 3 needs anyway.
+    /// 2. **`guildMemberNotify` is on** (`0x5e733f` / `0x5e73e7`, reading the record's `+0x28`).
+    ///    Registered `"0"` — off out of the box, and the reason a stock client is silent here.
+    /// 3. **the subject is not you.** The reference compares the wire NAME against the local
+    ///    player's (`0x609210` + `SStrCmp`); ours compares the wire GUID against [`SelfGuid`] —
+    ///    the same subject by a different key, and the key this arm already carries. It is not
+    ///    hypothetical: vmangos's `Guild::BroadcastPacket` walks **every** member including the
+    ///    one who just signed on (`Guild.cpp:651-656`), so without this you announce yourself at
+    ///    every login.
+    /// 4. **the subject is not on your friends list** — `FriendList::FindFriendSlot 0x5ae810`,
+    ///    and this is the conjunct benilla had wrong. It read the call as an *ignore* check, so an
+    ///    ignored guildmate was silenced (the reference announces them) and a guildmate who is
+    ///    also a friend was announced **twice**: `SMSG_FRIEND_STATUS` (`0x5acde6`/`0x5ace08`)
+    ///    emits the same two chat ids with no CVar gate at all, and de-duplicating against it is
+    ///    this conjunct's entire job.
     pub(crate) fn event(
         guild: &mut GuildState,
         chat_log: &mut ChatLog,
         social: &SocialState,
+        notify: &GuildMemberNotify,
+        self_guid: Option<u64>,
         notice: GuildEventNotice,
     ) {
-        let ignored = notice.guid.is_some_and(|g| social.is_ignored(g));
+        let announce = announce_signon(social, notify, self_guid, notice.guid);
         guild.apply_event(&notice);
-        push_lines(chat_log, lines::event_line(&notice, ignored));
+        push_lines(chat_log, lines::event_line(&notice, announce));
+    }
+
+    /// The sign-on/sign-off pair's four-conjunct display condition, as one predicate — see
+    /// [`event`] for each conjunct's byte address and why conjunct 4 is a *friends* test.
+    ///
+    /// Named and separate because it is the part that was wrong, and because a predicate is
+    /// testable where a `push_lines` side effect is not.
+    pub(super) fn announce_signon(
+        social: &SocialState,
+        notify: &GuildMemberNotify,
+        self_guid: Option<u64>,
+        subject: Option<u64>,
+    ) -> bool {
+        if !notify.0 {
+            return false; // conjunct 2
+        }
+        match (self_guid, subject) {
+            // conjuncts 3 and 4.
+            (Some(me), Some(subject)) => subject != me && !social.is_friend(subject),
+            // No local player (conjunct 1), or a pair carrying no guid at all: the condition is
+            // unanswerable, and the reference's silent exit is the honest answer to that.
+            _ => false,
+        }
     }
 
     /// `SMSG_GUILD_COMMAND_RESULT`.
@@ -573,19 +632,22 @@ pub(crate) struct UiGuildPlugin;
 
 impl Plugin for UiGuildPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GuildState>().add_systems(
-            Update,
-            (
-                feed::feed_guild.before(UiInput),
-                feed::drain_guild.after(UiInput),
-            ),
-        );
+        app.init_resource::<GuildState>()
+            .init_resource::<GuildMemberNotify>()
+            .add_systems(
+                Update,
+                (
+                    feed::feed_guild.before(UiInput),
+                    feed::drain_guild.after(UiInput),
+                ),
+            );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_social::SocialState;
     use benilla_protocol::messages::{guild_command, guild_command_error, guild_presence};
 
     fn identity(name: &str, ranks: &[&str]) -> Identity {
@@ -615,6 +677,64 @@ mod tests {
             params: params.iter().map(|p| (*p).to_string()).collect(),
             guid,
         }
+    }
+
+    /// The sign-on/sign-off line's **four-conjunct** display condition (decision 1589, from the
+    /// wow-re §5 dispatched for it). Every conjunct gets its own case, because the two that were
+    /// wrong were wrong in *opposite* directions and a single happy-path assertion would have
+    /// caught neither.
+    #[test]
+    fn the_signon_condition_is_all_four_conjuncts() {
+        let mut social = SocialState::default();
+        crate::ui_social::apply::friend_list(
+            &mut social,
+            vec![benilla_protocol::messages::FriendEntry {
+                guid: 7,
+                ..Default::default()
+            }],
+        );
+        crate::ui_social::apply::ignore_list(&mut social, vec![9]);
+        let on = GuildMemberNotify(true);
+        let off = GuildMemberNotify(false);
+        let me = Some(1);
+
+        // 2 · the CVar, which ships OFF — so the default client says nothing at all.
+        assert!(
+            !apply::announce_signon(&social, &off, me, Some(5)),
+            "guildMemberNotify off silences the whole family"
+        );
+        assert!(apply::announce_signon(&social, &on, me, Some(5)));
+
+        // 3 · not you. vmangos broadcasts the sign-on to EVERY member including the signer
+        // (`Guild::BroadcastPacket`, Guild.cpp:651-656), so without this you announce yourself at
+        // every login.
+        assert!(
+            !apply::announce_signon(&social, &on, me, Some(1)),
+            "your own sign-on is not announced to you"
+        );
+
+        // 4 · not a friend — de-duplication against SMSG_FRIEND_STATUS, which says the same thing
+        // with no CVar gate of its own. THIS is the conjunct benilla read as an ignore check.
+        assert!(
+            !apply::announce_signon(&social, &on, me, Some(7)),
+            "a guildmate who is also a friend is announced by the friend path, not twice"
+        );
+
+        // …and the same mislabel's other half: an IGNORED guildmate IS announced. The ignore list
+        // has nothing to do with this line.
+        assert!(
+            social.is_ignored(9),
+            "the fixture's ignore really is an ignore"
+        );
+        assert!(
+            apply::announce_signon(&social, &on, me, Some(9)),
+            "the reference announces an ignored guildmate — 0x5ae810 is not the ignore check"
+        );
+
+        // 1 · a local player, and the pair's own guid: either missing leaves the condition
+        // unanswerable, and the reference's silent exit is the answer.
+        assert!(!apply::announce_signon(&social, &on, None, Some(5)));
+        assert!(!apply::announce_signon(&social, &on, me, None));
     }
 
     /// `show_offline` changes what `GetNumGuildMembers` counts and how the rows are ordered —

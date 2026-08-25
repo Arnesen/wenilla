@@ -208,6 +208,20 @@ pub(crate) fn camera_character_path(realm: &str, character: &str) -> Option<Path
 /// never mentioned it). That split a player's state across two folders and — the part that
 /// actually bit — skipped [`home`]'s hermetic guard, so a **capture read the account name off
 /// whatever machine it ran on** and rendered it into the login screen it was photographing.
+/// `benilla-config/chat/<realm>-<character>.txt` — the chat windows' saved look (decision 1589):
+/// the background tint, the background alpha and the font size a chat tab's right-click menu sets.
+/// **Character-scoped**, where the reference keeps the same three inside its per-character
+/// `chat-cache.txt` — a raid alt and a questing alt want different chat boxes. See
+/// [`crate::ui_chat`]'s `settings` module for the file's shape and why it is a subset of its
+/// ancestor.
+pub(crate) fn chat_character_path(realm: &str, character: &str) -> Option<PathBuf> {
+    Some(home()?.join("chat").join(format!(
+        "{}-{}.txt",
+        file_token(realm),
+        file_token(character)
+    )))
+}
+
 pub(crate) fn saved_account_path() -> Option<PathBuf> {
     home().map(|h| h.join("account"))
 }
@@ -343,6 +357,11 @@ mod tests {
             camera_character_path("Hydraxian Waterlords", "Probeone"),
             Some(tmp.join("benilla-config/camera/Hydraxian_Waterlords-Probeone.txt"))
         );
+        // The chat windows' saved look (decision 1589) — character-scoped, same key shape again.
+        assert_eq!(
+            chat_character_path("Hydraxian Waterlords", "Probeone"),
+            Some(tmp.join("benilla-config/chat/Hydraxian_Waterlords-Probeone.txt"))
+        );
 
         // The login screen's remembered account name (decision 0539 §4) and the framing
         // instrument's pose log (0600) — the two residents that computed their own path in
@@ -375,6 +394,11 @@ mod tests {
             screenshots_dir(),
             None,
             "a capture writes no player screenshots"
+        );
+        assert_eq!(
+            chat_character_path("Hydraxian Waterlords", "Probeone"),
+            None,
+            "a capture reads no player's chat look"
         );
         std::fs::remove_dir_all(&tmp).ok();
     }

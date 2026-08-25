@@ -26,6 +26,9 @@ mod frames;
 mod input;
 /// The language gate — the exemptions and the fluency lookup behind the chat garble (B262).
 mod language;
+/// The chat windows' saved look (B246, decision 1589) — where the tab menu's tint/alpha/font-size
+/// picks are read from at login and written back at logout.
+mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -139,6 +142,8 @@ impl Plugin for UiChatPlugin {
                 OnExit(crate::char_select::ClientState::InWorld),
                 (channels::end_session_channels, end_session_chat),
             );
+        // The per-character saved look (B246) — its own load/watch/save edges.
+        settings::plugin(app);
     }
 }
 

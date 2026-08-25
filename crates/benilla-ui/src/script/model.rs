@@ -4,11 +4,11 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    auction, backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip,
-    guild, inspect, item_text, loot, loot_roll, macros, mail, merchant, party, pvp, quest,
-    quest_log, reputation, session, simplehtml, skills, slider, social, spellbook, taxi, trade,
-    tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView,
-    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    auction, backdrop, bank, char_stats, chat_window, container, craft, cursor, death, duel,
+    follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant, party, pvp,
+    quest, quest_log, reputation, session, simplehtml, skills, slider, social, spellbook, taxi,
+    trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject,
+    ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -436,6 +436,15 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_open_chat_requests`] drain — `tell_requests`' sibling, one step
     /// less resolved: a name there, a whole draft line here ([`chat_window`] registers the global).
     pub(crate) open_chat_requests: Vec<String>,
+    /// Per-chat-window **look** — background tint, background alpha, font size — index 0 =
+    /// `ChatFrame1` (decision 1589, [`chat_window`]). The engine's own per-window record narrowed
+    /// to the three fields the tab menu's Display block can move; the host seeds it from the
+    /// player's saved file and persists what Lua writes back.
+    pub(crate) chat_window_looks: [chat_window::ChatWindowLook; chat_window::NUM_CHAT_WINDOWS],
+    /// The 0-based window indices whose look Lua moved since the app's last
+    /// [`super::UiScript::take_chat_window_changes`] drain — the persist cue. A set, so a slider
+    /// drag costs one entry however many steps it took.
+    pub(crate) chat_window_changes: HashSet<usize>,
     /// The player's default chat language name, app-resolved from `ChrRaces.BaseLanguage` ×
     /// `Languages.dbc` ([`super::UiScript::set_default_language`]). `None` = the reference's
     /// no-player-object state, where `GetDefaultLanguage()` returns **zero Lua values**
@@ -1380,6 +1389,9 @@ impl Model {
             guild_requests: Vec::new(),
             tell_requests: Vec::new(),
             open_chat_requests: Vec::new(),
+            chat_window_looks: [chat_window::ChatWindowLook::DEFAULT;
+                chat_window::NUM_CHAT_WINDOWS],
+            chat_window_changes: HashSet::new(),
             default_language: None,
             duel_requests: Vec::new(),
             follow_requests: Vec::new(),

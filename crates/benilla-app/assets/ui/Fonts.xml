@@ -123,10 +123,17 @@
         for token, rgb in pairs(classRGB) do
             RAID_CLASS_COLORS[token] = { r = rgb[1], g = rgb[2], b = rgb[3] }
         end
-        -- The three OTHER tables the reference's Fonts.xml `<Script>` block carries —
-        -- CHAT_FONT_HEIGHTS, MATERIAL_TEXT_COLOR_TABLE, MATERIAL_TITLETEXT_COLOR_TABLE — are
-        -- deliberately not here: **zero corpus addons name any of them**, and nothing benilla ships
-        -- reads them. They cost nine lines each the day something does.
+        -- CHAT_FONT_HEIGHTS — the chat window's four selectable font heights, the reference's own
+        -- table verbatim (ref Fonts.xml l.21-26). It sat in the note below as "costs nine lines the
+        -- day something reads it" until decision 1589 (B246) built the chat tab's **Font Size**
+        -- submenu, which is the reference's only reader too (`FCFOptionsDropDown_Initialize`
+        -- iterates it). Still zero corpus addons, so the demand here is ours, not theirs.
+        CHAT_FONT_HEIGHTS = { 12, 14, 16, 18 }
+
+        -- The two OTHER tables the reference's Fonts.xml `<Script>` block carries —
+        -- MATERIAL_TEXT_COLOR_TABLE and MATERIAL_TITLETEXT_COLOR_TABLE — are deliberately not
+        -- here: **zero corpus addons name either**, and nothing benilla ships reads them. They
+        -- cost nine lines each the day something does.
     ]]></Script>
 
     <!-- MasterFont: the shadow-only root the GameFont* families chain through (ref l.56). -->

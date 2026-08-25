@@ -264,14 +264,51 @@ impl Plugin for UiLootRollPlugin {
 /// The *vote* lines keep their `_SELF` split (`LOOT_ROLL_NEED_SELF` &c. are among the referenced
 /// 15), as does `LOOT_ROLL_YOU_WON`.
 ///
-/// **The `NO_SPAM` variants are deliberately not used**, now for a *verified* reason rather than an
-/// open question: they are the `showLootSpam == 0` branch, and that CVar defaults to `"1"`, under
-/// which the plain `LOOT_ROLL_WON`/`_YOU_WON` (no roll number) are what the client prints. benilla
-/// has no CVar layer yet — decision 0594 records the whole gated flow for when it does.
+/// **The `NO_SPAM` variants are the `showLootSpam == 0` branch**, and since decision 1589 (B246's
+/// Chat options page) that CVar has a row, so `detailed` is a real argument rather than a constant
+/// `true`. 0594 §3 recorded the whole gated flow waiting for exactly this; wow-re's
+/// `lootroll-chat-and-lifecycle.md` §4 is the byte census behind it:
+///
+/// | `showLootSpam` | the per-vote / per-dice line (`0x61c0b0`) | the WON line (`0x61b9e0`) |
+/// |---|---|---|
+/// | `1` (default) | emitted | `LOOT_ROLL_WON` / `_YOU_WON` — **no roll number** |
+/// | `0` | suppressed entirely | `*_NO_SPAM_NEED` / `_GREED` — **carries the roll number** |
+///
+/// Two things about that table are easy to get backwards and both are VERIFIED: it is the *winner*
+/// line that changes shape (turning detail OFF makes it say MORE, because it is now the only line
+/// you get), and **`SMSG_LOOT_ALL_PASSED` is never gated on either side** — `0x61b640` contains no
+/// read of the CVar at all. The `NO_SPAM` discriminator is `rollType == 1` (need), so anything that
+/// is not need renders as greed.
+///
+/// Returns `None` for the one case the reference drops on the floor: a vote/dice line with detail
+/// off.
 ///
 /// Kept free of the resource lookups (`name`/`link` arrive resolved) so the whole table is directly
 /// testable — it is the piece most likely to be got subtly wrong.
-fn format_line(line: &RollLine, name: Option<&str>, is_self: bool, link: &str) -> String {
+fn format_line(
+    line: &RollLine,
+    name: Option<&str>,
+    is_self: bool,
+    link: &str,
+    detailed: bool,
+) -> Option<String> {
+    if !detailed {
+        if let RollLine::Announce(_) = line {
+            // `0x61c0b9`: the composer frees the node and returns.
+            return None;
+        }
+    }
+    Some(format_line_detailed(line, name, is_self, link, detailed))
+}
+
+/// [`format_line`]'s body once the suppression fork is out of the way.
+fn format_line_detailed(
+    line: &RollLine,
+    name: Option<&str>,
+    is_self: bool,
+    link: &str,
+    detailed: bool,
+) -> String {
     match line {
         // A real dice result (roll_number in 1..=100) — checked BEFORE the vote shapes.
         RollLine::Announce(p) if p.is_dice() => {
@@ -302,6 +339,25 @@ fn format_line(line: &RollLine, name: Option<&str>, is_self: bool, link: &str) -
             }
             (false, _) => format!("{} passed on: {link}", name.unwrap_or_default()),
         },
+        // LOOT_ROLL_*_NO_SPAM_NEED / _GREED (l.2629/2630, l.2632/2633) — the detail-off winner
+        // line, which is the ONLY line that roll produces, so it carries the number the suppressed
+        // dice line would have shown. The grey is the GlobalString's own `|cff818181`.
+        RollLine::Won(p) if !detailed => {
+            let kind = if p.roll_type == roll_vote::NEED {
+                "Need"
+            } else {
+                "Greed"
+            };
+            let n = p.roll_number;
+            if is_self {
+                format!("You won: {link} |cff818181({kind} - {n})|r")
+            } else {
+                format!(
+                    "{} won: {link} |cff818181({kind} - {n})|r",
+                    name.unwrap_or_default()
+                )
+            }
+        }
         // LOOT_ROLL_YOU_WON (l.2631) / LOOT_ROLL_WON (l.2628).
         RollLine::Won(_) if is_self => format!("You won: {link}"),
         RollLine::Won(_) => format!("{} won: {link}", name.unwrap_or_default()),
@@ -319,6 +375,7 @@ fn render(
     names: &mut NameCache,
     commands: &NetCommands,
     rolls: crate::items::RollCatalogs,
+    detailed: bool,
 ) -> Option<String> {
     // Every line embeds the item link, so the template must be in hand before any of them render.
     let (looted_item, roll, roller) = match line {
@@ -356,7 +413,9 @@ fn render(
         _ => None,
     };
 
-    Some(format_line(line, name.as_deref(), is_self, &link))
+    // Never `None` here: the suppression fork is the caller's (a suppressed line must be DROPPED,
+    // where a `None` from this function means "retry, a name is still in flight").
+    format_line(line, name.as_deref(), is_self, &link, detailed)
 }
 
 /// Surface the queued announcement lines in the chat window once their names resolve, colored
@@ -371,11 +430,20 @@ fn drain_lines(
     commands: &NetCommands,
     chat: &mut ChatLog,
     catalogs: crate::items::RollCatalogs,
+    detailed: bool,
 ) {
     let pending = std::mem::take(&mut rolls.pending);
     let mut still = Vec::new();
     for mut p in pending {
-        match render(&p.line, self_guid, items, names, commands, catalogs) {
+        // Detail off drops the vote/dice lines outright — and *drops* them, never retries them,
+        // which is why the fork is here and not inside `render`'s `None` (that one means "a name
+        // is still in flight, come back next frame").
+        if !detailed && matches!(p.line, RollLine::Announce(_)) {
+            continue;
+        }
+        match render(
+            &p.line, self_guid, items, names, commands, catalogs, detailed,
+        ) {
             Some(text) => chat.push_event(ChatEvent::text_only(ChatEventKind::Loot, text)),
             None => {
                 p.tries += 1;
@@ -482,6 +550,9 @@ fn feed_loot_rolls(
     // The random-suffix roll's catalogs (1547): the rolled name the frame and its chat lines show.
     props: Option<Res<crate::items::RandomProperties>>,
     enchants: Option<Res<crate::items::Enchants>>,
+    // `showLootSpam` (1589) — read here, at the moment each line is composed, exactly where the
+    // reference reads it (`0x61ba3a`/`0x61bafe`/`0x61c0b9`, all three inside the composers).
+    loot: Res<crate::ui_loot::LootConfig>,
 ) {
     rolls.tick(time.delta().as_millis() as u32);
 
@@ -501,6 +572,7 @@ fn feed_loot_rolls(
         &commands,
         &mut chat,
         catalogs,
+        loot.show_loot_spam,
     );
 
     // The snapshot goes in FIRST — a GroupLootFrame claimed by the START_LOOT_ROLL below reads its
@@ -666,10 +738,10 @@ mod tests {
             ),
         ];
         for (p, name, is_self, expect) in cases {
-            let got = format_line(&RollLine::Announce(*p), *name, *is_self, LINK);
+            let got = format_line(&RollLine::Announce(*p), *name, *is_self, LINK, true);
             assert_eq!(
                 got,
-                expect.replace("{L}", LINK),
+                Some(expect.replace("{L}", LINK)),
                 "roll_number {} roll_type {} name {name:?} is_self {is_self}",
                 p.roll_number,
                 p.roll_type
@@ -690,7 +762,9 @@ mod tests {
                 Some("Sam"),
                 true, // is_self
                 LINK,
-            );
+                true,
+            )
+            .expect("detail on emits the dice line");
             assert!(
                 got.ends_with("by Sam"),
                 "our own roll must name us third-person: {got}"
@@ -711,13 +785,17 @@ mod tests {
             Some("Bob"),
             false,
             LINK,
-        );
+            true,
+        )
+        .unwrap();
         let dice = format_line(
             &RollLine::Announce(announce(1, 57, roll_vote::GREED)),
             Some("Bob"),
             false,
             LINK,
-        );
+            true,
+        )
+        .unwrap();
         assert_ne!(vote, dice);
         assert!(vote.contains("has selected Greed"), "{vote}");
         assert!(dice.contains("Greed Roll - 57"), "{dice}");
@@ -735,13 +813,13 @@ mod tests {
             roll_type: roll_vote::NEED,
         };
         assert_eq!(
-            format_line(&RollLine::Won(won), Some("Bob"), false, LINK),
-            format!("Bob won: {LINK}")
+            format_line(&RollLine::Won(won), Some("Bob"), false, LINK, true),
+            Some(format!("Bob won: {LINK}"))
         );
         // LOOT_ROLL_YOU_WON *does* exist and is referenced — the won line keeps its self split.
         assert_eq!(
-            format_line(&RollLine::Won(won), None, true, LINK),
-            format!("You won: {LINK}")
+            format_line(&RollLine::Won(won), None, true, LINK, true),
+            Some(format!("You won: {LINK}"))
         );
         let passed = LootAllPassed {
             looted_target: 0xAA,
@@ -751,8 +829,73 @@ mod tests {
         };
         // Names nobody — the `name`/`is_self` arguments are irrelevant on this arm.
         assert_eq!(
-            format_line(&RollLine::AllPassed(passed), Some("Bob"), false, LINK),
-            format!("Everyone passed on: {LINK}")
+            format_line(&RollLine::AllPassed(passed), Some("Bob"), false, LINK, true),
+            Some(format!("Everyone passed on: {LINK}"))
+        );
+    }
+
+    /// `showLootSpam == 0` — the whole gated flow 0594 §3 recorded and 1589 finally wired, all
+    /// three of its claims in one place (wow-re `lootroll-chat-and-lifecycle.md` §4).
+    #[test]
+    fn detail_off_suppresses_the_roll_lines_and_reshapes_the_winner() {
+        // 1 · every vote and every dice line is dropped outright.
+        for p in [
+            announce(1, 128, roll_vote::NEED),
+            announce(1, 128, roll_vote::GREED),
+            announce(1, 128, roll_vote::PASS),
+            announce(1, 57, roll_vote::NEED),
+            announce(1, 57, roll_vote::GREED),
+        ] {
+            assert_eq!(
+                format_line(&RollLine::Announce(p), Some("Bob"), false, LINK, false),
+                None,
+                "roll_number {} roll_type {}",
+                p.roll_number,
+                p.roll_type
+            );
+        }
+
+        // 2 · the WINNER line grows the roll number it would otherwise have left to the dice
+        // line, and its NEED/GREED word is decided by `rollType == 1`.
+        let mut won = LootRollWon {
+            looted_target: 0xAA,
+            item_slot: 0,
+            item_id: 17182,
+            random_property_id: 0,
+            winner: 1,
+            roll_number: 84,
+            roll_type: roll_vote::NEED,
+        };
+        assert_eq!(
+            format_line(&RollLine::Won(won), Some("Bob"), false, LINK, false),
+            Some(format!("Bob won: {LINK} |cff818181(Need - 84)|r"))
+        );
+        assert_eq!(
+            format_line(&RollLine::Won(won), None, true, LINK, false),
+            Some(format!("You won: {LINK} |cff818181(Need - 84)|r"))
+        );
+        won.roll_type = roll_vote::GREED;
+        assert_eq!(
+            format_line(&RollLine::Won(won), Some("Bob"), false, LINK, false),
+            Some(format!("Bob won: {LINK} |cff818181(Greed - 84)|r"))
+        );
+        // "anything that is not need renders as greed" — the discriminator is `== 1`, not a
+        // two-way match, so a PASS-typed win (server bookkeeping we never expect) reads Greed.
+        won.roll_type = roll_vote::PASS;
+        assert!(format_line(&RollLine::Won(won), None, true, LINK, false)
+            .unwrap()
+            .contains("(Greed - 84)"));
+
+        // 3 · ALL_PASSED is not gated on either side — `0x61b640` reads the CVar not at all.
+        let passed = LootAllPassed {
+            looted_target: 0xAA,
+            item_slot: 0,
+            item_id: 17182,
+            random_property_id: 0,
+        };
+        assert_eq!(
+            format_line(&RollLine::AllPassed(passed), None, false, LINK, false),
+            Some(format!("Everyone passed on: {LINK}"))
         );
     }
 

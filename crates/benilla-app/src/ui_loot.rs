@@ -320,9 +320,30 @@ pub(crate) struct LootErrors(pub Vec<u8>);
 /// every row itself at the open edge. A held SHIFT inverts the setting — era's
 /// `AUTOLOOTTOGGLE` modified click, default SHIFT (Bindings_Vanilla.xml l.1467), the same
 /// gesture that WAS vanilla's whole auto-loot.
-#[derive(Resource, Default)]
+///
+/// `show_loot_spam` is 1.12's own `showLootSpam` — the *Detailed Loot Information* checkbox, whose
+/// subject is **group loot rolls**, not loot messages generally (decision 1589, the Chat page).
+/// It rides here rather than on [`crate::ui_loot_roll`] because it is one loot knob among the
+/// loot knobs and `cvars::KnobParams` fetches this resource already. VERIFIED at the bytes (wow-re
+/// `system/object-layer/scratch/lootroll-chat-and-lifecycle.md` §4): the CVar is `0xb4e2bc`,
+/// registered at `0x48fd1c` with default `"1"` and flags 5, and a byte census over the whole
+/// binary finds exactly four references — one writer and three readers, all three inside the
+/// loot-roll line composers.
+#[derive(Resource)]
 pub(crate) struct LootConfig {
     pub(crate) auto_loot: bool,
+    pub(crate) show_loot_spam: bool,
+}
+
+impl Default for LootConfig {
+    fn default() -> Self {
+        Self {
+            // No 1.12 CVar; era's registrar default is off (see the doc above).
+            auto_loot: false,
+            // The reference's registered `"1"` — detail on, which is 1.12's out-of-box chat.
+            show_loot_spam: true,
+        }
+    }
 }
 
 /// The client-local **loot-target latch** — the mirror of the real client's `[player+0x1d28]`

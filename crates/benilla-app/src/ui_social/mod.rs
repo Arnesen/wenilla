@@ -122,6 +122,18 @@ impl SocialState {
         guid != 0 && self.ignores.contains(&guid)
     }
 
+    /// Is `guid` on the FRIEND list? The reference's `FriendList::FindFriendSlot 0x5ae810` —
+    /// base `this+8`, stride `0x20`, bound `0x32`, the same triple `GetNumFriends 0x5ae490`
+    /// counts over (§5, wow-re `system/object-layer/scratch/guild-signon-cvar-gate.md`).
+    ///
+    /// Its one consumer is the guild sign-on/sign-off line's fourth conjunct, and its purpose is
+    /// **de-duplication, not suppression**: `SMSG_FRIEND_STATUS` emits the same two chat ids with
+    /// no CVar gate of its own, so a guildmate who is also a friend would otherwise be announced
+    /// twice. [`crate::ui_guild`]'s line path is where that matters.
+    pub(crate) fn is_friend(&self, guid: u64) -> bool {
+        guid != 0 && self.friends.iter().any(|f| f.guid == guid)
+    }
+
     /// `SMSG_FRIEND_LIST` — replace the list wholesale (it is never a delta).
     fn apply_friend_list(&mut self, friends: Vec<FriendEntry>) {
         self.friends = friends;

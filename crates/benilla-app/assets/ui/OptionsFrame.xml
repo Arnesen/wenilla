@@ -194,7 +194,7 @@
         -- name suffixes; the visible label doubles as the page title (the era does the same —
         -- Settings.RegisterCategory names both from one string).
         OPTIONS_CATEGORY_KEYS = {
-            "Controls", "Interface", "ActionBars", "Combat", "Social", "Keybindings", "Nameplates",
+            "Controls", "Interface", "ActionBars", "Combat", "Chat", "Keybindings", "Nameplates",
             "Graphics", "Audio",
         }
 
@@ -639,10 +639,29 @@
                 "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch",
                 "RowNewbieTips",
             },
-            -- The two chat-bubble switches (decision 1139), in the reference's relative order —
-            -- its Advanced Options chat chain runs CheckButton37 → 46 (Loot Spam, no knob of ours)
-            -- → 38, so ours are adjacent with that gap named rather than silently closed.
-            Social = { "RowChatBubbles", "RowPartyChatBubbles" },
+            -- 1.12's Advanced Options **Chat** box (decision 1589, B246 — "no chat section in
+            -- options"). The page was called `Social` and held exactly the two chat-bubble
+            -- switches 1139 put on it; it is the reference's own `CHAT_LABEL` box now, and grew
+            -- into it. Order is the reference's own anchor chain (UIOptionsFrame.xml l.751-840:
+            -- CheckButton 7 → 8 → 13 → 18 → 37 → 46 → 38 → 51 → 68), with the rows we have no
+            -- mechanism for skipped rather than stubbed:
+            --   · 7  Simple Chat        — needs FCF_Set_SimpleChat's re-layout (0288 §2)
+            --   · 8  Lock Chat Settings — needs drag/undock/resize to lock (0288 §2)
+            --   · 51 Auto-join Guild Recruitment Channel — carries **no cvar, uvar or func in the
+            --        reference either** (UIOptionsFrame.lua l.51 is a bare `{ index = 51 }`), so
+            --        it is inert there; a working row here would be an invention, not a fix
+            --   · 68 Disable Spam Filter — benilla filters no chat text. Unlike 51 this is a REAL
+            --        omission and not an inert row: `spamFilter` is registered "1" at `0x402e8e`
+            --        with a change callback, and its one reader is the chat chokepoint `0x49a870`,
+            --        which drops a `CHAT_MSG_FILTERED` line on a word-list hit unless the type is
+            --        whisper (§5, wow-re `system/ui/scratch/spam-filter-cvar.md`). The row lands
+            --        with the filter.
+            -- 1139's note about the 37 → 46 → 38 gap is closed by this record: 46 is Loot Spam,
+            -- and it has a knob now.
+            Chat = {
+                "RowGuildMemberAlert", "RowRemoveChatDelay", "RowChatBubbles", "RowLootSpam",
+                "RowPartyChatBubbles",
+            },
             -- 1.12's Advanced Options "Action Bars" group, whole (decision 1500 completing 1136).
             -- Its six rows, the four bar toggles then the grid switch then the lock. That is the
             -- DIRECTOR's order, not the reference's: 1.12's box is two columns and leads with the
@@ -1793,12 +1812,12 @@
                         <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowActionBars" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Combat", "Combat")</OnLoad></Scripts>
                     </Button>
-                    <Button name="$parentRowSocial" inherits="OptionsCategoryRowTemplate">
+                    <Button name="$parentRowChat" inherits="OptionsCategoryRowTemplate">
                         <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowCombat" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Social", "Social")</OnLoad></Scripts>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Chat", "Chat")</OnLoad></Scripts>
                     </Button>
                     <Button name="$parentRowKeybindings" inherits="OptionsCategoryRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowSocial" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowChat" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Keybindings", "Keybindings")</OnLoad></Scripts>
                     </Button>
                     <!-- Nameplates — the era Gameplay group's own last row (NAMEPLATE_OPTIONS_LABEL,
@@ -2783,26 +2802,87 @@
                                      in the reference's relative order. Neither is a dependency child:
                                      the client gates party lines on their own CVar, so party bubbles
                                      survive turning say/yell bubbles off. -->
-                                <Frame name="$parentSocial" hidden="true">
+                                <!-- The Chat page (decision 1589 — B246, "no chat section in
+                                     options"). 1.12's Advanced Options CHAT_LABEL box, in its own
+                                     anchor-chain order; which of its nine rows we ship and why the
+                                     other five are absent is the OPTIONS_PAGE_ROWS entry's note.
+                                     The window's *look* — background tint, opacity, font size —
+                                     is deliberately NOT here: the reference puts it on the chat
+                                     tab's right-click menu (ChatFrame.xml), and inventing a second
+                                     home for it would be a divergence, not a convenience. -->
+                                <Frame name="$parentChat" hidden="true">
                                     <Anchors>
                                         <Anchor point="TOPLEFT"/>
                                         <Anchor point="BOTTOMRIGHT"/>
                                     </Anchors>
                                     <Frames>
-                                        <Frame name="$parentRowChatBubbles" inherits="OptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowGuildMemberAlert" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                <!-- Registered "0" — the one row on this page that
+                                                     ships its feature OFF, and byte-read rather
+                                                     than chosen (cvars.rs cites the site). No
+                                                     applyFunc: the guild sign-on handler reads the
+                                                     knob as each event lands. -->
+                                                OptionsRow_OnLoad(self, "guildMemberNotify",
+                                                    "Guild Member Alert",
+                                                    "OPTION_TOOLTIP_GUILDMEMBER_ALERT")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRemoveChatDelay" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGuildMemberAlert" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGuildMemberAlert" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                <!-- A uvar, like the reference's (CheckButton18).
+                                                     Its applyFunc is the whole feature: the two
+                                                     fade constants live in ChatFrame.xml and
+                                                     SetChatMouseOverDelay is what moves them. The
+                                                     row needs one because nothing re-reads the
+                                                     global per frame — the fade reads the
+                                                     constants, and only this writes them. -->
+                                                OptionsGlobalRow_OnLoad(self, "REMOVE_CHAT_DELAY",
+                                                    "Remove Chat Hover Delay",
+                                                    "OPTION_TOOLTIP_REMOVE_CHAT_DELAY")
+                                                self.applyFunc = ChatFrame_ApplyMouseOverDelay
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowChatBubbles" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRemoveChatDelay" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRemoveChatDelay" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "ChatBubbles",
                                                     "Show Chat Bubbles", "OPTION_TOOLTIP_CHAT_BUBBLES")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowPartyChatBubbles" inherits="OptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowLootSpam" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowChatBubbles" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowChatBubbles" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                <!-- "Detailed Loot Information" is the label; the
+                                                     CVar is `showLootSpam` and it is about GROUP
+                                                     LOOT ROLLS, not about loot messages generally
+                                                     (its own tooltip: "Uncheck this to hide
+                                                     individual loot roll messages and only show
+                                                     the winner"). No applyFunc: the loot-roll
+                                                     lines read the CVar as each one is composed. -->
+                                                OptionsRow_OnLoad(self, "showLootSpam",
+                                                    "Detailed Loot Information",
+                                                    "OPTION_TOOLTIP_SHOW_LOOT_SPAM")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowPartyChatBubbles" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLootSpam" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLootSpam" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "ChatBubblesParty",
@@ -3153,10 +3233,10 @@
                                         getglobal(self:GetName() .. "Label"):SetText("Interface")
                                     </OnLoad></Scripts>
                                 </Button>
-                                <Button name="$parentSearchHeadSocial" inherits="OptionsSearchHeadTemplate">
+                                <Button name="$parentSearchHeadChat" inherits="OptionsSearchHeadTemplate">
                                     <Scripts><OnLoad>
-                                        self.categoryKey = "Social"
-                                        getglobal(self:GetName() .. "Label"):SetText("Social")
+                                        self.categoryKey = "Chat"
+                                        getglobal(self:GetName() .. "Label"):SetText("Chat")
                                     </OnLoad></Scripts>
                                 </Button>
                                 <Button name="$parentSearchHeadNameplates" inherits="OptionsSearchHeadTemplate">

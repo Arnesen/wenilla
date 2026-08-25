@@ -785,8 +785,11 @@ pub(super) fn attach_entity_visuals(
                         placement,
                         particles::EmitterFrames {
                             owner: Some(owner),
-                            // A unit's OWN model is not an attached model (`[model+0x17c]` = 0).
-                            // The cloud anchors at the unit; bones compose births only.
+                            // The cloud SORTS at the unit; bones compose births only. Since 1585
+                            // a world-mode store is frozen at birth, so neither can move a live
+                            // particle. (`[model+0x17c]` is the TRANSPORT matrix — 1591 — so it is
+                            // 0 for a unit on foot and this is not the attached/unattached split
+                            // it used to claim to be.)
                             anchor: Some(entity),
                             // The unit's model going away IS this emitter's model going away
                             // (stream-out, a visual rebuild) — free the pool with it (0826).

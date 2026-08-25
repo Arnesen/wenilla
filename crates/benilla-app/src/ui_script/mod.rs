@@ -769,6 +769,12 @@ mod group_loot_tests;
 #[cfg(test)]
 mod chat_tests;
 
+/// The chat tab's options menu, end to end (decision 1589 / B246) — its own file because it needs
+/// the whole dropdown + colour-picker stack under `ChatFrame.xml`, where `chat_tests` deliberately
+/// runs on the window alone.
+#[cfg(test)]
+mod chat_options_tests;
+
 #[cfg(test)]
 mod bag_tests;
 #[cfg(test)]

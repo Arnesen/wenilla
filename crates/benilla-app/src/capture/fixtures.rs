@@ -992,6 +992,21 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-options-graphics seed failed: {e}");
             }
         }
+        UiFixture::OptionsChat => {
+            let Some(mut script) = script else {
+                return;
+            };
+            // The Chat page (1589), the page fixtures' posture: the real CVar set, then the live
+            // open path. Its Remove Chat Hover Delay row reads a saved-variable global that
+            // `ChatFrame.xml` declares at file scope, so a hermetic capture sees the shipped "0"
+            // and the row paints unchecked — which is the shipped default, not a missing load.
+            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            if let Err(e) =
+                script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowChat:Click()")
+            {
+                warn!("capture: ui-options-chat seed failed: {e}");
+            }
+        }
         UiFixture::OptionsWorldDetail => {
             let Some(mut script) = script else {
                 return;

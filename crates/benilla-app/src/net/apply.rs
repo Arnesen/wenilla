@@ -226,6 +226,9 @@ pub(super) fn apply_net_updates(
                 // The auctioneer session (decision 1511) — the hello reply opens it, the three
                 // list results fill it, and `crate::ui_auction` feeds it to the window.
                 ResMut<crate::ui_auction::AuctionOpen>,
+                // Guild Member Alert (decision 1589) — the CVar knob the sign-on/sign-off pair's
+                // display condition reads; see `ui_guild::apply::event` for the four conjuncts.
+                Res<crate::ui_guild::GuildMemberNotify>,
             ),
         ),
     ),
@@ -390,6 +393,7 @@ pub(super) fn apply_net_updates(
                 current_map,
                 mut inspect_honor,
                 mut auction_open,
+                guild_notify,
             ),
         ),
     ) = caches;
@@ -1017,10 +1021,17 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::GuildRoster(roster) => crate::ui_guild::apply::roster(&mut guild, roster),
             // The sign-on/sign-off pair's trailing guid exists for exactly one purpose — the
-            // ignore check that suppresses their line — which is why this arm reads `social`.
-            SessionEvent::GuildEvent(notice) => {
-                crate::ui_guild::apply::event(&mut guild, &mut chat_log, &social, notice)
-            }
+            // four-conjunct display condition on their line — which is why this arm reads
+            // `social`, the notify knob and our own guid (decision 1589; the condition and its
+            // byte addresses are on `ui_guild::apply::event`).
+            SessionEvent::GuildEvent(notice) => crate::ui_guild::apply::event(
+                &mut guild,
+                &mut chat_log,
+                &social,
+                &guild_notify,
+                self_guid.0,
+                notice,
+            ),
             SessionEvent::GuildCommandResult(result) => {
                 crate::ui_guild::apply::command_result(&mut guild, &mut chat_log, result)
             }

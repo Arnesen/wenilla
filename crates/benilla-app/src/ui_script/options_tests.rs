@@ -165,7 +165,7 @@ fn clicking_a_row_moves_the_selection_and_the_page_title() {
 ///
 /// This test used to ride a rowless page here to watch Defaults stay disabled, and the stand-in
 /// kept moving as the arc filled pages in — Controls until 0961, Interface until 1136, Social
-/// until 1139. **There is no rowless category left**, which is the milestone rather than a gap;
+/// (now Chat) until 1139. **There is no rowless category left**, which is the milestone rather than a gap;
 /// the guard itself is pinned by `the_defaults_button_is_armed_by_rows_not_by_a_category` below.
 #[test]
 fn the_close_button_hides_the_window() {
@@ -690,6 +690,30 @@ fn interface_harness() -> UiScript {
     harness_on(s)
 }
 
+/// The Chat page's harness (decision 1589), the same posture as `combat_harness`: the **real**
+/// `ChatFrame.xml` ahead of the window, so the *Remove Chat Hover Delay* row captures the same
+/// file-scope `REMOVE_CHAT_DELAY = "0"` and the same `ChatFrame_ApplyMouseOverDelay` it captures in
+/// the client. Its own chain is the manifest's: `UIParent.xml` for the managed bottom stack the
+/// dock sits in, and `GameTooltip.xml` + `UIDropDownMenu.xml` because the tabs' options menus are
+/// dropdown capsules and a tab click reaches `CloseDropDownMenus`.
+fn chat_harness() -> UiScript {
+    let mut s = audio_harness();
+    s.set_screen_size(1024.0, 768.0);
+    load_definers(
+        &s,
+        &[
+            "Fonts.xml",
+            "MoneyFrame.xml",
+            "UiPanels.xml",
+            "UIParent.xml",
+            "GameTooltip.xml",
+            "UIDropDownMenu.xml",
+            "ChatFrame.xml",
+        ],
+    );
+    harness_on(s)
+}
+
 /// The Action Bars page's harness (1136's lock row, 1500's five switches): `ActionBar.xml` declares
 /// `LOCK_ACTIONBAR` and `MultiBars.xml` the four `SHOW_MULTI_ACTIONBAR_*` globals plus
 /// `ALWAYS_SHOW_MULTIBARS` (whose file-scope "0" IS the row's registered default), and both need
@@ -750,12 +774,12 @@ fn the_audio_page_reads_the_cvar_table_on_select() {
 
     // Off to another page: the Audio body goes away with the selection (the swap is what the
     // page loop does, and it is the reason a stale row can never be read from the wrong page).
-    s.run("OptionsFrameCategoryListRowSocial:Click()").unwrap();
+    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
     assert!(!s
         .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySocial:IsVisible()")
+        .eval::<bool>("return OptionsFrameContainerBodyChat:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1901,18 +1925,19 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 22 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
+    // 25 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed Loot
+    // Information + Guild Member Alert are 1589's; Status Bar Text, Mouse Sensitivity
     // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's; Camera Following Style
     // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 6 (3 from
-    // 1136, Buff Durations 1139, the target-of-target pair 1576) and the Action Bars page's 2 (the
+    // 1136, Buff Durations 1139, the target-of-target pair 1576), the Action Bars page's 2 (the
     // lock 1136, Always Show
-    // ActionBars 1500) + 6 API rows (the Interface page's Show Cloak / Show Helm, 1472; the Action
+    // ActionBars 1500) and the Chat page's 1 (Remove Chat Hover Delay, 1589) + 6 API rows (the Interface page's Show Cloak / Show Helm, 1472; the Action
     // Bars page's four multibar switches, 1500) — which is the point of counting here rather than
     // per page: the third store's rows are held to the same "the key is 1.12's own and it resolves"
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    assert_eq!(checked, 50, "every tipped row carries a live 1.12 key");
+    assert_eq!(checked, 53, "every tipped row carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec![
@@ -1967,7 +1992,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
         "Combat",
         "Interface",
         "ActionBars",
-        "Social",
+        "Chat",
     ] {
         s.run(&format!("OptionsFrameCategoryListRow{page}:Click()"))
             .unwrap();
@@ -2008,14 +2033,15 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // 22 of the 23 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
+    // 25 of the 26 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed
+    // Loot Information + Guild Member Alert 1589's; Status Bar Text, Mouse Sensitivity and
     // Max Camera Distance 1140's; Vertical Sync 1394's; Camera Following Style 1493's; Terrain
     // Distance 1513's), plus the Combat page's 14 saved-variable rows (1134), the Interface
     // page's 6 (1136, + Buff Durations 1139, + the target-of-target pair 1576), Action Bars' 2
     // (the lock 1136, Always Show
-    // ActionBars 1500) and 6 API rows (Show Cloak / Show Helm, 1472; the four multibar switches,
-    // 1500).
-    assert_eq!(raised, 50, "every row but Auto Loot has a 1.12 description");
+    // ActionBars 1500), the Chat page's 1 (Remove Chat Hover Delay, 1589) and 6 API rows (Show
+    // Cloak / Show Helm, 1472; the four multibar switches, 1500).
+    assert_eq!(raised, 53, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2778,9 +2804,10 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
     );
 }
 
-/// **Every category in this window now leads somewhere** (decision 1139). Social was the last one
+/// **Every category in this window now leads somewhere** (decision 1139). Chat — which was called
+/// `Social` until 1589 — was the last one
 /// that opened onto an empty page, and the arc that started at 1134 — rows over the second store —
-/// closes here: Controls, Interface, Action Bars, Combat, Social, Nameplates, Graphics and Audio
+/// closes here: Controls, Interface, Action Bars, Combat, Chat, Nameplates, Graphics and Audio
 /// all carry rows, and Keybindings runs its own machinery. A category added without a page fails
 /// this, which is the point: the honest tree (0950) is now a property the test holds, not a
 /// promise the reader has to check.
@@ -2830,7 +2857,8 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The **Social page** (decision 1139) — the two chat-bubble switches, and the last category in
+/// The **Chat page**'s two bubble switches (decision 1139; the page was `Social` until 1589 grew
+/// it into 1.12's own `CHAT_LABEL` box) — and the last category in
 /// this window to stop opening onto nothing. Both are CVar rows: `chat_bubble.rs` transcribed the
 /// client's `ChatBubbles`/`ChatBubblesParty` spawn gate faithfully in 0598 and then froze it at a
 /// pair of `const bool`, so this is the action-bar lock's shape again — the knob had to become
@@ -2839,29 +2867,29 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
 /// client gates party lines on their own CVar, which is why party bubbles survive turning
 /// say/yell bubbles off).
 #[test]
-fn the_social_page_toggles_the_chat_bubble_cvars() {
+fn the_chat_page_toggles_the_chat_bubble_cvars() {
     let mut s = audio_harness();
     s.set_cvar_host("ChatBubblesParty", "0");
     let mut s = harness_on(s);
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowSocial:Click()").unwrap();
+    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
 
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySocial:IsVisible()")
+        .eval::<bool>("return OptionsFrameContainerBodyChat:IsVisible()")
         .unwrap());
     assert!(s
         .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
         .unwrap());
     // Read from the table, not from a restated default: bubbles on, party bubbles off.
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySocialRowChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return OptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodySocialRowPartyChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
         .unwrap());
     let _ = s.take_sounds();
 
-    s.run("OptionsFrameContainerBodySocialRowPartyChatBubblesCheck:Click()")
+    s.run("OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
@@ -2872,25 +2900,132 @@ fn the_social_page_toggles_the_chat_bubble_cvars() {
         .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
 
     // Turning say/yell bubbles off writes only its own switch — party keeps the value above.
-    s.run("OptionsFrameContainerBodySocialRowChatBubblesCheck:Click()")
+    s.run("OptionsFrameContainerBodyChatRowChatBubblesCheck:Click()")
         .unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("ChatBubbles".to_string(), "0".to_string())]
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySocialRowPartyChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
         .unwrap());
 
     // Defaults walks the page back to the registered pair — including the ChatBubblesParty "1"
     // that deliberately disagrees with the binary's registered "0" (the director's /p ask, 0598).
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySocialRowChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return OptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySocialRowPartyChatBubblesCheck:GetChecked()")
+        .eval::<bool>("return OptionsFrameContainerBodyChatRowPartyChatBubblesCheck:GetChecked()")
         .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The **Chat page**'s two new rows (decision 1589 — B246, "no chat section in options"), the two
+/// that make it 1.12's `CHAT_LABEL` box rather than a two-row bubble page.
+///
+/// They are deliberately over *different stores*, and that is what this pins: **Remove Chat Hover
+/// Delay** is a saved-variable global with an `applyFunc` (its consumer is a pair of constants
+/// nothing re-reads per frame, so the write alone would change nothing), and **Detailed Loot
+/// Information** is a CVar with none (the loot-roll composer reads it as each line is built —
+/// 1136's rule for when a row needs one, seen from both sides on one page).
+#[test]
+fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
+    let mut s = chat_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowChat:Click()").unwrap();
+    let _ = s.take_sounds();
+    let _ = s.take_cvar_changes();
+
+    // Read: the shipped values, off the two files that declare them — not restated here.
+    assert_eq!(
+        s.eval::<String>("return REMOVE_CHAT_DELAY").unwrap(),
+        "0",
+        "ChatFrame.xml's own file-scope value, and the reference's declared default"
+    );
+    assert!(!s
+        .eval::<bool>("return OptionsFrameContainerBodyChatRowRemoveChatDelayCheck:GetChecked()")
+        .unwrap());
+    assert!(
+        s.eval::<bool>("return OptionsFrameContainerBodyChatRowLootSpamCheck:GetChecked()")
+            .unwrap(),
+        "showLootSpam is registered \"1\" — the binary's own default"
+    );
+
+    // The hover-delay row: the write is the global, and the applyFunc is what makes it mean
+    // something. Both fade constants collapse to zero — the reference's SetChatMouseOverDelay.
+    assert_eq!(
+        s.eval::<(f64, f64)>("return CHAT_TAB_SHOW_DELAY, CHAT_FRAME_FADE_TIME")
+            .unwrap(),
+        (0.2, 0.15)
+    );
+    s.run("OptionsFrameContainerBodyChatRowRemoveChatDelayCheck:Click()")
+        .unwrap();
+    assert_eq!(s.eval::<String>("return REMOVE_CHAT_DELAY").unwrap(), "1");
+    assert_eq!(
+        s.eval::<(f64, f64)>("return CHAT_TAB_SHOW_DELAY, CHAT_FRAME_FADE_TIME")
+            .unwrap(),
+        (0.0, 0.0),
+        "the box appears the instant the cursor crosses it"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "a saved-variable row reaches the CVar table not at all"
+    );
+
+    // …and back, which is the half a one-way applyFunc would break.
+    s.run("OptionsFrameContainerBodyChatRowRemoveChatDelayCheck:Click()")
+        .unwrap();
+    assert_eq!(s.eval::<String>("return REMOVE_CHAT_DELAY").unwrap(), "0");
+    assert_eq!(
+        s.eval::<(f64, f64)>("return CHAT_TAB_SHOW_DELAY, CHAT_FRAME_FADE_TIME")
+            .unwrap(),
+        (0.2, 0.15)
+    );
+
+    // The loot-spam row: a plain CVar write, no applyFunc, nothing else on the page moved.
+    s.run("OptionsFrameContainerBodyChatRowLootSpamCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("showLootSpam".to_string(), "0".to_string())]
+    );
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodyChatRowChatBubblesCheck:GetChecked()")
+        .unwrap());
+
+    // Defaults walks the page back across BOTH stores in one click.
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("showLootSpam".to_string(), "1".to_string())],
+        "only the row that had moved is written back"
+    );
+    assert_eq!(s.eval::<String>("return REMOVE_CHAT_DELAY").unwrap(), "0");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The saved *Remove Chat Hover Delay* survives a restart — the `applyFunc` runs at
+/// `VARIABLES_LOADED`, which is the only thing that can re-collapse the fade constants after a
+/// fresh VM has re-run `ChatFrame.xml`'s file-scope `"0"`.
+#[test]
+fn a_saved_hover_delay_is_applied_when_the_variables_land() {
+    let s = chat_harness();
+    // What the saved-variables chunk does: assign the global, then the window's VARIABLES_LOADED.
+    s.run("REMOVE_CHAT_DELAY = \"1\"").unwrap();
+    assert_eq!(
+        s.eval::<(f64, f64)>("return CHAT_TAB_SHOW_DELAY, CHAT_FRAME_FADE_TIME")
+            .unwrap(),
+        (0.2, 0.15),
+        "the bare assignment changes nothing on its own — that is why the row has an applyFunc"
+    );
+    s.run("OptionsFrame_ApplySavedSettings()").unwrap();
+    assert_eq!(
+        s.eval::<(f64, f64)>("return CHAT_TAB_SHOW_DELAY, CHAT_FRAME_FADE_TIME")
+            .unwrap(),
+        (0.0, 0.0)
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

@@ -86,7 +86,7 @@ use benilla_assets::{AssetSet, WorldAssets};
 use benilla_world::view::WorldCamera;
 
 /// The two CVars (registrar `0x603280`), host side. **Registered knobs since decision 1139** —
-/// they were a pair of `const bool` from 0598 until the options window had a Social page to put
+/// they were a pair of `const bool` from 0598 until the options window had a page to put
 /// them on, which is exactly the shape 1134 calls a row over a frozen gate. The defaults are the
 /// values that were frozen: `ChatBubbles` the reference's own "1"; `ChatBubblesParty` flipped ON
 /// against the binary's "0" (the director's ask: `/p` bubbles), the same deliberate deviation
@@ -271,7 +271,7 @@ pub(crate) struct BubbleQueue(Vec<(u64, ChatEventKind, String)>);
 impl BubbleQueue {
     /// Queue a routed wire line for a bubble. Drops non-bubbling kinds, disabled CVars, and
     /// senderless lines here; the live-unit/range/plate gates run in the driver. The switch is
-    /// read at PUSH time, so a Social-page click takes the very next line either way.
+    /// read at PUSH time, so a Chat-page click takes the very next line either way.
     pub(crate) fn push(
         &mut self,
         cfg: &BubbleConfig,

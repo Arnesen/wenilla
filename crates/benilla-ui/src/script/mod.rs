@@ -152,6 +152,7 @@ pub use char_stats::{
     SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_send::ChatSend;
+pub use chat_window::ChatWindowLook;
 pub use container::{
     ContainerMove, ContainerSlot, ContainerState, EnchantView, RandomPropertyView, UiCursorMode,
 };

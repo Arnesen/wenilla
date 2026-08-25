@@ -162,6 +162,25 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // registers "0" — the director's `/p` ask, mirrored from BubbleConfig::default().
     ("ChatBubbles", "1"),
     ("ChatBubblesParty", "1"),
+    // *Detailed Loot Information* (1589, the Chat page) — 1.12's `showLootSpam`, whose subject is
+    // group LOOT ROLLS (its own tooltip: "Uncheck this to hide individual loot roll messages and
+    // only show the winner"). Registered `"1"`, **byte-read**: wow-re's census of `0xb4e2bc`
+    // (`lootroll-chat-and-lifecycle.md` §4) has the register site at `0x48fd1c`, name `0x8430a0`,
+    // default string `0x82e748` = "1", **category** 5 — and exactly four references to the global,
+    // one writer and three readers, all in the roll-line composers. The knob is
+    // [`crate::ui_loot::LootConfig::show_loot_spam`], welded to that default below.
+    ("showLootSpam", "1"),
+    // *Guild Member Alert* (1589, the Chat page) — 1.12's `guildMemberNotify`, whose registered
+    // help string says what it does: "Receive notification when guild members log on/off".
+    //
+    // Registered **`"0"`** — this is one of the few rows that ships a feature OFF, and it is
+    // byte-read rather than chosen: the register site `0x5e24c7` pushes default `0x82e570` = "0"
+    // (§5, wow-re `system/object-layer/scratch/guild-signon-cvar-gate.md`). A stock 1.12 client is
+    // silent when a guildmate logs in, and a whole-image census of the record global `0xc4d3c4`
+    // finds exactly two readers, both inside `SMSG_GUILD_EVENT`'s handler. The knob is
+    // [`crate::ui_guild::GuildMemberNotify`]; the other three conjuncts of the line's display
+    // condition live on `ui_guild::apply::event`.
+    ("guildMemberNotify", "0"),
     // The minimap's two zoom indices (1131). Byte-verified 1.12 CVars, both registered `"3"`
     // (wow-re, at the `RegisterCVar 0x63db90` argument slot). No options row drives these — the
     // +/- buttons on the minimap do, through `Minimap:SetZoom`, exactly as in the reference, where
@@ -290,6 +309,7 @@ pub(crate) struct KnobParams<'w> {
     follow: ResMut<'w, FollowConfig>,
     video: ResMut<'w, VideoConfig>,
     pane_rate: ResMut<'w, PaneRate>,
+    guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
 }
 
 impl KnobParams<'_> {
@@ -317,6 +337,7 @@ impl KnobParams<'_> {
             follow: &mut self.follow,
             video: &mut self.video,
             pane_rate: &mut self.pane_rate,
+            guild_notify: &mut self.guild_notify,
         }
     }
 }
@@ -339,6 +360,7 @@ struct Knobs<'a> {
     follow: &'a mut FollowConfig,
     video: &'a mut VideoConfig,
     pane_rate: &'a mut PaneRate,
+    guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -393,6 +415,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // The two bubble switches (1139) — flags, like every other pair here.
         "chatbubbles" => knobs.bubbles.all = v != 0.0,
         "chatbubblesparty" => knobs.bubbles.party = v != 0.0,
+        // The loot-roll detail switch (1589) — a flag over the roll-line composer's two shapes.
+        "showlootspam" => knobs.loot.show_loot_spam = v != 0.0,
+        // Guild Member Alert (1589) — conjunct 2 of the sign-on/sign-off line's condition.
+        "guildmembernotify" => knobs.guild_notify.0 = v != 0.0,
         // The panel's 0/1/2 lands as the density multiplier ×1/×2/×3; the clamp is the 1.12
         // slider's own range (an off-grid hand-edit rides between stops, like every slider).
         "worlddetail" => knobs.clutter.density = v.clamp(0.0, 2.0) + 1.0,
@@ -514,6 +540,7 @@ fn sync_cvars(
             follow,
             video,
             pane_rate,
+            guild_notify,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -529,7 +556,7 @@ fn sync_cvars(
         );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 31] = [
+        let session: [(&str, String); 33] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -552,6 +579,8 @@ fn sync_cvars(
             ),
             ("cameraYawSmoothSpeed", follow.yaw_speed.to_string()),
             ("autoLootDefault", flag(loot.auto_loot)),
+            ("showLootSpam", flag(loot.show_loot_spam)),
+            ("guildMemberNotify", flag(guild_notify.0)),
             ("UnitNamePlayer", flag(names.player)),
             ("UnitNameNPC", flag(names.npc)),
             ("UnitNameOwn", flag(names.own)),
@@ -782,6 +811,18 @@ mod tests {
         assert_eq!(d["cameraYawSmoothSpeed"], follow.yaw_speed);
         assert_eq!(FollowStyle::default(), FollowStyle::Smart);
         assert_eq!(d["autoLootDefault"] != 0.0, LootConfig::default().auto_loot);
+        // The roll-detail switch (1589) welds to the same knob's default — and that default IS
+        // the binary's registered "1", so this row agrees with the reference on both sides.
+        assert_eq!(
+            d["showLootSpam"] != 0.0,
+            LootConfig::default().show_loot_spam
+        );
+        // …and the one row that ships a feature OFF, byte-read at `0x5e24c7` (§5).
+        assert_eq!(
+            d["guildMemberNotify"] != 0.0,
+            crate::ui_guild::GuildMemberNotify::default().0
+        );
+        assert_eq!(d["guildMemberNotify"], 0.0, "the binary registers \"0\"");
         // The name trio (0992) welds to NameConfig's defaults the same way.
         let names = NameConfig::default();
         assert_eq!(d["UnitNamePlayer"] != 0.0, names.player);
@@ -837,6 +878,7 @@ mod tests {
         let mut follow = FollowConfig::default();
         let mut video = VideoConfig::default();
         let mut pane_rate = PaneRate::default();
+        let mut guild_notify = crate::ui_guild::GuildMemberNotify::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -853,6 +895,7 @@ mod tests {
             follow: &mut follow,
             video: &mut video,
             pane_rate: &mut pane_rate,
+            guild_notify: &mut guild_notify,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -902,6 +945,11 @@ mod tests {
         assert_eq!(knobs.zoom.max, 30.0);
         assert!(apply_to_knobs("autoLootDefault", "1", &mut knobs));
         assert!(knobs.loot.auto_loot);
+        assert!(apply_to_knobs("showLootSpam", "0", &mut knobs));
+        assert!(!knobs.loot.show_loot_spam);
+        // Guild Member Alert (1589) — the row that ships OFF, so its ON is the interesting write.
+        assert!(apply_to_knobs("guildMemberNotify", "1", &mut knobs));
+        assert!(knobs.guild_notify.0);
         // The name trio lands on its gates (0992).
         assert!(apply_to_knobs("UnitNameNPC", "0", &mut knobs));
         assert!(!knobs.names.npc);
@@ -1002,6 +1050,7 @@ mod tests {
             .init_resource::<FollowConfig>()
             .init_resource::<VideoConfig>()
             .init_resource::<PaneRate>()
+            .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
 
@@ -1074,6 +1123,7 @@ mod tests {
             .init_resource::<FollowConfig>()
             .init_resource::<VideoConfig>()
             .init_resource::<PaneRate>()
+            .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app.update();

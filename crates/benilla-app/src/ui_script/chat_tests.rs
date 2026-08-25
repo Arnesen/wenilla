@@ -28,6 +28,14 @@ fn load_xml(s: &UiScript, file: &str) {
 fn chat_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
     load_xml(&s, "Fonts.xml");
+    // GameTooltip.xml + UIDropDownMenu.xml are real RUNTIME dependencies of the chat tabs since
+    // decision 1589: a left click closes any open menu (`CloseDropDownMenus`, the reference's own
+    // first move in `FCF_Tab_OnClick`) and a right click opens the window's options menu.
+    // `benilla.toc` already orders both ahead of ChatFrame.xml (l.60/64 vs l.399); the harness
+    // says so too, rather than a guard that would hide a real ordering fault. (The tooltip file is
+    // the dropdown kit's own dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "ChatFrame.xml");
     s.set_screen_size(1600.0, 900.0);
     s.resolve();

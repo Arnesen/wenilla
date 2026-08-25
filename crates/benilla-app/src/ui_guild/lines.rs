@@ -101,10 +101,20 @@ fn fill_d(template: &str, args: &[u32]) -> String {
 
 /// The line one `SMSG_GUILD_EVENT` prints, if any.
 ///
-/// `ignored` is [`crate::ui_social::SocialState::is_ignored`] on the event's trailing guid — the
-/// reference runs exactly that check on the sign-on/sign-off pair (`0x5ae810`) and prints nothing
-/// for an ignored guildmate. That check is the entire reason those two arms read a guid at all.
-pub(super) fn event_line(notice: &GuildEventNotice, ignored: bool) -> Option<String> {
+/// `announce_signon` is the sign-on/sign-off pair's **whole display condition**, resolved by the
+/// caller because three of its four conjuncts need state this function does not see. See
+/// [`super::apply::event`] for the conjuncts and their byte addresses; what matters here is that
+/// the pair is the only place in this table with a condition at all, and that the guid those two
+/// arms carry exists to answer it.
+///
+/// **This argument used to be `ignored`, and that was a mislabel** (corrected 1589, from a wow-re
+/// §5 dispatched for exactly this): `0x5ae810` is `FriendList::FindFriendSlot`, a **friends-list**
+/// membership test — base `this+8`, stride `0x20`, bound `0x32` — not the ignore-list check at
+/// `this+0x650`. Reading it as "ignore" got the behaviour backwards on both sides: an *ignored*
+/// guildmate was silenced where the reference announces them, and a guildmate who is also a
+/// *friend* was announced twice, because `SMSG_FRIEND_STATUS` says the same thing with no gate of
+/// its own. The repo's own `system/net` ledger had `0x5ae810` right the whole time.
+pub(super) fn event_line(notice: &GuildEventNotice, announce_signon: bool) -> Option<String> {
     let p = |i: usize| notice.params.get(i).map(String::as_str).unwrap_or_default();
     match notice.event {
         guild_event::PROMOTION => Some(fill(ERR_GUILD_PROMOTE_SSS, &[p(0), p(1), p(2)])),
@@ -115,11 +125,13 @@ pub(super) fn event_line(notice: &GuildEventNotice, ignored: bool) -> Option<Str
         guild_event::LEADER_IS => Some(fill(ERR_GUILD_LEADER_IS_S, &[p(0)])),
         guild_event::LEADER_CHANGED => Some(fill(ERR_GUILD_LEADER_CHANGED_SS, &[p(0), p(1)])),
         guild_event::DISBANDED => Some(ERR_GUILD_DISBANDED.to_string()),
-        guild_event::SIGNED_ON if !ignored => Some(fill(ERR_FRIEND_ONLINE_SS, &[p(0), p(0)])),
-        guild_event::SIGNED_OFF if !ignored => Some(fill(ERR_FRIEND_OFFLINE_S, &[p(0)])),
+        guild_event::SIGNED_ON if announce_signon => {
+            Some(fill(ERR_FRIEND_ONLINE_SS, &[p(0), p(0)]))
+        }
+        guild_event::SIGNED_OFF if announce_signon => Some(fill(ERR_FRIEND_OFFLINE_S, &[p(0)])),
         // MOTD's line is the FrameXML's (module doc); UPDATE_RANK_NAME and UPDATE_ROSTER are
-        // silent in the reference too; TABARD_CHANGE, an ignored guildmate's sign-on, and whatever
-        // the server invents past 0x0d show nothing. (The reference's default arm displays catalog
+        // silent in the reference too; TABARD_CHANGE, a sign-on the condition refuses, and
+        // whatever the server invents past 0x0d show nothing. (The reference's default arm displays catalog
         // id 0x69, whose GlobalStrings key is not settled — an unnamed key shows nothing, which is
         // the GlobalStrings data-suppression every other absent key in this client wears.)
         _ => None,
@@ -223,27 +235,36 @@ mod tests {
             params: vec!["Tigole".into(), "Furor".into(), "Officer".into()],
             guid: None,
         };
+        // Every other arm ignores the flag — a promotion prints whatever the condition says.
         assert_eq!(
             event_line(&notice, false).as_deref(),
             Some("Tigole has promoted Furor to Officer.")
         );
     }
 
-    /// The sign-on/sign-off lines are the friend-list ones — and an ignored guildmate's are
-    /// suppressed entirely, which is the whole reason those two arms carry a guid.
+    /// The sign-on/sign-off lines are the friend-list ones, and they are the only two arms in the
+    /// table with a display condition — which is the whole reason those two carry a guid.
+    ///
+    /// **The polarity flipped in 1589** and this test says so on purpose: the flag used to mean
+    /// "ignored" (suppress) and now means "announce", because `0x5ae810` turned out to be a
+    /// friends-list test, not the ignore check the transcription named.
     #[test]
-    fn sign_on_lines_are_the_friend_lines_and_honour_the_ignore_list() {
+    fn sign_on_lines_are_the_friend_lines_and_obey_their_condition() {
         let notice = GuildEventNotice {
             event: guild_event::SIGNED_ON,
             params: vec!["Tigole".into()],
             guid: Some(9),
         };
         assert_eq!(
-            event_line(&notice, false).as_deref(),
+            event_line(&notice, true).as_deref(),
             Some("|Hplayer:Tigole|h[Tigole]|h has come online."),
             "the name fills the link and the bracket both"
         );
-        assert_eq!(event_line(&notice, true), None, "ignored prints nothing");
+        assert_eq!(
+            event_line(&notice, false),
+            None,
+            "a refused condition prints nothing at all"
+        );
     }
 
     /// The MOTD's line belongs to the FrameXML, and the two silent events stay silent.

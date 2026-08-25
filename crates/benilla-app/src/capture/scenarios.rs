@@ -129,6 +129,11 @@ pub(super) enum UiFixture {
     /// read the CVar registration defaults (hermetic capture = no config file), so the pixels
     /// move only with the window, the atlas seam, or a registered default.
     OptionsGraphics,
+    /// The Options window ON THE CHAT PAGE (decision 1589 — B246's "no chat section in options").
+    /// The page 1.12 calls `CHAT_LABEL`: four checkbox rows over three stores at once (a saved
+    /// variable, three CVars), which is what makes it worth a baseline of its own — the row art is
+    /// the Audio page's, but the page is the first to mix stores in one column.
+    OptionsChat,
     /// The Graphics page with the Environment Detail MENU OPEN (0992) — the dropdown-list look
     /// instrument: the shared DropDownList1 at the window's effective scale (the kit's uiScale
     /// correction), three entries with High checked, the kit's dialog backdrop.
@@ -1015,6 +1020,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::OptionsGraphics),
+    },
+    // The same window on the CHAT page (1589). Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-chat`.
+    Scenario {
+        name: "ui-options-chat",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::OptionsChat),
     },
     // The Graphics page with the Environment Detail dropdown OPEN (0992). Run with
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-worlddetail`.

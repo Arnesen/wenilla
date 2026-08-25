@@ -417,7 +417,18 @@ fn channel_notices_compose_by_the_notice_law() {
 /// here is the real window carrying its real `<OnEvent>`.
 fn chat_vm() -> benilla_ui::script::UiScript {
     let mut s = benilla_ui::script::UiScript::new().unwrap();
-    for file in ["Fonts.xml", "ChatFrame.xml"] {
+    // GameTooltip.xml + UIDropDownMenu.xml are real RUNTIME dependencies of the chat tabs since
+    // decision 1589: a left click closes any open menu (`CloseDropDownMenus`, the reference's own
+    // first move) and a right click opens the window's options menu. `benilla.toc` already orders
+    // both ahead of ChatFrame.xml (l.60/64 vs l.399); the harness says so too, rather than a guard
+    // that would hide a real ordering fault. (The tooltip file is the dropdown kit's own
+    // dependency — its MenuBackdrop reads `TOOLTIP_DEFAULT_COLOR`.)
+    for file in [
+        "Fonts.xml",
+        "GameTooltip.xml",
+        "UIDropDownMenu.xml",
+        "ChatFrame.xml",
+    ] {
         let text = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets/ui")
