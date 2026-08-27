@@ -85,6 +85,15 @@ pub(crate) fn windowed_env() -> bool {
         || benilla_world::bgwin::background_run()
 }
 
+/// `$WOW_WIN=WxH` in **logical** px — the one parser, so the window that is *asked for* and the
+/// window that is *checked* can never drift. It was spelled twice inline in `lib.rs` (once for the
+/// UI-fixture arm, once for the world arm) and is now spelled here once and read there.
+pub(crate) fn requested_window_size() -> Option<UVec2> {
+    let v = std::env::var("WOW_WIN").ok()?;
+    let (w, h) = v.split_once('x')?;
+    Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
+}
+
 /// The display modes benilla ships. **Two, and neither is the reference's mode-setting
 /// fullscreen** — the module doc says why.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -209,9 +218,65 @@ pub(crate) struct VideoPlugin;
 impl Plugin for VideoPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VideoConfig>()
-            .add_systems(Startup, log_display_session)
+            .add_systems(Startup, (log_display_session, check_window_pinned).chain())
             .add_systems(Update, (apply_present_mode, apply_window_mode));
     }
+}
+
+/// **Did the window actually get the size `$WOW_WIN` asked for?** Refuse the run if not.
+///
+/// The window manager is free to clamp a requested inner size to the display, and macOS does. The
+/// failure is silent and it invalidates comparisons: on 2026-08-26 an MSAA A/B produced one leg at
+/// 3200x1800 and the other at 3024x1800, because the director had the laptop panel on overnight
+/// instead of the external monitor, and the window landed on a smaller screen. Nothing said so.
+/// `benilla-visual` refused the pair with `image size mismatch` — the right outcome by luck, from a
+/// tool three steps downstream that could only report the symptom, and a full A/B cycle was spent
+/// getting there.
+///
+/// Measured, not assumed: `WOW_WIN=4000x3000` on this machine yields `1920x1048 logical` — clamped
+/// to the display the window happened to open on, minus its chrome.
+///
+/// **Fatal under a capture, a warning otherwise**, and the split is the point. Every visual
+/// regression diff in the tree is denominated in the window the scenario asks for
+/// ([`windowed_env`]'s doc says so), so a capture at the wrong size is not a worse capture, it is
+/// an invalid one that will be diffed against a valid one. A non-capture run with `$WOW_WIN` is
+/// somebody looking at something; a clamp there is surprising, not wrong, so it says so and
+/// carries on.
+fn check_window_pinned(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(want) = requested_window_size() else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let got = UVec2::new(
+        window.resolution.width() as u32,
+        window.resolution.height() as u32,
+    );
+    if got == want {
+        return;
+    }
+    let capturing =
+        std::env::var_os("WOW_CAPTURE").is_some() || std::env::var_os("WOW_CAPTURE_UI").is_some();
+    if !capturing {
+        warn!(
+            "window: asked for {}x{} logical, got {}x{} — the window manager clamped it to the \
+             display. Harmless here; it would invalidate a capture.",
+            want.x, want.y, got.x, got.y
+        );
+        return;
+    }
+    error!(
+        "window: REFUSING this capture — asked for {}x{} logical, got {}x{}. The window manager \
+         clamped the request to the display this window opened on, so the image would not be the \
+         size the scenario is denominated in and any diff against it would be meaningless. Use a \
+         size that fits the current display (or move the window to a bigger one) and re-run.",
+        want.x, want.y, got.x, got.y
+    );
+    exit.write(AppExit::error());
 }
 
 /// One line at boot naming what the window actually got — and, on a Linux session, what it is

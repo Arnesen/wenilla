@@ -245,6 +245,11 @@ impl Plugin for WorldFoundation {
             // The world camera's multisampling level (`gxMultisample`, decision 1629) — read
             // ONCE, at the camera's spawn, because the reference's own flag says latched.
             .init_resource::<crate::view::MsaaSetting>()
+            .init_resource::<crate::view::MsaaFormats>()
+            // ...and the clamp that keeps it inside what this GPU will actually accept. Runs in
+            // plugin `finish()`, so it lands between the render adapter appearing and `Startup`
+            // reading the setting — see `view::MsaaSupportPlugin`.
+            .add_plugins(crate::view::MsaaSupportPlugin)
             // The viewer's body (wire (a)'s kinematics half) — defaulted by the engine so a
             // program with no avatar leaves it empty and every reader takes its no-body branch.
             .init_resource::<crate::view::Viewer>()

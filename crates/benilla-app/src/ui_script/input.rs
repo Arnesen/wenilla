@@ -36,6 +36,9 @@ pub(super) struct PointerFeed<'w> {
     /// cursor must not fight it. Same arm as `hidden` below, for the same reason: the mouse half
     /// of this pass is not ours this frame.
     synthetic: Res<'w, super::SyntheticPointer>,
+    /// A capture owns the pointer for its whole run ([`super::CapturePointerPinned`]) — the OS
+    /// cursor belongs to whoever is at the keyboard and must not reach the shot.
+    capture_pinned: Res<'w, super::CapturePointerPinned>,
 }
 
 impl PointerFeed<'_> {
@@ -94,7 +97,10 @@ pub(super) fn feed_ui_input(
     // WHOLE mouse half out — including the else-arm below, which is the half that matters: a
     // `pointer_left_window` between the synthetic press and the synthetic release would disarm
     // the gesture the probe is in the middle of.
-    let synthetic = pointer.synthetic.0;
+    // The two reasons the OS pointer is not ours this frame: a probe is driving a gesture through
+    // the real pointer path, or this is a capture (where it is never ours). Same treatment — skip
+    // the mouse half whole, touch nothing — so they read as one condition here.
+    let synthetic = pointer.synthetic.0 || pointer.capture_pinned.0;
     let (hover, click_consumed, payload_held) = (
         &mut pointer.hover,
         &mut pointer.click_consumed,

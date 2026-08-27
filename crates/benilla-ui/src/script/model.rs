@@ -541,6 +541,18 @@ pub(crate) struct Model {
     /// Unknown CVar names already warned about (warn-once, the era-atlas-miss posture).
     pub(crate) cvars_warned: HashSet<String>,
 
+    /// The device-enumerated multisample formats the Video options dropdown offers, in the order
+    /// it offers them — pushed by the host ([`super::UiScript::set_multisample_formats`]) from what
+    /// the render adapter actually accepts, and read by `GetMultisampleFormats` /
+    /// `GetCurrentMultisampleFormat` / `SetMultisampleFormat`.
+    ///
+    /// In the reference this is the distilled `{colorBits, depthBits, multisample}` triple list at
+    /// `[0xb4b444]` (count `[0xb4b440]`), built by `0x48c3e0` from the D3D
+    /// `CheckDeviceMultiSampleType` sweep or the GL `wglGetPixelFormatAttribivARB` sweep. Empty
+    /// until the host pushes it — a VM with no device behind it (every extract test) offers no
+    /// formats rather than inventing some.
+    pub(crate) multisample_formats: Vec<super::cvars::MultisampleFormat>,
+
     /// The globals `RegisterForSave` declared, in registration order — the saved-variables set the
     /// host writes out at logout/exit and re-executes at load (decision 1128, [`super::saved`]).
     pub(crate) saved_names: Vec<String>,
@@ -1436,6 +1448,7 @@ impl Model {
             cvars_saved_base: HashMap::new(),
             cvar_changes: Vec::new(),
             cvars_warned: HashSet::new(),
+            multisample_formats: Vec::new(),
             saved_names: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),

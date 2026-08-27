@@ -268,6 +268,27 @@ pub(crate) fn screenshots_dir() -> Option<PathBuf> {
     home().map(|h| h.join("Screenshots"))
 }
 
+/// `benilla-config/Diagnostics/` — where the stuck-thread self-sampler drops its profiles
+/// ([`crate::perf::stall`]).
+///
+/// **This was `~/Library/Logs/benilla/` until 2026-08-27, hand-built from `$HOME`** — a platform
+/// log directory, which is the exact shape the one-folder rule names as forbidden ("never a
+/// hand-built path, never a platform config dir"). It had been that way since decision 0713, and it
+/// went unnoticed because the sampler only writes when something is already wrong, so the stray
+/// folder appeared on the bad days and nobody was looking at paths on a bad day. It surfaced while
+/// proving out the MSAA clamp (1631): three probe runs stalled, and the stall lines named a
+/// directory that had no business existing.
+///
+/// It resolves through [`home`] like every other resident, which costs the sampler its capture
+/// runs (`home` answers `None` there, deliberately) and is the right trade: a `WOW_CAPTURE` run is
+/// bounded by the harness timeout and already has the probe backstop's `_exit(0)`, while the runs
+/// this instrument was built for — the director's, and the long probe rounds — keep it. The
+/// alternative, an ungated second accessor, would put "which paths are exempt from hermetic?" back
+/// into someone's head, which is what the single rule exists to prevent.
+pub(crate) fn diagnostics_dir() -> Option<PathBuf> {
+    home().map(|h| h.join("Diagnostics"))
+}
+
 /// Make an arbitrary realm/character name safe as one path component: anything outside
 /// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
 /// escape the folder or collide with the path separator.

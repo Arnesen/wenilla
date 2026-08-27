@@ -90,7 +90,7 @@ impl Plugin for HoverLogPlugin {
                     "frame_ms,cpu_ms,tick_us,resolve_us,measure_us,extract_us,convert_us,\
                      diff_us,quads,solves,derives,skipped,measured,measured_texts,tip_owner,tip_lines,\
                      tip_first_line,spliced,mesh_us,mesh_sort_us,mesh_split_us,mesh_write_us,\
-                     mesh_quads,mesh_runs"
+                     mesh_quads,mesh_runs,mesh_rewrites"
                 );
                 info!("hover log: recording every frame to {path}");
                 app.insert_resource(Recorder {
@@ -180,8 +180,8 @@ fn record(
     );
     let _ = writeln!(
         rec.out,
-        ",{},{},{},{},{},{}",
-        mesh.total, mesh.sort, mesh.split, mesh.write, mesh.quads, mesh.runs
+        ",{},{},{},{},{},{},{}",
+        mesh.total, mesh.sort, mesh.split, mesh.write, mesh.quads, mesh.runs, mesh.rewrites
     );
     rec.rows.push(Row {
         frame_ms,
@@ -236,6 +236,9 @@ fn summarize(label: &str, rows: &[&Row]) -> String {
     };
     let rebuilt = 100.0 * rows.iter().filter(|r| r.mesh.rebuilt).count() as f32 / n;
     let mesh_runs = rows.iter().map(|r| r.mesh.runs as f64).sum::<f64>() / f64::from(n);
+    // The number that reaches Bevy: a rewritten batch re-extracts, and `rewrites` tracking `runs`
+    // means the skip gate is being defeated for every batch at once (decision 1632).
+    let mesh_rw = rows.iter().map(|r| r.mesh.rewrites as f64).sum::<f64>() / f64::from(n);
     let skips = 100.0 * rows.iter().filter(|r| r.cost.skipped).count() as f32 / n;
     // Counted against the DROPPED threshold, not the raw budget: synced wall time rails at the
     // display's present grant and jitters around it, so counting frames over 16.7 ms mostly counts
@@ -249,7 +252,7 @@ fn summarize(label: &str, rows: &[&Row]) -> String {
          p99={:>6.2}  dropped={:>5.1}%\n      ui μs: tick={:>6.0} resolve={:>6.0} \
          measure={:>5.0} extract={:>6.0} convert={:>6.0} diff={:>5.0}\n      solves/frame={:.2} \
          derives/frame={:.2} reshaped/frame={:.2} extract-gate-skipped={:.0}%\n      mesh μs: \
-         total={:>6.0} sort={:>5.0} split={:>5.0} write={:>6.0}  rebuilt={:.0}% runs={:.0}",
+         total={:>6.0} sort={:>5.0} split={:>5.0} write={:>6.0}  rebuilt={:.0}% runs={:.0} rewrites={:.1}",
         rows.len(),
         pct(&wall, 0.50),
         pct(&wall, 0.99),
@@ -273,6 +276,7 @@ fn summarize(label: &str, rows: &[&Row]) -> String {
         mesh_us(|m| m.write),
         rebuilt,
         mesh_runs,
+        mesh_rw,
     )
 }
 
@@ -351,6 +355,7 @@ fn parse_row(line: &str) -> Option<Row> {
         write: n(21),
         quads: n(22) as usize,
         runs: n(23) as usize,
+        rewrites: n(24) as usize,
     };
     let num = |i: usize| fields[i].parse::<f64>().ok();
     let owner = fields[14].clone();

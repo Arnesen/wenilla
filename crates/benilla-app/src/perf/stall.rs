@@ -5,7 +5,7 @@
 //! each lost their reproduction motivated it (decision 0713): the ~1 s silent frame stalls at
 //! the BWL pin, and the on-close beachball the director had to force-quit — where even the probe
 //! backstop's `process::exit(0)` can wedge, because libc `exit(3)` runs the same atexit teardown
-//! the hang may own. Samples land in `~/Library/Logs/benilla/` and the path prints on stderr
+//! the hang may own. Samples land in `benilla-config/Diagnostics/` and the path prints on stderr
 //! (the tracing subscriber may already be gone during teardown).
 //!
 //! After a teardown sample, an [`EXIT_KILL_MS`] backstop `_exit(0)` ends the wedged process —
@@ -68,11 +68,15 @@ pub(super) fn plugin(app: &mut App) {
     if std::env::var("WOW_STALL_SAMPLE").is_ok_and(|v| v == "0") {
         return;
     }
-    let Ok(home) = std::env::var("HOME") else {
+    // Through `local_state`, never a hand-built path — the one-folder rule. This used to read
+    // `$HOME` and write `~/Library/Logs/benilla/`; see `local_state::diagnostics_dir`. `None` means
+    // a hermetic capture run, which gets no sampler.
+    let Some(dir) = crate::local_state::diagnostics_dir() else {
         return;
     };
-    let dir = std::path::PathBuf::from(home).join("Library/Logs/benilla");
-    let _ = std::fs::create_dir_all(&dir);
+    // NOT created here: an empty `Diagnostics/` on every single run would be this instrument
+    // advertising itself in the player's folder for the ~always-case where nothing ever stalls.
+    // The watchdog creates it at the moment it actually has a sample to write.
     START
         .set(Instant::now())
         .expect("stall_sample plugin built twice");
@@ -143,6 +147,7 @@ fn watchdog(dir: &std::path::Path) {
         {
             taken += 1;
             last_sample_ms = now;
+            let _ = std::fs::create_dir_all(dir);
             let file = dir.join(format!(
                 "stall-{}{}.txt",
                 std::process::id(),

@@ -643,3 +643,73 @@ fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
          roster on every slot the cursor passes over (decisions 1388, 1625)."
     );
 }
+
+/// **The action-bar hover law** (decision 1630, ledger B06): sweeping the cursor across ACTION BAR
+/// buttons must cost **zero** derivations of the layout graph.
+///
+/// The two guards above drive `SetOwner(button, "ANCHOR_RIGHT")` — the bag slot's idiom. The bars
+/// do not use it. With `UberTooltips` at its shipped default of `"1"`, every action button routes
+/// through `GameTooltip_SetDefaultAnchor` (`ActionBar.xml:510`, and the stance/pet/bonus bars the
+/// same), which is `SetOwner(owner, "ANCHOR_NONE")` followed by an explicit `SetPoint` — a
+/// completely different arm of the same verb, and the one that DROPS the tooltip's anchors.
+///
+/// That drop took the conservative touch, so it re-derived the whole graph on every button the
+/// cursor crossed — and on nothing else, which is why it survived two rounds of fixing and a
+/// live probe: the director's own recording is what named it, every derive frame owned by a
+/// `MultiBarBottomLeftButton*` or `BonusActionButton*`. The lesson worth keeping is in the guards
+/// as much as the fix: a hover guard that only drives one of two anchor idioms is testing the
+/// idiom, not the gesture.
+#[test]
+fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
+    let mut s = settled_default_ui();
+    s.run(
+        r#"
+        for i = 1, 12 do
+            local b = CreateFrame("Button", "BarOwner" .. i)
+            b:SetPoint("CENTER", 0, 0); b:SetSize(36, 36)
+        end
+        bar_n = 0
+        -- `GameTooltip_SetDefaultAnchor`'s body, which is what every action button actually runs:
+        -- own the tooltip WITHOUT an anchor, then point it by hand.
+        function bar_hover()
+            bar_n = bar_n + 1
+            local owner = getglobal("BarOwner" .. (math.mod(bar_n, 12) + 1))
+            GameTooltip:SetOwner(owner, "ANCHOR_NONE")
+            GameTooltip:ClearAllPoints()
+            GameTooltip:SetPoint("BOTTOMRIGHT", "UIParent", "BOTTOMRIGHT", -70, 80)
+            GameTooltip:AddLine("Spell " .. bar_n, 1, 1, 1)
+            if math.mod(bar_n, 2) == 0 then
+                GameTooltip:AddLine("Blasts the enemy for 20 damage.", 1, 1, 1, 1)
+            else
+                GameTooltip:AddLine("Instant", 1, 1, 1)
+            end
+            GameTooltip:Show()
+        end
+        "#,
+    )
+    .unwrap();
+
+    // Positive control across the births and the line pool's growth — both structural.
+    let born_at = s.layout_derivations();
+    for _ in 0..40 {
+        s.run("bar_hover()").unwrap();
+        app_frame(&mut s);
+    }
+    assert!(
+        s.layout_derivations() > born_at,
+        "creating twelve buttons must derive the graph — zero here makes the assertion vacuous."
+    );
+
+    let derives_before = s.layout_derivations();
+    for _ in 0..24 {
+        s.run("bar_hover()").unwrap();
+        app_frame(&mut s);
+    }
+    let derives = s.layout_derivations() - derives_before;
+    assert_eq!(
+        derives, 0,
+        "24 action-bar hovers derived the layout graph {derives} times. `SetOwner`'s ANCHOR_NONE \
+         arm drops the tooltip's anchors, which is a retarget to the EMPTY target set and names \
+         its node like any other (decision 1630, extending 1625)."
+    );
+}

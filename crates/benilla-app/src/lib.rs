@@ -377,10 +377,7 @@ pub fn run(build: BuildId) -> AppExit {
             // `$WOW_WIN` overrides here too — the resolution-A/B instrument for UI scenarios (a
             // scale-dependent text bug looks fine at the scenario's default size and truncates at
             // fullscreen heights).
-            if let Some(win) = std::env::var("WOW_WIN").ok().and_then(|v| {
-                let (w, h) = v.split_once('x')?;
-                Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
-            }) {
+            if let Some(win) = video::requested_window_size() {
                 win
             } else {
                 match std::env::var("WOW_CAPTURE").as_deref() {
@@ -408,12 +405,7 @@ pub fn run(build: BuildId) -> AppExit {
             // self-amplify at 4K where the 1024-era reference diluted them; matching the era's
             // pixel density (e.g. `WOW_WIN=512x288` on a 2× display → 1024×576 physical) isolates
             // that term. Also the knob for any future era-resolution comparison.
-            std::env::var("WOW_WIN")
-                .ok()
-                .and_then(|v| {
-                    let (w, h) = v.split_once('x')?;
-                    Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
-                })
+            video::requested_window_size()
                 // A run that reads no pixels gets a SMALL window. It is held `AlwaysOnTop` for its
                 // whole life so it can never be occluded into the ~1 fps throttle
                 // (`capture::ProbeFocusPlugin`, decision 0906) — at the full default that meant

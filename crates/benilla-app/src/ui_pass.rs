@@ -969,6 +969,12 @@ pub(crate) struct UiMeshCost {
     /// How many quads were sorted, and how many runs came out — the counts behind the µs.
     pub(crate) quads: usize,
     pub(crate) runs: usize,
+    /// How many pooled batch meshes were REWRITTEN this rebuild, rather than left alone or moved
+    /// by a translation-only nudge (1361's skip gate). This is the number that reaches Bevy: each
+    /// rewrite re-extracts in `RenderExtractApp`, which is where a hover's real cost turned out to
+    /// live (decision 1632). `rewrites == runs` every frame means the gate is being defeated for
+    /// every batch at once, which is what a z coupled to the run count did.
+    pub(crate) rewrites: usize,
 }
 
 fn rebuild_ui_mesh(
@@ -1194,6 +1200,14 @@ fn rebuild_ui_mesh(
     // `Transparent2d` phase by ascending mesh z, so later runs drawing on top is exactly "higher z").
     // Spread runs across a z window comfortably inside the camera's default near/far (±1000) regardless
     // of run count, so this never depends on how many runs a given frame happens to produce.
+    //
+    // NB (decision 1632): this z DOES move when the run count moves, and `translation_from` bails on
+    // `z_bits` first — so it looks like a hover (which adds a run: the ButtonHilight is additive with
+    // its own texture and can never merge) would defeat 1361's skip gate for every batch at once.
+    // It was tried, with a constant denominator, and MEASURED: no change to the hover cost, because
+    // the gate is not in fact being defeated — `mesh_rewrites` reads 2.2 of 96.6 runs on a hover
+    // sweep. Left exactly as it was; the note is here so the next reader does not re-run the
+    // experiment.
     let us_split = lap();
     let run_count = runs.len().max(1) as f32;
     // An unbounded material key set (a window resize moves every mask rect) resets the cache;
@@ -1203,6 +1217,7 @@ fn rebuild_ui_mesh(
         pools.materials.clear();
     }
     let mut used = 0usize;
+    let mut n_rewrites = 0usize;
     for (i, run) in runs.into_iter().enumerate() {
         if run.indices.is_empty() {
             continue;
@@ -1281,6 +1296,7 @@ fn rebuild_ui_mesh(
             used += 1;
             continue;
         }
+        n_rewrites += 1;
         // Pan-gate miss diagnostic (`WOW_UI_DIFF=1`, ≤3 lines/s so a startup burst can't
         // exhaust it): names the check that sent this slot to the rewrite path.
         if *UI_DIFF {
@@ -1410,6 +1426,7 @@ fn rebuild_ui_mesh(
             write: us_write,
             quads: n_sorted,
             runs: used,
+            rewrites: n_rewrites,
         };
     }
 }

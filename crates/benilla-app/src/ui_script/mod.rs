@@ -78,6 +78,31 @@ pub(crate) struct PointerOverUi(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct SyntheticPointer(pub(crate) bool);
 
+/// **A capture never reads the OS pointer** — set for the whole life of a `$WOW_CAPTURE` /
+/// `$WOW_CAPTURE_UI` run, and never cleared.
+///
+/// [`input::feed_ui_input`] treats this exactly like [`SyntheticPointer`]: the mouse half of the
+/// pass is skipped entirely, touching nothing. The keyboard half is untouched.
+///
+/// **Why it is not just `SyntheticPointer`.** They are different statements. That one means "a
+/// probe is driving a gesture *right now*", and the drag probe clears it when its gesture ends
+/// (`capture::probes::act`) — so borrowing it would re-expose the real cursor for the rest of the
+/// run, which is the opposite of the guarantee wanted here.
+///
+/// **Why it exists at all.** The mouse feed reads `window.cursor_position()`, so a UI capture's
+/// pixels depended on where the person at the keyboard had left their mouse: a cursor resting over
+/// the window arms a hover and a tooltip that a cursor an inch to the left does not. The old
+/// defence was an assumption written in a comment — *"probes park the cursor outside"* — with
+/// nothing enforcing it. On 2026-08-26 a `ui-tooltip` A/B came back with an MAE of 5.275 against
+/// 0.020 for every other UI scenario; that particular anomaly turned out to be a rebuilt-between-
+/// legs mistake, and three attempts to reproduce a cursor-driven one all failed, because
+/// `CGWarpMouseCursorPosition` does not synthesise the events winit needs. So the hazard was left
+/// on the record as **suspected, unproven** — and this closes it by construction instead, which
+/// costs nothing and does not require ever winning that argument. A capture that cannot read the
+/// pointer cannot be perturbed by it.
+#[derive(Resource, Default)]
+pub(crate) struct CapturePointerPinned(pub(crate) bool);
+
 /// The egui dev overlay's half of the pointer arbitration, written each egui pass by the debug
 /// panel's `track_pointer_over_ui`. **Defined here, with the arbiter that reads it** (decision
 /// 1174 finishing 0026): the type has to exist in a build with no dev overlays compiled in, and
@@ -297,6 +322,11 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<UiCostWanted>()
             .init_resource::<PointerOverUi>()
             .init_resource::<SyntheticPointer>()
+            // Not `init_resource`: the value IS the answer, read once from the env at build.
+            .insert_resource(CapturePointerPinned(
+                std::env::var_os("WOW_CAPTURE").is_some()
+                    || std::env::var_os("WOW_CAPTURE_UI").is_some(),
+            ))
             .init_resource::<EguiPointerOver>()
             .init_resource::<InspectMode>()
             .init_resource::<PlayerUiHover>()

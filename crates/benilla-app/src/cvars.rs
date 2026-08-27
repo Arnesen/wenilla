@@ -273,6 +273,21 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // echoes "set pending gxRestart" — so this row persists and `GetCVar` answers it, while the
     // camera keeps what it was born with. `$WOW_MSAA` overrides it session-only, below.
     ("gxMultisample", "1"),
+    // The multisample triple's other two thirds. The reference's Video dropdown formats all three
+    // into one row (`MULTISAMPLING_FORMAT_STRING` = "%d-bit color %d-bit depth %dx multisample")
+    // and `GetCurrentMultisampleFormat 0x48c580` looks up all three by name to find which row is
+    // selected — so without these registered that lookup can never match and the dropdown would
+    // sit on entry 1 forever.
+    //
+    // **They describe, they do not steer.** benilla does not offer a colour or depth format to
+    // choose: every format `benilla_world::view::MsaaFormats` publishes carries the same pair,
+    // derived from the swapchain format and `Depth32Float`. `SetMultisampleFormat` writes them
+    // from the chosen entry exactly like `0x48c640` does, which is a no-op in value and the right
+    // shape to keep. The defaults here are the literals that pair matches on every target we ship;
+    // if a target ever disagrees the dropdown's own row wins, because it is written from the live
+    // enumeration.
+    ("gxColorBits", "32"),
+    ("gxDepthBits", "32"),
     (crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
@@ -391,6 +406,7 @@ pub(crate) struct KnobParams<'w> {
     scale: ResMut<'w, UiScaleCvar>,
     view: ResMut<'w, ViewDistance>,
     msaa: ResMut<'w, MsaaSetting>,
+    msaa_formats: Res<'w, benilla_world::view::MsaaFormats>,
     look: ResMut<'w, LookConfig>,
     click: ResMut<'w, ClickConfig>,
     loot: ResMut<'w, LootConfig>,
@@ -726,6 +742,7 @@ fn sync_cvars(
             pane_rate,
             guild_notify,
             msaa,
+            msaa_formats,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -740,6 +757,23 @@ fn sync_cvars(
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
         script.register_cvars(REGISTERED.iter().copied());
+        // The Video dropdown's menu — what this device actually accepts, enumerated once at
+        // `finish()` by `view::MsaaSupportPlugin` (decision 1631) and handed over whole. Pushed
+        // here rather than owned by the VM because the list is a fact about the render adapter,
+        // which `benilla-ui` has no way to ask and should not grow one.
+        script.set_multisample_formats(
+            msaa_formats
+                .formats
+                .iter()
+                .map(
+                    |&(color_bits, depth_bits, samples)| benilla_ui::script::MultisampleFormat {
+                        color_bits,
+                        depth_bits,
+                        samples,
+                    },
+                )
+                .collect(),
+        );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
         let session: [(&str, String); 36] = [
             ("MasterVolume", sound.master.to_string()),
@@ -1286,6 +1320,11 @@ mod tests {
             .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
             .insert_resource(ViewDistance { farclip: 350.0 })
             .insert_resource(MsaaSetting { samples: 1 })
+            // The device menu the Video dropdown reads. A real-shaped list, not empty: these
+            // tests exercise `GetCurrentMultisampleFormat`'s lookup, which needs rows to find.
+            .insert_resource(benilla_world::view::MsaaFormats {
+                formats: vec![(32, 32, 1), (32, 32, 2), (32, 32, 4)],
+            })
             .init_resource::<LookConfig>()
             .init_resource::<ClickConfig>()
             .init_resource::<LootConfig>()

@@ -38,6 +38,23 @@ pub(crate) struct CvarSlot {
     pub default: String,
 }
 
+/// One device-supported multisample format, as the Video options dropdown shows it.
+///
+/// The reference's distilled triple (`[0xb4b444]`, count `[0xb4b440]`, built by `0x48c3e0`), and
+/// the shape `MULTISAMPLING_FORMAT_STRING` formats: `"%d-bit color %d-bit depth %dx multisample"`.
+///
+/// `samples == 1` is the encoding of **no multisampling**, not "one sample of it" — the convention
+/// both of the reference's enumerators normalise to (`0x58b8b1`'s jump table maps
+/// `D3DMULTISAMPLE_NONE → 1`; the GL path at `0x58d5fa`/`0x58d5fe`/`0x58d605` turns a failed
+/// `WGL_SAMPLES_ARB` query or a value of 0 into 1), and the same convention the device paths test
+/// with `> 1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MultisampleFormat {
+    pub color_bits: u32,
+    pub depth_bits: u32,
+    pub samples: u32,
+}
+
 impl super::UiScript {
     /// Hand registration the config file's persisted values (decision 1291): name → value, keys
     /// lowercased here. Set **before** any `register_cvars` / addon `RegisterCVar` runs in this
@@ -127,6 +144,18 @@ impl super::UiScript {
     /// native widget editing a CVar is the minimap-zoom pattern, reached from outside the crate.
     pub fn set_cvar_engine(&mut self, name: &str, value: &str) {
         set_from_engine(&mut self.model_mut(), name, value.to_string());
+    }
+
+    /// Publish the multisample formats this run's device actually accepts — what the Video
+    /// options dropdown offers, in the order it offers them.
+    ///
+    /// The host's half of the reference's `0x48c3e0`: there, a D3D `CheckDeviceMultiSampleType`
+    /// sweep over the nine-entry candidate table `0x85a83c` or a GL `wglGetPixelFormatAttribivARB`
+    /// sweep over every pixel format; here, `benilla_world::view::supported_sample_counts` asking
+    /// wgpu the same question. Pushed rather than pulled because the VM lives in `benilla-ui`,
+    /// which has no render adapter and should not grow one.
+    pub fn set_multisample_formats(&mut self, formats: Vec<MultisampleFormat>) {
+        self.model_mut().multisample_formats = formats;
     }
 }
 
@@ -230,6 +259,80 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // ── The Video options Multisampling dropdown ──────────────────────────────────────────────
+    // Three bindings over one list, exactly as `OptionsFrame.lua` consumes them: `_OnLoad` seeds
+    // the selection with `GetCurrentMultisampleFormat()`, `_Initialize` walks
+    // `GetMultisampleFormats()` three varargs at a time building the menu, and the Okay handler
+    // (l.240) calls `SetMultisampleFormat(UIDropDownMenu_GetSelectedID(...))`. Identities and
+    // behaviour from wow-re `system/console/scratch/gxmultisample-default.md` §7 — registration
+    // table `0x83de68`, records `0x83e2c0`/`0x83e2c8`/`0x83e2d0`.
+    lua.globals().set(
+        "GetMultisampleFormats",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            // Flat, three per entry — `0x48c360` "pushes all three fields of every entry", and the
+            // Lua walks `for i=1, arg.n, 3`. A device with nothing to offer returns nothing, and
+            // the loop runs zero times: an empty dropdown, not a fabricated one.
+            let mut out = mlua::MultiValue::new();
+            for f in &model.multisample_formats {
+                out.push_back(Value::Number(f.color_bits as f64));
+                out.push_back(Value::Number(f.depth_bits as f64));
+                out.push_back(Value::Number(f.samples as f64));
+            }
+            Ok(out)
+        })?,
+    )?;
+    lua.globals().set(
+        "GetCurrentMultisampleFormat",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let cvar = |n: &str| model.cvars.get(n).and_then(|s| s.value.parse::<u32>().ok());
+            let (Some(color), Some(depth), Some(samples)) = (
+                cvar("gxcolorbits"),
+                cvar("gxdepthbits"),
+                cvar("gxmultisample"),
+            ) else {
+                return Ok(1.0f64);
+            };
+            // **1-based, and 1.0 on no match** — `0x48c580` "returns the 1-based index of the
+            // matching triple, or 1.0 on no match". Not 0 and not nil: `_OnLoad` feeds this
+            // straight to `UIDropDownMenu_SetSelectedID`, so a miss has to name a real row.
+            let idx = model
+                .multisample_formats
+                .iter()
+                .position(|f| {
+                    f.color_bits == color && f.depth_bits == depth && f.samples == samples
+                })
+                .map_or(1.0, |i| (i + 1) as f64);
+            Ok(idx)
+        })?,
+    )?;
+    lua.globals().set(
+        "SetMultisampleFormat",
+        lua.create_function(|lua, id: Option<f64>| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // 1-based from `UIDropDownMenu_GetSelectedID`; anything off the end is ignored rather
+            // than clamped, because a clamp would silently apply a format the player did not pick.
+            let Some(f) = id
+                .filter(|v| *v >= 1.0)
+                .and_then(|v| model.multisample_formats.get(v as usize - 1).copied())
+            else {
+                return Ok(());
+            };
+            // All three, from the chosen entry — `0x48c640` "writes those three CVars from the
+            // chosen entry". Through `set_from_engine` so each ride the host's change queue and
+            // the config file is marked dirty, the same route a Lua `SetCVar` takes.
+            set_from_engine(&mut model, "gxColorBits", f.color_bits.to_string());
+            set_from_engine(&mut model, "gxDepthBits", f.depth_bits.to_string());
+            set_from_engine(&mut model, "gxMultisample", f.samples.to_string());
+            // The reference then sets `gxRestart` (`0x842978`, `0x63ce00`). We deliberately do not
+            // register that CVar: `gxMultisample` is latched here too (decision 1629 — the camera
+            // reads its sample count once, at spawn), so "applies at next launch" is already the
+            // behaviour and a second flag saying so would be a flag nothing reads.
+            Ok(())
+        })?,
+    )?;
+
     lua.globals().set(
         "SetCVar",
         lua.create_function(|lua, args: mlua::MultiValue| {
@@ -280,6 +383,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::MultisampleFormat;
     use crate::script::UiScript;
 
     fn script_with_volume() -> UiScript {
@@ -441,6 +545,93 @@ mod tests {
                 .unwrap(),
             "1.0",
             "the declared value is the DEFAULT, not the live value"
+        );
+    }
+
+    /// The Video options Multisampling dropdown, driven exactly as `OptionsFrame.lua` drives it:
+    /// `_Initialize` walks `GetMultisampleFormats()` three varargs at a time, `_OnLoad` seeds the
+    /// selection from `GetCurrentMultisampleFormat()`, and the Okay handler (l.240) writes back
+    /// through `SetMultisampleFormat(id)`.
+    #[test]
+    fn the_multisample_dropdown_round_trips_through_the_three_bindings() {
+        let mut s = UiScript::new().unwrap();
+        s.register_cvars([
+            ("gxColorBits", "32"),
+            ("gxDepthBits", "32"),
+            ("gxMultisample", "1"),
+        ]);
+        s.set_multisample_formats(vec![
+            MultisampleFormat {
+                color_bits: 32,
+                depth_bits: 32,
+                samples: 1,
+            },
+            MultisampleFormat {
+                color_bits: 32,
+                depth_bits: 32,
+                samples: 2,
+            },
+            MultisampleFormat {
+                color_bits: 32,
+                depth_bits: 32,
+                samples: 4,
+            },
+        ]);
+
+        // Flat triples, in order — the shape `for i=1, arg.n, 3` walks.
+        let flat: Vec<f64> = s.eval(r#"return { GetMultisampleFormats() }"#).unwrap();
+        assert_eq!(
+            flat,
+            vec![32.0, 32.0, 1.0, 32.0, 32.0, 2.0, 32.0, 32.0, 4.0],
+            "three fields per entry, entries in offer order"
+        );
+
+        // 1-BASED: the default `gxMultisample "1"` is the FIRST row, not the zeroth.
+        assert_eq!(
+            s.eval::<f64>("return GetCurrentMultisampleFormat()")
+                .unwrap(),
+            1.0
+        );
+
+        // Pick 4x — the third row — and all three CVars move together, as `0x48c640` writes them.
+        s.eval::<()>("SetMultisampleFormat(3)").unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("gxMultisample")"#)
+                .unwrap(),
+            "4"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("gxColorBits")"#)
+                .unwrap(),
+            "32"
+        );
+        assert_eq!(
+            s.eval::<f64>("return GetCurrentMultisampleFormat()")
+                .unwrap(),
+            3.0,
+            "the selection round-trips: what Set wrote, GetCurrent finds"
+        );
+
+        // The host sees the write, so the config file is dirtied — the same route a Lua SetCVar
+        // takes. Without this the player's choice would live only until they quit.
+        let changed: Vec<String> = s
+            .take_cvar_changes()
+            .into_iter()
+            .map(|(n, v)| format!("{n}={v}"))
+            .collect();
+        assert!(
+            changed.contains(&"gxMultisample=4".to_string()),
+            "expected gxMultisample on the change queue, got {changed:?}"
+        );
+
+        // Off the end is ignored, never clamped: a clamp would silently apply a format the player
+        // did not choose.
+        s.eval::<()>("SetMultisampleFormat(99)").unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("gxMultisample")"#)
+                .unwrap(),
+            "4",
+            "an out-of-range id must leave the selection alone"
         );
     }
 

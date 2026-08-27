@@ -620,7 +620,7 @@
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
-                "RowWindowedMode", "RowVerticalSync",
+                "RowWindowedMode", "RowVerticalSync", "RowMultisample",
             },
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
@@ -2310,6 +2310,59 @@
                                                 -- the box takes effect as you click it.
                                                 OptionsRow_OnLoad(self, "gxVSync", "Vertical Sync",
                                                     "OPTION_TOOLTIP_VERTICAL_SYNC")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMultisample" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Multisampling: 1.12's own Video Options dropdown
+                                                -- (OptionsFrameMultiSampleDropDown, id 4), over
+                                                -- gxMultisample. Label and tooltip key are the
+                                                -- reference's GlobalStrings (MULTISAMPLE =
+                                                -- "Multisampling" / OPTION_TOOLTIP_MULTISAMPLING).
+                                                --
+                                                -- The STOPS ARE THE DEVICE'S, not a fixed ladder:
+                                                -- built here from GetMultisampleFormats(), which
+                                                -- is what this GPU actually accepts (decision
+                                                -- 1631's enumeration, the same one that clamps a
+                                                -- typed gxMultisample). That is the reference's
+                                                -- design too -- its list comes from a D3D
+                                                -- CheckDeviceMultiSampleType sweep or a GL
+                                                -- wglGetPixelFormatAttribivARB sweep -- and it is
+                                                -- why the row cannot offer a mode that would kill
+                                                -- the client. An Apple GPU shows three stops
+                                                -- (1x/2x/4x); a machine with 8x shows four.
+                                                --
+                                                -- NOT marked deferred. That flag stages a value
+                                                -- until Apply (uiScale's mid-drag rescale is what
+                                                -- it exists for); this row writes live like every
+                                                -- other. What it cannot do is take effect live:
+                                                -- gxMultisample is LATCHED (decision 1629 -- the
+                                                -- camera reads its sample count once, at spawn),
+                                                -- exactly as the reference's own row is, whose
+                                                -- callback echoes "set pending gxRestart". The
+                                                -- CVar moves and persists on the click; the
+                                                -- picture changes at the next launch.
+                                                OptionsRow_OnLoad(self, "gxMultisample", "Multisampling",
+                                                    "OPTION_TOOLTIP_MULTISAMPLING")
+                                                local stops = {}
+                                                local fmt = { GetMultisampleFormats() }
+                                                -- Three varargs per entry, the walk OptionsFrame.lua
+                                                -- l.354 does (`for i=1, arg.n, 3`). The text is
+                                                -- MULTISAMPLING_FORMAT_STRING verbatim, inlined
+                                                -- rather than read off the global so the row does
+                                                -- not depend on GlobalStrings being loaded.
+                                                for i = 1, table.getn(fmt), 3 do
+                                                    table.insert(stops, {
+                                                        text = format("%d-bit color %d-bit depth %dx multisample",
+                                                            fmt[i], fmt[i + 1], fmt[i + 2]),
+                                                        value = tostring(fmt[i + 2]),
+                                                    })
+                                                end
+                                                OptionsDropdownRow_Setup(self, stops)
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

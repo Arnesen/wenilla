@@ -1096,6 +1096,91 @@ fn the_world_detail_dropdown_writes_the_cvar_and_the_capsule_follows() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The Graphics page's **Multisampling** row (decision 1631): its stops are enumerated from the
+/// DEVICE, not a fixed ladder, and picking one writes the latched `gxMultisample`.
+///
+/// The device list is seeded Apple-shaped — 1x/2x/4x and no 8x — because that is what this
+/// project's own machine reports, and because a fixed ladder offering 8x there is precisely the
+/// crash 1631 exists to prevent. A machine with 8x would show four rows off the same code.
+#[test]
+fn the_multisampling_row_offers_exactly_what_the_device_supports() {
+    // No explicit `register_cvars` here: `audio_harness` registers `cvars::REGISTERED` whole, and
+    // the three multisample rows live in it. That is deliberate — if they are ever dropped from
+    // the registry this test fails rather than papering over it with its own registration.
+    let mut s = audio_harness();
+    s.set_multisample_formats(vec![
+        benilla_ui::script::MultisampleFormat {
+            color_bits: 32,
+            depth_bits: 32,
+            samples: 1,
+        },
+        benilla_ui::script::MultisampleFormat {
+            color_bits: 32,
+            depth_bits: 32,
+            samples: 2,
+        },
+        benilla_ui::script::MultisampleFormat {
+            color_bits: 32,
+            depth_bits: 32,
+            samples: 4,
+        },
+    ]);
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowMultisampleLabel:GetText()")
+            .unwrap(),
+        "Multisampling",
+        "the reference's own MULTISAMPLE global"
+    );
+    // "1" is the registered default and means NO multisampling — the first stop, shown in the
+    // reference's own MULTISAMPLING_FORMAT_STRING wording.
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowMultisampleDropdownText:GetText()"
+        )
+        .unwrap(),
+        "32-bit color 32-bit depth 1x multisample"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on select must not write it back"
+    );
+
+    // Three stops, because the device offered three. This is the assertion that would fail if the
+    // row ever went back to a hardcoded ladder.
+    s.run("OptionsFrameContainerBodyGraphicsRowMultisampleDropdownButton:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
+        3.0
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button3:GetText()")
+            .unwrap(),
+        "32-bit color 32-bit depth 4x multisample"
+    );
+
+    // Picking 4x writes the CVar — live and persisted, even though the picture waits for the next
+    // launch (the 1629 latch; the camera takes its sample count at spawn).
+    s.run("DropDownList1Button3:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("gxMultisample".to_string(), "4".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowMultisampleDropdownText:GetText()"
+        )
+        .unwrap(),
+        "32-bit color 32-bit depth 4x multisample"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The Nameplates page (0992 — live at last): the three 1.12 UnitName* checkbox rows read the
 /// table on select and write their flags on the interface panel's own click kit (checked →
 /// CheckBoxOn; these rows carry no soundQuirk).
@@ -1925,10 +2010,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 26 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed Loot
+    // 27 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed Loot
     // Information + Guild Member Alert are 1589's; Status Bar Text, Mouse Sensitivity
-    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's and its Windowed Mode
-    // 1627's; Camera Following Style
+    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's, its Windowed Mode
+    // 1627's and its Multisampling 1632's; Camera Following Style
     // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 6 (3 from
     // 1136, Buff Durations 1139, the target-of-target pair 1576), the Action Bars page's 2 (the
     // lock 1136, Always Show
@@ -1938,7 +2023,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    assert_eq!(checked, 54, "every tipped row carries a live 1.12 key");
+    assert_eq!(checked, 55, "every tipped row carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec![
@@ -2034,15 +2119,16 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // 26 of the 27 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed
+    // 27 of the 28 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed
     // Loot Information + Guild Member Alert 1589's; Status Bar Text, Mouse Sensitivity and
-    // Max Camera Distance 1140's; Vertical Sync 1394's and Windowed Mode 1627's; Camera Following
+    // Max Camera Distance 1140's; Vertical Sync 1394's, Windowed Mode 1627's and Multisampling
+    // 1632's; Camera Following
     // Style 1493's; Terrain Distance 1513's), plus the Combat page's 14 saved-variable rows (1134), the Interface
     // page's 6 (1136, + Buff Durations 1139, + the target-of-target pair 1576), Action Bars' 2
     // (the lock 1136, Always Show
     // ActionBars 1500), the Chat page's 1 (Remove Chat Hover Delay, 1589) and 6 API rows (Show
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
-    assert_eq!(raised, 54, "every row but Auto Loot has a 1.12 description");
+    assert_eq!(raised, 55, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

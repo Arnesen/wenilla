@@ -162,6 +162,7 @@ pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
     EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
+pub use cvars::MultisampleFormat;
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;

@@ -183,6 +183,150 @@ impl MsaaSetting {
     }
 }
 
+/// The sample counts this run's GPU actually accepts — the guard between a player's
+/// `gxMultisample` and a wgpu validation error.
+///
+/// **This closes a hazard [`MsaaSetting`] itself opened.** Decision 1629 made the sample count a
+/// real setting a player can type, and nothing between the CVar and the GPU asked whether the GPU
+/// could do it. Bevy does not ask either — `bevy_render`'s `prepare_view_targets` writes
+/// `sample_count: msaa.samples()` into the descriptor unchecked (`view/mod.rs:1142`). wgpu *does*:
+/// `wgpu-core` tests the count against the format's `sample_count_supported` and fails
+/// `CreateTextureError::InvalidSampleCount` (`device/resource.rs:1316`), then tests it again on
+/// every pipeline rendering into that texture (`:3882`, `:3961`, `:4013`). A validation error on a
+/// texture rebuilt every frame is not a graceful degrade; it is the client dying on a value the
+/// player was invited to type. `gxMultisample 8` on a device that stops at 4x is the live case.
+///
+/// **Stepping down is the reference's own answer, not a defensive invention.** Its device-init
+/// retry loop at `0x63b380` walks the sample count *down* (`-= 2`, floored at 1) until the device
+/// accepts a mode, and only once it bottoms out does it begin surrendering depth and colour bits.
+/// A request the hardware cannot meet becoming the nearest one it can is therefore the faithful
+/// behaviour; refusing to boot is what would be unfaithful.
+///
+/// The three formats are every one we multisample into: the world camera's off-screen colour target
+/// (`Rgba16Float` — `benilla_app::world_backdrop`), `Core3d`'s depth (`CORE_3D_DEPTH_FORMAT` =
+/// `Depth32Float`), and the swapchain format the world viewer and the fallback camera render
+/// straight into. A count is granted only if **all three** take it: they are separate capability
+/// bits in wgpu, and a device may well offer 8x colour alongside 4x depth.
+fn supported_sample_counts(adapter: &bevy::render::renderer::RenderAdapter) -> Vec<u32> {
+    use bevy::image::BevyDefault as _;
+    use bevy::render::render_resource::TextureFormat;
+
+    let formats = [
+        TextureFormat::Rgba16Float,
+        TextureFormat::Depth32Float,
+        TextureFormat::bevy_default(),
+    ];
+    MSAA_RANGE
+        .clone()
+        .filter(|&n| {
+            formats.iter().all(|f| {
+                adapter
+                    .get_texture_format_features(*f)
+                    .flags
+                    .sample_count_supported(n)
+            })
+        })
+        .collect()
+}
+
+/// The largest count in `supported` at or below `requested`, floored at 1 — no multisampling, which
+/// no device can refuse. The step-*down* direction is the reference's; see
+/// [`supported_sample_counts`].
+pub fn clamp_to_supported(requested: u32, supported: &[u32]) -> u32 {
+    supported
+        .iter()
+        .copied()
+        .filter(|&n| n <= requested)
+        .max()
+        .unwrap_or(1)
+}
+
+/// The multisample formats this run's device accepts, as the Video options dropdown offers them —
+/// `(color_bits, depth_bits, samples)`, ascending.
+///
+/// The reference's distilled triple list (`[0xb4b444]`, count `[0xb4b440]`, built by `0x48c3e0` out
+/// of the D3D `CheckDeviceMultiSampleType` sweep or the GL `wglGetPixelFormatAttribivARB` sweep) —
+/// here, whatever wgpu says it will take. Filled by [`MsaaSupportPlugin`] from the same enumeration
+/// that does the clamping, so the list a player picks from and the ceiling a typed value is clamped
+/// to cannot disagree.
+///
+/// Empty until the adapter exists (and forever, headless): an empty dropdown is the honest answer
+/// for a run with no device, and the Lua walks it zero times.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct MsaaFormats {
+    pub formats: Vec<(u32, u32, u32)>,
+}
+
+/// Colour and depth bit counts for the dropdown's label, derived from the formats we actually
+/// render into rather than typed: `MULTISAMPLING_FORMAT_STRING` is
+/// `"%d-bit color %d-bit depth %dx multisample"`, and a number in it should be true.
+///
+/// The colour figure is the **swapchain**'s, not the world camera's off-screen `Rgba16Float`
+/// target. What the dropdown is describing is the mode the window is presented in — the thing the
+/// reference's enumerators were asking the device about — and quoting 64 there would be describing
+/// an internal buffer no player chose.
+fn dropdown_bit_depths() -> (u32, u32) {
+    use bevy::image::BevyDefault as _;
+    use bevy::render::render_resource::TextureFormat;
+
+    let bits = |f: TextureFormat| f.block_copy_size(None).unwrap_or(4) * 8;
+    (
+        bits(TextureFormat::bevy_default()),
+        bits(TextureFormat::Depth32Float),
+    )
+}
+
+/// Clamps [`MsaaSetting`] to what this run's GPU accepts, once, before anything spawns a camera.
+///
+/// **All the work is in `finish`, deliberately** — the same reason as
+/// `benilla_assets::gpu_blp::BlpGpuSupportPlugin`: `RenderAdapter` is inserted into the main world
+/// by `RenderPlugin::finish` (`bevy_render/src/lib.rs:419`), so it does not exist at `build` time
+/// and never exists at all in a headless app. Every plugin's `finish` completes before the runner's
+/// first update, and the cameras read `MsaaSetting` in `Startup` (1629's latch), so this is both
+/// the earliest honest moment and comfortably early enough.
+///
+/// Headless — no adapter, or no setting — changes nothing: such a run builds no swapchain to be
+/// wrong about.
+pub struct MsaaSupportPlugin;
+
+impl Plugin for MsaaSupportPlugin {
+    fn build(&self, _app: &mut App) {}
+
+    fn finish(&self, app: &mut App) {
+        // Scoped so the adapter borrow ends before the resource is written.
+        let supported = match app
+            .world()
+            .get_resource::<bevy::render::renderer::RenderAdapter>()
+        {
+            Some(adapter) => supported_sample_counts(adapter),
+            None => return,
+        };
+        // Published whether or not anything needs clamping: this is the dropdown's whole menu.
+        let (color_bits, depth_bits) = dropdown_bit_depths();
+        app.insert_resource(MsaaFormats {
+            formats: supported
+                .iter()
+                .map(|&s| (color_bits, depth_bits, s))
+                .collect(),
+        });
+        let Some(requested) = app.world().get_resource::<MsaaSetting>().map(|m| m.samples) else {
+            return;
+        };
+        let granted = clamp_to_supported(requested, &supported);
+        if granted == requested {
+            debug!("msaa: {requested}x accepted (this GPU offers {supported:?})");
+            return;
+        }
+        // At `warn`, not `debug`: the player asked for something and did not get it, and this is
+        // the only place that fact exists. A line that survives only in a debug build cannot answer
+        // "why won't my setting stick?" from a player's log.
+        warn!(
+            "msaa: this GPU does not offer {requested}x — using {granted}x (it offers {supported:?})"
+        );
+        app.world_mut().resource_mut::<MsaaSetting>().samples = granted;
+    }
+}
+
 /// The world camera's projection far plane in yards — the **horizon** plane, far beyond `farclip`
 /// on purpose so the coarse WDL ring draws behind the wall (decision 0684; the reference's own
 /// `horizonfarclip` is a second plane floored at `farclip + 528`, default 2112). One number, not a
@@ -460,6 +604,39 @@ mod msaa_tests {
     /// A request lands on the largest level wgpu can express at or below it — the direction the
     /// reference's own device-init retry loop steps (`0x63b380`, `-= 2` floored at 1). Never up:
     /// asking for 3 must not silently buy 4 samples' worth of bandwidth.
+    #[test]
+    fn an_unsupported_count_steps_down_to_the_nearest_the_device_offers() {
+        // The live hazard: a player types 8 on a device that stops at 4x. Stepping down is the
+        // reference's own retry direction (`0x63b380`), so this is faithful, not just safe.
+        let upto4 = [1, 2, 4];
+        assert_eq!(clamp_to_supported(8, &upto4), 4);
+        assert_eq!(clamp_to_supported(16, &upto4), 4);
+        assert_eq!(clamp_to_supported(4, &upto4), 4);
+        assert_eq!(clamp_to_supported(3, &upto4), 2);
+        assert_eq!(clamp_to_supported(1, &upto4), 1);
+    }
+
+    #[test]
+    fn a_supported_count_is_never_stepped_up_and_never_touched() {
+        let all = [1, 2, 4, 8, 16];
+        for n in all {
+            assert_eq!(clamp_to_supported(n, &all), n, "{n}x should pass through");
+        }
+        // Between two offered levels it still rounds DOWN — the direction is the whole point.
+        assert_eq!(clamp_to_supported(6, &all), 4);
+        assert_eq!(clamp_to_supported(15, &all), 8);
+    }
+
+    #[test]
+    fn a_device_that_offers_nothing_still_boots_at_one_sample() {
+        // `supported_sample_counts` returning empty means some format refused even 1x, which should
+        // be impossible — but the floor is 1 (no multisampling) rather than 0 or a panic, because a
+        // client that will not start is strictly worse than one that starts unaliased.
+        assert_eq!(clamp_to_supported(8, &[]), 1);
+        assert_eq!(clamp_to_supported(1, &[]), 1);
+        assert_eq!(MsaaSetting { samples: 1 }.level(), Msaa::Off);
+    }
+
     #[test]
     fn a_sample_count_rounds_down_never_up() {
         let level = |n| MsaaSetting { samples: n }.level();
