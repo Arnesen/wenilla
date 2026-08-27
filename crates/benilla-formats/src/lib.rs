@@ -25,7 +25,9 @@ mod install;
 pub use install::{candidates, wow_data};
 mod characters;
 pub use characters::{
-    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EquipGeosets, StartOutfitItem,
+    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile,
+    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EquipBlit, EquipGeosets,
+    StartOutfitItem,
 };
 mod camera_shakes;
 mod creatures;

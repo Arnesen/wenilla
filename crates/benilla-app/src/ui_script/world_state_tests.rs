@@ -25,7 +25,7 @@ fn load_xml(s: &UiScript, file: &str) {
     );
 }
 
-fn harness() -> UiScript {
+pub(crate) fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
@@ -42,7 +42,7 @@ fn harness() -> UiScript {
 }
 
 /// An Eastern Plaguelands-shaped row.
-fn row(icon: &str, text: &str, tooltip: &str) -> WorldStateUiView {
+pub(crate) fn row(icon: &str, text: &str, tooltip: &str) -> WorldStateUiView {
     WorldStateUiView {
         ui_state: 1,
         text: text.into(),
@@ -76,7 +76,7 @@ fn textures(s: &mut UiScript) -> Vec<String> {
         .collect()
 }
 
-fn push(s: &mut UiScript, rows: Vec<WorldStateUiView>) {
+pub(crate) fn push(s: &mut UiScript, rows: Vec<WorldStateUiView>) {
     s.set_world_state_ui(rows);
     s.tick(0.0);
     s.fire_event("UPDATE_WORLD_STATES", vec![]);
@@ -310,71 +310,6 @@ fn the_bindings_answer_the_reference_shape() {
     assert_eq!(
         s.eval::<i64>("return (GetWorldStateUIInfo('1'))").unwrap(),
         7
-    );
-}
-
-/// The readout and the dev cost pill both want the top centre, and before this they drew straight
-/// through each other (the pill is anchored 8 px down; the readout's first row starts at 15). The
-/// pill asks the frame itself how far down the band is spoken for
-/// ([`crate::perf::top_centre_claimed`]) and seats itself below that — so this pins the probe
-/// against the shipped XML: nothing claimed while the readout is empty, and the readout's real
-/// resolved bottom once it is up.
-#[test]
-fn the_readout_tells_the_dev_pill_how_much_of_the_top_it_uses() {
-    // NOT 768. The layout answers in WoW UI units — a screen that is always 768 units tall
-    // whatever the window is (decision 0582) — and the pill draws in window px, so a probe that
-    // subtracts one from the other is right only when the two happen to coincide. Feeding a
-    // window height that is NOT the virtual one is the whole point of this test: it is what the
-    // director's client does, and the first version of this probe put the pill back on top of the
-    // readout's third row there while passing every test at 768.
-    const SCREEN_H: f32 = 900.0;
-    let mut s = harness();
-    s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
-    s.resolve();
-    assert_eq!(
-        crate::perf::top_centre_claimed(&s, SCREEN_H),
-        0.0,
-        "hidden readout claims nothing — the pill keeps its usual seat"
-    );
-
-    push(
-        &mut s,
-        vec![
-            row(
-                "Interface\\WorldStateFrame\\AllianceTower",
-                "Towers Controlled: 3",
-                "Alliance Towers Controlled",
-            ),
-            row(
-                "Interface\\WorldStateFrame\\HordeTower",
-                "Towers Controlled: 1",
-                "Horde Towers Controlled",
-            ),
-        ],
-    );
-    s.resolve();
-    let claimed = crate::perf::top_centre_claimed(&s, SCREEN_H);
-    assert!(
-        claimed > 8.0,
-        "two rows reach past the pill's own seat, so the pill must move: {claimed}"
-    );
-    // The frame's own geometry, read back the way the probe reads it: the container's top offset
-    // plus one row per pushed row. Asserted against the XML rather than restated as constants.
-    let expected: f32 = s
-        .eval::<f64>("return (20 + WORLD_STATE_ROW_HEIGHT * 2 + 15) / GetScreenHeight()")
-        .expect("the frame's own numbers") as f32
-        * SCREEN_H;
-    assert!(
-        (claimed - expected).abs() < 0.5,
-        "the claim is the readout's resolved bottom: {claimed} vs {expected}"
-    );
-
-    push(&mut s, Vec::new());
-    s.resolve();
-    assert_eq!(
-        crate::perf::top_centre_claimed(&s, SCREEN_H),
-        0.0,
-        "and it hands the band back when the scope empties"
     );
 }
 

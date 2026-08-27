@@ -156,6 +156,10 @@ pub(in crate::entities) struct ItemGlow {
     /// and by the time the glow models load the attach path that knew the body bone is long gone.
     pub(in crate::entities) bone: u16,
     pub(in crate::entities) offset: bevy::prelude::Vec3,
+    /// The ITEM's **M2 attachment id** on the body, for the same reason: a glow is chained under
+    /// the item (`0x712f70`), so a widget's attach reset takes the glow exactly when it takes the
+    /// item it hangs on ([`crate::portrait::attach_reset`]).
+    pub(in crate::entities) attach: u16,
 }
 
 /// Set once an item root's glow instances are spawned (or resolved to nothing) — the once-only
@@ -260,6 +264,7 @@ pub(super) fn attach_item_glows(
                                 bone: glow.bone,
                                 seat: crate::portrait::PortraitSeat::Rider(seat + info.pivot),
                                 kind: info.kind,
+                                attach: Some(glow.attach),
                             },
                         ));
                     }
@@ -272,6 +277,7 @@ pub(super) fn attach_item_glows(
                                 material: p.material.clone(),
                                 bone: glow.bone,
                                 offset: seat,
+                                attach: Some(glow.attach),
                             },
                         ));
                     }
@@ -283,6 +289,7 @@ pub(super) fn attach_item_glows(
                     .insert(crate::portrait::PortraitEffects {
                         bone: glow.bone,
                         offset: seat,
+                        attach: Some(glow.attach),
                         emitters: dm.emitters.clone(),
                     });
             }

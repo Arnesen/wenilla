@@ -390,8 +390,9 @@ pub(super) fn spawn_booth_model(
     motion: BoothMotion,
     // Per-hand weapon grip `[right, left]` — hold that hand's `HandsClosed` finger pose because a weapon
     // occupies its attach point (the paperdoll rule, wow-re `hand-grip-mechanism.md` §4c). The glue
-    // preview draws its weapons into the hands, so it grips; the still portraits/paper-doll sheath theirs
-    // (decision 0465) → `[false, false]`, hands stay open.
+    // preview and the body panes both resolve it from **attachment occupancy**, which is the whole
+    // rule (`crate::portrait::hand_grip`); the round portraits pass `[false, false]` because the
+    // reference's portrait bake never arms a grip at all, not because they sheath anything.
     grip: [bool; 2],
     // Character billboard batches (the undead/night-elf eye-glow) — seated on their billboard bone's
     // joint and re-faced to the booth camera by [`face_booth_billboards`]. Needs the rig (no bones =

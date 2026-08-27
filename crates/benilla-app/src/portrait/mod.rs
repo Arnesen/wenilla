@@ -217,6 +217,10 @@ pub(crate) struct PortraitRider {
     pub(crate) bone: u16,
     /// The attach point's Bevy-space offset under that bone ([`crate::entities::BoneAttach`]).
     pub(crate) offset: Vec3,
+    /// The **M2 attachment id** this rider's model hangs from on the body — what
+    /// [`attach_reset`] filters on. `None` where the geometry is the host model's own and sits
+    /// in no attachment node at all (see [`PortraitBillboard::attach`]).
+    pub(crate) attach: Option<u16>,
 }
 
 /// Stamped on a lightweight **anchor child** the attach path plants under a unit for each
@@ -246,6 +250,10 @@ pub(crate) struct PortraitBillboard {
     pub(crate) bone: u16,
     pub(crate) seat: PortraitSeat,
     pub(crate) kind: benilla_formats::BillboardKind,
+    /// The **M2 attachment id** the batch's model hangs from on the body, for [`attach_reset`].
+    /// `None` for a batch of the host model ITSELF (the character's own eye-glow): the reference's
+    /// reset walks the duplicate's *attachment list*, and a geoset batch of the body is not in it.
+    pub(crate) attach: Option<u16>,
 }
 
 /// Whose model a mirrored camera-facing batch belongs to — which decides both where its pivot comes
@@ -292,6 +300,10 @@ impl PortraitSeat {
 pub(crate) struct PortraitEffects {
     /// The BODY bone whose booth joint the effect model's host seats on.
     pub(crate) bone: u16,
+    /// The **M2 attachment id** the effect-bearing model hangs from on the body, for
+    /// [`attach_reset`]. Every publisher of this marker is an item's model, so it is always
+    /// `Some`; the option shape is the other two markers'.
+    pub(crate) attach: Option<u16>,
     /// The host's offset in that bone's joint frame (Bevy axes) — the item's attach point, plus the
     /// glow slot's offset on the item's own model when this is a glow.
     pub(crate) offset: Vec3,
@@ -588,13 +600,27 @@ fn log_bake(
     effects: &[&PortraitEffects],
 ) {
     if booth_log() {
+        // The **attach ids** the bake is dressed at, sorted and de-duplicated. Counts alone could
+        // not answer the question `#bugs` B324 asked — *what is hanging on this doll?* — and the
+        // answer is one line: a hunter mid-shot read `at=[2,35]` (bow at HandLeft, arrow at
+        // HandArrow) where the reference can only ever show `[2]`. It is also the retest readout
+        // for the reference's attach reset ([`attach_reset`]): no id in the cut family may appear.
+        let mut at: Vec<u16> = riders
+            .iter()
+            .filter_map(|r| r.attach)
+            .chain(billboards.iter().filter_map(|b| b.attach))
+            .chain(effects.iter().filter_map(|f| f.attach))
+            .collect();
+        at.sort_unstable();
+        at.dedup();
         eprintln!(
-            "[booth] {token} {verb} parts={} riders={} billboards={} fx={}/{}",
+            "[booth] {token} {verb} parts={} riders={} billboards={} fx={}/{} at={at:?} grip={:?}",
             parts.len(),
             riders.len(),
             billboards.len(),
             effects.len(),
             effects.iter().map(|e| e.emitters.len()).sum::<usize>(),
+            hand_grip(riders, billboards, effects),
         );
     }
 }
@@ -1223,6 +1249,56 @@ fn test_mode(cached: &mut Option<bool>) -> bool {
     *cached.get_or_insert_with(|| std::env::var("WOW_PORTRAIT_TEST").is_ok_and(|s| !s.is_empty()))
 }
 
+/// The reference's **attach reset** — does `0x47a230` detach a sub-model hanging at this M2
+/// attachment id from the duplicate a model widget renders?
+///
+/// Every widget that shows a live unit builds its model by *duplicating* the unit's own
+/// `CM2Model`, attachment tree and all (`0x707400`/`0x70ea00` deep-copy the children at the same
+/// attach ids), and then runs this partial reset on the copy — the `<PlayerModel>` paper doll via
+/// `0x5059a0 → 0x47a230`, the round unit portrait via `0x525261` (wow-re
+/// `ui/scratch/dressup-model-equipment.md` §1, `ui/scratch/portrait-render.md` §4, both VERIFIED).
+///
+/// It detaches fifteen ids — `0xf` (twice), `0x10`, `0x11`, `0x12`, `0x13`–`0x19`, `0x1d`, `0x22`,
+/// `0x23` — and pointedly **keeps** the three hand points `0`/`1`/`2`, the sheath family
+/// `0x1a`/`0x1b`/`0x1c`/`0x1e`–`0x21`, and the worn slots (helm `0xb`, shoulders `5`/`6`,
+/// cape `0xc`). Read as a family, the cut is *everything transient*: chest blood front/back,
+/// breath, the two nameplates, Base, Head, the two spell hands, Special1–3, Chest — and
+/// **HandArrow (`0x23`)**, the nocked arrow. Equipment survives; effects do not.
+///
+/// `0x23` is the one that shows up in a bug report (`#bugs` B324): our booths mirrored the
+/// nocked arrow onto the character-window doll, where the reference can never draw one.
+fn attach_reset(attach: Option<u16>) -> bool {
+    matches!(attach, Some(0xf..=0x19 | 0x1d | 0x22 | 0x23))
+}
+
+/// The reference's **hand grip** for a widget's duplicate, from attachment occupancy alone
+/// (`0x5059a0` at `505a34`/`505a4d`: `GetAttachment(model, 2)` non-null → `CloseHand(1)`,
+/// `GetAttachment(model, 1)` non-null → `CloseHand(0)` — wow-re
+/// `animation/scratch/hand-grip-mechanism.md` §4c, which names this the cleanest expression of the
+/// rule and the one benilla should implement).
+///
+/// Returns [`booth::spawn_booth_model`]'s `[right, left]`. **Occupancy, not sheath state and not
+/// combat**: a hand holding anything closes; the shield's forearm point (`0`) closes nothing. The
+/// probe runs over the mirrored set *after* [`attach_reset`], exactly as the reference probes the
+/// duplicate after `0x47a230`.
+fn hand_grip(
+    riders: &[&PortraitRider],
+    billboards: &[&PortraitBillboard],
+    effects: &[&PortraitEffects],
+) -> [bool; 2] {
+    // A wand's whole model can be a single camera-facing batch and an emitter set, so the probe
+    // has to see every mirror lane, not just the meshes.
+    let occupied = |id: u16| {
+        riders.iter().any(|r| r.attach == Some(id))
+            || billboards.iter().any(|b| b.attach == Some(id))
+            || effects.iter().any(|f| f.attach == Some(id))
+    };
+    [
+        occupied(crate::entities::attach_id::HAND_RIGHT),
+        occupied(crate::entities::attach_id::HAND_LEFT),
+    ]
+}
+
 /// The three queries that read a unit's **dressed look** — the attach-spawned [`PortraitPart`] /
 /// [`PortraitRider`] descendants a booth mirrors. Bundled as one `SystemParam` so `sync_portraits`
 /// and `sync_paperdoll` stay under Bevy's 16-parameter system ceiling, and share the one
@@ -1272,13 +1348,15 @@ impl DressedLook<'_, '_> {
                 }
             }
             if let Ok(r) = self.riders.get(e) {
-                riders.push(r);
+                if !attach_reset(r.attach) {
+                    riders.push(r);
+                }
             }
             // A camera-facing batch prunes by whose model it is ([`PortraitSeat`]): a mount's own
             // glow card goes with the mount's meshes, an item's card rides an attach joint that
             // re-roots INSIDE the mount subtree while mounted and must survive it like a rider.
             if let Ok(b) = self.billboards.get(e) {
-                if !in_mount || b.seat != PortraitSeat::Body {
+                if (!in_mount || b.seat != PortraitSeat::Body) && !attach_reset(b.attach) {
                     billboards.push(b);
                 }
             }
@@ -1286,7 +1364,9 @@ impl DressedLook<'_, '_> {
             // its `ItemVisuals` glow's), seated on an attach joint — the rider rule. Nothing
             // publishes a mount's own emitters, so there is no mount case to exclude.
             if let Ok(fx) = self.effects.get(e) {
-                effects.push(fx);
+                if !attach_reset(fx.attach) {
+                    effects.push(fx);
+                }
             }
             if let Ok(c) = self.children.get(e) {
                 stack.extend(c.iter().map(|child| (child, in_mount)));
@@ -1524,7 +1604,14 @@ fn sync_portraits(
                 }),
                 anim_data.as_deref().map(|a| &a.0),
                 BoothMotion::Frozen,
-                [false, false], // a still portrait sheaths its weapons — no in-hand grip
+                // Open hands, and NOT because "a still portrait sheaths its weapons" — it does
+                // not; it mirrors whatever the body holds, same as a pane. The reference's
+                // portrait bake (`0x524f60`) duplicates and runs the attach reset `0x47a230`, and
+                // that is *all*: unlike `0x5059a0` it never probes the hand points or calls
+                // `0x479660`, and the duplicate starts from a fresh `0x70dd70` init that carries
+                // no armed anim blocks across. So the reference's own portrait holds a weapon in
+                // an open hand — rarely in frame on a bust, and its rule all the same.
+                [false, false],
                 &booth_billboards,
             );
             // Even a Frozen still re-evaluates its paused pose every frame — the park matters
@@ -1867,7 +1954,11 @@ fn sync_body_booth(
             // reference's `<PlayerModel>` widget does (decision 0822 §4 read it as live-rendering
             // and left the pose as a look call; the director made that call — decision 1069).
             BoothMotion::Loop,
-            [false, false], // the pane sheaths its weapons — no in-hand grip
+            // The grip is the reference's own probe of the duplicate's hand attachment nodes
+            // ([`hand_grip`]) — NOT a constant. The `[false, false]` this replaced rested on
+            // "the pane sheaths its weapons", which was never true of this lane: the pane mirrors
+            // whatever the body is holding, so a drawn weapon arrived in an open hand.
+            hand_grip(&riders, &billboards, &effects),
             &booth_billboards,
         );
         // The item effects go up on the posed skeleton's anchors — the body pane is the lane that
@@ -2176,20 +2267,50 @@ mod tests {
         }
     }
 
+    /// A camera-facing batch at attach `attach` — [`attach_id::SHOULDER_RIGHT`] by default, an id
+    /// the reference's [`attach_reset`] keeps.
     fn card(seat: PortraitSeat) -> PortraitBillboard {
+        card_at(seat, Some(SHOULDER))
+    }
+
+    fn card_at(seat: PortraitSeat, attach: Option<u16>) -> PortraitBillboard {
         PortraitBillboard {
             mesh: Handle::default(),
             material: Handle::default(),
             bone: 4,
             seat,
             kind: benilla_formats::BillboardKind::Spherical,
+            attach,
+        }
+    }
+
+    /// A worn attach id the reset KEEPS — the right pauldron. Every fixture that isn't testing the
+    /// reset itself hangs from it, so the reset never silently eats a fixture.
+    const SHOULDER: u16 = 5;
+
+    fn rider() -> PortraitRider {
+        rider_at(SHOULDER)
+    }
+
+    fn rider_at(attach: u16) -> PortraitRider {
+        PortraitRider {
+            static_mesh: Handle::default(),
+            material: Handle::default(),
+            bone: 4,
+            offset: Vec3::new(0.21, 1.42, 0.06),
+            attach: Some(attach),
         }
     }
 
     fn effects(bone: u16, offset: Vec3, count: usize) -> PortraitEffects {
+        effects_at(bone, offset, count, SHOULDER)
+    }
+
+    fn effects_at(bone: u16, offset: Vec3, count: usize, attach: u16) -> PortraitEffects {
         PortraitEffects {
             bone,
             offset,
+            attach: Some(attach),
             emitters: (0..count)
                 .map(|_| benilla_assets::ModelEmitter {
                     def: benilla_world::testing::plain_particle_def(),
@@ -2213,6 +2334,8 @@ mod tests {
         riders: usize,
         billboards: Vec<PortraitSeat>,
         effects: Vec<(u16, usize)>,
+        /// What the body panes would arm — [`hand_grip`] over the same collected set.
+        grip: [bool; 2],
     }
 
     /// Run the walk over `unit` in `app` and hand back what it collected.
@@ -2228,6 +2351,7 @@ mod tests {
                     riders: riders.len(),
                     billboards: billboards.iter().map(|b| b.seat).collect(),
                     effects: effects.iter().map(|e| (e.bone, e.emitters.len())).collect(),
+                    grip: hand_grip(&riders, &billboards, &effects),
                 };
             },
         );
@@ -2266,15 +2390,7 @@ mod tests {
         // …and the seated rider's gear, re-rooted under the mount: a shoulder rider, its
         // camera-facing batch and its emitters.
         let seat = app.world_mut().spawn(ChildOf(mount)).id();
-        app.world_mut().spawn((
-            PortraitRider {
-                static_mesh: Handle::default(),
-                material: Handle::default(),
-                bone: 4,
-                offset: Vec3::new(0.21, 1.42, 0.06),
-            },
-            ChildOf(seat),
-        ));
+        app.world_mut().spawn((rider(), ChildOf(seat)));
         app.world_mut().spawn((
             card(PortraitSeat::Rider(Vec3::new(0.15, 1.58, 0.05))),
             ChildOf(seat),
@@ -2311,6 +2427,103 @@ mod tests {
         );
     }
 
+    /// **`#bugs` B324 — the nocked arrow reached the character-window doll.** A hunter shooting in
+    /// combat has a bow at HandLeft(2) and an arrow at HandArrow(0x23); our booths mirrored both,
+    /// and the reference's doll can never draw the arrow: every model widget duplicates the unit's
+    /// attachment tree and then detaches `0x23` with fourteen other transient ids
+    /// (`0x47a230`, [`attach_reset`]). The bow is NOT ours to hide here — `0x47a230` keeps the hand
+    /// points — which is why this asserts both halves.
+    #[test]
+    fn the_nocked_arrow_never_reaches_a_booth_but_the_bow_in_hand_does() {
+        use crate::entities::attach_id::{HAND_ARROW, HAND_LEFT};
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let unit = app.world_mut().spawn(body_part()).id();
+        // The drawn bow: mesh parts at HandLeft.
+        app.world_mut().spawn((rider_at(HAND_LEFT), ChildOf(unit)));
+        // The nocked arrow, at the one body-bone attach the whole ammo mechanism uses.
+        app.world_mut().spawn((rider_at(HAND_ARROW), ChildOf(unit)));
+
+        let got = walk(&mut app, unit);
+        assert_eq!(
+            got.riders, 1,
+            "the arrow is detached from the duplicate; the bow is not"
+        );
+        assert_eq!(
+            got.grip,
+            [false, true],
+            "a bow at HandLeft closes the LEFT hand (0x5059a0's occupancy probe), \
+             and nothing closes the right"
+        );
+    }
+
+    /// **The reset's membership, against the byte list.** `0x47a230` detaches fifteen ids —
+    /// `0xf` twice, `0x10`, `0x11`, `0x12`, `0x13`–`0x19`, `0x1d`, `0x22`, `0x23` — and keeps
+    /// everything else. Spelled out rather than re-derived, because getting the boundary wrong
+    /// silently deletes worn gear from every pane (`0xb` helm, `0xc` cape, `5`/`6` shoulders) or
+    /// silently keeps an effect.
+    #[test]
+    fn the_attach_reset_cuts_the_transient_family_and_keeps_equipment() {
+        for kept in [
+            0, 1, 2, // the three hand points — the whole reason the widget shows weapons
+            3, 4, 5, 6, 7, 8, 9, 10, // elbows, shoulders, knees, hips
+            0xb, 0xc, 0xd, 0xe, // helm, cape, the two shoulder flaps
+            0x1a, 0x1b, 0x1c, // sheath main/off, sheath shield (also the worn quiver, 0x1a)
+            0x1e, 0x1f, 0x20, 0x21, // the large-weapon and hip-weapon sheath pairs
+        ] {
+            assert!(!attach_reset(Some(kept)), "0x47a230 keeps attach {kept:#x}");
+        }
+        for cut in [
+            0xf, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1d, 0x22, 0x23,
+        ] {
+            assert!(attach_reset(Some(cut)), "0x47a230 detaches attach {cut:#x}");
+        }
+        assert!(
+            !attach_reset(None),
+            "the host model's OWN batches sit in no attachment node — the reset walks the \
+             attachment list and cannot reach them"
+        );
+    }
+
+    /// **The grip is occupancy, not sheath state — and a shield never closes a hand.** The
+    /// forearm point (`0`) is the shield's, and `0x479700`/`0x5059a0` fork on ids `1`/`2` alone
+    /// (wow-re `hand-grip-mechanism.md` §4a/§4b: "a shield in the offhand NEVER closes the hand,
+    /// in any stance").
+    #[test]
+    fn a_shield_on_the_forearm_closes_no_hand() {
+        use crate::entities::attach_id::{HAND_RIGHT, SHIELD};
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let unit = app.world_mut().spawn(body_part()).id();
+        app.world_mut().spawn((rider_at(SHIELD), ChildOf(unit)));
+        app.world_mut().spawn((rider_at(HAND_RIGHT), ChildOf(unit)));
+
+        assert_eq!(
+            walk(&mut app, unit).grip,
+            [true, false],
+            "the sword's hand closes, the shield's does not"
+        );
+    }
+
+    /// **A wand is a camera-facing batch and an emitter set, with no mesh rider at all** — so a
+    /// grip probe that only walked the mesh lane would leave the hand open around it. The
+    /// reference probes the attachment NODE, which every lane of ours hangs from.
+    #[test]
+    fn a_meshless_held_item_still_closes_its_hand() {
+        use crate::entities::attach_id::{HAND_LEFT, HAND_RIGHT};
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let unit = app.world_mut().spawn(body_part()).id();
+        app.world_mut().spawn((
+            card_at(PortraitSeat::Rider(Vec3::ZERO), Some(HAND_RIGHT)),
+            ChildOf(unit),
+        ));
+        app.world_mut()
+            .spawn((effects_at(4, Vec3::ZERO, 1, HAND_LEFT), ChildOf(unit)));
+
+        assert_eq!(walk(&mut app, unit).grip, [true, true]);
+    }
+
     /// **A key blind to effects would never re-bake for a glow.** An item glow resolves
     /// asynchronously (`entities::item_glow`: the item's template, then the effect model's own load),
     /// so its mirror lands *after* the meshes it rides with — a later frame, with every mesh handle
@@ -2319,12 +2532,7 @@ mod tests {
     #[test]
     fn a_glow_arriving_after_its_item_still_changes_the_bake_key() {
         let parts = [body_part()];
-        let riders = [PortraitRider {
-            static_mesh: Handle::default(),
-            material: Handle::default(),
-            bone: 4,
-            offset: Vec3::new(0.21, 1.42, 0.06),
-        }];
+        let riders = [rider()];
         let parts: Vec<&PortraitPart> = parts.iter().collect();
         let riders: Vec<&PortraitRider> = riders.iter().collect();
 

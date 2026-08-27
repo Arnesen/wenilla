@@ -323,6 +323,9 @@ fn spawn_billboard_part(
                 // glow card prunes with the mount (`DressedLook::collect`).
                 seat: crate::portrait::PortraitSeat::Body,
                 kind: info.kind,
+                // A batch of the HOST model, not a sub-model in an attachment node — the
+                // reference's attach reset walks the attachment list and cannot reach it.
+                attach: None,
             },
         ))
         .id();

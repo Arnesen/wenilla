@@ -118,7 +118,7 @@ pub(crate) use attach::equip_slot;
 pub(crate) use equipment::ItemDisplays;
 pub(crate) use equipment::{BoneAttach, Equipment};
 // The instruments' read of what a body is actually WEARING vs what it resolved (`WOW_DRESS_CENSUS`).
-pub(crate) use equipment::{HeldAttached, ATTACH_SLOT_NAMES};
+pub(crate) use equipment::{attach_id, HeldAttached, ATTACH_SLOT_NAMES};
 
 /// The overhead attachment slot (`PlayerName`, id 18). The anchor of the overhead name, the
 /// floating combat text, and the questgiver marker alike.

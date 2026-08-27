@@ -25,16 +25,47 @@ const HAIR_SUBSTITUTE_VARIATION: u8 = 1;
 /// An atlas rect `(x, y, w, h)` in pixels — a composite destination tile.
 type Tile = (u32, u32, u32, u32);
 
-/// The body-atlas tiles the head + pelvis overlays composite into — three of the RF-0062 static 256²
+/// The body-atlas tiles the head + underwear overlays composite into — four of the RF-0062 static 256²
 /// partition's 10 rects. g8/g9 are the head strip (left column, Y 160–256: g8 the 32-tall upper band, g9
-/// the 64-tall lower band); g5 is the pelvis (right column, Y 96–160).
+/// the 64-tall lower band); g3 (torso upper) and g5 (pelvis) are the right column's Y 0–64 and Y 96–160 —
+/// the two tiles the underwear section dresses, one per texture column (RF-0062's group→cell map: the
+/// group-3 handler `0x4772f0` takes underwear cell `cc+0x20c`, the group-5 handler `0x4773a0` takes
+/// `cc+0x208`, and `0x478790` builds those two from the sectionType-4 row's `TextureName[1]`/`[0]`).
 const TILE_G8: Tile = (0, 160, 128, 32);
 const TILE_G9: Tile = (0, 192, 128, 64);
-const TILE_G5: Tile = (128, 96, 128, 64);
+// The underwear's two tiles ARE two of the equipment tiles — the composite reaches them through
+// `EQUIP_TILES` so there is one transcription of the rects, and these names exist for the tests,
+// which read far better naming the group than indexing the array.
+#[cfg(test)]
+const TILE_G3: Tile = EQUIP_TILES[3];
+#[cfg(test)]
+const TILE_G5: Tile = EQUIP_TILES[5];
+
+/// The underwear section's two blits: `(textureColumn, equipLayer, columnsTested)` — which
+/// `TextureName` column dresses which equipment tile, and **how far into that tile's equipment
+/// columns the client looks before it draws at all** (wow-re RF-0086, byte-derived from the two
+/// handlers).
+///
+/// The underwear is not an under-layer — it is the tile's **fallback**. `0x4772f0` (TorsoUpper)
+/// tests `cc+0x2e8/0x2ec/0x2f0` = columns 0–2 and `0x4773a0` (LegUpper) tests `cc+0x368/0x36c` =
+/// columns 0–1, each `jne` straight past the underwear blit; only with every tested cell null does
+/// the handler blit `cc+0x20c`/`cc+0x208`. So a shirt, a chest/robe or a guild tabard's background
+/// hides the bra, and legs or a robe hide the panties — but the tested set is a strict **prefix**,
+/// and the columns past it are not consulted: **a belt never hides the panties, and a plain tabard
+/// never hides the bra**, even though both repaint their tile afterwards.
+///
+/// The base-skin blit is unconditional in both branches, so a suppressed tile shows *skin*, not a
+/// hole — and the underwear itself is a REPLACE (alphaDepth 0, an opaque full-tile paste), never a
+/// blend.
+const UNDERWEAR_TILES: [(usize, usize, i8); 2] = [
+    (0, 5, 2), // TextureName[0] → LegUpper: {Legs, Chest/Robe} tested; the belt (col 2) is not
+    (1, 3, 3), // TextureName[1] → TorsoUpper: {Shirt, Chest/Robe, guild-tabard Background} tested
+];
 
 /// The eight equipment tiles g0–g7 (RF-0062), in **layer order** — the load-bearing identity of
-/// decision 0074: ItemDisplayInfo texture column *i* = compositor layer *i* = tile g*i*. Note g5 ==
-/// [`TILE_G5`] (equipment LegUpper shares the pelvis tile; underwear blits first, so it sits under).
+/// decision 0074: ItemDisplayInfo texture column *i* = compositor layer *i* = tile g*i*. Note g3 ==
+/// [`TILE_G3`] and g5 == [`TILE_G5`] — equipment TorsoUpper/LegUpper share the underwear's two tiles;
+/// underwear blits first, so it sits under.
 const EQUIP_TILES: [Tile; 8] = [
     (0, 0, 128, 64),     // g0 ArmUpper
     (0, 64, 128, 64),    // g1 ArmLower
@@ -59,12 +90,18 @@ const EQUIP_TEX_DIRS: [&str; 8] = [
     "FootTexture",
 ];
 
-/// The `[0x803bf8]` bodyslot×layer stacking table (decision 0074), rows = bodyslots 2–9 (shirt,
-/// chest, belt, pants, boots, wrist, gloves, tabard), columns = layers 0–7: the priority a slot's
-/// contribution stacks at within the layer's tile (ascending blits later ⇒ on top), `-1` = this slot
-/// never touches the layer. Transcribed from the RE'd const table; every column's ordering is
-/// art-coherent (pants under robe under belt; shirt under chest under wrist under glove; …).
-const EQUIP_LAYER_PRIORITY: [[i8; 8]; 8] = [
+/// The `[0x803bf8]` bodyslot×layer table (wow-re RF-0088), rows = bodyslots 2–9 (shirt, chest, belt,
+/// pants, boots, wrist, gloves, tabard), columns = layers 0–7: the **cell** within the layer's row
+/// that this slot's contribution occupies, `-1` = this slot never touches the layer.
+///
+/// It is a **default, not a fixed priority** — that was decision 0074's mistake and B326/B327's
+/// cause. `0x478ad0` tests the cell for `-1` and for a non-empty texture name, then hands the slot to
+/// the layer's own **chooser** `[0xb42424 + layer*4]`, and two of the eight choosers overrule the
+/// table from the item's `geosetGroup` (see [`equip_column`]). Layers 0/2/3/4/5/7 take it verbatim.
+///
+/// The row is 16 cells and holds **one record per cell**; the composite handler fans out over it by
+/// ascending cell index, so a higher cell is blitted later and covers a lower one.
+const EQUIP_LAYER_COLUMN: [[i8; 8]; 8] = [
     [0, 0, -1, 0, 0, -1, -1, -1],    // shirt
     [1, 1, -1, 1, 1, 1, 1, -1],      // chest (robes reach the legs)
     [-1, -1, -1, -1, -1, 2, -1, -1], // belt
@@ -72,8 +109,14 @@ const EQUIP_LAYER_PRIORITY: [[i8; 8]; 8] = [
     [-1, -1, -1, -1, -1, -1, 2, 0],  // boots
     [-1, 2, -1, -1, -1, -1, -1, -1], // wrist
     [-1, 3, 0, -1, -1, -1, -1, -1],  // gloves
-    [-1, -1, -1, 3, 4, -1, -1, -1],  // tabard
+    [-1, -1, -1, 4, 4, -1, -1, -1], // tabard (RF-0088: TorsoUpper is cell 4, not 3 — 0074 mis-read it)
 ];
+
+/// The worn-slot indices the two overruling choosers name, in `equipment` order (bodyslot − 2).
+const SLOT_CHEST: usize = 1;
+const SLOT_PANTS: usize = 3;
+const SLOT_BOOTS: usize = 4;
+const SLOT_GLOVES: usize = 6;
 
 /// CharSections texture lookup: (race, sex, sectionType, variation, colorIndex) → that row's up-to-3
 /// `TextureName` columns (empty strings for absent columns). Feeds both the base body skin
@@ -175,8 +218,9 @@ impl CharSections {
     ///
     /// `equipment` is the dressed extension (decision 0074): the worn ItemDisplayInfo rows by
     /// **bodyslot − 2** (shirt, chest, belt, pants, boots, wrist, gloves, tabard; `None` = the slot
-    /// is empty). Their region textures blit into the eight equipment tiles after the skin sections
-    /// (so underwear sits under the pants), stacked per layer by the client's priority table.
+    /// is empty). Their region textures blit into the eight equipment tiles after the skin sections,
+    /// stacked per layer by the client's priority table — and they also **gate** the underwear, which
+    /// is the tile's fallback rather than an under-layer ([`UNDERWEAR_TILES`]).
     #[allow(clippy::too_many_arguments)]
     pub fn composite_body(
         &self,
@@ -195,21 +239,20 @@ impl CharSections {
         };
         let mut atlas = read_texture_mip_chain(chain, base_path)
             .with_context(|| format!("reading base skin '{base_path}'"))?;
-        // (sectionType, variation, color, texColumn, destTile) — the verified fan-out (RF-0067 §"section
-        // → cell core" + RF-0074 head map). Within a tile, order matters (later overwrites/blends over
-        // earlier): base skin (already the canvas) → face → facial hair → hair. The pelvis (g5) is its own
-        // tile. Note the columns differ by section: face/facial-hair use TextureName[0]/[1] (lower/upper),
-        // hair uses [1]/[2]; underwear is TextureName[0]. Hair is blank for e.g. Human male (its texid
-        // columns are empty), so those reads no-op there; included so the path is correct for races whose
-        // hairline does composite into the head.
-        let overlays: [(u8, u8, u8, usize, Tile); 7] = [
+        // The head overlays: (sectionType, variation, color, texColumn, destTile) — the verified fan-out
+        // (RF-0067 §"section → cell core" + RF-0074 head map). Within a tile, order matters (later
+        // overwrites/blends over earlier): base skin (already the canvas) → face → facial hair → hair.
+        // Note the columns differ by section: face/facial-hair use TextureName[0]/[1] (lower/upper),
+        // hair uses [1]/[2]. Hair is blank for e.g. Human male (its texid columns are empty), so those
+        // reads no-op there; included so the path is correct for races whose hairline does composite
+        // into the head.
+        let overlays: [(u8, u8, u8, usize, Tile); 6] = [
             (SECTION_FACE, face, skin, 0, TILE_G9),
             (SECTION_FACE, face, skin, 1, TILE_G8),
             (SECTION_FACIAL_HAIR, facial_hair, hair_color, 0, TILE_G9),
             (SECTION_FACIAL_HAIR, facial_hair, hair_color, 1, TILE_G8),
             (SECTION_HAIR, hair_style, hair_color, 1, TILE_G9),
             (SECTION_HAIR, hair_style, hair_color, 2, TILE_G8),
-            (SECTION_UNDERWEAR, 0, skin, 0, TILE_G5),
         ];
         for (ty, var, color, col, tile) in overlays {
             let Some(path) = self.tex(race, sex, ty, var, color, col) else {
@@ -219,23 +262,29 @@ impl CharSections {
                 blit_over(&mut atlas, &overlay, tile);
             }
         }
-        // The equipment layers (decision 0074): per layer, the worn contributions stacked by the
-        // priority table, each read gendered-first (`_M`/`_F` by the wearer's sex, `_U` fallback).
-        for layer in 0..8 {
-            let mut contributions: Vec<(i8, &str)> = equipment
-                .iter()
-                .enumerate()
-                .filter_map(|(slot, d)| {
-                    let prio = EQUIP_LAYER_PRIORITY[slot][layer];
-                    let name = d.as_ref()?.region_textures[layer].as_deref()?;
-                    (prio >= 0).then_some((prio, name))
-                })
-                .collect();
-            contributions.sort_by_key(|(prio, _)| *prio);
-            for (_, name) in contributions {
-                if let Some(overlay) = read_equip_region(chain, layer, name, sex) {
-                    blit_over(&mut atlas, &overlay, EQUIP_TILES[layer]);
-                }
+        // The equipment plan, built once: the blits below consume it, and the underwear reads it as its
+        // gate. One plan, so "what dresses this tile?" has a single answer (decision 0074's `equip_blits`).
+        let plan = equip_blits(&equipment);
+        // The underwear ([`UNDERWEAR_TILES`]) — the tile's fallback, not an under-layer: a contribution
+        // in any of the group's TESTED columns and the client draws no underwear there at all, leaving
+        // the base skin it already blitted. Drawn before the equipment because the untested columns (the
+        // belt, the tabard) still stack on top of it.
+        for (col, layer, tested) in UNDERWEAR_TILES {
+            if plan.iter().any(|s| s.layer == layer && s.column < tested) {
+                continue;
+            }
+            let Some(path) = self.tex(race, sex, SECTION_UNDERWEAR, 0, skin, col) else {
+                continue;
+            };
+            if let Ok(overlay) = read_texture_mip_chain(chain, path) {
+                blit_over(&mut atlas, &overlay, EQUIP_TILES[layer]);
+            }
+        }
+        // The equipment layers (decision 0074), in the one order [`equip_blits`] decides, each read
+        // `_U`-first with the wearer's gender letter as the fallback (RF-0088 §7).
+        for step in &plan {
+            if let Some(overlay) = read_equip_region(chain, step.layer, step.texture, sex) {
+                blit_over(&mut atlas, &overlay, EQUIP_TILES[step.layer]);
             }
         }
         Ok(Some(atlas))
@@ -281,20 +330,148 @@ impl CharSections {
     }
 }
 
+/// One equipment contribution the body composite blits, carrying the worn bodyslot it came from,
+/// the layer/tile it lands in, and the `ItemDisplayInfo` region-texture name it draws.
+///
+/// This is the *plan* [`CharSections::composite_body`] executes, exposed so the instrument
+/// (`benilla-extract charatlas`) reads the composite off the **same law the composite runs** rather
+/// than a second transcription that can drift. "Which worn slot repainted this tile?" is the
+/// question both reported outfit bugs turned on, and it was unanswerable without this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EquipBlit<'a> {
+    /// The worn bodyslot, indexed as [`CharSections::composite_body`]'s `equipment` is (bodyslot − 2:
+    /// 0 shirt · 1 chest · 2 belt · 3 pants · 4 boots · 5 wrist · 6 gloves · 7 tabard).
+    pub slot: usize,
+    /// The compositor layer — `ItemDisplayInfo` texture column *i* = layer *i* = atlas tile g*i*.
+    pub layer: usize,
+    /// The cell this contribution occupies in the layer's row — [`equip_column`]'s answer, which is
+    /// the `[0x803bf8]` default unless the layer's chooser overruled it. Ascending = blitted later.
+    pub column: i8,
+    /// The `ItemDisplayInfo` region-texture name (no directory, no gender suffix).
+    pub texture: &'a str,
+}
+
+/// The cell a worn slot's contribution to `layer` occupies — the `[0x803bf8]` default, unless the
+/// layer's chooser overrules it (wow-re RF-0088 §5, byte-true; `0x479210` and `0x4793f0`).
+///
+/// **This is the fix for B327 and half of B326.** Only two of the eight choosers look past the
+/// table, and both read an `ItemDisplayInfo.geosetGroup` — so what a garment *is* moves where it
+/// paints:
+///
+/// - **ArmLower** (`0x479210`): gloves with a glove geoset, and a chest with a sleeve geoset, are
+///   promoted clear of the plain cells (to 6 and 5) so a sleeved chest paints over a bracer.
+/// - **LegLower** (`0x4793f0`): a **robe** (chest `geosetGroup[2]`) is promoted to **4**, above a
+///   boot's 3-or-2 — so footwear paints *under* a robe's skirt, never over its hem. Trousers
+///   carrying their own robe bit take 3 when the chest is a robe too, else 4.
+///
+/// Note the asymmetry that makes the bug: a *plain* chest stays at 1 and a boot sits at 2 or 3, so
+/// boots do cover ordinary trousers on the shin — which is right, and is why reading the table as a
+/// fixed priority looked correct for years. Only the robe inverts it.
+pub fn equip_column(equipment: &[Option<&ItemDisplay>; 8], slot: usize, layer: usize) -> i8 {
+    let group = |s: usize, j: usize| equipment[s].is_some_and(|d| d.geoset_groups[j] != 0);
+    match (layer, slot) {
+        // ArmLower — `0x479210`, one `0x4774f0(rec, 0)` up front, applied on two bodyslots.
+        (1, SLOT_GLOVES) if group(slot, 0) => 6,
+        (1, SLOT_CHEST) if group(slot, 0) => 5,
+        // LegLower — `0x4793f0`. The boot geoset lifts a boot 2 → 3; the robe bit lifts a chest
+        // 1 → 4, over both. The trouser leg reads the CHEST's robe bit as well: a robe over robe-
+        // trousers puts the trousers at 3 (under the robe), otherwise they take 4 themselves.
+        (6, SLOT_BOOTS) if group(slot, 0) => 3,
+        (6, SLOT_CHEST) if group(slot, 2) => 4,
+        (6, SLOT_PANTS) if group(slot, 2) => {
+            if group(SLOT_CHEST, 2) {
+                3
+            } else {
+                4
+            }
+        }
+        _ => EQUIP_LAYER_COLUMN[slot][layer],
+    }
+}
+
+/// The ordered equipment blits a dressed composite performs: per layer, each worn slot that clears
+/// `0x478ad0`'s two gates (a cell that is not `-1` in the default table, and a **non-empty** texture
+/// name — the client's test is on the string's first byte, not on the pointer) placed in the cell
+/// [`equip_column`] gives it, then emitted by ascending cell index.
+///
+/// A row holds **one record per cell**, so two slots landing on the same cell do not stack — the
+/// later writer replaces the earlier, which is what the client's `0x478900` store does. Reachable
+/// only when robe-trousers meet a robe chest and booted feet; `equipment` order decides it here,
+/// where the client's is equip order.
+pub fn equip_blits<'a>(equipment: &[Option<&'a ItemDisplay>; 8]) -> Vec<EquipBlit<'a>> {
+    let mut plan = Vec::new();
+    for (layer, _tile) in EQUIP_TILES.iter().enumerate() {
+        let mut row: [Option<EquipBlit<'a>>; 8] = [None; 8];
+        for (slot, display) in equipment.iter().enumerate() {
+            let Some(display) = display else { continue };
+            if EQUIP_LAYER_COLUMN[slot][layer] < 0 {
+                continue;
+            }
+            let Some(texture) = display.region_textures[layer]
+                .as_deref()
+                .filter(|name| !name.is_empty())
+            else {
+                continue;
+            };
+            let column = equip_column(equipment, slot, layer);
+            if let Some(cell) = row.get_mut(column as usize) {
+                *cell = Some(EquipBlit {
+                    slot,
+                    layer,
+                    column,
+                    texture,
+                });
+            }
+        }
+        plan.extend(row.into_iter().flatten());
+    }
+    plan
+}
+
+/// The atlas rect layer `layer`'s equipment contributions composite into — `(x, y, w, h)` in pixels
+/// of the 256² body atlas (the RF-0062 bbox table). Out of range past layer 7.
+pub fn equip_tile(layer: usize) -> Option<(u32, u32, u32, u32)> {
+    EQUIP_TILES.get(layer).copied()
+}
+
+/// The `Item\TextureComponents\` subdirectory layer `layer` reads its art from.
+pub fn equip_tex_dir(layer: usize) -> Option<&'static str> {
+    EQUIP_TEX_DIRS.get(layer).copied()
+}
+
 /// Read one equipment region texture off the chain: `Item\TextureComponents\<dir>\<name>_<L>.blp`,
-/// the gender letter by the wearer's sex (`M`/`F`), falling back to `_U` (unisex — the majority of
-/// the shipped files) then the bare name (defensive; nothing shipped is bare). `None` when no
-/// variant decodes — the layer is skipped, best-effort like the skin overlays.
+/// **`_U` first, the wearer's gender letter only if `_U` does not exist**. `None` when neither
+/// decodes — the layer is skipped, best-effort like the skin overlays.
 fn read_equip_region(chain: &mut Chain, layer: usize, name: &str, sex: u8) -> Option<BlpMipChain> {
-    let dir = EQUIP_TEX_DIRS[layer];
-    let letter = if sex == 1 { 'F' } else { 'M' };
-    for suffix in [format!("_{letter}"), "_U".into(), String::new()] {
-        let path = format!("Item\\TextureComponents\\{dir}\\{name}{suffix}.blp");
+    for path in equip_region_candidates(layer, name, sex) {
         if let Ok(mips) = read_texture_mip_chain(chain, &path) {
             return Some(mips);
         }
     }
     None
+}
+
+/// The chain paths a region texture is looked up under, in the order the composite tries them:
+/// **`_U`, then the wearer's gender letter** (wow-re RF-0088 §7, byte-true).
+///
+/// The order is load-bearing and it is the inverse of what benilla shipped, which was **B326**.
+/// `0x476e20` stages the literal `"U"` as the format's third `%s` before it computes anything else,
+/// probes that exact path (`0x648a10`, an existence test), and patches the character's gender letter
+/// over the `U` at `strlen-5` **only on a miss** — one byte, one branch, and no second attempt
+/// anywhere in the image. So a gendered file that exists **loses to `_U` whenever `_U` also exists**.
+///
+/// Of 7944 shipped basenames, 5920 are `_U`-only (the probe hits), 1937 are `_M`+`_F` with no `_U`
+/// (the patch is what those are for), and **43 ship both** — on those 43 the gendered art is dead.
+/// `Leather_A_02_Pant_LL` is one: its `_F` is 18 rows shorter than its `_U`, so preferring `_F` left
+/// a bare-skin ring below a night elf female's knee that the reference does not have.
+///
+/// Public so the instrument can report **which** candidate a contribution actually resolved to, and
+/// name the ones that resolved to nothing — a silently-skipped region reads on the model as a
+/// garment that stops early, which is exactly how it was first reported.
+pub fn equip_region_candidates(layer: usize, name: &str, sex: u8) -> [String; 2] {
+    let dir = EQUIP_TEX_DIRS[layer];
+    let letter = if sex == 1 { 'F' } else { 'M' };
+    ['U', letter].map(|c| format!("Item\\TextureComponents\\{dir}\\{name}_{c}.blp"))
 }
 
 /// Source-over composite of one region overlay's authored mip pyramid onto the body atlas at a fixed
@@ -391,6 +568,296 @@ mod tests {
         assert_eq!(cs.skin_texture(1, 0, 99), None, "absent color → no texture");
     }
 
+    /// A bare [`ItemDisplay`] carrying only the region textures and geoset groups a test cares about.
+    fn worn(regions: [Option<&str>; 8], geoset_groups: [u32; 3]) -> ItemDisplay {
+        ItemDisplay {
+            region_textures: regions.map(|r| r.map(str::to_string)),
+            geoset_groups,
+            ..Default::default()
+        }
+    }
+
+    /// Legwear + footwear + a chest, named so the cases below read as outfits.
+    fn leg(tex: &str) -> [Option<&str>; 8] {
+        [None, None, None, None, None, Some("lu"), Some(tex), None]
+    }
+
+    /// [`equip_blits`] is the composite's whole equipment law, so the two things a reported outfit
+    /// defect turns on are pinned here: **which** slots reach a tile, and in **what cell order**.
+    ///
+    /// The `[0x803bf8]` value is a **default**, not a fixed priority (wow-re RF-0088 §5): the layer's
+    /// chooser may overrule it from the item's `geosetGroup`, and the row is walked by ascending cell
+    /// with later covering earlier. Reading it as a fixed priority is what shipped **B327**.
+    #[test]
+    fn equip_blits_places_each_slot_in_its_chooser_cell() {
+        let plain_chest = worn(
+            [
+                Some("au"),
+                Some("al"),
+                None,
+                Some("tu"),
+                None,
+                None,
+                None,
+                None,
+            ],
+            [0, 0, 0],
+        );
+        let sleeved_chest = worn(
+            [
+                Some("au"),
+                Some("al"),
+                None,
+                Some("tu"),
+                None,
+                None,
+                None,
+                None,
+            ],
+            [1, 0, 0],
+        );
+        let bracer = worn(
+            [None, Some("bracer_al"), None, None, None, None, None, None],
+            [0, 0, 0],
+        );
+        let plain_gloves = worn(
+            [
+                None,
+                Some("glove_al"),
+                Some("glove_ha"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            [0, 0, 0],
+        );
+        let geoset_gloves = worn(
+            [
+                None,
+                Some("glove_al"),
+                Some("glove_ha"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            [1, 0, 0],
+        );
+
+        // ArmLower (`0x479210`): plain items take the table (shirt 0, chest 1, wrist 2, gloves 3);
+        // a glove/sleeve geoset lifts gloves to 6 and the chest to 5, clear of the plain cells.
+        let eq = [
+            None,
+            Some(&plain_chest),
+            None,
+            None,
+            None,
+            Some(&bracer),
+            Some(&plain_gloves),
+            None,
+        ];
+        let g1: Vec<_> = equip_blits(&eq)
+            .into_iter()
+            .filter(|s| s.layer == 1)
+            .map(|s| (s.column, s.texture))
+            .collect();
+        assert_eq!(g1, [(1, "al"), (2, "bracer_al"), (3, "glove_al")]);
+        let eq = [
+            None,
+            Some(&sleeved_chest),
+            None,
+            None,
+            None,
+            Some(&bracer),
+            Some(&geoset_gloves),
+            None,
+        ];
+        let g1: Vec<_> = equip_blits(&eq)
+            .into_iter()
+            .filter(|s| s.layer == 1)
+            .map(|s| (s.column, s.texture))
+            .collect();
+        assert_eq!(
+            g1,
+            [(2, "bracer_al"), (5, "al"), (6, "glove_al")],
+            "a sleeved chest paints over a bracer"
+        );
+    }
+
+    /// **B327, the carve.** On LegLower the chooser `0x4793f0` lifts a *robe* (chest `geosetGroup[2]`)
+    /// to cell 4 — above a boot's 3-or-2 — so footwear paints under a robe's skirt and can never
+    /// repaint its hem. The control that must not move: a **plain** chest stays at 1 and boots still
+    /// cover ordinary trousers, which is why the fixed-priority reading looked right for years.
+    #[test]
+    fn a_robe_outranks_footwear_on_leglower() {
+        let robe = worn(leg("robe_ll"), [1, 0, 1]);
+        let plain_chest = worn(leg("chest_ll"), [0, 0, 0]);
+        let trousers = worn(leg("pant_ll"), [0, 0, 0]);
+        let robe_trousers = worn(leg("robetrouser_ll"), [0, 0, 1]);
+        let shoes = worn(
+            [
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("shoe_ll"),
+                Some("shoe_fo"),
+            ],
+            [0, 0, 0],
+        );
+        let boots = worn(
+            [
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("boot_ll"),
+                Some("boot_fo"),
+            ],
+            [3, 0, 0],
+        );
+
+        fn g6(eq: &[Option<&ItemDisplay>; 8]) -> Vec<(i8, String)> {
+            equip_blits(eq)
+                .into_iter()
+                .filter(|s| s.layer == 6)
+                .map(|s| (s.column, s.texture.to_string()))
+                .collect()
+        }
+        /// The expected cells, spelled the way the assertions read.
+        fn cells(want: &[(i8, &str)]) -> Vec<(i8, String)> {
+            want.iter().map(|(c, t)| (*c, t.to_string())).collect()
+        }
+
+        // The report: a robe with sandals (no boot geoset) and with real boots. Either way the robe
+        // is last, so the skirt's hem is the robe's own art.
+        let eq = [
+            None,
+            Some(&robe),
+            None,
+            None,
+            Some(&shoes),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(
+            g6(&eq),
+            cells(&[(2, "shoe_ll"), (4, "robe_ll")]),
+            "sandals under the robe"
+        );
+        let eq = [
+            None,
+            Some(&robe),
+            None,
+            None,
+            Some(&boots),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(
+            g6(&eq),
+            cells(&[(3, "boot_ll"), (4, "robe_ll")]),
+            "boots under the robe too"
+        );
+
+        // The control: a plain chest does NOT get lifted, so boots still cover ordinary trousers.
+        let eq = [
+            None,
+            Some(&plain_chest),
+            None,
+            Some(&trousers),
+            Some(&boots),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(
+            g6(&eq),
+            cells(&[(0, "pant_ll"), (1, "chest_ll"), (3, "boot_ll")]),
+            "footwear still paints over trousers"
+        );
+
+        // Trousers carrying their own robe bit: 3 under a robe chest, 4 when there is no robe over
+        // them. The first case collides with a geoset-boot's 3 — one cell holds one record, and the
+        // later writer (the boots) wins, exactly as `0x478900` overwrites.
+        let eq = [
+            None,
+            Some(&robe),
+            None,
+            Some(&robe_trousers),
+            None,
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(g6(&eq), cells(&[(3, "robetrouser_ll"), (4, "robe_ll")]));
+        let eq = [
+            None,
+            Some(&plain_chest),
+            None,
+            Some(&robe_trousers),
+            None,
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(g6(&eq), cells(&[(1, "chest_ll"), (4, "robetrouser_ll")]));
+    }
+
+    /// `0x478ad0`'s two gates: a `-1` cell is a hard "this slot never touches this layer", and the
+    /// texture test is on the **string**, not the pointer — an empty name contributes nothing.
+    #[test]
+    fn equip_blits_drops_ungated_and_empty_contributions() {
+        let odd = worn(
+            [None, None, None, Some("boot_tu"), None, None, None, None],
+            [0, 0, 0],
+        );
+        let eq = [None, None, None, None, Some(&odd), None, None, None];
+        assert!(
+            equip_blits(&eq).is_empty(),
+            "a -1 cell drops the contribution entirely"
+        );
+
+        let blank = worn(
+            [None, None, None, Some(""), None, None, None, None],
+            [0, 0, 0],
+        );
+        let eq = [None, Some(&blank), None, None, None, None, None, None];
+        assert!(
+            equip_blits(&eq).is_empty(),
+            "an empty texture name is not a contribution"
+        );
+    }
+
+    /// **B326.** The region filename resolves `_U` FIRST and falls back to the wearer's gender letter
+    /// only when `_U` is absent (wow-re RF-0088 §7) — the inverse of what benilla shipped. On the 43
+    /// basenames that carry both, the gendered art is dead: `Leather_A_02_Pant_LL_F` is 18 rows
+    /// shorter than its `_U`, and preferring it left a bare ring below a night elf female's knee.
+    #[test]
+    fn region_textures_resolve_unisex_before_the_gender_letter() {
+        let female = equip_region_candidates(6, "Leather_A_02_Pant_LL", 1);
+        assert_eq!(
+            female,
+            [
+                "Item\\TextureComponents\\LegLowerTexture\\Leather_A_02_Pant_LL_U.blp",
+                "Item\\TextureComponents\\LegLowerTexture\\Leather_A_02_Pant_LL_F.blp",
+            ]
+        );
+        let male = equip_region_candidates(6, "Leather_A_02_Pant_LL", 0);
+        assert!(male[0].ends_with("_U.blp") && male[1].ends_with("_M.blp"));
+        // There is no third attempt anywhere in the image — a bare name never resolves.
+        assert_eq!(male.len(), 2);
+    }
+
     /// A single-level RGBA helper for the blit test.
     fn chain(width: u32, height: u32, px: Vec<u8>) -> BlpMipChain {
         BlpMipChain {
@@ -473,8 +940,14 @@ mod tests {
         assert!(changed(TILE_G9) > 4000, "face lower overlaid into g9");
         assert!(changed(TILE_G8) > 2000, "face upper overlaid into g8");
         assert!(changed(TILE_G5) > 4000, "pelvis overlaid into g5");
-        // A right-column tile with no naked-body overlay must be byte-identical to the base.
-        assert_eq!(changed((128, 0, 128, 64)), 0, "g3 carries no naked overlay");
+        // The torso tile is the underwear's second column — and **no male row authors it** (the bra is
+        // female-only; every sectionType-4 male row leaves `TextureName[1]` empty), so a human male's g3
+        // must stay byte-identical to the base. The female half is the next test.
+        assert_eq!(
+            changed(TILE_G3),
+            0,
+            "no male underwear row authors the naked-torso column"
+        );
 
         // Hair-mesh texture (decision 0045): a real hairstyle resolves a `Hair…` BLP; the bald style
         // (variation 0) has none. Guards the `SECTION_HAIR` constant + the type-3 row keying.
@@ -570,6 +1043,194 @@ mod tests {
             cs.skin_texture(1, 0, 1),
             Some("Character\\Human\\Male\\HumanMaleSkin00_01.blp")
         );
+    }
+
+    /// The underwear section spends **both** its texture columns (bug B325): `TextureName[0]` is the
+    /// pelvis (g5) and `TextureName[1]` the naked **torso** (g3) — the bra, authored only on the female
+    /// rows. Before this, a bare-chested female composited panties and nothing above them.
+    ///
+    /// The pin is byte-exact rather than a diff count: `…NakedTorsoSkin00_00.blp` is a 128×64 fully
+    /// opaque sheet (BLP alphaDepth 0 → the client's REPLACE), so if it lands at the right tile from its
+    /// own origin the composite's g3 rect must equal the file's mip 0 pixel-for-pixel. A wrong tile, a
+    /// wrong column, or a src-origin slip all break that equality.
+    #[test]
+    fn composite_body_dresses_the_female_torso_underwear() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cs = CharSections::load(&mut chain).expect("load CharSections");
+        // Night elf female, skinColor 0 — the appearance the B325 report shipped a screenshot of.
+        let (race, sex, skin) = (4u8, 1u8, 0u8);
+        assert_eq!(
+            cs.tex(race, sex, SECTION_UNDERWEAR, 0, skin, 1),
+            Some("Character\\NightElf\\Female\\NightElfFemaleNakedTorsoSkin00_00.blp"),
+            "the sectionType-4 row's second column is the naked torso"
+        );
+        let torso = read_texture_mip_chain(
+            &mut chain,
+            "Character\\NightElf\\Female\\NightElfFemaleNakedTorsoSkin00_00.blp",
+        )
+        .expect("read naked torso");
+        assert_eq!(
+            (torso.width, torso.height),
+            (128, 64),
+            "the sheet is authored exactly tile-sized"
+        );
+        let comp = cs
+            .composite_body(&mut chain, race, sex, skin, 0, 0, 0, 0, [None; 8])
+            .expect("composite ok")
+            .expect("base skin row present");
+
+        let (tx, ty, tw, th) = TILE_G3;
+        for row in 0..th {
+            let d = ((ty + row) * 256 + tx) as usize * 4;
+            let s = (row * tw) as usize * 4;
+            assert_eq!(
+                &comp.mips[0][d..d + tw as usize * 4],
+                &torso.mips[0][s..s + tw as usize * 4],
+                "g3 row {row} is the naked-torso sheet verbatim"
+            );
+        }
+    }
+
+    /// The underwear is the tile's **fallback**, and only the group's TESTED columns suppress it
+    /// (wow-re RF-0086; the byte-derived prefix in [`UNDERWEAR_TILES`]). This is the discriminating
+    /// pin, because the shipped art cannot make it: a real chest or a real pair of pants repaints
+    /// its whole tile opaquely, so "the underwear was suppressed" and "the underwear was painted
+    /// over" produce the same pixels.
+    ///
+    /// So the fixture is a display that **occupies a region column while painting nothing** — its
+    /// texture name resolves to no shipped file, so `read_equip_region` finds nothing to blit while
+    /// the column is still taken. That is the client's own gate: `0x4772f0`/`0x4773a0` test the
+    /// composite *cell*, not the equipped item. The same name at a different bodyslot lands in a
+    /// different column, and the outcome flips — which is the whole claim.
+    #[test]
+    fn only_the_tested_equipment_columns_suppress_the_underwear() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cs = CharSections::load(&mut chain).expect("load CharSections");
+        let (race, sex, skin) = (4u8, 1u8, 0u8); // night elf female, skinColor 0
+        let dir = "Character\\NightElf\\Female\\NightElfFemale";
+        let mut read = |n: &str| {
+            read_texture_mip_chain(&mut chain, &format!("{dir}{n}00_00.blp")).expect("read sheet")
+        };
+        let (base, torso, pelvis) = (
+            read("Skin"),
+            read("NakedTorsoSkin"),
+            read("NakedPelvisSkin"),
+        );
+
+        // The mip-0 pixels of a tile, out of a `stride`-wide image.
+        let rect = |img: &BlpMipChain, (x, y, w, h): Tile, stride: u32| -> Vec<u8> {
+            (0..h)
+                .flat_map(|r| {
+                    let o = (((y + r) * stride + x) * 4) as usize;
+                    img.mips[0][o..o + (w * 4) as usize].to_vec()
+                })
+                .collect()
+        };
+        let sheet = |img: &BlpMipChain| rect(img, (0, 0, 128, 64), 128);
+        let (torso_sheet, pelvis_sheet) = (sheet(&torso), sheet(&pelvis));
+        let (base_g3, base_g5) = (rect(&base, TILE_G3, 256), rect(&base, TILE_G5, 256));
+
+        // A display that TAKES the column without painting it (see the doc above).
+        let occupies = |layers: &[usize]| {
+            let mut region_textures: [Option<String>; 8] = Default::default();
+            for l in layers {
+                region_textures[*l] = Some("benilla-no-such-region".into());
+            }
+            ItemDisplay {
+                region_textures,
+                ..Default::default()
+            }
+        };
+        // bodyslot − 2: 0 shirt · 1 chest · 2 belt · 3 pants · 7 tabard.
+        let (shirt, chest, belt, pants, tabard) = (
+            occupies(&[3]),
+            occupies(&[3, 5]), // a robe reaches both groups
+            occupies(&[5]),
+            occupies(&[5]),
+            occupies(&[3]),
+        );
+        fn worn<'a>(slots: &[(usize, &'a ItemDisplay)]) -> [Option<&'a ItemDisplay>; 8] {
+            let mut e: [Option<&ItemDisplay>; 8] = [None; 8];
+            for (i, d) in slots {
+                e[*i] = Some(d);
+            }
+            e
+        }
+
+        // Byte-exact, but reported as a texel count and a name — a raw 32 KiB `assert_eq!` dump of a
+        // 128×64 RGBA tile is unreadable, and the useful fact is *which* of the three it is not.
+        let differing = |got: &[u8], want: &[u8]| {
+            got.chunks_exact(4)
+                .zip(want.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        // (label, equipment, expected g3, expected g5)
+        type Want<'a> = (&'a str, &'a Vec<u8>);
+        let cases: [(&str, [Option<&ItemDisplay>; 8], Want, Want); 6] = [
+            (
+                "naked",
+                worn(&[]),
+                ("the bra", &torso_sheet),
+                ("the panties", &pelvis_sheet),
+            ),
+            // Shirt is TorsoUpper column 0 — tested. Torso suppressed; the pelvis is a different group.
+            (
+                "shirt",
+                worn(&[(0, &shirt)]),
+                ("bare skin", &base_g3),
+                ("the panties", &pelvis_sheet),
+            ),
+            // A tabard occupies TorsoUpper too, but past the tested prefix: the bra still draws.
+            (
+                "tabard",
+                worn(&[(7, &tabard)]),
+                ("the bra", &torso_sheet),
+                ("the panties", &pelvis_sheet),
+            ),
+            // Legs is LegUpper column 0 — tested. Pelvis suppressed, torso untouched.
+            (
+                "pants",
+                worn(&[(3, &pants)]),
+                ("the bra", &torso_sheet),
+                ("bare skin", &base_g5),
+            ),
+            // A belt is LegUpper column 2, past the prefix: the panties survive it.
+            (
+                "belt",
+                worn(&[(2, &belt)]),
+                ("the bra", &torso_sheet),
+                ("the panties", &pelvis_sheet),
+            ),
+            // A robe reaches both groups at column 1, and suppresses both.
+            (
+                "chest",
+                worn(&[(1, &chest)]),
+                ("bare skin", &base_g3),
+                ("bare skin", &base_g5),
+            ),
+        ];
+        for (label, equipment, (g3_want, g3), (g5_want, g5)) in cases {
+            let comp = cs
+                .composite_body(&mut chain, race, sex, skin, 0, 0, 0, 0, equipment)
+                .expect("composite ok")
+                .expect("base skin row present");
+            for (tile, name, want_name, want) in [
+                (TILE_G3, "torso", g3_want, g3),
+                (TILE_G5, "pelvis", g5_want, g5),
+            ] {
+                let n = differing(&rect(&comp, tile, 256), want);
+                assert_eq!(
+                    n, 0,
+                    "{label}: the {name} tile is not {want_name} ({n}/8192 texels)"
+                );
+            }
+        }
+        // The fixture only means something if the three expectations are actually distinguishable.
+        assert_ne!(torso_sheet, base_g3, "the bra differs from bare skin");
+        assert_ne!(pelvis_sheet, base_g5, "the panties differ from bare skin");
     }
 
     /// Equipment layers on the **real** files (decision 0074): dressing the Human male in One's

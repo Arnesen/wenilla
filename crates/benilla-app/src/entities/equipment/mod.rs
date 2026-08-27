@@ -51,38 +51,41 @@ const PLAYER_HELD_SLOTS: [u8; HELD_SLOTS] = [15, 16, 17];
 /// M2 attachment-point ids (empirically pinned on `HumanMale.m2` — decision 0072): the drawn-hand
 /// points, the shield forearm, and the sheathed family the client's `0x47a070` jump table selects
 /// from (`K − (mainhand)` over `K ∈ {27, 31, 33}`, const 28 for the shield).
-pub(in crate::entities) mod attach_id {
+/// `pub(crate)` because the ids are a shared vocabulary, not this module's private numbering:
+/// the model panes filter the reference's attach reset and probe hand occupancy by them
+/// ([`crate::portrait::attach_reset`], [`crate::portrait::hand_grip`]).
+pub(crate) mod attach_id {
     /// Left forearm — a *drawn* shield.
-    pub(in crate::entities) const SHIELD: u16 = 0;
+    pub(crate) const SHIELD: u16 = 0;
     /// Right/left shoulder (pivots at ∓0.21 Y, shoulder height) — the pauldron pair.
-    pub(in crate::entities) const SHOULDER_RIGHT: u16 = 5;
-    pub(in crate::entities) const SHOULDER_LEFT: u16 = 6;
+    pub(crate) const SHOULDER_RIGHT: u16 = 5;
+    pub(crate) const SHOULDER_LEFT: u16 = 6;
     /// Head — the helm.
-    pub(in crate::entities) const HELM: u16 = 11;
+    pub(crate) const HELM: u16 = 11;
     /// Right hand — the drawn mainhand (and a drawn ranged weapon).
-    pub(in crate::entities) const HAND_RIGHT: u16 = 1;
+    pub(crate) const HAND_RIGHT: u16 = 1;
     /// Left hand — a drawn non-shield offhand.
-    pub(in crate::entities) const HAND_LEFT: u16 = 2;
+    pub(crate) const HAND_LEFT: u16 = 2;
     /// Right/left shoulder-blade — the stowed two-hander family (and a stowed ranged weapon).
-    pub(in crate::entities) const BACK_RIGHT: u16 = 26;
-    pub(in crate::entities) const BACK_LEFT: u16 = 27;
+    pub(crate) const BACK_RIGHT: u16 = 26;
+    pub(crate) const BACK_LEFT: u16 = 27;
     /// Centre back — the stowed shield.
-    pub(in crate::entities) const SHIELD_BACK: u16 = 28;
+    pub(crate) const SHIELD_BACK: u16 = 28;
     /// Lower-back pair — the stowed staff family.
-    pub(in crate::entities) const BACK_LOWER_MAIN: u16 = 30;
-    pub(in crate::entities) const BACK_LOWER_OFF: u16 = 31;
+    pub(crate) const BACK_LOWER_MAIN: u16 = 30;
+    pub(crate) const BACK_LOWER_OFF: u16 = 31;
     /// Hip pair — the stowed one-hander family (mainhand on the *left* hip, drawn across the body).
-    pub(in crate::entities) const HIP_MAIN: u16 = 32;
-    pub(in crate::entities) const HIP_OFF: u16 = 33;
+    pub(crate) const HIP_MAIN: u16 = 32;
+    pub(crate) const HIP_OFF: u16 = 33;
     /// HandArrow (35, bone 126 — flag-0x04 ignore-parent-rotation) — the in-hand nocked arrow's
     /// ONE body-bone attach (wow-re `nocked-ammo-cancel.md` §E2: `0x712f70(body, 0x23)` from
     /// `0x60ba30`/the `$BWP` BowPull handler; bow/wand only). The old Special2/Special3 (0x18/
     /// 0x19) reading is REFUTED — those are the `0x479f40` model-DIRECTORY selectors
     /// (`Item\ObjectComponents\Ammo\` vs `…\Weapon\`), never attach ids (§E1).
-    pub(in crate::entities) const HAND_ARROW: u16 = 0x23;
+    pub(crate) const HAND_ARROW: u16 = 0x23;
     /// The quiver-on-back attach (wow-re §H2, byte-verified 3×): the worn ammo container's
     /// model parents at M2 attachment id 26 — the same point the stowed two-hander family uses.
-    pub(in crate::entities) const QUIVER: u16 = 26;
+    pub(crate) const QUIVER: u16 = 26;
 }
 
 /// Item-display rendering: the `ItemDisplayInfo.dbc` catalog (held models + armor region textures,

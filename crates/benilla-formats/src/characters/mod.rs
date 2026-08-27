@@ -25,7 +25,10 @@ mod sections;
 
 pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
 pub use geosets::{CharacterGeosets, EquipGeosets};
-pub use sections::CharSections;
+pub use sections::{
+    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, CharSections,
+    EquipBlit,
+};
 
 // The appearance tables' schemas, for the `benilla-extract dbc` CSV dump (`crate::schema_for`) —
 // the same constructors the loaders above use, never a second transcription of the same layout.

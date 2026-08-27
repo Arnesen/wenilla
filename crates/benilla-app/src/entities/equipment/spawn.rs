@@ -70,15 +70,21 @@ impl SeatWriters<'_, '_> {
     /// attach point *plus* something model-local — a card's own pivot, a glow slot's point on the
     /// item — and only the attach-point term moves. The walk is recursive because an item's glow
     /// instances hang two levels down.
-    fn reseat(&mut self, root: Entity, bone: u16, delta: Vec3) {
+    ///
+    /// `attach` is assigned, not delta'd: it names WHICH attachment node the item now sits in, and
+    /// that is what a widget's attach reset filters on ([`crate::portrait::attach_reset`]). A move
+    /// that left it stale would keep, say, a stowed weapon marked with the hand id it left.
+    fn reseat(&mut self, root: Entity, bone: u16, attach: u16, delta: Vec3) {
         let mut stack = vec![root];
         while let Some(e) = stack.pop() {
             if let Ok(mut r) = self.riders.get_mut(e) {
                 r.bone = bone;
                 r.offset += delta;
+                r.attach = Some(attach);
             }
             if let Ok(mut c) = self.cards.get_mut(e) {
                 c.bone = bone;
+                c.attach = Some(attach);
                 c.seat = match c.seat {
                     crate::portrait::PortraitSeat::Body => crate::portrait::PortraitSeat::Body,
                     crate::portrait::PortraitSeat::Rider(at) => {
@@ -89,10 +95,12 @@ impl SeatWriters<'_, '_> {
             if let Ok(mut f) = self.effects.get_mut(e) {
                 f.bone = bone;
                 f.offset += delta;
+                f.attach = Some(attach);
             }
             if let Ok(mut g) = self.glows.get_mut(e) {
                 g.bone = bone;
                 g.offset += delta;
+                g.attach = attach;
             }
             if let Ok(kids) = self.children.get(e) {
                 stack.extend(kids.iter());
@@ -237,7 +245,7 @@ pub(in crate::entities) fn attach_held_items(
                                 rider.bone = bone;
                                 rider.local = offset;
                             }
-                            seats.reseat(root, bone, offset - old);
+                            seats.reseat(root, bone, n.attach, offset - old);
                             debug!(
                                 "held move: unit {entity} display {} → attach {} (bone {bone})",
                                 n.display, n.attach
@@ -325,9 +333,12 @@ fn spawn_slot(
                 visual: hs.visual,
                 // The item's seat on the BODY, carried so the glow attach can publish its own
                 // booth mirrors at a seat composed from it (decision 0822) — the glow spawns
-                // asynchronously and knows only this root.
+                // asynchronously and knows only this root. The attach id rides along for the
+                // same reason: a glow is chained UNDER the item, so the reference's attach reset
+                // takes it exactly when it takes the item ([`crate::portrait::attach_reset`]).
                 bone,
                 offset,
+                attach: hs.attach,
             });
     }
     // The engine-drawn bowstring (0408 §G2) — for the drawn BOW only: the ranged slot's
@@ -497,6 +508,7 @@ fn spawn_slot(
                     material: part.material.clone(),
                     bone,
                     offset,
+                    attach: Some(hs.attach),
                 },
             ));
             if skinned.is_some() {
@@ -583,6 +595,7 @@ fn spawn_slot(
                 bone,
                 seat: crate::portrait::PortraitSeat::Rider(offset + info.pivot),
                 kind: info.kind,
+                attach: Some(hs.attach),
             },
         ));
         // A card is a batch of the item's model and joins the wearer's appear-fade exactly like
@@ -658,6 +671,7 @@ fn spawn_slot(
             .insert(crate::portrait::PortraitEffects {
                 bone,
                 offset,
+                attach: Some(hs.attach),
                 emitters: dm.emitters.clone(),
             });
     }

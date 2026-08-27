@@ -859,8 +859,10 @@ mod quest_timer_tests;
 
 #[cfg(test)]
 mod durability_tests;
+// `pub(crate)` for its `harness`/`push`/`row` helpers: `perf::hud`'s own test drives the readout
+// through them rather than keeping a second copy of the XML-loading boilerplate.
 #[cfg(test)]
-mod world_state_tests;
+pub(crate) mod world_state_tests;
 
 #[cfg(test)]
 mod screenshot_tests;

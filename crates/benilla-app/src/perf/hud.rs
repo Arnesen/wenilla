@@ -292,6 +292,82 @@ pub(super) struct PillCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::script::ScriptValue;
+
+    use crate::ui_script::world_state_tests::{harness, push, row};
+
+    /// The readout and the dev cost pill both want the top centre, and before this they drew straight
+    /// through each other (the pill is anchored 8 px down; the readout's first row starts at 15). The
+    /// pill asks the frame itself how far down the band is spoken for ([`top_centre_claimed`]) and
+    /// seats itself below that — so this pins the probe against the shipped XML: nothing claimed while
+    /// the readout is empty, and the readout's real resolved bottom once it is up.
+    ///
+    /// **Why it lives here and not beside the frame it drives.** It was written in
+    /// `ui_script/world_state_tests.rs`, next to the readout — but `perf` is compiled out of a player
+    /// build, so the `player-tests` gate (`--no-default-features --lib`, decision 1175) could not
+    /// compile that file, and gating the one test with `#[cfg(feature = "dev")]` trips `run_mode`'s
+    /// dev-plane enforcer (1179: seam knowledge has exactly three addresses, and a gameplay module is
+    /// not one of them). Both laws point the same way — a test of a dev instrument belongs in a dev
+    /// root. It borrows the readout's own `#[cfg(test)]` helpers rather than copying them, so the XML
+    /// it drives stays the shipped one.
+    #[test]
+    fn the_readout_tells_the_dev_pill_how_much_of_the_top_it_uses() {
+        // NOT 768. The layout answers in WoW UI units — a screen that is always 768 units tall
+        // whatever the window is (decision 0582) — and the pill draws in window px, so a probe that
+        // subtracts one from the other is right only when the two happen to coincide. Feeding a
+        // window height that is NOT the virtual one is the whole point of this test: it is what the
+        // director's client does, and the first version of this probe put the pill back on top of the
+        // readout's third row there while passing every test at 768.
+        const SCREEN_H: f32 = 900.0;
+        let mut s = harness();
+        s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
+        s.resolve();
+        assert_eq!(
+            top_centre_claimed(&s, SCREEN_H),
+            0.0,
+            "hidden readout claims nothing — the pill keeps its usual seat"
+        );
+
+        push(
+            &mut s,
+            vec![
+                row(
+                    "Interface\\WorldStateFrame\\AllianceTower",
+                    "Towers Controlled: 3",
+                    "Alliance Towers Controlled",
+                ),
+                row(
+                    "Interface\\WorldStateFrame\\HordeTower",
+                    "Towers Controlled: 1",
+                    "Horde Towers Controlled",
+                ),
+            ],
+        );
+        s.resolve();
+        let claimed = top_centre_claimed(&s, SCREEN_H);
+        assert!(
+            claimed > 8.0,
+            "two rows reach past the pill's own seat, so the pill must move: {claimed}"
+        );
+        // The frame's own geometry, read back the way the probe reads it: the container's top offset
+        // plus one row per pushed row. Asserted against the XML rather than restated as constants.
+        let expected: f32 = s
+            .eval::<f64>("return (20 + WORLD_STATE_ROW_HEIGHT * 2 + 15) / GetScreenHeight()")
+            .expect("the frame's own numbers") as f32
+            * SCREEN_H;
+        assert!(
+            (claimed - expected).abs() < 0.5,
+            "the claim is the readout's resolved bottom: {claimed} vs {expected}"
+        );
+
+        push(&mut s, Vec::new());
+        s.resolve();
+        assert_eq!(
+            top_centre_claimed(&s, SCREEN_H),
+            0.0,
+            "and it hands the band back when the scope empties"
+        );
+    }
 
     /// The view the HUD draws only advances on the refresh interval — between ticks it holds
     /// still, which is the entire cost argument (identical snapshots are what the quad cache can
