@@ -257,6 +257,31 @@ pub struct MsaaFormats {
     pub formats: Vec<(u32, u32, u32)>,
 }
 
+impl MsaaFormats {
+    /// `requested`, stepped DOWN to the nearest count this device actually offers.
+    ///
+    /// **The single expression of "the device has the final say"** (decision 1643). It used to
+    /// exist only inside [`MsaaSupportPlugin::finish`], which runs once, before the first update —
+    /// i.e. against whatever [`MsaaSetting::default`] seeded, and therefore *before*
+    /// `config.toml` had been folded in. The doc two paragraphs up already claimed that "the list
+    /// a player picks from and the ceiling a typed value is clamped to cannot disagree"; a typed
+    /// value was in fact never clamped to it at all, and a saved `gxMultisample = 8` opened on a
+    /// GPU that stops at 4 handed the camera an 8 — the 2026-08-26 render-thread kill, one launch
+    /// later and on a machine the setting was never chosen on.
+    ///
+    /// **An empty list is no opinion, not a refusal.** Headless, or before the adapter exists,
+    /// there is no device to be wrong about and `requested` passes through — the same early-out
+    /// `finish` takes when there is no `RenderAdapter`. Clamping to 1 there would turn every
+    /// device-less test and every worldview boot into a silent "multisampling off".
+    pub fn clamp(&self, requested: u32) -> u32 {
+        if self.formats.is_empty() {
+            return requested;
+        }
+        let counts: Vec<u32> = self.formats.iter().map(|&(_, _, n)| n).collect();
+        clamp_to_supported(requested, &counts)
+    }
+}
+
 /// Colour and depth bit counts for the dropdown's label, derived from the formats we actually
 /// render into rather than typed: `MULTISAMPLING_FORMAT_STRING` is
 /// `"%d-bit color %d-bit depth %dx multisample"`, and a number in it should be true.
@@ -312,7 +337,10 @@ impl Plugin for MsaaSupportPlugin {
         let Some(requested) = app.world().get_resource::<MsaaSetting>().map(|m| m.samples) else {
             return;
         };
-        let granted = clamp_to_supported(requested, &supported);
+        // Through `MsaaFormats::clamp`, not `clamp_to_supported` directly: this seed clamp and the
+        // per-write clamp in `cvars::apply_to_knobs` must be the same rule, or the pair drifts
+        // exactly the way the missing half already did (1643).
+        let granted = app.world().resource::<MsaaFormats>().clamp(requested);
         if granted == requested {
             debug!("msaa: {requested}x accepted (this GPU offers {supported:?})");
             return;
@@ -664,6 +692,32 @@ mod msaa_tests {
         assert_eq!(clamp_to_supported(8, &[]), 1);
         assert_eq!(clamp_to_supported(1, &[]), 1);
         assert_eq!(MsaaSetting { samples: 1 }.level(), Msaa::Off);
+    }
+
+    /// [`MsaaFormats::clamp`] — the one expression of "the device has the final say" (1643),
+    /// and both of its halves matter.
+    ///
+    /// A device list steps a request DOWN to something the GPU will actually take, which is what
+    /// stops a saved `gxMultisample` from reaching the camera as a wgpu validation error. An
+    /// EMPTY list is no opinion rather than a refusal: headless, and before the adapter exists,
+    /// there is no device to be wrong about — clamping to 1 there would turn every device-less
+    /// run into a silent "multisampling off", including the one this crate's own tests run in.
+    #[test]
+    fn the_device_list_steps_down_and_an_empty_one_has_no_opinion() {
+        let apple = MsaaFormats {
+            formats: vec![(32, 32, 1), (32, 32, 2), (32, 32, 4)],
+        };
+        assert_eq!(apple.clamp(4), 4, "a count it offers is untouched");
+        assert_eq!(apple.clamp(3), 2, "down to the nearest offered, never up");
+        assert_eq!(apple.clamp(8), 4, "the 2026-08-26 render-thread kill");
+        assert_eq!(apple.clamp(16), 4);
+        assert_eq!(apple.clamp(1), 1);
+
+        let headless = MsaaFormats::default();
+        assert!(headless.formats.is_empty());
+        for n in [1, 2, 4, 8, 16] {
+            assert_eq!(headless.clamp(n), n, "no adapter, no opinion");
+        }
     }
 
     #[test]

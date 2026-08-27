@@ -137,13 +137,19 @@ pub(crate) fn layer_array_image(
     image.data = Some(rgba);
     image.texture_descriptor.mip_level_count = mip_levels;
     image.data_order = TextureDataOrder::LayerMajor;
+    // Ground is the surface the filter policy costs the most on — a tiling texture at a grazing
+    // angle is the anisotropy axis's worst case, and it fills most of the frame. The reference
+    // does not let this lane choose: both values come from the process globals
+    // ([`crate::tex_filter`]) — trilinear with anisotropy off, which is what `hwDetect` hands a
+    // virgin install (1645).
+    let filter = crate::tex_filter::tex_filter();
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 8,
+        mipmap_filter: filter.mipmap_filter(),
+        anisotropy_clamp: filter.anisotropy_clamp(),
         ..default()
     });
     image

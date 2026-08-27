@@ -289,6 +289,32 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // enumeration.
     ("gxColorBits", "32"),
     ("gxDepthBits", "32"),
+    // **The texture filter policy** — 1.12's own `trilinear` and `anisotropic`, over
+    // `benilla_assets::TexFilterSetting`. The defaults are the reference's registered strings, and
+    // benilla had neither CVar: it hardcoded trilinear + aniso 8 at every sampler it built, which
+    // is mode 5 — the *top* of what these two can ask for — shipped as the thing you get before
+    // asking. `tex_filter.rs` carries the derivation and the cost.
+    //
+    // Latched, exactly like `gxMultisample` above and for a harder reason: a sampler is baked into
+    // the `Image` at load and lives in the uploaded texture, so a live change would mean rebuilding
+    // every texture in the world. The reference's own UI says "enabled upon restart".
+    // `$WOW_TRILINEAR` / `$WOW_ANISO` override session-only, below.
+    // **`trilinear` registers "1", not the registrar's "0"** (decision 1645, correcting 1642).
+    // The reference's `CVar::Register` string is `"0"`, but `hwDetect` — registered `"1"` — runs
+    // `DetectHardware 0x641260` at boot and `CVar::Set`s sixteen video CVars from the matched
+    // `VideoHardware.dbc` row before the first frame, then self-clears. Every GPU this client runs
+    // on is unlisted in a 2004 table, so the row is the fallback scan's, whose reachable set is
+    // exactly rows 168/169/170 — and `trilinear` is 1 on 169 and 170, at both CPU tiers, with no
+    // CPU bias term. Measured as well as derived: the reference's own `WoW/Logs/gx.log` reads
+    // `VID: 106b` → `DID: 2` → `videoID: 170`.
+    //
+    // This is the same shape as `gxMultisample` above, which also registers the value the hardware
+    // table yields rather than a literal the registrar never emits on a modern machine.
+    ("trilinear", "1"),
+    // `anisotropic` registers `"1"` — off — and here the registrar's string IS the answer: it is
+    // **not** one of `hwDetect`'s sixteen (scan of `[0x639a60, 0x639b80)`: sixteen record-pointer
+    // reads, `0xc7f2e4` absent), so nothing overwrites it on any path.
+    ("anisotropic", "1"),
     // **Render scale** (decision 1639) — benilla's own CVar, no 1.12 counterpart, in the
     // `boothHalfRate` / `SoundOutputLimiter` mould: the reference has no such dial because it has
     // no second buffer to hang one on. The world renders into the composite lane's off-screen image
@@ -394,7 +420,12 @@ pub(crate) struct CvarPlugin;
 impl Plugin for CvarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CvarPersist>()
-            .add_systems(Startup, load_config.in_set(CvarLoad))
+            .add_systems(
+                Startup,
+                (load_config, publish_filter_policy)
+                    .chain()
+                    .in_set(CvarLoad),
+            )
             .add_systems(Update, sync_cvars);
         // **The flush is on the exit edge, not beside its feed** (decision 1528). It used to be
         // `(sync_cvars, save_config).chain()` in `Update`, which made the "or the app exiting"
@@ -433,6 +464,7 @@ pub(crate) struct KnobParams<'w> {
     follow: ResMut<'w, FollowConfig>,
     video: ResMut<'w, VideoConfig>,
     render_scale: ResMut<'w, RenderScale>,
+    tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
 }
@@ -451,6 +483,7 @@ impl KnobParams<'_> {
             scale: &mut self.scale,
             view: &mut self.view,
             msaa: &mut self.msaa,
+            msaa_formats: &self.msaa_formats,
             look: &mut self.look,
             click: &mut self.click,
             loot: &mut self.loot,
@@ -463,6 +496,7 @@ impl KnobParams<'_> {
             follow: &mut self.follow,
             video: &mut self.video,
             render_scale: &mut self.render_scale,
+            tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
         }
@@ -476,6 +510,8 @@ struct Knobs<'a> {
     scale: &'a mut UiScaleCvar,
     view: &'a mut ViewDistance,
     msaa: &'a mut MsaaSetting,
+    /// What the device actually offers — the ceiling `gxMultisample` is clamped to (1643).
+    msaa_formats: &'a benilla_world::view::MsaaFormats,
     look: &'a mut LookConfig,
     click: &'a mut ClickConfig,
     loot: &'a mut LootConfig,
@@ -488,6 +524,7 @@ struct Knobs<'a> {
     follow: &'a mut FollowConfig,
     video: &'a mut VideoConfig,
     render_scale: &'a mut RenderScale,
+    tex_filter: &'a mut benilla_assets::TexFilterSetting,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
 }
@@ -597,11 +634,70 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
         // and nothing reads this resource after the world camera's spawn.
         "gxmultisample" => {
-            knobs.msaa.samples = (v as u32).clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end())
+            // TWO ceilings, and the second one was missing until 1643. The reference's own
+            // `atoi`-then-clamp `[1, 16]` comes first; then the DEVICE's, because a count this
+            // GPU does not offer is not a setting that degrades — it is a wgpu validation error
+            // that kills the render thread on frame one ("Sample count 8 is not supported by
+            // format Rgba16Float on this device", 2026-08-26).
+            //
+            // `MsaaSupportPlugin::finish` already clamped, but it runs once, before the first
+            // update — so it saw `MsaaSetting::default()` and never the value `load_config` was
+            // about to fold in from `config.toml`. A config written on a machine that offers 8x
+            // and opened on one that stops at 4 therefore reached the camera untouched. Clamping
+            // at the WRITE covers every writer there is: the file, a Lua `SetCVar`, the dropdown,
+            // and the Defaults button.
+            let asked = (v as u32).clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end());
+            let granted = knobs.msaa_formats.clamp(asked);
+            if granted != asked {
+                // At `warn`, the same posture as the seed clamp: the player asked for something
+                // and did not get it, and this is the only place that fact exists.
+                warn!(
+                    "cvar {name}: this GPU does not offer {asked}x multisampling — using {granted}x"
+                );
+            }
+            knobs.msaa.samples = granted;
+        }
+        // The filter policy's two halves. Both write the PENDING value — latched, like
+        // `gxMultisample`: the process policy is published once at the end of `load_config` and
+        // nothing reads this resource afterwards. `anisotropic` takes the reference's own
+        // parse-then-clamp `[1, 16]` (`0x689110`); `trilinear` is a flag like every other.
+        "trilinear" => knobs.tex_filter.trilinear = v != 0.0,
+        "anisotropic" => {
+            knobs.tex_filter.aniso = (v as u32).clamp(
+                *benilla_assets::ANISO_RANGE.start(),
+                *benilla_assets::ANISO_RANGE.end(),
+            )
         }
         _ => return false,
     }
     true
+}
+
+/// Freeze the texture filter policy for the process, and say what it resolved to.
+///
+/// **A separate system, chained after [`load_config`], deliberately.** `load_config` returns early
+/// on an absent or malformed file, and the policy has to be published on every one of those paths:
+/// the sampler lanes are an async `AssetLoader` and a set of ordinary systems, none of which can
+/// read a resource the others own, so a run that never published would be reading
+/// [`benilla_assets::tex_filter`]'s fallback while a player's `config.toml` said otherwise.
+///
+/// The log line is not decoration — it is the same reasoning as `video::log_display_session`
+/// (1627). Every filtering report this client will get comes from a machine nobody here can run,
+/// and "which mode was that run actually in" must be readable off the log a player pastes rather
+/// than reasoned about.
+fn publish_filter_policy(filter: Res<benilla_assets::TexFilterSetting>) {
+    benilla_assets::publish_tex_filter(*filter);
+    let mode = filter.mode();
+    let name = match mode {
+        3 => "bilinear + nearest-mip select, aniso off",
+        4 => "trilinear, aniso off",
+        _ => "trilinear + aniso",
+    };
+    info!(
+        "texture filter: mode {mode} ({name}) — trilinear={} anisotropic={}",
+        u8::from(filter.trilinear),
+        filter.aniso
+    );
 }
 
 /// A stored minimap zoom level → a valid index: truncate to int and clamp into
@@ -630,6 +726,15 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     // overrides above. Pinning it into the config would make an instrument run sticky.
     if crate::video::novsync_env() {
         persist.env_overridden.insert("gxvsync".into());
+    }
+    // The filter policy's A/B levers, under the same law: pricing mode 3 against mode 5 on one
+    // machine in one session is exactly what these are for, and a value that stuck in
+    // `config.toml` would silently denominate every later reading.
+    if std::env::var_os("WOW_TRILINEAR").is_some() {
+        persist.env_overridden.insert("trilinear".into());
+    }
+    if std::env::var_os("WOW_ANISO").is_some() {
+        persist.env_overridden.insert("anisotropic".into());
     }
     // `$WOW_WIN`, a capture scenario, or any instrumented run owns the window's geometry for the
     // session (decision 1627), so the two CVars that would otherwise move it mid-run are
@@ -773,6 +878,7 @@ fn sync_cvars(
             guild_notify,
             msaa,
             msaa_formats,
+            tex_filter,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -805,7 +911,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 37] = [
+        let session: [(&str, String); 39] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -857,6 +963,8 @@ fn sync_cvars(
             ("boothHalfRate", flag(pane_rate.half)),
             ("renderScale", render_scale.0.to_string()),
             ("gxMultisample", msaa.samples.to_string()),
+            ("trilinear", flag(tex_filter.trilinear)),
+            ("anisotropic", tex_filter.aniso.to_string()),
         ];
         for (name, value) in session {
             script.set_cvar_host(name, &value);
@@ -1149,8 +1257,19 @@ mod tests {
         let mut guild_notify = crate::ui_guild::GuildMemberNotify::default();
         // Literal, not Default: MsaaSetting::default() reads $WOW_MSAA.
         let mut msaa = MsaaSetting { samples: 1 };
+        // What an Apple GPU answers for the trio we render into (Rgba16Float / Depth32Float /
+        // the swapchain). 8 and 16 are NOT in it — which is the whole point below.
+        let msaa_formats = benilla_world::view::MsaaFormats {
+            formats: vec![(32, 32, 1), (32, 32, 2), (32, 32, 4)],
+        };
         // Literal for the same reason: RenderScale::default() reads $WOW_RENDER_SCALE.
         let mut render_scale = RenderScale(1.0);
+        // Literal for the same reason again (1642): TexFilterSetting::default() reads
+        // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).
+        let mut tex_filter = benilla_assets::TexFilterSetting {
+            trilinear: true,
+            aniso: 1,
+        };
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -1170,6 +1289,8 @@ mod tests {
             pane_rate: &mut pane_rate,
             guild_notify: &mut guild_notify,
             msaa: &mut msaa,
+            tex_filter: &mut tex_filter,
+            msaa_formats: &msaa_formats,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -1182,8 +1303,33 @@ mod tests {
         // does — the value reaching the camera is a sample COUNT, where 1 is none (1629).
         assert!(apply_to_knobs("gxMultisample", "4", &mut knobs));
         assert_eq!(knobs.msaa.samples, 4);
+        // The filter policy's two rows: `anisotropic` takes the reference's own [1, 16] clamp,
+        // `trilinear` is a flag. Both write the pending value; the process policy is already
+        // published by the time either can be typed (1642).
+        assert!(apply_to_knobs("anisotropic", "99", &mut knobs));
+        assert_eq!(knobs.tex_filter.aniso, *benilla_assets::ANISO_RANGE.end());
+        assert!(apply_to_knobs("anisotropic", "0", &mut knobs));
+        assert_eq!(knobs.tex_filter.aniso, *benilla_assets::ANISO_RANGE.start());
+        // Both directions: the knob starts at what ships (on), so only the flip to 0 proves the
+        // arm does anything.
+        assert!(apply_to_knobs("trilinear", "0", &mut knobs));
+        assert!(!knobs.tex_filter.trilinear);
+        assert!(apply_to_knobs("trilinear", "1", &mut knobs));
+        assert!(knobs.tex_filter.trilinear);
+        // **The DEVICE's ceiling, not the reference's** (decision 1643). 99 clamps to the
+        // reference's 16 and then to the 4 this GPU offers — before 1643 it stopped at 16 and the
+        // camera was handed a sample count wgpu refuses, killing the render thread on frame one.
         assert!(apply_to_knobs("gxmultisample", "99", &mut knobs));
-        assert_eq!(knobs.msaa.samples, *MSAA_RANGE.end());
+        assert_eq!(knobs.msaa.samples, 4);
+        // The realistic route in: a config written where 8x exists, opened where it does not.
+        assert!(apply_to_knobs("gxMultisample", "8", &mut knobs));
+        assert_eq!(
+            knobs.msaa.samples, 4,
+            "a device that stops at 4x must never be handed an 8"
+        );
+        // A count the device DOES offer is untouched.
+        assert!(apply_to_knobs("gxmultisample", "2", &mut knobs));
+        assert_eq!(knobs.msaa.samples, 2);
         assert!(apply_to_knobs("gxmultisample", "0", &mut knobs));
         assert_eq!(knobs.msaa.samples, *MSAA_RANGE.start());
         // Render scale takes a fraction and clamps to its own range at both ends (1639).
@@ -1308,7 +1454,9 @@ mod tests {
     #[test]
     fn a_lua_setcvar_lands_in_config_toml_end_to_end() {
         use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-cvar-e2e-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         let _c = EnvGuard::unset("WOW_CAPTURE");
@@ -1365,6 +1513,12 @@ mod tests {
             .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
             .insert_resource(ViewDistance { farclip: 350.0 })
             .insert_resource(MsaaSetting { samples: 1 })
+            // Literal for the same reason (1642): TexFilterSetting::default() reads
+            // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).
+            .insert_resource(benilla_assets::TexFilterSetting {
+                trilinear: true,
+                aniso: 1,
+            })
             // The device menu the Video dropdown reads. A real-shaped list, not empty: these
             // tests exercise `GetCurrentMultisampleFormat`'s lookup, which needs rows to find.
             .insert_resource(benilla_world::view::MsaaFormats {
@@ -1403,7 +1557,9 @@ mod tests {
     fn entering_the_world_survives_the_quit_and_comes_back_selected() {
         use crate::char_select::{ClientState, Roster};
         use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-lastchar-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         let _c = EnvGuard::unset("WOW_CAPTURE");
@@ -1477,7 +1633,9 @@ mod tests {
     #[test]
     fn a_minimap_setzoom_reaches_the_knob_and_the_file() {
         use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-mmzoom-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         let _c = EnvGuard::unset("WOW_CAPTURE");

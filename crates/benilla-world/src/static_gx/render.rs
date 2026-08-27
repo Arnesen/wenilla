@@ -228,21 +228,25 @@ fn init_pipelines(mut commands: Commands, render_device: Res<RenderDevice>) {
         ),
     );
     // TWO samplers per array — repeat and clamp, both matching the BLP loader's model albedo
-    // sampler exactly (linear tri-filtered, ANISOTROPY 8 — `blp.rs`; the aniso is load-bearing
-    // for parity, oblique minification reads visibly softer without it). The shader selects by
-    // the vertex word's wrap bits: a shared array cannot carry per-layer address modes. The
-    // rare MIXED-wrap batch (repeat one axis, clamp the other) keeps the repeat sampler plus
-    // the shader's half-texel inset clamp on its clamped axis — an approximation confined to
-    // that class (decision 0763's silhouette concern, honoured per axis).
+    // sampler exactly. Parity with `blp.rs` was always the rule here; what changed is that
+    // `blp.rs` no longer picks the numbers. The mip filter and the anisotropy are the process
+    // filter policy's (`benilla_assets::tex_filter`), which the reference forces onto every
+    // texture it creates from `[0x835250]`/`[0x835254]` — so this lane stays in step by asking
+    // the same question rather than by copying the same literals. The shader selects by the
+    // vertex word's wrap bits: a shared array cannot carry per-layer address modes. The rare
+    // MIXED-wrap batch (repeat one axis, clamp the other) keeps the repeat sampler plus the
+    // shader's half-texel inset clamp on its clamped axis — an approximation confined to that
+    // class (decision 0763's silhouette concern, honoured per axis).
+    let filter = benilla_assets::tex_filter();
     let make = |label: &'static str, mode: AddressMode| {
         render_device.create_sampler(&SamplerDescriptor {
             label: Some(label),
             min_filter: FilterMode::Linear,
             mag_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
+            mipmap_filter: filter.gpu_mipmap_filter(),
             address_mode_u: mode,
             address_mode_v: mode,
-            anisotropy_clamp: 8,
+            anisotropy_clamp: filter.anisotropy_clamp(),
             ..Default::default()
         })
     };

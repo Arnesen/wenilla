@@ -795,8 +795,9 @@ mod differential_tests {
                                 .chars()
                                 .filter_map(|c| e.char_cell(face, ppem, c))
                                 .flat_map(|c| c.glyphs.iter())
-                                .map(|g| (g.advance.floor() + step_extra) / dpi)
-                                .sum();
+                                .map(|g| g.advance.floor() + step_extra)
+                                .sum::<f32>()
+                                / dpi;
                             assert_eq!(
                                 got, by_glyph,
                                 "{family} @{ppem} dpi {dpi} extra {step_extra}: {text:?} — the \

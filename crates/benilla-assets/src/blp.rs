@@ -5,7 +5,8 @@
 //! - [`BlpVariant::WorldArt`] — tiling world/model albedo: `Rgba8Unorm` (the RE'd gamma-space
 //!   invariant — the GPU does *not* linearize albedo on sample, so shader math stays in WoW's
 //!   gamma/byte space), the BLP's **authored** mip pyramid used verbatim (the real 1.12 client cannot
-//!   regenerate mips — it uploads the stored ones), repeat + trilinear + anisotropic sampling.
+//!   regenerate mips — it uploads the stored ones), repeat + the process filter policy
+//!   ([`crate::tex_filter`]).
 //! - [`BlpVariant::Sprite`] — emissive billboards (sun/moon discs): `Rgba8UnormSrgb`, clamp, mip 0.
 //! - [`BlpVariant::Cursor`] — the OS cursor image: `Rgba8UnormSrgb`, single mip.
 //!
@@ -26,7 +27,7 @@ use crate::gpu_blp::{for_upload, UploadChain};
 /// Which on-GPU form a BLP decodes to. See the module docs.
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum BlpVariant {
-    /// Tiling world/model albedo — `Rgba8Unorm`, authored mips, repeat + anisotropic. The default.
+    /// Tiling world/model albedo — `Rgba8Unorm`, authored mips, repeat + the filter policy. The default.
     #[default]
     WorldArt,
     /// Emissive billboard (celestial disc) — `Rgba8UnormSrgb`, clamp, mip 0 only.
@@ -117,8 +118,8 @@ impl AssetLoader for BlpImageLoader {
 /// `wow-5875-re/system/lighting`). Every decoded lane below uploads as this.
 const GAMMA_BYTES: TextureFormat = TextureFormat::Rgba8Unorm;
 
-/// World/model albedo: the BLP's authored mip pyramid laid in verbatim, repeat + trilinear +
-/// anisotropic. (Port of the old `repeat_texture_authored`.)
+/// World/model albedo: the BLP's authored mip pyramid laid in verbatim, repeat + the process
+/// filter policy ([`crate::tex_filter`]). (Port of the old `repeat_texture_authored`.)
 fn world_art_image(upload: UploadChain, wrap: (bool, bool)) -> Image {
     let UploadChain { chain, format } = upload;
     let levels = chain.mips.len() as u32;
@@ -157,13 +158,18 @@ fn world_art_image(upload: UploadChain, wrap: (bool, bool)) -> Image {
             ImageAddressMode::ClampToEdge
         }
     };
+    // The mip filter and the anisotropy are NOT this lane's to choose: the reference forces both
+    // from two process globals at every `TextureCreate` (`0x449ae0`), and what a virgin install
+    // gets from `hwDetect` is trilinear with anisotropy OFF. See [`crate::tex_filter`] — this used
+    // to read `Linear` / `8`, which is mode 5 shipped as if it were the default.
+    let filter = crate::tex_filter::tex_filter();
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: mode(wrap.0),
         address_mode_v: mode(wrap.1),
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 8,
+        mipmap_filter: filter.mipmap_filter(),
+        anisotropy_clamp: filter.anisotropy_clamp(),
         ..Default::default()
     });
     image
@@ -265,7 +271,10 @@ fn point_sprite_image(upload: UploadChain) -> Image {
         address_mode_v: ImageAddressMode::ClampToEdge,
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
+        // A mip chain means the policy owns the mip filter here too — the reference's override is
+        // unconditional across every texture it creates, with no per-class exemption. The aniso
+        // stays absent by the argument above, and the policy agrees in modes 3 and 4.
+        mipmap_filter: crate::tex_filter::tex_filter().mipmap_filter(),
         ..Default::default()
     });
     image

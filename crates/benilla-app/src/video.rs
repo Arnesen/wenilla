@@ -283,25 +283,35 @@ fn check_window_pinned(
     let Ok(window) = windows.single() else {
         return;
     };
-    let got = UVec2::new(
-        window.resolution.width() as u32,
-        window.resolution.height() as u32,
-    );
+    // `$WOW_DPI` re-denominates `$WOW_WIN` in PHYSICAL px (that knob's doc says so: the capture is
+    // the framebuffer that player's GPU would scan out), so the size this compares has to follow
+    // it. Comparing the logical size under an override refused every non-1× run outright — it read
+    // `want` against `want/dpi`.
+    let res = &window.resolution;
+    let got = match requested_dpi() {
+        Some(_) => UVec2::new(res.physical_width(), res.physical_height()),
+        None => UVec2::new(res.width() as u32, res.height() as u32),
+    };
     if got == want {
         return;
     }
+    let unit = if requested_dpi().is_some() {
+        "physical"
+    } else {
+        "logical"
+    };
     let capturing =
         std::env::var_os("WOW_CAPTURE").is_some() || std::env::var_os("WOW_CAPTURE_UI").is_some();
     if !capturing {
         warn!(
-            "window: asked for {}x{} logical, got {}x{} — the window manager clamped it to the \
+            "window: asked for {}x{} {unit}, got {}x{} — the window manager clamped it to the \
              display. Harmless here; it would invalidate a capture.",
             want.x, want.y, got.x, got.y
         );
         return;
     }
     error!(
-        "window: REFUSING this capture — asked for {}x{} logical, got {}x{}. The window manager \
+        "window: REFUSING this capture — asked for {}x{} {unit}, got {}x{}. The window manager \
          clamped the request to the display this window opened on, so the image would not be the \
          size the scenario is denominated in and any diff against it would be meaningless. Use a \
          size that fits the current display (or move the window to a bigger one) and re-run.",

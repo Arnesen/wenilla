@@ -74,14 +74,18 @@ pub fn repeat_texture_authored(upload: crate::gpu_blp::UploadChain, wrap: (bool,
             ImageAddressMode::ClampToEdge
         }
     };
+    // The reference forces the mip filter and the anisotropy from two process globals at every
+    // `TextureCreate`, and a virgin install lands on trilinear with anisotropy OFF
+    // ([`crate::tex_filter`]). This read `Linear` / `8` — mode 5 — under the comment "the vanilla
+    // look", which was the look of an install with `SET anisotropic "16"` in its `Config.wtf`.
+    let filter = crate::tex_filter::tex_filter();
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: mode(wrap.0),
         address_mode_v: mode(wrap.1),
-        // Trilinear + anisotropic: smooth, sharp-where-it-should-be, no shimmer — the vanilla look.
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 8,
+        mipmap_filter: filter.mipmap_filter(),
+        anisotropy_clamp: filter.anisotropy_clamp(),
         ..default()
     });
     image
@@ -143,16 +147,22 @@ pub fn liquid_frame_array(frames: Vec<BlpMipChain>) -> Image {
         dimension: Some(TextureViewDimension::D2Array),
         ..default()
     });
+    // **The apitrace that pinned this was read one step too far.** WoW.20 showed the ripple
+    // sampler at LINEAR_MIPMAP_LINEAR + MAX_ANISOTROPY 16 and it was recorded here as "VERIFIED
+    // the reference ripple sampler" — but that capture came off the repo's reference install,
+    // whose `Config.wtf` carries `SET anisotropic "16"`. It proves the *mechanism* (the global
+    // reaches the liquid sampler like every other), not the *default*, which is aniso off. There
+    // is no per-texture filter override anywhere in the reference, so water takes the same policy
+    // as ground ([`crate::tex_filter`]) — and at `anisotropic 16` this lane is byte-identical to
+    // what it was.
+    let filter = crate::tex_filter::tex_filter();
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
-        // Trilinear + 16× anisotropic — VERIFIED the reference ripple sampler (apitrace WoW.20: tex 442,
-        // LINEAR_MIPMAP_LINEAR + MAX_ANISOTROPY 16). This is what turns the unmipped sparkle into the
-        // reference's sparse, smooth, elongated wave-streaks at the grazing water surface.
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 16,
+        mipmap_filter: filter.mipmap_filter(),
+        anisotropy_clamp: filter.anisotropy_clamp(),
         ..default()
     });
     image

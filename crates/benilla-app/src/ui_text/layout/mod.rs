@@ -81,9 +81,10 @@ pub(crate) struct FontSpec<'a> {
 /// only-negative kerning scaled by the face's advance-adjust, then rounds). This extra tracking is
 /// look-defining — it is why real client text reads wider/denser than the raw font metrics.
 ///
-/// **Applied in PHYSICAL device pixels** (the ppem the face is actually rasterized at), then divided
-/// back to logical — because that is where the real client's law lives: `FT_advance >> 6` floors the
-/// device-pixel advance and the `+1`/`+1` biases are whole *device* pixels. Flooring in logical px
+/// **Answered in PHYSICAL device pixels** (the ppem the face is actually rasterized at); the caller
+/// divides back to logical **once**, at the end of the line (decision 1644) — because that is where
+/// the real client's law lives: `FT_advance >> 6` floors the device-pixel advance and the `+1`/`+1`
+/// biases are whole *device* pixels. Flooring in logical px
 /// instead (the pre-fix shortcut) over-tracks on any window where `dpi ≠ 1`: at retina a
 /// 6.385px-logical (12.77px-physical) ARIALN digit steps `(⌊12.77⌋+2)/2 = 7.0px`, not the logical
 /// `⌊6.385⌋+2 = 8.0px` — a full logical pixel of extra gap *per digit*, proportionally huge on small
@@ -92,8 +93,8 @@ pub(crate) struct FontSpec<'a> {
 /// Deliberate v1 simplification (module doc): kerning is dropped entirely (the client applies only
 /// *negative* pair kerns and rounds the sum — at UI sizes the rounded contribution is almost always
 /// 0).
-fn client_step(raw_physical_advance: f32, step_extra: f32, dpi: f32) -> f32 {
-    (raw_physical_advance.floor() + step_extra) / dpi
+fn client_step(raw_physical_advance: f32, step_extra: f32) -> f32 {
+    raw_physical_advance.floor() + step_extra
 }
 
 /// The step-law bias for a font's outline flag: the base `+1` for everyone, and one more `+1` for
@@ -236,17 +237,26 @@ fn layout_text_quads_inner(
     let e = &*e;
     let dpi = e.dpi();
     let sheet = e.sheet_image();
-    // Snap a logical coordinate to the nearest DEVICE pixel (a multiple of `1/dpi`), so glyph edges
-    // land on device pixels — the same integer-device-pixel snap the real client does, which keeps
-    // the cell crisp instead of resampled. A cell is an integer count of device texels, so the
-    // quad's far edge is then automatically device-aligned too.
+    // **The line rounds ONCE, and the glyphs are integer device offsets from it** (decision 1644).
     //
-    // Note what this now buys that it could not before: every glyph on a line shares one `pen_y`
-    // and an integer physical `bearing_top`, so they all round by the same residual and the line is
-    // FLAT. Under the old size ladder a rescale ran after this and multiplied each already-rounded
-    // position by a non-integer factor, giving every letter its own sub-pixel phase — which is what
-    // "the letters aren't on a line" was (decision 1342).
-    let snap = |v: f32| (v * dpi).round() / dpi;
+    // Glyph edges must land on device pixels — the same integer-device-pixel placement the real
+    // client does — or the cell is resampled instead of blitted. Everything a glyph contributes to
+    // its own position is *already* an integer count of device texels: swash's `bearing_x` /
+    // `bearing_top`, the shaper's `y_off`, and the step law's `floor(advance) + extra`. So the pen
+    // walks in DEVICE px, the line's origin is rounded once, and each glyph adds its integers to
+    // that one rounded number.
+    //
+    // The obvious spelling — `snap(pen + per_glyph_offset)` with `snap(v) = (v·dpi).round()/dpi` —
+    // is the same thing in exact arithmetic and NOT the same thing in `f32`, which is what B232
+    // was. At a fractional scale factor (Windows 150 %, a fractional Wayland scale) `bearing/dpi`
+    // is inexact, so a sum that is mathematically a half-pixel tie lands either side of the tie
+    // depending on the glyph's own bearing: the tall letters round one way, the x-height letters
+    // the other, and the word visibly steps. It fires only where the tie actually falls (~2 % of
+    // seats at dpi 1.5, ~4 % at 1.75 — measured), which is why it read as "one UI scale is broken
+    // and the next is fine" rather than as anything systematic. Rounding the ORIGIN instead of the
+    // sum removes the tie from the per-glyph term entirely: a line cannot be anything but flat.
+    // (The predecessor defect, 1342's: a rescale ran *after* the snap and multiplied each rounded
+    // position by a non-integer factor, giving every letter its own sub-pixel phase.)
 
     // The render lays the same lines the measure counted, or a MIDDLE-justified block seats
     // against a height it does not have ([`fontstring_lines`], decision 1343).
@@ -325,10 +335,12 @@ fn layout_text_quads_inner(
     let mut pen_y = block_top + baseline_in_cell;
 
     // One glyph laid at a line-relative x-origin of 0, pending the line's justification shift.
+    // Both offsets are **device px, and integral** — the pen's own walk plus swash's bearings.
     struct PendingGlyph {
-        x_rel: f32,
-        /// Vertical offset from the line baseline (`pen_y`).
-        y_rel: f32,
+        /// Horizontal offset from the line's rounded origin.
+        x_dev: f32,
+        /// Vertical offset from the line's rounded baseline.
+        y_dev: f32,
         uv: Rect,
         px_w: f32,
         px_h: f32,
@@ -347,12 +359,14 @@ fn layout_text_quads_inner(
         // This line's hyperlink x-ranges (line-origin space), one entry per distinct link — a
         // link's runs are contiguous, so min/max of its runs' pen extents is its span.
         let mut line_links: Vec<(std::sync::Arc<super::markup::LinkInfo>, f32, f32)> = Vec::new();
-        let mut pen_x = 0.0f32;
+        // The pen in DEVICE px: every step is `floor(advance) + extra`, an integer, so the walk
+        // is exact and the logical width is one division at the end rather than a sum of quotients.
+        let mut pen_dev = 0.0f32;
         for run in line {
             if run.text.is_empty() {
                 continue;
             }
-            let run_x0 = pen_x;
+            let run_x0 = pen_dev / dpi;
             // The pen walks CHARACTERS, not a shaped buffer. The client's law has no kerning and no
             // neighbour term (`ComputeStep 0x5ca2d0`), so a run's glyph sequence is the
             // concatenation of its characters' — which is exactly what the cache holds, and exactly
@@ -373,15 +387,15 @@ fn layout_text_quads_inner(
                 for g in &cc.glyphs {
                     if let Some(info) = e.cell(r.face, r.ppem, r.radius, g.glyph_id) {
                         pending.push(PendingGlyph {
-                            x_rel: pen_x + info.bearing_x / dpi,
-                            y_rel: g.y_off / dpi - info.bearing_top / dpi - thick_rise,
+                            x_dev: pen_dev + info.bearing_x,
+                            y_dev: g.y_off - info.bearing_top,
                             uv: info.uv,
                             px_w: info.px_w / dpi,
                             px_h: info.px_h / dpi,
                             color,
                         });
                     }
-                    pen_x += client_step(g.advance, r.step_extra, dpi);
+                    pen_dev += client_step(g.advance, r.step_extra);
                 }
                 char_index += 1;
             }
@@ -390,22 +404,27 @@ fn layout_text_quads_inner(
                     .iter_mut()
                     .find(|(a, _, _)| std::sync::Arc::ptr_eq(a, info))
                 {
-                    Some((_, _, x1)) => *x1 = pen_x,
-                    None => line_links.push((info.clone(), run_x0, pen_x)),
+                    Some((_, _, x1)) => *x1 = pen_dev / dpi,
+                    None => line_links.push((info.clone(), run_x0, pen_dev / dpi)),
                 }
             }
         }
 
         // Second pass: shift the whole line by the justification offset and emit.
-        let line_width = pen_x;
+        let line_width = pen_dev / dpi;
         let origin_x = match justify.h {
             JustifyH::Left => rect.min.x,
             JustifyH::Center => rect.min.x + (rect.width() - line_width) * 0.5,
             JustifyH::Right => rect.max.x - line_width,
         };
+        // The line's two rounded device anchors — computed once, shared by every glyph on it.
+        // `thick_rise` is a LOGICAL px (the composite cell's net blit shift), so it rides into the
+        // round with the baseline rather than being applied to each glyph after it.
+        let origin_dev_x = (origin_x * dpi).round();
+        let baseline_dev_y = ((pen_y - thick_rise) * dpi).round();
         for g in &pending {
-            let gx = snap(origin_x + g.x_rel);
-            let gy = snap(pen_y + g.y_rel);
+            let gx = (origin_dev_x + g.x_dev) / dpi;
+            let gy = (baseline_dev_y + g.y_dev) / dpi;
             quads.push(UiQuad {
                 rect: Rect::new(gx, gy, gx + g.px_w, gy + g.px_h),
                 z_key,
@@ -562,6 +581,83 @@ mod measure_fits_render {
                         "{label:?} wrapped inside its own measured width \
                          ({measured} px, height {h}, dpi {dpi})"
                     );
+                }
+            }
+        }
+    }
+
+    /// **One line is ONE baseline — at every DPI, size and seat.**
+    ///
+    /// The emit pass's whole claim (decision 1342) is that a line is flat *by construction*: one
+    /// `pen_y`, an integer physical `bearing_top` per glyph, so every letter rounds by the same
+    /// residual. That is true in exact arithmetic and it was NOT true in `f32` — `snap(pen_y −
+    /// bt/dpi)` rounds a per-glyph sum, and at a **fractional** scale factor (Windows 150 %,
+    /// a fractional Wayland/KDE scale) `bt/dpi` is inexact, so a value that is mathematically a
+    /// half-pixel tie lands either side of it depending on the glyph's own bearing. B232's
+    /// "the letters are not vertically aligned" is that tie, one device pixel wide, and it can
+    /// only be seen at the sizes and seats where the tie actually falls — which is why one UI
+    /// scale showed it and the next did not.
+    ///
+    /// The invariant is read off the quads: FRIZQT's hinted raster puts **every** cell bottom
+    /// exactly on the baseline (`px_h == bearing_top` for every glyph at every ppem 8..64 —
+    /// measured, engine sweep), so one baseline means one `rect.max.y`.
+    #[test]
+    fn one_line_is_one_baseline_at_every_dpi() {
+        let Some(mut e) = test_engine(1.0) else {
+            eprintln!("skipping: no install / font chain");
+            return;
+        };
+        // Integer DPIs are the ones this machine can capture; the fractional ones are what the
+        // reporters run, and they are exactly where the tie lives.
+        for dpi in [1.0f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            e.set_dpi_for_test(dpi);
+            for base in [10.0f32, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0] {
+                let s = spec(base * ERA);
+                // A quarter-pixel walk over the seat: a frame at 90 % UI scale seats its text at
+                // every fractional offset there is.
+                for step in 0..320 {
+                    let top = step as f32 * 0.25;
+                    let rect = Rect::new(17.5, top, 217.5, top + 20.0);
+                    let quads = layout_text_quads(
+                        &mut e,
+                        "Combat",
+                        rect,
+                        [1.0; 4],
+                        Justify {
+                            h: JustifyH::Left,
+                            v: JustifyV::Middle,
+                        },
+                        0,
+                        s,
+                    );
+                    let lo = quads
+                        .iter()
+                        .map(|q| q.rect.max.y)
+                        .fold(f32::INFINITY, f32::min);
+                    let hi = quads
+                        .iter()
+                        .map(|q| q.rect.max.y)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    assert!(
+                        (hi - lo) * dpi < 1e-3,
+                        "dpi {dpi}, height {base}, seat {top}: the letters of \"Combat\" \
+                         straddle {:.2} device px of baseline",
+                        (hi - lo) * dpi
+                    );
+                    // The same law horizontally: a glyph's left edge is the line's one rounded
+                    // origin plus integers, so it is on the device grid too (a letter off it is
+                    // resampled — the "uneven stems" half of the same report).
+                    for q in &quads {
+                        for (axis, dev) in
+                            [("top", q.rect.min.y * dpi), ("left", q.rect.min.x * dpi)]
+                        {
+                            assert!(
+                                (dev - dev.round()).abs() < 1e-3,
+                                "dpi {dpi}, height {base}, seat {top}: a glyph {axis} landed at \
+                                 {dev} device px — off the device grid"
+                            );
+                        }
+                    }
                 }
             }
         }

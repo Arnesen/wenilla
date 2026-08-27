@@ -362,7 +362,9 @@ mod tests {
     /// this one owns is 0954's layout table, unchanged by 1175's move.
     #[test]
     fn the_home_law_override_then_the_residents_and_hermetic_captures() {
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-ls-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -459,7 +461,9 @@ mod tests {
     /// changed.
     #[test]
     fn the_state_folder_no_longer_depends_on_finding_the_install() {
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _c = EnvGuard::unset("WOW_CAPTURE");
         let _h = EnvGuard::unset("BENILLA_HOME");
         let _d = EnvGuard::set("WOW_DATA", "/nonexistent/benilla-test/Data");
@@ -483,7 +487,9 @@ mod tests {
     /// whether it runs in the primary or in a slot.
     #[test]
     fn the_state_folder_lands_where_the_build_says() {
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _c = EnvGuard::unset("WOW_CAPTURE");
         let _h = EnvGuard::unset("BENILLA_HOME");
         let h = home().expect("home() always resolves outside a capture");
@@ -519,7 +525,9 @@ mod tests {
 
     #[test]
     fn write_atomic_creates_dirs_and_replaces_whole_files() {
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-wa-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         let path = tmp.join("nested/config.toml");

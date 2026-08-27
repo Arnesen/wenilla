@@ -73,11 +73,16 @@ pub(super) fn resolve(e: &mut TextEngine, font: &FontSpec) -> Resolved {
 /// The caller must have ensured `text`'s metrics; a character that has not been is skipped rather
 /// than shaped, because this half is deliberately `&`-only.
 pub(super) fn measure_line_width(e: &TextEngine, r: Resolved, step_extra: f32, text: &str) -> f32 {
-    let dpi = e.dpi();
-    text.chars()
+    // Summed in DEVICE px and divided once, because that is exactly what the render pen does
+    // (decision 1644 — it walks in device px so the line's origin can round once). A sum of
+    // quotients and a quotient of sums are not the same `f32`, and "measure == render, to the bit"
+    // is a property this module is asked to keep, not one it gets to approximate.
+    let steps: f32 = text
+        .chars()
         .filter_map(|c| e.char_cell(r.face, r.ppem, c))
-        .map(|c| (c.floor_sum + step_extra * c.glyphs.len() as f32) / dpi)
-        .sum()
+        .map(|c| c.floor_sum + step_extra * c.glyphs.len() as f32)
+        .sum();
+    steps / e.dpi()
 }
 
 /// The width law itself, for the differential test that pins it to a shaped sum.
@@ -385,16 +390,18 @@ pub(crate) fn line_advances(e: &mut TextEngine, text: &str, font: FontSpec) -> V
 
     let mut written = vec![false; text.len() + 1];
     written[0] = true;
-    let mut x = 0.0f32;
+    // The same device-px pen the render walks (1644), so a caret boundary is the same number the
+    // glyph before it was drawn at.
+    let mut x_dev = 0.0f32;
     for (off, ch) in drawn.char_indices() {
         if let Some(c) = e.char_cell(r.face, r.ppem, ch) {
             for g in &c.glyphs {
-                x += client_step(g.advance, r.step_extra, dpi);
+                x_dev += client_step(g.advance, r.step_extra);
             }
         }
         // This character's end boundary in DRAWN bytes → the RAW boundary it sits on.
         let end = bounds[(off + ch.len_utf8()).min(drawn.len())];
-        cum[end] = x;
+        cum[end] = x_dev / dpi;
         written[end] = true;
     }
     // Forward-fill the unwritten slots (cluster interiors, markup bytes): each carries the

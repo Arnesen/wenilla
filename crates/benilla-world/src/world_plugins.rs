@@ -246,6 +246,10 @@ impl Plugin for WorldFoundation {
             // ONCE, at the camera's spawn, because the reference's own flag says latched.
             .init_resource::<crate::view::MsaaSetting>()
             .init_resource::<crate::view::MsaaFormats>()
+            // The process texture filter policy (`trilinear` / `anisotropic`) — read ONCE, at the
+            // CVar load, for the same reason: a sampler is baked into an uploaded texture and the
+            // reference's own UI says "enabled upon restart".
+            .init_resource::<benilla_assets::TexFilterSetting>()
             // ...and the clamp that keeps it inside what this GPU will actually accept. Runs in
             // plugin `finish()`, so it lands between the render adapter appearing and `Startup`
             // reading the setting — see `view::MsaaSupportPlugin`.

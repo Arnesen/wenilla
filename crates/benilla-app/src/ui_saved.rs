@@ -129,7 +129,9 @@ mod tests {
     /// VM's value is replaced by the saved one — then `VARIABLES_LOADED` fires, once, after it.
     #[test]
     fn the_file_round_trips_through_the_folder_and_then_fires_variables_loaded() {
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-sv-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         let _c = EnvGuard::unset("WOW_CAPTURE");
@@ -165,7 +167,9 @@ mod tests {
     /// `BENILLA_HOME` pointing somewhere writable (0954's law, and the reason captures are stable).
     #[test]
     fn a_capture_run_neither_reads_nor_writes() {
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-svcap-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
@@ -184,7 +188,9 @@ mod tests {
     /// Nothing registered = the UI never loaded: writing would be a wipe, so it is skipped.
     #[test]
     fn an_empty_declaration_set_writes_nothing() {
-        let _l = ENV_LOCK.lock().unwrap();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = std::env::temp_dir().join(format!("benilla-svempty-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         let _c = EnvGuard::unset("WOW_CAPTURE");

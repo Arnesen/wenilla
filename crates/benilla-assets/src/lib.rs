@@ -48,6 +48,8 @@ pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
 /// Whether this run's GPU can eat WoW's stored DXT blocks, and the chain form that follows.
 mod gpu_blp;
 pub use gpu_blp::{bc_supported, for_upload, publish_bc_support, BlpGpuSupportPlugin, UploadChain};
+mod tex_filter;
+pub use tex_filter::{publish_tex_filter, tex_filter, TexFilterSetting, ANISO_RANGE};
 mod m2;
 pub use m2::{
     EmitterBillboard, M2Model, M2ModelLoader, ModelEmitter, ModelLight, ModelRibbon, PortraitCamera,

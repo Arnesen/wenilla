@@ -22,7 +22,9 @@ fn macro_view(name: &str, body: &str) -> MacroView {
 /// macros back — the whole persistence loop over the real `local_state` law.
 #[test]
 fn a_saved_macro_table_round_trips_through_benilla_macros() {
-    let _l = ENV_LOCK.lock().unwrap();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = std::env::temp_dir().join(format!("benilla-macros-{}", std::process::id()));
     std::fs::remove_dir_all(&tmp).ok();
     let _c = EnvGuard::unset("WOW_CAPTURE");
@@ -57,7 +59,9 @@ fn a_saved_macro_table_round_trips_through_benilla_macros() {
 /// a capture is session-only and nothing is written under anyone's install.
 #[test]
 fn a_capture_run_persists_nothing() {
-    let _l = ENV_LOCK.lock().unwrap();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _h = EnvGuard::set("BENILLA_HOME", "/tmp/benilla-should-not-exist");
     let _c = EnvGuard::set("WOW_CAPTURE", "ui-macro");
     assert_eq!(crate::local_state::macros_account_path(), None);
