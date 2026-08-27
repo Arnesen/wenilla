@@ -263,6 +263,13 @@ pub(crate) struct Model {
     /// irrelevant here: the tick sorts its visible subset by frame id every pass (the
     /// deterministic-dispatch law stays where it was).
     pub(crate) on_update_frames: Vec<FrameHandle>,
+    /// The frames carrying an `OnSizeChanged` script — 1446's list, for the layout resolve's
+    /// "before" snapshot instead of the tick. Same one writer, same reason: that snapshot's own
+    /// comment says it covers "a handful, usually zero", and it found them by filtering the WHOLE
+    /// `scripts` map with a string compare per entry, on every let-through resolve — 36–72 µs a
+    /// resolve at a 3,988-frame roster, which made it the biggest phase left in the preamble
+    /// (decision 1634's `[layout-pre] watched=`).
+    pub(crate) on_size_changed_frames: Vec<FrameHandle>,
     /// `event name → frames registered for it` (RegisterEvent), in **registration order** — an
     /// ordered Vec, never a set: the client's `SignalEvent 0x703e50` walks a per-event listener
     /// LIST, so cross-frame dispatch order is a law, not an accident (the abbey territory-line
@@ -1390,6 +1397,7 @@ impl Model {
             region_names: HashMap::new(),
             scripts: HashMap::new(),
             on_update_frames: Vec::new(),
+            on_size_changed_frames: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
             focused_editbox: None,

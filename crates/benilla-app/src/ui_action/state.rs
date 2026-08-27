@@ -269,9 +269,26 @@ fn resolve_range(
     Some((min, row.max + pad))
 }
 
-/// Resolve a slot's `(kind, id)` **through** a macro before any state is computed — the
-/// reference's own shape, and the reason a macro button on the bar wears its spell's cooldown
-/// swirl, usability tint, range colour and checked ring while showing its own icon.
+/// What a slot *is* once the MACRO indirection is applied — the reference's slot→spell resolver
+/// `0x4e5a50` plus the leg of the usable compute `0x4e5050` that reads its zero (decision 1636).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotResolve {
+    /// The slot IS this `(kind, id)` from here down: a SPELL or ITEM slot, or a macro whose
+    /// bound spell is live (`[rec+0x564] > 0`).
+    Action(u8, u32),
+    /// A macro that exists but casts nothing (`[rec+0x564] == 0`): `0x4e5050`'s spell-less leg
+    /// (`0x4e50f4`–`0x4e516f`) answers **usable=1** off `0x4e5030` — "the slot's macro id is in
+    /// the macro table" — and computes nothing else: no cooldown, no range, no checked ring.
+    BareMacro,
+    /// Not usable and nothing to report: a `/cast` whose name did not resolve (`-1`, which the
+    /// spell path refuses at `0x4e518b: jl`), or a slot whose macro no longer exists (`0x4e5030`
+    /// is 0 and `IsActionActive 0x4e55f0` has no spell to find).
+    Dead,
+}
+
+/// Resolve a slot **through** a macro before any state is computed — the reference's own shape,
+/// and the reason a macro button on the bar wears its spell's cooldown swirl, usability tint,
+/// range colour and checked ring while showing its own icon.
 ///
 /// Every `Is*Action`/`GetActionCooldown` binding routes through the one slot→spell resolver
 /// `0x4e5a50`, whose MACRO arm resolves the macro record and returns `[rec+0x564]` as the slot's
@@ -279,17 +296,23 @@ fn resolve_range(
 /// casts Fireball simply *is* the Fireball slot. `GetActionTexture` is the deliberate exception —
 /// its macro arm keeps the macro's own icon (`super::feed`).
 ///
-/// `None` = nothing to report (a macro bound to no spell; the reference's `[rec+0x564] == 0`).
-/// Only the SPELL indirection is modelled: 1.12 has no `/use <item>` slash command, so no 1.12
-/// macro body can name an item and the resolver's item leg is unreachable from one.
+/// The zero is NOT "nothing to report" (0983's reading — B340's grey `.spawn` macro): the field
+/// is three-valued and the usable compute reads each value differently, which [`SlotResolve`]
+/// carries. Only the SPELL indirection is modelled: 1.12 has no `/use <item>` slash command, so
+/// no 1.12 macro body can name an item and the resolver's item leg is unreachable from one.
 fn resolve_through_macro(
     kind: u8,
     action: u32,
     bound: &crate::ui_macro::MacroBoundSpells,
-) -> Option<(u8, u32)> {
+) -> SlotResolve {
+    use crate::ui_macro::BoundSpell;
     match kind {
-        ACTION_KIND_MACRO => bound.0.get(&action).map(|&s| (ACTION_KIND_SPELL, s)),
-        other => Some((other, action)),
+        ACTION_KIND_MACRO => match bound.0.get(&action) {
+            Some(BoundSpell::Spell(s)) => SlotResolve::Action(ACTION_KIND_SPELL, *s),
+            Some(BoundSpell::None) => SlotResolve::BareMacro,
+            Some(BoundSpell::Unresolved) | None => SlotResolve::Dead,
+        },
+        other => SlotResolve::Action(other, action),
     }
 }
 
@@ -369,10 +392,23 @@ pub(super) fn feed_action_state(
     for (&slot, button) in &actions.buttons {
         let action = u32::from(slot) + 1;
         let mut st = ActionState::default();
-        let Some((kind, id)) = resolve_through_macro(button.kind, button.action, bound) else {
-            // A macro that casts nothing reports nothing — the reference's `[rec+0x564] == 0`.
-            fresh.insert(action, st);
-            continue;
+        let (kind, id) = match resolve_through_macro(button.kind, button.action, bound) {
+            SlotResolve::Action(kind, id) => (kind, id),
+            SlotResolve::BareMacro => {
+                // The spell-less leg of `0x4e5050`: the macro exists, so the slot is usable —
+                // full colour on the bar — and there is no other state to compute (1636). The
+                // leg's one gate benilla does not model is `[0xb4b3e4]`, the player-control
+                // flag (wow-re `right-click-open.md` §3.1: 1 from boot, 0 only across a control
+                // loss — taxi/fear/charm); for that span the reference greys every spell-less
+                // macro and item.
+                st.usable = true;
+                fresh.insert(action, st);
+                continue;
+            }
+            SlotResolve::Dead => {
+                fresh.insert(action, st);
+                continue;
+            }
         };
         let button = &benilla_protocol::messages::ActionButton {
             slot,
@@ -694,32 +730,116 @@ mod tests {
     }
 
     /// A MACRO slot resolves through its bound spell for EVERY dynamic read (decision 0983) —
-    /// the `0x4e5a50` law — while an unbound macro reports nothing at all.
+    /// the `0x4e5a50` law — and the three values of `[rec+0x564]` split three ways at the usable
+    /// compute (decision 1636): a live spell IS that spell; a macro that casts nothing is a bare,
+    /// usable button (B340's `.spawn` macro); an unresolved `/cast` — or a slot whose macro is
+    /// gone — is grey.
     #[test]
     fn a_macro_slot_resolves_through_its_bound_spell() {
+        use crate::ui_macro::BoundSpell;
         use benilla_protocol::messages::ACTION_KIND_MACRO;
 
         let mut bound = crate::ui_macro::MacroBoundSpells::default();
-        bound.0.insert(3, 133); // macro 3 casts Fireball
+        bound.0.insert(3, BoundSpell::Spell(133)); // macro 3 casts Fireball
+        bound.0.insert(4, BoundSpell::None); // macro 4 is `.spawn 16032`
+        bound.0.insert(5, BoundSpell::Unresolved); // macro 5 is `/cast Pyroblast`, unknown
 
         assert_eq!(
             resolve_through_macro(ACTION_KIND_MACRO, 3, &bound),
-            Some((ACTION_KIND_SPELL, 133)),
+            SlotResolve::Action(ACTION_KIND_SPELL, 133),
             "from here down the macro IS the Fireball slot"
         );
         assert_eq!(
             resolve_through_macro(ACTION_KIND_MACRO, 4, &bound),
-            None,
-            "a macro that casts nothing has no cooldown, no range, no usability"
+            SlotResolve::BareMacro,
+            "a macro that casts nothing is usable, with no cooldown, no range"
+        );
+        assert_eq!(
+            resolve_through_macro(ACTION_KIND_MACRO, 5, &bound),
+            SlotResolve::Dead,
+            "a /cast of an unknown spell is the reference's -1: grey"
+        );
+        assert_eq!(
+            resolve_through_macro(ACTION_KIND_MACRO, 6, &bound),
+            SlotResolve::Dead,
+            "a slot whose macro no longer exists: grey"
         );
         // Spell and item slots pass through untouched.
         assert_eq!(
             resolve_through_macro(ACTION_KIND_SPELL, 133, &bound),
-            Some((ACTION_KIND_SPELL, 133))
+            SlotResolve::Action(ACTION_KIND_SPELL, 133)
         );
         assert_eq!(
             resolve_through_macro(ACTION_KIND_ITEM, 117, &bound),
-            Some((ACTION_KIND_ITEM, 117))
+            SlotResolve::Action(ACTION_KIND_ITEM, 117)
+        );
+    }
+
+    /// The feed end to end, at the symptom (B340): a MACRO slot whose macro casts nothing is
+    /// pushed **usable** — `IsUsableAction` answers true in the VM, the full-colour icon — while
+    /// a `/cast` of an unknown spell, and a slot whose macro is gone, are pushed grey. The
+    /// pre-1636 feed pushed `ActionState::default()` for all three, whose `usable` is false: every
+    /// GM `.spawn` macro on the bar was grey.
+    #[test]
+    fn the_feed_pushes_a_bare_macro_as_usable() {
+        use crate::ui_macro::{BoundSpell, MacroBoundSpells};
+        use benilla_protocol::messages::{ActionButton, ACTION_KIND_MACRO};
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        let mut actions = PlayerActions::default();
+        for (slot, index) in [(0u8, 1u32), (1, 2), (2, 3)] {
+            actions.buttons.insert(
+                slot,
+                ActionButton {
+                    slot,
+                    action: index,
+                    kind: ACTION_KIND_MACRO,
+                },
+            );
+        }
+        // Macro 1 is `.spawn 16032`, macro 2 is `/cast Pyroblast` with Pyroblast unknown, and
+        // macro 3 does not exist.
+        let mut bound = MacroBoundSpells::default();
+        bound.0.insert(1, BoundSpell::None);
+        bound.0.insert(2, BoundSpell::Unresolved);
+        app.insert_resource(actions)
+            .insert_resource(bound)
+            .init_resource::<Cooldowns>()
+            .init_resource::<crate::ui_script::UiClock>()
+            .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::ui_cast::PendingCast>()
+            .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
+            .init_resource::<crate::ui_cast::ActiveChannel>()
+            .init_resource::<crate::ui_action::SpellTargeting>()
+            .init_resource::<Selection>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<Items>()
+            .insert_resource(NetCommands(tx));
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.add_systems(Update, feed_action_state);
+        app.update();
+
+        let script = app.world().non_send_resource::<UiScript>();
+        let usable = |action: u32| {
+            script
+                .eval::<bool>(&format!(
+                    "return (IsUsableAction({action})) and true or false"
+                ))
+                .unwrap()
+        };
+        assert!(usable(1), "a macro that casts nothing is a usable button");
+        assert!(
+            !usable(2),
+            "a /cast of an unknown spell is grey (the reference's -1)"
+        );
+        assert!(!usable(3), "a slot whose macro no longer exists is grey");
+        assert!(
+            !script
+                .eval::<bool>("local _, oom = IsUsableAction(2) return oom and true or false")
+                .unwrap(),
+            "grey, not the out-of-power blue: notEnoughMana stays 0 on the spell-less leg"
         );
     }
 

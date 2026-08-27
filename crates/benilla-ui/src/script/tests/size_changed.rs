@@ -159,3 +159,54 @@ fn set_script_on_size_changed_is_accepted_because_the_resolve_pass_fires_it() {
     s.resolve();
     assert!(s.eval::<bool>("return ran").unwrap(), "…and it FIRED");
 }
+
+/// **The watch list is exactly the frames carrying the script.** The resolve's "before" snapshot
+/// reads `SetScript`'s maintained `on_size_changed_frames` rather than filtering the whole scripts
+/// map (decision 1634), so the list itself is now load-bearing: `SetScript(…, nil)` must remove
+/// the frame, and re-registering must not enrol it twice.
+///
+/// Asserted on the LIST, not on the fire count, and that is the point. A stale entry fires nothing
+/// — `fire` looks the handler up in Lua and finds nil — so behaviour hides the bug completely and
+/// the only symptom is the snapshot silently growing forever, one dead frame at a time. (Written
+/// as a fire-count test first; it passed with the `retain` deleted.)
+#[test]
+fn the_on_size_changed_watch_list_is_exactly_the_frames_carrying_the_script() {
+    use crate::script::model::Model;
+
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        fires = 0
+        Watched = CreateFrame("Frame", "WatchedPanel")
+        Watched:SetPoint("BOTTOMLEFT", 0, 0)
+        Watched:SetSize(10, 10)
+        Other = CreateFrame("Frame", "UnwatchedPanel")
+        Other:SetScript("OnShow", function() end)      -- another kind never enrols
+        local bump = function() fires = fires + 1 end
+        Watched:SetScript("OnSizeChanged", bump)
+        Watched:SetScript("OnSizeChanged", bump)       -- re-registering is not a second enrolment
+    "#,
+    )
+    .unwrap();
+    let watched = |s: &crate::script::UiScript| {
+        s.lua()
+            .app_data_ref::<Model>()
+            .expect("model app_data")
+            .on_size_changed_frames
+            .len()
+    };
+    assert_eq!(watched(&s), 1, "one frame carries the script");
+
+    s.resolve();
+    s.run("Watched:SetSize(40, 40)").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<i64>("return fires").unwrap(),
+        2,
+        "one fire per resolve whose size moved — the 0×0→10×10 birth, then the resize"
+    );
+
+    s.run(r#"Watched:SetScript("OnSizeChanged", nil)"#).unwrap();
+    assert_eq!(watched(&s), 0, "clearing the script un-watches the frame");
+}

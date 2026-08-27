@@ -272,3 +272,29 @@ fn set_alpha_overwrites_the_subtree() {
     let late = a.create(FrameKind::Frame, None, Some(root));
     assert_eq!(a.frame(late).unwrap().effective_alpha, 1.0);
 }
+
+// ── The per-kind registries ──────────────────────────────────────────────────────────────────
+
+/// The tooltip registry is exactly the live GameTooltips — including when one dies as somebody
+/// else's child, which is the case a registry maintained only at the explicit `destroy` call site
+/// would miss. Three hot paths read it instead of scanning the resolve's roster (decision 1634), so
+/// a stale entry is a dangling handle in the layout pre-pass, not a cosmetic drift.
+#[test]
+fn the_tooltip_registry_tracks_live_gametooltips() {
+    let mut a = arena();
+    assert!(a.tooltip_kinds().is_empty());
+
+    let holder = a.create(FrameKind::Frame, None, None);
+    let loose = a.create(FrameKind::GameTooltip, None, None);
+    let child = a.create(FrameKind::GameTooltip, None, Some(holder));
+    // A non-tooltip kind never enters the list.
+    let _plain = a.create(FrameKind::Button, None, None);
+    assert_eq!(a.tooltip_kinds(), &[loose, child]);
+
+    // Destroying the PARENT takes its tooltip child with it.
+    a.destroy(holder);
+    assert_eq!(a.tooltip_kinds(), &[loose]);
+
+    a.destroy(loose);
+    assert!(a.tooltip_kinds().is_empty());
+}

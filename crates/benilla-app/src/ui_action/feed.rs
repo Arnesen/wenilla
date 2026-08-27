@@ -290,10 +290,8 @@ pub(super) fn feed_actions(
     // The epoch is the second input, so a landed answer redisplays like the ref's DBCACHECALLBACK.
     let template_epoch = items.template_epoch();
     let macro_generation = script.macros_generation();
-    if !memory.resolved
-        || actions.dirty
-        || template_epoch != memory.template_epoch
-        || macro_generation != memory.macro_generation
+    let macros_moved = macro_generation != memory.macro_generation;
+    if !memory.resolved || actions.dirty || template_epoch != memory.template_epoch || macros_moved
     {
         actions.dirty = false;
         memory.resolved = true;
@@ -378,13 +376,20 @@ pub(super) fn feed_actions(
                 },
             );
         }
+        // A MACRO slot's observable is wider than its `ActionSlot`: the name line under the icon
+        // reads the macro table through `GetActionText` at repaint (decision 1636), so a rename —
+        // which moves the table and nothing in the slot value — must re-fire the slot exactly as
+        // a re-icon does, or the bar keeps the old name until an unrelated edit repaints it.
         let changed: Vec<u32> = fresh
             .keys()
             .chain(memory.pushed.keys())
             .copied()
             .collect::<HashSet<_>>()
             .into_iter()
-            .filter(|a| fresh.get(a) != memory.pushed.get(a))
+            .filter(|a| {
+                fresh.get(a) != memory.pushed.get(a)
+                    || (macros_moved && fresh.get(a).is_some_and(|s| s.kind == ACTION_KIND_MACRO))
+            })
             .collect();
         for &action in &changed {
             script.set_action(action, fresh.get(&action).cloned());

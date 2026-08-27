@@ -45,6 +45,13 @@ fn ui_diff_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_UI_DIFF").is_some())
 }
 
+/// `WOW_UI_SPLICE_VERIFY=1` — the splice's own adversary (decision 1638). Read once, off by
+/// default, and *expensive by design*: it makes every spliced frame also pay the full conversion.
+fn splice_verify_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_UI_SPLICE_VERIFY").is_some())
+}
+
 /// `WOW_UI_PICK=<x>,<y>[,<r>]` — **what drew this pixel?** The UI's answer to the world hover
 /// inspector. Every converted quad whose screen rect covers that point (or, with `r`, comes
 /// within `r` px of it — how a hairline thinner than the probe is caught) names itself once: the
@@ -103,6 +110,21 @@ fn report_ui_pick(eq: &benilla_ui::script::ExtractedQuad, rect: Rect, at: Vec2, 
         "[ui-pick] {:?} z={} rect=({:.2},{:.2})-({:.2},{:.2}) alpha={:.3} {what}",
         eq.target, eq.z, rect.min.x, rect.min.y, rect.max.x, rect.max.y, eq.alpha,
     );
+}
+
+/// A content arm's name, for a one-line log ([`report_gate_miss`]'s splice twin). Short and
+/// stable: these strings are histogrammed in the shell, not read as prose.
+fn content_kind(c: &QuadContent) -> &'static str {
+    match c {
+        QuadContent::Frame => "frame",
+        QuadContent::Minimap { .. } => "minimap",
+        QuadContent::Cooldown { .. } => "cooldown",
+        QuadContent::Texture { .. } => "texture",
+        QuadContent::ColorWheel => "colorwheel",
+        QuadContent::ColorValue { .. } => "colorvalue",
+        QuadContent::Backdrop { .. } => "backdrop",
+        QuadContent::Text { .. } => "text",
+    }
 }
 
 /// The half-texel-inset UV window a **cropped** quad may sample — [`UiQuad::uv_clamp`]'s producer
@@ -226,12 +248,231 @@ pub(super) struct GateInputs {
     /// conversion, kept current by the splice — this is what lets a one-entry change (the resting
     /// blink) re-convert one entry instead of the whole interface.
     spans: Vec<u32>,
+    /// The stitch's ping-pong buffer: last frame's quad allocation, emptied. A stitch drains the
+    /// live list into a fresh one and parks the drained allocation here, so a steady stream of
+    /// changes (a hovered tooltip re-filling every frame) reuses two buffers forever instead of
+    /// allocating ~1,400 quads a frame.
+    held: Vec<UiQuad>,
+}
+
+/// How this frame's entry list lines up with last frame's — what the splice re-converts, and
+/// where everything it keeps came from.
+struct Alignment {
+    /// For each entry of the NEW list: the OLD index whose already-converted quads it reuses, or
+    /// `None` — it must be converted. Kept indices are strictly increasing.
+    source: Vec<Option<usize>>,
+    /// The OLD entries nothing reuses. Their quads leave the list, so their conversion's side
+    /// effects (a parked minimap slot, a shine site, a link span) would have to be *undone* — the
+    /// splice cannot, so it only proceeds when every one of them was quads-only.
+    dropped: Vec<usize>,
+}
+
+/// The alignment: a merge over `z`, which both lists are sorted by ([`benilla_ui::script::UiScript::extract`]).
+///
+/// **Why `z` and not the index.** `z` is a packed `(strata, level, frame-insertion, layer, …)`
+/// key ([`benilla_ui::order::ZKey`]) — an entry's *identity*, unchanged when a neighbour is
+/// inserted or removed. A positional compare cannot see that: hovering one item slot inserts a
+/// single highlight entry at index 359 of 520 and shifts the 160 entries behind it, every one of
+/// which then compares unequal by index and equal by `z`. Before this, that frame took the full
+/// conversion — 86 % of all hover frames did (decision 1638).
+///
+/// **The merge FINDS the alignment; it is never trusted.** Quads are reused only for a pair that
+/// compares fully equal, and [`convert_entry`] is a pure function of the entry plus the raster
+/// environment the splice's guards pin — so an equal pair converts to equal quads whatever their
+/// indices. A merge that mis-pairs therefore costs conversions and never correctness, which is
+/// what makes it safe to key on a `z` we do not prove unique or even prove sorted. (It is not
+/// quite sorted: a ScrollingMessageFrame's own content line is emitted at its frame's slot and
+/// sorts above the frame's BACKGROUND regions, so the list dips locally around a chat window.
+/// Identical dips on both sides match anyway; a differing one re-converts a handful of entries.)
+fn align_entries(
+    was: &[benilla_ui::script::ExtractedQuad],
+    now: &[benilla_ui::script::ExtractedQuad],
+) -> Alignment {
+    let mut source: Vec<Option<usize>> = Vec::with_capacity(now.len());
+    let mut kept = vec![false; was.len()];
+    let (mut i, mut j) = (0usize, 0usize);
+    while j < now.len() {
+        let Some(w) = was.get(i) else {
+            // Last frame's list is spent: everything left is new.
+            source.push(None);
+            j += 1;
+            continue;
+        };
+        match w.z.cmp(&now[j].z) {
+            std::cmp::Ordering::Equal => {
+                let same = *w == now[j];
+                source.push(same.then_some(i));
+                kept[i] = same;
+                i += 1;
+                j += 1;
+            }
+            // An entry that is gone: last frame drew something this frame does not.
+            std::cmp::Ordering::Less => i += 1,
+            // An entry that is new.
+            std::cmp::Ordering::Greater => {
+                source.push(None);
+                j += 1;
+            }
+        }
+    }
+    let dropped = kept
+        .iter()
+        .enumerate()
+        .filter_map(|(i, k)| (!k).then_some(i))
+        .collect();
+    Alignment { source, dropped }
 }
 
 /// Entry `i`'s quad range under `spans` (the [`GateInputs::spans`] encoding).
 fn span_bounds(spans: &[u32], i: usize) -> (usize, usize) {
     let a = if i == 0 { 0 } else { spans[i - 1] as usize };
     (a, spans[i] as usize)
+}
+
+/// Whether an entry's conversion writes **quads and nothing else** — the splice's admission test.
+/// The full path plumbs four side channels (the engine's link spans, the parked minimap slot, the
+/// shine sites, the booth panes); the splice keeps last frame's values for all of them, which is
+/// only sound for entries that never write one. The autocast-shine token (decision 1383) is a
+/// side-channel kind wearing a Texture's clothes, so it is excluded by path.
+fn splice_simple(eq: &benilla_ui::script::ExtractedQuad) -> bool {
+    match &eq.content {
+        QuadContent::Frame
+        | QuadContent::Cooldown { .. }
+        | QuadContent::Backdrop { .. }
+        // Both colour-picker arms write one quad and nothing else — and they change on every
+        // step of a drag, which is exactly the traffic the splice exists for.
+        | QuadContent::ColorWheel
+        | QuadContent::ColorValue { .. } => true,
+        // A FontString's text writes nothing but quads, and that is every label, every unit
+        // frame's name, every tooltip line — the traffic this whole path exists for (decision
+        // 1638). A FRAME-targeted Text quad is a message-frame ring line, whose hyperlink spans
+        // are a REPLACE-THE-WHOLE-SET channel (`set_link_spans`): a line that stops carrying a
+        // link would leave a stale clickable rect behind, and the splice's post-conversion
+        // tripwire cannot see that, because the scratch it inspects is empty in exactly that
+        // case. So the target, not the tripwire, is the guard.
+        QuadContent::Text { .. } => matches!(eq.target, benilla_ui::order::ZTarget::Region(_)),
+        QuadContent::Texture {
+            portrait_unit: None,
+            path,
+            ..
+        } => !path
+            .as_deref()
+            .is_some_and(|p| crate::autocast_shine::token_model_scale(p).is_some()),
+        _ => false,
+    }
+}
+
+/// The splice's adversary ([`splice_verify_enabled`]): re-run the FULL conversion over the same
+/// entry list and prove the spliced list is what it would have produced — quads AND span table.
+///
+/// This is the check the splice's whole argument rests on, made by machine instead of by
+/// reasoning. It is what turns "an equal entry converts to equal quads" from a claim about
+/// [`convert_entry`] into a measurement over a real interface: a live client with ~520 entries, a
+/// tooltip re-filling every frame, and a hover highlight inserting and removing itself under it
+/// (decision 1638). A mismatch names the quad, the entry that owns it, and that entry's owner.
+///
+/// The side channels are collected into throwaway buffers and dropped — the point is the quads.
+/// `booths.panes` is the one exception, because [`convert_entry`] writes it through the shared
+/// bridge; re-adding the same tokens is idempotent, so a verify run's panes end up where the full
+/// path would have put them anyway.
+#[allow(clippy::too_many_arguments)]
+fn verify_splice(
+    prev: &GateInputs,
+    quads: &UiQuads,
+    s: f32,
+    w: f32,
+    h: f32,
+    assets: &mut Option<ResMut<WorldAssets>>,
+    images: &mut Assets<Image>,
+    font_atlas: &mut Option<ResMut<UiFontAtlas>>,
+    booths: &mut crate::portrait::BoothBridge,
+    text_ui: Option<&benilla_ui::script::EditBoxTextUi>,
+    caret_pinned: bool,
+    script: &UiScript,
+) {
+    let mut check: Vec<UiQuad> = Vec::with_capacity(quads.quads.len());
+    let mut spans: Vec<u32> = Vec::with_capacity(prev.extracted.len());
+    let (mut links, mut slot, mut shine) = (Vec::new(), None, Vec::new());
+    for eq in prev.extracted.iter().cloned() {
+        convert_entry(
+            eq,
+            s,
+            w,
+            h,
+            assets,
+            images,
+            font_atlas,
+            booths,
+            text_ui,
+            caret_pinned,
+            &mut check,
+            &mut links,
+            &mut slot,
+            &mut shine,
+        );
+        spans.push(check.len() as u32);
+    }
+    if spans != prev.spans {
+        let at = spans
+            .iter()
+            .zip(&prev.spans)
+            .position(|(a, b)| a != b)
+            .unwrap_or(spans.len().min(prev.spans.len()));
+        eprintln!(
+            "[ui-splice] VERIFY FAIL: span table diverges at entry {at} of {} \
+             (spliced end {:?}, full end {:?})",
+            prev.extracted.len(),
+            prev.spans.get(at),
+            spans.get(at),
+        );
+        return;
+    }
+    let Some(i) = check
+        .iter()
+        .zip(&quads.quads)
+        .position(|(a, b)| a != b)
+        .or_else(|| {
+            (check.len() != quads.quads.len()).then_some(check.len().min(quads.quads.len()))
+        })
+    else {
+        return;
+    };
+    // Which entry owns quad `i` — the span table is a prefix-end list, so the first end past it.
+    let owner = spans.partition_point(|&e| e as usize <= i);
+    let name = prev
+        .extracted
+        .get(owner)
+        .and_then(|eq| script.target_owner_name(eq.target));
+    eprintln!(
+        "[ui-splice] VERIFY FAIL: quad {i} of {}/{} differs — entry {owner} ({}, {})\n  spliced {}\n  full    {}",
+        quads.quads.len(),
+        check.len(),
+        name.as_deref().unwrap_or("?"),
+        prev.extracted
+            .get(owner)
+            .map_or("<none>", |eq| content_kind(&eq.content)),
+        quad_summary(quads.quads.get(i)),
+        quad_summary(check.get(i)),
+    );
+}
+
+/// One quad in a log line — enough to see WHICH way two conversions disagree (geometry, paint,
+/// crop, or which texture), never the whole struct.
+fn quad_summary(q: Option<&UiQuad>) -> String {
+    let Some(q) = q else {
+        return "<past the end>".into();
+    };
+    format!(
+        "z={} rect=({:.2},{:.2})-({:.2},{:.2}) color={:?} uv={:?} tex={:?}",
+        q.z_key,
+        q.rect.min.x,
+        q.rect.min.y,
+        q.rect.max.x,
+        q.rect.max.y,
+        q.color,
+        q.uv.corners,
+        q.texture.as_ref().map(|t| t.id()),
+    )
 }
 
 /// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
@@ -603,6 +844,7 @@ pub(super) fn drive_script(
                 derives: script.layout_derivations() - derives_before.unwrap_or(0),
                 skipped: true,
                 spliced: 0,
+                dropped: 0,
             };
         }
         if printing {
@@ -643,76 +885,97 @@ pub(super) fn drive_script(
     // which the unchanged entries prove are this frame's too: the settled path's own argument,
     // applied per entry.
     'splice: {
-        if capture.is_some()
-            || ui_diff_enabled()
-            || prev.dims != Some(dims)
-            || prev.generation != generation
-            || text_ui != prev.text_ui
-            || booths.images.0 != prev.portraits
-            || prev.extracted.len() != extracted.len()
-            || prev.spans.len() != extracted.len()
-            // spans describe `quads.quads` — if any future writer replaces the base lane out
-            // from under this pass, degrade to the full conversion instead of mis-stitching.
+        // `WOW_UI_GATE=1` names why the SPLICE declined too — one line per frame, the same dial
+        // and the same posture as `[ui-gate]` above, because "the gate missed, and then the
+        // splice missed too" is one question asked twice. Histogram it in the shell.
+        macro_rules! no_splice {
+            ($($arg:tt)*) => {{
+                if gate_log_enabled() {
+                    eprintln!("[ui-splice] miss: {}", format_args!($($arg)*));
+                }
+                break 'splice;
+            }};
+        }
+        if capture.is_some() {
+            no_splice!("capture mode");
+        }
+        if ui_diff_enabled() {
+            no_splice!("WOW_UI_DIFF pins the full path");
+        }
+        if prev.dims != Some(dims) {
+            no_splice!("window dims moved");
+        }
+        if prev.generation != generation {
+            no_splice!("font atlas generation moved");
+        }
+        // The focused edit box carries the caret BLINK — wall-clock state that appears in no
+        // entry, and the one time-dependent input the Text arm reads. It is what makes text
+        // splice-safe at all (decision 1638): everything else the conversion reads is either in
+        // the entry or pinned by a guard above.
+        if text_ui != prev.text_ui {
+            no_splice!("focused editbox text-ui moved");
+        }
+        if booths.images.0 != prev.portraits {
+            no_splice!("portrait sources moved");
+        }
+        // spans describe last conversion's `quads.quads` — if any future writer replaces the
+        // base lane out from under this pass, degrade to the full conversion instead of
+        // mis-stitching.
+        if prev.spans.len() != prev.extracted.len()
             || prev.spans.last().copied().unwrap_or(0) as usize != quads.quads.len()
         {
-            break 'splice;
+            no_splice!("span table stale");
         }
-        // The changed entry set, bounded: a real UI transition (a window opening) moves many
-        // entries, and the full conversion is the right tool there anyway.
-        const SPLICE_MAX: usize = 8;
-        let mut changed: Vec<usize> = Vec::with_capacity(SPLICE_MAX);
-        for (i, (now, was)) in extracted.iter().zip(&prev.extracted).enumerate() {
-            if now != was {
-                if changed.len() == SPLICE_MAX {
-                    break 'splice;
-                }
-                changed.push(i);
-            }
-        }
-        // The all-equal case belongs to the settled gate above; reaching here empty means a
-        // comparison razor slipped — take the full path rather than risk skipping a change.
-        if changed.is_empty() {
-            break 'splice;
-        }
-        // Only entries whose conversion writes quads alone are spliceable — old AND new: an
-        // entry morphing into a side-channel kind must reach the full path's plumbing. The
-        // autocast-shine token (decision 1383) is a side-channel kind wearing a Texture's
-        // clothes, so it is excluded by path.
-        let simple = |eq: &benilla_ui::script::ExtractedQuad| match &eq.content {
-            QuadContent::Frame
-            | QuadContent::Cooldown { .. }
-            | QuadContent::Backdrop { .. }
-            // Both colour-picker arms write one quad and nothing else — and they change on every
-            // step of a drag, which is exactly the traffic the splice exists for.
-            | QuadContent::ColorWheel
-            | QuadContent::ColorValue { .. } => true,
-            QuadContent::Texture {
-                portrait_unit: None,
-                path,
-                ..
-            } => !path
-                .as_deref()
-                .is_some_and(|p| crate::autocast_shine::token_model_scale(p).is_some()),
-            _ => false,
-        };
-        if !changed
+        let align = align_entries(&prev.extracted, &extracted);
+        // The entries this frame has to pay for, bounded: a real UI transition (a window
+        // opening) moves many, and the full conversion is the right tool there anyway.
+        const SPLICE_MAX: usize = 64;
+        let changed: Vec<usize> = align
+            .source
             .iter()
-            .all(|&i| simple(&extracted[i]) && simple(&prev.extracted[i]))
-        {
-            break 'splice;
+            .enumerate()
+            .filter_map(|(j, s)| s.is_none().then_some(j))
+            .collect();
+        if changed.len() + align.dropped.len() > SPLICE_MAX {
+            no_splice!(
+                "{} entries changed and {} dropped, over the {SPLICE_MAX} bound",
+                changed.len(),
+                align.dropped.len()
+            );
         }
-        // Re-convert just the changed entries. The scratch side channels are a tripwire:
-        // `simple` makes them unreachable today, and if an arm ever grows a new side effect
-        // the full path is the only safe answer.
+        // The all-equal case belongs to the settled gate above; reaching here with nothing to do
+        // means a comparison razor slipped — take the full path rather than risk skipping a
+        // change. (A frame that only *drops* entries has real work and is not this case.)
+        if changed.is_empty() && align.dropped.is_empty() {
+            no_splice!("no entry differs (a comparison razor slipped)");
+        }
+        // Checked on both ends: every entry being converted, and every entry LEAVING the list —
+        // a departing minimap slot or shine site would have to be un-parked, which the splice has
+        // no way to do.
+        if let Some(eq) = changed
+            .iter()
+            .map(|&j| &extracted[j])
+            .chain(align.dropped.iter().map(|&i| &prev.extracted[i]))
+            .find(|eq| !splice_simple(eq))
+        {
+            no_splice!(
+                "a {} entry ({}) is not spliceable",
+                content_kind(&eq.content),
+                script.target_owner_name(eq.target).unwrap_or_default()
+            );
+        }
+        // Re-convert just those entries. The scratch side channels are a tripwire: `simple`
+        // makes them unreachable today, and if an arm ever grows a new side effect the full path
+        // is the only safe answer.
         let mut scratch: Vec<UiQuad> = Vec::new();
         let mut scratch_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(changed.len());
         let mut scratch_links = Vec::new();
         let mut scratch_slot = None;
         let mut scratch_shine = Vec::new();
-        for &i in &changed {
+        for &j in &changed {
             let at = scratch.len();
             convert_entry(
-                extracted[i].clone(),
+                extracted[j].clone(),
                 s,
                 w,
                 h,
@@ -721,7 +984,7 @@ pub(super) fn drive_script(
                 &mut font_atlas,
                 &mut booths,
                 text_ui.as_ref(),
-                false,
+                capture.is_some(),
                 &mut scratch,
                 &mut scratch_links,
                 &mut scratch_slot,
@@ -730,47 +993,92 @@ pub(super) fn drive_script(
             scratch_ranges.push(at..scratch.len());
         }
         if !scratch_links.is_empty() || scratch_slot.is_some() || !scratch_shine.is_empty() {
-            break 'splice;
+            no_splice!("a re-converted entry wrote a side channel");
         }
-        let counts_stable = changed.iter().zip(&scratch_ranges).all(|(&i, r)| {
-            let (a, b) = span_bounds(&prev.spans, i);
-            b - a == r.len()
-        });
+        // The in-place case: nothing was inserted or removed, so every kept entry is still at
+        // its own index and every changed one still owns the same stretch of the list. This is
+        // the resting blink's shape and it writes bytes without moving any.
+        let identity = prev.extracted.len() == extracted.len()
+            && align
+                .source
+                .iter()
+                .enumerate()
+                .all(|(j, s)| s.is_none_or(|i| i == j));
+        let counts_stable = identity
+            && changed.iter().zip(&scratch_ranges).all(|(&j, r)| {
+                let (a, b) = span_bounds(&prev.spans, j);
+                b - a == r.len()
+            });
         let mut dirtied = false;
         if counts_stable {
-            // The blink's shape — same quad count, new bytes: write the spans in place.
-            for (&i, r) in changed.iter().zip(&scratch_ranges) {
-                let (a, b) = span_bounds(&prev.spans, i);
+            for (&j, r) in changed.iter().zip(&scratch_ranges) {
+                let (a, b) = span_bounds(&prev.spans, j);
                 if quads.quads[a..b] != scratch[r.clone()] {
                     quads.quads[a..b].clone_from_slice(&scratch[r.clone()]);
                     dirtied = true;
                 }
             }
         } else {
-            // An entry's quad count moved: stitch a fresh list from the kept spans plus the
-            // re-converted ones, and re-derive the span table.
-            let mut new_out: Vec<UiQuad> = Vec::with_capacity(quads.quads.len() + scratch.len());
-            let mut new_spans: Vec<u32> = Vec::with_capacity(prev.spans.len());
-            let mut ci = 0;
-            for i in 0..extracted.len() {
-                if ci < changed.len() && changed[ci] == i {
-                    new_out.extend_from_slice(&scratch[scratch_ranges[ci].clone()]);
-                    ci += 1;
-                } else {
-                    let (a, b) = span_bounds(&prev.spans, i);
-                    new_out.extend_from_slice(&quads.quads[a..b]);
+            // Stitch a fresh list: the kept runs MOVED out of last frame's (a `UiQuad` carries an
+            // `Arc` texture handle, and copying ~1,400 of them a frame to rebuild a list is pure
+            // refcount traffic for no pixel), the re-converted entries from the scratch, and a
+            // re-derived span table. `prev.held` is the ping-pong buffer: the drain leaves last
+            // frame's allocation empty and we keep it for the next stitch, so a steady stream of
+            // tooltip changes allocates nothing.
+            let mut old = std::mem::take(&mut prev.held);
+            std::mem::swap(&mut old, &mut quads.quads);
+            quads.quads.clear();
+            quads.quads.reserve(old.len() + scratch.len());
+            let mut new_spans: Vec<u32> = Vec::with_capacity(extracted.len());
+            {
+                let mut src = old.drain(..);
+                // How many of last frame's quads the drain has already yielded — kept runs are
+                // strictly increasing (the merge only ever advances), so one forward pass does it.
+                let mut cursor = 0usize;
+                let mut ci = 0usize;
+                for s in &align.source {
+                    match s {
+                        Some(i) => {
+                            let (a, b) = span_bounds(&prev.spans, *i);
+                            if a > cursor {
+                                src.by_ref().nth(a - cursor - 1);
+                            }
+                            quads.quads.extend(src.by_ref().take(b - a));
+                            cursor = b;
+                        }
+                        None => {
+                            quads
+                                .quads
+                                .extend_from_slice(&scratch[scratch_ranges[ci].clone()]);
+                            ci += 1;
+                        }
+                    }
+                    new_spans.push(quads.quads.len() as u32);
                 }
-                new_spans.push(new_out.len() as u32);
             }
+            prev.held = old;
             prev.spans = new_spans;
-            quads.quads = new_out;
             dirtied = true;
         }
         if dirtied {
             quads.dirty = true;
         }
-        for &i in &changed {
-            prev.extracted[i] = extracted[i].clone();
+        prev.extracted = extracted;
+        if splice_verify_enabled() {
+            verify_splice(
+                prev,
+                &quads,
+                s,
+                w,
+                h,
+                &mut assets,
+                &mut images,
+                &mut font_atlas,
+                &mut booths,
+                text_ui.as_ref(),
+                capture.is_some(),
+                &script,
+            );
         }
         drop(extract_span);
         let us_spl = lap();
@@ -790,6 +1098,7 @@ pub(super) fn drive_script(
                 derives: script.layout_derivations() - derives_before.unwrap_or(0),
                 skipped: false,
                 spliced: changed.len(),
+                dropped: align.dropped.len(),
             };
         }
         if printing {
@@ -797,10 +1106,11 @@ pub(super) fn drive_script(
             eprintln!(
                 "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
                  exm={us_exm} exa={us_spl} diff=0 eq={n_extracted} quads={} \
-                 solves={solves} changed={} skip=0 spliced={}",
+                 solves={solves} changed={} skip=0 spliced={} dropped={}",
                 quads.quads.len(),
                 u8::from(dirtied),
-                changed.len()
+                changed.len(),
+                align.dropped.len()
             );
         }
         return;
@@ -919,6 +1229,7 @@ pub(super) fn drive_script(
             derives: script.layout_derivations() - derives_before.unwrap_or(0),
             skipped: false,
             spliced: 0,
+            dropped: 0,
         };
         if printing {
             eprintln!(
@@ -1640,6 +1951,148 @@ mod clip_plumb_tests {
 /// The extract gate (decision 0740): a settled frame skips the whole conversion loop, and — the
 /// dangerous direction — any extract-visible change must reopen it, INCLUDING paint-only writes
 /// that never dirty the layout gate. Uses the same minimal headless app as `clip_plumb_tests`.
+/// The alignment merge ([`align_entries`]) — the half of the splice that sees through a shift.
+///
+/// The cases are built from a REAL extract list, because `FrameHandle` keeps its fields private
+/// on purpose: an entry's `z` is a packed [`benilla_ui::order::ZKey`] and hand-forging one would
+/// test a fiction rather than the traversal's own keys.
+#[cfg(test)]
+mod align_tests {
+    use benilla_ui::script::{ExtractedQuad, QuadContent, UiScript};
+
+    use super::align_entries;
+
+    /// Four regions across two frames — a z-sorted list with genuine keys to permute.
+    fn entries() -> Vec<ExtractedQuad> {
+        let mut script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+            for i = 1, 2 do
+              local f = CreateFrame("Frame", "F" .. i)
+              f:SetPoint("TOPLEFT", 0, 0)
+              f:SetSize(50, 50)
+              for j = 1, 2 do
+                local t = f:CreateTexture(nil, "ARTWORK")
+                t:SetTexture(i / 4, j / 4, 0)
+                t:SetAllPoints()
+              end
+            end
+        "#,
+            )
+            .unwrap();
+        script.resolve();
+        let list = script.extract();
+        assert!(
+            list.len() >= 6,
+            "two frames and four regions: {}",
+            list.len()
+        );
+        list
+    }
+
+    /// A repaint of one entry: it converts, its old self is dropped, and every other entry keeps
+    /// its own quads — the shape the splice has always handled, restated on the new machinery.
+    #[test]
+    fn a_changed_entry_is_the_only_one_that_converts() {
+        let was = entries();
+        let mut now = was.clone();
+        let at = now
+            .iter()
+            .position(|e| matches!(e.content, QuadContent::Texture { .. }))
+            .unwrap();
+        let QuadContent::Texture { color, .. } = &mut now[at].content else {
+            unreachable!()
+        };
+        *color = Some([0.0, 0.0, 1.0, 1.0]);
+
+        let a = align_entries(&was, &now);
+        assert_eq!(a.dropped, vec![at], "the repainted entry's old quads go");
+        for (j, s) in a.source.iter().enumerate() {
+            assert_eq!(
+                *s,
+                (j != at).then_some(j),
+                "entry {j} reuses its own quads unless it is the one that changed"
+            );
+        }
+    }
+
+    /// **The case a positional compare cannot see** (decision 1638): one entry appears in the
+    /// middle and every entry behind it shifts by one. All of them must keep their quads —
+    /// before this, index `j` was compared against a stranger and the whole list re-converted.
+    #[test]
+    fn an_insertion_shifts_the_tail_and_costs_one_conversion() {
+        let was = entries();
+        // The insertion needs a `z` strictly between its neighbours' — the merge reads a sorted
+        // list — so seat it at the first pair with room. Sibling regions differ by 1 in the key's
+        // declaration-order field; a frame boundary leaves a wide gap.
+        let at = (1..was.len())
+            .find(|&i| was[i].z - was[i - 1].z > 1)
+            .expect("some adjacent pair has room between its keys");
+        let mut now = was.clone();
+        let mut fresh = was[at].clone();
+        fresh.z = was[at - 1].z + 1;
+        now.insert(at, fresh);
+
+        let a = align_entries(&was, &now);
+        assert!(a.dropped.is_empty(), "nothing left the list");
+        assert_eq!(a.source[at], None, "the new entry is the one conversion");
+        for j in 0..at {
+            assert_eq!(a.source[j], Some(j), "the head is untouched");
+        }
+        for j in at + 1..now.len() {
+            assert_eq!(
+                a.source[j],
+                Some(j - 1),
+                "entry {j} keeps the quads it had at {}, one place back",
+                j - 1
+            );
+        }
+    }
+
+    /// The mirror: an entry vanishes, nothing converts at all, and the tail keeps its quads from
+    /// one place forward. The splice must still run — the quads have to leave the list.
+    #[test]
+    fn a_deletion_converts_nothing_and_still_has_work() {
+        let was = entries();
+        let at = was.len() / 2;
+        let mut now = was.clone();
+        now.remove(at);
+
+        let a = align_entries(&was, &now);
+        assert_eq!(
+            a.dropped,
+            vec![at],
+            "the vanished entry's quads are dropped"
+        );
+        assert!(
+            a.source.iter().all(Option::is_some),
+            "a deletion converts nothing"
+        );
+        for j in at..now.len() {
+            assert_eq!(a.source[j], Some(j + 1), "the tail shifts back one");
+        }
+    }
+
+    /// Two lists with nothing in common align to nothing kept — the bound above this call is
+    /// what then sends the frame to the full conversion.
+    #[test]
+    fn a_wholly_new_list_keeps_nothing() {
+        let was = entries();
+        let now: Vec<ExtractedQuad> = was
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                e.z += 1;
+                e
+            })
+            .collect();
+        let a = align_entries(&was, &now);
+        assert!(a.source.iter().all(Option::is_none));
+        assert_eq!(a.dropped.len(), was.len());
+    }
+}
+
 #[cfg(test)]
 mod extract_gate_tests {
     use bevy::prelude::*;
@@ -1971,6 +2424,105 @@ mod extract_gate_tests {
             app.world().resource::<UiQuads>().quads
                 == reference.world().resource::<UiQuads>().quads,
             "post-stitch splice output equals the full conversion"
+        );
+    }
+
+    /// **A frame appearing shifts every entry behind it, and the splice sees through that**
+    /// (decision 1638). Showing a hidden sibling inserts its entries into the MIDDLE of the
+    /// render list, so every entry after them lands at a new index. Compared index-wise they all
+    /// looked changed and the frame took the full conversion — which is what 86 % of hover frames
+    /// were doing. Both directions, and both must equal the full conversion of the same model.
+    #[test]
+    fn a_shown_sibling_splices_through_the_shift_and_matches_the_full_conversion() {
+        // A, B, C in declaration order, so B's entries sort between A's and C's: C is the tail
+        // that shifts. B starts hidden and contributes nothing.
+        const BUILD: &str = r#"
+            local function box(name, x, r, g, b)
+              local f = CreateFrame("Frame", name)
+              f:SetPoint("TOPLEFT", x, 0)
+              f:SetSize(50, 50)
+              local t = f:CreateTexture(nil, "ARTWORK")
+              t:SetTexture(r, g, b)
+              t:SetAllPoints()
+              return f
+            end
+            box("A", 0, 1, 0, 0)
+            hidden = box("B", 60, 0, 1, 0)
+            box("C", 120, 0, 0, 1)
+        "#;
+        let mut app = app_from_script(&format!("{BUILD}\nhidden:Hide()"));
+        app.world_mut()
+            .resource_mut::<crate::ui_script::UiCostWanted>()
+            .0 = true;
+        app.update();
+        let without = app.world().resource::<UiQuads>().quads.len();
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+
+        // ── Insertion ────────────────────────────────────────────────────────────────────────
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("hidden:Show()")
+            .unwrap();
+        app.update();
+        let cost = app.world().resource::<crate::ui_script::UiFrameCost>();
+        assert!(
+            cost.spliced > 0 && cost.dropped == 0,
+            "B's entries are the only conversions and nothing left the list \
+             (spliced={}, dropped={})",
+            cost.spliced,
+            cost.dropped
+        );
+        let quads = app.world().resource::<UiQuads>();
+        assert!(quads.dirty, "a frame appearing is a real change");
+        assert!(
+            quads.quads.len() > without,
+            "the shown frame's quad actually joined the list ({} -> {})",
+            without,
+            quads.quads.len()
+        );
+        // The reference must share the app's HISTORY, not just its end state: `Show()` on a
+        // hidden frame re-stacks it to the tail of its draw bucket — the client's own
+        // `effective_visible_show 0x76ae10` re-adding it to the level's intrusive list — so B
+        // draws above C afterwards. (The splice got that right on its own; this reference did
+        // not, which is how the difference surfaced.)
+        let mut reference = app_from_script(&format!("{BUILD}\nhidden:Hide()\nhidden:Show()"));
+        reference.update();
+        assert!(
+            app.world().resource::<UiQuads>().quads
+                == reference.world().resource::<UiQuads>().quads,
+            "the spliced list equals the full conversion of the same model"
+        );
+
+        // ── Deletion ─────────────────────────────────────────────────────────────────────────
+        // The mirror, and the reason `dropped` exists: nothing converts at all, so `spliced` is
+        // zero on a frame that most certainly did splice.
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("hidden:Hide()")
+            .unwrap();
+        app.update();
+        let cost = app.world().resource::<crate::ui_script::UiFrameCost>();
+        assert_eq!(cost.spliced, 0, "a pure deletion converts nothing");
+        assert!(
+            cost.dropped > 0,
+            "and it is the drop count that proves it spliced"
+        );
+        let quads = app.world().resource::<UiQuads>();
+        assert!(quads.dirty, "a vanished frame is a real change");
+        assert_eq!(
+            quads.quads.len(),
+            without,
+            "the list is back to what it was before B appeared"
+        );
+        let mut reference = app_from_script(&format!(
+            "{BUILD}\nhidden:Hide()\nhidden:Show()\nhidden:Hide()"
+        ));
+        reference.update();
+        assert!(
+            app.world().resource::<UiQuads>().quads
+                == reference.world().resource::<UiQuads>().quads,
+            "the post-deletion list equals the full conversion of the same model"
         );
     }
 

@@ -59,7 +59,7 @@
 //! prints the scenario names. `scripts/visual.sh` wraps all of this.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot, ScreenshotCaptured};
@@ -324,6 +324,37 @@ fn stable_frames() -> u32 {
 /// loudly. Deliberately generous: reaching it means the shot is not reproducible.
 const BUILD_CAP_FRAMES: u32 = 1800;
 
+/// Wall-clock ceiling on a whole capture run, deadline exceeded → `AppExit::error()`.
+///
+/// **Every other bound in this harness counts FRAMES, and that is only a bound while frames keep
+/// arriving.** On 2026-08-26 macOS stopped granting drawables to our window — `-[CAMetalLayer
+/// nextDrawable]` parked on its own ~1 s internal timeout, over and over, verified in the stall
+/// sampler's own captures (758 of ~1000 samples in `semaphore_timedwait_trap` beneath
+/// `CAMetalLayerPrivateNextDrawableLocked`, with `frame hitch: 1005..1019 ms` repeating in the log).
+/// At that rate [`BUILD_CAP_FRAMES`] is not 30 seconds of patience, it is **thirty minutes**, and
+/// every agent-driven capture that session read as a dead terminal with no error and no clue.
+///
+/// So the ceiling that matters is the one measured in the units the failure is measured in. It is
+/// not a retry, a fallback or a heuristic: a capture either produces its image or fails, and this is
+/// the line that makes the second one *happen* instead of hanging. The message it prints carries the
+/// observed frame rate, because "47 frames in 300 s" is the diagnosis and a bare timeout is not.
+///
+/// The starvation itself is macOS's, not ours — the compositor stops recycling presented drawables
+/// for a window it is not compositing, and nothing in-process can hand them back. We bound our own
+/// instrument; we do not fight the window server. Decision 1637.
+const DEADLINE_SECS: u64 = 300;
+
+/// The effective wall-clock ceiling — `$WOW_CAPTURE_DEADLINE=<secs>`, `0` to disable. A healthy
+/// capture is seconds (`ui-bag` 7 s, a settled world scenario ~10 s), so 300 s is ~30× headroom and
+/// cannot fire on a run that is merely slow.
+fn capture_deadline() -> Option<Duration> {
+    let secs = std::env::var("WOW_CAPTURE_DEADLINE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEADLINE_SECS);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
 /// Steps of [`CAPTURE_FRAME_DT`] the sims run, clock released, once the scene is built and
 /// quiescent — the shot's *sim age*. 150 = 2.5 s: past the 2 s spawn appear-fade
 /// (`model_fade::APPEAR_FADE_SECS`) and long past a flame pool's particle lifetime, so the scene is
@@ -437,8 +468,20 @@ struct CaptureCtx {
     /// frame-time stats + scene counts and exit. The repeatable perf instrument: same scenario, same
     /// settle, numbers instead of pixels. 0 = normal capture.
     probe_frames: u32,
-    /// The frozen clock is in force ([`CAPTURE_FRAME_DT`]) — always, except under a perf probe,
-    /// whose entire measurement *is* the real frame cost.
+    /// The frozen clock is still in force ([`CAPTURE_FRAME_DT`]). True for the whole of every run
+    /// that ends in a screenshot; a perf probe **starts** frozen and drops this the moment the scene
+    /// is built and aged, because its entire measurement *is* the real frame cost.
+    ///
+    /// It used to be `probe_frames == 0`, decided once at build — i.e. a probe ran its whole
+    /// `Building` phase on a live clock. That silently broke when 0815 replaced the settle proxies
+    /// with the image-stability gate: on a live clock the sky drifts and the flames burn, so the
+    /// image *cannot* stop changing and `watch.stable` never leaves 0. Every probe since has spent
+    /// the full [`BUILD_CAP_FRAMES`] — 1800 frames, ~30 s, and 1800 full-resolution readbacks of a
+    /// stability test that could not pass — and then printed a warning about a shot it never takes.
+    /// Worse for a *perf* instrument: the scene it measured was however old 1800 real frames made
+    /// it, which is a different age on every machine. Frozen build → deterministic [`age_frames`] →
+    /// release is the same three steps a capture takes, and it is what makes the probe repeatable.
+    /// Decision 1637.
     frozen_clock: bool,
     /// `$WOW_RESIZE=WxH` already applied (once, at first settle) — see the `Building` arm.
     resized: bool,
@@ -447,6 +490,17 @@ struct CaptureCtx {
     /// Process CPU seconds at the first sampled frame — the window baseline for the probe line's
     /// `cpu_ms`/`cpu_pct` (the load-robust metric, decision 0711; the scenario probe lacked it).
     probe_cpu_start: Option<f64>,
+    /// Wall-clock start of the run, and how long it may take — see [`capture_deadline`]. A real
+    /// [`Instant`], never `Time<Real>`: under the frozen clock `Time<Real>` is itself manual
+    /// ([`CAPTURE_FRAME_DT`] per frame), so a harness that timed itself by it would measure the
+    /// very frame count it is trying not to trust.
+    started: Instant,
+    deadline: Option<Duration>,
+    /// Frames [`drive_capture`] has run, all phases — the denominator of the rate the deadline
+    /// message reports.
+    frames: u32,
+    /// The deadline already fired; `AppExit` is written and no phase advances again.
+    bailed: bool,
 }
 
 /// `$WOW_RESIZE=WxH` — resize the window to this (logical px) once the image first settles,
@@ -714,14 +768,14 @@ impl Plugin for CapturePlugin {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        // The frozen capture clock ([`CAPTURE_FRAME_DT`]) — never under a perf probe, which reads
-        // `time.delta_secs()` AS its measurement and would report a flawless constant 16.67 ms for
-        // any scene, however slow.
-        let frozen_clock = probe_frames == 0;
-        if frozen_clock {
-            app.insert_resource(TimeUpdateStrategy::ManualDuration(CAPTURE_FRAME_DT))
-                .add_systems(Startup, hold_clock);
-        }
+        // The frozen capture clock ([`CAPTURE_FRAME_DT`]) — now for every run, probe included, and
+        // released at a phase boundary rather than never installed (see `CaptureCtx::frozen_clock`).
+        // A probe still measures a live clock: `drive_capture` restores
+        // `TimeUpdateStrategy::Automatic` on the way into `ProbeWarmup`, before a single frame is
+        // sampled, because `time.delta_secs()` under a manual strategy would report a flawless
+        // constant 16.67 ms for any scene, however slow.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(CAPTURE_FRAME_DT))
+            .add_systems(Startup, hold_clock);
         app.insert_resource(CaptureMode)
             .init_resource::<FrameWatch>()
             .insert_resource(CaptureCtx {
@@ -731,10 +785,14 @@ impl Plugin for CapturePlugin {
                 phase: Phase::Building(0),
                 ui_seeded: false,
                 probe_frames,
-                frozen_clock,
+                frozen_clock: true,
                 resized: false,
                 probe_samples: Vec::new(),
                 probe_cpu_start: None,
+                started: Instant::now(),
+                deadline: capture_deadline(),
+                frames: 0,
+                bailed: false,
             })
             .add_systems(Update, pin_scene.in_set(WorldStage::Present))
             // Before the UnitFeed pass: the seed stands in for wire data that in live play
@@ -837,7 +895,8 @@ fn drive_capture(
     capturing: Query<(), (With<Capturing>, Without<StabilityShot>)>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
-    time: Res<Time<bevy::time::Real>>,
+    // `ResMut` for one reason: re-anchoring the clock at the probe's release — see `Phase::Aging`.
+    mut time: ResMut<Time<bevy::time::Real>>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
     particles: Query<&benilla_world::particles::ParticleEmitter>,
     parts: Query<&ViewVisibility, With<benilla_world::model_render::ModelPart>>,
@@ -852,7 +911,35 @@ fn drive_capture(
     // instead; decision 0789 says why, and what learning it cost.
     game_time: Res<Time>,
     mut clock: ResMut<Time<Virtual>>,
+    // Switched to `Automatic` at the probe's release point — see `Phase::Aging`.
+    mut time_strategy: ResMut<TimeUpdateStrategy>,
 ) {
+    // The wall-clock ceiling, checked before anything else and in every phase — `Building` is
+    // where the drawable starvation was caught, but `FxAging` waits on a fixture that may never
+    // attach and `Saving` on a readback that may never land, and one deadline covers all three
+    // where three per-phase frame caps would not ([`capture_deadline`]).
+    if ctx.bailed {
+        return;
+    }
+    ctx.frames += 1;
+    if let Some(limit) = ctx.deadline {
+        let elapsed = ctx.started.elapsed();
+        if elapsed > limit {
+            ctx.bailed = true;
+            error!(
+                "capture: DEADLINE — {} ran {:.0}s without finishing ({} frames, {:.1} fps). \
+                 The harness bounds itself in frames, so this is what a machine that stopped \
+                 granting frames looks like; at 1 fps the frame caps are half an hour. No \
+                 image written. ($WOW_CAPTURE_DEADLINE=<secs>, 0 disables.)",
+                ctx.name,
+                elapsed.as_secs_f32(),
+                ctx.frames,
+                ctx.frames as f32 / elapsed.as_secs_f32(),
+            );
+            exit.write(AppExit::error());
+            return;
+        }
+    }
     // Both fixture viewers (fxview / waterfx) share the build→arm→age→shoot flow; only the
     // requested age differs.
     let fixture_age = fx_req
@@ -916,40 +1003,17 @@ fn drive_capture(
                     state.armed = true; // scene ready — the fixture spawns now, age clock clean
                 }
                 Phase::FxAging
-            } else if ctx.probe_frames > 0 {
-                // Probe: uncap presentation so we measure true frame cost, not the vsync ceiling.
-                // `$WOW_PROBE_VSYNC=1` keeps vsync ON instead — the probe then measures the PRESENT
-                // ceiling itself (what fps the display sync actually grants this window), the
-                // instrument for "what is the vsync cap right now".
-                let keep_vsync = std::env::var("WOW_PROBE_VSYNC").as_deref() == Ok("1");
-                if !keep_vsync {
-                    if let Ok(mut w) = windows.single_mut() {
-                        w.present_mode = probe_uncap_mode();
-                    }
-                }
-                info!(
-                    "probe: image settled; vsync {}, warming {PROBE_WARMUP_FRAMES} frames",
-                    if keep_vsync { "KEPT ON" } else { "off" }
-                );
-                Phase::ProbeWarmup(0)
-            } else if ctx.frozen_clock {
+            } else {
                 // Clock released here: the sims now run exactly `age_frames()` fixed steps, so the
-                // shot's sim age is the same on any machine (decision 0723).
+                // shot's sim age is the same on any machine (decision 0723) — and a probe takes the
+                // same road, so the scene it measures is that same fixed age instead of "however
+                // old 1800 real frames left it" (`CaptureCtx::frozen_clock`).
                 info!(
                     "capture: image settled after {} frames, aging {}",
                     n + 1,
                     age_frames()
                 );
                 Phase::Aging(0)
-            } else {
-                commands
-                    .spawn(Screenshot::primary_window())
-                    .observe(save_to_disk(ctx.out.clone()));
-                info!("capture: image settled, writing {}", ctx.out);
-                Phase::Saving {
-                    frames: 0,
-                    seen: false,
-                }
             }
         }
         Phase::FxAging => {
@@ -980,7 +1044,47 @@ fn drive_capture(
             // count-quiescence gate it shared a threshold with had already passed. What replaced it
             // is upstream and stronger: the image itself stopped changing before the clock was
             // released, so a straggler that would have mattered was already waited out (0815).
-            if n + 1 >= age_frames() {
+            if n + 1 < age_frames() {
+                Phase::Aging(n + 1)
+            } else if ctx.probe_frames > 0 {
+                // Scene built and aged to a known duration; hand the clock back to real time
+                // BEFORE a single frame is sampled, or `Phase::Probing` would read the manual
+                // [`CAPTURE_FRAME_DT`] as its measurement and report a flawless 16.67 ms.
+                ctx.frozen_clock = false;
+                *time_strategy = TimeUpdateStrategy::Automatic;
+                // Re-anchor `Time<Real>` to NOW, or the first automatic frame is billed for the
+                // entire frozen phase. `update_with_duration` sets `last_update = last_update +
+                // dt` — a fictional instant that falls behind reality by exactly the wall-clock
+                // time spent frozen (~8 s here). The next `Automatic` tick does
+                // `Instant::now() - that`, which lands as one multi-second delta: `perf::stats`
+                // reported it as a phantom `frame hitch: 1060 ms`, and `update_virtual_time`
+                // clamped it to `max_delta` and stepped every sim a quarter-second at once — a
+                // spawn burst whose cost then landed in the samples (measured: p95 46-52 ms
+                // against 18 ms before).
+                //
+                // Called from `Last`, so the huge delta it writes is overwritten by the next
+                // frame's `time_system` before anything reads it, and it never reaches
+                // `Time<Virtual>` at all — `update_virtual_time` only runs inside `time_system`.
+                // What survives is the anchor: `last_update = now`, so frame one of the
+                // measurement is an ordinary frame.
+                time.update_with_instant(Instant::now());
+                // Uncap presentation so we measure true frame cost, not the vsync ceiling.
+                // `$WOW_PROBE_VSYNC=1` keeps vsync ON instead — the probe then measures the PRESENT
+                // ceiling itself (what fps the display sync actually grants this window), the
+                // instrument for "what is the vsync cap right now".
+                let keep_vsync = std::env::var("WOW_PROBE_VSYNC").as_deref() == Ok("1");
+                if !keep_vsync {
+                    if let Ok(mut w) = windows.single_mut() {
+                        w.present_mode = probe_uncap_mode();
+                    }
+                }
+                info!(
+                    "probe: scene aged {} frames; vsync {}, warming {PROBE_WARMUP_FRAMES} frames",
+                    age_frames(),
+                    if keep_vsync { "KEPT ON" } else { "off" }
+                );
+                Phase::ProbeWarmup(0)
+            } else {
                 commands
                     .spawn(Screenshot::primary_window())
                     .observe(save_to_disk(ctx.out.clone()));
@@ -989,8 +1093,6 @@ fn drive_capture(
                     frames: 0,
                     seen: false,
                 }
-            } else {
-                Phase::Aging(n + 1)
             }
         }
         Phase::ProbeWarmup(n) => {

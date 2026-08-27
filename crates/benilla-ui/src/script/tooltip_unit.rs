@@ -262,15 +262,19 @@ fn update_bar(lua: &Lua, h: FrameHandle, unit: Option<&UnitState>) {
 pub(super) fn on_unit_push(lua: &Lua, token: &str) {
     let hits: Vec<FrameHandle> = {
         let model = lua.app_data_mut::<Model>().expect("model app_data");
+        // The arena's tooltip registry (1634), gated by the resolve's roster exactly as the walk
+        // it replaces was — `update_bar` writes layout.
         model
-            .frame_to_id
-            .keys()
+            .arena
+            .tooltip_kinds()
+            .iter()
             .copied()
             .filter(|&h| {
-                matches!(
-                    model.arena.frame(h).map(|f| &f.kind_state),
-                    Some(KindState::Tooltip(t)) if t.unit_token.as_deref() == Some(token)
-                )
+                model.frame_to_id.contains_key(&h)
+                    && matches!(
+                        model.arena.frame(h).map(|f| &f.kind_state),
+                        Some(KindState::Tooltip(t)) if t.unit_token.as_deref() == Some(token)
+                    )
             })
             .collect()
     };

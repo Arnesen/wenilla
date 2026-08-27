@@ -411,6 +411,13 @@ pub struct WidgetArena {
     /// corpus UI is thousands of frames. Appended at creation (kinds never change after);
     /// `destroy` removes its own handle, so the list never carries dead entries.
     ticked_kinds: Vec<FrameHandle>,
+    /// Every live **GameTooltip**, same registry shape as [`Self::ticked_kinds`] and for the same
+    /// reason one layer over: three hot paths (the auto-size pre-pass at the top of every layout
+    /// resolve, the per-tick fade advance, and the unit-push hook) all begin "find the tooltips",
+    /// and all three did it by walking the resolve's whole frame roster — ~4000 entries at a
+    /// corpus UI, to reach the two or three that exist. Appended at creation (kinds never change);
+    /// `destroy` removes its own handle, so the list never carries dead entries.
+    tooltip_kinds: Vec<FrameHandle>,
 }
 
 impl Default for WidgetArena {
@@ -429,6 +436,7 @@ impl WidgetArena {
             next_insertion: 0,
             minimap_created: 0,
             ticked_kinds: Vec::new(),
+            tooltip_kinds: Vec::new(),
         }
     }
 
@@ -440,6 +448,11 @@ impl WidgetArena {
     /// The frames whose kind the host must advance each tick (see the field note).
     pub fn ticked_kinds(&self) -> &[FrameHandle] {
         &self.ticked_kinds
+    }
+
+    /// The live GameTooltip frames (see the field note).
+    pub fn tooltip_kinds(&self) -> &[FrameHandle] {
+        &self.tooltip_kinds
     }
 
     // ── Read access ────────────────────────────────────────────────────────────────────────────
@@ -652,6 +665,9 @@ impl WidgetArena {
         if ticked {
             self.ticked_kinds.push(handle);
         }
+        if matches!(kind, FrameKind::GameTooltip) {
+            self.tooltip_kinds.push(handle);
+        }
 
         if let Some(p) = parent {
             self.frame_mut(p)
@@ -678,6 +694,7 @@ impl WidgetArena {
         let name = frame.name.clone();
         // Each (recursive) destroy removes its own handle — the tick registry stays dead-free.
         self.ticked_kinds.retain(|&t| t != h);
+        self.tooltip_kinds.retain(|&t| t != h);
 
         for c in children {
             self.destroy(c);

@@ -52,12 +52,17 @@
 //! So [`bound_spell`] and the press going through one [`resolve_spell_by_name`] is the reference's
 //! shape, not a convenience.
 //!
-//! One thing the reference distinguishes and benilla does not: a `/cast` line whose name did not
-//! resolve stores **-1**, a `CastSpellByName(` line whose name did not resolve stores **0**, and the
-//! incremental re-derive retries only negatives — so a failed `CastSpellByName` is never retried
-//! while a failed `/cast` is. benilla recomputes the whole table off two change signals instead
-//! (`rebind_macro_spells`), which retries both; strictly more forgiving, and the reason the
-//! asymmetry has no observable to reproduce here.
+//! **The field is three-valued, and the third value shows on the bar** (decision 1636): a `/cast`
+//! line whose name did not resolve stores **-1**; a `CastSpellByName(` line whose name did not
+//! resolve stores **0** — the same 0 a body with no cast line at all stores. The usable compute
+//! `0x4e5050` reads the difference: a 0 takes its spell-less leg, which answers usable=1 for any
+//! macro that exists (`0x4e5030`), while a -1 falls into the spell path and fails its `jl` at
+//! `0x4e518b` — the 0.4 grey. So `/cast Pyroblast` before you know Pyroblast is a grey button and
+//! `/script CastSpellByName("Pyroblast")` is a full-colour one; [`BoundSpell`] carries all three
+//! so the bar can tell them apart. The reference's incremental re-derive retries only negatives
+//! (a failed `CastSpellByName` is never retried, a failed `/cast` is); benilla recomputes the
+//! whole table off two change signals instead (`rebind_macro_spells`), which retries both —
+//! strictly more forgiving, and no observable differs.
 //!
 //! **`[rec+0x568]` is NOT what 0983 said it was.** It is the SPELLBOOK the bound spell resolved
 //! from — 0 = the player's list, 1 = the PET's (Lua's `BOOKTYPE_SPELL`/`BOOKTYPE_PET`) — not "the
@@ -72,6 +77,33 @@ use crate::ui_chat::commands::{Command, SlashCommands, SlashIndex};
 /// The literal the reference matches a `/script`-style body line against — `0x84cab0`, searched
 /// case-SENSITIVELY anywhere in the line (`0x4efed5` → `0x64b4f0` → a `rep cmpsb` `strncmp`).
 const CAST_BY_NAME_CALL: &str = "CastSpellByName(";
+
+/// Which of `0x4efe00`'s two arms matched the cast line — load-bearing because the two store
+/// different values for a name that does not resolve (wow-re `macro-execution-law.md` §7: arm A
+/// writes `-1` at `0x4eff48`, arm B stores the resolver's `0` verbatim at `0x4eff81`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CastArm {
+    /// A `/cast`-alias line (`SLASH_CAST%d`, read as Lua globals).
+    Slash,
+    /// A `CastSpellByName("…")` call anywhere in the line.
+    ByName,
+}
+
+/// The reference's `[rec+0x564]` — a macro record's cached bound spell — as the three values it
+/// actually takes (wow-re `macro-execution-law.md` §7, VERIFIED; the usable consequence is
+/// decision 1636). The action bar reads this through `ui_action::state`'s slot resolve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum BoundSpell {
+    /// `0` — no line matched either arm, or a `CastSpellByName(` name that did not resolve. The
+    /// bar treats the slot as a bare macro: usable, no spell state.
+    #[default]
+    None,
+    /// `-1` — a `/cast` line whose name did not resolve. The bar greys the slot (the spell path
+    /// of `0x4e5050` refuses a negative id at `0x4e518b`).
+    Unresolved,
+    /// A live spell id: from here down the slot IS that spell.
+    Spell(u32),
+}
 
 /// A macro body's runnable lines. The reference's tokenizer (`0x64ae50`) takes `"\r\n"` as a
 /// **delimiter SET** — either character splits — and skips empty tokens, which is why an interior
@@ -98,7 +130,7 @@ pub(crate) fn macro_lines(body: &str) -> impl Iterator<Item = &str> {
 ///   (never a hardcoded `"/cast"` — decision 0881's law, and the reference's own: it reads
 ///   `SLASH_CAST1`, `SLASH_CAST2`, … out of the Lua globals), argument taken whole; or
 /// - a line containing `CastSpellByName(` with a quoted first argument.
-pub(crate) fn cast_name(table: &SlashCommands, body: &str) -> Option<String> {
+pub(crate) fn cast_name(table: &SlashCommands, body: &str) -> Option<(CastArm, String)> {
     for line in macro_lines(body) {
         // Arm A. The separator after the alias must be a literal `' '` — the reference compares
         // `[ebp+ebx-0x108]` against `0x20` exactly (`0x4efe96`), so a TAB does not match and a
@@ -109,7 +141,7 @@ pub(crate) fn cast_name(table: &SlashCommands, body: &str) -> Option<String> {
             if table.lookup(cmd) == Some(Command::Slash(SlashIndex::Cast)) {
                 let args = args.trim();
                 if !args.is_empty() {
-                    return Some(args.to_string());
+                    return Some((CastArm::Slash, args.to_string()));
                 }
                 // The ref falls through to arm B on this same line, then to the next line.
                 continue;
@@ -117,7 +149,7 @@ pub(crate) fn cast_name(table: &SlashCommands, body: &str) -> Option<String> {
         }
         // Arm B, second and on the same line (`0x4efed5`).
         if let Some(name) = quoted_call_argument(line) {
-            return Some(name);
+            return Some((CastArm::ByName, name));
         }
     }
     None
@@ -135,14 +167,20 @@ fn quoted_call_argument(line: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// The macro's bound spell id — [`cast_name`] resolved against the player's book by the same law
+/// The macro's bound spell — [`cast_name`] resolved against the player's book by the same law
 /// `CastSpellByName` itself uses ([`resolve_spell_by_name`]), so the icon's cooldown swirl and the
-/// press always agree about which rank is meant. `None` for a macro that casts nothing, or names a
-/// spell this character does not know: the slot then reports no cooldown and no range, which is
-/// what the reference's `0x4e5a50` produces for a `[rec+0x564]` of 0.
-pub(crate) fn bound_spell(table: &SlashCommands, body: &str, book: &SpellBookState) -> Option<u32> {
-    let name = cast_name(table, body)?;
-    resolve_spell_by_name(book, &name).map(|s| s.spell_id)
+/// press always agree about which rank is meant. The miss is arm-dependent, exactly as the
+/// reference stores it (the module doc): a `/cast` of a name this character does not know is
+/// [`BoundSpell::Unresolved`], a `CastSpellByName(` of one is [`BoundSpell::None`].
+pub(crate) fn bound_spell(table: &SlashCommands, body: &str, book: &SpellBookState) -> BoundSpell {
+    let Some((arm, name)) = cast_name(table, body) else {
+        return BoundSpell::None;
+    };
+    match (resolve_spell_by_name(book, &name), arm) {
+        (Some(s), _) => BoundSpell::Spell(s.spell_id),
+        (None, CastArm::Slash) => BoundSpell::Unresolved,
+        (None, CastArm::ByName) => BoundSpell::None,
+    }
 }
 
 #[cfg(test)]
@@ -179,23 +217,26 @@ mod tests {
         let t = table();
         assert_eq!(
             cast_name(&t, "/target Bob\n/cast Fireball\n/say pew"),
-            Some("Fireball".into())
+            Some((CastArm::Slash, "Fireball".into()))
         );
-        assert_eq!(cast_name(&t, "/spell Frostbolt"), Some("Frostbolt".into()));
+        assert_eq!(
+            cast_name(&t, "/spell Frostbolt"),
+            Some((CastArm::Slash, "Frostbolt".into()))
+        );
         // The whole argument, subtext included — `resolve_spell_by_name` owns that grammar.
         assert_eq!(
             cast_name(&t, "/cast Fireball(Rank 1)"),
-            Some("Fireball(Rank 1)".into())
+            Some((CastArm::Slash, "Fireball(Rank 1)".into()))
         );
         // First match wins.
         assert_eq!(
             cast_name(&t, "/cast Fireball\n/cast Frostbolt"),
-            Some("Fireball".into())
+            Some((CastArm::Slash, "Fireball".into()))
         );
         // A bare `/cast` binds nothing and does not stop the walk.
         assert_eq!(
             cast_name(&t, "/cast\n/cast Frostbolt"),
-            Some("Frostbolt".into())
+            Some((CastArm::Slash, "Frostbolt".into()))
         );
         assert_eq!(cast_name(&t, "/say hello\n/target Bob"), None);
     }
@@ -207,12 +248,13 @@ mod tests {
     #[test]
     fn the_alias_separator_is_a_literal_space_and_the_alias_folds_case() {
         let t = table();
-        assert_eq!(cast_name(&t, "/CAST Fireball"), Some("Fireball".into()));
-        assert_eq!(cast_name(&t, "/Cast Fireball"), Some("Fireball".into()));
+        let fireball = Some((CastArm::Slash, "Fireball".into()));
+        assert_eq!(cast_name(&t, "/CAST Fireball"), fireball);
+        assert_eq!(cast_name(&t, "/Cast Fireball"), fireball);
         // A tab does not separate — the ref reads it as "not a /cast line" and walks on.
         assert_eq!(
             cast_name(&t, "/cast\tFireball\n/cast Frostbolt"),
-            Some("Frostbolt".into())
+            Some((CastArm::Slash, "Frostbolt".into()))
         );
         // Arm B is case-SENSITIVE (a `rep cmpsb` strncmp), so the lowercased spelling misses.
         assert_eq!(
@@ -227,12 +269,12 @@ mod tests {
         let t = table();
         assert_eq!(
             cast_name(&t, r#"/script CastSpellByName("Shadow Bolt")"#),
-            Some("Shadow Bolt".into())
+            Some((CastArm::ByName, "Shadow Bolt".into()))
         );
         // Spacing and a second argument don't matter; the first quoted argument is the name.
         assert_eq!(
             cast_name(&t, r#"/script CastSpellByName( "Healing Touch", 1 )"#),
-            Some("Healing Touch".into())
+            Some((CastArm::ByName, "Healing Touch".into()))
         );
         // A computed argument has no name to bind — neither here nor in the reference.
         assert_eq!(cast_name(&t, "/script CastSpellByName(spell)"), None);
@@ -264,12 +306,42 @@ mod tests {
         };
         let t = table();
         // No subtext -> the highest known rank.
-        assert_eq!(bound_spell(&t, "/cast Fireball", &book), Some(145));
+        assert_eq!(
+            bound_spell(&t, "/cast Fireball", &book),
+            BoundSpell::Spell(145)
+        );
         // A pinned subtext -> that rank, both spacings.
-        assert_eq!(bound_spell(&t, "/cast Fireball(Rank 1)", &book), Some(133));
-        assert_eq!(bound_spell(&t, "/cast Fireball (Rank 1)", &book), Some(133));
-        // Unknown spell / no cast line -> nothing bound (the slot reports no cooldown).
-        assert_eq!(bound_spell(&t, "/cast Pyroblast", &book), None);
-        assert_eq!(bound_spell(&t, "/say hi", &book), None);
+        assert_eq!(
+            bound_spell(&t, "/cast Fireball(Rank 1)", &book),
+            BoundSpell::Spell(133)
+        );
+        assert_eq!(
+            bound_spell(&t, "/cast Fireball (Rank 1)", &book),
+            BoundSpell::Spell(133)
+        );
+    }
+
+    /// The miss is arm-dependent, as the reference stores it (`macro-execution-law.md` §7 +
+    /// decision 1636): a `/cast` of a spell this character does not know is the `-1` the bar
+    /// greys; a body with no cast line, or a `CastSpellByName(` of an unknown name, is the `0`
+    /// the bar draws full-colour with no spell state.
+    #[test]
+    fn an_unresolved_cast_is_arm_dependent() {
+        let book = SpellBookState::default();
+        let t = table();
+        assert_eq!(
+            bound_spell(&t, "/cast Pyroblast", &book),
+            BoundSpell::Unresolved
+        );
+        assert_eq!(
+            bound_spell(&t, "/spell Pyroblast\n/say pew", &book),
+            BoundSpell::Unresolved
+        );
+        assert_eq!(bound_spell(&t, "/say hi", &book), BoundSpell::None);
+        assert_eq!(bound_spell(&t, ".spawn 16032", &book), BoundSpell::None);
+        assert_eq!(
+            bound_spell(&t, r#"/script CastSpellByName("Pyroblast")"#, &book),
+            BoundSpell::None
+        );
     }
 }

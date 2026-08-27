@@ -443,6 +443,7 @@
             button.flash = getglobal(n .. "Flash")
             button.border = getglobal(n .. "Border")
             button.cooldown = getglobal(n .. "Cooldown")
+            button.name = getglobal(n .. "Name")
             button.flashing = button.flashing or 0
             button.flashtime = button.flashtime or 0
             -- The grid count, same posture: a foreign button reaching ActionButton_HideGrid with
@@ -521,6 +522,7 @@
             button.flash = getglobal(button:GetName() .. "Flash")
             button.border = getglobal(button:GetName() .. "Border")
             button.cooldown = getglobal(button:GetName() .. "Cooldown")
+            button.name = getglobal(button:GetName() .. "Name")
             -- Ref ActionButton_OnLoad:104-106: the flash/range state the OnUpdate loop drives.
             button.flashing = 0
             button.flashtime = 0
@@ -943,6 +945,15 @@
                 button.border:Show()
             else
                 button.border:Hide()
+            end
+            -- Ref ActionButton_Update:236-238, "Update Macro Text": the Name line under the icon,
+            -- written on EVERY update, occupied or not — `GetActionText` answers a MACRO slot's
+            -- macro name and nil for anything else, and a nil clears the line, so an emptied or
+            -- re-filled slot loses the old name through this same write. Guarded only because an
+            -- adopted foreign button may inherit a template that declares no `$parentName`.
+            -- (B340: the line was declared in the template and never set — decision 1636.)
+            if button.name then
+                button.name:SetText(GetActionText(action))
             end
         end
 
@@ -1610,7 +1621,9 @@
         widget playing the same machine); NormalTexture = the 66x66 UI-Quickslot2 ring centered at
         (0,-1) (l.74-85); PushedTexture UI-Quickslot-Depress (l.86); HighlightTexture
         ButtonHilight-Square ADD (l.87); CheckedTexture CheckButtonHilight ADD (l.88 — the
-        IsCurrentAction/IsAutoRepeatAction ring). Only Name (macros) stays OUT.
+        IsCurrentAction/IsAutoRepeatAction ring); Name (the macro-name line, l.34-46) on ARTWORK,
+        set from `GetActionText` at the tail of every update as the ref's `ActionButton_Update`
+        does (decision 1636).
     -->
     <!-- **The reference's own two-level split, which ours used to conflate into one template.**
          `ActionButtonTemplate` (ref ActionButtonTemplate.xml:3) is REGIONS ONLY and carries no
@@ -1644,9 +1657,10 @@
                     </Anchors>
                 </FontString>
                 <!-- ref ActionButtonTemplate.xml's `$parentName` — the macro-name line along the
-                     button's bottom edge. Empty by default, so it draws nothing until something
-                     sets it; declared because it is part of the template's published contract and
-                     an addon indexing `<button>Name` would otherwise get nil. -->
+                     button's bottom edge. `BenillaActionButton_Update` writes it from
+                     `GetActionText` on every update (a MACRO slot's macro name, nil — cleared —
+                     for any other kind); it is also part of the template's published contract, so
+                     an addon indexing `<button>Name` gets the region. -->
                 <FontString name="$parentName" inherits="GameFontHighlightSmallOutline">
                     <Size><AbsDimension x="36" y="10"/></Size>
                     <Anchors>

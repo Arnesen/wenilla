@@ -360,16 +360,26 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
             let mut model = lua.app_data_mut::<Model>().expect("model");
             // `insert` answering true = this frame did not have the kind before — the tick's
             // OnUpdate list rides that edge (decision 1446; `scripts` has no other writer).
-            if model.scripts.entry(h).or_default().insert(kind) && kind == "OnUpdate" {
-                model.on_update_frames.push(h);
+            if model.scripts.entry(h).or_default().insert(kind) {
+                match kind {
+                    "OnUpdate" => model.on_update_frames.push(h),
+                    "OnSizeChanged" => model.on_size_changed_frames.push(h),
+                    _ => {}
+                }
             }
         }
         None => {
             per.set(kind, Value::Nil)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             if let Some(set) = model.scripts.get_mut(&h) {
-                if set.remove(&kind) && kind == "OnUpdate" {
-                    model.on_update_frames.retain(|&x| x != h);
+                if set.remove(&kind) {
+                    match kind {
+                        "OnUpdate" => model.on_update_frames.retain(|&x| x != h),
+                        "OnSizeChanged" => {
+                            model.on_size_changed_frames.retain(|&x| x != h);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

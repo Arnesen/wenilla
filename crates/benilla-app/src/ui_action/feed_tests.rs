@@ -352,4 +352,45 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         Some("Interface\\Icons\\Spell_Fire_FlameBolt"),
         "the generation gate re-resolved the slot"
     );
+
+    // RENAME the macro (decision 1636). The slot's value — texture, kind, id — is byte-identical
+    // after this, so a value diff alone would fire nothing and the bar would keep drawing the old
+    // name line until some unrelated edit repainted it. The feed must re-fire the slot anyway.
+    let events = |app: &mut App| {
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<i64>("return BENILLA_TEST_SLOT_EVENTS or 0")
+            .unwrap()
+    };
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            f:SetScript("OnEvent", function()
+                if arg1 == 1 then BENILLA_TEST_SLOT_EVENTS = (BENILLA_TEST_SLOT_EVENTS or 0) + 1 end
+            end)
+            EditMacro(1, "Shadowstep", nil)
+            "#,
+        )
+        .unwrap();
+    app.update();
+    assert_eq!(
+        events(&mut app),
+        1,
+        "a rename re-fires ACTIONBAR_SLOT_CHANGED for the slot"
+    );
+    assert_eq!(
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<Option<String>>(&format!("return GetActionText({ACTION})"))
+            .unwrap()
+            .as_deref(),
+        Some("Shadowstep"),
+        "and the repaint reads the new name"
+    );
+    // A frame with nothing moved fires nothing more — the re-fire is gated on the table moving.
+    app.update();
+    assert_eq!(events(&mut app), 1);
 }

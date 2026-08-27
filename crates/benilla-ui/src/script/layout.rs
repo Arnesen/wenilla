@@ -725,11 +725,15 @@ impl UiScript {
         // Snapshotted only for frames that actually CARRY a handler (a handful, usually zero), and
         // only past the tier-1 gate above — an idle frame returns before this line, so the change
         // costs nothing on the quiet path decision 0740 exists to protect.
+        //
+        // Read off `SetScript`'s maintained list (1446's shape, extended in 1634), NOT by filtering
+        // the whole `scripts` map: "a handful, usually zero" was true of the RESULT and never of
+        // the search, which cost a string compare per frame in a 3,988-frame roster and was the
+        // preamble's biggest phase — larger than everything the graph does with the answer.
         let watched: Vec<(FrameHandle, Option<Rect>)> = model
-            .scripts
+            .on_size_changed_frames
             .iter()
-            .filter(|(_, kinds)| kinds.contains("OnSizeChanged"))
-            .map(|(&h, _)| (h, model.resolved.get(&h).copied()))
+            .map(|&h| (h, model.resolved.get(&h).copied()))
             .collect();
         pre.watched = pre.lap();
         // ── The graph: the ledger's cache, or a fresh derivation ─────────────────────────────

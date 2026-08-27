@@ -154,6 +154,11 @@ pub(crate) struct UiFrameCost {
     /// full-conversion frame. Nonzero is the proof the splice path fired (the equivalence tests
     /// and the live `[ui-cost] spliced=` field both read it).
     pub(crate) spliced: usize,
+    /// How many entries the splice *dropped* — drew last frame and does not draw now. A frame
+    /// that only closes something has `spliced == 0` and still rode the splice, so this is the
+    /// other half of "did the splice path fire" (decision 1638). Not a CSV column: the recorder's
+    /// row is the phase timings, and `[ui-cost] dropped=` already carries it inline.
+    pub(crate) dropped: usize,
 }
 
 /// Does anything want [`UiFrameCost`] filled in this run? Measuring the split costs a clock read
@@ -585,6 +590,19 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
         // it that this seed never fed, so the capture quietly stopped showing the "5" it exists to
         // prove (found while fixing decision 1301).
         script.set_bonus_bar_offset(1);
+        // One MACRO slot too (button 4): a GM-style macro that casts nothing, so the capture
+        // shows the macro-name line under the icon and the icon full-colour — B340's shape
+        // (decision 1636). The table is seeded here because a capture has no character identity
+        // for `ui_macro::load_macros` to read a file for; nothing overwrites it.
+        script.set_macros(benilla_ui::script::MacroState {
+            account: vec![benilla_ui::script::MacroView {
+                name: "spawn".into(),
+                texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
+                body: ".spawn 16032".into(),
+                local_only: false,
+            }],
+            character: Vec::new(),
+        });
         for (action, icon, kind, id, count) in [
             (
                 73,
@@ -599,6 +617,13 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
                 "Interface\\Icons\\Ability_Warrior_BattleShout",
                 0x00,
                 102,
+                0,
+            ),
+            (
+                76,
+                "Interface\\Icons\\Ability_Racial_Cannibalize",
+                0x40,
+                1,
                 0,
             ),
             (80, "Interface\\Icons\\INV_Misc_Food_16", 0x80, 117, 5),
@@ -634,6 +659,17 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
                     count,
                     // The seed's only ITEM slot is the food stack, which is consumable.
                     consumable: kind == 0x80,
+                }),
+            );
+            // The state feed has nothing to feed server-less (no `PlayerActions`), and a slot
+            // with no pushed state answers `IsUsableAction` nil — the 0.4 grey on every icon,
+            // which the `ui-actionbar` baseline wore for as long as it existed. Stand in for it
+            // as this feed stands in for the unit feed: a live bar's resting state is usable.
+            script.set_action_state(
+                action,
+                Some(benilla_ui::script::ActionState {
+                    usable: true,
+                    ..Default::default()
                 }),
             );
         }

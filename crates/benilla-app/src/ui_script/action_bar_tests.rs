@@ -665,6 +665,76 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The macro-name line (ref `ActionButton_Update:236-238`, "Update Macro Text") through the REAL
+/// shipped XML: a MACRO slot's button reads its macro's name under the icon, a SPELL slot's reads
+/// nothing, and a macro slot that empties loses the name through the same unconditional write.
+/// B340 (decision 1636): the template declared `$parentName` and nothing ever set it, so every
+/// macro on the bar was nameless.
+#[test]
+fn macro_name_line_follows_get_action_text_through_the_xml() {
+    use benilla_ui::script::{MacroState, MacroView};
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    s.set_macros(MacroState {
+        account: vec![MacroView {
+            name: "spawn".into(),
+            texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
+            body: ".spawn 16032".into(),
+            local_only: false,
+        }],
+        character: Vec::new(),
+    });
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
+            kind: 0x40, // MACRO
+            action: 1,  // macro index 1
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.set_action(
+        2,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_A".into()),
+            kind: 0x00, // SPELL
+            action: 111,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.resolve();
+
+    // Read the fontstrings by name (the count test's reason: painted text is ambiguous).
+    let name_of = |s: &UiScript, n: u32| {
+        s.eval::<String>(&format!("return ActionButton{n}Name:GetText() or \"\""))
+            .unwrap()
+    };
+    assert_eq!(
+        name_of(&s, 1),
+        "spawn",
+        "a MACRO slot wears its macro's name"
+    );
+    assert_eq!(name_of(&s, 2), "", "a SPELL slot has no name line");
+    assert!(
+        s.extract()
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "spawn")),
+        "the name reaches the screen"
+    );
+
+    // The slot empties: the ref's write is unconditional, so a nil clears the line.
+    s.set_action(1, None);
+    s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Int(1)]);
+    s.resolve();
+    assert_eq!(name_of(&s, 1), "", "an emptied slot loses the name");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 #[test]
 fn shipped_bag_frame_drives_end_to_end() {
     use benilla_ui::script::{ContainerSlot, ContainerState};

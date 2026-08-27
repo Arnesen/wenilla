@@ -41,13 +41,20 @@ pub(crate) struct MacroFiles {
     identity: crate::ui_script::VmMemo<Option<(String, String)>>,
 }
 
-/// Macro index → the spell it casts — benilla's `[rec+0x564]` (wow-re
-/// `action-spell-icon-apis.md` §2), the field an action-bar MACRO slot's whole dynamic state reads
-/// through. Stored, not derived at read time, for the reference's own reason: it is a **field on
-/// the macro record**, recomputed when the macro (or the book) changes, so the three per-frame
-/// action-bar systems pay a hash lookup instead of a body re-parse each.
+/// Macro index → its bound spell — benilla's `[rec+0x564]` (wow-re `action-spell-icon-apis.md`
+/// §2), the field an action-bar MACRO slot's whole dynamic state reads through, in the
+/// reference's own three values ([`BoundSpell`]). Stored, not derived at read time, for the
+/// reference's own reason: it is a **field on the macro record**, recomputed when the macro (or
+/// the book) changes, so the three per-frame action-bar systems pay a hash lookup instead of a
+/// body re-parse each.
+///
+/// **One entry per macro that exists**, whatever it binds — absence means the index names no
+/// macro, which is the usable compute's `0x4e5030` verdict and reads differently from a macro
+/// that merely casts nothing (decision 1636: the former is grey, the latter is not).
 #[derive(Resource, Default)]
-pub(crate) struct MacroBoundSpells(pub(crate) std::collections::HashMap<u32, u32>);
+pub(crate) struct MacroBoundSpells(pub(crate) std::collections::HashMap<u32, BoundSpell>);
+
+pub(crate) use run::BoundSpell;
 
 pub(crate) struct UiMacroPlugin;
 
@@ -222,12 +229,17 @@ fn rebind_macro_spells(
         let Some(m) = macros.get(index as usize) else {
             continue;
         };
-        if let Some(spell) = run::bound_spell(&table, &m.body, &book) {
-            fresh.insert(index, spell);
-        }
+        fresh.insert(index, run::bound_spell(&table, &m.body, &book));
     }
     if fresh != bound.0 {
-        debug!("ui_macro: {} macro(s) bound to a spell", fresh.len());
+        let spells = fresh
+            .values()
+            .filter(|b| matches!(b, BoundSpell::Spell(_)))
+            .count();
+        debug!(
+            "ui_macro: {} macro(s), {spells} bound to a spell",
+            fresh.len()
+        );
         bound.0 = fresh;
     }
 }

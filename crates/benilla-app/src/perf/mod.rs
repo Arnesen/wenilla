@@ -138,6 +138,16 @@ impl Plugin for PerfPlugin {
         {
             app.add_systems(Update, census::row_bloat);
         }
+        // `WOW_MESH_TOUCH=<secs>` — the `AssetChanged` tax meter (see the system's doc): from
+        // `secs` onward, one scratch `Assets<Mesh>` modification per frame and nothing else, so
+        // the arming's price is read as a within-run paired delta with the UI's own work removed.
+        if let Some(at) = std::env::var("WOW_MESH_TOUCH")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            app.insert_resource(census::MeshTouchAt(at));
+            app.add_systems(Update, census::mesh_touch);
+        }
         // `WOW_CPU_CENSUS=<at>:<secs>` — the per-thread CPU census (see its module doc): where
         // the pill's cpu-ms goes, thread by thread, summing exactly to the process total.
         #[cfg(target_os = "macos")]

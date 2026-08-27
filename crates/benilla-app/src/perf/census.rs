@@ -512,3 +512,40 @@ pub(super) fn row_bloat(mut commands: Commands, mut done: Local<bool>, source: B
     );
     *done = true;
 }
+
+/// `WOW_MESH_TOUCH=<secs>` — from `secs` onward, mark ONE scratch [`Mesh`] asset modified every
+/// frame, and nothing else.
+///
+/// **The tax meter for [`bevy::asset::AssetChanged`].** Bevy 0.18's `AssetChanged<Mesh3d>` fast
+/// path is all-or-nothing: one `Assets<Mesh>` modification — of *any* mesh, including a `Mesh2d`
+/// UI batch no 3D row will ever reference — arms `mark_3d_meshes_as_changed_if_their_assets_changed`
+/// plus one `check_entities_needing_specialization::<M>` walk per registered material type, each
+/// over every `Mesh3d` row in the scene. 1361's per-slot skip gate and 1463's pan gate both exist
+/// to keep that disarmed, and both are gates on the *UI's* writes; this measures the price of a
+/// single arming with the UI's own work subtracted out, which no gate-side experiment can.
+///
+/// One run, two regimes, so the reading is a WITHIN-run paired delta: run-to-run cpu variance on
+/// this machine is ±1 ms (1157), which is the size of the thing being measured.
+pub(super) fn mesh_touch(
+    mut meshes: ResMut<Assets<Mesh>>,
+    time: Res<bevy::time::Time<bevy::time::Real>>,
+    at: Res<MeshTouchAt>,
+    mut scratch: Local<Option<Handle<Mesh>>>,
+) {
+    if time.elapsed_secs() < at.0 {
+        return;
+    }
+    let handle = scratch.get_or_insert_with(|| {
+        meshes.add(Mesh::new(
+            bevy::mesh::PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        ))
+    });
+    // `get_mut` is the whole point: it writes `AssetEvent::Modified` for this id, which bumps the
+    // global changed tick every `AssetChanged` filter reads. The mesh itself stays empty.
+    let _ = meshes.get_mut(&*handle);
+}
+
+/// When [`mesh_touch`] starts touching (seconds of `Time<Real>`).
+#[derive(Resource)]
+pub(super) struct MeshTouchAt(pub f32);

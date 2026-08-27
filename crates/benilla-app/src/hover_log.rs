@@ -90,7 +90,7 @@ impl Plugin for HoverLogPlugin {
                     "frame_ms,cpu_ms,tick_us,resolve_us,measure_us,extract_us,convert_us,\
                      diff_us,quads,solves,derives,skipped,measured,measured_texts,tip_owner,tip_lines,\
                      tip_first_line,spliced,mesh_us,mesh_sort_us,mesh_split_us,mesh_write_us,\
-                     mesh_quads,mesh_runs,mesh_rewrites"
+                     mesh_quads,mesh_runs,mesh_rewrites,dropped"
                 );
                 info!("hover log: recording every frame to {path}");
                 app.insert_resource(Recorder {
@@ -180,8 +180,15 @@ fn record(
     );
     let _ = writeln!(
         rec.out,
-        ",{},{},{},{},{},{},{}",
-        mesh.total, mesh.sort, mesh.split, mesh.write, mesh.quads, mesh.runs, mesh.rewrites
+        ",{},{},{},{},{},{},{},{}",
+        mesh.total,
+        mesh.sort,
+        mesh.split,
+        mesh.write,
+        mesh.quads,
+        mesh.runs,
+        mesh.rewrites,
+        c.dropped,
     );
     rec.rows.push(Row {
         frame_ms,
@@ -381,6 +388,10 @@ fn parse_row(line: &str) -> Option<Row> {
             skipped: num(11)? != 0.0,
             // Appended column (absent in pre-splice recordings — those read back as 0).
             spliced: fields.get(17).and_then(|f| f.parse().ok()).unwrap_or(0),
+            // Appended after the mesh block for the same reason `spliced` was appended after
+            // the tip block: a new column goes on the END so every recording made before it
+            // still reads (decision 1638).
+            dropped: fields.get(25).and_then(|f| f.parse().ok()).unwrap_or(0),
         },
         mesh,
         tip: if owner.is_empty() {

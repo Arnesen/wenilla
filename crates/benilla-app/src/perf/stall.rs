@@ -8,16 +8,25 @@
 //! the hang may own. Samples land in `benilla-config/Diagnostics/` and the path prints on stderr
 //! (the tracing subscriber may already be gone during teardown).
 //!
-//! After a teardown sample, an [`EXIT_KILL_MS`] backstop `_exit(0)` ends the wedged process —
+//! After a teardown sample, an [`EXIT_KILL_MS`] backstop `_exit` ends the wedged process —
 //! diagnosis first, then the force-quit the director would otherwise perform by hand.
-//! `libc::_exit`, never `process::exit`: it skips the atexit handlers.
+//! `libc::_exit`, never `process::exit`: it skips the atexit handlers. It exits with the code
+//! [`AppExit`] asked for, not a blanket 0 — a capture that already failed its own deadline must
+//! not be laundered into a success by the thing that unwedges it.
+//!
+//! **The backstop is not a diagnostic, and it runs where the samples cannot.** A hermetic capture
+//! run has no `benilla-config/` to write into ([`crate::local_state::home`] returns `None` under
+//! `$WOW_CAPTURE`), and for one day in 1631 that turned the whole plugin off for exactly the runs
+//! that most need a liveness guarantee — an agent-driven run with nobody watching it. So the split
+//! is by concern, not by run: the watchdog thread and its `_exit` always run; the sample *file* is
+//! written only where there is a folder that may hold one. Decision 1637.
 //!
 //! Verification is end-to-end via two injectors (used by the 0713 probe rounds, kept as standing
 //! test affordances): `WOW_STALL_INJECT=<at_secs>:<ms>` sleeps the main thread mid-run, and
 //! `WOW_TEARDOWN_INJECT=<ms>` wedges World drop via a resource whose `Drop` sleeps — the
 //! director's beachball, synthetically.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -33,6 +42,10 @@ static HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
 /// Latched the frame `AppExit` is written: switches the watchdog to the teardown threshold
 /// and arms the post-sample `_exit` backstop.
 static EXITING: AtomicBool = AtomicBool::new(false);
+/// The status `AppExit` asked to exit with, latched alongside [`EXITING`] so the backstop can
+/// honour it. A wedged teardown must not turn a failed run into a passing one — which is exactly
+/// what a blanket `_exit(0)` would do to the capture deadline (`capture::deadline`).
+static EXIT_CODE: AtomicU8 = AtomicU8::new(0);
 
 /// In-frame staleness that means a real stall (ms) — above the ~250 ms loading-screen
 /// hitches, below the ~1030 ms stall class it exists to catch.
@@ -58,35 +71,48 @@ fn since_start_ms() -> u64 {
 /// `Last`-schedule heartbeat: stamp the clock; latch [`EXITING`] the frame the app decides
 /// to quit (no later frame will run to unlatch anything).
 fn beat(mut exits: MessageReader<AppExit>) {
-    if exits.read().next().is_some() {
+    if let Some(exit) = exits.read().next() {
+        if let AppExit::Error(code) = exit {
+            EXIT_CODE.store(code.get(), Ordering::SeqCst);
+        }
         EXITING.store(true, Ordering::SeqCst);
     }
     HEARTBEAT_MS.store(since_start_ms().max(1), Ordering::SeqCst);
 }
 
 pub(super) fn plugin(app: &mut App) {
+    // The injectors are armed FIRST, deliberately: they are how the wedge is reproduced, and the
+    // one A/B this instrument exists to support is "same wedge, watchdog off — does the process
+    // still hang?". Registered after the `WOW_STALL_SAMPLE=0` gate, as they were until 1637, that
+    // control silently disarms the wedge too and comes back a clean exit 0, which reads as "the
+    // watchdog was never load-bearing" — the exact wrong conclusion. Arming a deliberate hang is
+    // never something the sampler's off-switch should be able to veto.
+    arm_injectors(app);
     if std::env::var("WOW_STALL_SAMPLE").is_ok_and(|v| v == "0") {
         return;
     }
     // Through `local_state`, never a hand-built path — the one-folder rule. This used to read
-    // `$HOME` and write `~/Library/Logs/benilla/`; see `local_state::diagnostics_dir`. `None` means
-    // a hermetic capture run, which gets no sampler.
-    let Some(dir) = crate::local_state::diagnostics_dir() else {
-        return;
-    };
-    // NOT created here: an empty `Diagnostics/` on every single run would be this instrument
-    // advertising itself in the player's folder for the ~always-case where nothing ever stalls.
-    // The watchdog creates it at the moment it actually has a sample to write.
+    // `$HOME` and write `~/Library/Logs/benilla/`; see `local_state::diagnostics_dir`. `None` is a
+    // hermetic capture run, which gets **no sample file and the watchdog anyway** — see the header:
+    // 1631 returned here instead and cost every capture its teardown backstop.
+    //
+    // The folder is NOT created here: an empty `Diagnostics/` on every single run would be this
+    // instrument advertising itself in the player's folder for the ~always-case where nothing ever
+    // stalls. The watchdog creates it at the moment it actually has a sample to write.
+    let dir = crate::local_state::diagnostics_dir();
     START
         .set(Instant::now())
         .expect("stall_sample plugin built twice");
     app.add_systems(Last, beat);
     std::thread::Builder::new()
         .name("stall-sample".into())
-        .spawn(move || watchdog(&dir))
+        .spawn(move || watchdog(dir))
         .expect("spawn stall-sample watchdog");
+}
 
-    // The injectors (doc above): a mid-run main-thread sleep, and a wedged World drop.
+/// The injectors (module doc): a mid-run main-thread sleep, and a wedged World drop. Both are
+/// standing test affordances, not diagnostics — see why they are armed ahead of the off-switch.
+fn arm_injectors(app: &mut App) {
     if let Some((at, ms)) = std::env::var("WOW_STALL_INJECT")
         .ok()
         .and_then(|v| v.split_once(':').map(|(a, m)| (a.to_owned(), m.to_owned())))
@@ -106,7 +132,7 @@ pub(super) fn plugin(app: &mut App) {
     }
 }
 
-fn watchdog(dir: &std::path::Path) {
+fn watchdog(dir: Option<std::path::PathBuf>) {
     let pid = std::process::id().to_string();
     let mut taken = 0u32;
     let mut last_sample_ms = 0u64;
@@ -123,20 +149,24 @@ fn watchdog(dir: &std::path::Path) {
             exit_seen_ms = now;
         }
         if exiting && now.saturating_sub(exit_seen_ms) > EXIT_KILL_MS {
+            let code = EXIT_CODE.load(Ordering::SeqCst);
             eprintln!(
-                "stall-sample: teardown still wedged {} ms after AppExit — _exit(0)",
+                "stall-sample: teardown still wedged {} ms after AppExit — _exit({code})",
                 now.saturating_sub(exit_seen_ms)
             );
             use std::io::Write;
             let _ = std::io::stdout().flush();
             // SAFETY: terminates the process immediately; no locks, no atexit — the whole
             // point, since the wedge may own both.
-            unsafe { libc::_exit(0) };
+            unsafe { libc::_exit(code as i32) };
         }
         let age = now.saturating_sub(hb);
         if !exiting && now < STARTUP_GRACE_MS {
             continue;
         }
+        // `dir` is `None` on a hermetic capture: everything above still runs (the backstop is this
+        // thread's other, unconditional job), there is just nowhere to put a sample.
+        let Some(dir) = dir.as_deref() else { continue };
         let threshold = if exiting { EXIT_STALL_MS } else { STALL_MS };
         if age > threshold
             && taken < SAMPLE_CAP

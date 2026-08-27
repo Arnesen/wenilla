@@ -2351,15 +2351,38 @@
                                                 local stops = {}
                                                 local fmt = { GetMultisampleFormats() }
                                                 -- Three varargs per entry, the walk OptionsFrame.lua
-                                                -- l.354 does (`for i=1, arg.n, 3`). The text is
-                                                -- MULTISAMPLING_FORMAT_STRING verbatim, inlined
-                                                -- rather than read off the global so the row does
-                                                -- not depend on GlobalStrings being loaded.
+                                                -- l.354 does (`for i=1, arg.n, 3`) -- and then we
+                                                -- use ONE of the three.
+                                                --
+                                                -- 1.12 formats all three (MULTISAMPLING_FORMAT_
+                                                -- STRING = "%d-bit color %d-bit depth %dx
+                                                -- multisample") because in 2004 they VARIED: its
+                                                -- D3D CheckDeviceMultiSampleType sweep really did
+                                                -- enumerate 16-bit and 32-bit colour modes, so the
+                                                -- colour and depth figures were part of the
+                                                -- choice. Ours cannot vary -- every entry carries
+                                                -- the one pair `view::dropdown_bit_depths` returns,
+                                                -- the swapchain's format and Depth32Float, fixed
+                                                -- in our code and not by luck of hardware. Quoting
+                                                -- them on every row would reproduce the FORMAT of
+                                                -- a fact we no longer have, and it overflowed the
+                                                -- capsule doing it (the director's 08-27 shot).
+                                                -- The full triple is on the record in 1632; the
+                                                -- row shows what a player is actually choosing.
+                                                --
+                                                -- "Off", not "1x": 1 is the encoding of NO
+                                                -- multisampling, not one sample of it -- VERIFIED
+                                                -- at 0x59989b (D3D leaves MultiSampleType
+                                                -- D3DMULTISAMPLE_NONE) and 0x59de35 (GL never
+                                                -- emits the SAMPLE_BUFFERS/SAMPLES pair). Short
+                                                -- values are this page's own grammar too: the
+                                                -- label carries the noun and the capsule carries
+                                                -- the value ("Environment Detail [ High ]").
                                                 for i = 1, table.getn(fmt), 3 do
+                                                    local n = fmt[i + 2]
                                                     table.insert(stops, {
-                                                        text = format("%d-bit color %d-bit depth %dx multisample",
-                                                            fmt[i], fmt[i + 1], fmt[i + 2]),
-                                                        value = tostring(fmt[i + 2]),
+                                                        text = (n > 1) and (n .. "x") or "Off",
+                                                        value = tostring(n),
                                                     })
                                                 end
                                                 OptionsDropdownRow_Setup(self, stops)

@@ -1136,14 +1136,15 @@ fn the_multisampling_row_offers_exactly_what_the_device_supports() {
         "Multisampling",
         "the reference's own MULTISAMPLE global"
     );
-    // "1" is the registered default and means NO multisampling — the first stop, shown in the
-    // reference's own MULTISAMPLING_FORMAT_STRING wording.
+    // "1" is the registered default and means NO multisampling, so the first stop reads "Off"
+    // rather than "1x" (1635). The label carries the noun; the capsule carries the value.
     assert_eq!(
         s.eval::<String>(
             "return OptionsFrameContainerBodyGraphicsRowMultisampleDropdownText:GetText()"
         )
         .unwrap(),
-        "32-bit color 32-bit depth 1x multisample"
+        "Off",
+        "1 is the encoding of NO multisampling, not one sample of it"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
@@ -1161,7 +1162,7 @@ fn the_multisampling_row_offers_exactly_what_the_device_supports() {
     assert_eq!(
         s.eval::<String>("return DropDownList1Button3:GetText()")
             .unwrap(),
-        "32-bit color 32-bit depth 4x multisample"
+        "4x"
     );
 
     // Picking 4x writes the CVar — live and persisted, even though the picture waits for the next
@@ -1176,7 +1177,7 @@ fn the_multisampling_row_offers_exactly_what_the_device_supports() {
             "return OptionsFrameContainerBodyGraphicsRowMultisampleDropdownText:GetText()"
         )
         .unwrap(),
-        "32-bit color 32-bit depth 4x multisample"
+        "4x"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
