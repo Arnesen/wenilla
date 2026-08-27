@@ -40,6 +40,12 @@ pub(crate) use ground_census::GroundCensusPlugin;
 mod visual_census;
 pub(crate) use visual_census::UnitVisualsPlugin;
 
+/// The motion-jitter meter — per frame, the camera / root / pose terms of a subject's rendered
+/// position as first *and second* differences, in mm and in pixels at its own distance: the
+/// reader that separates "the pose is noisy" from "the pose is smooth and the frames are not".
+mod jitter;
+pub(crate) use jitter::JitterMeterPlugin;
+
 /// The dress census — per-player "what did the wire ask for, what did we resolve, what is actually
 /// hanging off the skeleton": the three things a screenshot of a geared character conflates, and
 /// the reader that turns "my show-helm preference is ignored" into a counted contradiction (B123,

@@ -160,6 +160,7 @@ pub mod particles;
 pub mod ribbons;
 pub mod rig_anim;
 pub mod rig_palette;
+pub mod rig_rider;
 pub mod schedule;
 mod shaders;
 pub mod sky;

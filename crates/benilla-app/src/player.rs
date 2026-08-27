@@ -1426,13 +1426,27 @@ fn control(
         } else {
             // The kinematic mover step — walk/fall physics + the step-down snap (decisions
             // 0009/0182/0190); the mechanism lives in [`mover`].
-            // **Water walking** (decision 0866): hand the mover the liquid surface as a floor. The
-            // `!swimming` half is the reference's own gate — the water-walk arm at `0x63160d` is
-            // skipped when `MOVEFLAG_SWIMMING` is set (`0x631617`) — so granting the aura to a
-            // submerged caster does not eject them; they surface onto the water on the way out.
-            // (This branch is already the non-swimming one, so `swimming` is false here; the
-            // condition is written out because the gate is the mechanism, not an accident of
-            // control flow.)
+            // **Water walking** (decisions 0866 + 1611): hand the mover the liquid surface, which
+            // it treats as ordinary ground — the classify sees it, the grounded arm runs, and the
+            // clamp finalises Y ([`mover::step`], where the *why* of both halves lives). In the
+            // reference this is not a floor that gets handed anywhere: `MOVEFLAG_WATERWALKING` ORs
+            // the ADT liquid layers into the walk trace's class mask (`0x63162e`), so the surface
+            // simply *is* geometry. Passing it down is our stand-in for that, because liquid is
+            // queried rather than swept here.
+            //
+            // The `!swimming` half is the reference's own gate — the arm at `0x63160d` is skipped
+            // when `MOVEFLAG_SWIMMING` is set (`0x631617`) — so granting the aura to a submerged
+            // caster does not eject them; they surface onto the water on the way out. (This branch
+            // is already the non-swimming one, so `swimming` is false here; the condition is
+            // written out because the gate is the mechanism, not an accident of control flow.)
+            //
+            // **The arm's third gate is NOT implemented, and it is the way back INTO the water**:
+            // `0x6315f0` also requires `pitch > -37.0°` (`[0x80dfe8]`; the emitted `jne` reads ZF,
+            // so `==` is excluded), and its complement in `SetPitch 0x7c6f70` elects a
+            // zero-velocity `StartFalling` when a standing, non-falling water-walker looks down
+            // past the same angle. Both need the mover pitch (`CMovement+0x20`) live on land,
+            // which here is [`Player::swim_pitch`] — steered only while swimming today. Named in
+            // decision 1611 rather than half-built.
             let water_floor = (player.modes.water_walking && !swimming)
                 .then_some(surface_y)
                 .flatten();

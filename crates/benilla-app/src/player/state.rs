@@ -308,8 +308,8 @@ pub(super) struct MoveSpeed {
 /// - [`feather_fall`](Self::feather_fall) — terminal fall speed becomes [`FEATHER_TERMINAL_VELOCITY`]
 ///   ([`super::mover::step`]).
 /// - [`hover`](Self::hover) — ground contact rises by [`HOVER_HEIGHT`] ([`super::mover::step`]).
-/// - [`water_walking`](Self::water_walking) — the liquid surface is walkable ground, and the swim
-///   latch cannot arm ([`super::swim`]).
+/// - [`water_walking`](Self::water_walking) — the liquid surface becomes ordinary ground, in the
+///   classify and in the resolve alike ([`super::mover::step`]).
 /// - [`levitating`](Self::levitating) — the swim/depth decision is suppressed entirely
 ///   ([`super::swim::update_swimming`]).
 ///
@@ -327,15 +327,29 @@ pub(crate) struct MoveModes {
     /// a separate `UNIT_FIELD_FLAGS` gate ([`crate::player::UNIT_FLAG_STUNNED`]).
     pub(crate) rooted: bool,
     /// Water-walking (`SMSG_MOVE_WATER_WALK`, `SPELL_AURA_WATER_WALK` — Water Walking, Levitate, and
-    /// the ghost form): the liquid surface counts as walkable ground, so we stand on it instead of
-    /// sinking, and the swim latch cannot arm underneath us.
+    /// the ghost form): the liquid surface counts as ordinary walkable ground, so we stand on it
+    /// instead of sinking ([`super::mover::step`] — the classify and the clamp, decision 1611).
+    ///
+    /// **It does NOT stop the swim latch arming**, and the claim that it did stood here until
+    /// decision 1611 read the bytes: `0x6030c0`'s only mode test is `test ah,4` — LEVITATING
+    /// (`0x400`) — and it never looks at `0x10000000` at all. The exclusion runs the other way and
+    /// lives one layer down, in the trace-mask arm at `0x631617`: *swimming* turns water-walking
+    /// off, not the reverse. So a swimmer who gains the aura keeps swimming, by construction.
     pub(crate) water_walking: bool,
     /// Feather fall (`SMSG_MOVE_FEATHER_FALL`, `SPELL_AURA_FEATHER_FALL` — Slow Fall, Levitate): the
     /// fall integrator's terminal velocity drops to [`FEATHER_TERMINAL_VELOCITY`]. Nothing else
     /// changes — the arc, the flags and the landing report are the ordinary ones.
     pub(crate) feather_fall: bool,
     /// Hover (`SMSG_MOVE_SET_HOVER`, `SPELL_AURA_HOVER` — Levitate): ground contact sits
-    /// [`HOVER_HEIGHT`] above the surface, so the body floats and walks along a yard up.
+    /// [`HOVER_HEIGHT`] above the surface, so the body floats and walks along a yard up. It also
+    /// refuses the jump outright — the first test in `CMovement::Jump 0x7c6230`, live for the
+    /// keyboard press ([`super::mover::step`], and the swim breach in [`super::control`]).
+    ///
+    /// **Composed with [`water_walking`](Self::water_walking), those two gates leave a swimmer
+    /// with no way to the surface** (B322's first symptom, decision 1611): water-walking is off
+    /// while SWIMMING, and SWIMMING only clears on the depth compare or on a breach that HOVER
+    /// refuses. Both gates are individually VERIFIED; the *composition* is inferred, and it is the
+    /// one part of the Levitate lane still open.
     pub(crate) hover: bool,
     /// **Free flight** (`MOVEFLAG_LEVITATING`, GM `.cheat fly` — decision 0726). The one mode that
     /// arrives *unhandshaked*, merged out of a server-authored move ([`super::wire_in`]).

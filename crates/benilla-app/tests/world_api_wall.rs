@@ -285,7 +285,17 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// the conflation that ran the body panes' item effects at half speed (decision 1559, B312). The
 /// alternative was passing a `Res<PaneRate>`-shaped opinion down into the engine's own sim, which
 /// puts the game's knob inside the renderer to keep a count flat.
-const CEILING: usize = 162;
+/// And 162 → 163: `rig_rider::RigRider`, a PUBLISH of the same shape as `rig_anim::AnimParked`
+/// and `particles::ViewThrottled` above — a component the ENGINE reads and the GAME writes.
+/// Placing an attached model's vertices in its wearer's rig frame rather than in absolute f32
+/// world space is machinery (the whole lane is `rig_rider` + the palette's row writer, and the
+/// reason is arithmetic: at Elwynn's ~9481 yards the absolute sum lands on an 0.98 mm grid and is
+/// rebuilt every frame). *Which* bone a helm hangs from, and what a sheath swap does to that, is
+/// policy, and it is `entities::equipment`'s, in the game — the same M2 attachment table that
+/// decides where a weapon is drawn versus stowed. There is no engine-side way to know it: the
+/// engine sees a scene-graph child, and a child is not an attachment. The alternative was passing
+/// the game's attach-slot table down into the renderer to keep a count flat (decision 1609).
+const CEILING: usize = 163;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

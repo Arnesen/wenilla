@@ -99,14 +99,42 @@ pub(super) fn step(
     } else {
         0.0
     };
-    let ground_reach = hover_offset
-        + if player.airborne_since.is_some() {
-            LAND_PROBE
-        } else {
-            GROUND_PROBE
-        };
+    let base_reach = if player.airborne_since.is_some() {
+        LAND_PROBE
+    } else {
+        GROUND_PROBE
+    };
+    let ground_reach = hover_offset + base_reach;
     let classify = probe_down(center, ground_reach);
     let on_walkable = classify.as_ref().is_some_and(|h| h.normal1.y >= GROUND_COS);
+    // **Water walking: the liquid surface is GROUND, and the classify above has to see it**
+    // (decision 1611, correcting 0866). In the reference the surface is not a special case at all
+    // — `MOVEFLAG_WATERWALKING` ORs the two ADT liquid layers into the walk trace's *class mask*
+    // (`0x63162e or edi, 0x30000`, wow-re `moveflag-family.md` §2.2), so the same swept query that
+    // finds terrain finds the water, and the walk resolver stands on it at its raw Z with no
+    // water-specific code anywhere (`0x6367b0` contains zero references to the bit).
+    //
+    // Liquid is not a collider on our side — it is queried, not swept — so `probe_down` cannot see
+    // it. Asking the probe's own question against the surface plane is what puts it back in the
+    // classification. 0866 answered it only *after* the step, as a position clamp, and that is
+    // exactly what B322's lost-control bug was: with no collider under a water-walker every frame
+    // classified **airborne**, so the grounded arm's `horiz_vel = input_horiz` never ran again —
+    // and an airborne frame's horizontal is *frozen* momentum. Walk off a quay at a run and the
+    // last grounded frame's full 7 yd/s is what freezes: the body keeps running, at running speed,
+    // through every turn and through the keys being released, while the clamp reports `grounded`
+    // at the end of each frame. (The `length_squared() < 0.01` air nudge below is not even
+    // reached; it only bites for a body that arrives at a standstill.) 0866's live proof arrived
+    // by *teleport*, at rest, with no input — the one case that cannot show any of this — and 0866
+    // named the gap itself: "the water-walk walk-on case is untested headlessly".
+    //
+    // The reach is [`base_reach`] and deliberately **not** `ground_reach`: our hover climb is
+    // collider-driven and never lifts a body off water, so the clamp below keeps a hovering
+    // water-walker's feet exactly at the surface. The two tests are the same question and must
+    // stay the same answer — disagreeing is the whole of this bug. (Whether the reference floats a
+    // hovering water-walker a yard *above* the surface is a real open question, with a byte lead:
+    // see decision 1611.) A negative difference — the feet already under the surface — counts as
+    // support too: that is a body penetrating solid geometry, and the clamp resolves it upward.
+    let on_water = water_floor.is_some_and(|s| center.y - half_h.y - s <= base_reach);
     // Who we stand on (frame start); the end-of-frame snap probe below refreshes it post-move.
     let mut ground_entity = if on_walkable {
         classify.map(|h| h.entity)
@@ -146,7 +174,8 @@ pub(super) fn step(
     // failure 0209's atomic commit was built to make impossible. The ride is re-earned from the
     // certification every frame it continues, so this can hold nothing up that has not just proved
     // it can be climbed.
-    let on_floor = !held && (on_walkable || player.steep_support) && player.vel_y <= 0.0;
+    let on_floor =
+        !held && (on_walkable || on_water || player.steep_support) && player.vel_y <= 0.0;
 
     // The wedged rest (decision 0211) stands until real ground takes over or the support
     // vanishes — we walked off the funnel wall into open air, which resumes a normal fresh fall.
@@ -315,13 +344,20 @@ pub(super) fn step(
         }
     }
 
-    // **Water walking: the liquid surface IS the floor** (decision 0866). `water_floor` is the
-    // surface Y the caller resolved, and it is `Some` only while the mode is granted AND we are not
-    // already swimming — the reference's own gate, read at `0x631617` (`test eax,0x200000; jne`)
-    // right after the water-walk test: a caster who is already submerged keeps swimming, and only
-    // surfaces onto the water once out of it. Liquid is not a collider here (it is queried, not
-    // swept), so it cannot come out of the probes above; it lands as a floor clamp instead — the
-    // body may not sink past it, and resting on it is being grounded, which ends any arc.
+    // **The water floor, resolved** — the second half of the `on_water` classify above, and the
+    // depenetration a swept solid would have done for free: the body may not end the frame under
+    // the surface. It still has to run after the slide, because the slide and the fall are what
+    // can carry the feet through: a body dropping onto the water crosses more than [`LAND_PROBE`]
+    // in a frame, so the landing frame classifies airborne, falls, and is caught here — exactly
+    // how a collider landing resolves. On an ordinary on-water frame the classify has already said
+    // grounded and the slide kept Y, so this is a no-op that re-states it.
+    //
+    // `water_floor` is `Some` only while the mode is granted AND we are not already swimming — the
+    // reference's own gate at `0x631617` (`test eax,0x200000; jne`), whose *reason* is worth
+    // keeping: the swim path traces the same two liquid layers into a different container with the
+    // plane **negated** (`0x6320fe fchs`), a bound above rather than a floor below, so the two are
+    // mutually exclusive by construction and the same triangles can never enter the solver twice
+    // with opposite orientation (wow-re `moveflag-family.md` §2.4).
     if let Some(surface) = water_floor {
         let feet = center.y - half_h.y;
         if feet <= surface {
@@ -1851,6 +1887,97 @@ mod tests {
         let n = face(60.0);
         // …and the true plane no longer opposes what is left, so nothing further is clipped.
         assert!(out.dot(n) >= -1e-6);
+    }
+
+    /// **B322, the lost-control half** (decision 1611): a body walking off land onto water with
+    /// `MOVEFLAG_WATERWALKING` up must keep steering and must stop when the keys are released.
+    ///
+    /// Before 1611 it did neither, and the reason was structural rather than numeric: the liquid
+    /// surface was applied only as a position clamp *after* the step, so the classify — which
+    /// looks for colliders and finds nothing over open water — called every water-walking frame
+    /// **airborne**, and an airborne frame's horizontal is frozen momentum — so the last *grounded*
+    /// frame's velocity, taken on the land behind you, is what the body carries out over the water
+    /// for good. This fixture measured it before the fix: 60 frames east at 7 yd/s put the body at
+    /// x = 6.0; 30 frames pressing **north** moved it another 3.5 yd **east** and 0.0 north; 30
+    /// frames with **no keys at all** moved it 3.5 yd east again. The director's words: *"when you
+    /// step onto over water with it it won't let you control the char anymore, just keeps
+    /// running."*
+    ///
+    /// The three observables, in one drive: it reaches the water at all, a new direction actually
+    /// turns it, and releasing the keys stops it dead. The control that must not change is the
+    /// height — the feet stay on the surface throughout, which is what 0866 shipped and measured.
+    #[test]
+    fn a_water_walker_steers_and_stops_instead_of_coasting() {
+        const SURFACE: f32 = 0.0;
+        const SPEED: f32 = 7.0;
+        // Land out to x = 0, flush with the water; open water beyond it, with no collider at all.
+        const QUAY: [(f32, f32); 2] = [(-3.0, SURFACE), (0.0, SURFACE)];
+        let (east, north, idle) = world_from_profile(&QUAY)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let mut player = Player {
+                    modes: super::super::state::MoveModes {
+                        water_walking: true,
+                        ..Default::default()
+                    },
+                    pos: Vec3::new(-1.0, SURFACE, 0.0),
+                    ..Default::default()
+                };
+                let drive = |player: &mut Player, dir: Vec3, frames: usize| {
+                    for _ in 0..frames {
+                        step(
+                            player,
+                            &time,
+                            &world,
+                            &capsule,
+                            dir != Vec3::ZERO,
+                            dir,
+                            SPEED,
+                            false,
+                            Some(SURFACE),
+                        );
+                    }
+                    player.pos
+                };
+                let east = drive(&mut player, Vec3::X, 60);
+                let north = drive(&mut player, Vec3::Z, 30);
+                let idle = drive(&mut player, Vec3::ZERO, 30);
+                (east, north, idle)
+            })
+            .unwrap();
+
+        // Walked off the quay and out over open water, on the surface.
+        assert!(
+            east.x > 1.0,
+            "the walk onto the water must actually travel: {east:?}"
+        );
+        for (label, p) in [("east", east), ("north", north), ("idle", idle)] {
+            assert!(
+                (p.y - SURFACE).abs() < 1.0e-3,
+                "the feet must stay on the liquid surface ({label}): {p:?}"
+            );
+        }
+        // Steering: a new direction moves the body that way, and the abandoned one stops growing.
+        assert!(
+            north.z - east.z > 1.0,
+            "a water-walker must steer: z {} -> {}",
+            east.z,
+            north.z
+        );
+        assert!(
+            (north.x - east.x).abs() < 0.1,
+            "the abandoned direction must stop advancing: x {} -> {} (the frozen air-nudge drift)",
+            east.x,
+            north.x
+        );
+        // Release: dead stop, no coast. This is the assertion the report is about.
+        assert!(
+            idle.distance(north) < 1.0e-3,
+            "released keys must stop a water-walker dead: {north:?} -> {idle:?}"
+        );
     }
 
     #[test]

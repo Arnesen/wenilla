@@ -130,12 +130,13 @@ pub(in crate::entities) fn attach_held_items(
         // writes (`entities::attach`), and the held effects' draw-order rung is measured in the
         // world yards that scale produces.
         Option<&Transform>,
-        // The WEARER's rig, for its instance slot: an item's parts carry it in their tag so the
-        // wearer's body tint reaches its helm, shoulders and held items (decision 0812 — the
-        // reference's attached models inherit the parent CM2's computed colours, `0x714000`). Never
-        // used to SKIN those parts: they draw the static mesh, and the vertex stage's slot read is
-        // gated on the mesh's own joint attributes. The one exception is an item that rigs itself
-        // (0841) — it carries its own slot instead, and inherits the tint up the `ParentModel` chain.
+        // The WEARER's rig, for its instance slot — the fallback an attached model's parts carry
+        // in their tag when they have no slot of their own, so the wearer's body tint still
+        // reaches them (decision 0812 — the reference's attached models inherit the parent CM2's
+        // computed colours, `0x714000`). An item that owns a slot carries its own instead and
+        // inherits the tint up the `ParentModel` chain: the `welds_billboard` joint rig (0841),
+        // and — since 1609 — every ordinary attached model, which rides one rigid palette frame
+        // composed in this rig's frame rather than an absolute world matrix.
         Option<&benilla_world::rig_palette::RigSkin>,
         // The wearer's pose buffer: the attach joint spawns on first demand from the composed
         // pose (`RigPose::anchor_for`, decision 1355) — a weapon equipped in combat seats at the
@@ -145,8 +146,12 @@ pub(in crate::entities) fn attach_held_items(
     held: Option<Res<ItemDisplays>>,
     time: Res<Time>,
     mut seats: SeatWriters,
-    // An item model normally spawns no rig — but a display that welds geometry to a billboard bone
-    // has no correct rigid placement, so its spawn allocates a palette slot of its own (0841).
+    // The MOVE path re-seats a rider in place: an attach-point change is the one edit that leaves
+    // the item's entity alive while changing the bone its palette frame is composed from (1609).
+    mut movers: Query<&mut benilla_world::rig_rider::RigRider>,
+    // Every attached model with a skeleton allocates a palette slot of its own: one rigid frame in
+    // the wearer's rig frame (1609), or — for a display that welds geometry to a billboard bone,
+    // which has no correct rigid placement at all — its own camera-replaced joint rig (0841).
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
     let Some(held) = held else {
@@ -224,6 +229,14 @@ pub(in crate::entities) fn attach_held_items(
                             commands
                                 .entity(root)
                                 .insert(Transform::from_translation(offset));
+                            // The rider's frame is composed from (bone, offset), so the move has
+                            // to carry it — otherwise a sheathed sword keeps drawing at the hand
+                            // it was drawn from while its entity, its glow and its emitters all
+                            // travel to the hip (1609).
+                            if let Ok(mut rider) = movers.get_mut(root) {
+                                rider.bone = bone;
+                                rider.local = offset;
+                            }
                             seats.reseat(root, bone, offset - old);
                             debug!(
                                 "held move: unit {entity} display {} → attach {} (bone {bone})",
@@ -390,15 +403,58 @@ fn spawn_slot(
             );
             Some(slot)
         });
-    // The instance slot every part below carries in its `MeshTag`. Normally the WEARER's — that is
-    // what puts a tinted body's colour on its helm, shoulders and held items (decision 0812). A
-    // rigged item must carry its OWN, because the vertex stage indexes the palette with the same
-    // field; the wearer's tint reaches it through the `ParentModel` chain instead, which is the
-    // reference's own route for an attached model's colours (`0x714000`, `aura_visual`).
-    let rig_slot = match item_rig {
-        Some(slot) => slot,
-        None => ctx.rig_slot,
+    // **The rider** (decision 1609) — the other, and now ordinary, reason an attached model owns a
+    // palette slot. It is not the item's skeleton: an item rests at bind pose, so every row of it
+    // is the same placement matrix, and the lane writes that ONE frame — composed in the WEARER's
+    // rig frame, with the wearer's world position riding the slot's `rig_origin`.
+    //
+    // The picture is unchanged by construction (bind pose ⇒ `row = F` ⇒ the static mesh's own
+    // placement); what changes is that the placement is never an absolute f32 world coordinate.
+    // Built as a `~9500 + ~1` sum every frame, it landed on the 0.98 mm ULP grid of the large map
+    // axis and the helm snapped a whole ULP sideways every other frame while the body under it
+    // moved exactly — the jitter the director reported on the Goldshire guard. See
+    // [`benilla_world::rig_rider`] for the measurement and the residuals.
+    //
+    // A boneless display has no skinned twin to draw and keeps the old route; so does a palette
+    // with no room, which is the same graceful fallback the `welds_billboard` lane already had.
+    let rider = match item_rig {
+        Some(_) => None,
+        // A slot only earns its keep if something will actually SKIN through it: a display with
+        // bones but no skinned twin on any drawn part (a card-only model) would take a slot that
+        // no vertex ever indexes, and keep the absolute placement anyway.
+        None => (!dm.skeleton.joints.is_empty()
+            && parts
+                .iter()
+                .any(|p| p.billboard.is_none() && p.skinned_mesh.is_some()))
+        .then(|| {
+            benilla_world::rig_palette::RigSkin::allocate_bones(
+                palettes,
+                dm.skeleton.joints.len() as u32,
+                Handle::default(),
+            )
+        })
+        .flatten()
+        .map(|skin| {
+            let slot = skin.slot;
+            commands.entity(root).insert((
+                skin,
+                benilla_world::rig_rider::RigRider {
+                    host: entity,
+                    bone,
+                    local: offset,
+                    slot,
+                },
+            ));
+            slot
+        }),
     };
+    // The instance slot every part below carries in its `MeshTag`. The WEARER's only when the item
+    // has no palette slot of its own — that is what puts a tinted body's colour on a boneless
+    // helm (decision 0812). An item WITH a slot must carry its own, because the vertex stage
+    // indexes the palette with the same field; the wearer's tint reaches it through the
+    // `ParentModel` chain instead, which is the reference's own route for an attached model's
+    // colours (`0x714000`, `aura_visual::chained_tint`).
+    let rig_slot = item_rig.or(rider).unwrap_or(ctx.rig_slot);
     // Billboard batches (the torch's glow card) collected for the world-root card spawn
     // below — as plain children they'd render at the item root (the grip), not the
     // authored pivot (the torch head). Decision 0153.
@@ -415,11 +471,11 @@ fn spawn_slot(
             let set = item_fade_set(part);
             let effective = PartFade::resolve(joined, &set);
             let (init_mat, tag_alpha) = effective.seed(&set, now);
-            // A rigged item draws the SKINNED twin — every part of it, not only the welded batch:
-            // the model rests at bind pose, so each non-billboard bone's palette row is the
-            // identity and the other batches land pixel-for-pixel where the static mesh had them.
-            // The rig's absence (or a form that never built one) falls straight back to `mesh`.
-            let skinned = item_rig.and(part.skinned_mesh.as_ref());
+            // An item with a palette slot draws the SKINNED twin — every part of it, not only a
+            // welded batch: the model rests at bind pose, so each non-billboard bone's palette row
+            // is the placement matrix itself and the batches land pixel-for-pixel where the static
+            // mesh had them. Slotless (boneless display, or a full palette) falls back to `mesh`.
+            let skinned = item_rig.or(rider).and(part.skinned_mesh.as_ref());
             let mut child = parent.spawn((
                 Mesh3d(skinned.unwrap_or(&part.mesh).clone()),
                 MeshMaterial3d(init_mat),
@@ -446,7 +502,10 @@ fn spawn_slot(
             if skinned.is_some() {
                 // The palette replaces this part's world matrix outright, so its model-local
                 // `Aabb` below is not the volume it draws in — the same reason the effect lane's
-                // skinned parts opt out (`spell_fx`). Seven models' worth of always-drawn parts.
+                // skinned parts opt out (`spell_fx`). It also keeps the reference's own rule that
+                // a scene object is elected ONCE, at the body root, never per batch (1473) — which
+                // is what a rider's part would otherwise start doing, since the skinned twin keeps
+                // main-world data and so earns the `calculate_bounds` the static twin never had.
                 child.insert((
                     benilla_world::rig_palette::RigPart(root),
                     bevy::camera::visibility::NoFrustumCulling,
@@ -747,7 +806,20 @@ mod tests {
     /// bone (decision 0841), and run the attach. Returns the part tags, the wearer's own instance
     /// slot, the item root's palette slot (`None` when it spawned no rig), and the mesh the part
     /// actually drew with.
-    fn attach_a_shoulder(welded: bool) -> (Vec<u32>, u16, Option<u16>, Option<Handle<Mesh>>) {
+    /// What the shoulder harness reports: the spawned parts' tags, the wearer's own slot, the
+    /// item's slot (the one that is not the wearer's), the mesh it drew, and — the fact that
+    /// separates 1609's rider from 0841's joint rig on the same shape — the [`RigRider`] the item
+    /// root carries, if any.
+    struct Attached {
+        tags: Vec<u32>,
+        wearer_slot: u16,
+        item_rig: Option<u16>,
+        mesh: Option<Handle<Mesh>>,
+        rider: Option<benilla_world::rig_rider::RigRider>,
+        joints: usize,
+    }
+
+    fn attach_a_shoulder(welded: bool) -> Attached {
         const KIND: ItemModelKind = ItemModelKind::ShoulderLeft;
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
@@ -833,11 +905,29 @@ mod tests {
             .iter(app.world())
             .map(|m| m.0.clone())
             .next();
-        (tags, wearer_slot, item_rig, mesh)
+        let rider = app
+            .world_mut()
+            .query::<&benilla_world::rig_rider::RigRider>()
+            .iter(app.world())
+            .next()
+            .copied();
+        let joints = app
+            .world_mut()
+            .query::<&benilla_world::billboard::BillboardJointRig>()
+            .iter(app.world())
+            .count();
+        Attached {
+            tags,
+            wearer_slot,
+            item_rig,
+            mesh,
+            rider,
+            joints,
+        }
     }
 
     /// The welded case, named for the assertion that reads it.
-    fn attach_a_welded_shoulder() -> (Vec<u32>, u16, Option<u16>, Option<Handle<Mesh>>) {
+    fn attach_a_welded_shoulder() -> Attached {
         attach_a_shoulder(true)
     }
 
@@ -953,31 +1043,65 @@ mod tests {
     /// is the standing guard that the arc stays absent in our own basis.
     #[test]
     fn a_welded_billboard_item_spawns_its_own_rig() {
-        let (tags, wearer_slot, item_rig, mesh) = attach_a_welded_shoulder();
-        let item_slot = item_rig.expect("the welded display allocates a palette slot");
-        assert!(wearer_slot >= 1, "the wearer really has a rig of its own");
+        let a = attach_a_welded_shoulder();
+        let item_slot = a
+            .item_rig
+            .expect("the welded display allocates a palette slot");
+        assert!(a.wearer_slot >= 1, "the wearer really has a rig of its own");
         assert_ne!(
-            item_slot, wearer_slot,
+            item_slot, a.wearer_slot,
             "the item's palette is not the wearer's"
         );
-        assert_eq!(tags.len(), 1);
+        assert_eq!(a.tags.len(), 1);
         assert_eq!(
-            benilla_world::mesh_tag::rig_of(tags[0]),
+            benilla_world::mesh_tag::rig_of(a.tags[0]),
             item_slot,
             "the part indexes the ITEM's palette, not the body's"
         );
-        assert_eq!(mesh, Some(skinned_handle()), "…and draws the skinned twin");
+        assert_eq!(
+            a.mesh,
+            Some(skinned_handle()),
+            "…and draws the skinned twin"
+        );
+        // The welded lane keeps its own camera-replaced JOINT rig — it is not a rigid frame, and
+        // that is exactly why 1609's rider cannot serve it (see `rig_rider`'s residuals).
+        assert_eq!(a.joints, 1, "the welded item runs a billboard joint rig");
+        assert!(a.rider.is_none(), "…and is not a rider");
     }
 
-    /// The counter-anchor, on the same harness: an ordinary item — the 9684 models that weld
-    /// nothing — spawns no rig, keeps the wearer's slot (0812's tint route) and keeps the static
-    /// mesh. If the gate ever widened, this is what would start allocating a palette per torch.
+    /// **The rider (decision 1609).** The counter-anchor, on the same harness: an ordinary item —
+    /// the 9684 models that weld nothing — now takes a palette slot too, but a different KIND of
+    /// one. It is one rigid frame composed in the wearer's rig frame, not a joint rig, and the
+    /// four things that makes true are asserted together because any one alone is a silent no-op:
+    /// the part draws the **skinned** twin (a static mesh is never skinned), it carries its OWN
+    /// slot rather than the wearer's (the vertex stage indexes the palette with that field), the
+    /// root holds a [`RigRider`] naming the wearer and the attach bone, and no joint rig was built.
+    ///
+    /// Until 1609 this test asserted the opposite — no slot, the wearer's tag, the static mesh —
+    /// because the ordinary lane placed an item through its entity's absolute `GlobalTransform`.
+    /// At Elwynn's ~9481 yards that sum lands on an 0.98 mm f32 grid and is rebuilt every frame,
+    /// so a standing guard's helm hopped a whole grid step every other frame while the body under
+    /// it moved exactly. The static-mesh route is what this test now forbids coming back.
     #[test]
-    fn an_ordinary_item_still_spawns_no_rig() {
-        let (tags, wearer_slot, item_rig, mesh) = attach_a_shoulder(false);
-        assert!(item_rig.is_none(), "no palette slot for a rigid item");
-        assert_eq!(benilla_world::mesh_tag::rig_of(tags[0]), wearer_slot);
-        assert_eq!(mesh, Some(Handle::default()), "the static mesh, as before");
+    fn an_ordinary_item_rides_one_rigid_frame_in_its_wearers_rig() {
+        let a = attach_a_shoulder(false);
+        let item_slot = a.item_rig.expect("an ordinary item takes a rider slot");
+        assert_ne!(item_slot, a.wearer_slot, "its palette is not the wearer's");
+        assert_eq!(
+            benilla_world::mesh_tag::rig_of(a.tags[0]),
+            item_slot,
+            "the part indexes the RIDER's palette"
+        );
+        assert_eq!(
+            a.mesh,
+            Some(skinned_handle()),
+            "…and draws the skinned twin, or the slot would place nothing"
+        );
+        let rider = a.rider.expect("the item root carries the rider");
+        assert_eq!(rider.slot, item_slot);
+        assert_eq!(rider.bone, 3, "composed from the wearer's attach bone");
+        assert_eq!(rider.local, Vec3::ZERO, "…at the attachment point's offset");
+        assert_eq!(a.joints, 0, "a rigid item builds no joint rig");
     }
 
     /// **What a booth can see of an equipped item** (decision 0822, `#bugs` B118's paper-doll half).
@@ -1287,7 +1411,21 @@ mod tests {
             (8, ItemModelKind::ShoulderRight, true),
         ] {
             let mut dm = empty_display();
-            dm.parts = Some(vec![part(false)]);
+            let mut p = part(false);
+            // A real item model has a skeleton and a skinned twin, so it takes a rider slot
+            // (1609) — which is what makes the sheath swap's rider re-seat below observable.
+            p.skinned_mesh = Some(skinned_handle());
+            dm.parts = Some(vec![p]);
+            dm.skeleton = benilla_assets::ModelSkeleton {
+                joints: vec![benilla_assets::ModelJoint {
+                    parent: -1,
+                    local_translation: Vec3::ZERO,
+                    billboard: None,
+                    parent_arm: None,
+                }],
+                spine_bone: None,
+                head_bone: None,
+            };
             if effects {
                 dm.emitters = vec![benilla_assets::ModelEmitter {
                     def: benilla_world::testing::plain_particle_def(),
@@ -1422,6 +1560,19 @@ mod tests {
             .find(|r| r.offset.distance(BACK_AT) < 1e-5)
             .map(|r| r.bone);
         assert_eq!(seat, Some(2), "the rider's cached seat followed the move");
+        // **And the palette rider followed it too** (decision 1609). The MOVE is the one edit that
+        // keeps the item's entity alive while changing the bone its frame is composed from, so the
+        // rider is the one thing a re-parent can silently leave behind: the sword would go on
+        // drawing at the hand it was stowed from while its entity, its glow and its emitters all
+        // travelled to the back.
+        let rider = app
+            .world()
+            .entity(weapon)
+            .get::<benilla_world::rig_rider::RigRider>()
+            .expect("the weapon rides a rider frame");
+        assert_eq!(rider.bone, 2, "the rider is composed from the sheath bone");
+        assert_eq!(rider.local, BACK_AT, "…at the sheath point's offset");
+        assert_eq!(rider.host, wearer);
     }
 
     /// The other half of the per-slot diff: a slot whose item genuinely CHANGED is rebuilt (its old

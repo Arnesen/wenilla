@@ -202,6 +202,15 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_UNIT_VISUALS").is_ok() {
                 app.add_plugins(crate::capture::UnitVisualsPlugin);
             }
+            // The motion-jitter meter: `WOW_JITTER=<name-substr>[,<start_s>]` prints one line per
+            // frame for the nearest matching unit — the camera, root and pose terms of its
+            // rendered position, each as a first AND second difference, in mm and in pixels at
+            // its own distance. Δ alone cannot tell a slow idle from noise; Δ² can, and Δ²/dt²
+            // says whether a ragged Δ is bad arithmetic or merely uneven frame times (see
+            // `capture::JitterMeterPlugin`).
+            if std::env::var("WOW_JITTER").is_ok() {
+                app.add_plugins(crate::capture::JitterMeterPlugin);
+            }
             // The dress census: `WOW_DRESS_CENSUS=<secs>[,<every>]` prints one line per streamed
             // PLAYER — what the wire asked for (`PLAYER_FLAGS`' hide bits), what we resolved
             // (helm/cloak display ids) and what is actually attached — plus a `contradictions=`
