@@ -44,7 +44,7 @@ use crate::vplates::VPlateMode;
 use benilla_ui::script::UiScript;
 use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
 use benilla_world::clutter::ClutterConfig;
-use benilla_world::view::{ViewDistance, FARCLIP_RANGE};
+use benilla_world::view::{MsaaSetting, ViewDistance, FARCLIP_RANGE, MSAA_RANGE};
 
 /// The host-backed CVars: `(registered name, default)`. Grows one row per knob a settings page
 /// actually wires — never ahead of the knob (see the module doc).
@@ -208,6 +208,30 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // `gxRestart = 1` does not apply (wgpu swaps the presentation interval live, so the box takes
     // effect on click), and `$WOW_NOVSYNC=1` overrides it session-only, below.
     ("gxVSync", "1"),
+    // **Display mode** (decision 1627) — 1.12's own `gxWindow`, the Video Options *Windowed Mode*
+    // checkbox (`WINDOWED_MODE` / `OPTION_TOOLTIP_WINDOWED_MODE` are both in the reference's
+    // GlobalStrings; see `reference/1.12-globals.tsv`). The knob is
+    // [`crate::video::VideoConfig::display`], which the window's `mode` follows.
+    //
+    // Default **"0" = not windowed**, which is the reference's own default and every shipped
+    // game's — but "0" does NOT mean what it means in 1.12. The reference mode-sets the display;
+    // we raise a **borderless** fullscreen window, and ship no exclusive mode at all.
+    // [`crate::video`] carries the three-platform argument for why that is the whole of it (short
+    // version: Wayland cannot do exclusive, X11's XRandR path cannot restore the desktop after a
+    // crash, macOS has no such mode, and WoW itself dropped exclusive fullscreen in 8.0.1).
+    //
+    // Departs from the reference row's `gxRestart = 1` exactly like `gxVSync` above: ours applies
+    // on the click.
+    ("gxWindow", "0"),
+    // The **windowed** size, `gxResolution` — 1.12's own CVar name, narrowed to half its job.
+    // There it is the display mode *and* the backbuffer; here it is only what "windowed" means,
+    // because fullscreen is the monitor's own size and we expose no mode list to pick from (the
+    // deviation decision 1092 already records for `GxAspect`, unchanged by 1627).
+    //
+    // A **string** CVar, like it is in the reference — the one row [`apply_to_knobs`] has to match
+    // ahead of its numeric parse. Default is the 1600×900 that was the client's only size before
+    // 1627, so a windowed run is bit-for-bit where it was.
+    ("gxResolution", "1600x900"),
     // The body panes' half-rate render (decision 1444) — **benilla's own CVar**, no 1.12
     // counterpart: the reference draws its doll inside the main pass (no second view exists to
     // rate-limit), while our RTT booths (1069) re-run the render graph per pane per frame. "1" =
@@ -231,6 +255,24 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // FIRST character and not a "no memory" sentinel — which is exactly why a stock `Config.wtf`
     // has no such line until you have played somebody other than your first character
     // (`SaveConfig 0x63d980` skips values equal to their default; `compose_file` does the same).
+    // Multisample antialiasing — 1.12's own `gxMultisample`, registered at `0x63a950` with help
+    // "multisample antialiasing" and flags `3` = registered | **latched**. The knob is
+    // [`benilla_world::view::MsaaSetting`], read once at the world camera's spawn; its doc carries
+    // the full derivation.
+    //
+    // **Default "1" — off — and BYTE-DERIVED, unusually indirectly.** The reference registers no
+    // literal here: the default string is `snprintf("%d")`'d at runtime from field 21 of the
+    // `VideoHardware.dbc` row `DetectHardware` (`0x641260`) matched the GPU to. Across the shipped
+    // 193-row table that field only ever holds 1 (144 rows) or 2 (49 rows), and the three rows the
+    // fallback match can reach all hold 1 — so on any GPU the 2004-era table does not list, which
+    // is every machine this client runs on now, the registered string is "1". A 1 is genuinely no
+    // multisampling on both of its backends, not a one-sample mode. (wow-re §5 cross-check,
+    // 2026-08-26, `system/console/scratch/gxmultisample-default.md`; decision 1629.)
+    //
+    // Latched means a change is PENDING until the next launch — the reference's own callback
+    // echoes "set pending gxRestart" — so this row persists and `GetCVar` answers it, while the
+    // camera keeps what it was born with. `$WOW_MSAA` overrides it session-only, below.
+    ("gxMultisample", "1"),
     (crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
@@ -302,12 +344,28 @@ impl CvarPersist {
 /// short enough that a crash loses one gesture, not a session ("write-on-change, debounced").
 const SAVE_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The startup fold of `config.toml` into the knob resources ([`load_config`]).
+///
+/// A set rather than a bare system because one knob is **read once and never again**: the world
+/// camera takes its `Msaa` at spawn (decision 1629, the reference's latched `gxMultisample`), so
+/// `setup_player` must not be able to run before the file has been folded in. Every other knob is
+/// live-read and does not care.
+///
+/// This removes a **race, not an observed bug**. Measured: with the constraint deleted, a
+/// `gxMultisample = "4"` in `config.toml` still reached the camera — and it did so despite
+/// `PlayerPlugin` being added *before* `CvarPlugin` (`lib.rs`), i.e. the order that happened to
+/// hold was the executor's choice out of an unconstrained graph, not insertion order and not
+/// anything we could point at. The failure it prevents is silent (the player's setting is simply a
+/// launch late) and would surface as a bug report nobody could reproduce.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CvarLoad;
+
 pub(crate) struct CvarPlugin;
 
 impl Plugin for CvarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CvarPersist>()
-            .add_systems(Startup, load_config)
+            .add_systems(Startup, load_config.in_set(CvarLoad))
             .add_systems(Update, sync_cvars);
         // **The flush is on the exit edge, not beside its feed** (decision 1528). It used to be
         // `(sync_cvars, save_config).chain()` in `Update`, which made the "or the app exiting"
@@ -332,6 +390,7 @@ pub(crate) struct KnobParams<'w> {
     sound: ResMut<'w, SoundConfig>,
     scale: ResMut<'w, UiScaleCvar>,
     view: ResMut<'w, ViewDistance>,
+    msaa: ResMut<'w, MsaaSetting>,
     look: ResMut<'w, LookConfig>,
     click: ResMut<'w, ClickConfig>,
     loot: ResMut<'w, LootConfig>,
@@ -360,6 +419,7 @@ impl KnobParams<'_> {
             sound: &mut self.sound,
             scale: &mut self.scale,
             view: &mut self.view,
+            msaa: &mut self.msaa,
             look: &mut self.look,
             click: &mut self.click,
             loot: &mut self.loot,
@@ -383,6 +443,7 @@ struct Knobs<'a> {
     sound: &'a mut SoundConfig,
     scale: &'a mut UiScaleCvar,
     view: &'a mut ViewDistance,
+    msaa: &'a mut MsaaSetting,
     look: &'a mut LookConfig,
     click: &'a mut ClickConfig,
     loot: &'a mut LootConfig,
@@ -401,11 +462,25 @@ struct Knobs<'a> {
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
 /// build knows (the caller decides whether that warns or rides through).
 fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
+    let key = name.to_ascii_lowercase();
+    // `gxResolution` is a **string** CVar — `"WxH"`, the reference's own spelling — so it has to be
+    // matched ahead of the numeric parse every other row goes through, which would reject it as a
+    // bad value (decision 1627). It is the only such row; if a second one ever lands, this is the
+    // shape it joins, not a second special case somewhere else.
+    if key == "gxresolution" {
+        match crate::video::parse_resolution(value) {
+            Some(size) => knobs.video.windowed = size,
+            // Same posture as the numeric miss below: known key, bad value — consumed, and the
+            // resource keeps its truth.
+            None => warn!("cvar {name}: unparseable value '{value}' ignored"),
+        }
+        return true;
+    }
     let Ok(v) = value.parse::<f32>() else {
         warn!("cvar {name}: unparseable value '{value}' ignored");
         return true; // known key, bad value — consumed, resource keeps its truth
     };
-    match name.to_ascii_lowercase().as_str() {
+    match key.as_str() {
         "mastervolume" => knobs.sound.master = v.clamp(0.0, 1.0),
         "soundvolume" => knobs.sound.sfx = v.clamp(0.0, 1.0),
         "musicvolume" => knobs.sound.music = v.clamp(0.0, 1.0),
@@ -473,8 +548,18 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // Vertical Sync — a flag like every other checkbox here. `video::apply_present_mode`
         // watches the value and pushes it to the window; nothing else reads it.
         "gxvsync" => knobs.video.vsync = v != 0.0,
+        // Display mode (1627) — a flag like every other checkbox here, and the reference's own
+        // polarity: `1` is WINDOWED (the row is "Windowed Mode"). `video::apply_window_mode`
+        // watches the value and pushes it to the window; nothing else reads it.
+        "gxwindow" => knobs.video.display = crate::video::display_from_flag(v),
         // The body panes' half-rate render (1444) — a flag like every other checkbox here.
         "boothhalfrate" => knobs.pane_rate.half = v != 0.0,
+        // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`.
+        // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
+        // and nothing reads this resource after the world camera's spawn.
+        "gxmultisample" => {
+            knobs.msaa.samples = (v as u32).clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end())
+        }
         _ => return false,
     }
     true
@@ -507,34 +592,34 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     if crate::video::novsync_env() {
         persist.env_overridden.insert("gxvsync".into());
     }
-    let Some(path) = crate::local_state::config_path() else {
-        return; // hermetic capture, or no install — session-only state
-    };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            warn!("config: cannot read {}: {e}", path.display());
-            return;
-        }
-    };
-    let cfg: LocalConfig = match toml::from_str(&text) {
-        Ok(c) => c,
-        Err(e) => {
+    // `$WOW_WIN`, a capture scenario, or any instrumented run owns the window's geometry for the
+    // session (decision 1627), so the two CVars that would otherwise move it mid-run are
+    // session-only under exactly the same law as the four above.
+    if crate::video::windowed_env() {
+        persist.env_overridden.insert("gxwindow".into());
+        persist.env_overridden.insert("gxresolution".into());
+    }
+    // `$WOW_MSAA` is the multisampling A/B lever (1629), session-only under the same law as every
+    // override above: a value pinned into the file would make a measurement sticky across
+    // relaunches.
+    if std::env::var_os("WOW_MSAA").is_some() {
+        persist.env_overridden.insert("gxmultisample".into());
+    }
+    let cvars = match stored_config() {
+        StoredConfig::Absent => return, // no file, hermetic capture, or no install
+        StoredConfig::Bad(msg) => {
             // A malformed file is preserved, not clobbered: nothing loads, but nothing saves
             // over it either until a change actually happens — and the warn names the file.
-            warn!(
-                "config: {} is malformed ({e}) — running on defaults",
-                path.display()
-            );
+            warn!("{msg}");
             return;
         }
+        StoredConfig::Table(t) => t,
     };
     let known: HashSet<String> = REGISTERED
         .iter()
         .map(|(n, _)| n.to_ascii_lowercase())
         .collect();
-    for (name, value) in &cfg.cvars {
+    for (name, value) in &cvars {
         let key = name.to_ascii_lowercase();
         if !known.contains(&key) {
             warn!("config: unknown cvar '{name}' — preserved, not applied");
@@ -546,7 +631,67 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
         }
         apply_to_knobs(name, value, &mut knobs);
     }
-    persist.file = cfg.cvars;
+    persist.file = cvars;
+}
+
+/// What the one read of `config.toml` found.
+enum StoredConfig {
+    /// No file, no install, or a hermetic capture — every value is its registered default.
+    Absent,
+    /// The file's `[cvars]` table.
+    Table(BTreeMap<String, String>),
+    /// The file is there but unreadable or malformed. The string is what [`load_config`] warns
+    /// with — carried rather than logged, because this read happens before the `App` (and so
+    /// before `LogPlugin`) exists.
+    Bad(String),
+}
+
+/// Read `config.toml`.
+///
+/// **One parser, two callers at two different times** — [`load_config`] at `Startup`, and the
+/// primary window literal in [`crate::run`], which has to know `gxWindow`/`gxResolution` *before*
+/// the window exists ([`crate::video::boot_window_mode`] carries why booting windowed and flipping
+/// a frame later is not good enough).
+///
+/// Deliberately **not** cached in a `OnceLock`, though it was written that way first. Three reads
+/// of a sub-kilobyte file at process start is not a cost worth a global, and a process-wide cache
+/// is actively wrong: every test that lays a config down and then runs `load_config` would be
+/// answered from whatever the *first* test in the binary happened to see, and `local_state`'s home
+/// law can legitimately move under a run. The thing worth having exactly one of is this function,
+/// not its result.
+fn stored_config() -> StoredConfig {
+    let Some(path) = crate::local_state::config_path() else {
+        return StoredConfig::Absent; // hermetic capture, or no install — session-only state
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StoredConfig::Absent,
+        Err(e) => return StoredConfig::Bad(format!("config: cannot read {}: {e}", path.display())),
+    };
+    match toml::from_str::<LocalConfig>(&text) {
+        Ok(cfg) => StoredConfig::Table(cfg.cvars),
+        Err(e) => StoredConfig::Bad(format!(
+            "config: {} is malformed ({e}) — running on defaults",
+            path.display()
+        )),
+    }
+}
+
+/// One CVar as `config.toml` holds it, matched case-insensitively — **before the `App` exists**
+/// (decision 1627).
+///
+/// Every other consumer wants [`CvarPersist::stored`], which answers from the same values once
+/// they are a resource and stays current across a VM replacement (1291). This one exists for the
+/// single caller that cannot wait for a resource: the primary window has to be *built* with its
+/// display mode already resolved.
+pub(crate) fn boot_cvar(name: &str) -> Option<String> {
+    match stored_config() {
+        StoredConfig::Table(t) => t
+            .into_iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v),
+        StoredConfig::Absent | StoredConfig::Bad(_) => None,
+    }
 }
 
 /// Per frame: seed the VM's table once it exists (registered set + the RESOLVED session values,
@@ -580,6 +725,7 @@ fn sync_cvars(
             video,
             pane_rate,
             guild_notify,
+            msaa,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -595,7 +741,7 @@ fn sync_cvars(
         );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 33] = [
+        let session: [(&str, String); 36] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -634,7 +780,18 @@ fn sync_cvars(
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
             ("gxVSync", flag(video.vsync)),
+            // The reference's polarity: the CVar is `gxWindow`, so `1` is the WINDOWED state.
+            (
+                "gxWindow",
+                flag(video.display == crate::video::DisplayMode::Windowed),
+            ),
+            // The one string-valued row, composed in the reference's spelling.
+            (
+                "gxResolution",
+                format!("{}x{}", video.windowed.x, video.windowed.y),
+            ),
             ("boothHalfRate", flag(pane_rate.half)),
+            ("gxMultisample", msaa.samples.to_string()),
         ];
         for (name, value) in session {
             script.set_cvar_host(name, &value);
@@ -824,6 +981,9 @@ mod tests {
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
         // env-less 350 literal (view.rs doc: "Default 350" — the reference's own, 1624).
         assert_eq!(d["farclip"], 350.0);
+        // Same shape as farclip: `MsaaSetting::default()` reads $WOW_MSAA, so the registered
+        // default mirrors the env-less literal — 1, the reference's own (1629).
+        assert_eq!(d["gxMultisample"], 1.0);
         // The Controls trio (0961) welds to its knob Defaults the same way.
         assert_eq!(
             d["deselectOnClick"] != 0.0,
@@ -918,6 +1078,8 @@ mod tests {
         let mut video = VideoConfig::default();
         let mut pane_rate = PaneRate::default();
         let mut guild_notify = crate::ui_guild::GuildMemberNotify::default();
+        // Literal, not Default: MsaaSetting::default() reads $WOW_MSAA.
+        let mut msaa = MsaaSetting { samples: 1 };
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -935,6 +1097,7 @@ mod tests {
             video: &mut video,
             pane_rate: &mut pane_rate,
             guild_notify: &mut guild_notify,
+            msaa: &mut msaa,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -943,6 +1106,14 @@ mod tests {
         assert_eq!(knobs.sound.master, 1.0);
         assert!(apply_to_knobs("farclip", "50", &mut knobs));
         assert_eq!(knobs.view.farclip, *FARCLIP_RANGE.start());
+        // Multisampling clamps to the reference's own [1, 16] and takes an int the way its `atoi`
+        // does — the value reaching the camera is a sample COUNT, where 1 is none (1629).
+        assert!(apply_to_knobs("gxMultisample", "4", &mut knobs));
+        assert_eq!(knobs.msaa.samples, 4);
+        assert!(apply_to_knobs("gxmultisample", "99", &mut knobs));
+        assert_eq!(knobs.msaa.samples, *MSAA_RANGE.end());
+        assert!(apply_to_knobs("gxmultisample", "0", &mut knobs));
+        assert_eq!(knobs.msaa.samples, *MSAA_RANGE.start());
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
         assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
         assert!(!knobs.sound.music_enabled);
@@ -1114,6 +1285,7 @@ mod tests {
             .insert_resource(SoundConfig::default())
             .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
             .insert_resource(ViewDistance { farclip: 350.0 })
+            .insert_resource(MsaaSetting { samples: 1 })
             .init_resource::<LookConfig>()
             .init_resource::<ClickConfig>()
             .init_resource::<LootConfig>()
@@ -1295,29 +1467,45 @@ mod tests {
         let parsed: LocalConfig = toml::from_str(hand).unwrap();
         assert_eq!(parsed.cvars.get("Farclip").map(String::as_str), Some("500"));
     }
-    /// **`realmName` is the table's one string-valued CVar, and it defaults EMPTY.**
+    /// **The table's string-valued CVars, named — and each one's default asserted on its own
+    /// terms.**
     ///
-    /// Empty rather than a guess: the value is written from the session's real realm by
-    /// `set_realm_name`, so the default only ever describes a client that has not connected.
-    /// wow-re records `"Last realm connected to"` beside the registration, but that reads like the
-    /// CVar's HELP text rather than its value, and nothing here needs it resolved — `""` is what
-    /// `Ace/AceState.lua:27`'s `ace.trim(GetCVar("realmName"))` handles cleanly, and inventing a
-    /// realm name would be worse than admitting we have none yet.
+    /// Pinned as a closed list so a new string CVar has to come here and think about the numeric
+    /// test above rather than silently widening it. That is exactly what happened at 1627, when
+    /// this test still said "the ONE": `gxResolution` arrived and the list grew by one, on purpose.
     ///
-    /// Pinned as "the ONE" so a second string CVar has to come here and think about the numeric
-    /// test above rather than silently widening it.
+    /// **`realmName` defaults EMPTY** — empty rather than a guess: the value is written from the
+    /// session's real realm by `set_realm_name`, so the default only ever describes a client that
+    /// has not connected. wow-re records `"Last realm connected to"` beside the registration, but
+    /// that reads like the CVar's HELP text rather than its value, and nothing here needs it
+    /// resolved — `""` is what `Ace/AceState.lua:27`'s `ace.trim(GetCVar("realmName"))` handles
+    /// cleanly, and inventing a realm name would be worse than admitting we have none yet.
+    ///
+    /// **`gxResolution` defaults to the pre-1627 window** (decision 1627). It is the one row
+    /// [`apply_to_knobs`] matches ahead of its numeric parse, so its default is asserted through
+    /// the same parser the live value goes through — a spelling this table accepts but
+    /// [`crate::video::parse_resolution`] rejects would otherwise ship as a silent fall back to
+    /// `DEFAULT_WINDOWED`.
     #[test]
-    fn the_only_string_valued_cvar_is_the_realm_and_it_defaults_empty() {
-        let strings: Vec<&str> = REGISTERED
+    fn the_string_valued_cvars_are_the_realm_and_the_windowed_size() {
+        let mut strings: Vec<&str> = REGISTERED
             .iter()
             .filter(|(_, v)| v.parse::<f32>().is_err())
             .map(|(n, _)| *n)
             .collect();
-        assert_eq!(strings, vec!["realmName"]);
-        let realm = REGISTERED
-            .iter()
-            .find(|(n, _)| *n == "realmName")
-            .map(|(_, v)| *v);
-        assert_eq!(realm, Some(""));
+        strings.sort_unstable(); // the list is the claim, not where the rows sit in the table
+        assert_eq!(strings, vec!["gxResolution", "realmName"]);
+        let default_of = |name: &str| {
+            REGISTERED
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| *v)
+                .expect("registered")
+        };
+        assert_eq!(default_of("realmName"), "");
+        assert_eq!(
+            crate::video::parse_resolution(default_of("gxResolution")),
+            Some(crate::video::DEFAULT_WINDOWED)
+        );
     }
 }

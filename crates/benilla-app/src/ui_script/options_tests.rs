@@ -1925,9 +1925,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 25 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed Loot
+    // 26 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed Loot
     // Information + Guild Member Alert are 1589's; Status Bar Text, Mouse Sensitivity
-    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's; Camera Following Style
+    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's and its Windowed Mode
+    // 1627's; Camera Following Style
     // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 6 (3 from
     // 1136, Buff Durations 1139, the target-of-target pair 1576), the Action Bars page's 2 (the
     // lock 1136, Always Show
@@ -1937,7 +1938,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    assert_eq!(checked, 53, "every tipped row carries a live 1.12 key");
+    assert_eq!(checked, 54, "every tipped row carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec![
@@ -2033,15 +2034,15 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // 25 of the 26 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed
+    // 26 of the 27 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed
     // Loot Information + Guild Member Alert 1589's; Status Bar Text, Mouse Sensitivity and
-    // Max Camera Distance 1140's; Vertical Sync 1394's; Camera Following Style 1493's; Terrain
-    // Distance 1513's), plus the Combat page's 14 saved-variable rows (1134), the Interface
+    // Max Camera Distance 1140's; Vertical Sync 1394's and Windowed Mode 1627's; Camera Following
+    // Style 1493's; Terrain Distance 1513's), plus the Combat page's 14 saved-variable rows (1134), the Interface
     // page's 6 (1136, + Buff Durations 1139, + the target-of-target pair 1576), Action Bars' 2
     // (the lock 1136, Always Show
     // ActionBars 1500), the Chat page's 1 (Remove Chat Hover Delay, 1589) and 6 API rows (Show
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
-    assert_eq!(raised, 53, "every row but Auto Loot has a 1.12 description");
+    assert_eq!(raised, 54, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

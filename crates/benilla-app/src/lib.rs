@@ -358,6 +358,14 @@ pub fn run(build: BuildId) -> AppExit {
 
     app.add_plugins(benilla_world::boot::tuned_default_plugins(Window {
         title: "benilla".into(),
+        // **Born in the player's display mode, not flipped into it** (decision 1627). `gxWindow`
+        // is read straight off `config.toml` here rather than waiting for `Startup`'s
+        // `load_config`, because a launch that opens windowed and goes fullscreen one frame later
+        // is a visible flash on every start — and, under a compositor that only maps a fullscreen
+        // surface 1:1 (gamescope), a first second spent in the exact input state this is meant to
+        // end. Every instrumented run stays windowed regardless (`video::windowed_env`), so the
+        // capture harness, the probe fleet and `$WOW_WIN` are untouched by any of this.
+        mode: video::boot_window_mode(),
         // UI-fixture captures shrink the window so the docked panel fills the frame — the capture
         // is the look-pass instrument and the window is its subject. The action bar is the
         // exception: it spans 1024px + 128px end caps along the screen bottom, so it gets a wide,
@@ -416,7 +424,11 @@ pub fn run(build: BuildId) -> AppExit {
                 .unwrap_or(if benilla_world::bgwin::no_pixel_run() {
                     UVec2::new(640, 360)
                 } else {
-                    UVec2::new(1600, 900)
+                    // The player's `gxResolution` — what "windowed" means for them, and what
+                    // leaving fullscreen restores (1627). Its default is the 1600×900 that was
+                    // hard-coded here before, and while `mode` above is fullscreen `bevy_winit`
+                    // ignores this entirely (it applies an inner size only on the `Windowed` arm).
+                    video::boot_windowed_size()
                 })
                 .into()
         },

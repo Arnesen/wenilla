@@ -550,6 +550,8 @@ pub(crate) struct PlayerUiPlugin;
 impl Plugin for PlayerUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiQuads>()
+            .init_resource::<UiMeshCost>()
+            .init_resource::<crate::ui_script::UiCostWanted>()
             .add_plugins((
                 Material2dPlugin::<UiQuadMaterial>::default(),
                 // Owned here, not in main.rs: the lane's decode is not optional (see its doc).
@@ -590,6 +592,23 @@ fn spawn_ui_camera(mut commands: Commands) {
     commands.spawn((
         PlayerUiCamera,
         Camera2d,
+        // **No MSAA — named, because silence here means 4×.** `bevy_render`'s `CameraPlugin`
+        // registers `Camera` → `Msaa` as a required component (`bevy_render/src/camera.rs:56`) and
+        // `Msaa::default()` is `Sample4`, so a camera that never mentions MSAA does not get "none",
+        // it gets four samples. Every other non-world camera in the tree says `Msaa::Off` out loud
+        // (the portrait booths, the minimap composite); this one simply never did, and paid for it.
+        //
+        // There is nothing here for multisampling to resolve. The world arrives already resolved —
+        // since decision 1603 the world camera renders offscreen and this pass draws the finished
+        // image as its first quad ([`crate::world_backdrop`]), so this camera's samples only
+        // re-average an image whose own MSAA is long since done. What it draws itself is
+        // axis-aligned rects, and the Bevy UI trees riding this camera (decision 0541) antialias
+        // their own edges analytically in-shader. What it *costs* is a full-window 4× sampled
+        // colour texture, a full-window 4× multisampled Core2d depth texture (Bevy sizes that one
+        // at `msaa.samples()` unconditionally — `core_2d::prepare_core_2d_depth_textures` — even
+        // though `AlphaMode2d::Blend` puts every quad in `Transparent2d`, which never writes it),
+        // 4× the fill on every quad, and a resolve. Decision 1628.
+        bevy::render::view::Msaa::Off,
         // The gamma composite lane's mandatory decode (decision 0254) — without it the UI presents
         // ~2.2× bright, since the quad pass leaves gamma values in the target.
         crate::ui_gamma::UiGammaLane,
@@ -923,6 +942,35 @@ static UI_DIFF: std::sync::LazyLock<bool> =
 static UI_PROBE: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| std::env::var("WOW_UI_PROBE").as_deref() == Ok("1"));
 
+/// **What a `quads.dirty` frame costs on the RENDER side** — the meter this pass never had
+/// (decision 1625's residual, found the hard way).
+///
+/// `[ui-cost]` and the hover recorder split the UI *script* pass into tick/resolve/measure/extract/
+/// convert, and stop there. Everything below — sorting every quad in the interface, clipping and
+/// run-splitting them, and regenerating each run's vertex data — runs in a DIFFERENT system, on
+/// exactly the frames a tooltip content change dirties the lane, and no instrument had a clock on
+/// it. So the recorder built for the hover symptom could report "the UI phases are flat" on a frame
+/// that was doing a full mesh rebuild, which is worse than silence: it reads as an alibi.
+///
+/// Published as its own resource rather than a field of `UiFrameCost` because the two systems are
+/// unordered within `Update` — a field there would be wiped by whichever ran second.
+#[derive(Resource, Default, Clone)]
+pub(crate) struct UiMeshCost {
+    /// Did the rebuild actually run this frame, or did the early-out take it?
+    pub(crate) rebuilt: bool,
+    /// Total µs across the whole rebuild.
+    pub(crate) total: u128,
+    /// Collect + stable sort over every quad in both lanes.
+    pub(crate) sort: u128,
+    /// Clip + split into texture-identity runs.
+    pub(crate) split: u128,
+    /// Vertex-data regeneration, mesh writes, material lookups, batch entity churn.
+    pub(crate) write: u128,
+    /// How many quads were sorted, and how many runs came out — the counts behind the µs.
+    pub(crate) quads: usize,
+    pub(crate) runs: usize,
+}
+
 fn rebuild_ui_mesh(
     mut quads: ResMut<UiQuads>,
     mut commands: Commands,
@@ -931,8 +979,30 @@ fn rebuild_ui_mesh(
     mut pools: Local<BatchPools>,
     white: Option<Res<UiWhiteTexture>>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    hidden: Res<crate::ui_hide::UiHidden>,
+    // The hide binding and the cost meter's pair, bundled (clippy's argument ceiling — the same
+    // reason `stores` is a tuple).
+    mut hide_and_meter: (
+        Res<crate::ui_hide::UiHidden>,
+        ResMut<UiMeshCost>,
+        Res<crate::ui_script::UiCostWanted>,
+    ),
 ) {
+    let (hidden, mesh_cost, cost_wanted) =
+        (&hide_and_meter.0, &mut hide_and_meter.1, &hide_and_meter.2);
+    // The meter is off unless something asked (the hover recorder, `WOW_UI_COST=1`) — an unmetered
+    // rebuild pays one bool test, not six clock reads.
+    let cost_on = cost_wanted.0 || crate::ui_script::extract::ui_cost_enabled();
+    **mesh_cost = UiMeshCost::default();
+    let t_rebuild = cost_on.then(std::time::Instant::now);
+    let mut t_mark = t_rebuild;
+    let mut lap = move || -> u128 {
+        if !cost_on {
+            return 0;
+        }
+        t_mark
+            .replace(std::time::Instant::now())
+            .map_or(0, |t| t.elapsed().as_micros())
+    };
     let (meshes, materials) = (&mut stores.0, &mut stores.1);
     let q = quads.as_mut();
     // TOGGLEUI hides at the *draw*, not at the producers: both lanes keep filling, so the UI comes
@@ -1026,6 +1096,8 @@ fn rebuild_ui_mesh(
         q.quads.iter().chain(q.overlays.iter()).collect()
     };
     sorted.sort_by_key(|q| q.z_key);
+    let n_sorted = sorted.len();
+    let us_sort = lap();
     // The backdrop is PREPENDED, not sorted in. Giving it a `z_key` would mean picking a number
     // below every other producer's and trusting all of them to stay above it — and the append
     // lane's lowest band is already 0 (`overlay_z::WORLD_TEXT`), so there is no room under it
@@ -1122,6 +1194,7 @@ fn rebuild_ui_mesh(
     // `Transparent2d` phase by ascending mesh z, so later runs drawing on top is exactly "higher z").
     // Spread runs across a z window comfortably inside the camera's default near/far (±1000) regardless
     // of run count, so this never depends on how many runs a given frame happens to produce.
+    let us_split = lap();
     let run_count = runs.len().max(1) as f32;
     // An unbounded material key set (a window resize moves every mask rect) resets the cache;
     // materials on live batches survive via the entities' own handle clones and simply re-enter
@@ -1327,6 +1400,18 @@ fn rebuild_ui_mesh(
     pools.meshes.truncate(used);
     pools.stored.truncate(used);
     pools.offsets.truncate(used);
+    if cost_on {
+        let us_write = lap();
+        **mesh_cost = UiMeshCost {
+            rebuilt: true,
+            total: t_rebuild.map_or(0, |t| t.elapsed().as_micros()),
+            sort: us_sort,
+            split: us_split,
+            write: us_write,
+            quads: n_sorted,
+            runs: used,
+        };
+    }
 }
 
 /// Deliberately-overlapping synthetic content proving the sort: 5 z strata × 40 quads each, offset both
@@ -1424,6 +1509,8 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<UiQuadMaterial>()
             .init_resource::<UiQuads>()
+            .init_resource::<UiMeshCost>()
+            .init_resource::<crate::ui_script::UiCostWanted>()
             .init_resource::<crate::ui_hide::UiHidden>()
             .insert_resource(UiWhiteTexture(Handle::default()))
             .add_systems(Update, rebuild_ui_mesh);

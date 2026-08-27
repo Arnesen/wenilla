@@ -114,6 +114,75 @@ pub struct ViewDistance {
 /// gone and the window now follows this number, so the headroom went with it (1513).
 pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
 
+/// The world camera's multisampling level — WoW's **`gxMultisample`** CVar.
+///
+/// Held on the reference's own scale: a **sample count**, clamped to [`MSAA_RANGE`] (`[1, 16]`,
+/// the reference's own clamp in the CVar callback at `0x63b250`), where **1 means no
+/// multisampling at all** — not "one sample of MSAA". Both of the reference's device backends read
+/// it that way: D3D9 at `0x599899` leaves `pp.MultiSampleType` at `D3DMULTISAMPLE_NONE` for any
+/// value `<= 1`, and the GL path at `0x59de32` never writes the `WGL_SAMPLE_BUFFERS_ARB` /
+/// `WGL_SAMPLES_ARB` pair at all — the attribute list simply terminates where they would begin.
+/// (wow-re `system/console/scratch/gxmultisample-default.md`, §5-verified 2026-08-26.)
+///
+/// **Default 1 — off — and that is the reference's own default, not a perf choice dressed up as
+/// fidelity.** The reference does not register a literal here: `CVar::Register` at `0x63a950` is
+/// handed a string `snprintf("%d")`'d at runtime from field 21 of the `VideoHardware.dbc` row that
+/// `DetectHardware` (`0x641260`) matched the GPU to. Across the shipped 193-row table that field
+/// only ever holds 1 (144 rows) or 2 (49 rows) — nothing higher exists anywhere in it — and all
+/// three rows reachable by the fallback match hold **1**. Every id in the table is 2004-era, so no
+/// modern GPU matches a specific row and the fallback is what answers: the string registered on
+/// any machine this client actually runs on today is `"1"`. Decision 1629.
+///
+/// **Latched, like the reference's own flag byte** (`CVar::Register` flags `3` = registered |
+/// latched; the callback echoes `"set pending gxRestart"`). The value here is the **pending** one:
+/// changing it persists and `GetCVar` reports it, but the device — here, the camera's `Msaa`
+/// component — keeps what it was born with until the next launch. That is not a limitation we are
+/// working around; it is the reference's behaviour, and it happens to be forced on us anyway,
+/// since swapping MSAA live leaves our post passes MSAA-mismatched and freezes the view.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MsaaSetting {
+    /// The requested sample count, `[1, 16]`. 1 = no multisampling.
+    pub samples: u32,
+}
+
+/// The settable range of [`MsaaSetting::samples`] — the reference's own `atoi`-then-clamp `[1, 16]`
+/// at `0x63b250`. Shared by the CVar apply and the `$WOW_MSAA` env knob so the two cannot drift.
+pub const MSAA_RANGE: std::ops::RangeInclusive<u32> = 1..=16;
+
+impl Default for MsaaSetting {
+    /// `$WOW_MSAA` overrides the default, **session-only** — the A/B lever, the same posture as
+    /// `$WOW_FARCLIP` (a value pinned into `config.toml` would make a measurement sticky). The
+    /// spellings it has always accepted are kept: `off`/`0`/`1` all mean none.
+    fn default() -> Self {
+        let samples = match std::env::var("WOW_MSAA").ok().as_deref() {
+            Some("off") => Some(1),
+            Some(v) => v.parse::<u32>().ok(),
+            None => None,
+        }
+        .map_or(1, |v| v.clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end()));
+        Self { samples }
+    }
+}
+
+impl MsaaSetting {
+    /// The sample count as a Bevy [`Msaa`](bevy::render::view::Msaa) level.
+    ///
+    /// wgpu can only express 1/2/4/8, while the reference's range runs to 16, so a request lands on
+    /// the **largest expressible level at or below it**. That direction is the reference's own: its
+    /// device-init retry loop (`0x63b380`) steps the sample count *down* — `-= 2`, floored at 1 —
+    /// and only once it bottoms out does it start giving up depth and colour bits. Nothing anywhere
+    /// steps it up, so rounding down can never hand a player more than they asked for.
+    pub fn level(self) -> bevy::render::view::Msaa {
+        use bevy::render::view::Msaa;
+        match self.samples {
+            0..=1 => Msaa::Off,
+            2..=3 => Msaa::Sample2,
+            4..=7 => Msaa::Sample4,
+            _ => Msaa::Sample8,
+        }
+    }
+}
+
 /// The world camera's projection far plane in yards — the **horizon** plane, far beyond `farclip`
 /// on purpose so the coarse WDL ring draws behind the wall (decision 0684; the reference's own
 /// `horizonfarclip` is a second plane floored at `farclip + 528`, default 2112). One number, not a
@@ -368,5 +437,42 @@ mod tests {
             Vec3::new(0.0, 0.0, 5000.0),
             0.0
         ));
+    }
+}
+
+#[cfg(test)]
+mod msaa_tests {
+    use super::*;
+    use bevy::render::view::Msaa;
+
+    /// The env-less default is **off**, and off is spelled 1 (the reference's scale), not 0.
+    /// Welded to the `gxMultisample` registration in `benilla-app`'s `cvars.rs` by its own test.
+    #[test]
+    fn the_default_is_the_references_one_sample_which_means_none() {
+        // Not `MsaaSetting::default()` — a test run under `$WOW_MSAA` would read the env and this
+        // is a claim about the literal.
+        let literal = MsaaSetting { samples: 1 };
+        assert_eq!(literal.level(), Msaa::Off);
+        assert_eq!(*MSAA_RANGE.start(), 1);
+        assert_eq!(*MSAA_RANGE.end(), 16);
+    }
+
+    /// A request lands on the largest level wgpu can express at or below it — the direction the
+    /// reference's own device-init retry loop steps (`0x63b380`, `-= 2` floored at 1). Never up:
+    /// asking for 3 must not silently buy 4 samples' worth of bandwidth.
+    #[test]
+    fn a_sample_count_rounds_down_never_up() {
+        let level = |n| MsaaSetting { samples: n }.level();
+        assert_eq!(level(1), Msaa::Off);
+        assert_eq!(level(2), Msaa::Sample2);
+        assert_eq!(level(3), Msaa::Sample2);
+        assert_eq!(level(4), Msaa::Sample4);
+        assert_eq!(level(7), Msaa::Sample4);
+        assert_eq!(level(8), Msaa::Sample8);
+        // The reference clamps at 16; anything that reaches here is already in range, and the top
+        // of that range is still only eight samples of real hardware.
+        assert_eq!(level(16), Msaa::Sample8);
+        // 0 cannot arrive through the clamp, but the mapping must not panic if it ever does.
+        assert_eq!(level(0), Msaa::Off);
     }
 }

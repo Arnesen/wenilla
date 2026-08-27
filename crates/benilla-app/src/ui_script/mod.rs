@@ -29,7 +29,7 @@ use benilla_world::schedule::WorldStage;
 /// because the AddOns screens read the same folder without a VM (decision 1196).
 pub(crate) mod addons;
 mod content;
-mod extract;
+pub(crate) mod extract;
 mod input;
 mod manifest;
 

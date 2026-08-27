@@ -209,125 +209,132 @@ impl Plugin for PlayerPlugin {
                     .before(control)
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             );
-        app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
-            // The world camera renders only when the world can be seen (decision 0540): in world,
-            // or under the opaque loading screen (whose covered render is what compiles the
-            // world's pipelines before the first visible frame). At the glue screens the fully
-            // streamed world otherwise burns real GPU time behind an opaque fullscreen scene.
-            .add_systems(Update, setup::gate_world_camera)
-            // In capture mode the harness ([`crate::capture`]) pins the camera (and thus the stream
-            // focus), so `control` must not also drive it — gate it off when capturing. In-world
-            // only (decision 0193): at the character-select glue screen the controller must not
-            // grab the cursor, fly the camera, or queue movement sends behind the overlay.
-            .add_systems(
-                Update,
-                control
-                    .in_set(PlayerControlSet)
-                    .in_set(WorldStage::Input)
-                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
-            )
-            // The posture setter's queue (the `/sit` family — decision 0881; `control` is the sole
-            // executor, like the sheath queue).
-            .add_message::<StandStateRequest>()
-            // Land-here ([`land`]): the ask, and the re-attach when the server's teleport lands.
-            // Before `control` so the frame that applies the teleport is the frame that takes
-            // third-person control back — `control` reads `detached` after this has cleared it.
-            .add_message::<land::LandHere>()
-            .add_systems(
-                Update,
-                land::land_here
-                    .in_set(WorldStage::Input)
-                    .before(control)
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
-            )
-            // (The two scripted probe drivers that used to sit here — `WOW_PROBE_LOOK`'s
-            // mouse-turn and `WOW_PROBE_CAM`'s camera park — are the harness's now, and register
-            // themselves against `control` from there: decision 1174 moved every instrument out of
-            // this module so a player build carries none of them.)
-            // A server-authored spline (Charge/knockback/taxi) driving our own player is mirrored into
-            // `Player` here, *before* `control` reads `pos` to seat the camera and skip input. Same
-            // gates as `control` (not while capturing; in-world only).
-            .add_systems(
-                Update,
-                server_ride::drive_self_ride
-                    .in_set(WorldStage::Input)
-                    .before(control)
-                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
-            )
-            // A session END releases the avatar — a confirmed `/logout`, or a lost session
-            // (decision 1262): the streamed entity is despawned by the net drain either way, and
-            // dropping `active` re-arms the take-control latch for the next login (possibly a
-            // different character). Ungated — the message lands as the state flips.
-            .add_systems(
-                Update,
-                wire_in::release_on_session_end.in_set(WorldStage::Input),
-            )
-            // Which body the client drives at all (decision 1277). Strictly before everything that
-            // reads the marker — the controller, and the collision-height mirror below.
-            .add_systems(
-                Update,
-                embody::maintain_embodiment
-                    .in_set(WorldStage::Input)
-                    .before(control)
-                    .before(mirror_mover_collision_height),
-            )
-            // Mirror the driven body's collision height onto `Player` for the swim arm (decision
-            // 0645). A *continuous* sync rather than a one-shot at take-control, for the reason the
-            // take-control branch itself records: a cross-map worldport re-streams the entity, so
-            // anything latched on that edge is lost on transfer — and a possession swaps it for a
-            // body of an entirely different size. Before `control`, which is where the swim depth
-            // lines are evaluated.
-            .add_systems(
-                Update,
-                mirror_mover_collision_height
-                    .in_set(WorldStage::Input)
-                    .before(control),
-            )
-            // The camera shake (B298, decision 1540) lands on the camera AFTER `control` has
-            // seated it: the applier adds its offset to the pose `seat_camera` just wrote, so the
-            // eye it measures the distance falloff against is the un-shaken one. `control` is at
-            // Bevy's 16-param ceiling, so the offset cannot be threaded into it as a resource —
-            // and running after is the better shape anyway.
-            .add_systems(
-                Update,
-                crate::camera_shake::apply_camera_shake
-                    .in_set(WorldStage::Input)
-                    .after(control)
-                    // Gated off in capture mode alongside `control`, and for the same reason a
-                    // capture keeps the doodad rail static: a pinned camera that a passing kodo
-                    // could nudge is not a regression baseline any more.
-                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
-            )
-            // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
-            // input immediately BEFORE the controller, which folds the flag into its forward axis.
-            // The player's own turn input therefore runs after us and wins, which is exactly what
-            // makes the turn-away cancel reachable.
-            .add_systems(
-                Update,
-                follow::steer_follow
-                    .in_set(WorldStage::Input)
-                    .before(control)
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
-            )
-            // The self-avatar zoom-in fade rides the same `MeshTag`/material channel as the interior
-            // classifier + the appear/despawn fades, so it must run *after* both to win the frame while
-            // fading (and yield to them otherwise). It also writes `Visibility` (the first-person
-            // hide), so it must run after the model-`Visibility` authority
-            // (`debug_panel::apply_model_visibility`) too — otherwise whichever system Bevy's
-            // arbitrary sort ran last would win, and the authority could re-show the body in
-            // first-person. First-person correctness outranks the dev creature-toggle for these few
-            // submeshes. Gated off in capture mode alongside `control` (whose per-frame
-            // `self_fade_alpha` it consumes), so a pinned capture never hides the avatar.
-            .add_systems(
-                Update,
-                apply_self_model_fade
-                    .after(benilla_world::interior::classify_entity_interior)
-                    .after(benilla_world::model_fade::apply_render_fade)
-                    .after(benilla_world::model_render::ModelVisSet)
-                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
-            );
+        app.add_systems(
+            Startup,
+            // AFTER the config fold, not merely after the assets: the camera reads `gxMultisample`
+            // once, at spawn (1629), so a player's setting has to be in the resource by now.
+            setup::setup_player
+                .after(AssetSet::Open)
+                .after(crate::cvars::CvarLoad),
+        )
+        // The world camera renders only when the world can be seen (decision 0540): in world,
+        // or under the opaque loading screen (whose covered render is what compiles the
+        // world's pipelines before the first visible frame). At the glue screens the fully
+        // streamed world otherwise burns real GPU time behind an opaque fullscreen scene.
+        .add_systems(Update, setup::gate_world_camera)
+        // In capture mode the harness ([`crate::capture`]) pins the camera (and thus the stream
+        // focus), so `control` must not also drive it — gate it off when capturing. In-world
+        // only (decision 0193): at the character-select glue screen the controller must not
+        // grab the cursor, fly the camera, or queue movement sends behind the overlay.
+        .add_systems(
+            Update,
+            control
+                .in_set(PlayerControlSet)
+                .in_set(WorldStage::Input)
+                .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+        )
+        // The posture setter's queue (the `/sit` family — decision 0881; `control` is the sole
+        // executor, like the sheath queue).
+        .add_message::<StandStateRequest>()
+        // Land-here ([`land`]): the ask, and the re-attach when the server's teleport lands.
+        // Before `control` so the frame that applies the teleport is the frame that takes
+        // third-person control back — `control` reads `detached` after this has cleared it.
+        .add_message::<land::LandHere>()
+        .add_systems(
+            Update,
+            land::land_here
+                .in_set(WorldStage::Input)
+                .before(control)
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+        )
+        // (The two scripted probe drivers that used to sit here — `WOW_PROBE_LOOK`'s
+        // mouse-turn and `WOW_PROBE_CAM`'s camera park — are the harness's now, and register
+        // themselves against `control` from there: decision 1174 moved every instrument out of
+        // this module so a player build carries none of them.)
+        // A server-authored spline (Charge/knockback/taxi) driving our own player is mirrored into
+        // `Player` here, *before* `control` reads `pos` to seat the camera and skip input. Same
+        // gates as `control` (not while capturing; in-world only).
+        .add_systems(
+            Update,
+            server_ride::drive_self_ride
+                .in_set(WorldStage::Input)
+                .before(control)
+                .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+        )
+        // A session END releases the avatar — a confirmed `/logout`, or a lost session
+        // (decision 1262): the streamed entity is despawned by the net drain either way, and
+        // dropping `active` re-arms the take-control latch for the next login (possibly a
+        // different character). Ungated — the message lands as the state flips.
+        .add_systems(
+            Update,
+            wire_in::release_on_session_end.in_set(WorldStage::Input),
+        )
+        // Which body the client drives at all (decision 1277). Strictly before everything that
+        // reads the marker — the controller, and the collision-height mirror below.
+        .add_systems(
+            Update,
+            embody::maintain_embodiment
+                .in_set(WorldStage::Input)
+                .before(control)
+                .before(mirror_mover_collision_height),
+        )
+        // Mirror the driven body's collision height onto `Player` for the swim arm (decision
+        // 0645). A *continuous* sync rather than a one-shot at take-control, for the reason the
+        // take-control branch itself records: a cross-map worldport re-streams the entity, so
+        // anything latched on that edge is lost on transfer — and a possession swaps it for a
+        // body of an entirely different size. Before `control`, which is where the swim depth
+        // lines are evaluated.
+        .add_systems(
+            Update,
+            mirror_mover_collision_height
+                .in_set(WorldStage::Input)
+                .before(control),
+        )
+        // The camera shake (B298, decision 1540) lands on the camera AFTER `control` has
+        // seated it: the applier adds its offset to the pose `seat_camera` just wrote, so the
+        // eye it measures the distance falloff against is the un-shaken one. `control` is at
+        // Bevy's 16-param ceiling, so the offset cannot be threaded into it as a resource —
+        // and running after is the better shape anyway.
+        .add_systems(
+            Update,
+            crate::camera_shake::apply_camera_shake
+                .in_set(WorldStage::Input)
+                .after(control)
+                // Gated off in capture mode alongside `control`, and for the same reason a
+                // capture keeps the doodad rail static: a pinned camera that a passing kodo
+                // could nudge is not a regression baseline any more.
+                .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
+        )
+        // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
+        // input immediately BEFORE the controller, which folds the flag into its forward axis.
+        // The player's own turn input therefore runs after us and wins, which is exactly what
+        // makes the turn-away cancel reachable.
+        .add_systems(
+            Update,
+            follow::steer_follow
+                .in_set(WorldStage::Input)
+                .before(control)
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+        )
+        // The self-avatar zoom-in fade rides the same `MeshTag`/material channel as the interior
+        // classifier + the appear/despawn fades, so it must run *after* both to win the frame while
+        // fading (and yield to them otherwise). It also writes `Visibility` (the first-person
+        // hide), so it must run after the model-`Visibility` authority
+        // (`debug_panel::apply_model_visibility`) too — otherwise whichever system Bevy's
+        // arbitrary sort ran last would win, and the authority could re-show the body in
+        // first-person. First-person correctness outranks the dev creature-toggle for these few
+        // submeshes. Gated off in capture mode alongside `control` (whose per-frame
+        // `self_fade_alpha` it consumes), so a pinned capture never hides the avatar.
+        .add_systems(
+            Update,
+            apply_self_model_fade
+                .after(benilla_world::interior::classify_entity_interior)
+                .after(benilla_world::model_fade::apply_render_fade)
+                .after(benilla_world::model_render::ModelVisSet)
+                .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
+        );
     }
 }
 

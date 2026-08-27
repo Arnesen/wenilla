@@ -25,7 +25,7 @@ use cooldown::cooldown_quads;
 /// each phase's wall μs, the quad counts, the layout gate's decision, and whether the diff found
 /// the produced quads changed. Untraced by design — the campaign grades untraced cpu_ms, and
 /// `trace_chrome` inflates exactly the fine-grained spans this measures (0718's calibration).
-fn ui_cost_enabled() -> bool {
+pub(crate) fn ui_cost_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("WOW_UI_COST").as_deref() == Ok("1"))
 }

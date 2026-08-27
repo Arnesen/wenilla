@@ -316,18 +316,13 @@ struct ViewCam {
     speed: f32,
 }
 
-fn spawn_view_camera(mut commands: Commands) {
+fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>) {
     let start = wow_to_bevy([VIEW_START.0, VIEW_START.1, 100.0]);
     let far = crate::view::CAM_FAR;
     commands.spawn((
         Camera3d::default(),
         crate::view::WorldCamera,
-        match std::env::var("WOW_MSAA").ok().as_deref() {
-            Some("off") | Some("0") | Some("1") => bevy::render::view::Msaa::Off,
-            Some("2") => bevy::render::view::Msaa::Sample2,
-            Some("8") => bevy::render::view::Msaa::Sample8,
-            _ => bevy::render::view::Msaa::Sample4,
-        },
+        msaa.level(),
         Projection::from(PerspectiveProjection {
             far,
             near: NEAR,

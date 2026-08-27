@@ -387,6 +387,96 @@ fn fire_probe_lua(
 /// line survives a window moving. `WOW_PROBE_DRAG_LUA="<chunk>"` runs a chunk after each gesture —
 /// the report channel (`ProbeLog` from [`ProbeLuaPlugin`] is installed by that probe; this one
 /// prints the chunk's own returned string).
+/// The HOVER SWEEP (`WOW_PROBE_HOVER="Frame1;Frame2;…"`, `WOW_PROBE_HOVER_AT` seconds, default 14,
+/// `WOW_PROBE_HOVER_STEP` seconds per frame-to-frame step, default 0.25, looping until exit) —
+/// the cursor crosses each named frame's centre through the REAL pointer path, pressing nothing.
+///
+/// Built because a hover-cost pin was taken with a Lua driver that called `GameTooltip:SetOwner`
+/// directly, and that driver is not the gesture: it never moves `model.mouseover`, so it skips the
+/// hit test, `OnEnter`/`OnLeave`, the button's state textures and highlight, and whatever the
+/// shipped UI hangs off those. The reported symptom was "hovering costs 2 ms" and the instrument
+/// could not hover. This is the missing half of `WOW_HOVER_LOG`: that one records what a hand on
+/// the mouse does, and this one supplies the hand.
+pub(crate) struct ProbeHoverPlugin;
+
+impl Plugin for ProbeHoverPlugin {
+    fn build(&self, app: &mut App) {
+        let names: Vec<String> = std::env::var("WOW_PROBE_HOVER")
+            .unwrap_or_default()
+            .split(';')
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
+        let at = std::env::var("WOW_PROBE_HOVER_AT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(14.0);
+        let step = std::env::var("WOW_PROBE_HOVER_STEP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.25);
+        app.insert_resource(ProbeHover {
+            names,
+            at,
+            step,
+            i: 0,
+            next: 0.0,
+            announced: false,
+        })
+        .add_systems(Update, fire_probe_hover);
+    }
+}
+
+/// [`ProbeHoverPlugin`]'s state: which name is next, and when.
+#[derive(Resource)]
+struct ProbeHover {
+    names: Vec<String>,
+    at: f32,
+    step: f32,
+    i: usize,
+    next: f32,
+    announced: bool,
+}
+
+/// Move the cursor onto the next named frame's centre. Loops forever, so a run of any length is a
+/// steady sweep — the population the recorder splits on.
+fn fire_probe_hover(
+    mut probe: ResMut<ProbeHover>,
+    mut synthetic: ResMut<crate::ui_script::SyntheticPointer>,
+    time: ProbeClock,
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    self_player: Query<(), With<crate::net::SelfPlayer>>,
+) {
+    if probe.names.is_empty() {
+        return;
+    }
+    let now = time.elapsed_secs();
+    if now < probe.at || self_player.is_empty() || now < probe.next {
+        return;
+    }
+    let Some(mut script) = script else { return };
+    probe.next = now + probe.step;
+    synthetic.0 = true;
+    let name = probe.names[probe.i % probe.names.len()].clone();
+    probe.i += 1;
+    match frame_centre(&script, &name) {
+        Some((x, y)) => {
+            if !probe.announced {
+                probe.announced = true;
+                info!(
+                    "probe-hover: sweeping {} frame(s) every {:.2}s, first {name} ({x:.0},{y:.0})",
+                    probe.names.len(),
+                    probe.step
+                );
+            }
+            script.mouse_move(x, y);
+        }
+        // Named but unresolved is worth saying once per pass rather than silently sweeping air —
+        // a sweep over frames that do not exist reads as "hovering is free".
+        None => warn!("probe-hover: {name} has no resolved rect — nothing hovered this step"),
+    }
+}
+
 pub(crate) struct ProbeDragPlugin;
 
 impl Plugin for ProbeDragPlugin {

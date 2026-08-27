@@ -25,10 +25,14 @@ use super::{
 /// the character controller is in.)
 const DEFAULT_MOVE_SPEED: f32 = 7.0;
 
-fn spawn_fallback_camera(commands: &mut Commands) {
+fn spawn_fallback_camera(commands: &mut Commands, msaa: Msaa) {
     commands.spawn((
         Camera3d::default(),
         WorldCamera,
+        // The same level the real camera takes — this one used to name nothing at all, which
+        // (`Camera` requires `Msaa`, defaulting to `Sample4`) meant a data-less free-fly quietly
+        // ran four samples no matter what the player had set. Decision 1629.
+        msaa,
         Hdr,
         Tonemapping::None,
         benilla_world::ffx_glow::FfxGlow::WORLD,
@@ -48,6 +52,9 @@ pub(super) fn setup_player(
     mut commands: Commands,
     config: Option<Res<RenderConfig>>,
     world_assets: Option<Res<WorldAssets>>,
+    // The pending `gxMultisample` (decision 1629), already resolved: this system is ordered after
+    // [`crate::cvars::CvarLoad`], so `config.toml` has been folded in before the camera is born.
+    msaa: Res<benilla_world::view::MsaaSetting>,
 ) {
     let env_speed = std::env::var("WOW_MOVE_SPEED")
         .ok()
@@ -75,7 +82,7 @@ pub(super) fn setup_player(
 
     // No client data → free-fly an empty scene.
     let (Some(_), Some(_)) = (config, world_assets) else {
-        spawn_fallback_camera(&mut commands);
+        spawn_fallback_camera(&mut commands, msaa.level());
         return;
     };
 
@@ -89,15 +96,12 @@ pub(super) fn setup_player(
         // THE world camera (the portrait booths are further `Camera3d`s — every "where is the viewer"
         // consumer filters on this marker, never on bare `Camera3d`; see its doc).
         WorldCamera,
-        // MSAA from $WOW_MSAA (off/0/1 → Off, 2, 4 default, 8). A STARTUP knob, not a live toggle:
-        // switching MSAA at runtime leaves our post-process passes (glow/egui) MSAA-mismatched and
-        // freezes the view, so A/B by restarting. 4× is real GPU fill cost — performance-foundation.md.
-        match std::env::var("WOW_MSAA").ok().as_deref() {
-            Some("off") | Some("0") | Some("1") => bevy::render::view::Msaa::Off,
-            Some("2") => bevy::render::view::Msaa::Sample2,
-            Some("8") => bevy::render::view::Msaa::Sample8,
-            _ => bevy::render::view::Msaa::Sample4,
-        },
+        // The player's `gxMultisample` (decision 1629), read ONCE here and never again — the
+        // reference registers this CVar *latched* and its callback echoes "set pending gxRestart",
+        // so a change is pending until the next launch. Which is also the only thing we could do:
+        // swapping MSAA live leaves our post passes (glow/egui) MSAA-mismatched and freezes the
+        // view. `$WOW_MSAA` still overrides it session-only, through the resource's `Default`.
+        msaa.level(),
         Projection::from(PerspectiveProjection {
             far: cam_far,
             near: CAM_NEAR,

@@ -111,6 +111,7 @@ impl Plugin for DevProbesPlugin {
             if [
                 "WOW_PROBE",
                 "WOW_PROBE_CHAT",
+                "WOW_PROBE_HOVER",
                 "WOW_PROBE_KEY",
                 "WOW_PROBE_LUA",
                 "WOW_PROBE_CHEST",
@@ -138,6 +139,12 @@ impl Plugin for DevProbesPlugin {
             // the "do what the hand on the mouse does" instrument (see `capture::ProbeDragPlugin`).
             if std::env::var("WOW_PROBE_DRAG").is_ok() {
                 app.add_plugins(crate::capture::ProbeDragPlugin);
+            }
+            // The probe-hover sweep: `WOW_PROBE_HOVER="ActionButton1;ActionButton2;…"` crosses each
+            // named frame's centre through the real pointer path, pressing nothing — the "hand on
+            // the mouse" `WOW_HOVER_LOG` was built to record and could not supply itself.
+            if std::env::var("WOW_PROBE_HOVER").is_ok() {
+                app.add_plugins(crate::capture::ProbeHoverPlugin);
             }
             // The probe-key taps: `WOW_PROBE_KEY="Space@14"` presses keys once in-world — the "press
             // space headlessly" instrument for input-gated behavior (see `capture::ProbeKeyPlugin`).

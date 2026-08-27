@@ -242,6 +242,9 @@ impl Plugin for WorldFoundation {
             // The faithful view distance (`farclip`) — one source of truth for the wall + the
             // per-object cull (and, post-split, the stream radius). See `view.rs`.
             .init_resource::<crate::view::ViewDistance>()
+            // The world camera's multisampling level (`gxMultisample`, decision 1629) — read
+            // ONCE, at the camera's spawn, because the reference's own flag says latched.
+            .init_resource::<crate::view::MsaaSetting>()
             // The viewer's body (wire (a)'s kinematics half) — defaulted by the engine so a
             // program with no avatar leaves it empty and every reader takes its no-body branch.
             .init_resource::<crate::view::Viewer>()

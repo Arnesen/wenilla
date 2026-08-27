@@ -618,7 +618,10 @@
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
                 "RowEnableMusic", "RowEnableAmbience",
             },
-            Graphics = { "RowUiScale", "RowFarclip", "RowWorldDetail", "RowVerticalSync" },
+            Graphics = {
+                "RowUiScale", "RowFarclip", "RowWorldDetail",
+                "RowWindowedMode", "RowVerticalSync",
+            },
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
                 "RowPlayerNames", "RowNpcNames", "RowOwnName",
@@ -2268,10 +2271,35 @@
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowVerticalSync" inherits="OptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowWindowedMode" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Windowed Mode: 1.12's own Video Options checkbox
+                                                -- over gxWindow, label and tooltip key both the
+                                                -- reference's GlobalStrings (WINDOWED_MODE /
+                                                -- OPTION_TOOLTIP_WINDOWED_MODE).
+                                                --
+                                                -- The row is the reference's; UNCHECKED is not.
+                                                -- There it mode-sets the display at gxResolution;
+                                                -- here it raises a BORDERLESS fullscreen window,
+                                                -- and no exclusive mode exists to reach (decision
+                                                -- 1627 -- Wayland cannot do one at all, and WoW
+                                                -- itself dropped exclusive fullscreen in 8.0.1).
+                                                --
+                                                -- Not deferred, for the same reason as Vertical
+                                                -- Sync below: the reference row carries
+                                                -- gxRestart = 1 and ours applies on the click.
+                                                OptionsRow_OnLoad(self, "gxWindow", "Windowed Mode",
+                                                    "OPTION_TOOLTIP_WINDOWED_MODE")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowVerticalSync" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWindowedMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWindowedMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Vertical Sync: 1.12's own Video Options checkbox
