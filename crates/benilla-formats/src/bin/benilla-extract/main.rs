@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 mod chaincensus;
 mod charatlas;
 mod charprocs;
+mod glueextent;
 mod m2dump;
 mod scan;
 mod shakecensus;
@@ -93,6 +94,17 @@ enum Command {
         /// Write the composited atlas here as a PNG (256²).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Measure every shipped glue scene's **art extent** (decision 1619): how far the opaque art
+    /// of each `UI_*` diorama covers around its authored camera 0, and the window aspects past
+    /// which the glue framing law stops widening and zooms instead. The instrument behind B330
+    /// (the login backdrop's edges showing at 16:9) — the same measurement the client makes at
+    /// scene spawn, printed for all seven scenes with the looser readings beside it.
+    Glueextent {
+        /// Also print every batch's footprint in the frame (front/back/clipped triangle counts,
+        /// projected extents) — which card sets the measured edge.
+        #[arg(long)]
+        batches: bool,
     },
     /// Dump a DBC table to CSV using our schema for it (headers included).
     Dbc {
@@ -778,6 +790,7 @@ fn main() -> Result<()> {
                 output.display()
             );
         }
+        Command::Glueextent { batches } => glueextent::glueextent(&mut chain, batches)?,
         Command::M2coll { internal_path } => m2dump::m2coll(&mut chain, &internal_path)?,
         Command::M2seq { internal_path } => m2dump::m2seq(&mut chain, &internal_path)?,
         Command::M2events { internal_path } => m2dump::m2events(&mut chain, &internal_path)?,

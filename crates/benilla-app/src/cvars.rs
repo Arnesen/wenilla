@@ -86,7 +86,7 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // clip. Registered so the fix can be A/B'd live against the defect it fixes.
     ("SoundOutputLimiter", "1"),
     ("uiScale", "0.9"),
-    ("farclip", "777"),
+    ("farclip", "350"),
     // The Controls-page trio (0961). `deselectOnClick`/`mouseInvertPitch` are 1.12's own
     // Interface Options CVars (UIOptionsFrame.lua indices 45/1); their defaults are the
     // reference behaviors benilla already shipped (empty-world click clears the target; no
@@ -219,6 +219,19 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // ~1.6 ms at 1600×900, 7.6 ms at 4K, per frame while a body pane is open — and the director
     // retested the 30 fps doll as fine. Full-rate is one `SetCVar("boothHalfRate", 0)` away.
     ("boothHalfRate", "1"),
+    // The select screen's memory of who you last entered the world as (decision 1622) — 1.12's
+    // own `lastCharacterIndex`, help string "Last character selected". **No host knob**: the live
+    // value is the character screen's own state ([`crate::char_select::Roster::pending_index`]),
+    // which this row only mirrors — the `statusBarText` posture, and why the arm in
+    // [`apply_to_knobs`] is empty.
+    //
+    // Registered **"0"**, byte-read rather than chosen: `CVar::Register` at `0x402d93` pushes
+    // default string `0x82e570` = "0", category 4, and caches the CVar* at `[0x882674]`. The value
+    // is a **0-based** row (the engine's selection cell `[0x83856c]` under `"%d"`), so "0" is the
+    // FIRST character and not a "no memory" sentinel — which is exactly why a stock `Config.wtf`
+    // has no such line until you have played somebody other than your first character
+    // (`SaveConfig 0x63d980` skips values equal to their default; `compose_file` does the same).
+    (crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
 /// `config.toml`'s shape: a `[cvars]` table of `Name = "value"` strings (CVars are strings in
@@ -250,16 +263,38 @@ pub(crate) struct CvarPersist {
 }
 
 impl CvarPersist {
-    /// The persisted `checkAddonVersion` (decision 1292) — what the addon load walk gates on.
-    /// Read from the persist state rather than the VM because the walk runs while the VM's CVar
-    /// table does not exist yet (registration is a per-VM `Update` seed, 1291); the 1291 fold
-    /// keeps this current across reloads, so it is the value the reference's live read would see.
-    /// Absent = the registrar default: check ON.
-    pub(crate) fn addon_version_check(&self) -> bool {
+    /// One CVar as `config.toml` holds it — matched case-insensitively, so a hand-edited
+    /// spelling still answers.
+    ///
+    /// Read from the persist state rather than from the VM's table for the callers that want a
+    /// value **before, or outside, a registered table**: the addon load walk runs while the VM's
+    /// CVar table does not exist yet (registration is a per-VM `Update` seed, 1291), and the
+    /// select screen wants its remembered row the moment a roster lands, from a system that has
+    /// no business holding the VM (1622). The 1291 fold keeps this current across VM
+    /// replacements, so it is the value the reference's live read would see.
+    pub(crate) fn stored(&self, name: &str) -> Option<&str> {
         self.file
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("checkAddonVersion"))
-            .is_none_or(|(_, v)| v != "0")
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// A persist state that already holds one stored value — a launch whose `config.toml` said
+    /// so, without a file. `#[cfg(test)]` and `pub(crate)` because [`Self::file`] is private:
+    /// `char_select`'s restore test drives the real [`apply_roster_policy`] over a real remembered
+    /// row rather than a copy of its logic (the `Roster::with_pending_pick` posture).
+    #[cfg(test)]
+    pub(crate) fn with_stored(name: &str, value: &str) -> Self {
+        Self {
+            file: BTreeMap::from([(name.to_string(), value.to_string())]),
+            ..Self::default()
+        }
+    }
+
+    /// The persisted `checkAddonVersion` (decision 1292) — what the addon load walk gates on.
+    /// Absent = the registrar default: check ON.
+    pub(crate) fn addon_version_check(&self) -> bool {
+        self.stored("checkAddonVersion").is_none_or(|v| v != "0")
     }
 }
 
@@ -431,6 +466,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // and the gate reads the live table — but a KNOWN key, so a toggle dirties the config
         // and persists (the statusBarText posture).
         "checkaddonversion" => {}
+        // The remembered character row (1622) — same posture again: the live value is the select
+        // screen's own, which writes this key rather than reading it back. Known, so entering the
+        // world dirties the config and the memory survives to the next launch.
+        "lastcharacterindex" => {}
         // Vertical Sync — a flag like every other checkbox here. `video::apply_present_mode`
         // watches the value and pushes it to the window; nothing else reads it.
         "gxvsync" => knobs.video.vsync = v != 0.0,
@@ -783,8 +822,8 @@ mod tests {
         assert!(!sound.reverb, "zone reverb ships off (decision 1153)");
         assert_eq!(d["uiScale"], DEFAULT_UI_SCALE);
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
-        // env-less 777 literal (view.rs doc: "Default 777").
-        assert_eq!(d["farclip"], 777.0);
+        // env-less 350 literal (view.rs doc: "Default 350" — the reference's own, 1624).
+        assert_eq!(d["farclip"], 350.0);
         // The Controls trio (0961) welds to its knob Defaults the same way.
         assert_eq!(
             d["deselectOnClick"] != 0.0,
@@ -859,7 +898,7 @@ mod tests {
     fn apply_parses_clamps_and_reports_unknowns() {
         let mut sound = SoundConfig::default();
         let mut scale = UiScaleCvar(0.9);
-        let mut view = ViewDistance { farclip: 777.0 };
+        let mut view = ViewDistance { farclip: 350.0 };
         let mut look = LookConfig::default();
         let mut click = ClickConfig::default();
         let mut loot = LootConfig::default();
@@ -1002,7 +1041,7 @@ mod tests {
             ("MusicVolume".into(), "0.7".into(), "0.4".into()), // moved: written
             ("MasterVolume".into(), "1".into(), "1".into()),    // default: absent
             ("uiScale".into(), "1.2".into(), "0.9".into()),     // env value: file keeps 0.8
-            ("farclip".into(), "777".into(), "777".into()),     // back to default: removed
+            ("farclip".into(), "350".into(), "350".into()),     // back to default: removed
         ];
         let out = compose_file(&previous, &env, &snapshot);
         assert_eq!(out.get("MusicVolume").map(String::as_str), Some("0.7"));
@@ -1033,26 +1072,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
-        app.add_plugins(bevy::MinimalPlugins)
-            .insert_resource(SoundConfig::default())
-            .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
-            .insert_resource(ViewDistance { farclip: 777.0 })
-            .init_resource::<LookConfig>()
-            .init_resource::<ClickConfig>()
-            .init_resource::<LootConfig>()
-            .init_resource::<NameConfig>()
-            .init_resource::<VPlateMode>()
-            .init_resource::<ClutterConfig>()
-            .init_resource::<MinimapZoom>()
-            .init_resource::<BubbleConfig>()
-            .init_resource::<ZoomLimit>()
-            .init_resource::<FollowConfig>()
-            .init_resource::<VideoConfig>()
-            .init_resource::<PaneRate>()
-            .init_resource::<crate::ui_guild::GuildMemberNotify>()
-            .add_plugins(CvarPlugin);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        let mut app = cvar_app();
 
         // Startup: the file's MusicVolume reaches the knob; Update: the VM table seeds from it.
         app.update();
@@ -1084,6 +1104,114 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// A client whose CVar host is real: every knob resource the [`KnobParams`] census wants,
+    /// [`CvarPlugin`] itself, and a VM for the table to live in. The three end-to-end tests below
+    /// each stand a whole client up, and the census is one row per knob — copied per test, adding
+    /// a knob meant editing every copy.
+    fn cvar_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .insert_resource(SoundConfig::default())
+            .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
+            .insert_resource(ViewDistance { farclip: 350.0 })
+            .init_resource::<LookConfig>()
+            .init_resource::<ClickConfig>()
+            .init_resource::<LootConfig>()
+            .init_resource::<NameConfig>()
+            .init_resource::<VPlateMode>()
+            .init_resource::<ClutterConfig>()
+            .init_resource::<MinimapZoom>()
+            .init_resource::<BubbleConfig>()
+            .init_resource::<ZoomLimit>()
+            .init_resource::<FollowConfig>()
+            .init_resource::<VideoConfig>()
+            .init_resource::<PaneRate>()
+            .init_resource::<crate::ui_guild::GuildMemberNotify>()
+            .add_plugins(CvarPlugin);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app
+    }
+
+    /// **The reported bug, end to end** (decision 1622): "char screen doesn't remember the last
+    /// logged in char, the ref does". Two launches over one `benilla-config/`, with the real
+    /// [`CvarPlugin`] and the real [`crate::char_select`] systems in between — entering the world
+    /// as somebody has to survive the quit and bring the screen back to them.
+    ///
+    /// The seam this covers and the per-module tests cannot: `set_cvar_engine`'s queued change is
+    /// only *persisted* if [`apply_to_knobs`] answers `true` for the name. A knobless CVar that
+    /// falls through to `_ => return false` reaches the VM's table, reads back correctly all
+    /// session, and is silently dropped at the save — which is this bug again, one layer down.
+    #[test]
+    fn entering_the_world_survives_the_quit_and_comes_back_selected() {
+        use crate::char_select::{ClientState, Roster};
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("benilla-lastchar-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _u = EnvGuard::unset("WOW_UI_SCALE");
+        let _f = EnvGuard::unset("WOW_FARCLIP");
+        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
+        let _w = EnvGuard::unset("WOW_CHAR");
+        let _s = EnvGuard::unset("WOW_CHARSELECT_PICK");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let roster = || {
+            (1..=4)
+                .map(|g| crate::char_select::test_character(g, &format!("Char{g}")))
+                .collect::<Vec<_>>()
+        };
+
+        // ── Launch 1: the roster lands, and the player enters the world as the third row. ────
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = cvar_app();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        crate::char_select::add_test_systems(&mut app, tx);
+        app.update(); // Startup loads the (absent) file; the first Update seeds the VM table
+        app.world_mut().write_message(crate::net::CharListMessage {
+            characters: roster(),
+            realm: None,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<Roster>().selected(),
+            Some(0),
+            "nothing remembered yet, so the first row — the behaviour that was already right",
+        );
+        app.world_mut().resource_mut::<Roster>().pending_pick = Some(3); // guid 3 = row 2
+        app.update();
+        app.world_mut().write_message(AppExit::Success);
+        app.update();
+
+        let text = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
+        assert!(
+            text.contains("lastCharacterIndex = \"2\""),
+            "entering the world must reach the file, 0-based like Config.wtf:\n{text}"
+        );
+
+        // ── Launch 2: a fresh client over the same folder, and the roster arrives. ───────────
+        let (tx, _rx2) = crossbeam_channel::unbounded();
+        let mut app = cvar_app();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        crate::char_select::add_test_systems(&mut app, tx);
+        app.update();
+        app.world_mut().write_message(crate::net::CharListMessage {
+            characters: roster(),
+            realm: None,
+        });
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<Roster>().selected(),
+            Some(2),
+            "the second launch must stand the SAME character on the stage — the whole report",
+        );
+        assert_eq!(
+            *app.world().resource::<State<ClientState>>().get(),
+            ClientState::CharSelect,
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     /// The minimap's zoom rides the same loop, driven from the **engine** rather than a Lua
     /// `SetCVar` (decision 1131): the `+`/`-` buttons call `Minimap:SetZoom`, which writes the live
     /// index and its CVar together — and that has to reach the knob and the file exactly like a
@@ -1106,26 +1234,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
-        app.add_plugins(bevy::MinimalPlugins)
-            .insert_resource(SoundConfig::default())
-            .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
-            .insert_resource(ViewDistance { farclip: 777.0 })
-            .init_resource::<LookConfig>()
-            .init_resource::<ClickConfig>()
-            .init_resource::<LootConfig>()
-            .init_resource::<NameConfig>()
-            .init_resource::<VPlateMode>()
-            .init_resource::<ClutterConfig>()
-            .init_resource::<MinimapZoom>()
-            .init_resource::<BubbleConfig>()
-            .init_resource::<ZoomLimit>()
-            .init_resource::<FollowConfig>()
-            .init_resource::<VideoConfig>()
-            .init_resource::<PaneRate>()
-            .init_resource::<crate::ui_guild::GuildMemberNotify>()
-            .add_plugins(CvarPlugin);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        let mut app = cvar_app();
         app.update();
 
         // Startup restored the knob, and the VM's table answers with it — which is what the UI-load

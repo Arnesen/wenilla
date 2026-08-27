@@ -33,22 +33,24 @@ pub fn color_texture_format() -> TextureFormat {
 /// coverage-correct, leaf-coloured downsample, so we lay them in as-is under the alpha test — no
 /// re-filter, no alpha-to-coverage (1.12 does neither). Mips + anisotropy give the no-shimmer look
 /// at distance without softening the up-close art.
-pub fn repeat_texture_authored(chain: BlpMipChain, wrap: (bool, bool)) -> Image {
+pub fn repeat_texture_authored(upload: crate::gpu_blp::UploadChain, wrap: (bool, bool)) -> Image {
+    let crate::gpu_blp::UploadChain { chain, format } = upload;
     let levels = chain.mips.len() as u32;
-    let mip0 = chain.mips[0].clone(); // satisfies Image::new's length assert; full chain set below
     let mut data = Vec::with_capacity(chain.mips.iter().map(Vec::len).sum());
     for mip in &chain.mips {
         data.extend_from_slice(mip);
     }
-    let mut image = Image::new(
+    // Taking an `UploadChain` rather than a bare chain is deliberate: the format and the bytes are
+    // decided together by `gpu_blp::for_upload`, so this function cannot be handed blocks under an
+    // uncompressed descriptor. It was, once — see `UploadChain`'s doc (decision 1626).
+    let mut image = Image::new_uninit(
         Extent3d {
             width: chain.width,
             height: chain.height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        mip0,
-        color_texture_format(),
+        format,
         // `RENDER_WORLD` — see [`image_gpu_bytes`] and the `blp.rs` `WorldArt` variant this is the
         // synchronous twin of: the render world takes the chain rather than cloning it and keeping
         // a main-world copy. Its callers are `WorldAssets::texture` and the character-skin

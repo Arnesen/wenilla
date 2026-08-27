@@ -390,6 +390,7 @@ pub(super) fn drive_script(
     let printing = ui_cost_enabled();
     let cost_on = printing || ui_cost_wanted.0;
     let solves_before = cost_on.then(|| script.layout_solves());
+    let derives_before = cost_on.then(|| script.layout_derivations());
     // The measure counters are PER FRAME: `measure_fontstrings` adds to them, and both publish
     // sites below carry them forward so the two measure passes sum into one frame's row. Nothing
     // else zeroes them, so without this the recorder's "re-shaped strings" column is a lifetime
@@ -599,6 +600,7 @@ pub(super) fn drive_script(
                 diff: 0,
                 quads: quads.quads.len(),
                 solves,
+                derives: script.layout_derivations() - derives_before.unwrap_or(0),
                 skipped: true,
                 spliced: 0,
             };
@@ -785,6 +787,7 @@ pub(super) fn drive_script(
                 diff: 0,
                 quads: quads.quads.len(),
                 solves,
+                derives: script.layout_derivations() - derives_before.unwrap_or(0),
                 skipped: false,
                 spliced: changed.len(),
             };
@@ -913,6 +916,7 @@ pub(super) fn drive_script(
             diff: us_diff,
             quads: n_quads,
             solves,
+            derives: script.layout_derivations() - derives_before.unwrap_or(0),
             skipped: false,
             spliced: 0,
         };

@@ -4,6 +4,7 @@
 //!   benilla-visual diff     <a.png> <b.png>   [--out <diff.png>] [--fail <mae>] [--amplify <n>]
 //!   benilla-visual diff-dir <dir_a> <dir_b>   [--out <diff_dir>] [--fail <mae>] [--amplify <n>]
 //!   benilla-visual flicker  <burst_dir>       [--out <envelope.png>] [--fail <mae>] [--amplify <n>]
+//!   benilla-visual stat     <img.png>         [--rect <x>,<y>,<w>,<h>]
 //!
 //! `diff` compares two images; `diff-dir` compares every `*.png` present in *both* directories by name.
 //! Prints the metrics; writes amplified heatmap(s) when `--out` is given; exits non-zero if any image's
@@ -206,6 +207,10 @@ fn main() -> Result<()> {
                 .context("compose-dir needs --out <dir>")?;
             compose_dir(Path::new(da), Path::new(db), out)?;
         }
+        "stat" => {
+            let [img] = one(rest, "stat")?;
+            stat_cmd(Path::new(img), opts.rect.as_deref())?;
+        }
         "crop" => {
             let [img] = one(rest, "crop")?;
             let rect = opts
@@ -274,6 +279,67 @@ fn series(dir: &Path, at: &str) -> Result<()> {
 /// the frame entirely is an ERROR, never an edge-clamped guess; a rect that only partially fits is
 /// clamped *out loud*; and every pixel sample prints in SOURCE coordinates at source resolution, so
 /// nothing downstream does coordinate math on a zoomed image.
+/// Per-channel min / mean / max over a rect (or the whole frame) — the "is this region flat?"
+/// instrument. A frame edge that shows the render target's clear colour instead of art reads as
+/// `min == max` on every channel (decision 1619, the glue framing's void check); a region of art
+/// never does. Printed, not judged: the caller compares two rects or two captures.
+fn stat_cmd(path: &Path, rect: Option<&str>) -> Result<()> {
+    let img = load(path)?;
+    let (w, h) = img.dimensions();
+    let r = match rect {
+        Some(spec) => {
+            let want = parse_rect(spec)?;
+            if want.x0 >= w || want.y0 >= h {
+                bail!("--rect {spec} starts outside the {w}x{h} frame");
+            }
+            Rect {
+                x0: want.x0,
+                y0: want.y0,
+                x1: want.x1.min(w),
+                y1: want.y1.min(h),
+            }
+        }
+        None => Rect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        },
+    };
+    let mut min = [u8::MAX; 3];
+    let mut max = [u8::MIN; 3];
+    let mut sum = [0u64; 3];
+    for y in r.y0..r.y1 {
+        for x in r.x0..r.x1 {
+            let p = img.get_pixel(x, y).0;
+            for c in 0..3 {
+                min[c] = min[c].min(p[c]);
+                max[c] = max[c].max(p[c]);
+                sum[c] += u64::from(p[c]);
+            }
+        }
+    }
+    let n = u64::from(r.width()) * u64::from(r.height());
+    let mean = sum.map(|s| s as f64 / n as f64);
+    let flat = min == max;
+    println!(
+        "{}: {w}x{h} rect [{}..{}, {}..{}] ({} px)  min {:?}  mean [{:.1}, {:.1}, {:.1}]  max {:?}  {}",
+        path.display(),
+        r.x0,
+        r.x1,
+        r.y0,
+        r.y1,
+        n,
+        min,
+        mean[0],
+        mean[1],
+        mean[2],
+        max,
+        if flat { "FLAT" } else { "varied" }
+    );
+    Ok(())
+}
+
 fn crop_cmd(path: &Path, rect: &str, at: Option<&str>, scale: u32, out: &Path) -> Result<()> {
     let img = load(path)?;
     let (w, h) = img.dimensions();
@@ -787,6 +853,7 @@ fn print_usage() {
            benilla-visual hotspot     <burst_dir>     --out <strip.png> [--toggle-delta <n>] [--pad <n>]\n  \
            benilla-visual series      <burst_dir>     --at \"<x>,<y>[;<x>,<y>…]\"\n  \
            benilla-visual compose-dir <dir_a> <dir_b> --out <dir>   (side-by-side `a | b` per image)\n  \
+           benilla-visual stat        <img.png>       [--rect \"<x>,<y>,<w>,<h>\"]\n\
            benilla-visual crop        <img.png>       --rect \"<x>,<y>,<w>,<h>\" --out <crop.png> [--scale <n>] [--at \"<x>,<y>;…\"]\n\
          \n\
          flicker reads a WOW_LIVE_SHOT_COUNT burst (adjacent frames) in shot order and reports both\n\

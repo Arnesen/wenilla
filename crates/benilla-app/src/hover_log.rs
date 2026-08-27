@@ -84,7 +84,7 @@ impl Plugin for HoverLogPlugin {
                 let _ = writeln!(
                     out,
                     "frame_ms,cpu_ms,tick_us,resolve_us,measure_us,extract_us,convert_us,\
-                     diff_us,quads,solves,skipped,measured,measured_texts,tip_owner,tip_lines,\
+                     diff_us,quads,solves,derives,skipped,measured,measured_texts,tip_owner,tip_lines,\
                      tip_first_line,spliced"
                 );
                 info!("hover log: recording every frame to {path}");
@@ -155,7 +155,7 @@ fn record(
         .unwrap_or_else(|| (String::new(), 0, String::new()));
     let _ = writeln!(
         rec.out,
-        "{frame_ms:.3},{cpu_ms:.3},{},{},{},{},{},{},{},{},{},{},{},{},{lines},{},{}",
+        "{frame_ms:.3},{cpu_ms:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{lines},{},{}",
         c.tick,
         c.resolve,
         c.measure,
@@ -164,6 +164,7 @@ fn record(
         c.diff,
         c.quads,
         c.solves,
+        c.derives,
         u8::from(c.skipped),
         c.measured,
         cell(&c.measured_texts.join(" ⏎ ")),
@@ -210,6 +211,11 @@ fn summarize(label: &str, rows: &[&Row]) -> String {
     // extract gate skipped the conversion+rasterize loop outright.
     #[allow(clippy::cast_precision_loss)]
     let solves = rows.iter().map(|r| r.cost.solves as f64).sum::<f64>() / f64::from(n);
+    // The term `solves` hides (decision 1625): a solve that had to DERIVE the layout graph first
+    // costs an order of magnitude more than one that used the ledger, and both count as one solve.
+    // The law is zero — anything else is a write site that gave up naming its node, which
+    // `WOW_LAYOUT_DERIVE_TRACE=<secs>:<n>` will backtrace on a live run.
+    let derives = rows.iter().map(|r| r.cost.derives as f64).sum::<f64>() / f64::from(n);
     let skips = 100.0 * rows.iter().filter(|r| r.cost.skipped).count() as f32 / n;
     // Counted against the DROPPED threshold, not the raw budget: synced wall time rails at the
     // display's present grant and jitters around it, so counting frames over 16.7 ms mostly counts
@@ -222,7 +228,7 @@ fn summarize(label: &str, rows: &[&Row]) -> String {
         "  {label:<34} n={:<6} wall p50={:>6.2} p99={:>6.2} max={:>7.2}  cpu p50={:>6.2} \
          p99={:>6.2}  dropped={:>5.1}%\n      ui μs: tick={:>6.0} resolve={:>6.0} \
          measure={:>5.0} extract={:>6.0} convert={:>6.0} diff={:>5.0}\n      solves/frame={:.2} \
-         reshaped/frame={:.2} extract-gate-skipped={:.0}%",
+         derives/frame={:.2} reshaped/frame={:.2} extract-gate-skipped={:.0}%",
         rows.len(),
         pct(&wall, 0.50),
         pct(&wall, 0.99),
@@ -237,6 +243,7 @@ fn summarize(label: &str, rows: &[&Row]) -> String {
         ui_us(|c| c.convert),
         ui_us(|c| c.diff),
         solves,
+        derives,
         measured,
         skips,
     )
@@ -303,20 +310,20 @@ fn parse_row(line: &str) -> Option<Row> {
         }
     }
     fields.push(cur);
-    if fields.len() < 16 {
+    if fields.len() < 17 {
         return None;
     }
     let num = |i: usize| fields[i].parse::<f64>().ok();
-    let owner = fields[13].clone();
+    let owner = fields[14].clone();
     Some(Row {
         frame_ms: num(0)? as f32,
         cpu_ms: num(1)? as f32,
         cost: UiFrameCost {
-            measured: num(11)? as usize,
-            measured_texts: if fields[12].is_empty() {
+            measured: num(12)? as usize,
+            measured_texts: if fields[13].is_empty() {
                 Vec::new()
             } else {
-                fields[12].split(" ⏎ ").map(str::to_string).collect()
+                fields[13].split(" ⏎ ").map(str::to_string).collect()
             },
             tick: num(2)? as u128,
             resolve: num(3)? as u128,
@@ -326,14 +333,15 @@ fn parse_row(line: &str) -> Option<Row> {
             diff: num(7)? as u128,
             quads: num(8)? as usize,
             solves: num(9)? as u64,
-            skipped: num(10)? != 0.0,
+            derives: num(10)? as u64,
+            skipped: num(11)? != 0.0,
             // Appended column (absent in pre-splice recordings — those read back as 0).
-            spliced: fields.get(16).and_then(|f| f.parse().ok()).unwrap_or(0),
+            spliced: fields.get(17).and_then(|f| f.parse().ok()).unwrap_or(0),
         },
         tip: if owner.is_empty() {
             None
         } else {
-            Some((owner, num(14)? as i64, fields[15].clone()))
+            Some((owner, num(15)? as i64, fields[16].clone()))
         },
     })
 }

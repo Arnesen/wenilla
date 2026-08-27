@@ -601,7 +601,15 @@ pub(super) fn append_line(
     if let Some(d) = model.region_data.get_mut(&lh) {
         if d.size != pin {
             d.size = pin;
-            model.touch_layout();
+            // NAMED, not conservative (decision 1388). This writes one region's EXPLICIT SIZE and
+            // nothing else — no anchor target, no roster membership — which is the exact shape
+            // 1388 migrated every size setter to. It was missed because it is an internal write
+            // rather than a `SetWidth` binding, and the miss is expensive in the one place it can
+            // least afford to be: the pin flips whenever a line changes ROLE between wrapped and
+            // plain, which is what every hover from one item or spell to a differently-shaped one
+            // does. A conservative touch there re-derives the whole layout graph — every live
+            // frame's scale re-synced, every anchored region re-hashed — on each hover.
+            model.touch_layout_region(lh);
             // The wrap pin is the measure key's wrap-width input.
             model.touch_measure(lh);
         }

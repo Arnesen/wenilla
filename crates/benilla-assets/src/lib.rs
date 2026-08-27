@@ -45,6 +45,9 @@ pub use adt::{chunk_to_mesh, AdtLoader, AdtTile, ChunkShading};
 pub use wdt::{WdtIndex, WdtIndexLoader};
 mod blp;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
+/// Whether this run's GPU can eat WoW's stored DXT blocks, and the chain form that follows.
+mod gpu_blp;
+pub use gpu_blp::{bc_supported, for_upload, publish_bc_support, BlpGpuSupportPlugin, UploadChain};
 mod m2;
 pub use m2::{
     EmitterBillboard, M2Model, M2ModelLoader, ModelEmitter, ModelLight, ModelRibbon, PortraitCamera,
@@ -234,6 +237,9 @@ pub fn register_asset_loaders(app: &mut App) {
     app.init_asset::<WmoModel>();
     app.init_asset::<AdtTile>();
     app.init_asset::<WdtIndex>();
+    // Publishes whether this device can eat DXT blocks (decision 1626). A plugin, because the
+    // answer only exists after `RenderPlugin::finish` — see `BlpGpuSupportPlugin`.
+    app.add_plugins(BlpGpuSupportPlugin);
     app.register_asset_loader(BlpImageLoader);
     app.register_asset_loader(M2ModelLoader);
     app.register_asset_loader(WmoModelLoader);

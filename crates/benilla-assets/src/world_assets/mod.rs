@@ -26,7 +26,7 @@ use bevy::render::render_resource::{Buffer, Face};
 
 use crate::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 use crate::SpatialCache;
-use benilla_formats::{blp_to_rgba, read_texture_mip_chain, tga_to_rgba, Chain, ModelBlend};
+use benilla_formats::{blp_to_rgba, read_texture_native_chain, tga_to_rgba, Chain, ModelBlend};
 
 /// BLP/RGBA -> Bevy `Image` texture helpers (+ solid/cursor/liquid-frame textures). Split out for
 /// size; re-exported so callers keep using `benilla_assets::{solid_layer_chain, …}`.
@@ -374,8 +374,11 @@ impl WorldAssets {
         if let Some(handle) = self.textures.fetch(&key) {
             return Some(handle);
         }
-        let chain = read_texture_mip_chain(&mut self.chain.lock_recover(), &key.0).ok()?;
-        let handle = images.add(repeat_texture_authored(chain, wrap));
+        // Passthrough: world art is uploaded in the form the BLP stores it (decision 1626).
+        // Nothing reads a world texture main-side — the same reasoning that already makes this
+        // lane `RenderAssetUsages::RENDER_WORLD` — so there are no CPU texels to lose.
+        let chain = read_texture_native_chain(&mut self.chain.lock_recover(), &key.0).ok()?;
+        let handle = images.add(repeat_texture_authored(crate::for_upload(chain), wrap));
         self.textures.insert(key, handle.clone());
         Some(handle)
     }

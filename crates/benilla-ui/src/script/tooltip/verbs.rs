@@ -71,8 +71,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                             let same = input.anchors.len() == 1
                                 && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
                             if !same {
+                                // The plate re-points at the button under the cursor, which moves
+                                // an EDGE — structural under 1388, and therefore a whole-graph
+                                // derivation on every bag slot and every spellbook button a hover
+                                // sweep crossed. It names its node now (decision 1625): the old
+                                // and new target lists are both right here, so the cached graph's
+                                // edges are re-pointed instead of thrown away.
+                                let old_targets: Vec<u32> =
+                                    input.anchors.iter().map(|a| a.relative_to).collect();
                                 input.anchors = vec![new];
-                                model.touch_layout();
+                                model.touch_layout_retarget_frame(h, &old_targets, &[owner_id]);
                             }
                         }
                         None if anchor.eq_ignore_ascii_case("ANCHOR_NONE") => {

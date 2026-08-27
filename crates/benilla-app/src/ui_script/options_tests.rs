@@ -1344,7 +1344,7 @@ fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
 }
 
 /// Defaults on the Graphics page: uiScale back to its registered default (0.9) and farclip to
-/// its (777), the rows following, ONLY the moved values queuing — and a pending uiScale edit
+/// its (350), the rows following, ONLY the moved values queuing — and a pending uiScale edit
 /// dies with it (the default write supersedes what Apply would have committed).
 #[test]
 fn defaults_resets_the_graphics_page_to_registered_defaults() {
@@ -1367,7 +1367,7 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         "{changes:?}"
     );
     assert!(
-        changes.contains(&("farclip".to_string(), "777".to_string())),
+        changes.contains(&("farclip".to_string(), "350".to_string())),
         "{changes:?}"
     );
     assert_eq!(
@@ -1380,7 +1380,7 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
             "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
-        "777"
+        "350"
     );
     assert_eq!(
         s.eval::<String>(

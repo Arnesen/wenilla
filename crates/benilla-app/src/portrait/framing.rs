@@ -51,8 +51,9 @@ pub(super) fn diag_to_vert(fov: f32, aspect: f32) -> f32 {
 /// It is the client's own reference frame, not a guess. The Lua screen is `768a × 768`
 /// (wow-re `ui/scratch/modelframe-camera-law.md` §12.1), so at the era's default `a = 4/3` the
 /// design space is exactly `1024×768` — the resolution every `UI_<Race>` diorama and its camera-0
-/// framing were authored against.
-pub(super) const GLUE_AUTHORED_ASPECT: f32 = 4.0 / 3.0;
+/// framing were authored against. One definition, in the crate that also measures the art
+/// against it ([`benilla_formats::glue_art_extent`]).
+pub(super) use benilla_formats::{ArtExtent, GLUE_AUTHORED_ASPECT};
 
 /// The **glue scene's** vertical opening angle — the authored 4:3 view box, never cropped.
 ///
@@ -77,18 +78,104 @@ pub(super) const GLUE_AUTHORED_ASPECT: f32 = 4.0 / 3.0;
 /// narrow window opens upward rather than cropping the diorama's sides. Continuous at `4/3`, where
 /// both legs give `0.6·fov`.
 ///
+/// **…as far as the art goes** (decision 1619, B330). Every diorama is finite — a sky card of some
+/// authored width, a ground that stops — and 1587's hor+ had no ceiling: `UI_MainMenu` runs out
+/// of backdrop before 16:9 and the frame past its slanted edges was the clear colour; `UI_Tauren`
+/// runs out at ~2.24:1. **Not one of the seven scenes is drawn wider than about 3:2**
+/// ([`benilla_formats::shipped_glue_art_extent`], measured per texel off the chain: MainMenu 1.54,
+/// Human 1.47, Orc 1.57, Dwarf 1.43, NightElf 1.45, Scourge 1.57, Tauren 1.46 — 1587's "no void at
+/// 21:9 on `UI_Human`" held only because the create screen's side panels stand exactly over it).
+/// So `art` bounds both legs: the wide leg grows the width only to `art.half_w` and past it
+/// **holds the width and closes the vertical** — the zoom the reference does everywhere, done
+/// only where the art forces it — and the narrow leg does the same with `art.half_h`. The
+/// authored box itself is never given up (`max(h0)` / `max(t0)`): a scene whose art does not fill
+/// 4:3 is the art's problem, not a reason to zoom past the composition. `None` is 1587's
+/// unbounded law.
+///
+/// **…and never tighter than the reference at 16:9.** Holding the width zooms faster than the
+/// reference's diagonal law, so left alone it re-crops the character at 21:9 (B242, the report
+/// 1587 closed). The zoom has a floor ([`glue_zoom_floor`]): the reference's own 16:9 opening —
+/// the tightest framing every race has been played at, on the most common panel, for fifteen
+/// years, an empirical bound on "the character still fits", not a mechanism. (A floor of "what
+/// 16:9 needs to reach this scene's art" was tried and clipped the night elf male's hair and
+/// boots at 16:9 — 8% past the reference is past what fits.) Past the aspect where the floor's
+/// opening cannot fill the art's width, the scene is **pillarboxed** — rendered at that aspect,
+/// centred, black either side — which is what the modern client does past 16:9 and the only
+/// honest answer once the art is narrower than the window: not void (B330), not a crop (B242),
+/// a frame.
+///
+/// Where this lands: at 16:9 every scene but one zooms to within a few percent of the reference's
+/// own `0.49·fov`, by construction rather than by a constant, and fills the window; the night
+/// elves' stage — its sky card exactly 4:3 wide, so the box itself is its ceiling — is boxed at
+/// 1.65:1 there, ~3.6% of the width each side, where the reference shows black corners past the
+/// same card. At 21:9 the reference cropped
+/// and 1587 showed void, and every scene now shows its 16:9 framing with bars (~9–13% of the
+/// width, per scene). At 4:3 nothing changes: byte-identical.
+///
 /// Scoped to the full-screen glue scene on purpose. A `<PlayerModel>` pane renders into a fixed
 /// rect that is *not* the window, so its crop is its own `W/H` and stays verbatim ([`diag_to_vert`],
 /// decisions 1089/1543).
-pub(super) fn glue_scene_vert_fov(fov: f32, window_aspect: f32) -> f32 {
+pub(super) fn glue_scene_framing(
+    fov: f32,
+    window_aspect: f32,
+    art: Option<ArtExtent>,
+) -> GlueFraming {
     let authored = diag_to_vert(fov, GLUE_AUTHORED_ASPECT);
-    if window_aspect >= GLUE_AUTHORED_ASPECT || window_aspect <= 0.0 {
-        authored
-    } else {
-        // Hold the authored *horizontal* half-extent `tan(authored/2)·(4/3)` and solve for the
-        // vertical that a narrower window needs to keep it.
-        2.0 * ((authored * 0.5).tan() * GLUE_AUTHORED_ASPECT / window_aspect).atan()
+    let full = |vert_fov: f32| GlueFraming {
+        vert_fov,
+        viewport_aspect: None,
+    };
+    if window_aspect <= 0.0 {
+        return full(authored); // a degenerate (mid-resize) window: the authored opening, finite
     }
+    let t0 = (authored * 0.5).tan(); // the authored vertical half-extent
+    let h0 = t0 * GLUE_AUTHORED_ASPECT; // …and horizontal
+    if window_aspect >= GLUE_AUTHORED_ASPECT {
+        // hor+: the authored vertical opening, until the width reaches the art's edge; past it
+        // the width is held there and the vertical closes — down to the 16:9 floor, past which
+        // the window is wider than the framing can honestly fill: pillarbox.
+        let ceiling = art.map_or(f32::INFINITY, |a| a.half_w.max(h0));
+        let half_w = (t0 * window_aspect).min(ceiling);
+        let floor = glue_zoom_floor(fov);
+        let half_h = half_w / window_aspect;
+        if half_h >= floor {
+            full(2.0 * half_h.atan())
+        } else {
+            GlueFraming {
+                vert_fov: 2.0 * floor.atan(),
+                viewport_aspect: Some(half_w / floor),
+            }
+        }
+    } else {
+        // The mirror: hold the authored horizontal half-extent and open upward, until the art's
+        // top/bottom edge; past it the height is held and the sides crop — the stage's edges,
+        // never the character, so no floor and no bars.
+        let ceiling = art.map_or(f32::INFINITY, |a| a.half_h.max(t0));
+        let half_h = (h0 / window_aspect).min(ceiling);
+        full(2.0 * half_h.atan())
+    }
+}
+
+/// What [`glue_scene_framing`] decided for one window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct GlueFraming {
+    /// The booth camera's vertical opening (radians).
+    pub(super) vert_fov: f32,
+    /// `Some(aspect)`: render into a centred viewport of this aspect instead of the whole window
+    /// (pillarbox — the window is wider than the art can fill at the zoom floor). `None`: the
+    /// whole window.
+    pub(super) viewport_aspect: Option<f32>,
+}
+
+/// The panel the reference was played on without complaint for fifteen years — the aspect whose
+/// reference framing is the zoom floor, and the one the modern client fills before it boxes.
+pub(super) const REFERENCE_PANEL: f32 = 16.0 / 9.0;
+
+/// The **zoom floor** — the vertical half-extent (tan units) the glue scene is never framed
+/// tighter than: the reference's own opening at [`REFERENCE_PANEL`], `tan(½·fov/√((16/9)²+1))`.
+/// See [`glue_scene_framing`].
+pub(super) fn glue_zoom_floor(fov: f32) -> f32 {
+    (diag_to_vert(fov, REFERENCE_PANEL) * 0.5).tan()
 }
 
 /// The real client's portrait/model **projection**: gxumath `0x5c3cc0`, a *diagonal-FOV*
@@ -679,9 +766,9 @@ mod tests {
     /// every window shape, instead of spending height on width the way the reference's
     /// `aspect = a_screen` does.
     ///
-    /// The three numbers that matter: the authored `0.6·fov` survives at 4:3, at 16:9 and at the
-    /// 3440×1440 panel the report came from — where the un-pinned law gives `0.386·fov`, a 1.55×
-    /// zoom, and the character's head and feet leave the frame.
+    /// Unbounded (no art): the authored `0.6·fov` survives at 4:3, at 16:9 and at the 3440×1440
+    /// panel the report came from — where the un-pinned law gives `0.386·fov`, a 1.55× zoom, and
+    /// the character's head and feet leave the frame.
     #[test]
     fn the_glue_scene_holds_its_authored_vertical_on_every_wide_window() {
         let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
@@ -697,9 +784,10 @@ mod tests {
             3440.0 / 1440.0,
             32.0 / 9.0,
         ] {
+            let f = glue_scene_framing(1.0, wide, None);
             assert!(
-                close(glue_scene_vert_fov(1.0, wide), authored),
-                "a{wide} must keep the authored vertical opening"
+                close(f.vert_fov, authored) && f.viewport_aspect.is_none(),
+                "a{wide} must keep the authored vertical opening, unboxed"
             );
         }
         // What we are NOT doing any more — the reference's own numbers, kept here so the size of
@@ -710,7 +798,7 @@ mod tests {
 
     /// The other side of the same clamp: a window NARROWER than 4:3 opens upward rather than
     /// cropping the diorama's sides, so the authored horizontal half-extent is the invariant there.
-    /// Continuous at 4:3, where both legs of [`glue_scene_vert_fov`] agree.
+    /// Continuous at 4:3, where both legs of [`glue_scene_framing`] agree.
     #[test]
     fn a_narrow_glue_window_holds_its_authored_width_instead() {
         let half_width = |vert: f32, a: f32| (vert * 0.5).tan() * a;
@@ -719,16 +807,151 @@ mod tests {
             GLUE_AUTHORED_ASPECT,
         );
         for narrow in [5.0 / 4.0, 1.0, 3.0 / 4.0] {
-            let got = half_width(glue_scene_vert_fov(1.0, narrow), narrow);
+            let got = half_width(glue_scene_framing(1.0, narrow, None).vert_fov, narrow);
             assert!(
                 (got - authored).abs() < 5e-4,
                 "a{narrow}: authored half-width {authored} vs {got}"
             );
         }
         // …and it never *narrows* the view: a tall window sees more, never less.
-        assert!(glue_scene_vert_fov(1.0, 1.0) > glue_scene_vert_fov(1.0, GLUE_AUTHORED_ASPECT));
+        assert!(
+            glue_scene_framing(1.0, 1.0, None).vert_fov
+                > glue_scene_framing(1.0, GLUE_AUTHORED_ASPECT, None).vert_fov
+        );
         // A degenerate window (zero height, mid-resize) must not produce a NaN fov.
-        assert!(glue_scene_vert_fov(1.0, 0.0).is_finite());
+        assert!(glue_scene_framing(1.0, 0.0, None).vert_fov.is_finite());
+    }
+
+    /// The art ceiling (decision 1619): with a measured extent the wide leg widens exactly to the
+    /// art's edge, past it holds that width and closes the vertical, and once the vertical would
+    /// close below the reference's 16:9 opening the window is pillarboxed at the aspect that
+    /// opening fills the art at. At and below the art's aspect nothing differs from 1587's law.
+    #[test]
+    fn a_wide_window_widens_to_the_arts_edge_then_zooms_then_pillarboxes() {
+        let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
+        let authored = diag_to_vert(1.0, GLUE_AUTHORED_ASPECT);
+        let t0 = (authored * 0.5).tan();
+        // Art that runs out of width at exactly 3:2 (the login gate's shape), tall enough never
+        // to bind.
+        let art = Some(ArtExtent {
+            half_w: t0 * 1.5,
+            half_h: 10.0,
+        });
+        let half_width =
+            |f: GlueFraming, a: f32| (f.vert_fov * 0.5).tan() * f.viewport_aspect.unwrap_or(a);
+        // Up to 3:2 the vertical opening is the authored one — identical to the unbounded law.
+        for a in [GLUE_AUTHORED_ASPECT, 1.4, 1.5] {
+            let f = glue_scene_framing(1.0, a, art);
+            assert!(
+                close(f.vert_fov, authored) && f.viewport_aspect.is_none(),
+                "a{a}"
+            );
+        }
+        // Past it the width is pinned at the art's edge and the vertical closes: the zoom. At
+        // 16:9 that lands beside the reference's own diagonal-law number (0.490) — a 3:2 edge
+        // gives 2·atan(1.5·t0/(16/9)) — within a few percent, and no constant says so.
+        let f = glue_scene_framing(1.0, 16.0 / 9.0, art);
+        assert!(f.viewport_aspect.is_none(), "16:9 fills the window");
+        assert!(close(half_width(f, 16.0 / 9.0), t0 * 1.5));
+        assert!(
+            f.vert_fov < authored && (f.vert_fov - 0.490_26).abs() < 0.03,
+            "{}",
+            f.vert_fov
+        );
+        assert!(f.vert_fov >= 2.0 * glue_zoom_floor(1.0).atan() - 1e-6);
+        // Wider still, the zoom would pass the reference's 16:9 opening: the floor holds it
+        // there and the scene is boxed at the aspect the floor fills the art at (1.5·t0 / floor),
+        // the same box on any wider window.
+        let floor = glue_zoom_floor(1.0);
+        assert!(close(floor, (diag_to_vert(1.0, 16.0 / 9.0) * 0.5).tan()));
+        for a in [3440.0 / 1440.0, 32.0 / 9.0] {
+            let f = glue_scene_framing(1.0, a, art);
+            assert!(
+                close((f.vert_fov * 0.5).tan(), floor),
+                "a{a} sits on the floor"
+            );
+            let boxed = f.viewport_aspect.expect("pillarboxed");
+            assert!(close(boxed, t0 * 1.5 / floor), "a{a}: box {boxed}");
+            assert!(boxed < a, "the box is narrower than the window");
+            assert!(
+                close(half_width(f, a), t0 * 1.5),
+                "…and still ends at the art"
+            );
+        }
+        // Wide art (a scene drawn out to 21:9) never binds: 1587's answer, unchanged.
+        let wide_art = Some(ArtExtent {
+            half_w: t0 * 4.0,
+            half_h: 10.0,
+        });
+        let f = glue_scene_framing(1.0, 3440.0 / 1440.0, wide_art);
+        assert!(close(f.vert_fov, authored) && f.viewport_aspect.is_none());
+        // Art narrower than 16:9 can reach at the reference's opening (the night elves' sky, a
+        // 4:3 card — 1.31, inside the authored box, so the box's own width is the ceiling): the
+        // floor holds and 16:9 itself is boxed, at the aspect the floor fills the box at — the
+        // same box on any wider window.
+        let narrow_art = Some(ArtExtent {
+            half_w: t0 * 1.31,
+            half_h: 10.0,
+        });
+        let h0 = t0 * GLUE_AUTHORED_ASPECT;
+        for a in [16.0 / 9.0, 3440.0 / 1440.0] {
+            let f = glue_scene_framing(1.0, a, narrow_art);
+            assert!(
+                close((f.vert_fov * 0.5).tan(), floor),
+                "a{a} sits on the floor"
+            );
+            let boxed = f.viewport_aspect.expect("boxed");
+            assert!((boxed - h0 / floor).abs() < 2e-3, "a{a}: box {boxed}");
+        }
+        // …and 16:10 is not: the box's width still fills it above the floor.
+        assert!(glue_scene_framing(1.0, 1.6, narrow_art)
+            .viewport_aspect
+            .is_none());
+    }
+
+    /// The authored box is never given up: art that does not even reach it (a `0.0` extent, or
+    /// one inside 4:3) leaves the 4:3 framing exactly where 1587 put it — on both legs.
+    #[test]
+    fn art_inside_the_authored_box_never_zooms_past_the_composition() {
+        let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
+        let authored = diag_to_vert(1.0, GLUE_AUTHORED_ASPECT);
+        let none = Some(ArtExtent {
+            half_w: 0.0,
+            half_h: 0.0,
+        });
+        assert!(close(
+            glue_scene_framing(1.0, GLUE_AUTHORED_ASPECT, none).vert_fov,
+            authored
+        ));
+        assert!(close(glue_scene_framing(1.0, 1.0, none).vert_fov, authored));
+        // At 16:9 with no art past the box, the box's own width is held — and holding 4:3's
+        // width in a 16:9 window closes the vertical past the reference's 16:9 opening, so the
+        // floor takes it: the authored box at that opening, boxed.
+        let f = glue_scene_framing(1.0, 16.0 / 9.0, none);
+        let t0 = (authored * 0.5).tan();
+        let floor = glue_zoom_floor(1.0);
+        assert!(close((f.vert_fov * 0.5).tan(), floor));
+        let boxed = f.viewport_aspect.expect("boxed");
+        assert!(
+            (boxed - t0 * GLUE_AUTHORED_ASPECT / floor).abs() < 2e-3,
+            "box {boxed}"
+        );
+        // 16:10 still fills: 4:3's width there is above the floor.
+        assert!(glue_scene_framing(1.0, 1.6, none).viewport_aspect.is_none());
+        // …and a narrow window with a bounded height holds that height, cropping the sides.
+        let short = Some(ArtExtent {
+            half_w: 10.0,
+            half_h: t0 * 1.1,
+        });
+        let v = glue_scene_framing(1.0, 0.75, short).vert_fov;
+        assert!(
+            close((v * 0.5).tan(), t0 * 1.1),
+            "height held at the art's edge"
+        );
+        assert!(
+            glue_scene_framing(1.0, 0.75, None).vert_fov > v,
+            "…below the unbounded law's"
+        );
     }
 
     /// **The portrait bake's projection, pinned against the real client's own GL stream**

@@ -994,6 +994,8 @@ impl Plugin for PortraitPlugin {
                     sync_petdoll_booth,
                     glue_booth::sync_glue_booth,
                     glue_booth::sync_glue_scene,
+                    // After the scene's framing: the viewport/clear its law decided (1619).
+                    glue_booth::pillarbox_glue_scene,
                     // After the scene: the pet's seat and its light are the scene's to publish.
                     glue_booth::sync_glue_pet,
                     dressup::sync_dressup_booth,

@@ -7,6 +7,13 @@
 //! - **DXTC** — S3TC blocks; `alpha_type` selects DXT1 (0) / DXT3 (1) / DXT5 (7), decoded via the same
 //!   `texpresso` codec `wow-blp` uses, so the output is byte-identical.
 //!
+//! **Two entry points, because the GPU wants the blocks and the CPU wants the pixels.**
+//! [`decode`] always yields `Rgba8Unorm`; [`decode_native`] hands back the DXTC blocks *verbatim*
+//! and only decodes the shapes that have no GPU-native form (Raw1/Raw3). The reference client
+//! uploads the stored blocks untouched (`glCompressedTexImage2DARB`; wow-re `system/image/image.md`
+//! "raw passthrough — device eats DXT"), so the native path is both the faithful one and 4x-8x
+//! cheaper in VRAM and texture bandwidth. Decoding is for consumers that read texels on the CPU.
+//!
 //! Two fidelity points that cost the old `wow-blp` two forks, folded in here natively:
 //! 1. the palette is **BGRA**, not RGBA (reading it as RGBA swaps R↔B on every palettized Blizzard
 //!    atlas — the "Westfall clutter is blue" bug);
@@ -117,8 +124,99 @@ fn level_size(width: u32, height: u32, level: usize) -> (u32, u32) {
     }
 }
 
-/// Decode a BLP2 texture (raw archive bytes) to RGBA8 mip levels.
-pub fn decode(bytes: &[u8]) -> Result<DecodedBlp> {
+/// The texel form a [`NativeBlp`] level carries.
+///
+/// A BLP is one of three shapes on disk (module header); only DXTC has a GPU-native form, so the
+/// other two report [`Self::Rgba8Unorm`] and carry decoded pixels. Callers switch on this to pick a
+/// `TextureFormat` and to size a level.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlpTexels {
+    /// Decoded pixels — the Raw1 (palettized) and Raw3 (BGRA8) shapes, which have no block form.
+    Rgba8Unorm,
+    /// DXT1 blocks (8 bytes per 4x4), `alpha_type` 0. 1-bit alpha at most.
+    Bc1,
+    /// DXT3 blocks (16 bytes per 4x4), `alpha_type` 1. Explicit 4-bit alpha.
+    Bc2,
+    /// DXT5 blocks (16 bytes per 4x4), `alpha_type` 7. Interpolated alpha.
+    Bc3,
+}
+
+impl BlpTexels {
+    /// Is this a block-compressed form (i.e. can it be uploaded to the GPU verbatim)?
+    pub fn is_block_compressed(self) -> bool {
+        !matches!(self, Self::Rgba8Unorm)
+    }
+
+    /// How many bytes a `width x height` level occupies in this form.
+    ///
+    /// Block forms round **up** to whole 4x4 blocks, which is why a 2x2 or 1x1 tail mip still costs
+    /// one full block — exactly what the BLP stores for it, and what wgpu expects to receive.
+    pub fn level_bytes(self, width: u32, height: u32) -> usize {
+        match self {
+            Self::Rgba8Unorm => (width as usize) * (height as usize) * 4,
+            Self::Bc1 | Self::Bc2 | Self::Bc3 => {
+                let blocks = width.div_ceil(4) as usize * height.div_ceil(4) as usize;
+                blocks * if self == Self::Bc1 { 8 } else { 16 }
+            }
+        }
+    }
+
+    /// The `texpresso` codec for a block form, or `None` for [`Self::Rgba8Unorm`].
+    fn codec(self) -> Option<texpresso::Format> {
+        match self {
+            Self::Rgba8Unorm => None,
+            Self::Bc1 => Some(texpresso::Format::Bc1),
+            Self::Bc2 => Some(texpresso::Format::Bc2),
+            Self::Bc3 => Some(texpresso::Format::Bc3),
+        }
+    }
+}
+
+/// A BLP with its levels in whatever form the file stores them — see [`decode_native`].
+pub struct NativeBlp {
+    pub width: u32,
+    pub height: u32,
+    /// What every entry of `mips` holds.
+    pub texels: BlpTexels,
+    /// One buffer per level, level 0 first. Never empty (same guarantee as [`DecodedBlp::mips`]).
+    pub mips: Vec<NativeMip>,
+    mip_chain_count: usize,
+}
+
+/// One level of a [`NativeBlp`].
+pub struct NativeMip {
+    pub width: u32,
+    pub height: u32,
+    /// Block bytes (DXTC) or RGBA8 pixels — per [`NativeBlp::texels`]. Always exactly
+    /// [`BlpTexels::level_bytes`] long: a short tail level is zero-padded, matching what
+    /// [`decode`] does before handing blocks to the codec.
+    pub bytes: Vec<u8>,
+}
+
+impl NativeBlp {
+    /// See [`DecodedBlp::mip_chain_count`].
+    pub fn mip_chain_count(&self) -> usize {
+        self.mip_chain_count
+    }
+}
+
+/// The header fields both entry points read, parsed once.
+struct Header<'a> {
+    compression: u8,
+    alpha_bits: u32,
+    alpha_type: u8,
+    width: u32,
+    height: u32,
+    offsets: Vec<u32>,
+    sizes: Vec<u32>,
+    palette: &'a [u8],
+    /// The authored chain length, `mip_chain_count(width, height, has_mipmaps)`.
+    chain: usize,
+}
+
+/// Parse and bounds-check the BLP2 header, palette and level table. Shared by [`decode`] and
+/// [`decode_native`] so the two can never disagree about what a file says.
+fn parse_header(bytes: &[u8]) -> Result<Header<'_>> {
     if bytes.len() < HEADER_SIZE || &bytes[0..4] != b"BLP2" {
         return Err(Error::NotBlp2);
     }
@@ -153,24 +251,62 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedBlp> {
         .ok_or(Error::BadColorMap)?;
 
     let chain = mip_chain_count(width, height, has_mipmaps);
+    Ok(Header {
+        compression,
+        alpha_bits,
+        alpha_type,
+        width,
+        height,
+        offsets,
+        sizes,
+        palette,
+        chain,
+    })
+}
+
+impl Header<'_> {
+    /// The raw stored bytes of level `level`, or `None` when the chain ends early (some textures
+    /// stop before the formula's count).
+    fn level_data<'b>(&self, bytes: &'b [u8], level: usize) -> Result<Option<&'b [u8]>> {
+        let off = self.offsets[level] as usize;
+        let sz = self.sizes[level] as usize;
+        if level > 0 && (sz == 0 || off == 0) {
+            return Ok(None);
+        }
+        bytes
+            .get(off..off + sz)
+            .map(Some)
+            .ok_or(Error::OutOfBounds { level })
+    }
+
+    /// Which block form this file's DXTC levels are in. `alpha_type` 0→DXT1, 1→DXT3, 7→DXT5;
+    /// anything else (a stale byte — e.g. `2` on alpha-less particle atlases) → DXT1, since
+    /// `alpha_bits` already governs whether alpha is meaningful.
+    fn dxt_texels(&self) -> BlpTexels {
+        match self.alpha_type {
+            1 => BlpTexels::Bc2,
+            7 => BlpTexels::Bc3,
+            _ => BlpTexels::Bc1,
+        }
+    }
+}
+
+/// Decode a BLP2 texture (raw archive bytes) to RGBA8 mip levels.
+pub fn decode(bytes: &[u8]) -> Result<DecodedBlp> {
+    let h = parse_header(bytes)?;
     // Always decode level 0 (blp_to_rgba needs it even when the chain count is 0); then deeper levels
     // up to the chain count, stopping if the file doesn't carry one.
-    let n = chain.clamp(1, 16);
+    let n = h.chain.clamp(1, 16);
 
     let mut mips = Vec::with_capacity(n);
     for level in 0..n {
-        let (lw, lh) = level_size(width, height, level);
-        let off = offsets[level] as usize;
-        let sz = sizes[level] as usize;
-        if level > 0 && (sz == 0 || off == 0) {
-            break; // chain ends early (some textures stop before the formula's count)
-        }
-        let data = bytes
-            .get(off..off + sz)
-            .ok_or(Error::OutOfBounds { level })?;
-        let rgba = match compression {
-            1 => decode_raw1(palette, data, lw, lh, alpha_bits),
-            2 => decode_dxt(data, lw, lh, alpha_type),
+        let (lw, lh) = level_size(h.width, h.height, level);
+        let Some(data) = h.level_data(bytes, level)? else {
+            break;
+        };
+        let rgba = match h.compression {
+            1 => decode_raw1(h.palette, data, lw, lh, h.alpha_bits),
+            2 => decode_dxt(data, lw, lh, h.dxt_texels()),
             3 => decode_raw3(data, lw, lh),
             other => return Err(Error::UnknownCompression(other)),
         }?;
@@ -182,11 +318,82 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedBlp> {
     }
 
     Ok(DecodedBlp {
-        width,
-        height,
+        width: h.width,
+        height: h.height,
         mips,
-        mip_chain_count: chain,
+        mip_chain_count: h.chain,
     })
+}
+
+/// Decode a BLP2 texture **keeping its DXTC blocks verbatim** — the form the reference uploads.
+///
+/// DXTC levels come back as block bytes with [`NativeBlp::texels`] naming the variant; Raw1/Raw3
+/// files, which have no block form, are decoded exactly as [`decode`] would and report
+/// [`BlpTexels::Rgba8Unorm`]. Either way every level is padded to its full
+/// [`BlpTexels::level_bytes`], so a caller can concatenate the chain and hand it to the GPU without
+/// re-deriving sizes.
+pub fn decode_native(bytes: &[u8]) -> Result<NativeBlp> {
+    let h = parse_header(bytes)?;
+    let texels = if h.compression == 2 {
+        h.dxt_texels()
+    } else {
+        BlpTexels::Rgba8Unorm
+    };
+    let n = h.chain.clamp(1, 16);
+
+    let mut mips = Vec::with_capacity(n);
+    for level in 0..n {
+        let (lw, lh) = level_size(h.width, h.height, level);
+        let Some(data) = h.level_data(bytes, level)? else {
+            break;
+        };
+        let bytes = match h.compression {
+            1 => decode_raw1(h.palette, data, lw, lh, h.alpha_bits)?,
+            2 => pad_to(data, texels.level_bytes(lw, lh)),
+            3 => decode_raw3(data, lw, lh)?,
+            other => return Err(Error::UnknownCompression(other)),
+        };
+        mips.push(NativeMip {
+            width: lw,
+            height: lh,
+            bytes,
+        });
+    }
+
+    Ok(NativeBlp {
+        width: h.width,
+        height: h.height,
+        texels,
+        mips,
+        mip_chain_count: h.chain,
+    })
+}
+
+/// Decode one block-compressed level to RGBA8 — the inverse of keeping the blocks.
+///
+/// For a caller that took [`decode_native`]'s passthrough and then found it could not upload it
+/// after all (no BC on the device): it can get the pixels without re-reading and re-parsing the
+/// file. `texels` must be a block form; [`BlpTexels::Rgba8Unorm`] returns `bytes` unchanged, since
+/// that is already the answer.
+pub fn decode_level(texels: BlpTexels, width: u32, height: u32, bytes: &[u8]) -> Vec<u8> {
+    let Some(fmt) = texels.codec() else {
+        return bytes.to_vec();
+    };
+    let blocks = pad_to(bytes, fmt.compressed_size(width as usize, height as usize));
+    let mut out = vec![0u8; (width as usize) * (height as usize) * 4];
+    fmt.decompress(&blocks, width as usize, height as usize, &mut out);
+    out
+}
+
+/// `data` grown to exactly `need` bytes with zeros (or truncated if the file over-stores).
+///
+/// The pad is what [`decode`] has always done before handing a short tail mip to the codec
+/// (matching wow-blp / SereniaBLPLib); the native path owes the GPU the same full level.
+fn pad_to(data: &[u8], need: usize) -> Vec<u8> {
+    let mut out = vec![0u8; need];
+    let n = data.len().min(need);
+    out[..n].copy_from_slice(&data[..n]);
+    out
 }
 
 /// Palettized: 1-byte indices into a 256-entry BGRA palette, then a packed alpha block (`alpha_bits`).
@@ -246,23 +453,12 @@ fn decode_raw3(data: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// DXTC: alpha_type 0→DXT1(Bc1), 1→DXT3(Bc2), 7→DXT5(Bc3); anything else (stale byte) → DXT1, since
-/// `alpha_bits` already governs whether alpha is meaningful. Undersized small-mip data is zero-padded
-/// to the block size (matching wow-blp / SereniaBLPLib), so a short tail mip still decodes.
-fn decode_dxt(data: &[u8], w: u32, h: u32, alpha_type: u8) -> Result<Vec<u8>> {
-    let fmt = match alpha_type {
-        1 => texpresso::Format::Bc2,
-        7 => texpresso::Format::Bc3,
-        _ => texpresso::Format::Bc1,
-    };
-    let need = fmt.compressed_size(w as usize, h as usize);
-    let blocks = if data.len() < need {
-        let mut p = vec![0u8; need];
-        p[..data.len()].copy_from_slice(data);
-        std::borrow::Cow::Owned(p)
-    } else {
-        std::borrow::Cow::Borrowed(data)
-    };
+/// DXTC → RGBA8. The variant comes from [`Header::dxt_texels`]. Undersized small-mip data is
+/// zero-padded to the block size (matching wow-blp / SereniaBLPLib), so a short tail mip still
+/// decodes.
+fn decode_dxt(data: &[u8], w: u32, h: u32, texels: BlpTexels) -> Result<Vec<u8>> {
+    let fmt = texels.codec().expect("dxt_texels never returns Rgba8Unorm");
+    let blocks = pad_to(data, fmt.compressed_size(w as usize, h as usize));
     let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
     fmt.decompress(&blocks, w as usize, h as usize, &mut out);
     Ok(out)
@@ -331,6 +527,125 @@ mod tests {
         assert!(matches!(decode(&b), Err(Error::NotBlp2)));
         assert!(matches!(decode(&[]), Err(Error::NotBlp2)));
         assert!(matches!(decode(b"not a blp at all"), Err(Error::NotBlp2)));
+    }
+
+    /// Build a DXT-compressed (compression 2) BLP with a real mip chain: 8x8 down to 1x1, so the
+    /// tail levels are the sub-block ones that make block handling interesting.
+    fn dxt_blp(alpha_type: u8, block_bytes: usize) -> Vec<u8> {
+        let mut offsets = [0u32; 16];
+        let mut sizes = [0u32; 16];
+        let mut payload = Vec::new();
+        let base = (HEADER_SIZE + PALETTE_SIZE) as u32;
+        // 8x8, 4x4, 2x2, 1x1 — mip_chain_count(8, 8, true) == 3, so both entry points read the
+        // first THREE levels (8x8, 4x4, 2x2); the 1x1 is stored but past the authored count.
+        for (i, (w, h)) in [(8u32, 8u32), (4, 4), (2, 2), (1, 1)]
+            .into_iter()
+            .enumerate()
+        {
+            let blocks = w.div_ceil(4) as usize * h.div_ceil(4) as usize;
+            let n = blocks * block_bytes;
+            offsets[i] = base + payload.len() as u32;
+            sizes[i] = n as u32;
+            // Deterministic non-trivial block payload so a byte swap would show.
+            payload.extend((0..n).map(|k| (k as u32 * 37 + i as u32 * 11) as u8));
+        }
+        let mut b = header(2, 8, alpha_type, 1, 8, 8, offsets, sizes);
+        b.resize(HEADER_SIZE + PALETTE_SIZE, 0);
+        b.extend_from_slice(&payload);
+        b
+    }
+
+    /// The load-bearing equivalence for the native upload path: `decode_native` must hand back the
+    /// file's blocks *verbatim*, and running those blocks through the codec must reproduce exactly
+    /// what `decode` produces. If these ever diverge, a GPU-uploaded texture stops matching what
+    /// every CPU-side consumer sees.
+    #[test]
+    fn native_blocks_are_verbatim_and_decode_to_the_same_pixels() {
+        for (alpha_type, texels, block_bytes) in [
+            (0u8, BlpTexels::Bc1, 8usize),
+            (1, BlpTexels::Bc2, 16),
+            (7, BlpTexels::Bc3, 16),
+            (2, BlpTexels::Bc1, 8), // stale alpha_type byte falls back to DXT1
+        ] {
+            let b = dxt_blp(alpha_type, block_bytes);
+            let native = decode_native(&b).expect("valid DXT BLP decodes natively");
+            let decoded = decode(&b).expect("valid DXT BLP decodes to pixels");
+
+            assert_eq!(native.texels, texels, "alpha_type {alpha_type}");
+            assert!(native.texels.is_block_compressed());
+            assert_eq!(native.mips.len(), decoded.mips.len());
+            assert_eq!(native.mip_chain_count(), decoded.mip_chain_count());
+
+            for (level, (n, d)) in native.mips.iter().zip(&decoded.mips).enumerate() {
+                assert_eq!((n.width, n.height), (d.width, d.height));
+                // Every level is exactly its full block size — including the 2x2 and 1x1 tails,
+                // which occupy one whole block each.
+                assert_eq!(
+                    n.bytes.len(),
+                    texels.level_bytes(n.width, n.height),
+                    "level {level} block size"
+                );
+                // Verbatim: the bytes are the file's, not re-encoded.
+                let off = native_level_offset(&b, level);
+                assert_eq!(
+                    &n.bytes[..],
+                    &b[off..off + n.bytes.len()],
+                    "level {level} must be the file's own blocks"
+                );
+                // And they decode to exactly what the RGBA path produced.
+                let fmt = texels.codec().unwrap();
+                let mut out = vec![0u8; (n.width as usize) * (n.height as usize) * 4];
+                fmt.decompress(&n.bytes, n.width as usize, n.height as usize, &mut out);
+                assert_eq!(out, d.rgba, "level {level} pixels must match decode()");
+            }
+        }
+    }
+
+    /// Where level `i`'s payload starts, read back out of the header we built.
+    fn native_level_offset(blp: &[u8], level: usize) -> usize {
+        u32::from_le_bytes(blp[20 + level * 4..24 + level * 4].try_into().unwrap()) as usize
+    }
+
+    /// Raw1/Raw3 have no block form, so the native path decodes them and says so — a caller that
+    /// switches on `texels` gets a correct `Rgba8Unorm` upload rather than garbage.
+    #[test]
+    fn native_reports_rgba_for_the_shapes_with_no_block_form() {
+        let pixel_offset = (HEADER_SIZE + PALETTE_SIZE) as u32;
+        let mut offsets = [0u32; 16];
+        let mut sizes = [0u32; 16];
+        offsets[0] = pixel_offset;
+        sizes[0] = 2 * 2 * 4;
+        let mut b = header(3, 8, 0, 0, 2, 2, offsets, sizes);
+        b.resize(HEADER_SIZE + PALETTE_SIZE, 0);
+        b.extend_from_slice(&[
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ]);
+
+        let native = decode_native(&b).expect("raw3 decodes natively");
+        assert_eq!(native.texels, BlpTexels::Rgba8Unorm);
+        assert!(!native.texels.is_block_compressed());
+        assert_eq!(native.mips[0].bytes, decode(&b).unwrap().mips[0].rgba);
+        assert_eq!(
+            native.mips[0].bytes.len(),
+            BlpTexels::Rgba8Unorm.level_bytes(2, 2)
+        );
+    }
+
+    /// A tail level the file under-stores is zero-padded to a whole block, so the concatenated
+    /// chain a caller uploads is always exactly the size wgpu expects.
+    #[test]
+    fn a_short_tail_level_is_padded_to_its_full_block() {
+        let mut b = dxt_blp(0, 8);
+        // Level 2 is the 2x2 tail — one whole BC1 block. Shrink its recorded size to 3 bytes.
+        let short = 3u32;
+        b[84 + 2 * 4..88 + 2 * 4].copy_from_slice(&short.to_le_bytes());
+        let native = decode_native(&b).expect("short tail still decodes");
+        let tail = native.mips.last().unwrap();
+        assert_eq!((tail.width, tail.height), (2, 2));
+        assert_eq!(tail.bytes.len(), 8, "one whole BC1 block");
+        assert!(tail.bytes[short as usize..].iter().all(|&x| x == 0));
+        // And decode() survives the same truncation — the two paths pad identically.
+        assert_eq!(decode(&b).unwrap().mips.len(), native.mips.len());
     }
 
     #[test]

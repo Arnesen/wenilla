@@ -442,13 +442,26 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
         // Value-only unless the target moved (decision 1388) — the per-frame `SetPoint` idiom
         // (a dragged window, a moving spark) re-points the SAME anchor at the SAME target with new
         // offsets, so it names its node and the cached graph survives the frame.
+        //
+        // A retarget names its node too now (decision 1625): the edge set is not derivable from a
+        // per-node hash, but it IS derivable from the anchors, and both lists are right here. The
+        // target lists are collected only on the structural path — the value-only one is the hot
+        // idiom and must stay allocation-free.
         let structural = anchor_retarget_is_structural(&input.anchors, &new);
+        let old_targets: Option<Vec<u32>> =
+            structural.then(|| input.anchors.iter().map(|a| a.relative_to).collect());
         input.anchors.retain(|a| a.point != point);
         input.anchors.push(new);
-        if structural {
-            model.touch_layout();
-        } else {
-            model.touch_layout_frame(h);
+        match old_targets {
+            None => model.touch_layout_frame(h),
+            Some(old) => {
+                let new_targets: Vec<u32> = model.layout_inputs[&h]
+                    .anchors
+                    .iter()
+                    .map(|a| a.relative_to)
+                    .collect();
+                model.touch_layout_retarget_frame(h, &old, &new_targets);
+            }
         }
     }
     Ok(())
@@ -460,7 +473,14 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
 /// node reads that node's rect". An anchor whose OFFSETS moved is a value change — the node
 /// re-solves and nothing else does, which is exactly what a precise touch claims. An anchor whose
 /// TARGET moved is not: an edge has to disappear and another to appear, and no per-node hash can
-/// say so, so the cached graph must be thrown away instead (decision 1388).
+/// say so.
+///
+/// 1388 answered that by throwing the cached graph away. **Since decision 1625 it does not have
+/// to be**: the write site holds both target lists, so the node's edges are re-pointed in place
+/// (`Model::touch_layout_retarget_frame`) and the roster and every other node's hash survive.
+/// What this predicate decides is therefore no longer "value change or catastrophe" but which of
+/// two precise touches to use — and it still earns its place, because the value-only answer is
+/// the hot per-frame idiom and must stay allocation-free.
 ///
 /// Mirrors the `retain(point) + push` the setters do. It is value-only in exactly one shape — one
 /// existing anchor carries this point and keeps the same target. Zero (an edge appears) and two or

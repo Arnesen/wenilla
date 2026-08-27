@@ -490,3 +490,68 @@ fn a_paint_only_write_leaves_tier_one_closed() {
     s.resolve();
     assert_eq!(solves(&s), before);
 }
+
+/// **The retarget falsifier** (decision 1625): after a node is re-pointed from target A to target
+/// B, the cached graph's EDGES must describe the new shape — moving B must move the node.
+///
+/// This is the one direction that can be silently wrong. 1625 keeps the cached graph across an
+/// anchor retarget by patching one node's edges instead of re-deriving all of them, and a patch
+/// that dropped the *new* edge would under-dirty: the node would sit at a stale rect while the
+/// thing it is anchored to moved. (The other direction — a leftover edge to the OLD target — only
+/// costs a needless re-solve, so it is asserted second and separately.)
+///
+/// It asserts on RECTS, not on counts, because a wrong edge set is a wrong picture: the failure
+/// this guards against is a tooltip left behind at the last button's position.
+#[test]
+fn a_retargeted_anchor_follows_its_new_target() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        a = CreateFrame("Frame", "A", nil); a:SetWidth(10); a:SetHeight(10)
+        a:SetPoint("TOPLEFT", nil, "TOPLEFT", 0, 0)
+        b = CreateFrame("Frame", "B", nil); b:SetWidth(10); b:SetHeight(10)
+        b:SetPoint("TOPLEFT", nil, "TOPLEFT", 100, 0)
+        plate = CreateFrame("Frame", "Plate", nil)
+        plate:SetWidth(10); plate:SetHeight(10)
+        plate:SetPoint("TOPLEFT", a, "TOPRIGHT", 0, 0)
+        "#,
+    )
+    .expect("setup");
+    s.resolve();
+    s.resolve();
+
+    // The retarget: the plate now hangs off B, exactly as `GameTooltip:SetOwner` re-points the
+    // plate at the next button under the cursor.
+    s.run(r#"plate:SetPoint("TOPLEFT", b, "TOPRIGHT", 0, 0)"#)
+        .expect("retarget");
+    s.resolve();
+    let after_retarget = s.eval::<f64>("return Plate:GetLeft()").expect("plate left");
+    assert!(
+        (after_retarget - 110.0).abs() < 0.01,
+        "the retargeted plate must sit at B's right edge (110), not {after_retarget}"
+    );
+
+    // …and it must keep following B. This is the assertion the edge patch exists to satisfy: the
+    // graph was NOT re-derived across the retarget, so if the new edge never made it into the
+    // cached edge set, B moving reaches nothing and the plate stays put.
+    s.run(r#"b:SetPoint("TOPLEFT", nil, "TOPLEFT", 300, 0)"#)
+        .expect("move B");
+    s.resolve();
+    let after_move = s.eval::<f64>("return Plate:GetLeft()").expect("plate left");
+    assert!(
+        (after_move - 310.0).abs() < 0.01,
+        "moving the NEW target must move the plate (310), not leave it at {after_move} — the \
+         retarget's edge patch dropped the new edge and the node is under-dirtied (decision 1625)"
+    );
+
+    // …and it must NOT follow the old one any more.
+    s.run(r#"a:SetPoint("TOPLEFT", nil, "TOPLEFT", 0, -50)"#)
+        .expect("move A");
+    s.resolve();
+    let plate_now = s.eval::<f64>("return Plate:GetLeft()").expect("plate left");
+    assert!(
+        (plate_now - 310.0).abs() < 0.01,
+        "the plate must not follow its OLD target any more (310), got {plate_now}"
+    );
+}

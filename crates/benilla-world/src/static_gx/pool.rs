@@ -218,6 +218,7 @@ impl GxTexturePool {
         });
         for class in &mut self.classes {
             for (src, layer) in class.pending.drain(..) {
+                let (block_w, block_h) = class.format.block_dimensions();
                 for mip in 0..class.mips.min(src.mip_level_count()) {
                     let mut dst = class.array.as_image_copy();
                     dst.mip_level = mip;
@@ -227,9 +228,17 @@ impl GxTexturePool {
                     encoder.copy_texture_to_texture(
                         s,
                         dst,
+                        // The **physical** mip extent — rounded up to whole blocks. wgpu-core's
+                        // `validate_texture_copy_range` checks `copy_size % block_dimensions`
+                        // unconditionally (there is no "it's the whole mip" exemption), and a
+                        // BLP's authored chain bottoms out at 2x2 — below a BC block on EVERY
+                        // texture. Uncompressed formats have 1x1 blocks, so this is the identity
+                        // there and the line reads the same for both. Without the round-up, the
+                        // first BC texture pooled here is a validation error, and wgpu's default
+                        // handler makes that a process panic (decision 1626).
                         Extent3d {
-                            width: (class.size.width >> mip).max(1),
-                            height: (class.size.height >> mip).max(1),
+                            width: (class.size.width >> mip).max(1).div_ceil(block_w) * block_w,
+                            height: (class.size.height >> mip).max(1).div_ceil(block_h) * block_h,
                             depth_or_array_layers: 1,
                         },
                     );

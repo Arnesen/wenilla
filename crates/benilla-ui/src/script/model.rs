@@ -1703,7 +1703,7 @@ impl Model {
         // next resolve must derive it in full. Every site that has NOT been migrated to a precise
         // touch lands here, which is why migration can be incremental and a missed one is slow
         // rather than wrong.
-        self.layout_touched = None;
+        self.give_up_naming();
         self.bump_layout_epoch();
     }
 
@@ -1729,6 +1729,43 @@ impl Model {
         match self.frame_to_id.get(&h) {
             Some(&id) => self.touch_layout_node(id),
             None => self.touch_layout(),
+        }
+    }
+
+    /// An anchor RETARGET that names its node: the write moved node `h`'s (or `rh`'s) set of
+    /// anchor TARGETS, and hands over both target lists so the cached graph's edges can be
+    /// re-pointed instead of thrown away (decision 1625, extending 1388).
+    ///
+    /// `old`/`new` are the node's FULL anchor-target lists either side of the write. Falls back to
+    /// the conservative touch whenever the scope refuses the patch — the same "worst case is a
+    /// derivation" safety the other precise touches have.
+    pub(crate) fn touch_layout_retarget_frame(&mut self, h: FrameHandle, old: &[u32], new: &[u32]) {
+        match self.frame_to_id.get(&h).copied() {
+            // Already conservative ⇒ the next resolve rebuilds every edge from scratch anyway, so
+            // patching them would be work with no reader.
+            Some(id)
+                if self.layout_touched.is_some() && self.layout_scope.retarget(id, old, new) =>
+            {
+                self.touch_layout_node(id);
+            }
+            _ => self.touch_layout(),
+        }
+    }
+
+    /// [`Self::touch_layout_retarget_frame`]'s region twin.
+    pub(crate) fn touch_layout_retarget_region(
+        &mut self,
+        rh: RegionHandle,
+        old: &[u32],
+        new: &[u32],
+    ) {
+        match self.region_to_id.get(&rh).copied() {
+            Some(id)
+                if self.layout_touched.is_some() && self.layout_scope.retarget(id, old, new) =>
+            {
+                self.touch_layout_node(id);
+            }
+            _ => self.touch_layout(),
         }
     }
 
@@ -1771,7 +1808,7 @@ impl Model {
                         .expect("checked above")
                         .push(id);
                 }
-                _ => self.layout_touched = None,
+                _ => self.give_up_naming(),
             }
         }
     }
@@ -1786,7 +1823,7 @@ impl Model {
                         .expect("checked above")
                         .push(id);
                 }
-                _ => self.layout_touched = None,
+                _ => self.give_up_naming(),
             }
         }
     }
@@ -1798,10 +1835,31 @@ impl Model {
         match &mut self.layout_touched {
             // Already conservative: a precise touch cannot un-say an imprecise one.
             None => {}
-            Some(_) if !in_graph => self.layout_touched = None,
+            Some(_) if !in_graph => self.give_up_naming(),
             Some(list) => list.push(id),
         }
         self.bump_layout_epoch();
+    }
+
+    /// Give up naming what this write moved: the cached graph can no longer be trusted, so the
+    /// next resolve derives it in full. **Every** site that sets [`Self::layout_touched`] to
+    /// `None` goes through here, because that transition is the only event worth a name.
+    ///
+    /// `WOW_LAYOUT_DERIVE_TRACE=<secs>:<n>` — backtrace the first `n` of them after `secs`. 1388
+    /// left `layout_derivations` as "the counter to watch", and a non-zero reading as the proof
+    /// that "a write site somewhere fell back to the conservative touch" — but gave nobody a way
+    /// to find out WHICH, and `WOW_LAYOUT_TOUCH_TRACE` cannot answer it: it fires on every touch,
+    /// and the precise ones outnumber the poisoning one by hundreds to one. Only the Some → None
+    /// EDGE is printed: once a frame has given up, the fallbacks behind it are consequences, not
+    /// causes, and printing them buries the one line that matters.
+    fn give_up_naming(&mut self) {
+        if self.layout_touched.is_some() && derive_trace_armed() {
+            eprintln!(
+                "[layout-derive] the ledger gave up naming, at:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        self.layout_touched = None;
     }
 
     /// Tier 1's counter, shared by every touch above. Bumping it is what re-opens the gate; which
@@ -1842,4 +1900,28 @@ impl Model {
             }
         }
     }
+}
+
+/// `WOW_LAYOUT_DERIVE_TRACE=<secs>:<n>`'s latch — arm after `secs` (past UI load, whose thousands
+/// of legitimate births are all conservative by construction and would eat the budget), then allow
+/// `n` prints. Same spec shape as `WOW_LAYOUT_TOUCH_TRACE`, deliberately: one thing to remember.
+fn derive_trace_armed() -> bool {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::OnceLock;
+    static SPEC: OnceLock<Option<(std::time::Instant, f64, AtomicU32)>> = OnceLock::new();
+    let Some((t0, delay, left)) = SPEC.get_or_init(|| {
+        let v = std::env::var("WOW_LAYOUT_DERIVE_TRACE").ok()?;
+        let (secs, n) = v.split_once(':')?;
+        Some((
+            std::time::Instant::now(),
+            secs.trim().parse().ok()?,
+            AtomicU32::new(n.trim().parse().ok()?),
+        ))
+    }) else {
+        return false;
+    };
+    t0.elapsed().as_secs_f64() >= *delay
+        && left
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
+            .is_ok()
 }

@@ -5,7 +5,8 @@
 //! The IO thread parks after the world handshake and emits the account roster
 //! ([`CharListMessage`]); the **pick policy** here decides what answers it — the pending pick
 //! (seamless reconnect, decision 0065), the `WOW_CHAR` env fast path, or the director's choice on
-//! the screen. The pick travels the [`CharPick`] channel; `Connected` flips us `InWorld`;
+//! the screen, which opens on whoever they last entered the world as (`lastCharacterIndex`,
+//! decision 1622). The pick travels the [`CharPick`] channel; `Connected` flips us `InWorld`;
 //! a `/logout` round-trip ([`LoggedOutMessage`]) flips back to select with the pending pick
 //! cleared, and a **lost** session flips all the way back to the login screen (decision 1262 —
 //! the reference's `DISCONNECTED_FROM_SERVER`).
@@ -112,6 +113,9 @@ impl Plugin for CharSelectPlugin {
                         enter_on_connected,
                         back_on_logout,
                         back_on_disconnect,
+                        // LAST, and outside both `run_if`s: it mirrors the pick this frame ended
+                        // with, and world entry is reached from the create screen too (1622).
+                        persist_last_character,
                     )
                         .chain(),
                     (
@@ -276,6 +280,109 @@ impl Roster {
         self.pending_pick
             .and_then(|g| self.chars.iter().find(|c| c.guid == g))
     }
+
+    /// The **roster position** of the pick in flight — what the reference persists as
+    /// `lastCharacterIndex` at Enter World (decision 1622). By guid rather than by the live
+    /// selection, so the row it names is the one actually being entered even if the selection has
+    /// since moved.
+    pub(super) fn pending_index(&self) -> Option<usize> {
+        let guid = self.pending_pick?;
+        self.chars.iter().position(|c| c.guid == guid)
+    }
+}
+
+// ── The remembered character (`lastCharacterIndex`, decision 1622) ───────────────────────────────
+
+/// The CVar the select screen remembers you by — a **real 1.12 CVar**, byte-verified in wow-re
+/// (registered at `0x402d93`, name `0x82e8f8`, help "Last character selected", default `"0"`,
+/// pointer cached at `[0x882674]`), and written engine-side: no shipped GlueXML names it and the
+/// binary never looks it up by name.
+pub(crate) const CVAR_LAST_CHARACTER: &str = "lastCharacterIndex";
+
+/// The stored index is **0-based**, and `"0"` is the FIRST character — not "nothing remembered".
+///
+/// It is the engine's own selection cell `[0x83856c]` printed with `"%d"`: `SelectCharacter`
+/// (`0x473470`) takes the glue Lua's 1-based row and `dec`s it, and the event back out
+/// (`0x472740`) re-adds the one. So the number on disk is one *less* than the row `CharacterSelect
+/// .selectedIndex` counts in, and it lines up with [`Roster::selected`] exactly.
+///
+/// The registered default being `"0"` is load-bearing rather than incidental: `CVar::SaveConfig`
+/// (`0x63d980`) skips any value equal to its default, so a player who last entered on their first
+/// character has **no such line in `Config.wtf` at all** — and reads back as row 0 anyway. Ours
+/// composes the same way (`cvars::compose_file`), so `config.toml` gets the same shape for the
+/// same reason.
+fn last_character_value(row: usize) -> String {
+    row.to_string()
+}
+
+/// The stored value → a row. `None` only for a value that is not a number at all (a hand edit);
+/// out-of-range is the *caller's* business, because the reference's answer to it is not a clamp.
+fn last_character_row(value: &str) -> Option<usize> {
+    value.trim().parse::<usize>().ok()
+}
+
+/// The remembered row for a roster of `len` characters — the reference's whole selection rule,
+/// `CGlueMgr::SetSelectedCharacter` `0x472740`:
+///
+/// ```text
+/// selected = (stored < 0 || stored >= count) ? 0 : stored
+/// ```
+///
+/// Out of range falls back to the **first** row, never to the nearest one: a character deleted
+/// since you last played, or a realm with fewer characters, puts you at the top of the list rather
+/// than beside where the old row used to be.
+fn remembered_row(persist: &crate::cvars::CvarPersist, len: usize) -> usize {
+    persist
+        .stored(CVAR_LAST_CHARACTER)
+        .and_then(last_character_row)
+        .filter(|&row| row < len)
+        .unwrap_or(0)
+}
+
+/// Mirror the character we are **entering the world as** into [`CVAR_LAST_CHARACTER`].
+///
+/// **At Enter World, not at every click** — which is the difference between "the last character
+/// you logged in as" and "the last row you happened to touch", and it is the reference's own
+/// seam: `CGlueMgr::EnterWorld` (`0x46b500`) formats `[0x83856c]` into the CVar at `0x46b5fa`,
+/// and clicks and arrow keys reach `0x472740` without ever going near it. [`Roster::pending_pick`]
+/// is exactly that moment for us, so [`Roster::pending_index`] is what this reads.
+///
+/// The write goes through [`UiScript::set_cvar_engine`] so it rides the change queue like a Lua
+/// `SetCVar` and the host's sync persists it — the minimap-zoom pattern (1131), already used from
+/// this screen by the AddOns panel's force-load box (1293). **One divergence, stated:** the
+/// reference flushes `Config.wtf` synchronously in the same call (`0x46b6f6`), while ours reaches
+/// disk on the exit edge with every other CVar (1528) — so a crash between entering the world and
+/// quitting loses the memory, where the reference would not. That is the CVar store's shape, not
+/// this key's, and changing it is an autosave design (1528's own "what this does NOT fix").
+fn persist_last_character(
+    roster: Res<Roster>,
+    mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    // Memory about the VM's CVar table, so it dies with the VM (decision 1290). A bare `Local`
+    // here would be betting that `cvars::sync_cvars`'s per-VM seed carries this key into the next
+    // table — true today, and exactly the "correct against one VM, silently wrong against the
+    // next" shape 1290 built its structural gate to refuse. `get_for` because this system also
+    // runs while there is no VM at all.
+    mut mirrored: Local<crate::ui_script::VmMemo<Option<usize>>>,
+) {
+    let Some(row) = roster.pending_index() else {
+        return; // nobody is entering the world — nothing to remember
+    };
+    let mirrored = mirrored.get_for(script.as_deref());
+    if *mirrored == Some(row) {
+        return;
+    }
+    let Some(script) = script.as_deref_mut() else {
+        return;
+    };
+    script.set_cvar_engine(CVAR_LAST_CHARACTER, &last_character_value(row));
+    // Latch only once the table actually took it. An engine write to a name the host has not
+    // registered yet is a deliberate silent no-op (`script::cvars::set_from_engine`), and the
+    // per-VM seed that registers it runs in `cvars::sync_cvars` — a sibling `Update` system with
+    // no ordering against this one. Latching on the frame the write was dropped would swallow
+    // exactly one entry, and it would be the session's first.
+    if script.cvar(CVAR_LAST_CHARACTER).is_some() {
+        *mirrored = Some(row);
+    }
 }
 
 /// Ask the parked IO thread to log in as `guid` (the pick channel) and remember it as pending.
@@ -295,6 +402,11 @@ fn apply_roster_policy(
     mut msgs: MessageReader<CharListMessage>,
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
+    // The remembered row (decision 1622) — read off the persist state rather than the VM's table
+    // because it is a value the *file* owns and the session only mirrors, and because reading it
+    // here keeps this system send-able. It is consulted exactly once per process: `selected` is
+    // `None` only before the first roster lands.
+    persist: Res<crate::cvars::CvarPersist>,
     // Is the character pick already spoken for? Present only when a rig is driving this run
     // (decision 1174's always-present run fact) — absent in every ordinary run, which is the
     // player answer and the one this screen was written for.
@@ -332,7 +444,12 @@ fn apply_roster_policy(
         // ref's literal `SELECT_LAST_CHARACTER` → `SelectCharacter(numChars)` and lands on the same
         // character regardless — vmangos enumerates `ORDER BY create_time, guid`, so the new one is
         // last. Otherwise clamp into range, first row default.
-        if roster.just_created.is_some() {
+        // **`SELECT_LAST_CHARACTER` outranks the remembered row** — the reference's own
+        // precedence, and the order is why: the C side restores the CVar and pushes it into Lua
+        // (`0x472563` → `UPDATE_SELECTED_CHARACTER`) *before* firing `CHARACTER_LIST_UPDATE`, and
+        // `UpdateCharacterList`'s deferred `selectLast` flag then overwrites it.
+        let created = roster.just_created.is_some();
+        if created {
             roster.select_created_by_name();
             if let Some(name) = roster.just_created.take() {
                 warn!(
@@ -344,9 +461,18 @@ fn apply_roster_policy(
         }
         if roster.chars.is_empty() {
             roster.select(None);
-        } else {
-            let sel = roster.selected().unwrap_or(0).min(roster.chars.len() - 1);
-            roster.select(Some(sel));
+        } else if !created {
+            // The remembered character (decision 1622), re-applied on **every** roster — the
+            // reference reads the CVar in the char-list rebuild itself (`0x4724d0` → `0x472740`),
+            // not once at startup, so the screen always opens on whoever you last entered the
+            // world as. Out of range falls back to the first row; see `remembered_row`.
+            let row = remembered_row(&persist, roster.chars.len());
+            // Greppable, and it names the character rather than only the index: "the first row
+            // happened to be right" and "the memory worked" are the same picture on screen, and
+            // this line is the only thing that tells them apart in a log.
+            let who = roster.chars[row].name.clone();
+            info!("char select: {CVAR_LAST_CHARACTER} selects row {row} ({who})");
+            roster.select(Some(row));
         }
         // `WOW_CHARSELECT_PICK=<name>` — **select** that row and stay on the screen, the
         // deliberate opposite of `WOW_CHAR`'s enter-the-world fast path. Without it the screen is
@@ -767,37 +893,63 @@ pub(crate) fn class_name(class: u8) -> &'static str {
     }
 }
 
+/// A `Character` with only its identity filled in — enough for any test that cares about *which*
+/// row, not what stands on the stage. `pub(crate)` so [`crate::cvars`]'s end-to-end round trip can
+/// build a roster without a second copy of this list drifting from the real one.
+#[cfg(test)]
+pub(crate) fn test_character(guid: u64, name: &str) -> Character {
+    Character {
+        guid,
+        name: name.to_string(),
+        race: 1,
+        class: 1,
+        gender: 0,
+        skin: 0,
+        face: 0,
+        hair_style: 0,
+        hair_color: 0,
+        facial_hair: 0,
+        level: 1,
+        zone: 0,
+        map: 0,
+        position: benilla_protocol::wire::Vector3d {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        flags: 0,
+        equipment: [benilla_protocol::CharEnumItem::default(); 19],
+        pet_display_id: 0,
+        pet_level: 0,
+        pet_family: 0,
+    }
+}
+
+/// The roster policy and its CVar mirror, with none of the screen they normally run under — the
+/// two systems the remembered selection is made of ([`apply_roster_policy`] reads it,
+/// [`persist_last_character`] writes it), wired into a test app.
+///
+/// `pub(crate)` so [`crate::cvars`] can drive them over a **real** CVar host: the seam where a
+/// queued engine write becomes a line in `config.toml` lives entirely in that module, and this
+/// module's own tests stub it. `CharSelectPlugin` itself is not usable there — it wants the whole
+/// glue screen, its art and its sounds.
+#[cfg(test)]
+pub(crate) fn add_test_systems(app: &mut App, pick: crossbeam_channel::Sender<CharRequest>) {
+    app.insert_state(ClientState::CharSelect)
+        .init_resource::<Roster>()
+        .insert_resource(CharPick(pick))
+        .add_message::<CharListMessage>()
+        .add_systems(
+            Update,
+            (apply_roster_policy, persist_last_character).chain(),
+        );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn character(guid: u64, name: &str) -> Character {
-        Character {
-            guid,
-            name: name.to_string(),
-            race: 1,
-            class: 1,
-            gender: 0,
-            skin: 0,
-            face: 0,
-            hair_style: 0,
-            hair_color: 0,
-            facial_hair: 0,
-            level: 1,
-            zone: 0,
-            map: 0,
-            position: benilla_protocol::wire::Vector3d {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-            },
-            flags: 0,
-            equipment: [benilla_protocol::CharEnumItem::default(); 19],
-            pet_display_id: 0,
-            pet_level: 0,
-            pet_family: 0,
-        }
-    }
+    use super::test_character as character;
 
     /// **A session that dies during world entry does not leave the client in the world**
     /// (decision 1262).
@@ -914,6 +1066,284 @@ mod tests {
         };
         roster.note_created("ZZBULLONE".to_string()); // as typed
         assert_eq!(roster.selected, Some(1));
+    }
+
+    // ── The remembered character (`lastCharacterIndex`, decision 1622) ───────────────────────────
+
+    /// Drive the REAL [`apply_roster_policy`] over one roster message, with `config.toml` already
+    /// holding `stored` for `lastCharacterIndex` (`None` = a launch that has never entered a
+    /// world). Returns the row the screen opens on.
+    fn roster_policy_over(
+        stored: Option<&str>,
+        names: &[&str],
+        preselected: Option<usize>,
+    ) -> Option<usize> {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Roster>()
+            .insert_resource(CharPick(tx))
+            .insert_resource(match stored {
+                Some(v) => crate::cvars::CvarPersist::with_stored(CVAR_LAST_CHARACTER, v),
+                None => crate::cvars::CvarPersist::default(),
+            })
+            .add_message::<CharListMessage>()
+            .add_message::<AppExit>()
+            .add_systems(Update, apply_roster_policy);
+        if let Some(row) = preselected {
+            app.world_mut().resource_mut::<Roster>().select(Some(row));
+        }
+        app.world_mut().write_message(CharListMessage {
+            characters: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| character(i as u64 + 1, n))
+                .collect(),
+            realm: None,
+        });
+        app.update();
+        app.world().resource::<Roster>().selected()
+    }
+
+    /// **The report**: the screen must open on the character you last logged in as, as the
+    /// reference does. The stored value is 0-based — the engine's own selection cell, one less
+    /// than the row the glue Lua counts in — so `"2"` IS row 2.
+    #[test]
+    fn the_roster_opens_on_the_remembered_character() {
+        assert_eq!(
+            roster_policy_over(
+                Some("2"),
+                &["Kerwind", "Xero", "Zzbullone", "Wartwof"],
+                None
+            ),
+            Some(2),
+            "a config.toml remembering the third character must select it, not row one",
+        );
+    }
+
+    /// A client that has never entered a world stores nothing — and `"0"` is not "nothing", it is
+    /// the FIRST character (the registrar default, which is exactly why the key is absent from a
+    /// `Config.wtf` whose player last played their first character). Both land on row 0, and it
+    /// matters that they land there for the reference's reason.
+    #[test]
+    fn nothing_remembered_and_a_stored_zero_are_both_the_first_row() {
+        assert_eq!(
+            roster_policy_over(None, &["Kerwind", "Xero"], None),
+            Some(0)
+        );
+        assert_eq!(
+            roster_policy_over(Some("0"), &["Kerwind", "Xero"], None),
+            Some(0),
+        );
+    }
+
+    /// The remembered character was deleted (or this realm simply has fewer): the reference's
+    /// `0x472740` sends an out-of-range index to the **first** row — never to the nearest one.
+    #[test]
+    fn a_remembered_row_past_the_end_falls_back_to_the_first() {
+        assert_eq!(
+            roster_policy_over(Some("9"), &["Kerwind", "Xero"], None),
+            Some(0),
+            "the reference clamps to 0, not to the last row — `(idx >= count) ? 0 : idx`",
+        );
+    }
+
+    /// A hand-edited or corrupt value is not a crash and not a wrong row: the first row.
+    #[test]
+    fn an_unparseable_remembered_value_is_the_first_row() {
+        assert_eq!(
+            roster_policy_over(Some("Kerwind"), &["Kerwind", "Xero"], None),
+            Some(0),
+        );
+    }
+
+    /// **Every** roster re-applies the stored row, not just the session's first — the reference
+    /// reads the CVar inside the char-list rebuild (`0x4724d0`), so a live selection that was
+    /// never entered as does not survive a re-enum. This is the half that makes the memory mean
+    /// "who you last **logged in** as" rather than "the last row you clicked".
+    #[test]
+    fn a_re_enumerated_roster_returns_to_the_remembered_character() {
+        assert_eq!(
+            roster_policy_over(Some("0"), &["Kerwind", "Xero", "Zzbullone"], Some(2)),
+            Some(0),
+            "row 2 was only ever clicked; the roster rebuild goes back to the remembered row 0",
+        );
+    }
+
+    /// …but a just-created character still wins, which is the reference's precedence and the
+    /// order it comes in: the C side pushes the restored index into Lua first, and
+    /// `UpdateCharacterList`'s deferred `selectLast` flag overwrites it (B119 stays fixed).
+    #[test]
+    fn a_created_character_outranks_the_remembered_one() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Roster>()
+            .insert_resource(CharPick(tx))
+            .insert_resource(crate::cvars::CvarPersist::with_stored(
+                CVAR_LAST_CHARACTER,
+                "0",
+            ))
+            .add_message::<CharListMessage>()
+            .add_message::<AppExit>()
+            .add_systems(Update, apply_roster_policy);
+        // The create result landed before the fresh roster (the order `net::io` does NOT use —
+        // the one `apply_roster_policy` exists to answer).
+        app.world_mut()
+            .resource_mut::<Roster>()
+            .note_created("Zzbullone".into());
+        app.world_mut().write_message(CharListMessage {
+            characters: vec![
+                character(1, "Kerwind"),
+                character(2, "Xero"),
+                character(3, "Zzbullone"),
+            ],
+            realm: None,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<Roster>().selected(),
+            Some(2),
+            "SELECT_LAST_CHARACTER outranks the remembered row 0",
+        );
+    }
+
+    /// The base, in the one place it lives, and the value's own spelling for the first character.
+    #[test]
+    fn the_stored_index_is_zero_based_and_round_trips() {
+        for row in [0usize, 1, 4, 9] {
+            assert_eq!(last_character_row(&last_character_value(row)), Some(row));
+        }
+        assert_eq!(
+            last_character_value(0),
+            "0",
+            "row 0 IS the registrar default"
+        );
+        assert_eq!(
+            last_character_row("0"),
+            Some(0),
+            "0 is the first row, not 'none'"
+        );
+        assert_eq!(last_character_row(""), None);
+    }
+
+    /// **The write is at Enter World, not at selection** — the reference's `0x46b500` formats the
+    /// CVar from the index it is about to enter as, while clicks and arrow keys reach `0x472740`
+    /// and never touch it. So "last logged in", exactly as reported.
+    #[test]
+    fn only_entering_the_world_writes_the_cvar() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        script.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Roster>()
+            .insert_resource(CharPick(tx))
+            .insert_non_send_resource(script)
+            .add_systems(Update, persist_last_character);
+        {
+            let mut roster = app.world_mut().resource_mut::<Roster>();
+            roster.chars = vec![
+                character(1, "Kerwind"),
+                character(2, "Xero"),
+                character(3, "Zz"),
+            ];
+            roster.select(Some(2)); // clicked around the list…
+            roster.select(Some(1));
+        }
+        app.update();
+        assert!(
+            app.world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .take_cvar_changes()
+                .is_empty(),
+            "a selection alone must NOT be remembered — the reference writes nothing here",
+        );
+
+        // …and now Enter World, on the row that was selected.
+        app.world_mut().resource_mut::<Roster>().pending_pick = Some(2);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .take_cvar_changes(),
+            vec![(CVAR_LAST_CHARACTER.to_string(), "1".to_string())],
+            "guid 2 sits at row 1, and the row is what rides the queue",
+        );
+    }
+
+    /// **The 1290 property, at this call site.** A login replaces the VM, and the memo of "the
+    /// table already says 1" must die with it — otherwise the mirror stays quiet against a table
+    /// that has never been told, and the memory survives only for as long as some *other* module
+    /// happens to carry the key across (`cvars::sync_cvars`'s saved-base seed does, today).
+    #[test]
+    fn a_replaced_vm_is_told_the_remembered_row_again() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let fresh = || {
+            let mut s = benilla_ui::script::UiScript::new().unwrap();
+            s.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
+            s
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Roster>()
+            .insert_resource(CharPick(tx))
+            .insert_non_send_resource(fresh())
+            .add_systems(Update, persist_last_character);
+        {
+            let mut roster = app.world_mut().resource_mut::<Roster>();
+            roster.chars = vec![character(1, "Kerwind"), character(2, "Xero")];
+            roster.pending_pick = Some(2);
+        }
+        app.update();
+        app.update(); // steady frames stay quiet — the memo does its job within one VM
+
+        // The login edge: `ui_script::lifecycle` drops the VM and installs a boot VM in its place.
+        app.world_mut()
+            .insert_non_send_resource::<benilla_ui::script::UiScript>(fresh());
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .take_cvar_changes(),
+            vec![(CVAR_LAST_CHARACTER.to_string(), "1".to_string())],
+            "the new VM's table must be told the row too — a memo that outlived the old one \
+             would leave this table on its default and lose the memory at quit",
+        );
+    }
+
+    /// The write must survive the frame in which the host has not registered its table yet: an
+    /// engine write to an unregistered name is a deliberate silent no-op, so latching on it would
+    /// swallow the session's FIRST entry — the one launch-to-launch memory exists for.
+    #[test]
+    fn an_entry_made_before_the_cvar_table_exists_is_not_lost() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Roster>()
+            .insert_resource(CharPick(tx))
+            .insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap())
+            .add_systems(Update, persist_last_character);
+        {
+            let mut roster = app.world_mut().resource_mut::<Roster>();
+            roster.chars = vec![character(1, "Kerwind"), character(2, "Xero")];
+            roster.pending_pick = Some(2);
+        }
+
+        app.update(); // the table has no such name yet — the write is dropped
+        app.world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .register_cvars([(CVAR_LAST_CHARACTER, "0")]);
+        app.update(); // ...and the next frame must still catch it up
+
+        assert_eq!(
+            app.world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .take_cvar_changes(),
+            vec![(CVAR_LAST_CHARACTER.to_string(), "1".to_string())],
+        );
     }
 
     /// The reverse arrival order (result first, roster after) stays armed and is answered by the

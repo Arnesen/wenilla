@@ -43,6 +43,15 @@ pub(crate) struct LayerTexture {
 /// smaller mips slotting into the deeper array levels; when its chain runs out the last authored mip
 /// is reused (NEAREST-resampled if the dims still differ).
 pub(crate) fn chain_to_layer(blp: BlpMipChain, target_size: u32) -> LayerTexture {
+    // **This lane cannot take DXT blocks and must not be handed them.** It NEAREST-resamples levels
+    // to a uniform array size and its caller stomps the alpha byte for the matte case — both are
+    // per-texel CPU writes, which is exactly what a block form does not have. So terrain layers
+    // stay decoded while model/WMO albedo passes through (decision 1626); the day this lane wants
+    // the same win, the resample and the alpha stomp are what have to go first.
+    debug_assert!(
+        blp.is_rgba8(),
+        "terrain layer packing indexes texels; it needs a decoded chain"
+    );
     let mut chain = Vec::with_capacity(mip_chain_byte_size(target_size, LAYER_MIP_COUNT));
     for level in 0..LAYER_MIP_COUNT {
         let level_w = (target_size >> level).max(1);
@@ -192,6 +201,7 @@ mod tests {
             })
             .collect();
         BlpMipChain {
+            texels: benilla_formats::BlpTexels::Rgba8Unorm,
             width: size,
             height: size,
             mips: levels,

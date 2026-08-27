@@ -309,7 +309,14 @@ pub(super) fn build_char_skin_materials(
                             worn,
                         )
                         .ok()??;
-                    let handle = images.add(repeat_texture_authored(composed, (true, true)));
+                    // Through the upload gate like every other texture: a composite is
+                    // layered texel-by-texel on the CPU so it is already RGBA8, and
+                    // `for_upload` is a no-op on it — but going through it is what makes
+                    // the format and the bytes provably agree (decision 1626).
+                    let handle = images.add(repeat_texture_authored(
+                        benilla_assets::for_upload(composed),
+                        (true, true),
+                    ));
                     skin_cache.insert(key, handle.clone());
                     Some(handle)
                 }

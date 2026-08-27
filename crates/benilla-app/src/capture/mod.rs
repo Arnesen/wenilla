@@ -151,6 +151,7 @@ pub(crate) use probe_look::ProbeLookPlugin;
 pub(crate) fn start_state() -> crate::char_select::ClientState {
     match glue_screen() {
         Some(GlueScreen::CharCreate) => crate::char_select::ClientState::CharCreate,
+        Some(GlueScreen::Login) => crate::char_select::ClientState::Login,
         None if crate::run_mode::scenario_active() => crate::char_select::ClientState::InWorld,
         None => crate::char_select::ClientState::Login,
     }
@@ -505,8 +506,13 @@ impl Plugin for CapturePlugin {
             // The preview pick goes through the existing `WOW_CHARCREATE_PICK` instrument rather
             // than a second path into `CreateSelection` — same reason the map is seeded by env
             // (decision 0743): one route into a fact, whoever is asking.
-            let (race, sex, class) = g.pick;
-            std::env::set_var("WOW_CHARCREATE_PICK", format!("{race},{sex},{class}"));
+            // …and an explicit pick in the environment outranks the scenario's default — the
+            // per-race lever, so one scenario photographs every `UI_*` stage.
+            if let Some((race, sex, class)) = g.pick {
+                if std::env::var_os("WOW_CHARCREATE_PICK").is_none() {
+                    std::env::set_var("WOW_CHARCREATE_PICK", format!("{race},{sex},{class}"));
+                }
+            }
         }
         // The fxview instrument: a synthetic scenario (ground scene, noon) + the fixture
         // request from env. Not in SCENARIOS — `scripts/visual.sh`'s golden sweep must never

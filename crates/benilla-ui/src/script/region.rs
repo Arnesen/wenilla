@@ -751,13 +751,22 @@ pub(super) fn region_set_point(
         // The frame twin's law (decision 1388): re-pointing the same anchor at the same target is
         // a VALUE change and names its node; anything that moves the target set is structural.
         // This is the castbar spark's and every combat-text string's per-frame write.
+        // …and a retarget names its node too (decision 1625) — see the frame twin.
         let structural = anchor_retarget_is_structural(&data.anchors, &new);
+        let old_targets: Option<Vec<u32>> =
+            structural.then(|| data.anchors.iter().map(|a| a.relative_to).collect());
         data.anchors.retain(|a| a.point != point);
         data.anchors.push(new);
-        if structural {
-            model.touch_layout();
-        } else {
-            model.touch_layout_region(rh);
+        match old_targets {
+            None => model.touch_layout_region(rh),
+            Some(old) => {
+                let new_targets: Vec<u32> = model.region_data[&rh]
+                    .anchors
+                    .iter()
+                    .map(|a| a.relative_to)
+                    .collect();
+                model.touch_layout_retarget_region(rh, &old, &new_targets);
+            }
         }
     }
     Ok(())

@@ -482,6 +482,14 @@ pub fn equip_region_candidates(layer: usize, name: &str, sex: u8) -> [String; 2]
 /// plain copy (the client's REPLACE), an alpha one blends. Levels past either pyramid's end, and the
 /// sub-pixel remainder of a degenerate deep-mip tile, are clamped/skipped.
 fn blit_over(dst: &mut BlpMipChain, src: &BlpMipChain, tile: Tile) {
+    // The composite is a per-texel source-over blend, so both sides must be decoded pixels. Every
+    // reader here goes through `read_texture_mip_chain` (never the block-passthrough twin) — this
+    // says so out loud, because a chain that arrived as DXT blocks would blend garbage silently
+    // rather than fail (decision 1626).
+    debug_assert!(
+        dst.is_rgba8() && src.is_rgba8(),
+        "character-skin compositing needs decoded chains on both sides"
+    );
     let (tx, ty, tw, th) = tile;
     let levels = dst.mips.len().min(src.mips.len());
     for i in 0..levels {
@@ -863,6 +871,7 @@ mod tests {
         BlpMipChain {
             width,
             height,
+            texels: crate::BlpTexels::Rgba8Unorm,
             mips: vec![px],
         }
     }

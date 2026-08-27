@@ -206,6 +206,10 @@ pub(crate) struct LayoutScope {
     dep_head: Vec<u32>,
     dep_to: Vec<u32>,
     dep_next: Vec<u32>,
+    /// Edge slots freed by [`Self::retarget`], for [`Self::edge`] to reuse. Without it a session
+    /// of hovers would grow `dep_to` by one entry per retarget forever — bounded only by the next
+    /// full derivation, which is exactly the event retargeting exists to avoid.
+    dep_free: Vec<u32>,
     /// Per id: in the dirty closure.
     dirty: Vec<bool>,
     /// The closure's worklist.
@@ -269,6 +273,7 @@ impl LayoutScope {
         self.dirty.resize(n, false);
         self.dep_to.clear();
         self.dep_next.clear();
+        self.dep_free.clear();
         self.stack.clear();
         self.plan.clear();
         self.regions.clear();
@@ -302,10 +307,89 @@ impl LayoutScope {
             return; // an anchor to an id this pass has no node for (the screen root, a dead
                     // target): it cannot become dirty, so it constrains nothing.
         };
-        let e = self.dep_to.len() as u32;
-        self.dep_to.push(from);
-        self.dep_next.push(*head);
+        let e = match self.dep_free.pop() {
+            Some(e) => {
+                self.dep_to[e as usize] = from;
+                self.dep_next[e as usize] = *head;
+                e
+            }
+            None => {
+                let e = self.dep_to.len() as u32;
+                self.dep_to.push(from);
+                self.dep_next.push(*head);
+                e
+            }
+        };
         *head = e;
+    }
+
+    /// Re-point node `id`'s outgoing edges after an anchor RETARGET — the write 1388 had to
+    /// classify as structural and answer with a whole-graph derivation.
+    ///
+    /// 1388's reasoning was that "an edge has to disappear and another to appear, and no per-node
+    /// hash can say so, so the cached graph must be thrown away". The first half is true and the
+    /// second does not follow: the write site knows both edge sets, because a node's outgoing
+    /// edges ARE its anchor targets (see the derive's two `scope.edge` loops). What it could not
+    /// do was *say* so — this is the vocabulary that was missing, not a cost that was unavoidable.
+    ///
+    /// It matters because the hottest retarget in the client is `GameTooltip:SetOwner`, which
+    /// re-points the plate at the button under the cursor: every bag slot and every spellbook
+    /// button crossed in a hover sweep was re-deriving the whole roster.
+    ///
+    /// `old`/`new` are the node's FULL anchor-target lists, before and after the write — not the
+    /// one that moved. That is what makes duplicates exact: a node with two anchors onto the same
+    /// target has two edges, and removing one per old entry leaves precisely the right count.
+    ///
+    /// Returns `false` when it cannot do this safely and the caller must fall back to the
+    /// conservative touch. Removing an edge is the only direction that can be WRONG (a missing
+    /// edge under-dirties, and under-dirtying ships a stale rect), so every uncertainty is
+    /// resolved by refusing: an id the cached graph has no node for, or a frame whose edges come
+    /// from a ScrollFrame override rather than from its own anchors (the derive does not consult
+    /// the authored anchors at all in that case). An old target with no edge to remove is NOT an
+    /// uncertainty — `edge` silently drops an anchor onto an id this pass has no node for, so its
+    /// absence is the expected shape, and skipping it removes nothing that exists.
+    pub(crate) fn retarget(&mut self, id: u32, old: &[u32], new: &[u32]) -> bool {
+        let Some(&n) = self.node_of.get(id as usize) else {
+            return false;
+        };
+        if n == u32::MAX {
+            return false;
+        }
+        if n & REGION_TAG == 0 && self.plan[n as usize].2.is_some() {
+            return false; // a ScrollFrame override owns this frame's edges, not its anchors
+        }
+        for &t in old {
+            self.unlink_edge(t, id);
+        }
+        for &t in new {
+            self.edge(id, t);
+        }
+        true
+    }
+
+    /// Unlink ONE `to → from` edge, if the list holds one. The lists are short by construction
+    /// (a node's dependents), and even a hub's is walked in microseconds against the ~1.3 ms
+    /// derivation this is replacing, so no bound is imposed on the walk.
+    fn unlink_edge(&mut self, to: u32, from: u32) {
+        let Some(&head) = self.dep_head.get(to as usize) else {
+            return;
+        };
+        let mut prev = u32::MAX;
+        let mut e = head;
+        while e != u32::MAX {
+            let next = self.dep_next[e as usize];
+            if self.dep_to[e as usize] == from {
+                if prev == u32::MAX {
+                    self.dep_head[to as usize] = next;
+                } else {
+                    self.dep_next[prev as usize] = next;
+                }
+                self.dep_free.push(e);
+                return;
+            }
+            prev = e;
+            e = next;
+        }
     }
 
     /// Mark `id` dirty and queue it, if it is not already.

@@ -97,8 +97,11 @@ impl Viewer {
 /// View distance in yards. `farclip` = WoW's `farclip` CVar — the ONE view distance: the far plane of
 /// the detailed world (geometry beyond it is clipped per-pixel, the wall, and the WDL horizon fills
 /// in beyond) **and** the reach of terrain residency (`terrain_stream::window`, decision 1513).
-/// Default **777** (the vanilla clamp's max; the reference registers 350 — 0954's deliberate
-/// divergence, matching the reference `Config.wtf` most players ran).
+/// Default **350** — the reference client's own registered default (decision 1624, superseding
+/// 0954's divergence to the clamp's max 777). 777 shipped as "the `Config.wtf` most players ran",
+/// but it is the *maximum*, and it is what every player gets before they touch anything: at 777 the
+/// residency window is 24 chunks per axis against 350's 11 ([`terrain_stream::window::inner_radius`]),
+/// ~4.8x the area streamed, drawn and held resident. The slider still reaches 777.
 #[derive(Resource, Clone, Copy)]
 pub struct ViewDistance {
     pub farclip: f32,
@@ -118,7 +121,7 @@ pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
 pub const CAM_FAR: f32 = 3000.0;
 
 impl Default for ViewDistance {
-    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 777 default. The options row is
+    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 350 default. The options row is
     /// the live lever, but a headless capture has no hands — and a horizon or fog report almost always
     /// arrives with the director's slider somewhere other than the default (the 0684 gap was invisible
     /// at 777 and glaring at 320), so reproducing one must not need a human. Read once at startup, like
@@ -127,7 +130,7 @@ impl Default for ViewDistance {
         let farclip = std::env::var("WOW_FARCLIP")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
-            .map_or(777.0, |v| {
+            .map_or(350.0, |v| {
                 v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end())
             });
         Self { farclip }

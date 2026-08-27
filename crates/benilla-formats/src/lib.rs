@@ -14,6 +14,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
 
+/// The BLP texel forms, re-exported so a consumer of [`BlpMipChain`] can switch on
+/// [`BlpMipChain::texels`] without depending on `benilla-blp` directly.
+pub use benilla_blp::BlpTexels;
+
 mod chain;
 pub use chain::{Chain, ChainEntry};
 /// The UI texture table's other half — loose `.tga` art (addon folders; decision 1322).
@@ -206,26 +210,28 @@ pub use value_track::{TrackValue, ValueTrack};
 mod models;
 pub use models::{
     accumulate_wmo_group_camera_collision, accumulate_wmo_group_camera_only_collision,
-    accumulate_wmo_group_collision, hand_grip_finger_poses, load_m2_animation_summary,
-    load_m2_bone_spins, load_m2_bounds, load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned,
-    load_object_model, load_wmo, load_wmo_collision_tris, m2_bone_spins, m2_owner_reach,
-    m2_ribbon_emitter_count, m2_sequence_visible_textures, m2_texture_transform_count,
-    non_separable_billboard_bones, owner_last_rung, owner_last_rung_bucket,
-    parse_m2_animation_lookup, parse_m2_animation_summary, parse_m2_animations,
-    parse_m2_attachments, parse_m2_bounds, parse_m2_camera, parse_m2_cch_marker,
-    parse_m2_collision_hull, parse_m2_event_markers, parse_m2_global_sequence_bones,
-    parse_m2_lights, parse_m2_playable_animation_lookup, parse_m2_portrait_camera,
-    parse_m2_render_submeshes, parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs,
-    parse_wmo_lights, parse_wmo_portals, parse_wmo_root, wmo_group_doodad_refs,
-    wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs,
-    wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim,
-    AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot,
-    CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
-    GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds, M2Light,
-    M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim,
-    RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton, SkeletonBone, StringAnchors, UvAnim,
-    WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight,
-    WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
+    accumulate_wmo_group_collision, authored_half_height, batch_footprint, glue_art_extent,
+    hand_grip_finger_poses, load_m2_animation_summary, load_m2_bone_spins, load_m2_bounds,
+    load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned, load_object_model, load_wmo,
+    load_wmo_collision_tris, m2_bone_spins, m2_owner_reach, m2_ribbon_emitter_count,
+    m2_sequence_visible_textures, m2_texture_transform_count, non_separable_billboard_bones,
+    owner_last_rung, owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
+    parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
+    parse_m2_cch_marker, parse_m2_collision_hull, parse_m2_event_markers,
+    parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_playable_animation_lookup,
+    parse_m2_portrait_camera, parse_m2_render_submeshes, parse_m2_skeleton,
+    parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights, parse_wmo_portals, parse_wmo_root,
+    shipped_glue_art_extent, wmo_group_doodad_refs, wmo_group_fixed_colors,
+    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
+    wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim, AlphaMap, AlphaSeq,
+    AnimEvent, ArtExtent, BatchFootprint, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
+    BoneSpin, CharSkinSlot, CollisionMesh, Coverage, CoverageReader, EmitterBoneLink, EventMarker,
+    FogPolicy, FootprintTris, GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary,
+    M2Attachment, M2Bounds, M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm,
+    ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton,
+    SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
+    WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot,
+    ALPHA_KEY_REF, GLUE_AUTHORED_ASPECT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{
@@ -360,16 +366,22 @@ pub fn read_texture_rgba(chain: &mut Chain, path: &str) -> Result<(u32, u32, Vec
     blp_to_rgba(&bytes)
 }
 
-/// A decoded BLP, mip-major: each entry is one authored mip level's RGBA8 bytes, level 0 first.
+/// A BLP's authored mip pyramid, mip-major, level 0 first.
 /// **Never empty**: the chain length is `BlpHeader::mipmaps_count().max(1)` — a no-mipmaps BLP (the
 /// count formula reports 0) still yields a 1-level chain (level 0), matching `benilla_blp::decode`'s
 /// own guarantee that `mips` is never empty (see [`blp_bytes_to_mip_chain`]).
+///
+/// [`texels`](Self::texels) says what the buffers hold. [`blp_bytes_to_mip_chain`] always decodes to
+/// `Rgba8Unorm`; [`blp_bytes_to_native_chain`] keeps DXTC blocks verbatim for a GPU that can eat
+/// them. A consumer that reads texels on the CPU must use the former (or check `texels`).
 #[derive(Debug, Clone)]
 pub struct BlpMipChain {
     /// Mip-0 dimensions; level i's dims are `(width >> i).max(1) × (height >> i).max(1)`.
     pub width: u32,
     pub height: u32,
-    /// One RGBA8 buffer per authored mip level, level 0 first. **Authored, not regenerated** —
+    /// What every entry of `mips` holds — decoded pixels, or S3TC blocks.
+    pub texels: BlpTexels,
+    /// One buffer per authored mip level, level 0 first. **Authored, not regenerated** —
     /// the BLP's pre-baked mip levels are what the real 1.12 client uploads ("the BLP's own stored mip
     /// chain is used verbatim — no client-side mip regeneration"). Using these instead of
     /// CPU-resampling mip 0 in gamma byte space is the
@@ -382,6 +394,37 @@ impl BlpMipChain {
     /// Width × height of the mip level `i`, clamped to 1×1 minimum (wgpu / GL convention).
     pub fn mip_size(&self, i: u32) -> (u32, u32) {
         ((self.width >> i).max(1), (self.height >> i).max(1))
+    }
+
+    /// Are these levels CPU-readable `Rgba8Unorm` pixels? The guard for any consumer that indexes
+    /// into a level (resample, alpha stomp, colour read) — block bytes are not pixels.
+    pub fn is_rgba8(&self) -> bool {
+        !self.texels.is_block_compressed()
+    }
+
+    /// This chain with every level decoded to `Rgba8Unorm`; a no-op if it already is.
+    ///
+    /// The escape hatch for a consumer that asked for the passthrough form and then could not use
+    /// it — it costs the decode it was trying to avoid, but it needs no second read of the file and
+    /// it cannot fail, so the caller is never left holding blocks it must not upload.
+    pub fn into_rgba8(self) -> Self {
+        if self.is_rgba8() {
+            return self;
+        }
+        let mips = self
+            .mips
+            .iter()
+            .enumerate()
+            .map(|(i, level)| {
+                let (w, h) = self.mip_size(i as u32);
+                benilla_blp::decode_level(self.texels, w, h, level)
+            })
+            .collect();
+        Self {
+            texels: BlpTexels::Rgba8Unorm,
+            mips,
+            ..self
+        }
     }
 }
 
@@ -396,6 +439,16 @@ pub fn read_texture_mip_chain(chain: &mut Chain, path: &str) -> Result<BlpMipCha
         .read_file(&name)
         .with_context(|| format!("reading texture '{name}'"))?;
     blp_bytes_to_mip_chain(&bytes).with_context(|| format!("decoding texture '{name}'"))
+}
+
+/// Read a texture from the chain by internal path and keep its DXTC blocks verbatim —
+/// [`blp_bytes_to_native_chain`]'s chain-reading wrapper, the twin of [`read_texture_mip_chain`].
+pub fn read_texture_native_chain(chain: &mut Chain, path: &str) -> Result<BlpMipChain> {
+    let name = path.replace('/', "\\");
+    let bytes = chain
+        .read_file(&name)
+        .with_context(|| format!("reading texture '{name}'"))?;
+    blp_bytes_to_native_chain(&bytes).with_context(|| format!("decoding texture '{name}'"))
 }
 
 /// Decode every authored mip level of an **in-memory** BLP into `Rgba8Unorm` buffers — the BLP's own
@@ -423,6 +476,38 @@ pub fn blp_bytes_to_mip_chain(bytes: &[u8]) -> Result<BlpMipChain> {
     Ok(BlpMipChain {
         width,
         height,
+        texels: BlpTexels::Rgba8Unorm,
+        mips,
+    })
+}
+
+/// Every authored mip level of an in-memory BLP **with its DXTC blocks kept verbatim** — the form
+/// the reference client uploads (`glCompressedTexImage2DARB`; wow-re `system/image/image.md`).
+///
+/// Raw1/Raw3 BLPs have no block form and come back decoded, reporting
+/// [`BlpTexels::Rgba8Unorm`] — so a caller switches on [`BlpMipChain::texels`] rather than
+/// assuming. Levels are padded to whole blocks, so the concatenated chain is exactly what wgpu
+/// expects for the reported format.
+pub fn blp_bytes_to_native_chain(bytes: &[u8]) -> Result<BlpMipChain> {
+    let decoded =
+        benilla_blp::decode_native(bytes).map_err(|e| anyhow::anyhow!("decoding BLP: {e}"))?;
+    // Same floor-at-one reasoning as `blp_bytes_to_mip_chain`.
+    let (width, height, count) = (
+        decoded.width,
+        decoded.height,
+        decoded.mip_chain_count().max(1),
+    );
+    let texels = decoded.texels;
+    let mips: Vec<Vec<u8>> = decoded
+        .mips
+        .into_iter()
+        .take(count)
+        .map(|m| m.bytes)
+        .collect();
+    Ok(BlpMipChain {
+        width,
+        height,
+        texels,
         mips,
     })
 }

@@ -118,6 +118,12 @@ pub(crate) struct UiFrameCost {
     pub(crate) diff: u128,
     pub(crate) quads: usize,
     pub(crate) solves: u64,
+    /// How many times this frame's resolve DERIVED the layout graph from scratch (decision 1388's
+    /// `layout_derivations`). The law is zero, and it is here because it was not: the recorder was
+    /// built for the hover-cost symptom and reported `solves` — the cheap term — while a
+    /// derivation, ~30× more expensive and paid on the same frames, was invisible to it
+    /// (decision 1625).
+    pub(crate) derives: u64,
     pub(crate) skipped: bool,
     /// How many entries the per-entry splice re-converted this frame — `0` on a settled or
     /// full-conversion frame. Nonzero is the proof the splice path fired (the equivalence tests

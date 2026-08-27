@@ -231,27 +231,42 @@ pub(super) struct GlueScenario {
     pub(super) screen: GlueScreen,
     /// The preview's race, sex and class ids — the reference comparisons are per-race, so a
     /// scenario says which one it photographs. Applied through the existing
-    /// `WOW_CHARCREATE_PICK` instrument rather than a second path into `CreateSelection`.
-    pub(super) pick: (u8, u8, u8),
+    /// `WOW_CHARCREATE_PICK` instrument rather than a second path into `CreateSelection` — and
+    /// **that instrument wins when it is already set**, so one scenario photographs any race
+    /// (`WOW_CHARCREATE_PICK=6,0,11 WOW_CAPTURE=glue-charcreate` is the tauren stage). `None` for
+    /// a screen with no preview to pick.
+    pub(super) pick: Option<(u8, u8, u8)>,
 }
 
-/// Which glue screen a [`GlueScenario`] photographs. One today; the select screen wants a roster
-/// (so it needs a server, or a seeded one) and the login screen is nearly static.
+/// Which glue screen a [`GlueScenario`] photographs. The select screen wants a roster (so it
+/// needs a server, or a seeded one) and is not here.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum GlueScreen {
     /// The character-creation screen (decision 0423). Photographs, in one frame: the authored-rig
     /// lighting of the `UI_*` backdrop scene and its per-race fog (the lane 1171 left uncovered),
     /// the preview body in its starting outfit (0527), and the GlueXML panel around them.
     CharCreate,
+    /// The login screen (decision 0539) — `UI_MainMenu` behind the account form. Nearly static,
+    /// which is why it was not here until its framing was the subject (B330, decision 1619): the
+    /// gate's backdrop is the narrowest art of the seven scenes, so it is the one whose edges a
+    /// wide window reaches first. `WOW_WIN=2560x1440` is the reporter's shape.
+    Login,
 }
 
 /// The glue sweep. Human, 1 (Human male warrior) — the race whose scene the reference's own
-/// screenshots use, and the outfit path most exercised elsewhere.
-pub(super) const GLUE_SCENARIOS: &[GlueScenario] = &[GlueScenario {
-    name: "glue-charcreate",
-    screen: GlueScreen::CharCreate,
-    pick: (1, 0, 1),
-}];
+/// screenshots use, and the outfit path most exercised elsewhere — and the login gate.
+pub(super) const GLUE_SCENARIOS: &[GlueScenario] = &[
+    GlueScenario {
+        name: "glue-charcreate",
+        screen: GlueScreen::CharCreate,
+        pick: Some((1, 0, 1)),
+    },
+    GlueScenario {
+        name: "glue-login",
+        screen: GlueScreen::Login,
+        pick: None,
+    },
+];
 
 /// THE golden baseline: **two spots FRAMED BY THE DIRECTOR, each at noon and at night — four
 /// captures, and that is the whole sweep.** Elwynn water and a Felwood hollow on Kalimdor. The

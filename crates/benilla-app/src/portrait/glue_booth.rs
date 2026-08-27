@@ -25,7 +25,10 @@ use crate::entities::Creatures;
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
-use super::framing::{attachment_point, diag_to_vert, glue_scene_vert_fov, PORTRAIT_ASPECT};
+use super::framing::{
+    attachment_point, diag_to_vert, glue_scene_framing, ArtExtent, GLUE_AUTHORED_ASPECT,
+    PORTRAIT_ASPECT,
+};
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
     BoothBillboardSpec, BoothCam, BoothEffects, BoothLight, BoothMotion, BoothPart, BoothRider,
@@ -193,6 +196,14 @@ pub(crate) struct CreateScene {
     spawned: bool,
     /// The authored camera 0, captured at spawn (drives the booth camera while the scene shows).
     cam: Option<benilla_assets::PortraitCamera>,
+    /// How far the scene's art paints around that camera — the shipped scene's measured extent
+    /// ([`benilla_formats::shipped_glue_art_extent`], decision 1619) — the ceiling on the framing
+    /// law's widening ([`glue_scene_framing`]). `None` with no scene.
+    art: Option<ArtExtent>,
+    /// `Some(aspect)` while the framing law pillarboxes the scene (the window is wider than the
+    /// art can fill at the zoom floor): the booth camera renders into a centred viewport of this
+    /// aspect, black either side ([`pillarbox_glue_scene`]). `None`: the whole window.
+    viewport_aspect: Option<f32>,
     /// The character's stage spot — scene attachment 0 (Bevy model space), `ZERO` with no scene.
     /// (Verified for select too: the body seats on attachment **0**, `0x473039` — attachment 1 is
     /// the enum's secondary model, wow-re `glue-select-model.md` TU-B; 0429's attachment-1
@@ -491,6 +502,16 @@ pub(super) fn spawn_glue_booth(
             // composites the character straight over the page, the ref's model-in-the-scene look.
             // FfxGlow's combine carries the scene alpha through for exactly this.
             clear_color: ClearColorConfig::Custom(Color::NONE),
+            // The OUTPUT clear — what the upscaling blit paints on the target OUTSIDE the
+            // camera's viewport, when the framing law boxes the scene (decision 1619,
+            // [`pillarbox_glue_scene`]). Bevy's default here is the global `ClearColor`, which
+            // the world's lighting sets to the day's fog colour every frame — so without this
+            // the bars came out Elwynn-sky blue. Black: a frame, not a page showing through.
+            // With no viewport the blit covers the whole target and this is never seen.
+            output_mode: bevy::camera::CameraOutputMode::Write {
+                blend_state: None,
+                clear_color: ClearColorConfig::Custom(Color::BLACK),
+            },
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
@@ -549,6 +570,8 @@ pub(super) fn spawn_glue_booth(
         handle: None,
         spawned: false,
         cam: None,
+        art: None,
+        viewport_aspect: None,
         char_spot: Vec3::ZERO,
         char_facing: Quat::IDENTITY,
         char_scale: 1.0,
@@ -610,6 +633,8 @@ pub(super) fn sync_glue_scene(
             scene.handle = None;
             scene.spawned = false;
             scene.cam = None;
+            scene.art = None;
+            scene.viewport_aspect = None;
             scene.char_spot = Vec3::ZERO;
             scene.char_facing = Quat::IDENTITY;
             scene.char_scale = 1.0;
@@ -648,6 +673,8 @@ pub(super) fn sync_glue_scene(
         ))));
         scene.spawned = false;
         scene.cam = None;
+        scene.art = None;
+        scene.viewport_aspect = None;
         scene.char_spot = Vec3::ZERO;
         clear_pet(&mut commands, &mut scene);
         commands.entity(scene.root).despawn_related::<Children>();
@@ -786,6 +813,21 @@ pub(super) fn sync_glue_scene(
         scene_rig.finish(&mut commands);
         scene.spawned = true;
         scene.cam = model.camera0;
+        // The scene's art extent — the shipped table's transcription of what the tool measured
+        // off this very model (decision 1619). Said out loud as the aspects the law acts on.
+        scene.art = benilla_formats::shipped_glue_art_extent(token);
+        if let (Some(art), Some(cam)) = (scene.art, model.camera0.as_ref()) {
+            let t0 = benilla_formats::authored_half_height(cam.fov);
+            info!(
+                "create scene: UI_{token} art extent — half_w {:.4} (widens to {:.2}:1), half_h {:.4} \
+                 (opens to 1:{:.2}); boxes past {:.2}:1",
+                art.half_w,
+                art.half_w / t0,
+                art.half_h,
+                art.half_h / (t0 * GLUE_AUTHORED_ASPECT),
+                art.half_w.max(t0 * GLUE_AUTHORED_ASPECT) / super::framing::glue_zoom_floor(cam.fov),
+            );
+        }
         scene.char_spot = stage;
         scene.char_facing = stage_facing;
         scene.char_scale = stage_scale;
@@ -836,19 +878,63 @@ pub(super) fn sync_glue_scene(
         let up = Quat::from_axis_angle(fwd, cam.roll) * Vec3::Y;
         // The record fov is the client's *diagonal* convention. The scene is a FULL-SCREEN pane, so
         // the reference feeds that conversion the display's own aspect and spends height on width —
-        // a 1.55× zoom at 21:9 that crops head and feet (B242). [`glue_scene_vert_fov`] pins the
+        // a 1.55× zoom at 21:9 that crops head and feet (B242). [`glue_scene_framing`] pins the
         // authored 4:3 view box instead; its doc carries the law. Far kept generous: fog is not
         // rendered yet, so the authored far (27.8 on Orc) would slice unfogged geometry.
+        let framing = glue_scene_framing(cam.fov, aspect, scene.art);
+        if scene.viewport_aspect != framing.viewport_aspect {
+            scene.viewport_aspect = framing.viewport_aspect;
+        }
         let rig = (
             Transform::from_translation(cam.eye).looking_at(cam.target, up),
             Projection::from(PerspectiveProjection {
-                fov: glue_scene_vert_fov(cam.fov, aspect),
+                fov: framing.vert_fov,
                 near: cam.near,
                 far: cam.far.max(1000.0),
                 ..default()
             }),
         );
         aim(&mut cams, GLUE_SLOT, &rig);
+    }
+}
+
+/// Apply the framing law's **pillarbox** to the glue booth camera (decision 1619): while
+/// [`CreateScene::viewport_aspect`] is set, the camera renders into a centred viewport of that
+/// aspect on the window-sized target, and the target either side is the camera's black *output*
+/// clear (see [`spawn_glue_booth`]) — a frame. Inside the box nothing changes: the scene's own
+/// unpainted pixels stay transparent over the page, as they always were. Writes only on change —
+/// a `Camera` write re-runs the camera system.
+pub(super) fn pillarbox_glue_scene(
+    scene: Res<CreateScene>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut cams: Query<(&BoothCam, &mut Camera)>,
+) {
+    let Ok(w) = window.single() else {
+        return;
+    };
+    let (full_w, full_h) = (w.physical_width().max(1), w.physical_height().max(1));
+    let viewport = scene.viewport_aspect.map(|aspect| {
+        let box_w = ((full_h as f32 * aspect).round() as u32).clamp(1, full_w);
+        bevy::camera::Viewport {
+            physical_position: UVec2::new((full_w - box_w) / 2, 0),
+            physical_size: UVec2::new(box_w, full_h),
+            ..default()
+        }
+    });
+    for (booth, mut cam) in cams.iter_mut() {
+        if booth.0 != GLUE_SLOT {
+            continue;
+        }
+        let same = match (&cam.viewport, &viewport) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.physical_position == b.physical_position && a.physical_size == b.physical_size
+            }
+            _ => false,
+        };
+        if !same {
+            cam.viewport = viewport.clone();
+        }
     }
 }
 
