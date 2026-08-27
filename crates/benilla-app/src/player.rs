@@ -1812,7 +1812,14 @@ fn control(
             // The counter-twist gap: how far the aim sits from the rendered body — the strafe
             // offset while it lasts, unwinding to zero as `model_yaw` closes on `face_yaw`.
             if let Some(mut twist) = twist {
-                twist.yaw_gap = wrap_pi(player.face_yaw - player.model_yaw);
+                // `WOW_TWIST_GAP=<radians>` forces the gap — the counter-twist's A/B lever. The
+                // pass is inert at `yaw_gap == 0` and a scripted probe cannot open a real gap
+                // (`WOW_PROBE_CAM` turns the model with the camera, so the measured gap is float
+                // noise, ~1e-6 rad), which means "removing the twist changed nothing" has never
+                // yet been a measurement of the twist — only of a pass that never ran. This is
+                // what lets it actually be exercised.
+                twist.yaw_gap = twist_gap_override()
+                    .unwrap_or_else(|| wrap_pi(player.face_yaw - player.model_yaw));
             }
         }
 
@@ -1983,4 +1990,15 @@ fn control(
         movement_net::park_mover(&net.0 .0, &mut player);
         camera::fly_free(dt, &keys, typing, &mut rig, &mut cam, &mut cam_t);
     }
+}
+
+/// `WOW_TWIST_GAP=<radians>`: pin the body counter-twist's yaw gap instead of deriving it from
+/// aim-minus-model. Zero-cost when unset: one env read, once.
+fn twist_gap_override() -> Option<f32> {
+    static G: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *G.get_or_init(|| {
+        std::env::var("WOW_TWIST_GAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+    })
 }

@@ -39,7 +39,10 @@
 use bevy::camera::Projection;
 use bevy::prelude::*;
 
+use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
+
 use benilla_world::rig_anim::RigPose;
+use benilla_world::rig_palette::RigSkin;
 use benilla_world::view::WorldCamera;
 
 use super::ProbeClock;
@@ -88,6 +91,34 @@ struct JitterMeter {
     /// attachment, same frame, one measured in absolute world space and one in the rig's.
     prev_rid: Vec<Vec3>,
     prev2_rid: Vec<Vec3>,
+    /// **The rows the vertex stage actually blends** — the palette, probed at each bone's bind
+    /// position, same two-frame window.
+    ///
+    /// The blind spot this closes, and it is the one that let a wrong "fixed" call stand. Every
+    /// other bone column here reads `RigPose::model`, the pose the compose pass produced — and
+    /// the GPU never reads it. It skins from the palette, which `rig_anim::compose::rig_worlds`
+    /// composes a SECOND time from the rig's locals through the root's own frame, folding in the
+    /// `flags & 0x7` arm and the billboard replacement. Anything that goes wrong between those
+    /// two compositions is invisible to `flesh`, so a clean `flesh` column has never been able to
+    /// clear the body — it only ever cleared the pose.
+    prev_pal: Vec<Vec3>,
+    prev2_pal: Vec<Vec3>,
+    /// **The end of the chain: where each probe lands ON SCREEN, in pixels.** Every other column
+    /// stops somewhere upstream — model space, rig space, world space — and each of those can be
+    /// spotless while the thing the eye reads is not, because the camera's ORIENTATION, the
+    /// projection and the viewport all sit between them and the glass. This series is the shader's
+    /// own arithmetic (`view_rot * (p_rig + (origin - cam))`, then clip) carried to viewport
+    /// pixels, so it is the only column that can be held against "I can see it move".
+    prev_scr: Vec<Vec2>,
+    prev2_scr: Vec<Vec2>,
+    /// The camera's ROTATION, same two-frame window. `prev_cam` above is its translation only —
+    /// and a camera that never moves an inch can still swing the whole scene a fraction of a pixel
+    /// by rolling a single ULP, which reads as "everything shimmers" and is invisible to a
+    /// translation probe.
+    prev_camrot: Quat,
+    prev2_camrot: Quat,
+    /// Each bone's BIND position (from the rig's inverse bindposes) — bind data, computed once.
+    binds: Vec<Vec3>,
     /// Frames of history held (`< 2` means Δ² is not defined yet).
     depth: u32,
 }
@@ -124,6 +155,13 @@ impl Plugin for JitterMeterPlugin {
             prev2_anc: Vec::new(),
             prev_rid: Vec::new(),
             prev2_rid: Vec::new(),
+            prev_pal: Vec::new(),
+            prev2_pal: Vec::new(),
+            prev_scr: Vec::new(),
+            prev2_scr: Vec::new(),
+            prev_camrot: Quat::IDENTITY,
+            prev2_camrot: Quat::IDENTITY,
+            binds: Vec::new(),
             depth: 0,
         })
         // `Last`, so every writer that can still move the subject this frame — the pose evaluator,
@@ -181,7 +219,27 @@ type SubjectQuery = (
     &'static NetEntity,
     &'static GlobalTransform,
     &'static RigPose,
+    Option<&'static RigSkin>,
+    Has<SelfPlayer>,
 );
+
+/// **The palette probe** — [`flesh_probes`]' twin on the rows the vertex stage blends. A row is
+/// `rig_from_joint × inverse_bindpose`, so it maps BIND space, not bone-local space: probing it at
+/// the bone's bind position plus [`flesh_radii`]'s offset is the same question `flesh_probes` asks
+/// of `RigPose::model`, put to the numbers that actually reach the GPU. Probing it at the row's own
+/// translation column instead would read a rotation as up to the model's full height of lever arm,
+/// ~10x what any real vertex sees.
+fn palette_probes(rows: &[Mat4], binds: &[Vec3], radii: &[f32]) -> Vec<Vec3> {
+    let mut out = Vec::with_capacity(rows.len() * 3);
+    for (i, m) in rows.iter().enumerate() {
+        let bind = binds.get(i).copied().unwrap_or(Vec3::ZERO);
+        let r = radii.get(i).copied().unwrap_or(LEAF_R);
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            out.push(m.transform_point3(bind + axis * r));
+        }
+    }
+    out
+}
 
 /// One `JIT` line per frame for the subject: the three terms' Δ and Δ², in mm and in pixels.
 #[allow(clippy::too_many_arguments)] // one param per term the reading has to separate
@@ -191,13 +249,14 @@ fn sample_jitter(
     names: Res<NameCache>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     window: Query<&Window>,
-    subjects: Query<SubjectQuery, Without<SelfPlayer>>,
+    subjects: Query<SubjectQuery>,
     globals: Query<&GlobalTransform>,
     kids: Query<&Children>,
     meshes: Query<(), With<Mesh3d>>,
     attach: Query<&crate::entities::BoneAttach>,
     riders: Query<&benilla_world::rig_rider::RigRider>,
     palettes: Res<benilla_world::rig_palette::RigPalettes>,
+    ibps: Res<Assets<SkinnedMeshInverseBindposes>>,
     players: Query<&AnimationPlayer>,
     // The clock the POSE advances on — `ProbeClock` above is `Time<Real>`, the wall clock, and the
     // gap between the two is the whole defect (`benilla_world::frame_pace`). Logging both side by
@@ -214,13 +273,22 @@ fn sample_jitter(
     let cam_pos = cam_g.translation();
     // Nearest match to the camera — with no substring, nearest rigged unit outright.
     let want = meter.want.clone();
-    let Some((entity, guid, net, tf, rig)) = subjects
+    // `WOW_JITTER="self"` aims the meter at the AVATAR — the director's own repro (an undressed
+    // character, watched from a close third person), and the one subject every other spelling of
+    // this filter excluded. Without it the meter could only ever answer for somebody else's body,
+    // which is a different entity, a different equipment lane, and a camera that is seated ON it.
+    let on_self = want == "self";
+    let Some((entity, guid, net, tf, rig, skin, _)) = subjects
         .iter()
-        .filter(|(_, guid, _, _, _)| {
-            want.is_empty()
-                || names
-                    .peek(guid.0)
-                    .is_some_and(|n| n.to_lowercase().contains(&want))
+        .filter(|&(_, guid, _, _, _, _, is_self)| {
+            if on_self {
+                return is_self;
+            }
+            !is_self
+                && (want.is_empty()
+                    || names
+                        .peek(guid.0)
+                        .is_some_and(|n| n.to_lowercase().contains(&want)))
         })
         .min_by(|a, b| {
             let d = |g: &GlobalTransform| g.translation().distance_squared(cam_pos);
@@ -249,6 +317,80 @@ fn sample_jitter(
         meter.radii = flesh_radii(&rig.parents, &rig.locals);
     }
     let flesh = flesh_probes(&rig.model, &meter.radii);
+    // The rows the vertex stage blends, probed the same way — the body's OWN ground truth. Empty
+    // when the subject holds no palette slot (bind-pose fallback), which reads as all-zero columns
+    // rather than as a clean result.
+    let mut bone_pos: Vec<Vec3> = Vec::new();
+    // The same rows' ROTATION, as the three transformed unit axes. Bone translations can be
+    // smooth while the frames they carry are not — a probe offset from the bone rides the
+    // rotation, and that is what the flesh/vertex actually follows. Differencing a unit axis
+    // measures the rotational motion at unit radius, directly comparable to the file's.
+    let mut bone_axes: Vec<[Vec3; 3]> = Vec::new();
+    let pal: Vec<Vec3> = match skin.and_then(|s| {
+        Some((
+            palettes.rig_rows(s.slot, s.bones() as usize)?,
+            ibps.get(s.ibp())?,
+        ))
+    }) {
+        Some((rows, ibp)) => {
+            if meter.binds.len() != rows.len() {
+                meter.binds = ibp
+                    .iter()
+                    .take(rows.len())
+                    .map(|m| m.inverse().transform_point3(Vec3::ZERO))
+                    .collect();
+            }
+            let probes = palette_probes(&rows, &meter.binds, &meter.radii);
+            // The bones' OWN rig-relative positions (the row applied to the bind point, no probe
+            // offset) — the raw lane's series, and the one shape an offline compose of the same
+            // M2 can be differenced against point-for-point.
+            bone_pos = rows
+                .iter()
+                .zip(&meter.binds)
+                .map(|(m, &b)| m.transform_point3(b))
+                .collect();
+            bone_axes = rows
+                .iter()
+                .map(|m| {
+                    [
+                        m.transform_vector3(Vec3::X),
+                        m.transform_vector3(Vec3::Y),
+                        m.transform_vector3(Vec3::Z),
+                    ]
+                })
+                .collect();
+            probes
+        }
+        None => Vec::new(),
+    };
+    // **Project them.** The mirror of `wow_model.wgsl`'s vertex stage, operation for operation:
+    // camera-relative first (`p_rig + (origin - cam)`, never the absolute world coordinate), then
+    // the view rotation, then clip, then viewport. What comes out is where the eye finds that bit
+    // of flesh, in pixels, this frame.
+    let vp = Vec2::new(
+        window.physical_width() as f32,
+        window.physical_height() as f32,
+    );
+    let view_rot = Mat3::from_quat(cam_g.rotation()).transpose();
+    let clip_from_view = projection.get_clip_from_view();
+    let rig_origin = skin.and_then(|s| palettes.slot_origin(s.slot));
+    let scr: Vec<Vec2> = match rig_origin {
+        Some(origin) => {
+            let shift = origin - cam_pos;
+            pal.iter()
+                .map(|&p| {
+                    let clip = clip_from_view * (view_rot * (p + shift)).extend(1.0);
+                    if clip.w.abs() < 1.0e-6 {
+                        return Vec2::ZERO;
+                    }
+                    let ndc = Vec2::new(clip.x, clip.y) / clip.w;
+                    Vec2::new((ndc.x * 0.5 + 0.5) * vp.x, (0.5 - ndc.y * 0.5) * vp.y)
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let camrot = cam_g.rotation();
     // The anchors are ordinary scene-graph entities in ABSOLUTE world space — the seam 0974
     // named and did not close. Their translations are read exactly as the renderer reads them.
     let ancs: Vec<Vec3> = rig
@@ -271,13 +413,17 @@ fn sample_jitter(
         || meter.prev_flesh.len() != flesh.len()
         || meter.prev_anc.len() != ancs.len()
         || meter.prev_rid.len() != rids.len()
+        || meter.prev_pal.len() != pal.len()
+        || meter.prev_scr.len() != scr.len()
     {
         let name = names.peek(guid.0).unwrap_or("?").to_string();
         println!(
             "JIT# t=<s> dt=<ms> dist=<yd> pxyd=<px/yd> | camd1 camd2 (mm) | rootd1 rootd2 (mm) \
              | bone=<max bone> d1 d2 (mm) d1px d2px | flesh=<bone> d1 d2 (mm) d1px d2px v(mm/s) | \
              anc=<n> d1 d2 (mm) d1px d2px | \
-             ancstep xyz (mm) | rider=<n> d1 d2 (mm) d1px d2px | window={}x{}   subject={name:?} \
+             ancstep xyz (mm) | rider=<n> d1 d2 (mm) d1px d2px | \
+             pal=<bone> d1 d2 (mm) d1px d2px nbig | \
+             SCREEN d1med d2med d2max (px) nbig | camrot d1 d2 (urad) | window={}x{}   subject={name:?} \
              guid={:#x} display={:?} bones={} scale={scale:.3}",
             window.physical_width(),
             window.physical_height(),
@@ -326,6 +472,12 @@ fn sample_jitter(
         meter.prev2_anc = Vec::new();
         meter.prev_rid = rids.iter().map(|&(_, t)| t).collect();
         meter.prev2_rid = Vec::new();
+        meter.prev_pal = pal;
+        meter.prev2_pal = Vec::new();
+        meter.prev_scr = scr;
+        meter.prev2_scr = Vec::new();
+        meter.prev_camrot = camrot;
+        meter.prev2_camrot = camrot;
         meter.prev2 = Vec::new();
         meter.prev_root = root;
         meter.prev2_root = Vec3::ZERO;
@@ -343,6 +495,12 @@ fn sample_jitter(
         meter.prev_anc = ancs;
         meter.prev2_rid = std::mem::take(&mut meter.prev_rid);
         meter.prev_rid = rids.iter().map(|&(_, t)| t).collect();
+        meter.prev2_pal = std::mem::take(&mut meter.prev_pal);
+        meter.prev_pal = pal;
+        meter.prev2_scr = std::mem::take(&mut meter.prev_scr);
+        meter.prev_scr = scr;
+        meter.prev2_camrot = meter.prev_camrot;
+        meter.prev_camrot = camrot;
         meter.prev2_root = meter.prev_root;
         meter.prev_root = root;
         meter.prev2_cam = meter.prev_cam;
@@ -398,6 +556,48 @@ fn sample_jitter(
     let fd1med = d1s.get(d1s.len() / 2).copied().unwrap_or(0.0);
     let big_px = 0.25 / (scale * px_per_yd).max(1.0e-6);
     let fnbig = per_bone.iter().filter(|&&c| c > big_px).count();
+    // The same pair on the PALETTE probes. No `scale` here, unlike the flesh columns: these rows
+    // are composed through the root's own frame, so the unit's scale is already in them.
+    let (mut pd2, mut pworst) = (0.0f32, 0usize);
+    let mut pal_bone = vec![0.0f32; pal.len() / 3];
+    for (i, &p) in pal.iter().enumerate() {
+        let c = (p - 2.0 * meter.prev_pal[i] + meter.prev2_pal[i]).length();
+        let b = &mut pal_bone[i / 3];
+        *b = b.max(c);
+        if c > pd2 {
+            pd2 = c;
+            pworst = i;
+        }
+    }
+    let pd1 = pal
+        .get(pworst)
+        .map_or(0.0, |&p| (p - meter.prev_pal[pworst]).length());
+    let pnbig = pal_bone
+        .iter()
+        .filter(|&&c| c > 0.25 / px_per_yd.max(1.0e-6))
+        .count();
+    // **In pixels, at the glass.** Per bone, the max over its three probes; then the MEDIAN bone
+    // (the "whole model" number the report actually asks about), the worst bone, and the count
+    // past a quarter pixel.
+    let mut scr_bone = vec![(0.0f32, 0.0f32); scr.len() / 3];
+    for (i, &q) in scr.iter().enumerate() {
+        let c = (q - 2.0 * meter.prev_scr[i] + meter.prev2_scr[i]).length();
+        let d = (q - meter.prev_scr[i]).length();
+        let b = &mut scr_bone[i / 3];
+        *b = (b.0.max(d), b.1.max(c));
+    }
+    let mut s1: Vec<f32> = scr_bone.iter().map(|b| b.0).collect();
+    let mut s2: Vec<f32> = scr_bone.iter().map(|b| b.1).collect();
+    s1.sort_by(f32::total_cmp);
+    s2.sort_by(f32::total_cmp);
+    let sd1med = s1.get(s1.len() / 2).copied().unwrap_or(0.0);
+    let sd2med = s2.get(s2.len() / 2).copied().unwrap_or(0.0);
+    let sd2max = s2.last().copied().unwrap_or(0.0);
+    let snbig = s2.iter().filter(|&&c| c > 0.25).count();
+    // Camera ROTATION, in microradians: Δ and Δ² of the angle between consecutive orientations.
+    let ang = |a: Quat, b: Quat| a.angle_between(b) * 1.0e6;
+    let crd1 = ang(camrot, meter.prev_camrot);
+    let crd2 = (ang(camrot, meter.prev_camrot) - ang(meter.prev_camrot, meter.prev2_camrot)).abs();
     // The flesh probe's **velocity**, mm/s — `Δ/dt`, not `Δ`. This is the judder discriminator,
     // and it is the one number the series cannot reconstruct from the others: if the pose is
     // smooth in time but sampled at uneven `dt`, then `Δ ≈ v·dt` is ragged exactly as `dt` is
@@ -473,12 +673,70 @@ fn sample_jitter(
     // when a smooth pose is merely sampled at uneven times, and blows up when it is not smooth.
     let dvel = d2 * scale / (dt * dt);
     let mm = |v: f32| v * scale * 1000.0;
+    // **`WOW_JITTER_RAW=<bone>` — one bone's series, unaggregated.** Every other column here is a
+    // median or a worst-of over ~350 probe points, and both of those hide the shape of a series:
+    // a median cannot show a staircase (the *set* stays busy while each member holds), and a
+    // worst-of is not one series at all — it re-picks its subject every frame, so differencing it
+    // is meaningless. Twice now a reading taken off those columns pointed at the wrong mechanism.
+    // This prints the chosen bone's palette-probe position (rig-relative yards, full f32) and its
+    // projected screen position (pixels), so the series can be differenced honestly downstream.
+    // **The two ABSOLUTE numbers the vertex stage still sums** (`wow_model.wgsl`:
+    // `p_cam = frame_from_local·v + (frame_origin - view.world_position)`). Everything else on the
+    // path is rig-sized and exact; these two are world coordinates, so at Elwynn's ~9.5 k yards
+    // ONE of their axes has an ULP of 2^-10 yd = 0.9766 mm while the other two sit at ~7.6e-6.
+    // That asymmetry is the whole fingerprint: the staircase is one-dimensional, so it is
+    // invisible looking ALONG the big axis and full-amplitude looking across it.
+    if let Some(o) = rig_origin {
+        println!(
+            "ORIGIN\t{now:.6}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}",
+            o.x, o.y, o.z, cam_pos.x, cam_pos.y, cam_pos.z
+        );
+    }
+    if raw_bone() == Some(usize::MAX) {
+        // `WOW_JITTER_RAW=all` — the whole skeleton, one line per bone per frame. The point is
+        // localisation: differenced against an offline compose of the same M2 it says WHICH bones
+        // carry motion the file does not, and a subtree answer names the pass that added it.
+        for (b, p) in bone_pos.iter().enumerate() {
+            let a = bone_axes.get(b).copied().unwrap_or_default();
+            println!(
+                "RAWALL\t{now:.6}\t{b}\t{:.9}\t{:.9}\t{:.9}\t{:.6}\t\
+                 {:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}",
+                p.x,
+                p.y,
+                p.z,
+                anim.first().map_or(-1.0, |a| a.1),
+                a[0].x,
+                a[0].y,
+                a[0].z,
+                a[1].x,
+                a[1].y,
+                a[1].z,
+                a[2].x,
+                a[2].y,
+                a[2].z
+            );
+        }
+    } else if let Some(b) = raw_bone() {
+        if let (Some(p), Some(q)) = (bone_pos.get(b), scr.get(3 * b)) {
+            println!(
+                "RAW\t{now:.6}\t{b}\t{:.9}\t{:.9}\t{:.9}\t{:.6}\t{:.6}\t{:.6}",
+                p.x,
+                p.y,
+                p.z,
+                q.x,
+                q.y,
+                anim.first().map_or(-1.0, |a| a.1)
+            );
+        }
+    }
     println!(
         "JIT\t{now:.4}\t{:.3}\t{dist:.3}\t{px_per_yd:.1}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{worst}\t\
          {:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t\
          {}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.4}\t{}\t{:.3}\t{}\t{:.4}\t{:.3}\t\
          {}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t\
-         {:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}",
+         {:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t\
+         {}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t\
+         {:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{:.2}",
         dt * 1000.0,
         cam_d1 * 1000.0,
         cam_d2 * 1000.0,
@@ -515,14 +773,43 @@ fn sample_jitter(
         rd2 * 1000.0,
         rd1 * px_per_yd,
         rd2 * px_per_yd,
+        pworst / 3,
+        mm(pd1),
+        mm(pd2),
+        pd1 * px_per_yd,
+        pd2 * px_per_yd,
+        pnbig,
+        sd1med,
+        sd2med,
+        sd2max,
+        snbig,
+        crd1,
+        crd2,
     );
 
     meter.prev2 = std::mem::replace(&mut meter.prev, bones);
     meter.prev2_flesh = std::mem::replace(&mut meter.prev_flesh, flesh);
+    meter.prev2_pal = std::mem::replace(&mut meter.prev_pal, pal);
+    meter.prev2_scr = std::mem::replace(&mut meter.prev_scr, scr);
+    meter.prev2_camrot = std::mem::replace(&mut meter.prev_camrot, camrot);
     meter.prev2_anc = std::mem::replace(&mut meter.prev_anc, ancs);
     meter.prev2_rid =
         std::mem::replace(&mut meter.prev_rid, rids.iter().map(|&(_, t)| t).collect());
     meter.prev2_root = std::mem::replace(&mut meter.prev_root, root);
     meter.prev2_cam = std::mem::replace(&mut meter.prev_cam, cam_pos);
     meter.prev_anim = anim;
+}
+
+/// `WOW_JITTER_RAW`'s bone — read once. Absent (or unparseable) leaves the raw lane silent, which
+/// is the default: it is a debugging firehose, one line per frame on top of the `JIT` line.
+fn raw_bone() -> Option<usize> {
+    static B: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("WOW_JITTER_RAW")
+            .ok()
+            .and_then(|v| match v.trim() {
+                "all" => Some(usize::MAX),
+                n => n.parse().ok(),
+            })
+    })
 }

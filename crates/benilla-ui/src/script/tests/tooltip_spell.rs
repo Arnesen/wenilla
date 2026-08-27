@@ -603,6 +603,60 @@ fn action_hover_delegates_by_kind() {
     assert!(s.take_errors().is_empty());
 }
 
+/// A MACRO slot's hover is the reference's `0x52b040`: ONE white line, the macro's name (the
+/// "normal" colour `0xc0cf60` = 0xffffffff, wow-re `tooltip-content-law.md`), and a slot whose
+/// macro no longer exists shows no plate at all. The director's report after 1636 landed: a macro
+/// on the bar had no tooltip — the arm was a pre-0983 `_ => Ok(())`.
+#[test]
+fn action_hover_on_a_macro_slot_shows_its_name_in_white() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_macros(MacroState {
+        account: vec![MacroView {
+            name: "spawn".into(),
+            texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
+            body: ".spawn 16032".into(),
+            local_only: false,
+        }],
+        character: Vec::new(),
+    });
+    s.set_action(
+        24,
+        Some(ActionSlot {
+            kind: 0x40, // MACRO
+            action: 1,  // macro index 1
+            ..Default::default()
+        }),
+    );
+    s.set_action(
+        25,
+        Some(ActionSlot {
+            kind: 0x40,
+            action: 7, // no such macro
+            ..Default::default()
+        }),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetAction(24)
+        assert(tt:IsShown(), "a macro slot shows a plate")
+        assert(tt:NumLines() == 1, "exactly one line, got " .. tt:NumLines())
+        assert(TTTextLeft1:GetText() == "spawn", "the macro's name")
+        local r, g, b = TTTextLeft1:GetTextColor()
+        assert(r == 1 and g == 1 and b == 1, "white — the normal line colour, not the spell title gold")
+        assert(not TTTextRight1:IsShown(), "no right column")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetAction(25)
+        assert(tt:NumLines() == 0 and not tt:IsShown(), "a missing macro shows no plate")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
+}
+
 /// The tooltip's left-column texts in order.
 fn left_lines(s: &mut UiScript) -> Vec<String> {
     let n: i64 = s.eval("return TT:NumLines()").unwrap();

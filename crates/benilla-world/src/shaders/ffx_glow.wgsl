@@ -86,6 +86,41 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 // The CPU pack `0x6cb930` builds primary as `(LightParams.glow·255)<<24 | 0x5393A8`: rgb is the
 // CONSTANT steel blue-gray 0x53/0x93/0xA8, and primary.w (the blur² weight) is the same zone glow
 // the glow pass uses — so glow.x serves both combines and glow.y is a pure 0/1 gate.
+// **Deband dither** (`glow.w`, off by default — see `ffx_glow.rs`). The frame's ONE quantization
+// to 8 bits happens on `outg` below: it is a gamma-space float, and the surface's sRGB
+// present-encode rounds it to a byte. A smooth surface therefore steps in 1/255, and at the
+// gradients a lit character actually has (~1.3 levels/px on a bare arm) a body drifting the
+// 0.11 px/frame of a breathing idle needs ~7 FRAMES to accumulate one step — so the shading
+// updates at ~8 Hz on a 60 Hz display and every iso-luma contour crosses its threshold together.
+// Large motions clear a level per frame and hide it completely, which is exactly the
+// small-moves-tick / big-moves-smooth split the director reported.
+//
+// The hash is Bevy's own `screen_space_dither` (its tonemapping pass applies it and we skip that
+// pass entirely — `Tonemapping::None` returns before the node does anything, so
+// `DebandDither::Enabled` on our camera is dead code). It is a pure function of the PIXEL, not of
+// time: a still frame stays bitwise still, while a moving gradient's contour dissolves across
+// neighbouring pixels instead of snapping as one line.
+//
+// **This is a deliberate divergence.** The reference's framebuffer was 8-bit and undithered, so
+// byte-exactness and this are mutually exclusive; that is why it is opt-in and why the default
+// keeps the byte lane intact.
+fn screen_space_dither(frag_coord: vec2<f32>) -> vec3<f32> {
+    var dither = vec3<f32>(dot(vec2<f32>(171.0, 231.0), frag_coord)).xxx;
+    dither = fract(dither.rgb / vec3<f32>(103.0, 71.0, 97.0));
+    return (dither - vec3<f32>(0.5)) / 255.0;
+}
+
+// The combine's one exit: dither (when armed) in GAMMA space — the space the present-encode
+// rounds in — then the frame's single decode.
+fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> {
+    let dithered = clamp(
+        outg + screen_space_dither(frag_coord) * step(0.5, glow.w),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    return vec4<f32>(srgb_to_linear(dithered), alpha);
+}
+
 @fragment
 fn fs_combine(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // GAMMA LANE (0161): the whole frame is already gamma bytes — the blur ran on gamma (like
@@ -108,7 +143,7 @@ fn fs_combine(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let p = clamp(4.0 * luma * (1.0 - luma), 0.0, 1.0);
         let ghost_tint = vec3<f32>(83.0, 147.0, 168.0) / 255.0; // 0x5393A8
         let outg = min(vec3<f32>(luma) + ghost_tint * p, vec3<f32>(1.0));
-        return vec4<f32>(srgb_to_linear(outg), scene.a);
+        return combine_out(outg, scene.a, in.position.xy);
     }
     // The z lane — the drunk/underwater haze: cross-fade the screen toward the ¼-res blur
     // BEFORE the glow add (`out = lerp(screen, blur, z) + w·blur²`, the shipped FFXGlow.bls;
@@ -117,5 +152,5 @@ fn fs_combine(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // the screen term: it stands for the same byte RT.
     let hazed = mix(sg, min(bg, vec3<f32>(1.0)), glow.z);
     let outg = min(hazed + glow.x * bg * bg, vec3<f32>(1.0));
-    return vec4<f32>(srgb_to_linear(outg), scene.a);
+    return combine_out(outg, scene.a, in.position.xy);
 }

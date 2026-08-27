@@ -389,6 +389,28 @@ fn prepare_textures(
     }
 }
 
+/// `WOW_DITHER=1` — arm the combine's deband dither (the shader's `glow.w`).
+///
+/// The frame's ONE quantization to 8 bits is the surface's sRGB present-encode of the combine's
+/// gamma-space output, so a smooth surface steps in 1/255. Measured on a lit bare arm the shading
+/// gradient is ~1.3 levels/px; a breathing idle drifts the body ~0.11 px/frame; so a pixel needs
+/// ~7 FRAMES to cross one step and the shading updates at ~8 Hz under a 60 Hz frame rate. Motion
+/// large enough to clear a level every frame hides it entirely — the reported
+/// small-moves-tick / big-moves-smooth split.
+///
+/// **Off by default because it is a divergence.** The reference's framebuffer was 8-bit and
+/// undithered; this lane is byte-exact against it (0161) and dithering trades that for a smoother
+/// gradient. Bevy would normally apply its own in the tonemapping pass, but `Tonemapping::None`
+/// makes that node return immediately, so the `DebandDither::Enabled` our camera inherits from
+/// `Camera3d` never runs — this is the only place it can live.
+fn dither_armed() -> f32 {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    match *ON.get_or_init(|| std::env::var_os("WOW_DITHER").is_some()) {
+        true => 1.0,
+        false => 0.0,
+    }
+}
+
 /// The combine's `(x, y, z, w)` uniform for one view — the whole per-view scaling law in one
 /// pure function, so it can be tested without a render world.
 ///
@@ -398,13 +420,13 @@ fn prepare_textures(
 /// - **y/z** — the FFXDeath gate and the haze mix, both scaled by [`FfxGlow::state_scale`]: these
 ///   are keyed on the **viewer's own state**, which the reference paints inside the WorldFrame and
 ///   every UI frame composites over, so neither may reach a bake (decision 1481).
-/// - **w** — reserved.
+/// - **w** — the deband-dither arm ([`dither_armed`]), 0 or 1.
 fn combine_uniform(zone_gain: f32, death: f32, haze: f32, glow: &FfxGlow) -> [f32; 4] {
     [
         zone_gain * glow.gain_scale,
         death * glow.state_scale,
         haze * glow.state_scale,
-        0.0,
+        dither_armed(),
     ]
 }
 

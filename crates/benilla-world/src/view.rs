@@ -399,6 +399,35 @@ pub struct WorldCamera;
 /// relative precision — and our ULP-relative bias ladder ([`crate::sky_order`]) — independent of
 /// the near value. The small near is what keeps the whole waterline-crossing band (the corner-min
 /// submersion probe, `liquid::detect_submersion`) inches tall instead of a yard.
+/// The `$WOW_MSAA` startup knob → a sample count, shared by both world-camera spawners
+/// (`benilla_world::worldview` and the app's `player::setup`) so the two can never disagree.
+///
+/// **8x is refused rather than passed through.** wgpu validates the sample count against the HDR
+/// target's format, and the WebGPU spec guarantees only `[1, 4]` for `Rgba16Float` (this Mac's
+/// adapter reports `[1, 2, 4]`). `WOW_MSAA=8` therefore panicked the render thread inside
+/// `prepare_view_targets` on frame one — an A/B leg that asked for it died with a wgpu validation
+/// error instead of returning an answer, which is how it was found. There is no adapter handle at
+/// camera-spawn time to query, so the honest move is to fall back to 4x and say so loudly: a
+/// usable knob and a legible failure beat a hard crash.
+///
+/// A STARTUP knob, not a live toggle: switching MSAA at runtime leaves the post-process passes
+/// (glow/egui) MSAA-mismatched and freezes the view, so A/B by restarting.
+pub fn msaa_from_env() -> bevy::render::view::Msaa {
+    use bevy::render::view::Msaa;
+    match std::env::var("WOW_MSAA").ok().as_deref() {
+        Some("off") | Some("0") | Some("1") => Msaa::Off,
+        Some("2") => Msaa::Sample2,
+        Some("8") => {
+            warn!(
+                "WOW_MSAA=8: Rgba16Float is only guaranteed [1, 4] samples and this adapter \
+                 reports [1, 2, 4] — falling back to 4x rather than panicking the render thread"
+            );
+            Msaa::Sample4
+        }
+        _ => Msaa::Sample4,
+    }
+}
+
 pub const CAM_NEAR: f32 = 1.0 / 9.0;
 /// The camera's vertical field of view (radians) — one constant shared by the projection
 /// (the camera spawn) and every consumer that needs the near rectangle's true shape. 45°, the value the

@@ -519,13 +519,28 @@ impl RigPalettes {
     /// rig-relative (decision 0974), so the slot's origin goes back on here — the picker ray is a
     /// world-space ray, and it is not a precision consumer.
     pub fn world_palette(&self, slot: u16, bones: usize) -> Option<Vec<Mat4>> {
+        let o = *self.origins.get(slot as usize)?;
+        self.rows_at(slot, bones, [o[0], o[1], o[2]])
+    }
+
+    /// The rig's palette rows **as the vertex stage blends them** — rig-relative (decision 0974),
+    /// the slot origin deliberately NOT added back. [`Self::world_palette`] is the picker's
+    /// world-space read; this is the PRECISION one, for the same reason [`Self::rider_placement`]
+    /// returns its pair unsummed: re-adding the ~9 k-yard origin would stamp the very f32 grid
+    /// the lane exists to avoid onto the measurement, and the instrument would then read its own
+    /// arithmetic as the defect.
+    pub fn rig_rows(&self, slot: u16, bones: usize) -> Option<Vec<Mat4>> {
+        self.rows_at(slot, bones, [0.0; 3])
+    }
+
+    /// Both reads above: the rows of `slot`, with `o` added onto the translation column.
+    fn rows_at(&self, slot: u16, bones: usize, o: [f32; 3]) -> Option<Vec<Mat4>> {
         let s = slot as usize;
         let len = (*self.slot_len.get(s)? as usize).min(bones);
         if len == 0 {
             return None;
         }
-        let base = self.table[s] as usize;
-        let o = self.origins[s];
+        let base = *self.table.get(s)? as usize;
         Some(
             (0..len)
                 .map(|b| {
@@ -539,6 +554,15 @@ impl RigPalettes {
                 })
                 .collect(),
         )
+    }
+
+    /// A slot's rig ORIGIN — the world position its rows are measured from, exactly as the vertex
+    /// stage reads it out of `rig_origin[slot]`. The instrument pairs it with [`Self::rig_rows`] to
+    /// reproduce the shader's own `frame_from_local * v + (frame_origin - view.world_position)`
+    /// without ever forming the absolute world coordinate the lane exists to avoid.
+    pub fn slot_origin(&self, slot: u16) -> Option<Vec3> {
+        let o = self.origins.get(slot as usize)?;
+        Some(Vec3::new(o[0], o[1], o[2]))
     }
 
     /// A rider slot's placement **as the vertex stage reads it** (decision 1609): its
@@ -617,6 +641,16 @@ impl RigSkin {
     /// its palette read with it; the collapsed lane has no joint list to measure).
     pub fn bones(&self) -> u32 {
         self.len
+    }
+
+    /// The rig's inverse bindposes — the instrument read. `WOW_JITTER`'s palette term probes the
+    /// rows at each bone's BIND position, which is the only honest way to ask "how far does a
+    /// vertex bound to this bone actually move" of the numbers the GPU blends: a row's own
+    /// translation column is the bind-space ORIGIN's image, a lever up to the model's full height
+    /// away from the bone, and differencing it reads a rotation as ~10x the displacement any real
+    /// vertex sees.
+    pub fn ibp(&self) -> &Handle<SkinnedMeshInverseBindposes> {
+        &self.ibp
     }
 
     /// Allocate a palette rig for the collapsed lane (decision 0724): no joint entities — the

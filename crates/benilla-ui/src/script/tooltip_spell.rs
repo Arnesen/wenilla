@@ -604,8 +604,16 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     // GameTooltip:SetAction(slot) — the action-bar hover: pure delegation by payload kind
-    // (byte-verified: SPELL 0x00 → the spell builder, ITEM 0x80 → the item builder, MACRO 0x40 —
-    // no macro system yet, no tooltip).
+    // (`0x5322a0`, byte-verified: SPELL 0x00 → the spell builder `0x52e610`, ITEM 0x80 → the item
+    // builder `0x52b650`, MACRO 0x40 → `0x52b040`; wow-re `ui.md`'s SetAction dispatch).
+    //
+    // The MACRO arm is the reference's whole `0x52b040`: fetch the record (`0x4f0f40`), and either
+    // hide (no record) or render ONE line — the macro's NAME (`rec+0x24`) — through the
+    // single-coloured-line wrapper `0x5303b0` in the "normal" colour `0xc0cf60`, which is WHITE
+    // (`0xffffffff`, VERIFIED never rewritten — wow-re `tooltip-content-law.md` §1's colour
+    // table). Not the spell title's gold, and nothing about the bound spell: 1.12 has no
+    // `#showtooltip`. This arm was a `_ => Ok(())` left from before 0983 shipped macros, which is
+    // why a macro on the bar hovered to nothing (the director, 2026-08-27, after 1636).
     m.set(
         "SetAction",
         lua.create_function(|lua, (this, slot): (Table, u32)| {
@@ -630,6 +638,22 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // Route through the shared item renderer (the id-keyed entry).
                     let f: mlua::Function = this.get("SetItemById")?;
                     f.call::<()>((this.clone(), a.action))
+                }
+                0x40 => {
+                    let h = frame_handle_of(lua, &this)?;
+                    let name = {
+                        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                        clear_content(&mut model, h);
+                        // The same 1..36 index lookup `GetActionText` and the bar's icon arm
+                        // make, so the three can never disagree about which macro a slot holds.
+                        model.macros.get(a.action as usize).map(|m| m.name.clone())
+                    };
+                    fire_cleared(lua, h);
+                    if let Some(name) = name {
+                        append_line(lua, &this, (name, WHITE), None, false)?;
+                    }
+                    super::tooltip::show_or_hide_empty(lua, h);
+                    Ok(())
                 }
                 _ => Ok(()),
             }

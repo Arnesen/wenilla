@@ -130,6 +130,21 @@ pub(super) fn apply_body_twist(
     locals: Query<&Transform>,
     stores: Query<&crate::net::ObjectStore>,
 ) {
+    // `WOW_NO_TWIST=1` — stand the whole counter-twist down, and say what the gap WAS. The pass
+    // is inert at `yaw_gap == 0` (both shares are zero and every write is a no-op), so a bisect
+    // that only removes it cannot tell "the twist was innocent" from "the twist never ran"; the
+    // logged gap separates them.
+    if twist_off() {
+        for (_, t) in &units {
+            if t.yaw_gap != 0.0 {
+                info!(
+                    "twist: STOOD DOWN (WOW_NO_TWIST) — yaw_gap was {:.5} rad",
+                    t.yaw_gap
+                );
+            }
+        }
+        return;
+    }
     for (unit, mut twist) in &mut units {
         let mounted = stores
             .get(unit)
@@ -216,6 +231,12 @@ pub(super) fn plugin(app: &mut App) {
         PostUpdate,
         apply_body_twist.in_set(benilla_world::rig_anim::PosePost),
     );
+}
+
+/// `WOW_NO_TWIST`'s switch — read once. A bisect lever, not a shipping mode.
+fn twist_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("WOW_NO_TWIST").is_some())
 }
 
 #[cfg(test)]

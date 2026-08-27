@@ -199,6 +199,18 @@ fn main() -> Result<()> {
                 .context("series needs --at \"<x>,<y>[;<x>,<y>…]\"")?;
             series(Path::new(dir), at)?;
         }
+        "flow" => {
+            let [dir] = one(rest, "flow")?;
+            flow(Path::new(dir), opts.rect.as_deref())?;
+        }
+        "edge" => {
+            let [dir] = one(rest, "edge")?;
+            let at = opts
+                .at
+                .as_deref()
+                .context("edge needs --at \"<x0>,<y>,<x1>[;…]\"")?;
+            edge(Path::new(dir), at)?;
+        }
         "compose-dir" => {
             let [da, db] = two(rest, "compose-dir")?;
             let out = opts
@@ -444,6 +456,174 @@ fn parse_at(spec: &str) -> Result<Vec<(u32, u32)>> {
 }
 
 /// Stitch every `*.png` present in both dirs into `left | right` side-by-side images under `out`.
+/// **The sub-pixel motion ruler** (`flow <burst_dir> [--rect "<x>,<y>,<w>,<h>"]`).
+///
+/// `flicker` and `series` answer *how much* a pixel changed. Neither can answer the question a
+/// "the animation ticks" report actually asks — is the thing in front of the pixel advancing
+/// **evenly**? — and the obvious way to ask it is a trap: recover one silhouette edge's sub-pixel
+/// position frame by frame, and the ruler is built out of 8-bit pixels, so it carries its own
+/// 1/255 quantisation and a 0.2 px step cannot be separated from the tool's noise floor. That
+/// ambiguity is exactly what left the first staircase reading unattributed.
+///
+/// So estimate the whole window's displacement at once, by least squares over every pixel in it
+/// (Lucas–Kanade, the standard first-order flow solve): thousands of gradients vote on one
+/// `(dx, dy)`, the 8-bit floor averages down by `√N`, and the estimate lands two orders of
+/// magnitude under a pixel. A breathing body is not a rigid translation and does not need to be —
+/// what is read off the series is whether the aggregate advances smoothly, and a staircase in the
+/// RENDER shows up as a staircase here whatever the body underneath is doing.
+///
+/// Columns are the per-frame displacement, its magnitude, and the **second difference** — the
+/// curvature-per-frame discriminator the world-space jitter meter uses, on this side of the glass.
+/// The summary counts **stalled** frames (under a fifth of the median step): a smooth pan has
+/// none, a staircase is mostly them.
+fn flow(dir: &Path, rect: Option<&str>) -> Result<()> {
+    let names = pngs(dir)?;
+    if names.len() < 3 {
+        bail!(
+            "flow wants at least 3 frames, {} has {}",
+            dir.display(),
+            names.len()
+        );
+    }
+    let first = load(&dir.join(names.iter().next().expect("non-empty")))?;
+    let (w, h) = first.dimensions();
+    // The default window is the whole frame minus the one-pixel border the central differences
+    // need. A named rect is clamped out loud, never silently (the `crop` honesty rule).
+    let win = match rect {
+        Some(spec) => {
+            let want = parse_rect(spec)?;
+            let got = Rect {
+                x0: want.x0.min(w.saturating_sub(1)),
+                y0: want.y0.min(h.saturating_sub(1)),
+                x1: want.x1.min(w),
+                y1: want.y1.min(h),
+            };
+            if got.x0 >= got.x1 || got.y0 >= got.y1 {
+                bail!("--rect {spec:?} lies outside the {w}x{h} frame");
+            }
+            if got != want {
+                println!(
+                    "flow: --rect clamped to [{}..{}, {}..{}]",
+                    got.x0, got.x1, got.y0, got.y1
+                );
+            }
+            got
+        }
+        None => Rect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        },
+    };
+    let (ww, wh) = ((win.x1 - win.x0) as usize, (win.y1 - win.y0) as usize);
+    if ww < 3 || wh < 3 {
+        bail!("flow wants a window at least 3x3, got {ww}x{wh}");
+    }
+    println!(
+        "flow: {} frames, {w}x{h}, window [{}..{}, {}..{}] ({ww}x{wh} = {} px)",
+        names.len(),
+        win.x0,
+        win.x1,
+        win.y0,
+        win.y1,
+        ww * wh
+    );
+    println!("  frame        dx        dy      |d|      |d2|");
+    let mut prev = luma_window(&first, &win);
+    let mut steps: Vec<(f64, f64)> = Vec::new();
+    for (i, name) in names.iter().enumerate().skip(1) {
+        let cur = luma_window(&load(&dir.join(name))?, &win);
+        let Some((dx, dy)) = lucas_kanade(&prev, &cur, ww, wh) else {
+            println!("  {i:5}   (no gradient in the window — flow is undefined here)");
+            prev = cur;
+            continue;
+        };
+        let d2 = steps
+            .last()
+            .map(|&(px, py)| (dx - px).hypot(dy - py))
+            .unwrap_or(f64::NAN);
+        println!(
+            "  {i:5}  {dx:+8.4}  {dy:+8.4}  {:7.4}  {:8.4}",
+            dx.hypot(dy),
+            d2
+        );
+        steps.push((dx, dy));
+        prev = cur;
+    }
+    let mags: Vec<f64> = steps.iter().map(|&(x, y)| x.hypot(y)).collect();
+    let curv: Vec<f64> = steps
+        .windows(2)
+        .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
+        .collect();
+    if mags.is_empty() {
+        return Ok(());
+    }
+    let med = |v: &mut Vec<f64>| -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let med_mag = med(&mut mags.clone());
+    let stalled = mags.iter().filter(|m| **m < 0.2 * med_mag).count();
+    println!(
+        "  --- steps: median |d| {med_mag:.4} px   max |d| {:.4}   stalled (<20% of median) {stalled}/{}",
+        mags.iter().copied().fold(0.0, f64::max),
+        mags.len()
+    );
+    if !curv.is_empty() {
+        let med_c = med(&mut curv.clone());
+        println!(
+            "  --- curvature: median |d2| {med_c:.4} px   max |d2| {:.4}   ratio |d2|/|d| {:.3}",
+            curv.iter().copied().fold(0.0, f64::max),
+            med_c / med_mag.max(f64::MIN_POSITIVE)
+        );
+    }
+    Ok(())
+}
+
+/// One frame's luma over `win`, row-major — the flow solve's input (f32 is exact for 8-bit sums
+/// and halves the working set against a 3200x1800 f64 buffer).
+fn luma_window(img: &image::RgbImage, win: &Rect) -> Vec<f32> {
+    let mut out = Vec::with_capacity(((win.x1 - win.x0) * (win.y1 - win.y0)) as usize);
+    for y in win.y0..win.y1 {
+        for x in win.x0..win.x1 {
+            let p = img.get_pixel(x, y).0;
+            out.push(
+                0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2]),
+            );
+        }
+    }
+    out
+}
+
+/// Least-squares first-order optical flow between two luma windows: the `(dx, dy)` that best
+/// explains `b` as `a` shifted, solved once over every interior pixel. `None` when the window
+/// carries no usable gradient structure (a flat sky — the normal matrix is singular and any
+/// answer would be invented).
+fn lucas_kanade(a: &[f32], b: &[f32], w: usize, h: usize) -> Option<(f64, f64)> {
+    let (mut sxx, mut sxy, mut syy, mut sxt, mut syt) = (0.0f64, 0.0, 0.0, 0.0, 0.0);
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let i = y * w + x;
+            let ix = 0.5 * f64::from(a[i + 1] - a[i - 1]);
+            let iy = 0.5 * f64::from(a[i + w] - a[i - w]);
+            let it = f64::from(b[i] - a[i]);
+            sxx += ix * ix;
+            sxy += ix * iy;
+            syy += iy * iy;
+            sxt += ix * it;
+            syt += iy * it;
+        }
+    }
+    let det = sxx * syy - sxy * sxy;
+    // Scale-relative: the normal matrix grows with the window, so an absolute epsilon would call
+    // a big flat window solvable and a small textured one singular.
+    if det <= 1e-12 * (sxx * syy).max(f64::MIN_POSITIVE) {
+        return None;
+    }
+    Some(((sxy * syt - syy * sxt) / det, (sxy * sxt - sxx * syt) / det))
+}
+
 fn compose_dir(da: &Path, db: &Path, out: &Path) -> Result<()> {
     let names: BTreeSet<String> = pngs(da)?.intersection(&pngs(db)?).cloned().collect();
     if names.is_empty() {
@@ -736,6 +916,121 @@ fn over_fail(m: &Metrics, fail: Option<f64>) -> bool {
 }
 
 /// Load an image as RGB (dropping any alpha — capture windows are opaque).
+/// One silhouette's sub-pixel position along a scanline, per frame — the shading-independent
+/// answer to "did the rendered geometry MOVE smoothly?".
+///
+/// Per frame and per scanline: take the row's own darkest and brightest samples, put the
+/// threshold halfway between them, and linearly interpolate the crossing. Renormalising to the
+/// row's own ends every frame is the whole point — a uniform brightness change (the body turning
+/// into the light) moves `lo` and `hi` together and leaves the crossing where it was, while a
+/// geometric shift moves it. That is the property [`flow`] lacks.
+fn edge(dir: &Path, at: &str) -> Result<()> {
+    let names = pngs(dir)?;
+    if names.len() < 3 {
+        bail!(
+            "edge wants at least 3 frames, {} has {}",
+            dir.display(),
+            names.len()
+        );
+    }
+    let mut lines: Vec<(u32, u32, u32)> = Vec::new();
+    for spec in at.split(';').filter(|s| !s.trim().is_empty()) {
+        let p: Vec<u32> = spec
+            .trim()
+            .split(',')
+            .map(|v| {
+                v.trim()
+                    .parse::<u32>()
+                    .context("edge --at wants <x0>,<y>,<x1>")
+            })
+            .collect::<Result<_>>()?;
+        let [x0, y, x1] = p[..] else {
+            bail!("edge --at wants <x0>,<y>,<x1>, got {spec:?}");
+        };
+        if x1 <= x0 + 1 {
+            bail!("edge scanline {spec:?} needs x1 > x0+1");
+        }
+        lines.push((x0, y, x1));
+    }
+    for &(x0, y, x1) in &lines {
+        println!("scanline y={y}  x {x0}..{x1}");
+        let mut pos: Vec<f64> = Vec::new();
+        for name in &names {
+            let img = load(&dir.join(name))?;
+            if y >= img.height() || x1 >= img.width() {
+                bail!(
+                    "scanline ({x0},{y},{x1}) outside {}x{}",
+                    img.width(),
+                    img.height()
+                );
+            }
+            let row: Vec<f64> = (x0..=x1)
+                .map(|x| {
+                    let p = img.get_pixel(x, y).0;
+                    0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2])
+                })
+                .collect();
+            let lo = row.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            // Too little contrast to call an edge — report it rather than invent a position.
+            if hi - lo < 12.0 {
+                pos.push(f64::NAN);
+                continue;
+            }
+            let mid = 0.5 * (lo + hi);
+            let mut found = f64::NAN;
+            for i in 0..row.len() - 1 {
+                let (a, b) = (row[i] - mid, row[i + 1] - mid);
+                if (a <= 0.0 && b > 0.0) || (a >= 0.0 && b < 0.0) {
+                    found = f64::from(x0) + i as f64 + a / (a - b);
+                    break;
+                }
+            }
+            pos.push(found);
+        }
+        let good = pos.iter().filter(|p| p.is_finite()).count();
+        for (i, p) in pos.iter().enumerate().take(28) {
+            let d = if i == 0 { f64::NAN } else { p - pos[i - 1] };
+            println!("    {i:4}  x={p:10.4}  d={d:+8.4}");
+        }
+        let d1: Vec<f64> = pos
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .filter(|v| v.is_finite())
+            .collect();
+        let d2: Vec<f64> = pos
+            .windows(3)
+            .map(|w| (w[2] - 2.0 * w[1] + w[0]).abs())
+            .filter(|v| v.is_finite())
+            .collect();
+        if d1.is_empty() || d2.is_empty() {
+            println!(
+                "  no usable edge on {}/{} frames",
+                names.len() - good,
+                names.len()
+            );
+            continue;
+        }
+        let med = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+            v[v.len() / 2]
+        };
+        let (m1, m2) = (med(d1.clone()), med(d2.clone()));
+        let mx = d1.iter().copied().fold(0.0, f64::max);
+        println!(
+            "  frames with an edge {good}/{}   median |d| {m1:.4} px   max |d| {mx:.4} px",
+            names.len()
+        );
+        println!(
+            "  median |d2| {m2:.4} px   roughness |d2|/|d| {:.3}   (a smooth curve at 60 Hz is <<1)",
+            m2 / m1.max(1e-9)
+        );
+        let stalled = d1.iter().filter(|&&v| v < 0.2 * m1).count();
+        println!("  stalled steps (<20% of median): {stalled}/{}", d1.len());
+    }
+    Ok(())
+}
+
 fn load(path: &Path) -> Result<image::RgbImage> {
     Ok(image::open(path)
         .with_context(|| format!("opening {}", path.display()))?
@@ -852,6 +1147,8 @@ fn print_usage() {
            benilla-visual flicker     <burst_dir>     [--out <envelope.png>] [--fail <mae>] [--amplify <n>] [--toggle-delta <n>]\n  \
            benilla-visual hotspot     <burst_dir>     --out <strip.png> [--toggle-delta <n>] [--pad <n>]\n  \
            benilla-visual series      <burst_dir>     --at \"<x>,<y>[;<x>,<y>…]\"\n  \
+           benilla-visual flow        <burst_dir>     [--rect \"<x>,<y>,<w>,<h>\"]\n  \
+           benilla-visual edge        <burst_dir>     --at \"<x0>,<y>,<x1>[;…]\"\n  \
            benilla-visual compose-dir <dir_a> <dir_b> --out <dir>   (side-by-side `a | b` per image)\n  \
            benilla-visual stat        <img.png>       [--rect \"<x>,<y>,<w>,<h>\"]\n\
            benilla-visual crop        <img.png>       --rect \"<x>,<y>,<w>,<h>\" --out <crop.png> [--scale <n>] [--at \"<x>,<y>;…\"]\n\
@@ -862,6 +1159,21 @@ fn print_usage() {
          surface blinking, many thin ones are z-fighting — and crops the largest into a contact sheet.\n\
          series drops the averaging: one named pixel's rgb/luma per frame, to line up against the\n\
          client's WOW_DEPTH log at the same coordinates.\n\
+         edge NOISE FLOOR: about +/-0.5 px per frame on real content. VALIDATED against a provably
+smooth 0.5 deg/s camera pan over static geometry (true motion 0.28 px/frame, monotone): edge
+reported steps of -0.241 +0.212 +0.998 +0.732 -0.749 — NEGATIVE steps on a monotone pan. Its
+MEAN is right, its per-frame value is not. So it can only resolve discrete events well above
+~1 px (the attachment staircase's 0.83-1.1 px hop clears it; a 0.1-0.2 px breathing motion does
+not, and a roughness statistic computed at that scale is measuring this floor, not the render).
+edge tracks a SILHOUETTE's sub-pixel position along one scanline, per frame. Unlike flow it
+does not assume brightness constancy — it renormalises to the scanline's own light/dark ends
+every frame, so a shaded, deforming surface (skin, cloth) whose lighting changes as it moves
+still reads its GEOMETRY. flow is invalid on exactly that content: on a run where the palette
+was provably 33x rougher it reported *smoother*, because Lucas-Kanade read the shading change
+as motion. Use edge for a body, flow only for rigid, uniformly-lit subjects.
+flow measures MOTION rather than change: one least-squares sub-pixel displacement per frame\n\
+         pair over the whole window, so a render that advances in steps reads as steps and one that\n\
+         advances smoothly reads smooth — the question a per-pixel delta cannot answer.\n\
          crop cuts a window for close reading (nearest-neighbour zoom only, samples printed in\n\
          SOURCE coordinates) — use it instead of sips/ffmpeg pipelines, which have minted false\n\
          findings (sips --cropOffset is (y, x) and silently ignores what it can't parse).\n\

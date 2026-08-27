@@ -205,7 +205,62 @@ pub(crate) fn pace_virtual_time(
     *generic = virt.as_generic();
 }
 
+/// `WOW_FIXED_DT`'s pending arm — see [`plugin`].
+#[derive(Resource)]
+struct FixedDt {
+    dt: Duration,
+    at: std::time::Instant,
+    armed: bool,
+}
+
+/// Install the manual strategy once the wall clock passes the arm time, and say so in the log —
+/// a run whose clock silently failed to pin would read exactly like a run that measured something.
+fn arm_fixed_dt(mut cfg: ResMut<FixedDt>, mut commands: Commands) {
+    if cfg.armed || std::time::Instant::now() < cfg.at {
+        return;
+    }
+    cfg.armed = true;
+    commands.insert_resource(TimeUpdateStrategy::ManualDuration(cfg.dt));
+    info!(
+        "frame_pace: WOW_FIXED_DT armed — animation clock pinned to {:.4} ms/frame",
+        cfg.dt.as_secs_f64() * 1000.0
+    );
+}
+
 pub fn plugin(app: &mut App) {
+    // **`WOW_FIXED_DT=<ms>` — the deterministic clock**, and it exists for one question that no
+    // other instrument here can answer: *is the RENDERED motion even?*
+    //
+    // A per-frame screenshot burst is the only way to measure what the eye actually receives, and
+    // saving a 3200x1800 PNG stalls the frame to tens of milliseconds — so the burst perturbs the
+    // very timing it is trying to measure, and its frames sample the animation on a grid as ragged
+    // as the capture. Pinning the advance makes the geometry side perfectly even BY CONSTRUCTION,
+    // so any unevenness left in the captured pixels belongs to the render, not the clock. That is
+    // the whole discrimination: a body whose bones all move sub-pixel per frame can be flawless in
+    // world space and still step on screen, and only this pairing separates the two.
+    //
+    // It composes with the pacer rather than fighting it: `Time<Real>` drives `Time<Virtual>`, and
+    // [`pace_virtual_time`] stands down the moment a manual strategy is set.
+    // Spelled `<ms>[,<arm_after_wall_seconds>]`, default 40 s. **The delay is not a convenience,
+    // it is required**: a manual strategy overrides `Time<Real>`, which is the clock every probe
+    // trigger reads, and during load the app is not vsync-limited — it ran ~385 updates/second, so
+    // a pinned 16.6667 ms clock reached "90 seconds" in 14 s of wall time and the run exited before
+    // the character had finished streaming in. Arming on a real wall-clock `Instant` keeps the
+    // pinning for the part of the run that is being measured and leaves login/teleport on real time.
+    if let Some((ms, after)) = std::env::var("WOW_FIXED_DT").ok().and_then(|v| {
+        let (ms, after) = match v.split_once(',') {
+            Some((a, b)) => (a, b.trim().parse::<f64>().ok()?),
+            None => (v.as_str(), 40.0),
+        };
+        Some((ms.trim().parse::<f64>().ok().filter(|m| *m > 0.0)?, after))
+    }) {
+        app.insert_resource(FixedDt {
+            dt: Duration::from_secs_f64(ms / 1000.0),
+            at: std::time::Instant::now() + Duration::from_secs_f64(after.max(0.0)),
+            armed: false,
+        })
+        .add_systems(First, arm_fixed_dt.before(TimeSystems));
+    }
     app.init_resource::<FramePacer>()
         .add_systems(First, pace_virtual_time.after(TimeSystems));
 }
