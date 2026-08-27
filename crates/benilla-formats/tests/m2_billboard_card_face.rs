@@ -124,6 +124,7 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         rgb_seq: None,
         wmo_batch: None,
         env_map: false,
+        section: None,
     };
 
     assert!(

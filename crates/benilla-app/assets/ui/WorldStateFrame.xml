@@ -2,8 +2,8 @@
     <!--
         The always-up world-state readout — report B190's second half: the alliance/horde progress
         line an outdoor-PvP zone or a battleground shows at the top of the screen. In Eastern
-        Plaguelands that is the two tower counters ("Towers Controlled: 3") plus the capture-point
-        progress; in Warsong Gulch the flag captures; in Arathi Basin bases and resources.
+        Plaguelands that is the two tower counters ("Towers Controlled: 3"); in Warsong Gulch the
+        flag captures; in Arathi Basin bases and resources.
 
         The SPEC is the reference's two C bindings, byte-carved (wow-re
         system/ui/scratch/worldstate-ui-law.md, 0x4c5a40 / 0x4c5a70) and re-expressed here:
@@ -25,18 +25,46 @@
         has joined the zone-dependent DEFENSE chat channel. Leave LocalDefense and the readout goes
         away while the map icons stay.
 
-        `uiState` picks which of the two icons a row draws: the reference's dynamic pair is a state
-        that toggles (Warsong Gulch's "the enemy flag has been picked up"), so a row with a
-        dynamicIcon shows it while its state is live and the static icon otherwise. A row with no
-        StateVariable of its own answers uiState = 1, which is why the plain counters draw their
-        static icon and never blink.
+        THE GEOMETRY IS THE REFERENCE'S, and it is not what you would guess (wow-re
+        worldstate-ui-law.md §12, carved 2026-08-25; decision 1604 folds it back). The first pass
+        of this frame invented a snug 20x20 icon in a 22px row, and that was wrong in a way that
+        showed: EVERY icon these rows name is a sprite authored into the UPPER-LEFT corner of a
+        power-of-two canvas with the rest transparent — AllianceTower/HordeTower are a 16x16 sprite
+        at (3,2) of a 32x32 file, UI-PVP-Alliance/Horde a ~40x40 crest in a 64x64 one. Squeeze that
+        whole canvas into a snug box and the visible art floats up and to the left of the box,
+        away from its label. NOTHING IS CROPPED to fix that — there is no <TexCoords> on any of
+        these regions, and a texture with none samples the full 0..1 quad (CSimpleTexture's ctor
+        0x76fc40 stamps it). The compensation is geometric, and these three numbers are one tuned
+        system: the icon slot is OVERSIZED to 42x42 (a 32px file upscaled 1.3125x), hung SIX UNITS
+        OFF the row's left edge, and the text is seated TEN UNITS ABOVE the slot's centreline. The
+        upper-left ink then lands as a ~21x21 square whose centre sits just under the text's, which
+        is what "icon next to its label" is supposed to look like.
+
+        THERE ARE TWO ICON SLOTS, fed by two different DBC columns, and shipped content never puts
+        the same art in both:
+
+            Icon        (+0x0c) -> the 42x42 slot below. AllianceTower, HordeTower,
+                                   UI-PVP-Alliance, UI-PVP-Horde.
+            DynamicIcon (+0x64) -> a SEPARATE 32x32 button off the row's right edge, shown only
+                                   while uiState == 2. HordeFlag/AllianceFlag, Warsong Gulch only.
+
+        So the dynamic icon does NOT replace the static one — both are on screen together, which is
+        the Warsong Gulch look: the faction shield with its capture count, and a flashing enemy
+        flag to its right while a carrier is running. `uiState == 2` is the flag-taken value; the
+        first pass swapped the art on `uiState ~= 0`, which fired on the ordinary state 1 and
+        replaced a shield that should never have moved.
 
         OUT, named: the CAPTUREPOINT extended UI — the sliding bar over
         Interface\WorldStateFrame\WorldState-CaptureBar that the one Eastern Plaguelands progress
         row drives. Its two states come through the binding already (extUIState1/2 carry the
-        alliance/horde fractions), so it is a widget to add, not a seam to change; the row itself
-        renders as its text line until then, so the progress number is on screen either way. Also
-        out: the battleground scoreboard (the Type 2 rows), which the reference builds from the
+        alliance/horde fractions), so it is a widget to add, not a seam to change. NOW KNOWN, and
+        worth writing down before someone builds it: in the reference that row never reaches this
+        frame at all — the update path branches on a non-empty extendedUI FIRST, and id 138 is the
+        only always-up-class row with one, so EPL's real readout is two text rows here plus a
+        separate bar anchored under the MinimapCluster. Until that bar exists we keep showing the
+        row as its text line (decision 1590 §7's stand-in, unchanged) so the progress number is on
+        screen; it costs a third line the reference doesn't draw, and it goes when the bar lands.
+        Also out: the battleground scoreboard (the Type 2 rows), which the reference builds from the
         same DBC through a DIFFERENT handler and a different pair of bindings whose bail leg is not
         even the same shape — GetNumBattlefieldStats/GetBattlefieldStatInfo, a separate slice.
     -->
@@ -44,11 +72,30 @@
         <![CDATA[
         NUM_ALWAYS_UP_ROWS = 0;
 
-        -- Vertical pitch between rows, and the icon's box. Ours, not measured from the reference:
-        -- this frame is being written rather than transcribed, and the numbers below are what make
-        -- a two- or three-row readout sit legibly under the top edge.
-        WORLD_STATE_ROW_HEIGHT = 22;
-        WORLD_STATE_ICON_SIZE = 20;
+        -- The reference's own numbers (worldstate-ui-law.md §12). The row is an anchor node, not a
+        -- box: its 42-wide icon slot hangs off its left edge and its text runs past its right, so
+        -- none of these are "the readout's size" — they are the offsets that seat corner-authored
+        -- art against a label. The pitch is the template height, because rows chain TOP to the
+        -- previous row's BOTTOM with no gap.
+        WORLD_STATE_ROW_HEIGHT = 24;
+        -- The dynamic-icon flash: 0.5 s in, 0.5 s out, indefinitely.
+        WORLD_STATE_FLASH_HALF = 0.5;
+
+        -- The flash overlay's ramp. The art (…Flash.blp) is DXT1 with no alpha channel — black IS
+        -- the transparency — which is why it draws ADD; the pulse is the region's own alpha.
+        function WorldStateDynamicIcon_OnUpdate(elapsed)
+            local t = (this.flashTime or 0) + elapsed;
+            local period = 2 * WORLD_STATE_FLASH_HALF;
+            while ( t >= period ) do
+                t = t - period;
+            end
+            this.flashTime = t;
+            local level = t / WORLD_STATE_FLASH_HALF;
+            if ( level > 1 ) then
+                level = 2 - level;
+            end
+            getglobal(this:GetName() .. "Flash"):SetAlpha(level);
+        end
 
         -- Rebuild the readout from the host's list. Cheap enough to run whole on every fire: the
         -- list is at most a handful of rows, and the events are a zone's worth apart.
@@ -56,13 +103,19 @@
             local numUI = GetNumWorldStateUI();
 
             -- Grow the row pool on demand and never shrink it, the way every pooled list here
-            -- does: the tail from a busier zone is parked hidden rather than destroyed.
+            -- does: the tail from a busier zone is parked hidden rather than destroyed. Row 1
+            -- hangs off the container; every later row chains to the one above it, so the pitch is
+            -- the template's height and lives in exactly one place.
             if ( numUI > NUM_ALWAYS_UP_ROWS ) then
                 for i = NUM_ALWAYS_UP_ROWS + 1, numUI do
                     local row = CreateFrame("Frame", "WorldStateAlwaysUpFrame" .. i,
                         WorldStateAlwaysUpFrame, "WorldStateAlwaysUpTemplate");
-                    row:SetPoint("TOP", WorldStateAlwaysUpFrame, "TOP", 0,
-                        -(i - 1) * WORLD_STATE_ROW_HEIGHT);
+                    if ( i == 1 ) then
+                        row:SetPoint("TOP", WorldStateAlwaysUpFrame, "TOP", -23, -20);
+                    else
+                        row:SetPoint("TOP", getglobal("WorldStateAlwaysUpFrame" .. (i - 1)),
+                            "BOTTOM", 0, 0);
+                    end
                 end
                 NUM_ALWAYS_UP_ROWS = numUI;
             end
@@ -73,40 +126,42 @@
                     row:Hide();
                 else
                     local uiState, text, icon, dynamicIcon, tooltip, dynamicTooltip = GetWorldStateUIInfo(i);
-                    local iconTexture = getglobal(row:GetName() .. "Icon");
-                    local textString = getglobal(row:GetName() .. "Text");
+                    local name = row:GetName();
 
-                    -- The dynamic icon replaces the static one while the row's own state is live.
-                    -- A row with neither draws no icon at all and the text takes the whole width;
-                    -- the reference's own data has several such rows (the progress line).
-                    local shown = icon;
+                    -- The static slot takes its column verbatim. An EMPTY column is not a special
+                    -- case: SetTexture("") clears the art and draws nothing while the authored
+                    -- 42x42 rect — and so everything anchored to it — stays exactly where it was.
+                    -- The slot is reserved and blank, never collapsed; a row that slid its text
+                    -- left into the empty slot would ragged the readout's left edge, and the
+                    -- reference does no such thing.
+                    getglobal(name .. "Icon"):SetTexture(icon);
+                    getglobal(name .. "Text"):SetText(text);
                     row.tooltip = tooltip;
-                    if ( dynamicIcon ~= "" and uiState ~= 0 ) then
-                        shown = dynamicIcon;
-                        if ( dynamicTooltip ~= "" ) then
-                            row.tooltip = dynamicTooltip;
-                        end
-                    end
-                    -- ClearAllPoints first: SetPoint ADDS an anchor, and the template already
-                    -- seated the text against the icon.
-                    textString:ClearAllPoints();
-                    if ( shown == "" ) then
-                        iconTexture:Hide();
-                        textString:SetPoint("LEFT", row, "LEFT", 0, 0);
+
+                    -- The dynamic slot is a SEPARATE button off the row's right edge, and it is
+                    -- the flag-taken state alone that shows it.
+                    local dynamic = getglobal(name .. "DynamicIcon");
+                    if ( dynamicIcon ~= "" and uiState == 2 ) then
+                        getglobal(dynamic:GetName() .. "Texture"):SetTexture(dynamicIcon);
+                        getglobal(dynamic:GetName() .. "Flash"):SetTexture(dynamicIcon .. "Flash");
+                        dynamic.tooltip = dynamicTooltip;
+                        dynamic.flashTime = 0;
+                        dynamic:Show();
                     else
-                        iconTexture:SetTexture(shown);
-                        iconTexture:Show();
-                        textString:SetPoint("LEFT", iconTexture, "RIGHT", 4, 0);
+                        dynamic:Hide();
                     end
-                    textString:SetText(text);
                     row:Show();
                 end
             end
 
-            -- The container is only as tall as the rows it shows, and disappears entirely when
-            -- there are none — this frame has no chrome of its own to leave behind.
+            -- OURS, and non-visual: the reference's container is a bare 10x10 anchor node it never
+            -- resizes, so its own bottom says nothing about how far the rows reach. We keep the
+            -- authored size but grow the height to the rows' real extent, so "how much of the top
+            -- of the screen is this using?" is a question the frame can answer — the dev cost pill
+            -- asks it, and seats itself below (crates/benilla-app/src/perf/hud.rs). Rows anchor to
+            -- the container's TOP, which is fixed, so nothing moves.
             if ( numUI > 0 ) then
-                WorldStateAlwaysUpFrame:SetHeight(numUI * WORLD_STATE_ROW_HEIGHT);
+                WorldStateAlwaysUpFrame:SetHeight(20 + numUI * WORLD_STATE_ROW_HEIGHT);
                 WorldStateAlwaysUpFrame:Show();
             else
                 WorldStateAlwaysUpFrame:Hide();
@@ -119,27 +174,70 @@
         ]]>
     </Script>
 
-    <!-- One row: an icon and its line of text, with the row's tooltip on hover. Grown on demand
-         into WorldStateAlwaysUpFrame by the update above. -->
+    <!-- One row: the oversized icon slot, its line of text, and the dynamic-icon button that only
+         Warsong Gulch ever lights. Grown on demand into WorldStateAlwaysUpFrame by the update
+         above. Every offset here is the reference's — see the header for why they are not the
+         snug numbers you would pick by eye. -->
     <Frame name="WorldStateAlwaysUpTemplate" virtual="true" enableMouse="true">
-        <Size><AbsDimension x="220" y="20"/></Size>
+        <Size><AbsDimension x="45" y="24"/></Size>
         <Layers>
             <Layer level="ARTWORK">
                 <Texture name="$parentIcon">
-                    <Size><AbsDimension x="20" y="20"/></Size>
+                    <Size><AbsDimension x="42" y="42"/></Size>
                     <Anchors>
-                        <Anchor point="LEFT"/>
+                        <Anchor point="LEFT">
+                            <Offset><AbsDimension x="-6" y="0"/></Offset>
+                        </Anchor>
                     </Anchors>
                 </Texture>
                 <FontString name="$parentText" inherits="GameFontNormalSmall" justifyH="LEFT">
                     <Anchors>
                         <Anchor point="LEFT" relativeTo="$parentIcon" relativePoint="RIGHT">
-                            <Offset><AbsDimension x="4" y="0"/></Offset>
+                            <Offset><AbsDimension x="-12" y="10"/></Offset>
                         </Anchor>
                     </Anchors>
                 </FontString>
             </Layer>
         </Layers>
+        <Frames>
+            <Button name="$parentDynamicIcon" hidden="true">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT">
+                        <Offset><AbsDimension x="40" y="9"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture name="$parentTexture">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                        </Texture>
+                    </Layer>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentFlash" alphaMode="ADD">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnUpdate>
+                        WorldStateDynamicIcon_OnUpdate(arg1);
+                    </OnUpdate>
+                    <OnEnter>
+                        if ( this.tooltip and this.tooltip ~= "" ) then
+                            GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT");
+                            GameTooltip:SetText(this.tooltip);
+                            GameTooltip:Show();
+                        end
+                    </OnEnter>
+                    <OnLeave>
+                        GameTooltip:Hide();
+                    </OnLeave>
+                </Scripts>
+            </Button>
+        </Frames>
         <Scripts>
             <OnEnter>
                 if ( this.tooltip and this.tooltip ~= "" ) then
@@ -156,12 +254,14 @@
 
     <!-- The container. Top-centre of the screen, which is where an outdoor-PvP zone's counters and
          a battleground's score belong: the minimap owns the top-right and the readout must not
-         fight it. Hidden until a scope admits a row. -->
-    <Frame name="WorldStateAlwaysUpFrame" parent="UIParent" hidden="true">
-        <Size><AbsDimension x="220" y="20"/></Size>
+         fight it. The reference declares it 10x10 and never touches it again — it is an anchor
+         node, and rows overflow it freely (see the update for the one thing we do differently, and
+         why). Hidden until a scope admits a row. -->
+    <Frame name="WorldStateAlwaysUpFrame" parent="UIParent" toplevel="true" hidden="true">
+        <Size><AbsDimension x="10" y="10"/></Size>
         <Anchors>
             <Anchor point="TOP" relativeTo="UIParent" relativePoint="TOP">
-                <Offset><AbsDimension x="0" y="-15"/></Offset>
+                <Offset><AbsDimension x="-5" y="-15"/></Offset>
             </Anchor>
         </Anchors>
         <Scripts>

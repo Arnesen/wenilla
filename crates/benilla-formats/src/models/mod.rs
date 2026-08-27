@@ -108,6 +108,7 @@ fn remap_submesh(
             rgb_seq: None,    // …ditto (1408)
             wmo_batch: None,  // set by the WMO path from the MOGP batch-section counts
             env_map: false,   // set by the M2 path from texture_unit_lookup[texCoordSet] > 2
+            section: None,    // set by the M2 path from the batch's skin_section_index
         },
         globals,
     )

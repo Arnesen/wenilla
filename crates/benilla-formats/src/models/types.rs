@@ -499,6 +499,18 @@ pub struct RenderSubmesh {
     /// The batch's MOBA section for WMO group batches ([`WmoBatchClass`] — TRANS / INT / EXT, the
     /// per-class lighting law of an interior group). `None` for every M2 batch.
     pub wmo_batch: Option<WmoBatchClass>,
+    /// The M2 **skin-section index** this batch draws (`SkinBatch::skin_section_index`) — `None`
+    /// for every WMO batch, which has no such concept.
+    ///
+    /// Two batches of one model that name the SAME section rasterize the **same triangles**: a base
+    /// layer and the shine/reflect layer authored over it (`ARMORREFLECT3` on the ballista's bolt
+    /// heads and shields, `BALISTASHINE02` on the loose bolts — 264 sections across 221 world
+    /// doodads, `m2_shared_section`). The reference draws both from one vertex array under
+    /// depth-write + LEQUAL, so the later one wins the coplanar tie **exactly** (wow-re
+    /// `m2-depth-blend-state`). We only match that while both take the same vertex-transform path,
+    /// which is why the consolidators refuse a batch whose section they cannot take whole — see
+    /// `terrain_stream::spawn::assemble`.
+    pub section: Option<u16>,
     /// This batch's texture coordinates are **GENERATED, not authored** — a sphere-map environment
     /// coordinate derived per frame from the view-space reflection vector, not the vertex UVs
     /// ([`benilla_m2::M2Model::stage_is_env_mapped`]: `texture_unit_lookup[texCoordSet] > 2`).
@@ -601,6 +613,7 @@ impl Default for RenderSubmesh {
             rgb_seq: None,
             wmo_batch: None,
             env_map: false,
+            section: None,
         }
     }
 }

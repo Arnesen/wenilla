@@ -685,6 +685,10 @@ pub fn parse_m2_render_submeshes(
             sub.fog_policy = fog_policy; // render flag 0x02 / the per-blend fog table
             sub.skin_slot = skin_slot; // so a skin-less load can fill this batch at spawn
             sub.geoset_id = section.id; // the skinSectionId — character geoset selection keys on it
+                                        // …and the section INDEX, which is a different question: `geoset_id` says which
+                                        // geoset a compositor may show, this says which TRIANGLES this batch draws. Two
+                                        // batches sharing it are coplanar by construction — see `RenderSubmesh::section`.
+            sub.section = Some(batch.skin_section_index);
             sub.wrap_x = wrap_x; // texture record flags 0x1/0x2 — clamp is a silhouette decision
             sub.wrap_y = wrap_y;
             sub.char_slot = char_slot; // character runtime slot (body/hair) — filled per-player at spawn

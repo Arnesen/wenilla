@@ -54,6 +54,11 @@ use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 
 pub(crate) use clock::{process_cpu_secs, system_cpu_ticks};
 pub(crate) use gpu::GpuMsShared;
+/// The pill's "who else is using this band?" probe, reached by the world-state frame's own tests
+/// (`ui_script::world_state_tests`) so the two systems that share the top centre are pinned against
+/// each other rather than each against its own idea of the geometry.
+#[cfg(test)]
+pub(crate) use hud::top_centre_claimed;
 pub(crate) use hud::PerfHud;
 pub(crate) use journal::FpsJournalPlugin;
 

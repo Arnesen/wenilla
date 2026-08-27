@@ -198,6 +198,31 @@ pub fn spawn_model_entities(
     // The per-batch slot map (see [`SpawnedModel::by_batch`]) — every `continue` in the loop
     // below leaves a `None` in place instead of shifting later batches.
     let mut by_batch: Vec<Option<Entity>> = vec![None; submeshes.len()];
+    // **Coplanar siblings ride ONE lane** — a batch whose M2 skin section is drawn by another
+    // batch of this same model never diverts into a consolidator, and neither does that sibling.
+    //
+    // Two batches naming one section rasterize the SAME triangles ([`RenderSubmesh::section`]): a
+    // base layer and the shine/reflect layer authored over it. The reference draws both from one
+    // vertex array under depth-write + LEQUAL, so the later batch wins that coplanar tie EXACTLY
+    // (wow-re `m2-depth-blend-state`). The consolidators exclude on per-batch facts — env-mapped
+    // UVs and the `0x10`/`0x08` depth flags (`static_gx::divert`), additive order (`merge`) — and a
+    // shine layer carries all of them, so the pair got split: base into the retained/merged lane,
+    // shine onto the entity path. Those two lanes reach the same world vertex by different
+    // arithmetic (the bake resolves it on the CPU in f64 and re-centres; the entity shader rotates
+    // it in f32 at local magnitude — `static_gx::bake`'s own note: "what remains against the entity
+    // path is the GPU's own rotate-at-local-magnitude rounding, which no bake can undercut"). A few
+    // ULPs is nothing between separate surfaces and everything between coplanar ones: the shine's
+    // reverse-Z GreaterEqual test against its own base becomes a per-pixel coin flip that re-rolls
+    // on every camera move — the ballista's bolt heads and shields dithering exactly the way B38's
+    // awning did (decision 0680). Keeping the section whole is the only place the two depths are
+    // equal by CONSTRUCTION; a depth bias would merely pick a winner for a tie we should never have
+    // created. It costs 264 sections across 221 world doodads (`m2_shared_section`).
+    let shared_geometry = shared_geometry(
+        &submeshes
+            .iter()
+            .map(|s| s.geometry.section)
+            .collect::<Vec<_>>(),
+    );
     for (batch_idx, sub) in submeshes.iter().enumerate() {
         // The batch's app-built render form (decision 0834). Callers gate spawning on the forms
         // being complete, so a miss here is a broken contract — skip the batch rather than panic.
@@ -378,7 +403,7 @@ pub fn spawn_model_entities(
         // exterior FADER prop stays on the entity path (the exile protocol has no prop
         // shape — that keep is today's default look) and is TALLIED, never silent.
         if let Some((gx, site)) = staticgx.as_mut() {
-            let facts = if !crate::static_gx::enabled() {
+            let facts = if !crate::static_gx::enabled() || shared_geometry[batch_idx] {
                 None
             } else {
                 match site {
@@ -474,6 +499,7 @@ pub fn spawn_model_entities(
         // falls through and spawns individually.
         if let Some((merge, site)) = merge.as_mut() {
             if crate::terrain_stream::merge::merge_enabled()
+                && !shared_geometry[batch_idx]
                 && class.merges()
                 // The fader lane is OPT-IN (`WOW_MERGE_FADERS=1`, decision 1423): a fader —
                 // neither never-fade nor a steady interior prop — spawns per-entity by
@@ -789,6 +815,20 @@ fn cull_bound(stat: Option<&Aabb>, anim: Option<Aabb>) -> Option<Aabb> {
     }
 }
 
+/// Which batches share their triangles with another batch of the same model — the consolidator
+/// gate's predicate, over the batches' [`benilla_formats::RenderSubmesh::section`] indices in batch
+/// order. `true` at `i` means batch `i` names a section some other batch also names.
+///
+/// `None` (every WMO batch — no section concept) never shares: the WMO lanes keep their own
+/// MOBA-order law and are not what this closes. The list is a model's batch count long — tens at
+/// the very most — so the quadratic scan is cheaper than any map.
+fn shared_geometry(sections: &[Option<u16>]) -> Vec<bool> {
+    sections
+        .iter()
+        .map(|s| s.is_some() && sections.iter().filter(|o| *o == s).count() > 1)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,5 +877,26 @@ mod tests {
         let b = cull_bound(Some(&bind), None).expect("a bound");
         assert!(Vec3::from(b.min()).abs_diff_eq(Vec3::splat(-1.0), 1e-4));
         assert!(Vec3::from(b.max()).abs_diff_eq(Vec3::splat(1.0), 1e-4));
+    }
+
+    /// The ballista's own shape: section 10 drawn twice (base + shine) and section 4 drawn once.
+    /// Both members of the pair are flagged, not just the refusable one — the whole point is that
+    /// they travel together, so gating only the shine would leave the base in the retained lane
+    /// and the split exactly where it was.
+    #[test]
+    fn both_batches_of_a_shared_section_are_flagged() {
+        let flags = shared_geometry(&[Some(4), Some(10), Some(10), Some(7)]);
+        assert_eq!(flags, vec![false, true, true, false]);
+    }
+
+    /// WMO batches carry no section, and `None == None` would otherwise make every WMO batch in a
+    /// group "shared" with every other — pulling the whole WMO population out of the retained lane.
+    #[test]
+    fn section_less_batches_never_share() {
+        assert_eq!(shared_geometry(&[None, None, None]), vec![false; 3]);
+        assert_eq!(
+            shared_geometry(&[None, Some(0), Some(0), None]),
+            vec![false, true, true, false]
+        );
     }
 }
