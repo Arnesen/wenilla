@@ -435,6 +435,15 @@ struct Booth {
     root: Entity,
     target: Handle<Image>,
     baked: Option<LookKey>,
+    /// **Body panes only** — what [`sync_body_booth`] last snapshotted, in place of `baked`.
+    /// A body pane is a `<PlayerModel>` widget and re-takes its model on the reference's own
+    /// four triggers, never on the world moving something ([`SnapKey`]).
+    snap: Option<SnapKey>,
+    /// The pane was on screen last frame ([`BoothPanes`]) — the edge detector for the widget's
+    /// C++ show override (`0x505d00`), which re-duplicates on every hidden→visible transition.
+    shown: bool,
+    /// How many times that edge has fired. Lives in [`SnapKey::show`].
+    show_rev: u32,
     /// Demand-render window (decision 0540): frames [`gate_booth_cameras`] still keeps this
     /// booth's camera active. Armed to [`BOOTH_SETTLE_FRAMES`] by every content edge (bake,
     /// empty, framing/yaw write); 0 with `pending` drained = the camera sleeps and the target
@@ -456,6 +465,30 @@ struct Booth {
     /// closed window. [`gate_booth_cameras`] releases the hold at [`PENDING_LANDING_SECS`]
     /// with a warn — the still keeps whatever did land.
     pending_since: Option<f64>,
+    /// **This bake has not yet been drawn with every pipeline compiled** — the [`Booth::pending`]
+    /// law, one level further down the stack (report B331).
+    ///
+    /// `pending` asks whether a texture is resident in `Assets<Image>`; that is a *main-world*
+    /// question, and it is not the whole of "did this draw appear". Off macOS Bevy builds each
+    /// pipeline variant on the async pool, and a batch whose variant is still building is
+    /// **skipped** — silently, with no error and no missing asset ([`PipeWatch::compiling`] has
+    /// the byte references). A live view redraws it a few frames later and nobody ever sees it.
+    /// A one-shot portrait bake does not: [`BOOTH_SETTLE_FRAMES`] elapse, the camera sleeps, and
+    /// the still keeps the hole for the rest of the session — which is exactly the report
+    /// ("*sometimes hair missing, sometimes face, totally random*"): hair is the alpha-key
+    /// pipeline, the body the opaque one, the eye-glow card the additive one, and which of the
+    /// three had landed by the fourth frame is a race. It is invisible on macOS, where the same
+    /// compile `block_on`s the render thread instead: the whole class exists on the reporters'
+    /// machines and on no screen we can look at. Decision 1621.
+    ///
+    /// Set by [`wake_booth`]; [`gate_booth_cameras`] holds the camera awake while the cache is
+    /// draining and then spends one final rendered frame, exactly as it does for `pending`.
+    pipes_settling: bool,
+    /// When the current [`Booth::pipes_settling`] hold began (wall secs) — `None` while it is
+    /// clear. Bounded like [`Booth::pending_since`] and for the same reason: a session that keeps
+    /// meeting new variants (walking a city) keeps the cache non-empty, and an unbounded hold
+    /// would pin a 256² camera rendering behind it.
+    pipes_since: Option<f64>,
     /// The **destination pane's** aspect this booth's camera is currently framed for
     /// ([`framing::WowPortraitProjection::aspect`], decision 1069) — 1.0 until the UI has drawn the
     /// pane once, then sticky: a hidden window must not re-frame the bake back to square.
@@ -578,6 +611,14 @@ pub(crate) struct StageRig;
 /// an MPQ image lands in well under a second — because a premature release only costs a stale
 /// still, while the old unbounded hold cost a forever-rendering camera.
 const PENDING_LANDING_SECS: f64 = 10.0;
+
+/// How long a [`Booth::pipes_settling`] hold may keep the camera awake (wall secs) before it is
+/// spent anyway ([`Booth::pipes_since`]). The pipeline cache always drains *eventually* — every
+/// build settles `Ok` or `Err` — but it is a **process-global** counter, so a session that keeps
+/// meeting new variants (walking into a new city, the first cast of every spell) can hold it
+/// non-empty for a long stretch. Generous, because the cost of waiting is one 256² camera and the
+/// cost of releasing early is the wrong face on the screen for the rest of the session.
+const PIPELINE_SETTLING_SECS: f64 = 15.0;
 
 /// `WOW_BOOTH_LOG=1` — is the booth instrument armed? (Read once.)
 fn booth_log() -> bool {
@@ -743,6 +784,11 @@ fn wake_booth<'a>(
         .collect();
     // A fresh hold gets a fresh clock ([`Booth::pending_since`]) — the gate stamps it.
     booth.pending_since = None;
+    // …and a fresh bake owes a pipeline settle ([`Booth::pipes_settling`]): the variants this
+    // bake's materials specialize to are only queued when the render world first sees them, so
+    // the gate cannot judge this until the settle window has otherwise drained.
+    booth.pipes_settling = true;
+    booth.pipes_since = None;
 }
 
 #[derive(Resource, Default)]
@@ -936,6 +982,11 @@ impl Plugin for PortraitPlugin {
             .add_systems(
                 Update,
                 (
+                    // First: the model-changed producers this frame, so every pane below reads
+                    // one revision. Its writes are `Commands`, so a bump reaches the panes on the
+                    // NEXT frame — which is the reference's own latency, an event queued into
+                    // `0x524cd0`'s per-frame drain and consumed by Lua a round-trip later.
+                    bump_model_revision,
                     test_bake::sync_test_portraits,
                     sync_portraits,
                     sync_paperdoll,
@@ -1150,10 +1201,15 @@ fn setup_booths(
                 root,
                 target: image,
                 baked: None,
+                snap: None,
+                shown: false,
+                show_rev: 0,
                 wake: 0,
                 live: false,
                 pending: Vec::new(),
                 pending_since: None,
+                pipes_settling: false,
+                pipes_since: None,
                 aspect: 1.0,
                 rigged: false,
                 parked: false,
@@ -1224,10 +1280,15 @@ fn setup_booths(
                 root,
                 target: image,
                 baked: None,
+                snap: None,
+                shown: false,
+                show_rev: 0,
                 wake: 0,
                 live: false,
                 pending: Vec::new(),
                 pending_since: None,
+                pipes_settling: false,
+                pipes_since: None,
                 aspect: 1.0,
                 rigged: false,
                 parked: false,
@@ -1247,6 +1308,164 @@ fn setup_booths(
 /// change mid-run).
 fn test_mode(cached: &mut Option<bool>) -> bool {
     *cached.get_or_insert_with(|| std::env::var("WOW_PORTRAIT_TEST").is_ok_and(|s| !s.is_empty()))
+}
+
+/// benilla's **`UNIT_MODEL_CHANGED`**, for the two producers that are not a change of dress
+/// ([`crate::entities::DressKey`] is the rest). One counter per unit; a body pane re-takes its
+/// snapshot when it moves ([`SnapKey`]).
+///
+/// - **The manual sheath ceremony's own keyframe.** `SetSheatheState(…, bInstant = 0)` — which
+///   only `ToggleSheath` passes, on all three legs — runs the ceremony, and the clip's `$SHL`/
+///   `$SHR` event marks the unit **unconditionally** (`0x611b60` → `0x5ffb10`, the mark at
+///   `0x5ffbbe`, a function with one `ret`). So pressing Z moves an open character sheet's doll,
+///   one Lua round-trip later. Every *snap* sheath change — the combat auto-draw, the stand-state
+///   stow, the descriptor apply — takes `bInstant != 0` and reaches the queue only through the
+///   enchant-gated `0x5eed50`, which is why drawing a bow on a mob does **not** move the doll.
+///   That split is `#bugs` B324.
+/// - **An item's glow instances landing** — ours, not the reference's. Its widget duplicates a
+///   model the world had already finished building; our `ItemVisuals` models stream in, and a key
+///   blind to their arrival would leave a permanently-glowing weapon glowing nothing in the
+///   character window (the case [`LookKey`]'s effects term was added for).
+#[derive(Component, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ModelRevision(pub(crate) u32);
+
+/// Bump [`ModelRevision`] for every unit one of its producers fired on this frame.
+fn bump_model_revision(
+    mut commands: Commands,
+    mut swaps: MessageReader<crate::creature_anim::SheathSwapMessage>,
+    glows: Query<&benilla_world::model_fade::ParentModel, Added<crate::entities::ItemGlowAttached>>,
+    revs: Query<&ModelRevision>,
+) {
+    let mut bumped = <bevy::platform::collections::HashSet<Entity>>::default();
+    let units = swaps
+        .read()
+        .map(|m| m.entity)
+        // A glow's root is chained to the WEARER (`spawn_slot` stamps `ParentModel(wearer)`),
+        // which is the unit whose model just gained geometry.
+        .chain(glows.iter().map(|p| p.0));
+    for unit in units {
+        if !bumped.insert(unit) {
+            continue;
+        }
+        let next = revs.get(unit).map_or(0, |r| r.0).wrapping_add(1);
+        commands.entity(unit).try_insert(ModelRevision(next));
+    }
+}
+
+/// The attach ids the **sheath lane owns** — the hand points a weapon is drawn into, the forearm a
+/// shield takes, and the six sheath points plus the shield's back slot it is stowed at. A draw or
+/// a stow moves an item among these, and for two kinds of item makes it vanish outright: a
+/// **ranged** weapon renders nothing while stowed (`0x611770` detaches it and never re-attaches —
+/// `ranged-sheath-display.md`), and so does a melee weapon whose `SheatheType` is 0. The worn
+/// quiver rides `0x1a` on the same gate.
+///
+/// [`SnapKey`] is blind to every one of them, which is the whole mechanism of `#bugs` B324: a
+/// widget's duplicate must not notice that the world drew a weapon.
+fn sheath_lane(attach: Option<u16>) -> bool {
+    matches!(attach, Some(0..=2 | 26..=28 | 30..=33))
+}
+
+/// **What a body pane re-takes its snapshot on** — the reference's re-`SetUnit` set, as content.
+///
+/// A `<PlayerModel>` does not mirror the unit: it **duplicates** the unit's `CM2Model` once and
+/// renders the copy (`0x5059a0` → `0x707400`), and the copy is dead to everything the world does
+/// afterwards — `[dup+0x34]` holds the source only long enough to build, and is Released and
+/// nulled inside `0x707400` itself (wow-re `ui/scratch/paperdoll-liveness-law.md`, §5 verified).
+/// Ours mirrored the live tree every frame, so a bow drawn in combat walked straight onto the
+/// character sheet.
+///
+/// The copy is re-taken on exactly four things, and each is a field here:
+///
+/// 1. **The pane becoming visible** ([`Self::show`]). Not a Lua event at all — `0x505d00` is the
+///    widget's effective-visible SHOW override (primary vtable index 34) and re-duplicates on
+///    every hidden→visible edge; index 33 `0x505ce0` destroys the model on hide. This is why
+///    `PaperDollFrame_OnShow` calls no `SetUnit` and the doll still tracks your gear.
+/// 2. **A change of dress** ([`Self::dress`], [`Self::stable`]) — `UNIT_MODEL_CHANGED`, whose one
+///    fire site image-wide is `0x524df1`. Equipping or unequipping a visible item marks the unit
+///    unconditionally (`0x5e2810` → `0x5dee30`); so do a displayId change, a helm/cloak toggle and
+///    an enchant. **Nocked ammo does not** (`0x60ba30` reaches no queue site), and neither does
+///    entering combat.
+/// 3. **An explicit model event** ([`Self::rev`]) — the manual sheath ceremony's own `$SHL`/`$SHR`
+///    keyframe, and our late-arriving item glows. See [`ModelRevision`].
+/// 4. **A resize** ([`Self::aspect_bits`]) — `DISPLAY_SIZE_CHANGED` → `RefreshUnit()`, the one
+///    re-take the FrameXML does register, and the reason the widget re-snapshots its camera (1069).
+#[derive(PartialEq, Eq)]
+struct SnapKey {
+    /// A different body is a different `SetUnit`.
+    unit: Entity,
+    /// The mirrored geometry **no sheath change can move**: the unit's own body parts — which
+    /// carry the armour composite, and the reference shares that texture object by pointer, so a
+    /// re-blit is meant to reach an open doll — plus every rider and card outside
+    /// [`sheath_lane`]: the helm, the pauldrons, their glows and their emitters.
+    stable: Vec<(AssetId<Mesh>, AssetId<WowModelMaterial>)>,
+    /// The same cut over the effect seats [`LookKey`] keys on, for the same reason.
+    stable_fx: Vec<(u16, [u32; 3], usize)>,
+    /// The three weapon slots, resolved **above** the placement gate — the only lane whose sheath
+    /// state can decide whether an item exists at all, and so the one that cannot be read off the
+    /// mirrored tree ([`crate::entities::DressKey`]).
+    dress: Option<crate::entities::DressKey>,
+    rev: u32,
+    show: u32,
+    aspect_bits: u32,
+}
+
+impl SnapKey {
+    /// Build the key for `unit`'s pane this frame. `dress`/`rev` are the unit's own components
+    /// (absent until its equipment first resolves, which is simply another value); `show` and
+    /// `aspect` are the booth's.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        unit: Entity,
+        parts: &[&PortraitPart],
+        riders: &[&PortraitRider],
+        billboards: &[&PortraitBillboard],
+        effects: &[&PortraitEffects],
+        dress: Option<crate::entities::DressKey>,
+        rev: u32,
+        show: u32,
+        aspect: f32,
+    ) -> Self {
+        // Sorted, so the key cannot move for a reason as incidental as traversal order: adding or
+        // removing a sheath-lane child re-orders the siblings popped around it.
+        let mut stable: Vec<(AssetId<Mesh>, AssetId<WowModelMaterial>)> = parts
+            .iter()
+            .map(|p| (p.static_mesh.id(), p.material.id()))
+            .chain(
+                riders
+                    .iter()
+                    .filter(|r| !sheath_lane(r.attach))
+                    .map(|r| (r.static_mesh.id(), r.material.id())),
+            )
+            .chain(
+                billboards
+                    .iter()
+                    .filter(|b| !sheath_lane(b.attach))
+                    .map(|b| (b.mesh.id(), b.material.id())),
+            )
+            .collect();
+        stable.sort_unstable();
+        let mut stable_fx: Vec<(u16, [u32; 3], usize)> = effects
+            .iter()
+            .filter(|f| !sheath_lane(f.attach))
+            .map(|e| {
+                (
+                    e.bone,
+                    e.offset.to_array().map(f32::to_bits),
+                    e.emitters.len(),
+                )
+            })
+            .collect();
+        stable_fx.sort_unstable();
+        SnapKey {
+            unit,
+            stable,
+            stable_fx,
+            dress,
+            rev,
+            show,
+            aspect_bits: aspect.to_bits(),
+        }
+    }
 }
 
 /// The reference's **attach reset** — does `0x47a230` detach a sub-model hanging at this M2
@@ -1311,6 +1530,11 @@ struct DressedLook<'w, 's> {
     billboards: Query<'w, 's, &'static PortraitBillboard>,
     effects: Query<'w, 's, &'static PortraitEffects>,
     mounts: Query<'w, 's, (), With<crate::entities::mount::MountBody>>,
+    /// The two re-snapshot inputs a body pane cannot read off the mirrored tree ([`SnapKey`]).
+    /// They ride here because this is already the "what does this unit look like" param, and
+    /// because all three body-pane systems were at Bevy's 16-parameter ceiling.
+    dress: Query<'w, 's, &'static crate::entities::DressKey>,
+    revs: Query<'w, 's, &'static ModelRevision>,
 }
 
 impl DressedLook<'_, '_> {
@@ -1373,6 +1597,15 @@ impl DressedLook<'_, '_> {
             }
         }
         (parts, riders, billboards, effects)
+    }
+
+    /// `unit`'s dress and model revision — `None`/`0` before its equipment has first resolved,
+    /// which is simply another key value and re-snapshots when it lands.
+    fn snapshot_inputs(&self, unit: Entity) -> (Option<crate::entities::DressKey>, u32) {
+        (
+            self.dress.get(unit).ok().copied(),
+            self.revs.get(unit).map_or(0, |r| r.0),
+        )
     }
 }
 
@@ -1661,10 +1894,16 @@ fn sync_portraits(
 /// 0208 §5), and the model root spins to the pane's [`PaperDollBooth::yaw`] (the ref's
 /// `Model:SetRotation`).
 ///
-/// **What re-bakes.** A parts-key change respawns the posed instance and re-aims the (yaw-
+/// **What re-bakes.** A [`SnapKey`] change respawns the posed instance and re-aims the (yaw-
 /// independent) camera; a bare yaw change only re-rotates the root — neither happens on an unchanged
 /// frame. The bake stands ready whether or not the window is open, but the 512² *pass* only runs
 /// while the pane is being drawn ([`BoothPanes`], decision 1069).
+///
+/// The key is **not** the mirrored geometry. A `<PlayerModel>` duplicates the unit's model once and
+/// renders a copy the world can no longer reach, and it re-takes that copy on four things — the
+/// pane showing, a change of dress, an explicit model event, a resize. Mirroring live put a bow
+/// drawn in combat straight onto the character sheet (`#bugs` B324); [`SnapKey`] carries the whole
+/// law and its byte provenance.
 #[allow(clippy::too_many_arguments)]
 fn sync_paperdoll(
     mut commands: Commands,
@@ -1827,6 +2066,19 @@ fn sync_body_booth(
     // publishes nothing, and re-framing the standing bake back to square on the way out would be a
     // visible pop on the way back in.
     let aspect = panes.0.get(slot).copied().unwrap_or(booth.aspect);
+    // **The show edge** — the widget's own re-take (`0x505d00`, the effective-visible SHOW
+    // override at primary vtable index 34, which re-duplicates the unit's model on every
+    // hidden→visible transition; index 33 destroys it on hide). `BoothPanes` publishes a slot
+    // exactly while its pane is being drawn, so its rising edge is that transition.
+    //
+    // We re-take rather than destroy-and-rebuild: the two are indistinguishable on screen (nothing
+    // is drawn in between) and keeping the bake avoids the re-frame pop 1069's aspect latch exists
+    // to prevent.
+    let on_screen = panes.0.contains_key(slot);
+    if on_screen && !booth.shown {
+        booth.show_rev = booth.show_rev.wrapping_add(1);
+    }
+    booth.shown = on_screen;
     // There is no 2D stand-in for a body pane — the bridge always points at the live target (an
     // empty booth just renders the dark backdrop until the unit's model attaches).
     let live = PortraitSource::Live(booth.target.clone());
@@ -1842,9 +2094,9 @@ fn sync_body_booth(
     if parts.is_empty() {
         // No unit / model not attached → empty the booth and forget the applied yaw (so it
         // re-applies on the next bake).
-        if booth.baked.is_some() {
+        if booth.snap.is_some() {
             commands.entity(booth.root).despawn_related::<Children>();
-            booth.baked = None;
+            booth.snap = None;
             *last_pose = None;
             // Render the emptied stage before sleeping (decision 0540) — and the emptied stage has
             // no emitters left, so the pane stops being live.
@@ -1860,7 +2112,18 @@ fn sync_body_booth(
         return;
     }
     let unit = unit.expect("unit present — parts came from its descendants");
-    let key = LookKey::build(&parts, &riders, &billboards, &effects);
+    let (dress, rev) = look.snapshot_inputs(unit);
+    let key = SnapKey::build(
+        unit,
+        &parts,
+        &riders,
+        &billboards,
+        &effects,
+        dress,
+        rev,
+        booth.show_rev,
+        aspect,
+    );
     let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
     // Anchors first, before any teardown — a still-loading display must not be framed from
     // fabricated zero bounds (see the portrait site, and `booth_anchors`). Resolved out here rather
@@ -1875,7 +2138,10 @@ fn sync_body_booth(
         .map_or(1.0, |a| framing::pane_root_scale(a, display_aspect));
     // A changed pane aspect re-runs the same path: the camera's projection depends on it, and it
     // only ever moves once — the first frame the window is drawn.
-    let parts_changed = booth.baked.as_ref() != Some(&key) || booth.aspect != aspect;
+    // **The snapshot compare** — the whole of `#bugs` B324. This used to be `LookKey`, the
+    // mirrored geometry, which moved the instant the world drew a weapon. It is now the
+    // reference's own re-`SetUnit` set, and a draw is not in it.
+    let parts_changed = booth.snap.as_ref() != Some(&key);
     if parts_changed {
         booth.aspect = aspect;
         let Some(anchors) = anchors_now else {
@@ -1931,7 +2197,7 @@ fn sync_body_booth(
             })
             .collect();
         // Same law as the portrait bake: never latch a world-lane material into the pane. Leave
-        // `booth.baked` alone and retry next frame (see the portrait site for the full note).
+        // `booth.snap` alone and retry next frame (see the portrait site for the full note).
         if booth_light.pane.take_unready() {
             booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
             return;
@@ -1995,7 +2261,7 @@ fn sync_body_booth(
                 .chain(booth_riders.iter().map(|r| &r.material))
                 .chain(booth_billboards.iter().map(|b| &b.material)),
         );
-        booth.baked = Some(key);
+        booth.snap = Some(key);
     }
     // The model root: **yaw → rotation, plus the pane's model scale** — the widget's own
     // `T(pos)·R(facing)·S(s)` with `pos` at the origin (the ref's `Model:SetRotation` writes the
@@ -2031,6 +2297,42 @@ fn sync_body_booth(
     }
 }
 
+/// What one frame owes a booth's **pipeline settle** ([`Booth::pipes_settling`]) — the decision
+/// alone, so the law is testable without standing a render world up around it.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum PipeSettle {
+    /// The render world is still building variants, so it is still dropping draws: keep the
+    /// camera awake rather than freeze a still with a hole in it.
+    Hold,
+    /// Drained. Spend the settle on one final rendered frame — the same "one more frame" a
+    /// landed [`Booth::pending`] texture buys, and for the same reason.
+    Spend,
+    /// Nothing owed *yet*: the cache reads idle, but this bake's own [`BOOTH_SETTLE_FRAMES`]
+    /// window has not drained, so the reading cannot be trusted about it.
+    Idle,
+    /// [`PIPELINE_SETTLING_SECS`] ran out — spend it anyway, loudly.
+    Expired,
+}
+
+/// The settle's one rule, and the ±1-frame race it exists to survive.
+///
+/// A bake's pipeline variants are queued by the **render** world, the frame after the main world
+/// spawned its meshes, and `PipeWatch`'s counters cross back a frame later still. So an idle
+/// reading taken at the moment of the bake is a reading of the cache *before* this bake existed —
+/// which is why `Spend` waits for `wake_drained`: by the time [`BOOTH_SETTLE_FRAMES`] have gone
+/// by, whatever this bake queued is counted.
+fn pipe_settle(compiling: bool, wake_drained: bool, held_for: f64) -> PipeSettle {
+    if held_for > PIPELINE_SETTLING_SECS {
+        PipeSettle::Expired
+    } else if compiling {
+        PipeSettle::Hold
+    } else if wake_drained {
+        PipeSettle::Spend
+    } else {
+        PipeSettle::Idle
+    }
+}
+
 /// The demand-render gate (decision 0540): each booth camera is active only while its booth has
 /// something new to show — [`Booth::wake`] frames after a content edge, or a bake texture still
 /// in flight ([`Booth::pending`]) — except the booths whose content is **live**, which render
@@ -2055,6 +2357,9 @@ fn gate_booth_cameras(
     panes: Res<BoothPanes>,
     images: Res<Assets<Image>>,
     warm: Res<crate::pipe_warm::WarmPass>,
+    // The pipeline settle's input ([`Booth::pipes_settling`]) — is the render world still
+    // building variants, i.e. is it still dropping draws on the floor.
+    pipes: Res<crate::pipe_warm::PipeWatch>,
     time: Res<Time<bevy::time::Real>>,
     mut cams: Query<(
         Entity,
@@ -2104,6 +2409,36 @@ fn gate_booth_cameras(
                 booth.wake = booth.wake.max(1);
             }
         }
+        // The **pipeline settle** ([`Booth::pipes_settling`]), the pending hold's twin one level
+        // down: a batch whose pipeline variant is still being built draws NOTHING and says
+        // nothing about it, so a still committed inside a compile burst keeps the hole. Judged
+        // only once the settle window has otherwise drained — the variants this bake needs are
+        // queued by the RENDER world, and these counters cross back ±1 frame, so an idle reading
+        // taken the frame of the bake is a reading of the frame before it.
+        let settling = if booth.pipes_settling {
+            let now = time.elapsed_secs_f64();
+            let since = *booth.pipes_since.get_or_insert(now);
+            match pipe_settle(pipes.compiling(), booth.wake == 0, now - since) {
+                PipeSettle::Hold => true,
+                PipeSettle::Idle => false,
+                spent => {
+                    if spent == PipeSettle::Expired {
+                        warn!(
+                            "booth {}: pipelines still compiling after \
+                             {PIPELINE_SETTLING_SECS:.0}s — spending the settle with the still \
+                             as-is",
+                            token.as_str(),
+                        );
+                    }
+                    booth.pipes_settling = false;
+                    booth.wake = booth.wake.max(1);
+                    false
+                }
+            }
+        } else {
+            booth.pipes_since = None;
+            false
+        };
         let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some();
         // A live bake renders every frame — but only while the UI is actually drawing its pane.
         // (The glue screens sample their booth outside the FrameXML extract, so they publish no
@@ -2114,7 +2449,8 @@ fn gate_booth_cameras(
             || live_scene
             || live_pane
             || booth.wake > 0
-            || !booth.pending.is_empty();
+            || !booth.pending.is_empty()
+            || settling;
         // Half-rate (decision 1444, [`PaneRate`]): when the live pane is the ONLY thing keeping
         // this camera rendering — no wake window settling a fresh bake, no pending texture hold,
         // no fullscreen glue scene — skip every other frame. `active` stays the LOGICAL state:
@@ -2132,7 +2468,8 @@ fn gate_booth_cameras(
             && live_pane
             && !(test || warming || live_scene)
             && booth.wake == 0
-            && booth.pending.is_empty();
+            && booth.pending.is_empty()
+            && !settling;
         let throttled = paced && frames.0 % 2 == 1;
         let render = active && !throttled;
         if was_paced != paced {
@@ -2153,13 +2490,15 @@ fn gate_booth_cameras(
             && (cam.is_active != render || active)
         {
             eprintln!(
-                "[booth] t={:7.2} {} active={} render={} wake={} pending={} marker={}",
+                "[booth] t={:7.2} {} active={} render={} wake={} pending={} settling={} \
+                 marker={}",
                 time.elapsed_secs(),
                 token.as_str(),
                 active,
                 render,
                 booth.wake,
                 booth.pending.len(),
+                settling,
                 markers.contains(booth.root),
             );
         }
@@ -2258,6 +2597,7 @@ fn aim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::ItemModelKind;
 
     fn body_part() -> PortraitPart {
         PortraitPart {
@@ -2427,6 +2767,160 @@ mod tests {
         );
     }
 
+    /// A distinct mesh/material pair, so a fixture's identity is its own.
+    fn mesh(n: u64) -> Handle<Mesh> {
+        Handle::Uuid(
+            bevy::asset::uuid::Uuid::from_u128(0xb324_0000 | u128::from(n)),
+            std::marker::PhantomData,
+        )
+    }
+    fn mat(n: u64) -> Handle<WowModelMaterial> {
+        Handle::Uuid(
+            bevy::asset::uuid::Uuid::from_u128(0xb324_1000 | u128::from(n)),
+            std::marker::PhantomData,
+        )
+    }
+
+    /// A rider at `attach` with its own geometry.
+    fn geom_rider(attach: u16, n: u64) -> PortraitRider {
+        PortraitRider {
+            static_mesh: mesh(n),
+            material: mat(n),
+            bone: 4,
+            offset: Vec3::ZERO,
+            attach: Some(attach),
+        }
+    }
+
+    fn dress_of(held: [Option<(u32, ItemModelKind, i32)>; 3]) -> crate::entities::DressKey {
+        crate::entities::DressKey {
+            display_id: Some(57),
+            held,
+            held_ready: true,
+        }
+    }
+
+    /// The three-slot dress of a hunter carrying a bow — unchanged by drawing it, because
+    /// [`crate::entities::DressKey`] is read above the placement gate.
+    fn hunter() -> crate::entities::DressKey {
+        dress_of([None, None, Some((3026, ItemModelKind::Weapon, 0))])
+    }
+
+    fn key(
+        riders: &[PortraitRider],
+        dress: crate::entities::DressKey,
+        rev: u32,
+        show: u32,
+    ) -> SnapKey {
+        let body = [body_part()];
+        let body: Vec<&PortraitPart> = body.iter().collect();
+        let riders: Vec<&PortraitRider> = riders.iter().collect();
+        SnapKey::build(
+            Entity::PLACEHOLDER,
+            &body,
+            &riders,
+            &[],
+            &[],
+            Some(dress),
+            rev,
+            show,
+            1.0,
+        )
+    }
+
+    /// **`#bugs` B324, the half that removes the bow.** In combat the auto-draw is a *snap*
+    /// (`SetSheatheState(…, bInstant != 0)`), which reaches `UNIT_MODEL_CHANGED`'s one fire site
+    /// only through the enchant-gated `0x5eed50` — so the reference's doll never hears about it.
+    /// Ours re-baked on the mirrored geometry, and a drawn bow IS mirrored geometry.
+    ///
+    /// The bow appears from nothing (a stowed ranged weapon renders nothing at all), so this is
+    /// not a matter of ignoring a moved rider: the key has to be blind to the hand points, and to
+    /// know the bow exists from somewhere else. That somewhere is the dress.
+    #[test]
+    fn drawing_a_bow_in_combat_does_not_re_snapshot_the_pane() {
+        use crate::entities::attach_id::HAND_LEFT;
+        let bow = [geom_rider(HAND_LEFT, 1)];
+        let stowed = key(&[], hunter(), 0, 1);
+        let drawn = key(&bow, hunter(), 0, 1);
+        assert!(
+            stowed == drawn,
+            "the world drew the bow; the widget's duplicate must not notice"
+        );
+
+        // **The control, and the defect as a number.** The pane used to key on [`LookKey`] — the
+        // mirrored geometry — and that is exactly what a draw moves. Without this the test above
+        // asserts only that the new key ignores an input, never that the old one did not.
+        let body = [body_part()];
+        let body: Vec<&PortraitPart> = body.iter().collect();
+        let bow: Vec<&PortraitRider> = bow.iter().collect();
+        assert!(
+            LookKey::build(&body, &[], &[], &[]) != LookKey::build(&body, &bow, &[], &[]),
+            "the pre-1616 key moved on the draw — which is the bug"
+        );
+    }
+
+    /// The melee twin: a stow does not delete the weapon, it re-parents it (0826) — same handles,
+    /// a hand point for a hip point. Both ends are in the sheath lane, so neither is in the key.
+    #[test]
+    fn stowing_a_sword_does_not_re_snapshot_the_pane() {
+        use crate::entities::attach_id::{HAND_RIGHT, HIP_MAIN};
+        let sword = dress_of([Some((1234, ItemModelKind::Weapon, 0)), None, None]);
+        let drawn = key(&[geom_rider(HAND_RIGHT, 7)], sword, 0, 1);
+        let hipped = key(&[geom_rider(HIP_MAIN, 7)], sword, 0, 1);
+        assert!(drawn == hipped);
+    }
+
+    /// …but the **manual** toggle does. `ToggleSheath` passes `bInstant = 0` on all three legs,
+    /// which runs the ceremony, whose `$SHL`/`$SHR` keyframe marks the unit unconditionally
+    /// (`0x5ffb10`, the mark at `0x5ffbbe`). benilla fires `SheathSwapMessage` at exactly that
+    /// keyframe, and [`bump_model_revision`] turns it into a re-take. The director confirmed the
+    /// observable: with the sheet open, Z moves the doll.
+    #[test]
+    fn the_manual_sheath_ceremony_re_snapshots_the_pane() {
+        use crate::entities::attach_id::HAND_LEFT;
+        let before = key(&[], hunter(), 0, 1);
+        let after = key(&[geom_rider(HAND_LEFT, 1)], hunter(), 1, 1);
+        assert!(
+            before != after,
+            "the ceremony's own keyframe is a model event"
+        );
+    }
+
+    /// Opening the window re-takes the model — the C++ show override `0x505d00`, not a Lua event
+    /// (`PaperDollFrame_OnShow` calls no `SetUnit` at all). So a weapon drawn while the sheet was
+    /// shut IS on the doll the next time you open it.
+    #[test]
+    fn showing_the_pane_re_snapshots_it() {
+        use crate::entities::attach_id::HAND_LEFT;
+        let open_stowed = key(&[], hunter(), 0, 1);
+        let reopened_drawn = key(&[geom_rider(HAND_LEFT, 1)], hunter(), 0, 2);
+        assert!(open_stowed != reopened_drawn);
+    }
+
+    /// Equipping is `UNIT_MODEL_CHANGED`'s unconditional producer (`0x5e2810` → `0x5dee30` →
+    /// `0x5df119`), and it must reach the pane through the dress even when the new weapon is
+    /// **stowed** — where it adds no mirrored geometry whatsoever.
+    #[test]
+    fn equipping_a_stowed_weapon_still_re_snapshots_the_pane() {
+        let empty = key(&[], dress_of([None, None, None]), 0, 1);
+        let armed = key(&[], hunter(), 0, 1);
+        assert!(
+            empty != armed,
+            "the dress moved even though nothing is drawn"
+        );
+    }
+
+    /// And the gear that cannot move with a sheath is keyed straight off the mirrored tree, so a
+    /// helm arriving — or the armour composite re-blitting, which the reference shares by pointer
+    /// and means to show on an open doll — re-takes without any event plumbing.
+    #[test]
+    fn a_helm_arriving_re_snapshots_the_pane() {
+        use crate::entities::attach_id::HELM;
+        let bare = key(&[], hunter(), 0, 1);
+        let helmed = key(&[geom_rider(HELM, 9)], hunter(), 0, 1);
+        assert!(bare != helmed);
+    }
+
     /// **`#bugs` B324 — the nocked arrow reached the character-window doll.** A hunter shooting in
     /// combat has a bow at HandLeft(2) and an arrow at HandArrow(0x23); our booths mirrored both,
     /// and the reference's doll can never draw the arrow: every model widget duplicates the unit's
@@ -2576,6 +3070,49 @@ mod tests {
         assert_eq!(
             player_temporary_portrait(Some(9), Some(1)),
             "Interface\\CharacterFrame\\TemporaryPortrait.blp",
+        );
+    }
+
+    /// **A still is never committed while the render world is still building pipelines** —
+    /// report B331, the player's own portrait baking with the face (or the hair, or the shoulder)
+    /// simply absent, "totally random", on the reporter's Windows machine.
+    ///
+    /// The mechanism is not a missing asset and never shows up as one: off macOS Bevy builds each
+    /// pipeline variant on the async pool, and `SetItemPipeline` answers a not-yet-built variant
+    /// with `Skip` — the batch draws nothing, silently. Every live view redraws it a few frames
+    /// later; a one-shot bake sleeps after [`BOOTH_SETTLE_FRAMES`] and keeps the hole for the
+    /// session. Which batches lose the race is which variants were cold, which is why one bake
+    /// loses the hair (the alpha-key pipeline) and the next the face (the opaque one).
+    #[test]
+    fn a_bake_holds_its_camera_awake_while_pipelines_are_still_building() {
+        assert_eq!(pipe_settle(true, true, 0.0), PipeSettle::Hold);
+        assert_eq!(pipe_settle(true, false, 0.0), PipeSettle::Hold);
+    }
+
+    /// **An idle cache does not spend the settle until the bake's own window has drained.** The
+    /// counters cross worlds a frame behind, and the variants a bake needs are only queued once
+    /// the render world has seen its meshes — so "the cache is idle" read on the frame of the
+    /// bake is a fact about the frame *before* it. Spending there would restore exactly the bug.
+    #[test]
+    fn an_idle_reading_before_the_settle_window_drains_decides_nothing() {
+        assert_eq!(pipe_settle(false, false, 0.0), PipeSettle::Idle);
+        assert_eq!(pipe_settle(false, true, 0.0), PipeSettle::Spend);
+    }
+
+    /// The bound (the [`Booth::pipes_since`] doc): the cache is process-global, so a session that
+    /// keeps meeting new variants can hold it non-empty indefinitely. The hold is released loudly
+    /// rather than pinning a camera rendering for the rest of the session — the same shape, and
+    /// the same reasoning, as [`PENDING_LANDING_SECS`].
+    #[test]
+    fn the_settle_is_bounded_even_while_the_cache_keeps_filling() {
+        assert_eq!(
+            pipe_settle(true, false, PIPELINE_SETTLING_SECS + 0.1),
+            PipeSettle::Expired,
+        );
+        // …and the bound outranks the hold, or a busy cache would never reach it.
+        assert_eq!(
+            pipe_settle(true, true, PIPELINE_SETTLING_SECS + 0.1),
+            PipeSettle::Expired,
         );
     }
 }

@@ -357,6 +357,21 @@ pub(super) fn apply_server_moves(
             player.vel_y = 0.0;
             player.fall_far = false;
         }
+        // **A hover grant jumps you** ([`Player::hover_launch`], decision 1620). The reference's
+        // handler for this very opcode is `0x61a620`, and setting the flag is its *last* act:
+        // `61a62c je` splits enable from disable, enable runs `CMovement::Jump(force = 0)`
+        // (`61a62e push 0; 61a630 call 0x7c6230`) and disable runs `StartFalling` (`61a637 call
+        // 0x7c61c0`), and only then does `61a646 call 0x7c7310` write `0x40000000`. Casting
+        // Levitate while swimming therefore launches the body clear of the water — the director's
+        // report against the reference client, which 1616 had recorded as faithfully inert
+        // because its census looked inside the resolver and the lift is a layer above it.
+        //
+        // The revoke arm needs nothing of ours: `StartFalling` sets FALLING with velocity 0, and
+        // dropping `hover_offset` to zero already leaves the body a yard over its floor with the
+        // ground probe out of reach, so the next step falls from rest by itself.
+        else if m.mode == MoveMode::Hover && m.apply {
+            player.hover_launch = true;
+        }
         let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
         let _ = net_cmds.0.send(ClientCommand::MoveModeAck {
             guid: m.guid,
@@ -550,7 +565,7 @@ fn apply_self_move(
     player.face_yaw = wrap_pi(player.face_yaw + dyaw);
     player.model_yaw = wrap_pi(player.model_yaw + dyaw);
     cam.yaw += dyaw;
-    player.swim_pitch = m.pitch;
+    player.mover_pitch = m.pitch;
 
     // Riding a deck: `ON_TRANSPORT` is outside the merge mask, so this packet did not deboard us —
     // it moved us **within** the platform frame. Re-anchor the local pose from the boat's live

@@ -513,6 +513,9 @@ pub(super) fn spawn_glue_booth(
             root,
             target: image,
             baked: None,
+            snap: None,
+            shown: false,
+            show_rev: 0,
             // The glue camera is scene-driven, not wake-driven: `gate_booth_cameras` keeps it
             // active exactly while a glue scene shows (the scene is LIVE — looping animation,
             // global sequences, particle emitters — so it renders continuously, unlike the stills).
@@ -522,6 +525,8 @@ pub(super) fn spawn_glue_booth(
             live: false,
             pending: Vec::new(),
             pending_since: None,
+            pipes_settling: false,
+            pipes_since: None,
             aspect: 1.0,
             rigged: false,
             parked: false,

@@ -123,6 +123,7 @@ impl PluginGroup for WorldPlugins {
             // filed in the app). Its ordering rides the billboard place set, which is why the
             // lane registers itself rather than asking a caller to know that.
             .add(crate::ground_fx::plugin)
+            .add(crate::frame_pace::plugin)
             .add(crate::rig_palette::plugin)
             // The rig machinery beside the palette it fills: the pose evaluator, the pose
             // post-pass window, the world/palette composition, and the global-sequence channels.

@@ -210,8 +210,10 @@ pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: 
     if player.modes.levitating {
         return player.swimming;
     }
+    let was = player.swimming;
     let Some(surface) = surface_y else {
         player.swimming = false; // not in liquid
+        stop_pitch(player, was);
         return false;
     };
     let depth = surface - player.pos.y;
@@ -225,7 +227,29 @@ pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: 
                 .is_some_and(|t0| now - t0 < player.jump_zspeed / (2.0 * GRAVITY));
         depth > swim_enter_depth(h) && !hop_blocked
     };
+    stop_pitch(player, was);
     player.swimming
+}
+
+/// **StopSwim zeroes the mover pitch** — `0x7c6e80` (`and [esi+0x40],0xffdfff3f`, then `+0x54` and
+/// `+0x20` to zero), the swim-clear the depth-driven stop reaches through
+/// `0x6031eb → 0x60dff0 → 0x61a070` → queue opcode `0x13` → the dispatcher arm `0x61601d`. It is
+/// the *only* zeroing writer of [`Player::mover_pitch`] (`swim-camera-pitch.md` (b)): mouse release
+/// never levels it, and neither does anything on land.
+///
+/// Which matters now that the pitch is land-live and water walking reads it (decision 1616): swim
+/// out of a river nose-down, and without this the aim you left the water with would still be
+/// pointing past −37° when your feet found the surface, and the water would not hold you.
+///
+/// **The breach jump deliberately does not come here.** `CMovement::Jump 0x7c6230` clears SWIMMING
+/// through `0x7c61f0` (`and eax,0xfbdfffff` — `0x200000` and `0x4000000` together, plus `0x2000`
+/// FALLING), which never touches `+0x20`; only the depth path routes through `0x7c6e80`. So a
+/// dolphin-hop keeps its aim and a swim-out levels — and that difference is in the bytes, not a
+/// convenience.
+fn stop_pitch(player: &mut Player, was: bool) {
+    if was && !player.swimming {
+        player.mover_pitch = 0.0;
+    }
 }
 
 /// The **jump out of the water** — the takeoff frame of a jump while swimming (**VERIFIED**
@@ -273,7 +297,7 @@ pub(super) struct SwimOutcome {
     /// `Some` when the rest-line cap redirected the stroke (the surface-swim regime): the
     /// *effective* travel pitch after the redirect — what the body pose and the wire pitch tail
     /// present this frame (→0 pinned at the line). `None` when the cap didn't bite (free swim,
-    /// idle, descending). The raw camera aim stays in [`Player::swim_pitch`] untouched.
+    /// idle, descending). The raw camera aim stays in [`Player::mover_pitch`] untouched.
     pub surface_pitch: Option<f32>,
 }
 
@@ -469,6 +493,49 @@ mod tests {
             collision_height: crate::entities::CollisionHeight(h),
             ..Default::default()
         }
+    }
+
+    /// **StopSwim levels the mover pitch, the breach jump does not** — `0x7c6e80`'s zeroing of
+    /// `+0x20`, which only the depth-driven stop routes through (decision 1616, B322). It matters
+    /// because the pitch is land-live and water walking reads it: leave a river nose-down without
+    /// this and the aim you were swimming with is still past −37° when your feet reach the surface,
+    /// so the water refuses to hold you.
+    #[test]
+    fn leaving_the_water_by_depth_levels_the_pitch_and_a_breach_does_not() {
+        let deep = swim_enter_depth(HUMAN_MALE) + 1.0;
+        let mut player = player_at(0.0);
+        player.mover_pitch = -0.9;
+        assert!(update_swimming(&mut player, Some(deep), 0.0), "must swim");
+        assert_eq!(player.mover_pitch, -0.9, "swimming holds the aim");
+        // Still swimming inside the hysteresis band: nothing levels.
+        let band = swim_exit_depth(HUMAN_MALE) + 0.001;
+        assert!(update_swimming(&mut player, Some(band), 0.1));
+        assert_eq!(player.mover_pitch, -0.9);
+        // Out through the bottom of the band — StopSwim, and the pitch goes with it.
+        assert!(!update_swimming(&mut player, Some(0.5), 0.2));
+        assert_eq!(
+            player.mover_pitch, 0.0,
+            "`0x7c6e80` zeroes +0x20 on StopSwim"
+        );
+        // Leaving the liquid entirely is the same stop (`inLiquid == 0`).
+        player.mover_pitch = -0.9;
+        assert!(update_swimming(&mut player, Some(deep), 1.0));
+        assert!(!update_swimming(&mut player, None, 1.1));
+        assert_eq!(player.mover_pitch, 0.0);
+        // The breach jump clears SWIMMING through `0x7c61f0`, which never touches `+0x20`: the
+        // caller drops the latch itself, so the next tick sees no transition and the aim survives.
+        player.mover_pitch = -0.9;
+        assert!(update_swimming(&mut player, Some(deep), 2.0));
+        player.swimming = false; // what the breach arm in `player::control` does
+        breach_pitch_survives(&mut player, deep);
+        assert_eq!(player.mover_pitch, -0.9, "a dolphin-hop keeps its aim");
+    }
+
+    /// One tick of the latch after a breach has already cleared it — factored out only so the
+    /// assertion above reads as one line.
+    fn breach_pitch_survives(player: &mut Player, depth: f32) {
+        player.vel_y = 0.0;
+        update_swimming(player, Some(depth), 2.1);
     }
 
     /// The gate's three bits, named — `0x6030c0`'s `js` / `shr 3` / `shr 0xb` tests, which appear

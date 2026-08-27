@@ -38,6 +38,7 @@ use benilla_assets::m2_url;
 mod resolve;
 pub(in crate::entities) use resolve::placement;
 pub(super) use resolve::resolve_equipment;
+pub(crate) use resolve::DressKey;
 mod spawn;
 pub(super) use spawn::attach_held_items;
 
@@ -200,8 +201,8 @@ impl HeldSlot {
 /// `Item\ObjectComponents\{Weapon,Shield}\model[0]` for held items; `Shoulder\model[0]`/`model[1]`
 /// for the left/right pauldron (each with its own `model_texture` column); `Head\<stem>_<Ra><S>.m2`
 /// for helms — per-race/sex files, prefix by race id (Hu Or Dw Ni Sc Ta Gn Tr), M/F by sex.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum ItemModelKind {
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum ItemModelKind {
     Weapon,
     Shield,
     ShoulderLeft,

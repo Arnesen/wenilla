@@ -58,6 +58,7 @@ use equipment::{attach_held_items, resolve_equipment};
 /// `ItemVisuals` id hangs on the item's OWN attachment points — the permanent weapon glows and
 /// the shaman/oil enchant visuals.
 mod item_glow;
+pub(crate) use item_glow::ItemGlowAttached;
 use item_glow::{attach_item_glows, ItemGlows};
 
 /// Mounts (decision 0441): the `UNIT_FIELD_MOUNTDISPLAYID` → second-creature-visual projection —
@@ -118,7 +119,11 @@ pub(crate) use attach::equip_slot;
 pub(crate) use equipment::ItemDisplays;
 pub(crate) use equipment::{BoneAttach, Equipment};
 // The instruments' read of what a body is actually WEARING vs what it resolved (`WOW_DRESS_CENSUS`).
-pub(crate) use equipment::{attach_id, HeldAttached, ATTACH_SLOT_NAMES};
+pub(crate) use equipment::{attach_id, DressKey, HeldAttached, ATTACH_SLOT_NAMES};
+// [`DressKey`] carries one of these per weapon slot, but nothing outside this module has to NAME
+// the type to hold or compare a key — only the tests that build one do.
+#[cfg(test)]
+pub(crate) use equipment::ItemModelKind;
 
 /// The overhead attachment slot (`PlayerName`, id 18). The anchor of the overhead name, the
 /// floating combat text, and the questgiver marker alike.

@@ -67,6 +67,25 @@ pub(in crate::entities) fn placement(
     }
 }
 
+/// One held slot's enchant ids, folded to a single change-detectable number for [`DressKey`].
+///
+/// The **scan width is the glow resolver's** (`0x62ec70`'s seven `CGItem` enchant slots), so the
+/// fold moves exactly when the thing it stands in for — the item's glow — could. Creatures carry
+/// none: a virtual item has no enchant fields, like the synthetic item the reference's
+/// `GetVirtualItem` hands its own resolver.
+fn enchant_fold(
+    s: &benilla_protocol::messages::ObjectFields,
+    kind: EntityKind,
+    slot: usize,
+) -> i32 {
+    if kind != EntityKind::Player {
+        return 0;
+    }
+    (0..7u8)
+        .filter_map(|j| s.player_visible_item_enchant(PLAYER_HELD_SLOTS[slot], j))
+        .fold(0i32, |acc, e| acc.wrapping_mul(31).wrapping_add(e as i32))
+}
+
 /// The nocked ammo's attach point (wow-re `nocked-ammo-cancel.md` §E2/E5, byte-verified): the
 /// ONE body-bone attach in the whole mechanism is HandArrow (35), fired for a **bow** once its
 /// BowPull event latches `[+0xd58]&0x4000` — `nock_latched` is [`NockLatch`], driven by the real
@@ -116,6 +135,32 @@ pub(in crate::entities) struct ResolveKey {
     latched: bool,
 }
 
+/// The **dress** half of the same resolve — [`ResolveKey`]'s complement, and the reason it is a
+/// separate component: a model widget's duplicate is re-taken on a *dress* change and not on a
+/// *placement* one (wow-re `ui/scratch/paperdoll-liveness-law.md`; `crate::portrait::SnapKey`).
+///
+/// Everything here is read **before** [`placement`], which is the whole point. The three weapon
+/// slots are the only ones whose very *presence* a sheath state can decide — a stowed ranged
+/// weapon renders nothing at all, and so does a sheath-type-less melee weapon — so a key built
+/// from `HeldItems` would move every time the player drew a bow. This one does not.
+///
+/// Deliberately absent: the **nocked ammo** and the **quiver**, both sheath-derived, and neither a
+/// model-event producer in the reference (`0x60ba30` reaches no queue site at all). Helm,
+/// shoulders and the body composite are absent for the opposite reason — they cannot move with a
+/// sheath, so the pane keys on their mirrored geometry directly.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct DressKey {
+    /// The body the widget duplicates.
+    pub(crate) display_id: Option<u32>,
+    /// Mainhand · offhand · ranged: `(ItemDisplayInfo id, model kind, ItemVisuals id)`.
+    pub(crate) held: [Option<(u32, ItemModelKind, i32)>; HELD_SLOTS],
+    /// Every weapon identity above has a model with **built parts**. Ours, not the reference's:
+    /// it duplicates a model the world had already finished assembling, where our item models
+    /// stream in. While false the pane keeps re-taking, so a weapon that lands a few frames after
+    /// the window opened is not frozen out of the bake.
+    pub(crate) held_ready: bool,
+}
+
 /// Resolve every unit's held items from its descriptor. Creatures read display/invType/sheath straight
 /// from the virtual-item fields; players go visible-item entry → [`crate::items::Items`] (ask-once query on
 /// a miss). Ensures each needed display id has a [`DisplayModel`] entry in [`ItemDisplays`] (built
@@ -140,6 +185,7 @@ pub(in crate::entities) fn resolve_equipment(
         Option<&NockedAmmo>,
         Has<NockLatch>,
         Option<&ResolveKey>,
+        Option<&DressKey>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
     mut templates: ResMut<Items>,
@@ -180,6 +226,7 @@ pub(in crate::entities) fn resolve_equipment(
         nocked,
         nock_latched,
         current_key,
+        current_dress,
     ) in &units
     {
         if !matches!(net_entity.kind, EntityKind::Unit | EntityKind::Player) {
@@ -295,6 +342,9 @@ pub(in crate::entities) fn resolve_equipment(
         let mut slots: [Option<HeldSlot>; ATTACH_SLOTS] = [None; ATTACH_SLOTS];
         let mut wielded = Wielded::default();
         let mut ranged_inv_type = None;
+        // The DRESS, gathered as we go: what the unit *wears* in the three weapon slots, recorded
+        // before `placement` decides whether any of it is currently rendered ([`DressKey`]).
+        let mut worn: [Option<(u32, ItemModelKind, i32)>; HELD_SLOTS] = [None; HELD_SLOTS];
         for slot in 0..HELD_SLOTS {
             // (display id, inventory type, item sheath type, class, subclass, material) per slot.
             let resolved: Option<(u32, u32, u8, u8, u8, u8)> = match net_entity.kind {
@@ -357,14 +407,20 @@ pub(in crate::entities) fn resolve_equipment(
             if !char_component {
                 continue; // wielded resolved; the model never attaches on a non-character body
             }
-            let Some(attach) = placement(slot, inv_type, item_sheath, sheath_of(slot, inv_type))
-            else {
-                continue;
-            };
             let kind = if inv_type == 14 {
                 ItemModelKind::Shield
             } else {
                 ItemModelKind::Weapon
+            };
+            // The dress, recorded **above** the placement gate — the one line that makes a
+            // widget's snapshot blind to the sheath. Third term: the slot's enchant ids, folded.
+            // Read straight off the descriptor rather than taken from the resolved `visual` below,
+            // because that one is only computed for a slot that is actually placed — and an
+            // enchant change is a model-event producer whether or not the weapon is drawn.
+            worn[slot] = Some((display, kind, enchant_fold(s, net_entity.kind, slot)));
+            let Some(attach) = placement(slot, inv_type, item_sheath, sheath_of(slot, inv_type))
+            else {
+                continue;
             };
             ensure_item_model(&mut held, display, kind, &asset_server);
             // The glow (decision 0805): the display's intrinsic visual, else this weapon slot's
@@ -390,6 +446,23 @@ pub(in crate::entities) fn resolve_equipment(
                 attach,
                 visual,
             });
+        }
+        // Publish the dress the moment the weapons are resolved. `held_ready` asks only about
+        // slots that are actually PLACED — a stowed ranged weapon has no model requested at all,
+        // so counting it would leave the key permanently unready and the pane permanently live,
+        // which is the very thing this component exists to stop.
+        let dress = DressKey {
+            display_id: net_entity.display_id,
+            held: worn,
+            held_ready: slots[..HELD_SLOTS].iter().flatten().all(|hs| {
+                held.models
+                    .get(&(hs.display, hs.kind))
+                    .and_then(|dm| dm.parts.as_ref())
+                    .is_some()
+            }),
+        };
+        if current_dress != Some(&dress) {
+            commands.entity(entity).insert(dress);
         }
         // The nocked ammo (byte-verified `0x60ba30` + the Q-E round, wow-re
         // `nocked-ammo-cancel.md` §E2/E5): the ONE body-bone attach in the whole mechanism is

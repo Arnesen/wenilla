@@ -139,6 +139,7 @@ pub mod doodad_anim;
 pub mod entity_shade;
 pub mod exterior_cull;
 pub mod ffx_glow;
+pub mod frame_pace;
 pub mod ground_fx;
 pub mod instance_tint;
 pub mod interact;

@@ -40,6 +40,25 @@ pub(super) const TURN_RATE: f32 = std::f32::consts::PI;
 /// 0492). NOT ±π/2 — that clamp belongs to the separate, rate-limited pitch-KEY integrator
 /// (`0x7c4f80`), whose keys are default-unbound and which we don't bind.
 pub(super) const MOUSELOOK_PITCH_CLAMP: f32 = 1.553_343;
+
+/// The **shallowest mover pitch that still lets water walking see the water** (radians) —
+/// **VERIFIED** −37.0° = −0.6457718 (`[0x80dfe8] = 0xbf25514d`, read from the image), the third
+/// gate of the trace-mask arm `0x6315f0`:
+///
+/// ```text
+/// 63161e d9 46 20        fld   dword ptr [esi + 0x20]     ; the mover pitch
+/// 631621 d8 1d e8 df 80  fcomp dword ptr [0x80dfe8]       ; -37.0 deg
+/// 631627 df e0 / f6 c4 41  fnstsw ax ; test ah, 0x41
+/// 63162c 75 06           jne   0x631634                   ; ZF form -> skip the arm
+/// 63162e 81 cf 00 00 03  or    edi, 0x30000               ; liquid layers 0-1 into the mask
+/// ```
+///
+/// The emitted `jne` reads **ZF**, so the liquid layers are added only when `ah & 0x41 == 0`, i.e.
+/// **pitch strictly greater** than −37°; at exactly −37° the arm is skipped. Aim down past it and
+/// the water stops being geometry, which is how a water-walker gets back *into* the water.
+/// (`SetPitch 0x7c6f70`'s own complement at `0x7c6fb3` is the standstill half of the same move —
+/// see the note in [`super::mover::step`] on why we need no second kick.) Decision 1616.
+pub(super) const WATER_WALK_PITCH_FLOOR: f32 = -0.645_771_8;
 /// Turn-rate scale while also translating (moving/strafing) — the verified `×0.75` (`flags & 0x200f`).
 pub(super) const TURN_RATE_MOVING: f32 = 0.75;
 
@@ -334,7 +353,9 @@ pub(crate) struct MoveModes {
     /// decision 1611 read the bytes: `0x6030c0`'s only mode test is `test ah,4` — LEVITATING
     /// (`0x400`) — and it never looks at `0x10000000` at all. The exclusion runs the other way and
     /// lives one layer down, in the trace-mask arm at `0x631617`: *swimming* turns water-walking
-    /// off, not the reverse. So a swimmer who gains the aura keeps swimming, by construction.
+    /// off, not the reverse. So a swimmer who gains *this* bit keeps swimming, by construction —
+    /// but a swimmer who casts **Levitate** does not, because Levitate also grants
+    /// [`hover`](Self::hover), whose handler jumps the body out first (decision 1620).
     pub(crate) water_walking: bool,
     /// Feather fall (`SMSG_MOVE_FEATHER_FALL`, `SPELL_AURA_FEATHER_FALL` — Slow Fall, Levitate): the
     /// fall integrator's terminal velocity drops to [`FEATHER_TERMINAL_VELOCITY`]. Nothing else
@@ -344,6 +365,9 @@ pub(crate) struct MoveModes {
     /// [`HOVER_HEIGHT`] above the surface, so the body floats and walks along a yard up. It also
     /// refuses the jump outright — the first test in `CMovement::Jump 0x7c6230`, live for the
     /// keyboard press ([`super::mover::step`], and the swim breach in [`super::control`]).
+    ///
+    /// **And the grant itself jumps you** — the one granted mode that moves the body, and the whole
+    /// of why Levitate looks like a launch ([`Player::hover_launch`], decision 1620).
     ///
     /// **Composed with [`water_walking`](Self::water_walking), those two gates leave a swimmer
     /// with no way to the surface** (B322's first symptom, decision 1611): water-walking is off
@@ -663,6 +687,25 @@ pub(crate) struct Player {
     /// up and from the cone's descent bound coming down — neither can hold a body that has not just
     /// proved it is on a surface — and cleared the moment a walkable floor takes over.
     pub(super) steep_support: bool,
+    /// **A `SetHover(true)` owes a jump** — the reference's hover wire handler `0x61a620` does not
+    /// merely set the flag: its enable arm is `61a62e push 0; 61a630 call 0x7c6230`, i.e.
+    /// `CMovement::Jump(force = 0)`, and only *then* `61a646 call 0x7c7310` sets `0x40000000`.
+    /// The disable arm is the mirror — `61a637 call 0x7c61c0` (`StartFalling`). Neither of the
+    /// other two granted modes does anything of the kind: `SetWaterWalk`'s handler `0x61a3d0` is
+    /// four instructions around `call 0x7c7280`, and `SetFeatherFall`'s `0x61a4e0` only refreshes
+    /// the fall clamp. **Hover is the one mode that moves the body**, and that is the whole of why
+    /// Levitate (spell 1706, which grants all three) visibly launches you (decision 1620, B322).
+    ///
+    /// `force == 0` is what makes it a *different* jump from the player's: it skips
+    /// `0x7c623a`'s `test [ecx+0x40], 0x40000000` hover refusal — the wire path exists precisely to
+    /// be able to jump a unit that is already hovering (wow-re `moveflag-family.md` §4.2). It still
+    /// takes the ROOT|FALLING refusal at `0x7c625c`, and it still reads SWIMMING at `0x7c6261` to
+    /// pick the take-off seed. So this is a latch and not a direct write: the reference commits the
+    /// jump inside the handler because `MOVEFLAG_FALLING` then keeps its resolver off the body,
+    /// while our mover re-derives contact from probes every frame and would zero the velocity again
+    /// on the next step. Consumed at the two take-off sites in [`super::control`], where the
+    /// keyboard jump is consumed, so the seed is picked by the same code that picks it for Space.
+    pub(super) hover_launch: bool,
     /// The take-off vertical speed (yd/s, WoW +Z up) snapshotted when the airborne phase began — the
     /// client's `StartFalling` argument (`+0xa0`, constant per arc) and the `zspeed` we send in the
     /// jump tail: `JUMP_SPEED` for a jump, **exactly 0** for a step-off (the walk election calls
@@ -703,21 +746,46 @@ pub(crate) struct Player {
     /// zero every depth line collapses to 0 and the avatar swims on dry land. It defaults to
     /// [`DEFAULT_COLLISION_HEIGHT`] and is replaced once our body's display id resolves.
     pub(crate) collision_height: crate::entities::CollisionHeight,
-    /// The **swim pitch** (radians, +up) — the client's persistent per-unit pitch (`CMovement+0x20`,
-    /// the swim §5's TU-B): **held** when unsteered (an idle floater keeps its pitch — never
-    /// auto-leveled; the only zeroing writer `0x7c6e80` fires from stop-swim/teleport, not mouse
-    /// release). ActiveMover by mouselook as a **DIRECT set** of the camera aim pitch, clamped
-    /// [`MOUSELOOK_PITCH_CLAMP`] (±89°) — **VERIFIED** (the camera-pitch §5, wow-re
-    /// `swim-camera-pitch.md`, decision 0492, refuting the earlier no-camera-coupling census):
-    /// the ref's mouse-move event chain lands in `SetPitch 0x7c6f70`, an unconditional store
-    /// with no integrator and no rate limit, and the basis rebuild re-aims travel in-call —
+    /// The **mover pitch** (radians, +up) — the client's persistent per-unit pitch
+    /// (`CMovement+0x20`, the swim §5's TU-B): **held** when unsteered (an idle floater keeps its
+    /// pitch — never auto-leveled; the only zeroing writer `0x7c6e80` fires from
+    /// stop-swim/teleport, not mouse release). ActiveMover by mouselook as a **DIRECT set** of the
+    /// camera aim pitch, clamped [`MOUSELOOK_PITCH_CLAMP`] (±89°) — **VERIFIED** (the camera-pitch
+    /// §5, wow-re `swim-camera-pitch.md`, decision 0492, refuting the earlier no-camera-coupling
+    /// census): the ref's mouse-move event chain lands in `SetPitch 0x7c6f70`, an unconditional
+    /// store with no integrator and no rate limit, and the basis rebuild re-aims travel in-call —
     /// hence zero lag. The `0x7c4f80` 0.75·turnRate integrator (clamp ±π/2) belongs to the
     /// PitchUp/Down keys, default-unbound in 1.12, which we don't bind. A left-drag camera
     /// orbit steers nothing (it doesn't turn the character, so it must not bend the swim);
     /// Space never touches the pitch (it is the Jump command, 0487).
+    ///
+    /// **It is not the *swim* pitch, and the name it used to carry was the bug** (decision 1616,
+    /// B322): `+0x20` is one field, live in every mode. The mouse path that writes it —
+    /// `0x514400 → 0x5103e0 → 0x515330 → 0x60de70 → 0x6198a0` — carries **no swim test** at any
+    /// link (`swim-camera-pitch.md` §5/§7: the unit gate `0x5145e0` is controllability only), and
+    /// `SetPitch`'s own store at `0x7c6f91` precedes its `test [esi+0x40],0x200000`. Swimming gates
+    /// only what *reads* it: the travel basis, the body pose, the wire tail. On land it has two
+    /// other readers, and both are water walking's — the trace-mask arm's third gate
+    /// (`0x63161e`, pitch > −37°) and `SetPitch`'s own dive-through (`0x7c6fb3`). Steering it only
+    /// inside the swim branch left both unbuildable, which is why 1611 could only name them.
     /// Streamed on the wire's swim tail; the body renders pitched by it while swimming fwd/back
     /// (TU-A's `Ry` law, see the render block in [`super::control`]).
-    pub(super) swim_pitch: f32,
+    pub(super) mover_pitch: f32,
+    /// The camera pitch the **last pitch event** carried — the aim value we most recently pushed
+    /// into [`Player::mover_pitch`]. Not state of the avatar's; state of the *input*, and it is
+    /// here because the reference's pitch push is **event-driven, not per-frame**: `SetPitch` is
+    /// called from the mouse-MOTION handler `0x514400` (input event `0x400500cb`, gated on a held
+    /// drag button), so a mouse that does not move enqueues nothing at all
+    /// (`swim-camera-pitch.md`, CADENCE). Our control system has only the already-accumulated
+    /// camera angle, so "the mouse moved" is spelled here as "the camera aim differs from the one
+    /// the last push carried".
+    ///
+    /// Which is load-bearing rather than pedantic (decision 1616): the other writers of the pitch —
+    /// the drunk wobble, and StopSwim's zeroing at `0x7c6e80` — are only real if a still mouse
+    /// leaves their value alone. Re-asserting the camera angle every frame would overwrite the
+    /// swim-exit levelling on the very next one, and a water-walker who left the water nose-down
+    /// would fall straight back through the surface.
+    pub(super) aim_pitch_seen: f32,
     /// This frame's **flag-scalar swim travel speed** (yd/s) — the directional swim/swimBack
     /// speed when any swim translation input is live, else 0. The swim stroke's playback-rate
     /// numerator — **VERIFIED** (the swim-feel §5's TU-I): `0x5fe2f0` divides `GetCurrentSpeed`
@@ -765,6 +833,25 @@ pub(super) struct PlayerRide {
 }
 
 impl Player {
+    /// **Take the jump a `SetHover(true)` owes**, consuming the latch — the reference's
+    /// `CMovement::Jump(force = 0)` at `0x61a630`, minus the seed select and the commit, which are
+    /// the caller's because they are shared with Space (decision 1620).
+    ///
+    /// The two refusals are `0x7c625c test ah, 0x30` — **ROOT** (`0x1000`) and **FALLING**
+    /// (`0x2000`), our [`Self::airborne_since`]. The one it does *not* take is the hover refusal at
+    /// `0x7c623a`, which `force == 0` skips at `0x7c6236`; that is the entire reason this leg
+    /// exists, since the body it is about to launch was granted hover in the same breath.
+    ///
+    /// It is a take-and-clear rather than a level read because the reference's handler fires once
+    /// per opcode, not once per frame: a `SetHover` that lands on a rooted or already-falling body
+    /// is *dropped*, not deferred until the refusal lifts (`0x7c6288 xor eax,eax; ret` — the
+    /// refusal returns failure and nothing retries it).
+    pub(super) fn take_wire_jump(&mut self) -> bool {
+        let fire = self.hover_launch && !self.modes.rooted && self.airborne_since.is_none();
+        self.hover_launch = false;
+        fire
+    }
+
     /// Turn the avatar's **aim** by `radians` — the scripted mouse-turn's one lever
     /// (`capture::probe_look`, decision 0621). Writing `face_yaw` is deliberately the whole of it:
     /// from here on this is the identical path a real mouse-turn takes, and it is the same value
@@ -1157,8 +1244,8 @@ mod autorun_tests {
 #[cfg(test)]
 mod move_mode_tests {
     use super::{
-        incapacitated_flags, MoveModes, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE,
-        HOVER_HEIGHT, TERMINAL_VELOCITY,
+        incapacitated_flags, MoveModes, Player, FEATHER_TERMINAL_VELOCITY, GRAVITY,
+        HOVER_CLIMB_RATE, HOVER_HEIGHT, TERMINAL_VELOCITY,
     };
     use crate::creature_anim::move_flags as f;
     use benilla_protocol::MoveMode;
@@ -1344,6 +1431,47 @@ mod move_mode_tests {
             (frames as f32 * dt - HOVER_HEIGHT / HOVER_CLIMB_RATE).abs() < 0.02,
             "climbed in {frames} frames, expected ≈0.143 s"
         );
+    }
+
+    /// **A hover grant owes exactly one jump, and two states eat it** (decision 1620, B322) — the
+    /// `Jump(force = 0)` at `0x61a630`, refused by `0x7c625c test ah, 0x30` for ROOT and FALLING and
+    /// by nothing else. In particular NOT by hover itself: `0x7c6236`'s `force == 0` skip is the
+    /// whole point of the leg, and the body being launched is hovering by construction.
+    #[test]
+    fn a_hover_grant_owes_one_jump_and_only_root_or_falling_eats_it() {
+        let granted = || Player {
+            hover_launch: true,
+            modes: MoveModes {
+                hover: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut p = granted();
+        assert!(p.take_wire_jump(), "hover does not refuse its own grant");
+        assert!(
+            !p.take_wire_jump(),
+            "one opcode, one jump — the latch is consumed, not level-triggered"
+        );
+
+        let mut rooted = granted();
+        rooted.modes.rooted = true;
+        assert!(!rooted.take_wire_jump(), "ROOT — `0x7c625c test ah,0x30`");
+        assert!(
+            !rooted.hover_launch,
+            "a refused Jump returns failure and nothing retries it (`0x7c6288 xor eax,eax`)"
+        );
+
+        let mut falling = granted();
+        falling.airborne_since = Some(0.0);
+        assert!(
+            !falling.take_wire_jump(),
+            "FALLING — the same test's other bit"
+        );
+
+        let mut ungranted = Player::default();
+        assert!(!ungranted.take_wire_jump(), "no opcode, no jump");
     }
 
     /// **The two incapacitate suppressions take exactly their own bits** (decision 0880) — the

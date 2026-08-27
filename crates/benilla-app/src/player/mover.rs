@@ -39,8 +39,48 @@ use super::{
     move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY,
     FOOT_CONE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT,
     JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE,
-    STEP_UP_HEIGHT, TERMINAL_VELOCITY, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    STEP_UP_HEIGHT, TERMINAL_VELOCITY, WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL, WEDGE_STALL_RATIO,
+    WEDGE_STILL_FRAMES,
 };
+
+/// **The trace-mask arm `0x6315f0`, as a predicate** — the liquid surface [`step`] may stand on
+/// this frame, or `None` for "the water is not geometry right now". All three of the arm's gates,
+/// in the order the reference tests them, and none of them ours:
+///
+/// - **`water_walking`** — `0x631610 test eax,0x10000000`, the granted bit. Setting it ORs the two
+///   ADT liquid layers into the walk trace's *class mask* (`0x63162e or edi,0x30000`), which is the
+///   whole of what the flag does: the surface becomes ordinary swept geometry and the resolver
+///   stands on it at its raw Z. `0x6367b0` contains **zero** references to the bit
+///   (wow-re `moveflag-family.md` §2.1/§2.2).
+/// - **`!swimming`** — `0x631617 test eax,0x200000; jne`. Granting *this* bit to a submerged caster
+///   does **not** eject them, and that is the reference's behaviour too, not a gap of ours
+///   (decision 1616): the swim path traces the same two liquid layers into a *different* container
+///   with the plane **negated** (`0x6320fe fchs`) — a bound above, not a floor below — so the two
+///   are mutually exclusive by construction and the same triangles can never enter the solver twice
+///   with opposite orientation (§2.4). A swimmer surfaces onto the water on the way *out*, when the
+///   depth compare `0x6030c0` drops SWIMMING in water shallower than `0.75·h − 1/36`.
+///
+///   **Do not read that as "casting Levitate while swimming does nothing" — 1616 did, and it was
+///   wrong** (decision 1620, the director's report from the reference client). Levitate grants
+///   three auras, and the *hover* one launches you: `SetHover(true)`'s handler `0x61a620` runs
+///   `CMovement::Jump(force = 0)` before it ever sets the flag, which clears SWIMMING and seeds an
+///   upward take-off. Water walking is then what catches the body on the way down. The gate above
+///   is real and is not the whole story, which is the shape of that mistake: a verified mechanism
+///   answering a question one layer below the one being asked.
+/// - **`mover_pitch > `[`WATER_WALK_PITCH_FLOOR`]** — `0x63161e`, strictly greater (the emitted
+///   `jne` reads ZF, so −37.0° exactly is *excluded*). Aim below it and the layers leave the mask:
+///   the surface stops being ground and the body falls through into the swim. This is the
+///   reference's own way back **into** the water while water-walking.
+pub(super) fn water_floor(
+    water_walking: bool,
+    swimming: bool,
+    mover_pitch: f32,
+    surface_y: Option<f32>,
+) -> Option<f32> {
+    (water_walking && !swimming && mover_pitch > WATER_WALK_PITCH_FLOOR)
+        .then_some(surface_y)
+        .flatten()
+}
 
 /// What the step decided — read by the move-flags / wire logic that follows it in `control`.
 pub(super) struct Outcome {
@@ -72,6 +112,7 @@ pub(super) fn step(
     dir: Vec3,
     speed: f32,
     want_jump: bool,
+    wire_jump: bool,
     water_floor: Option<f32>,
 ) -> Outcome {
     let dt = time.delta_secs();
@@ -127,14 +168,19 @@ pub(super) fn step(
     // by *teleport*, at rest, with no input — the one case that cannot show any of this — and 0866
     // named the gap itself: "the water-walk walk-on case is untested headlessly".
     //
-    // The reach is [`base_reach`] and deliberately **not** `ground_reach`: our hover climb is
-    // collider-driven and never lifts a body off water, so the clamp below keeps a hovering
-    // water-walker's feet exactly at the surface. The two tests are the same question and must
-    // stay the same answer — disagreeing is the whole of this bug. (Whether the reference floats a
-    // hovering water-walker a yard *above* the surface is a real open question, with a byte lead:
-    // see decision 1611.) A negative difference — the feet already under the surface — counts as
-    // support too: that is a body penetrating solid geometry, and the clamp resolves it upward.
-    let on_water = water_floor.is_some_and(|s| center.y - half_h.y - s <= base_reach);
+    // The reach is [`ground_reach`], hover offset included, because **a hovering water-walker
+    // rests a full yard above the surface** — 1611 left that an open question and it is now
+    // **VERIFIED** (decision 1616): the walk resolver's finalize down-probe `0x636e45` calls
+    // `0x632ba0`, whose trace `0x632d29` is `0x631e70` — the query whose own head is the mask arm
+    // (`0x6320a0 call 0x6315f0`, `0x6320b1` the trace). So the distance `L` that probe reports is
+    // measured to the *water*, and `0x636e74`'s hover arm then leaves the body at
+    // `pos.z_before_snap − max(L − 1.0, 0)`: exactly 1.0 yd over whatever it found, water included,
+    // with no water-specific code on either side. A classify that stopped at [`base_reach`] would
+    // call that float airborne and drop it — the same disagreement, one rung up.
+    //
+    // A negative difference — the feet already under the surface — counts as support too: that is
+    // a body penetrating solid geometry, and the resolve below pushes it back out.
+    let on_water = water_floor.is_some_and(|s| center.y - half_h.y - s <= ground_reach);
     // Who we stand on (frame start); the end-of-frame snap probe below refreshes it post-move.
     let mut ground_entity = if on_walkable {
         classify.map(|h| h.entity)
@@ -206,7 +252,11 @@ pub(super) fn step(
         // latch, no cooldown. The mounted flourish is deliberately NOT gated on hover —
         // `0x60dea0` diverts to MountSpecial before the command ever reaches this handler
         // (`player::control`'s flourish block runs upstream of this call, same order).
-        if want_jump && !player.modes.hover {
+        // …and `wire_jump` is the leg that is NOT refused: the reference's own `Jump(force = 0)`
+        // skips the test above (`0x7c6236 test eax,eax; je 0x7c6243`) so a `SetHover(true)` can
+        // launch a body that is already hovering (decision 1620). Same seed select, same commit —
+        // it is the *same* jump, entered through the door the wire is given.
+        if (want_jump && !player.modes.hover) || wire_jump {
             player.vel_y = JUMP_SPEED;
             player.wedged = false;
             player.steep_support = false;
@@ -256,6 +306,7 @@ pub(super) fn step(
             time.delta(),
             Support {
                 offset: hover_offset,
+                water: water_floor,
                 steep: player.steep_support,
             },
         );
@@ -328,43 +379,74 @@ pub(super) fn step(
     // and the wire sees a normal landing (`MSG_MOVE_FALL_LAND`) this frame, not next.
     let mut grounded = grounded || player.wedged;
 
+    // **The water floor, resolved** — the second half of the `on_water` classify above. It runs
+    // after the slide because the slide and the fall are what can carry the feet through: a body
+    // dropping onto the water crosses more than [`LAND_PROBE`] in a frame, so the landing frame
+    // classifies airborne, falls, and is caught here — exactly how a collider landing resolves.
+    //
+    // Two halves, and they are the reference's two, in its order. **Down** is `0x636e52`'s snap as
+    // corrected by `0x636e74`'s hover arm — `pos.z_final = pos.z_before_snap − max(L − 1.0, 0)`,
+    // i.e. descend only far enough to leave the hover clearance, and not at all when the floor is
+    // nearer than that. **Up** is never here: a rise is the rate-limited second pass just below
+    // (`0x636fa1`), so a hover granted over water floats up over ~0.14 s instead of popping. The
+    // one exception is **depenetration** — the body may not *end* the frame under the surface,
+    // which is not a rule of the reference's but a consequence of it not needing one: over there
+    // the surface is a swept solid and the sweep never lets the body through in the first place.
+    //
+    // The down half stands aside for a walkable collider: a pier deck three yards over the lake is
+    // the nearer floor, and in the reference both are hits in the same trace with the nearest
+    // winning. Depenetration stands aside for exactly one thing — **a body that is rising**. It is
+    // a floor, and a floor catches what falls onto it, never what is on its way up through it; the
+    // reference needs no such clause because over there the surface is a swept solid and the sweep
+    // is directional for free. Ours is a post-hoc push-out, and without the gate it would swallow
+    // the very launch a hover grant just seeded (decision 1620): cast Levitate a foot under the
+    // waterline and the `SWIM_JUMP_SPEED` take-off would be clamped flat to the surface with its
+    // velocity zeroed, a pop where the reference throws you clear. With `vel_y <= 0` it is still
+    // the water-walk *lift* it was built to be — wade in chest-deep, aura up, and this is the frame
+    // that puts you on top of the water, because a wader stands at rest.
+    //
+    // **Why there is no second kick for the standstill dive.** `SetPitch 0x7c6f70` fires an
+    // explicit zero-velocity `StartFalling` when a *standing*, non-falling water-walker aims below
+    // −37° (`0x7c6fb3`–`0x7c6fd3`), which reads like a mechanism we are missing. It is the
+    // reference compensating for its own walk resolver: `0x6367b0` early-returns when the substep's
+    // horizontal distance is under `2^-20`, so a body at rest never re-runs the ground query and
+    // would not notice the mask change until it moved. Our classify runs every frame in every
+    // state, so dropping the liquid layers is already the whole of the dive, standing or running.
+    // Building the kick as well would be a second path to the same fall.
+    if let Some(surface) = water_floor {
+        let feet = center.y - half_h.y;
+        let rest = surface + hover_offset;
+        if feet < surface && player.vel_y <= 0.0 {
+            center.y = surface + half_h.y;
+            player.vel_y = 0.0;
+            player.wedged = false;
+            grounded = true;
+        } else if !on_walkable && feet > rest && feet - surface <= ground_reach {
+            center.y = rest + half_h.y;
+            player.vel_y = 0.0;
+            player.wedged = false;
+            grounded = true;
+        }
+    }
+
     // **The hover climb** (decision 0872): the snap above can only lower the body, so the *rise* to
     // the 1.0-yd clearance is this separate rate-limited pass — the reference's second writer at
     // `0x636fa1`–`0x6370f1`, which climbs toward the same clearance at [`HOVER_CLIMB_RATE`]. Without
     // it the grant reads as an instant pop; with it the body floats up over ~0.14 s.
     // (…and never while anchored: the climb is the walk resolver's own second pass, so the rooted
     // mover's stationary early-return skips it exactly like the snap above.)
+    //
+    // The water is one more floor to hover over (decision 1616) and the only one `probe_down`
+    // cannot see, so it is measured against the plane and folded in as a candidate — nearest wins,
+    // which is what the reference's single trace does for free.
     if hover_offset > 0.0 && !held && !anchored {
-        if let Some(h) = probe_down(center, HOVER_HEIGHT + CAPSULE_HEIGHT) {
-            let clearance = h.distance;
+        let solid = probe_down(center, HOVER_HEIGHT + CAPSULE_HEIGHT).map(|h| h.distance);
+        let water = water_floor.map(|s| (center.y - half_h.y - s).max(0.0));
+        if let Some(clearance) = [solid, water].into_iter().flatten().reduce(f32::min) {
             if clearance < HOVER_HEIGHT {
                 center.y += (HOVER_HEIGHT - clearance).min(HOVER_CLIMB_RATE * dt);
                 player.vel_y = player.vel_y.max(0.0); // climbing, not falling
             }
-        }
-    }
-
-    // **The water floor, resolved** — the second half of the `on_water` classify above, and the
-    // depenetration a swept solid would have done for free: the body may not end the frame under
-    // the surface. It still has to run after the slide, because the slide and the fall are what
-    // can carry the feet through: a body dropping onto the water crosses more than [`LAND_PROBE`]
-    // in a frame, so the landing frame classifies airborne, falls, and is caught here — exactly
-    // how a collider landing resolves. On an ordinary on-water frame the classify has already said
-    // grounded and the slide kept Y, so this is a no-op that re-states it.
-    //
-    // `water_floor` is `Some` only while the mode is granted AND we are not already swimming — the
-    // reference's own gate at `0x631617` (`test eax,0x200000; jne`), whose *reason* is worth
-    // keeping: the swim path traces the same two liquid layers into a different container with the
-    // plane **negated** (`0x6320fe fchs`), a bound above rather than a floor below, so the two are
-    // mutually exclusive by construction and the same triangles can never enter the solver twice
-    // with opposite orientation (wow-re `moveflag-family.md` §2.4).
-    if let Some(surface) = water_floor {
-        let feet = center.y - half_h.y;
-        if feet <= surface {
-            center.y = surface + half_h.y;
-            player.vel_y = 0.0;
-            player.wedged = false;
-            grounded = true;
         }
     }
 
@@ -405,6 +487,19 @@ pub(crate) struct Support {
     /// [`super::HOVER_HEIGHT`] while the mode is up and `0.0` for everyone else, which is the
     /// ordinary case.
     pub(crate) offset: f32,
+    /// **The liquid surface that counts as floor this frame** (Bevy Y), or `None` when the water is
+    /// not geometry — [`super::mover::water_floor`]'s answer, threaded down because the election
+    /// snap has to see it and cannot.
+    ///
+    /// Liquid is queried on our side, never swept, so `cast_body` is blind to it. The reference has
+    /// no such split: `MOVEFLAG_WATERWALKING` ORs the two ADT liquid layers into the walk trace's
+    /// class mask (`0x63162e or edi, 0x30000`), so the one trace that finds terrain finds the water
+    /// too and the election is over a single candidate set. Ours needs the plane handed in, and
+    /// **this is the third site that needed it** — 1611 put it in the classify, 1616 in the hover
+    /// climb, and the snap kept its own blindness until 1623 (B322). The shared shape of all three:
+    /// every question of the form "is there ground below me?" has to ask the plane as well as the
+    /// sweep, or the two disagree and the body oscillates between their answers.
+    pub(crate) water: Option<f32>,
     /// The support entering the frame is a **certified steep contact**, not a walkable floor — the
     /// reference's `0x4000000` (decision 1125). It is the sole gate on the step-down probe's deep
     /// reach; see the reach in [`grounded_step`].
@@ -645,7 +740,23 @@ pub(crate) fn grounded_step(
         }
         + surface_offset;
     let hit = cast(slid, Vec3::NEG_Y * reach);
-    let snap = Some((reach, hit.as_ref().map(|h| (h.distance, h.normal1.y))));
+    // **The water is one more candidate in the same election** ([`Support::water`], decision 1623).
+    // The sweep above cannot see liquid, so the plane is measured against the same probe: feet to
+    // surface, in sight only within the same `reach`, and flat (`normal.y = 1.0`) because a liquid
+    // surface always is. Nearest wins — which is what the reference's single masked trace does for
+    // free. No entity: the water is not a collider, and `GroundedStep::ground`'s `None` already
+    // means "keep whatever the caller believed", which is exactly right for standing on a lake.
+    let water = support.water.and_then(|s| {
+        let d = slid.y - CAPSULE_HEIGHT * 0.5 - s;
+        (d <= reach).then_some(d.max(0.0))
+    });
+    let floor = match (hit, water) {
+        (Some(h), Some(w)) if w < h.distance => Some((w, 1.0, None)),
+        (Some(h), _) => Some((h.distance, h.normal1.y, Some(h.entity))),
+        (None, Some(w)) => Some((w, 1.0, None)),
+        (None, None) => None,
+    };
+    let snap = Some((reach, floor.map(|(d, n, _)| (d, n))));
     let mut ground = None;
     let mut steep_support = false;
     // **A ride's height is earned; the snap follows ground *down*, it never undoes a climb.**
@@ -701,9 +812,9 @@ pub(crate) fn grounded_step(
     // which is what keeps the dive gone. Seeing further and falling further are different questions,
     // and only the second one is the director's "instant".
     let cone_reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
-    if let Some(h) = hit {
-        let drop = (h.distance - surface_offset).max(0.0);
-        let walkable = h.normal1.y >= GROUND_COS;
+    if let Some((distance, normal_y, entity)) = floor {
+        let drop = (distance - surface_offset).max(0.0);
+        let walkable = normal_y >= GROUND_COS;
         // A ride's height is earned (above): only a floor higher than the ride began on may end it.
         if !(rode && walkable && drop >= ride_rise) {
             slid.y -= drop.min(cone_reach);
@@ -715,7 +826,7 @@ pub(crate) fn grounded_step(
                 // dive coming back through the cap.
                 steep_support = true;
             } else if walkable {
-                ground = Some(h.entity);
+                ground = entity;
             } else {
                 // **Support is earned by descending, not by touching.** Resting *on* a steep face
                 // gives a clearance of ~0, and standing still the bound is the slack alone — so a
@@ -1552,6 +1663,7 @@ mod tests {
                     dt,
                     Support {
                         offset: 0.0,
+                        water: None,
                         steep: true,
                     },
                 );
@@ -1889,6 +2001,188 @@ mod tests {
         assert!(out.dot(n) >= -1e-6);
     }
 
+    /// **B322, the swim half — the three gates of `0x6315f0`, including the one 1611 could only
+    /// name.** The pitch gate is what lets a water-walker back *into* the water, and it is a strict
+    /// `>`: the reference's `jne` reads ZF, so −37.0° exactly is on the falling side of the line.
+    #[test]
+    fn the_water_is_geometry_only_while_all_three_gates_hold() {
+        const SURFACE: f32 = 12.5;
+        let eps = 1.0e-4;
+        // Granted, dry-shod, aim level: the water is a floor.
+        assert_eq!(water_floor(true, false, 0.0, Some(SURFACE)), Some(SURFACE));
+        // Aiming down, either side of the line — and *on* it.
+        assert_eq!(
+            water_floor(true, false, WATER_WALK_PITCH_FLOOR + eps, Some(SURFACE)),
+            Some(SURFACE),
+            "just shallower than -37 deg still walks on water"
+        );
+        assert_eq!(
+            water_floor(true, false, WATER_WALK_PITCH_FLOOR, Some(SURFACE)),
+            None,
+            "-37.0 deg exactly is EXCLUDED — `0x63162c`'s jne reads ZF"
+        );
+        assert_eq!(
+            water_floor(true, false, WATER_WALK_PITCH_FLOOR - eps, Some(SURFACE)),
+            None,
+            "aim past -37 deg and the liquid layers leave the mask: the dive"
+        );
+        // Aiming *up* never costs the floor — the arm has no upper bound.
+        assert_eq!(
+            water_floor(true, false, 1.5, Some(SURFACE)),
+            Some(SURFACE),
+            "the arm gates the nose-down half only"
+        );
+        // Swimming excludes it (`0x631617`), and so does not having the aura.
+        assert_eq!(water_floor(true, true, 0.0, Some(SURFACE)), None);
+        assert_eq!(water_floor(false, false, 0.0, Some(SURFACE)), None);
+        // No liquid under the feet is no floor, whatever the gates say.
+        assert_eq!(water_floor(true, false, 0.0, None), None);
+    }
+
+    /// **B322, the height half** (decision 1616): Levitate is hover **and** water walking, and the
+    /// two compose — the body rests a full yard *above* the waterline, not with its feet in it.
+    ///
+    /// 1611 left this open. It is settled at the bytes: the walk resolver's finalize down-probe
+    /// (`0x636e45`) is `0x632ba0`, whose trace (`0x632d29`) is `0x631e70` — the query whose own head
+    /// is the mask arm (`0x6320a0 call 0x6315f0`). So the distance `L` the probe reports is measured
+    /// to the *water*, and `0x636e74` then leaves the body at `pos.z_before_snap − max(L − 1.0, 0)`.
+    ///
+    /// Three things at once, because they are one mechanism: the rise off the waterline is
+    /// **rate-limited** (the reference's second pass `0x636fa1`, not a pop), it **settles at
+    /// exactly** [`HOVER_HEIGHT`], and a body dropped in from above **stops there** instead of
+    /// sinking to the surface.
+    #[test]
+    fn a_hovering_water_walker_floats_a_yard_over_the_waterline() {
+        const SURFACE: f32 = 0.0;
+        // No land at all: open water, so nothing but the liquid plane can hold the body up.
+        const OPEN: [(f32, f32); 2] = [(-3.0, -40.0), (3.0, -40.0)];
+        let (first, rest, dropped) = world_from_profile(&OPEN)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let levitate = super::super::state::MoveModes {
+                    water_walking: true,
+                    hover: true,
+                    ..Default::default()
+                };
+                let idle = |player: &mut Player, frames: usize| {
+                    for _ in 0..frames {
+                        step(
+                            player,
+                            &time,
+                            &world,
+                            &capsule,
+                            false,
+                            Vec3::ZERO,
+                            7.0,
+                            false,
+                            false,
+                            Some(SURFACE),
+                        );
+                    }
+                    player.pos.y
+                };
+                // Granted while standing on the water: climbs, it does not pop.
+                let mut player = Player {
+                    modes: levitate,
+                    pos: Vec3::new(0.0, SURFACE, 0.0),
+                    ..Default::default()
+                };
+                let first = idle(&mut player, 1);
+                let rest = idle(&mut player, 60);
+                // Dropped in from well above: the fall stops at the hover line, not the waterline.
+                let mut faller = Player {
+                    modes: levitate,
+                    pos: Vec3::new(0.0, SURFACE + 8.0, 0.0),
+                    ..Default::default()
+                };
+                let dropped = idle(&mut faller, 240);
+                (first, rest, dropped)
+            })
+            .unwrap();
+
+        assert!(
+            first > SURFACE && first - SURFACE < HOVER_HEIGHT * 0.5,
+            "the rise off the waterline is rate-limited, not a pop: {first} after one frame"
+        );
+        assert!(
+            (rest - (SURFACE + HOVER_HEIGHT)).abs() < 1.0e-3,
+            "a hovering water-walker rests exactly {HOVER_HEIGHT} yd over the surface: {rest}"
+        );
+        assert!(
+            (dropped - (SURFACE + HOVER_HEIGHT)).abs() < 1.0e-3,
+            "a hovering water-walker dropped in from above stops on the hover line: {dropped}"
+        );
+    }
+
+    /// **B322, the lift** (decision 1616): the director's *"it doesn't bring you to surface when
+    /// used in water"*, for the case the reference actually surfaces — a body standing in liquid
+    /// too shallow to swim in. The surface is solid geometry over there, so a body inside it is a
+    /// body inside a wall, and the sweep's depenetration is what puts it on top. Ours is a queried
+    /// plane with no sweep, so the resolve has to say it.
+    #[test]
+    fn water_walking_lifts_a_wader_out_of_the_water() {
+        const SURFACE: f32 = 0.0;
+        // A lakebed 1.4 yd under the surface — wading depth for a human (swim starts at ~1.52).
+        const BED: [(f32, f32); 2] = [(-4.0, -1.4), (4.0, -1.4)];
+        let (walker, levitator) = world_from_profile(&BED)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let run = |modes: super::super::state::MoveModes, frames: usize| {
+                    let mut player = Player {
+                        modes,
+                        pos: Vec3::new(0.0, -1.4, 0.0),
+                        ..Default::default()
+                    };
+                    for _ in 0..frames {
+                        step(
+                            &mut player,
+                            &time,
+                            &world,
+                            &capsule,
+                            false,
+                            Vec3::ZERO,
+                            7.0,
+                            false,
+                            false,
+                            Some(SURFACE),
+                        );
+                    }
+                    player.pos.y
+                };
+                let walker = run(
+                    super::super::state::MoveModes {
+                        water_walking: true,
+                        ..Default::default()
+                    },
+                    30,
+                );
+                let levitator = run(
+                    super::super::state::MoveModes {
+                        water_walking: true,
+                        hover: true,
+                        ..Default::default()
+                    },
+                    60,
+                );
+                (walker, levitator)
+            })
+            .unwrap();
+        assert!(
+            (walker - SURFACE).abs() < 1.0e-3,
+            "water walking must lift a wader onto the surface: {walker}"
+        );
+        assert!(
+            (levitator - (SURFACE + HOVER_HEIGHT)).abs() < 1.0e-3,
+            "…and Levitate's hover carries it the last yard: {levitator}"
+        );
+    }
+
     /// **B322, the lost-control half** (decision 1611): a body walking off land onto water with
     /// `MOVEFLAG_WATERWALKING` up must keep steering and must stop when the keys are released.
     ///
@@ -1936,6 +2230,7 @@ mod tests {
                             dir != Vec3::ZERO,
                             dir,
                             SPEED,
+                            false,
                             false,
                             Some(SURFACE),
                         );
@@ -2012,6 +2307,7 @@ mod tests {
                         Vec3::X,
                         0.0,
                         true,
+                        false,
                         None,
                     );
                     (out.jumped, player.vel_y)
@@ -2026,6 +2322,212 @@ mod tests {
         assert!(
             plain_jumped && plain_vy > 0.0,
             "the hover-free control must take off: jumped {plain_jumped}, vel_y {plain_vy}"
+        );
+    }
+
+    /// **The jump hover cannot refuse** (decision 1620, B322) — the same handler, entered through
+    /// the wire's door. `0x7c6236 test eax,eax; je 0x7c6243` skips the hover test above whenever
+    /// `force` is 0, and the sole `force = 0` call site is `0x61a62e`, inside the `SetHover(true)`
+    /// handler. So the body that is hovering — the one the test above proves Space cannot move — is
+    /// exactly the body this leg launches, because it was granted hover a moment ago.
+    #[test]
+    fn the_wire_jump_launches_the_hovering_body_the_keyboard_cannot() {
+        let flat: [(f32, f32); 2] = [(-3.0, 0.0), (3.0, 0.0)];
+        let (keyboard, wire) = world_from_profile(&flat)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let press = |want_jump: bool, wire_jump: bool| {
+                    let mut player = Player {
+                        modes: super::super::state::MoveModes {
+                            hover: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let out = step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        false,
+                        Vec3::X,
+                        0.0,
+                        want_jump,
+                        wire_jump,
+                        None,
+                    );
+                    (out.jumped, player.vel_y)
+                };
+                (press(true, false), press(false, true))
+            })
+            .unwrap();
+        assert_eq!(
+            keyboard,
+            (false, 0.0),
+            "`0x7c623a` still refuses Space while hovering"
+        );
+        assert_eq!(
+            wire,
+            (true, JUMP_SPEED),
+            "`force = 0` skips that test and takes off on the land seed `0xc0fe93d8`"
+        );
+    }
+
+    /// **The waterline is a floor, and a floor does not catch a body on its way up** (decision
+    /// 1620, B322). The depenetration half of the water resolve is ours, not the reference's — over
+    /// there the surface is a swept solid and the sweep is directional for free — so it needs the
+    /// clause the sweep gets for nothing. Without it, casting Levitate a foot under the waterline
+    /// would have the launch clamped flat to the surface with its velocity zeroed on the very next
+    /// step: a pop where the reference throws you clear.
+    #[test]
+    fn the_waterline_catches_a_sinking_body_and_lets_a_launched_one_through() {
+        const SURFACE: f32 = 0.0;
+        const OPEN: [(f32, f32); 2] = [(-3.0, -40.0), (3.0, -40.0)];
+        const UNDER: f32 = SURFACE - 0.5;
+        let (launched, at_rest) = world_from_profile(&OPEN)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let one_step = |vel_y: f32| {
+                    let mut player = Player {
+                        modes: super::super::state::MoveModes {
+                            water_walking: true,
+                            ..Default::default()
+                        },
+                        pos: Vec3::new(0.0, UNDER, 0.0),
+                        vel_y,
+                        ..Default::default()
+                    };
+                    step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        false,
+                        Vec3::ZERO,
+                        0.0,
+                        false,
+                        false,
+                        Some(SURFACE),
+                    );
+                    (player.pos.y, player.vel_y)
+                };
+                // The seed a `SetHover(true)` picks while SWIMMING (`0x7c6261` → `0xc1118c48`).
+                (one_step(9.096_748), one_step(0.0))
+            })
+            .unwrap();
+
+        let (up_y, up_vy) = launched;
+        assert!(
+            up_y > UNDER && up_y < SURFACE,
+            "the launch keeps rising under its own seed, un-snapped: {up_y}"
+        );
+        assert!(
+            up_vy > 0.0,
+            "and keeps its velocity — a clamp to the surface would zero it: {up_vy}"
+        );
+
+        let (rest_y, rest_vy) = at_rest;
+        assert!(
+            (rest_y - SURFACE).abs() < 1.0e-3,
+            "a body at rest under the surface is still lifted onto it: {rest_y}"
+        );
+        assert_eq!(rest_vy, 0.0, "and the floor takes its velocity");
+    }
+
+    /// **A Levitating walker holds its line over water, moving or still** (decision 1623, B322) —
+    /// the director's report: *"when I start walking it drop a bit lower and then when I stop it
+    /// goes up again, over land it's fine somehow."*
+    ///
+    /// The "somehow" is the whole bug. On land the election snap finds a collider and places the
+    /// body at its own reach; over water it found nothing, took the **step-off-a-ledge** leg
+    /// (`slid.y -= (reach − surface_offset).min(cone_reach)`) and walked the body down a full cone's
+    /// worth every frame, which the hover climb then hauled back at [`HOVER_CLIMB_RATE`]. The two
+    /// settle at an equilibrium — measured at `+0.117` against a `+1.000` line, i.e. **0.88 yd low**
+    /// — and it is speed-dependent, because `cone_reach` is `travel · STEP_SLOPE_RATIO + slack`.
+    /// Standing still the same leg still bit, just at the slack alone (`1/36` per frame), so the
+    /// idle float was climbing 0.117 and losing 0.028 forever instead of resting.
+    ///
+    /// Both are one cause and it is not the hover: **liquid is queried, never swept, so the snap's
+    /// `cast_body` is blind to it** — the third site to need the plane handed in after 1611's
+    /// classify and 1616's climb. A plain water-walker hid it, because with no hover offset the
+    /// descent lands under the surface and the depenetration push-out undoes it in the same frame.
+    #[test]
+    fn a_levitating_walker_holds_its_line_over_water_moving_or_still() {
+        const SURFACE: f32 = 0.0;
+        const OPEN: [(f32, f32); 2] = [(-400.0, -40.0), (400.0, -40.0)];
+        let (first_rise, settled, walk_low, walk_end, stopped) = world_from_profile(&OPEN)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let mut player = Player {
+                    modes: super::super::state::MoveModes {
+                        water_walking: true,
+                        hover: true,
+                        ..Default::default()
+                    },
+                    pos: Vec3::new(0.0, SURFACE, 0.0),
+                    ..Default::default()
+                };
+                let run = |player: &mut Player, moving: bool, n: usize| {
+                    let mut low = f32::INFINITY;
+                    for _ in 0..n {
+                        step(
+                            player,
+                            &time,
+                            &world,
+                            &capsule,
+                            moving,
+                            if moving { Vec3::X } else { Vec3::ZERO },
+                            7.0,
+                            false,
+                            false,
+                            Some(SURFACE),
+                        );
+                        low = low.min(player.pos.y);
+                    }
+                    low
+                };
+                run(&mut player, false, 2);
+                let first_rise = player.pos.y;
+                run(&mut player, false, 88);
+                let settled = player.pos.y;
+                let walk_low = run(&mut player, true, 90);
+                let walk_end = player.pos.y;
+                run(&mut player, false, 60);
+                (first_rise, settled, walk_low, walk_end, player.pos.y)
+            })
+            .unwrap();
+
+        let line = SURFACE + HOVER_HEIGHT;
+        // The climb is the rate and nothing else — no per-frame descent quietly eating into it.
+        assert!(
+            (first_rise - 2.0 * HOVER_CLIMB_RATE / 60.0).abs() < 1.0e-5,
+            "two frames of climb are exactly two frames of the rate, with nothing pulling back \
+             against them: {first_rise}"
+        );
+        assert!(
+            (settled - line).abs() < 1.0e-4,
+            "an idle Levitator rests on the hover line: {settled}"
+        );
+        assert!(
+            (walk_low - line).abs() < 1.0e-4,
+            "and does not sag a millimetre while walking — lowest was {walk_low}, want {line}"
+        );
+        assert!(
+            (walk_end - line).abs() < 1.0e-4,
+            "still on the line after 90 walking frames: {walk_end}"
+        );
+        assert!(
+            (stopped - line).abs() < 1.0e-4,
+            "and stopping is not a rise, because nothing was lost: {stopped}"
         );
     }
 

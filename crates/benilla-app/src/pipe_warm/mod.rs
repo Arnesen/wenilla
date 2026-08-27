@@ -79,6 +79,29 @@ pub(crate) struct PipeShared {
     pub(crate) covered: AtomicBool,
 }
 
+impl PipeWatch {
+    /// **Is a pipeline still being built?** — i.e. is there a variant the render world would
+    /// silently DROP the draw for right now.
+    ///
+    /// Off macOS, `create_pipeline_task` spawns the build on the async pool
+    /// (`bevy_render` 0.18.1 `pipeline_cache.rs:855`; the `block_on` arm is `cfg`'d to
+    /// wasm/macOS/single-threaded), and until it settles `PipelineCache::get_render_pipeline`
+    /// returns `None` — at which point `SetItemPipeline` returns
+    /// [`RenderCommandResult::Skip`](bevy::render::render_phase::RenderCommandResult::Skip)
+    /// (`render_phase/mod.rs:1745`) and that batch simply **does not draw this frame**. A live
+    /// view redraws it the moment the pipeline lands; a one-shot bake that has already gone to
+    /// sleep keeps the hole forever (report B331 — see [`crate::portrait`]'s pipeline settle).
+    ///
+    /// Reading `settled` first is deliberate: the pair is published unsynchronised, so the only
+    /// skew this ordering can produce is a stale-low `settled` against a fresh `created` — a
+    /// spurious `true`, which costs one extra rendered frame. The other order could produce a
+    /// spurious `false`, which is a wrong still.
+    pub(crate) fn compiling(&self) -> bool {
+        let settled = self.0.settled.load(Ordering::Relaxed);
+        self.0.created.load(Ordering::Relaxed) > settled
+    }
+}
+
 pub(crate) fn plugin(app: &mut App) {
     let shared = Arc::new(PipeShared {
         created: AtomicUsize::new(0),

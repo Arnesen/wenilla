@@ -168,7 +168,7 @@ pub(in crate::entities) struct ItemGlow {
 /// keeps them: it moves the root to the new attach point (decision 0826), so a glowing weapon
 /// keeps its glow — and its live particles — across the draw.
 #[derive(Component)]
-pub(super) struct ItemGlowAttached;
+pub(crate) struct ItemGlowAttached;
 
 /// Spawn each pending item root's glow instances: one effect-model instance per authored slot, at
 /// that slot's attachment point on the item's own model.
