@@ -5,7 +5,7 @@
 //! select/hover wash mechanism, the working era search; 0985: the provenance split those
 //! cite; 0989: the directed cuts — steppers and the corner X gone, the whole bar live via
 //! the engine's track-press law, the search box at the era's verbatim seat; 0992: the
-//! dropdown row shape on the 1.12 kit — Environment Detail — and the Nameplates page's
+//! dropdown row shape on the 1.12 kit — Camera Following Style — and the Nameplates page's
 //! three UnitName* rows; 1476: the ground dim — a black fill over the 0.6 tile, seated clear
 //! of the rope's ink, because a 60% veil is not a page you can read over bright terrain).
 //!
@@ -1015,6 +1015,67 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The **Display Mode** row (1650) — modern Classic's own control, which 1627 had already given us
+/// the two states for. Blizzard's `Blizzard_SettingsDefinitions_Shared/Graphics.lua` (identical on
+/// live, classic and classic_era) builds a boolean proxy as a dropdown with exactly two entries,
+/// `VIDEO_OPTIONS_WINDOWED_FULLSCREEN` and `VIDEO_OPTIONS_WINDOWED`, and no Fullscreen entry at all.
+///
+/// **The polarity is the thing worth pinning.** `gxWindow` is 1.12's CVar and keeps 1.12's sense —
+/// `"1"` is WINDOWED — so the FIRST entry, the borderless one this client defaults to, is the CVar's
+/// `"0"`. A row whose label and value run opposite ways is exactly the kind that gets silently
+/// inverted by a later edit, and until this test there was no coverage of the row at all.
+#[test]
+fn the_display_mode_dropdown_maps_its_entries_to_the_gx_window_polarity() {
+    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowDisplayMode";
+    let mut s = audio_harness();
+    s.set_cvar_host("gxWindow", "0");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
+            .unwrap(),
+        "Display Mode"
+    );
+    // "0" is NOT windowed, which 1627 redefined as the borderless fullscreen window.
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
+            .unwrap(),
+        "Windowed (Fullscreen)"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on select must not write it back"
+    );
+
+    // Two entries, and only two — the modern list has no Fullscreen row, because 8.0.1 removed
+    // the exclusive mode those clients had and 1627 ships none for its own platform reasons.
+    s.run(&format!("{ROW}DropdownButton:Click()")).unwrap();
+    assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
+    assert_eq!(
+        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
+        2.0
+    );
+    assert!(s
+        .eval::<bool>("return DropDownList1Button1Check:IsVisible()")
+        .unwrap());
+
+    // Picking Windowed writes the CVar's "1", closes the list, and repaints the capsule.
+    s.run("DropDownList1Button2:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("gxWindow".to_string(), "1".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}DropdownText:GetText()"))
+            .unwrap(),
+        "Windowed"
+    );
+    assert!(!s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// **Vertical Sync** (1394) — the Graphics page's third row, and the first option in this window
 /// that reaches the *window* rather than a gameplay or UI knob. It is 1.12's own Video Options
 /// checkbox 5 (`gxVSync`), which lived on the perf HUD as a dev checkbox until it turned out to be
@@ -1065,13 +1126,13 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The dropdown row (0992, the first): the capsule reads the CVar on select (text from the
-/// row's own entries), the capsule button opens the shared list at the OWNER's effective scale
-/// (the kit's 0992 uiScale correction — the window rides SetScale) with the current value's
-/// entry checked, and an entry click writes the CVar, repaints the capsule, and closes the
-/// list on the kit's own law.
+/// Environment Detail is the reference's own slider (1649): 0..2 step 1 over `WorldDetail`, with
+/// 0992's Low/Medium/High names kept in the readout seat — a groove whose readout says "1" tells a
+/// player nothing. Dragging writes the CVar; a value from outside the range shows the nearest stop
+/// and writes nothing back (0959's out-of-range law).
 #[test]
-fn the_world_detail_dropdown_writes_the_cvar_and_the_capsule_follows() {
+fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
+    const ROW: &str = "OptionsFrameContainerBodyGraphicsRowWorldDetail";
     let mut s = audio_harness();
     s.set_cvar_host("WorldDetail", "0");
     let mut s = harness_on(s);
@@ -1079,159 +1140,62 @@ fn the_world_detail_dropdown_writes_the_cvar_and_the_capsule_follows() {
     s.run("OptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
-        s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowWorldDetailDropdownText:GetText()"
-        )
-        .unwrap(),
-        "Low"
-    );
-    assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowWorldDetailLabel:GetText()")
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
             .unwrap(),
         "Environment Detail"
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "Low"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
 
-    // The capsule button opens the list: three entries, the stored value's row checked, and
-    // the shared list wearing the window's effective scale (0.78 era scale, checkFit capped).
-    s.run("OptionsFrameContainerBodyGraphicsRowWorldDetailDropdownButton:Click()")
-        .unwrap();
-    assert!(s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
-    assert_eq!(
-        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
-        3.0
-    );
+    // The reference's grid, verbatim: three stops, one apart (OptionsFrame.lua l.27).
     assert!(s
-        .eval::<bool>("return DropDownList1Button1Check:IsVisible()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return DropDownList1Button3Check:IsVisible()")
-        .unwrap());
-    assert!(s
-        .eval::<bool>(
-            "return math.abs(DropDownList1:GetScale() - OptionsFrame:GetScale()) < 0.0001"
-        )
+        .eval::<bool>(&format!(
+            "local lo, hi = {ROW}ControlSlider:GetMinMaxValues() \
+             return lo == 0 and hi == 2 and {ROW}ControlSlider:GetValueStep() == 1"
+        ))
         .unwrap());
 
-    // Clicking High: the write queues, the capsule repaints, the list closes.
-    s.run("DropDownList1Button3:Click()").unwrap();
+    // A drag to the top stop: the write queues and the readout names it.
+    s.run(&format!("{ROW}ControlSlider:SetValue(2)")).unwrap();
     assert_eq!(
         s.take_cvar_changes(),
         vec![("WorldDetail".to_string(), "2".to_string())]
     );
     assert_eq!(
-        s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowWorldDetailDropdownText:GetText()"
-        )
-        .unwrap(),
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
         "High"
     );
-    assert!(!s.eval::<bool>("return DropDownList1:IsVisible()").unwrap());
 
-    // An off-grid value (an env A/B: the hermetic capture's clutter-off session seeds "-1")
+    // Off-grid input snaps to the stop grid (era obeyStepOnDrag), naming the stop it landed on.
+    s.run(&format!("{ROW}ControlSlider:SetValue(0.6)")).unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "Medium"
+    );
+
+    // An out-of-range value (an env A/B: the hermetic capture's clutter-off session seeds "-1")
     // displays the NEAREST stop — 0959's out-of-range law — and writes nothing back.
     s.set_cvar_host("WorldDetail", "-1");
+    s.take_cvar_changes();
     s.run("OptionsFrameCategoryListRowAudio:Click(); OptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
-        s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowWorldDetailDropdownText:GetText()"
-        )
-        .unwrap(),
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
         "Low"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
         "the nearest-stop display must not write back"
-    );
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-}
-
-/// The Graphics page's **Multisampling** row (decision 1631): its stops are enumerated from the
-/// DEVICE, not a fixed ladder, and picking one writes the latched `gxMultisample`.
-///
-/// The device list is seeded Apple-shaped — 1x/2x/4x and no 8x — because that is what this
-/// project's own machine reports, and because a fixed ladder offering 8x there is precisely the
-/// crash 1631 exists to prevent. A machine with 8x would show four rows off the same code.
-#[test]
-fn the_multisampling_row_offers_exactly_what_the_device_supports() {
-    // No explicit `register_cvars` here: `audio_harness` registers `cvars::REGISTERED` whole, and
-    // the three multisample rows live in it. That is deliberate — if they are ever dropped from
-    // the registry this test fails rather than papering over it with its own registration.
-    let mut s = audio_harness();
-    s.set_multisample_formats(vec![
-        benilla_ui::script::MultisampleFormat {
-            color_bits: 32,
-            depth_bits: 32,
-            samples: 1,
-        },
-        benilla_ui::script::MultisampleFormat {
-            color_bits: 32,
-            depth_bits: 32,
-            samples: 2,
-        },
-        benilla_ui::script::MultisampleFormat {
-            color_bits: 32,
-            depth_bits: 32,
-            samples: 4,
-        },
-    ]);
-    let mut s = harness_on(s);
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    s.run("OptionsFrameCategoryListRowGraphics:Click()")
-        .unwrap();
-
-    assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowMultisampleLabel:GetText()")
-            .unwrap(),
-        "Multisampling",
-        "the reference's own MULTISAMPLE global"
-    );
-    // "1" is the registered default and means NO multisampling, so the first stop reads "Off"
-    // rather than "1x" (1635). The label carries the noun; the capsule carries the value.
-    assert_eq!(
-        s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowMultisampleDropdownText:GetText()"
-        )
-        .unwrap(),
-        "Off",
-        "1 is the encoding of NO multisampling, not one sample of it"
-    );
-    assert!(
-        s.take_cvar_changes().is_empty(),
-        "reading the table on select must not write it back"
-    );
-
-    // Three stops, because the device offered three. This is the assertion that would fail if the
-    // row ever went back to a hardcoded ladder.
-    s.run("OptionsFrameContainerBodyGraphicsRowMultisampleDropdownButton:Click()")
-        .unwrap();
-    assert_eq!(
-        s.eval::<f64>("return DropDownList1.numButtons").unwrap(),
-        3.0
-    );
-    assert_eq!(
-        s.eval::<String>("return DropDownList1Button3:GetText()")
-            .unwrap(),
-        "4x"
-    );
-
-    // Picking 4x writes the CVar — live and persisted, even though the picture waits for the next
-    // launch (the 1629 latch; the camera takes its sample count at spawn).
-    s.run("DropDownList1Button3:Click()").unwrap();
-    assert_eq!(
-        s.take_cvar_changes(),
-        vec![("gxMultisample".to_string(), "4".to_string())]
-    );
-    assert_eq!(
-        s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowMultisampleDropdownText:GetText()"
-        )
-        .unwrap(),
-        "4x"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1391,9 +1355,9 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **Render Scale** (decision 1639) — benilla's own Graphics row, seated directly above
-/// Multisampling because above 100 % it *is* antialiasing, on a client whose `gxMultisample`
-/// ships off (1629).
+/// **Render Scale** (decision 1639) — benilla's own Graphics row, and since 1648 the page's ONLY
+/// antialiasing control: the reference's own Multisampling row was pulled on the director's call,
+/// leaving `gxMultisample` reachable as a CVar and `$WOW_MSAA` but off the page.
 ///
 /// Three things this pins, each of which was a real choice:
 ///
@@ -2133,18 +2097,20 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             untipped.push(row.to_string());
             continue;
         }
-        // The one deliberate exception (decision 1639). Render Scale has no 1.12 counterpart
-        // and so no `OPTION_TOOLTIP_*` to resolve, but it is the row that most needs a
-        // description — its first reviewer said outright they could not tell what it did. It
-        // carries one under a `BENILLA_` prefix so the reference's namespace stays the
-        // reference's, which is exactly what this guard is here to protect. Everything the
-        // guard was built to catch — an invented or typo'd `OPTION_TOOLTIP_` key that silently
-        // resolves to nothing — is untouched by the carve-out.
-        if key == "BENILLA_TOOLTIP_RENDER_SCALE" {
-            assert_eq!(
-                row, "GraphicsRowRenderScale",
-                "{row}: not this row's string"
-            );
+        // The deliberate exceptions (1639 Render Scale, 1650 Display Mode). Neither has a 1.12
+        // counterpart whose `OPTION_TOOLTIP_*` could be resolved — Render Scale has no era row at
+        // all, and Display Mode's era row was a CHECKBOX whose string says "Check to…" — and both
+        // are rows a player needs a description for. Each carries one under a `BENILLA_` prefix so
+        // the reference's namespace stays the reference's, which is exactly what this guard is
+        // here to protect. Everything the guard was built to catch — an invented or typo'd
+        // `OPTION_TOOLTIP_` key that silently resolves to nothing — is untouched: the pairing below
+        // is exact, so a `BENILLA_` key on the wrong row still fails.
+        const BENILLA_OWNED: &[(&str, &str)] = &[
+            ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
+            ("BENILLA_TOOLTIP_DISPLAY_MODE", "GraphicsRowDisplayMode"),
+        ];
+        if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
+            assert_eq!(row, *want_row, "{row}: not this row's string");
             let text: String = s.eval(&format!("return {key}")).unwrap();
             assert!(!text.is_empty(), "{row}: {key} resolves to nothing");
             checked += 1;
@@ -2167,8 +2133,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     }
     // 27 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed Loot
     // Information + Guild Member Alert are 1589's; Status Bar Text, Mouse Sensitivity
-    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's, its Windowed Mode
-    // 1627's and its Multisampling 1632's; Camera Following Style
+    // and Max Camera Distance 1140's; Graphics' Vertical Sync is 1394's, its Display Mode
+    // 1627's (a dropdown since 1650) and its Multisampling 1632's; Camera Following Style
     // 1493's; Terrain Distance 1513's) + the Combat page's 14 saved-variable rows (1134) + the Interface page's 6 (3 from
     // 1136, Buff Durations 1139, the target-of-target pair 1576), the Action Bars page's 2 (the
     // lock 1136, Always Show
@@ -2178,9 +2144,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    // 55 of the 56 are 1.12's own; the 56th is Render Scale, whose description is benilla's
-    // (1639) and whose carve-out is above.
-    assert_eq!(checked, 56, "every tipped row carries a live key");
+    // 53 of the 55 are 1.12's own; the other two are Render Scale (1639) and Display Mode
+    // (1650), whose descriptions are benilla's and whose carve-out is above.
+    assert_eq!(checked, 55, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2278,16 +2244,16 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     }
     // 27 of the 28 CVar rows (the Chat page's two bubble switches are 1139's and its Detailed
     // Loot Information + Guild Member Alert 1589's; Status Bar Text, Mouse Sensitivity and
-    // Max Camera Distance 1140's; Vertical Sync 1394's, Windowed Mode 1627's and Multisampling
+    // Max Camera Distance 1140's; Vertical Sync 1394's, Display Mode 1627's and Multisampling
     // 1632's; Camera Following
     // Style 1493's; Terrain Distance 1513's), plus the Combat page's 14 saved-variable rows (1134), the Interface
     // page's 6 (1136, + Buff Durations 1139, + the target-of-target pair 1576), Action Bars' 2
     // (the lock 1136, Always Show
     // ActionBars 1500), the Chat page's 1 (Remove Chat Hover Delay, 1589) and 6 API rows (Show
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
-    // …plus the Graphics page's Render Scale (1639), the one row whose description is
-    // benilla's own rather than a 1.12 GlobalString — see the tooltip-key guard above.
-    assert_eq!(raised, 56, "every row but Auto Loot raises a description");
+    // …plus the Graphics page's Render Scale (1639) and Display Mode (1650), the two rows whose
+    // descriptions are benilla's own rather than 1.12 GlobalStrings — see the guard above.
+    assert_eq!(raised, 55, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

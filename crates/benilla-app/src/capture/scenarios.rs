@@ -128,9 +128,9 @@ pub(super) enum UiFixture {
     /// Rows read the CVar registration defaults (hermetic capture = no config file), so the
     /// pixels move only with the window, the atlas seam, or a registered default.
     OptionsAudio,
-    /// The Options window ON THE GRAPHICS PAGE (decision 0959; farclip row retired 0961;
-    /// Environment Detail joined 0992) — uiScale at its 0.64..1.0 panel range with the percent
-    /// readout, and the dropdown row's closed capsule (the 1.12 kit art) reading "High". Rows
+    /// The Options window ON THE GRAPHICS PAGE (decision 0959; farclip row retired 0961 and back
+    /// 1513; Environment Detail joined 0992, a slider since 1649) — uiScale at its 0.64..1.0 panel
+    /// range with the percent readout, and three slider grooves under it. Rows
     /// read the CVar registration defaults (hermetic capture = no config file), so the pixels
     /// move only with the window, the atlas seam, or a registered default.
     OptionsGraphics,
@@ -144,10 +144,12 @@ pub(super) enum UiFixture {
     /// known colour so the markers sit somewhere checkable rather than at the default white's
     /// centre. The one fixture whose subject is pixels this client computes.
     ColorPicker,
-    /// The Graphics page with the Environment Detail MENU OPEN (0992) — the dropdown-list look
+    /// The Controls page with the Camera Following Style MENU OPEN — the dropdown-list look
     /// instrument: the shared DropDownList1 at the window's effective scale (the kit's uiScale
-    /// correction), three entries with High checked, the kit's dialog backdrop.
-    OptionsWorldDetail,
+    /// correction), three entries with the stored one checked, the kit's dialog backdrop. It was
+    /// Environment Detail's list (0992) until 1649 put that row back on the reference's slider;
+    /// the instrument follows the shape, not the row, so it moved to a row that still has a list.
+    OptionsDropdownList,
     /// The Options window MID-SEARCH (decision 0984) — the results-view look instrument: the
     /// "volume" query reflows the four live volume sliders under the clickable Audio head
     /// (GameFontNormalLarge), title "Search Results", Defaults hidden, the clear-X shown in
@@ -1077,15 +1079,15 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: Some(UiFixture::ColorPicker),
     },
-    // The Graphics page with the Environment Detail dropdown OPEN (0992). Run with
-    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-worlddetail`.
+    // The Controls page with the Camera Following Style dropdown OPEN (0992, re-seated 1649). Run
+    // with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-dropdown`.
     Scenario {
-        name: "ui-options-worlddetail",
+        name: "ui-options-dropdown",
         map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
-        ui: Some(UiFixture::OptionsWorldDetail),
+        ui: Some(UiFixture::OptionsDropdownList),
     },
     // The options window's Keybindings page, Movement expanded (1008). Run with
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-keybindings`.

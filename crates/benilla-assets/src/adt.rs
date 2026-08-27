@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use benilla_formats::{
-    adt_to_tile_mesh, blp_bytes_to_mip_chain, ChunkMesh, Doodad, WmoInstance, ALPHA_MAP_SIZE,
+    adt_to_tile_mesh, blp_bytes_to_native_chain, ChunkMesh, Doodad, WmoInstance, ALPHA_MAP_SIZE,
     SHADOW_MAP_SIZE,
 };
 use bevy::asset::io::Reader;
@@ -37,8 +37,7 @@ use bevy::reflect::TypePath;
 
 use crate::coords::wow_to_bevy;
 use crate::terrain::{
-    alpha_array_image, chain_to_layer, layer_array_image, shadow_array_image, solid_layer_chain,
-    LayerTexture, LAYER_TEX_SIZE,
+    alpha_array_image, layer_array_image, pack_layers, shadow_array_image, RawLayer, LAYER_TEX_SIZE,
 };
 
 /// A loaded ADT terrain tile: the decoded chunks + per-chunk shading indices + the tile's three
@@ -167,10 +166,10 @@ impl AssetLoader for AdtLoader {
         let tile = adt_to_tile_mesh(&bytes).map_err(to_io)?;
 
         // Layer array: a solid-green fallback at index 0, then each unique referenced layer texture.
-        let fallback = solid_layer_chain([107, 133, 82, 0]);
-        let layer_mips = fallback.mip_count;
-        let mut layer_buf = fallback.chain;
-        let mut layer_count = 1u32;
+        // The layers are collected in their **authored** form and packed only once the tile is fully
+        // read — one `texture_2d_array` has one format, so whether this tile's DXT blocks go up
+        // untouched is a question about the whole set (`terrain::pack_layers`, decision 1646).
+        let mut layers: Vec<RawLayer> = Vec::new();
         let mut layer_index: HashMap<String, u32> = HashMap::new();
 
         let mut alpha_buf: Vec<u8> = Vec::new();
@@ -198,11 +197,12 @@ impl AssetLoader for AdtLoader {
                 let key = normalize_path(name);
                 li[slot] = if let Some(&i) = layer_index.get(&key) {
                     i
-                } else if let Some(layer) = decode_layer(ctx, &key).await {
-                    layer_buf.extend_from_slice(&layer.chain);
-                    layer_index.insert(key, layer_count);
-                    layer_count += 1;
-                    layer_count - 1
+                } else if let Some(layer) = read_layer(ctx, &key).await {
+                    // +1: index 0 is the fallback layer, which is not in `layers`.
+                    let index = layers.len() as u32 + 1;
+                    layers.push(layer);
+                    layer_index.insert(key, index);
+                    index
                 } else {
                     0
                 };
@@ -244,7 +244,19 @@ impl AssetLoader for AdtLoader {
             shadow_count = 1;
         }
 
-        let layer_array = layer_array_image(LAYER_TEX_SIZE, layer_count, layer_mips, layer_buf);
+        let layer_count = layers.len() as u32 + 1;
+        let packed = pack_layers([107, 133, 82, 0], layers);
+        // Which lane this tile took, and what it cost. Per-tile rather than aggregated because the
+        // question after a perf report is always "which tiles fell back, and where am I standing" —
+        // and one greppable format name per tile answers it from a player's log with no machinery
+        // (`grep -c Bc2RgbaUnorm` against `grep -c Rgba8Unorm`) (1646).
+        debug!(
+            "adt {}: layer array {layer_count} x {:?}, {} KiB",
+            ctx.path(),
+            packed.format,
+            packed.data.len() >> 10
+        );
+        let layer_array = layer_array_image(LAYER_TEX_SIZE, layer_count, packed);
         let alpha_array = alpha_array_image(ALPHA_MAP_SIZE, alpha_count, alpha_buf);
         let shadow_array = shadow_array_image(SHADOW_MAP_SIZE, shadow_count, shadow_buf);
 
@@ -264,27 +276,27 @@ impl AssetLoader for AdtLoader {
     }
 }
 
-/// Decode a layer texture into the packed array form. Prefers the `_s` specular variant (sheen mask
-/// in alpha); else falls back to the base BLP with alpha forced to 0 (matte — no sheen). `key` is a
+/// Read a layer texture in its authored form. Prefers the `_s` specular variant (sheen mask in
+/// alpha); else falls back to the base BLP, flagged `matte` so no sheen rides it. `key` is a
 /// normalized internal path.
-async fn decode_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<LayerTexture> {
+///
+/// **Native, not decoded**: the blocks are kept here so [`pack_layers`] still has the choice. A
+/// Raw1/Raw3 BLP has no block form and comes back decoded anyway, which is why the caller never has
+/// to ask — it is [`benilla_formats::BlpMipChain::texels`] that says what arrived.
+async fn read_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<RawLayer> {
     if let Some(spec) = key.strip_suffix(".blp").map(|stem| format!("{stem}_s.blp")) {
         if let Ok(bytes) = ctx.read_asset_bytes(mpq_url(&spec)).await {
-            if let Ok(chain) = blp_bytes_to_mip_chain(&bytes) {
-                return Some(chain_to_layer(chain, LAYER_TEX_SIZE));
+            if let Ok(chain) = blp_bytes_to_native_chain(&bytes) {
+                return Some(RawLayer {
+                    chain,
+                    matte: false,
+                });
             }
         }
     }
     let bytes = ctx.read_asset_bytes(mpq_url(key)).await.ok()?;
-    let chain = blp_bytes_to_mip_chain(&bytes).ok()?;
-    let mut layer = chain_to_layer(chain, LAYER_TEX_SIZE);
-    layer
-        .chain
-        .iter_mut()
-        .skip(3)
-        .step_by(4)
-        .for_each(|a| *a = 0); // matte: no sheen mask
-    Some(layer)
+    let chain = blp_bytes_to_native_chain(&bytes).ok()?;
+    Some(RawLayer { chain, matte: true })
 }
 
 /// An internal (`\`/lowercase) path → an `mpq://` URL.

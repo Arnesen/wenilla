@@ -1024,19 +1024,20 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-color-picker seed failed: {e}");
             }
         }
-        UiFixture::OptionsWorldDetail => {
+        UiFixture::OptionsDropdownList => {
             let Some(mut script) = script else {
                 return;
             };
-            // The dropdown list open (0992), same posture as the page fixtures: real CVar set,
-            // the live open-select-toggle path. The list's width settles from its OnUpdate a
-            // frame later (the kit's WIDTH SETTLE law) — inside the capture's settle frames.
+            // The dropdown list open (0992, re-seated onto Camera Following Style by 1649), same
+            // posture as the page fixtures: real CVar set, the live open-select-toggle path. The
+            // list's width settles from its OnUpdate a frame later (the kit's WIDTH SETTLE law) —
+            // inside the capture's settle frames.
             script.register_cvars(crate::cvars::REGISTERED.iter().copied());
             if let Err(e) = script.run(
-                "ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowGraphics:Click(); \
-                 OptionsFrameContainerBodyGraphicsRowWorldDetailDropdownButton:Click()",
+                "ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowControls:Click(); \
+                 OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()",
             ) {
-                warn!("capture: ui-options-worlddetail seed failed: {e}");
+                warn!("capture: ui-options-dropdown seed failed: {e}");
             }
         }
         UiFixture::KeyBindings => {

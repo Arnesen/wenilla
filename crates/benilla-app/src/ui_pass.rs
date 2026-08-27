@@ -929,6 +929,14 @@ fn retire_batches(pools: &mut BatchPools, commands: &mut Commands) {
 /// texture-identity runs, and write the runs into the pooled batches ([`BatchPools`]). See the
 /// module doc for the full approach (painter's order within/across runs) and its batching
 /// consequence.
+/// The two asset stores [`rebuild_ui_mesh`] writes, plus the image-removal stream its material
+/// cache has to hear — one bundle, because the rebuild is already at clippy's argument ceiling.
+type RebuildStores<'w, 's> = (
+    ResMut<'w, Assets<Mesh>>,
+    ResMut<'w, Assets<UiQuadMaterial>>,
+    MessageReader<'w, 's, AssetEvent<Image>>,
+);
+
 fn ui_mesh_frozen() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_FREEZE_UI_MESH").is_some())
@@ -980,8 +988,7 @@ pub(crate) struct UiMeshCost {
 fn rebuild_ui_mesh(
     mut quads: ResMut<UiQuads>,
     mut commands: Commands,
-    // The two asset stores the rebuild writes, bundled (clippy's argument ceiling).
-    mut stores: (ResMut<Assets<Mesh>>, ResMut<Assets<UiQuadMaterial>>),
+    mut stores: RebuildStores,
     mut pools: Local<BatchPools>,
     white: Option<Res<UiWhiteTexture>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -993,6 +1000,29 @@ fn rebuild_ui_mesh(
         Res<crate::ui_script::UiCostWanted>,
     ),
 ) {
+    // **Forget the materials of images that no longer exist** — first, before any early return,
+    // because a missed read is a leak rather than a stale frame.
+    //
+    // A cached material holds a strong `Handle<Image>`, and its PREPARED form holds the whole GPU
+    // texture behind a bind group Bevy never re-prepares. So an entry keyed on a retired asset
+    // pins that texture for as long as the cache holds the key — and the world backdrop retires a
+    // full-window `Rgba16Float` image (46 MB at 3200×1800) on every resize and every render-scale
+    // change, which is once a frame while a window is being dragged (decision 1647).
+    //
+    // `Removed` only, not `Unused`: `Unused` fires when the last strong handle drops, and this
+    // cache IS a strong handle, so for a cached texture it can never fire. The producer removes
+    // the asset explicitly (`world_backdrop::track_render_size`) precisely so this can hear it.
+    let retired: Vec<AssetId<Image>> = stores
+        .2
+        .read()
+        .filter_map(|e| match e {
+            AssetEvent::Removed { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    if !retired.is_empty() {
+        pools.materials.retain(|key, _| !retired.contains(&key.0));
+    }
     let (hidden, mesh_cost, cost_wanted) =
         (&hide_and_meter.0, &mut hide_and_meter.1, &hide_and_meter.2);
     // The meter is off unless something asked (the hover recorder, `WOW_UI_COST=1`) — an unmetered
@@ -1525,6 +1555,9 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_asset::<UiQuadMaterial>()
+            // The pass binds images and listens for their removal (the material cache sweep), so
+            // an app without the Image asset is an under-provisioned harness, not a lighter one.
+            .init_asset::<Image>()
             .init_resource::<UiQuads>()
             .init_resource::<UiMeshCost>()
             .init_resource::<crate::ui_script::UiCostWanted>()
@@ -1602,6 +1635,86 @@ mod tests {
             1,
             "the UI comes back on the same content"
         );
+    }
+
+    /// **A removed image takes its cached material with it** (decision 1647).
+    ///
+    /// The cache holds a strong `Handle<Image>` per entry and its prepared form holds the whole GPU
+    /// texture behind a bind group Bevy never re-prepares — so an entry keyed on an asset that no
+    /// longer exists pins that texture indefinitely. Nothing here notices until something retires
+    /// images in bulk, and the world backdrop does exactly that: one full-window `Rgba16Float`
+    /// image per resize, which is once a frame while a window is being dragged.
+    ///
+    /// The removal is seen a few frames late by construction (the loop below names the three
+    /// lags). That is fine for memory hygiene and would NOT be fine for correctness — which is
+    /// exactly why the correctness half of 1647 is a new `AssetId` rather than an invalidation.
+    #[test]
+    fn a_removed_image_does_not_keep_its_material_alive() {
+        let mut app = rebuild_app();
+        let art = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::new_fill(
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                &[255; 4],
+                TextureFormat::Rgba8Unorm,
+                RenderAssetUsages::default(),
+            ));
+        let art_id = art.id();
+        {
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            q.quads.push(UiQuad {
+                rect: Rect::new(0.0, 0.0, 32.0, 32.0),
+                texture: Some(art.clone()),
+                ..default()
+            });
+            q.dirty = true;
+        }
+        app.update();
+        assert!(
+            names_image(&app, art_id),
+            "the textured quad must have produced a material naming that image"
+        );
+
+        // Retire it exactly the way the world backdrop retires a resized target: drop every quad
+        // that names it, then remove the asset. Only the cache is left holding it.
+        drop(art);
+        {
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            q.quads.retain(|quad| quad.texture.is_none());
+            q.dirty = true;
+        }
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .remove(art_id);
+        // Three separate one-frame lags stand between the removal and an observably dead material:
+        // `Assets::asset_events` writes the `Removed` message in `PostUpdate` while the rebuild
+        // reads it in `Update`; the retired batch entity's own handle drops at that frame's command
+        // flush; and a dropped handle is only reclaimed by `track_assets` in the NEXT `PreUpdate`.
+        // None of that matters for the freeze — the correctness half is a new AssetId, not an
+        // invalidation — so the loop simply spends the frames rather than pretending to be exact.
+        for _ in 0..4 {
+            app.update();
+        }
+
+        assert!(
+            !names_image(&app, art_id),
+            "a material for a removed image is dead weight: it pins the image AND the GPU \
+             texture behind its prepared bind group for as long as the cache holds the key"
+        );
+    }
+
+    /// Does any live `UiQuadMaterial` still name this image?
+    fn names_image(app: &App, id: AssetId<Image>) -> bool {
+        app.world()
+            .resource::<Assets<UiQuadMaterial>>()
+            .iter()
+            .any(|(_, m)| m.texture.as_ref().is_some_and(|t| t.id() == id))
     }
 
     /// **TOGGLEUI hides the UI, not the world.** Since the world arrives as this pass's own

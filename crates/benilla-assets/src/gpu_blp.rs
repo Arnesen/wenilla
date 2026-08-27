@@ -4,8 +4,8 @@
 //! those blocks verbatim — `glCompressedTexImage2DARB`, with the software DXT decoder existing only
 //! as a 16-bit-device fallback (wow-re `system/image/image.md`: *"raw passthrough — device eats
 //! DXT"*, and `system/models/scratch/wmo-texture-sampling.md` for the per-level upload formats).
-//! benilla used to decode every one of them to `Rgba8Unorm` on the CPU and upload that: **4x the
-//! bytes of DXT1, 2x of DXT3/DXT5**, on the whole resident working set and on every texture fetch
+//! benilla used to decode every one of them to `Rgba8Unorm` on the CPU and upload that: **8x the
+//! bytes of DXT1, 4x of DXT3/DXT5**, on the whole resident working set and on every texture fetch
 //! that misses the cache. On a bandwidth-starved integrated GPU that is the frame's dominant cost,
 //! and it is the divergence Liho's Steam Deck reading exposed (decision 1626).
 //!

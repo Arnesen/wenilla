@@ -195,10 +195,11 @@ pub(crate) struct WorldBackdrop {
     pub(crate) image: Handle<Image>,
     /// The size the image was last built at, in physical px — the resize gate.
     size: UVec2,
-    /// The scale factor the camera's target was last stamped with — the re-stamp gate, and the
-    /// number that keeps every logical↔physical conversion on the world camera honest. See
-    /// [`retarget_world_camera`].
-    scale_factor: f32,
+    /// What the world camera's target was last stamped with: **which image**, and the scale factor
+    /// that went with it. Both halves gate the re-stamp — the factor because a stale one is B169,
+    /// the image because a rebuilt backdrop is a NEW asset (see [`track_render_size`]) and a camera
+    /// left aiming at the retired one renders into nothing. `None` until the first stamp.
+    stamped: Option<(AssetId<Image>, f32)>,
 }
 
 impl WorldBackdrop {
@@ -252,9 +253,9 @@ fn setup_backdrop(
     commands.insert_resource(WorldBackdrop {
         image,
         size,
-        // Deliberately not the window's: `retarget_world_camera` stamps the real one and must see
-        // a mismatch on its first run, before any camera exists to point at the image.
-        scale_factor: f32::NAN,
+        // Nothing stamped yet, so `retarget_world_camera`'s first run always fires — before any
+        // camera exists to point at the image.
+        stamped: None,
     });
 }
 
@@ -265,6 +266,45 @@ fn setup_backdrop(
 ///
 /// Runs before the stamp (the plugin's `.chain()`), so the factor is always computed against the
 /// image that now exists.
+///
+/// ## The rebuild publishes a NEW asset — it does not write through the old handle (decision 1647)
+///
+/// It used to do exactly that (`*images.get_mut(&handle) = new_backdrop_image(size)`), and **the
+/// world froze**: change any graphics setting or resize the window while in the world and the 3D
+/// stopped dead at the frame of the change, stretched over the new window, while the interface
+/// carried on. That is the director's report of 2026-08-27, and it reproduces on the bench (see the
+/// decision record's measurement).
+///
+/// The mechanism is a **texture-identity lie**, and it is Bevy's prepared-bind-group model meeting
+/// our material cache:
+///
+/// - Mutating an `Image` behind its handle makes a whole new GPU texture — `GpuImage`'s
+///   `prepare_asset` (`bevy_render/texture/gpu_image.rs`) calls `create_texture` afresh on every
+///   `AssetEvent::Modified`.
+/// - A material's bind group, by contrast, is captured **once**: `PreparedMaterial2d::prepare_asset`
+///   (`bevy_sprite_render/mesh2d/material.rs`) calls `as_bind_group` when the *material* asset is
+///   added or modified, and nothing re-prepares it when a texture it named is re-created.
+/// - [`crate::ui_pass`] keys its material cache on `AssetId<Image>`. Same id ⇒ same material ⇒ the
+///   same bind group, still holding the `TextureView` of the texture we just threw away.
+///
+/// So the world camera drew into the new texture and the UI kept sampling the old one, forever.
+///
+/// A new handle fixes it at the identity rather than by invalidating a cache: **`AssetId<Image>` is
+/// the tree's name for a GPU texture, so a new GPU texture gets a new name.** Every consumer then
+/// reacts on its own — the cache misses and builds a fresh material, [`emit_backdrop_quad`]'s quad
+/// differs and flags a rebuild, and [`retarget_world_camera`] re-points the camera.
+///
+/// It is also the only version that is safe against prepare *order*. `Material2dPlugin` registers
+/// `RenderAssetPlugin::<PreparedMaterial2d<M>>::default()` — `AFTER = ()`, i.e. **not** ordered
+/// after `prepare_assets::<GpuImage>` — so the "touch the material so its bind group rebuilds"
+/// remedy (which `benilla_world::clouds` uses, and whose comment already named this whole hazard)
+/// can re-bind the *previous* `GpuImage` if the material happens to prepare first. A fresh
+/// `AssetId` cannot: it either finds its own `GpuImage` or `as_bind_group` returns
+/// `RetryNextUpdate` and Bevy retries next frame.
+///
+/// The retired asset is **removed**, not merely dropped, because the stale cache entry is still
+/// holding a strong handle to it; `ui_pass`'s rebuild forgets materials whose image was removed,
+/// which is what keeps a window drag from retiring tens of megabytes a frame into a live cache.
 fn track_render_size(
     mut backdrop: ResMut<WorldBackdrop>,
     mut images: ResMut<Assets<Image>>,
@@ -282,22 +322,20 @@ fn track_render_size(
     if size == backdrop.size {
         return;
     }
-    let handle = backdrop.image.clone();
-    if let Some(image) = images.get_mut(&handle) {
-        *image = new_backdrop_image(size);
-        backdrop.size = size;
-        // Said out loud on every change, because a measurement taken at the wrong scale looks
-        // exactly like a measurement: the pixels the GPU is actually being asked for are the one
-        // term no probe line could infer from the window.
-        info!(
-            "render scale {:.3}: world renders at {}x{} into a {}x{} window",
-            scale.0,
-            size.x,
-            size.y,
-            window.physical_width(),
-            window.physical_height()
-        );
-    }
+    let retired = std::mem::replace(&mut backdrop.image, images.add(new_backdrop_image(size)));
+    images.remove(&retired);
+    backdrop.size = size;
+    // Said out loud on every change, because a measurement taken at the wrong scale looks
+    // exactly like a measurement: the pixels the GPU is actually being asked for are the one
+    // term no probe line could infer from the window.
+    info!(
+        "render scale {:.3}: world renders at {}x{} into a {}x{} window",
+        scale.0,
+        size.x,
+        size.y,
+        window.physical_width(),
+        window.physical_height()
+    );
 }
 
 /// Point the world camera at the backdrop instead of the swapchain — **carrying the window's own
@@ -354,13 +392,15 @@ fn retarget_world_camera(
     // The image's real size, not the requested one: `track_render_size` ran first and may have
     // clamped, and the factor must describe the texture that exists.
     let scale_factor = window_factor * backdrop.size.x as f32 / px.x.max(1) as f32;
-    // `!=` on the stored NAN seed is true, so the first run always stamps.
-    #[allow(clippy::float_cmp)]
-    let moved = scale_factor != backdrop.scale_factor;
+    // **The image as well as the factor.** A rebuild retires the old asset and publishes a new one
+    // ([`track_render_size`]), and on a pure window resize the factor does NOT move — so a
+    // factor-only gate would leave every world camera aiming at an asset that no longer exists.
+    let want = (backdrop.image.id(), scale_factor);
+    let moved = backdrop.stamped != Some(want);
     if !moved && added.is_empty() {
         return;
     }
-    backdrop.scale_factor = scale_factor;
+    backdrop.stamped = Some(want);
     let bias = MipBias(mip_bias(scale_factor / window_factor));
     for (entity, mut current) in &mut cameras {
         *current = RenderTarget::Image(bevy::camera::ImageRenderTarget {
@@ -612,6 +652,112 @@ mod tests {
         );
         assert_eq!(mip_bias(2.0), 0.0);
         assert_eq!(mip_bias(4.0), 0.0);
+    }
+
+    /// **A rebuild publishes a NEW image, and the camera follows it onto the new one** — the
+    /// 2026-08-27 world-freeze (decision 1647).
+    ///
+    /// Writing the new size through the OLD handle is what froze the world: `ui_pass` keys its
+    /// material cache on `AssetId<Image>`, and Bevy prepares a material's bind group once, so the
+    /// same id handed back the same bind group — still holding the `TextureView` of the texture
+    /// that had just been thrown away. The world camera drew into the new texture; the UI kept
+    /// sampling the dead one, forever.
+    ///
+    /// Three assertions, because the fix has three halves and any one of them alone is still broken:
+    /// the id must MOVE (or the cache cannot tell), the old asset must be GONE (or the retired
+    /// image is pinned by whatever still names it), and the camera must be re-stamped onto the new
+    /// handle — that last one is the half a factor-only gate misses, since a pure window resize
+    /// does not move the scale factor at all.
+    #[test]
+    fn a_rebuilt_backdrop_is_a_new_asset_and_the_camera_follows_it() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>();
+        let mut w = Window::default();
+        w.resolution.set_scale_factor(2.0);
+        app.world_mut().spawn((w, PrimaryWindow));
+        app.insert_resource(RenderScale(1.0))
+            .add_systems(Startup, setup_backdrop)
+            .add_systems(Update, (track_render_size, retarget_world_camera).chain());
+        let cam = app
+            .world_mut()
+            .spawn((WorldCamera, RenderTarget::default()))
+            .id();
+        app.update();
+        let first = app.world().resource::<WorldBackdrop>().image.id();
+
+        // The director's own path: move the render scale while the world is up.
+        app.insert_resource(RenderScale(0.5));
+        app.update();
+
+        let second = app.world().resource::<WorldBackdrop>().image.id();
+        assert_ne!(
+            first, second,
+            "a rebuilt backdrop is a NEW GPU texture, so it must be a new AssetId — \
+             the same id hands `ui_pass` back a bind group pointing at the retired texture"
+        );
+        assert!(
+            !app.world().resource::<Assets<Image>>().contains(first),
+            "the retired image must be removed, not merely dropped: a cached material still \
+             holds a strong handle to it"
+        );
+        match app.world().entity(cam).get::<RenderTarget>() {
+            Some(RenderTarget::Image(t)) => assert_eq!(
+                t.handle.id(),
+                second,
+                "the camera must be re-stamped onto the new image"
+            ),
+            _ => panic!("the world camera must target the backdrop image"),
+        }
+    }
+
+    /// A pure WINDOW resize moves the image without moving the scale factor — the case a
+    /// factor-only re-stamp gate silently misses, leaving the camera aimed at a removed asset.
+    #[test]
+    fn a_window_resize_restamps_the_camera_even_though_the_factor_does_not_move() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>();
+        let mut w = Window::default();
+        w.resolution.set_scale_factor(2.0);
+        let win = app.world_mut().spawn((w, PrimaryWindow)).id();
+        app.insert_resource(RenderScale(1.0))
+            .add_systems(Startup, setup_backdrop)
+            .add_systems(Update, (track_render_size, retarget_world_camera).chain());
+        let cam = app
+            .world_mut()
+            .spawn((WorldCamera, RenderTarget::default()))
+            .id();
+        app.update();
+        let before = match app.world().entity(cam).get::<RenderTarget>() {
+            Some(RenderTarget::Image(t)) => (t.handle.id(), t.scale_factor),
+            _ => panic!("the world camera must target the backdrop image"),
+        };
+
+        app.world_mut()
+            .entity_mut(win)
+            .get_mut::<Window>()
+            .expect("the primary window")
+            .resolution
+            .set(640.0, 400.0);
+        app.update();
+
+        let after = match app.world().entity(cam).get::<RenderTarget>() {
+            Some(RenderTarget::Image(t)) => (t.handle.id(), t.scale_factor),
+            _ => panic!("the world camera must target the backdrop image"),
+        };
+        assert_ne!(before.0, after.0, "the resize must re-point the camera");
+        assert!(
+            (before.1 - after.1).abs() < 1e-6,
+            "at scale 1.0 the factor is the window's own and does not move on a resize — \
+             which is exactly why the re-stamp cannot be gated on it alone: {} vs {}",
+            before.1,
+            after.1
+        );
+        assert!(
+            app.world().resource::<Assets<Image>>().contains(after.0),
+            "the camera must point at an image that still exists"
+        );
     }
 
     /// End to end on a live `App`: a half-scale world on a 2× display renders into a half-size

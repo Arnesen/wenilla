@@ -609,7 +609,7 @@
         -- CENTER-80, child rows +15 indent in the small font). Era rows with no 1.12 CVar +
         -- benilla knob behind them (Enable Sound=Sound_EnableAllSound, Dialog, output device,
         -- channels…) do not ship — the 0950 honest-tree rule applied to settings.
-        -- The one options string that is NOT the reference's (decision 1639). Every other
+        -- The options strings that are NOT the reference's (1639, 1650). Every other
         -- tooltip on this window resolves an OPTION_TOOLTIP_* out of 1.12's GlobalStrings, and a
         -- benilla row with no counterpart there has so far simply gone mute (the nameplate pair).
         -- Render Scale cannot afford to: the director's own reaction to the dial was "not really
@@ -622,6 +622,17 @@
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
             .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
+        -- Display Mode (1650). 1.12's own OPTION_TOOLTIP_WINDOWED_MODE cannot ride this row: it
+        -- is written for the checkbox it belonged to ("Check to play in a non-fullscreen
+        -- window..."), and its second half describes a desktop-gamma consequence of an exclusive
+        -- mode-set we do not do. The row also has to answer the question a player arrives with —
+        -- "where is Fullscreen?" — which no reference string was ever written to answer.
+        BENILLA_TOOLTIP_DISPLAY_MODE =
+            "Windowed (Fullscreen) fills the screen with a borderless window; Windowed runs in "
+            .. "an ordinary one.\n\n"
+            .. "There is no exclusive fullscreen mode. WoW itself removed one in 8.0.1, and "
+            .. "modern Classic offers these same two."
+
         OPTIONS_PAGE_ROWS = {
             Controls = {
                 "RowStickyTarget", "RowAutoLoot", "RowInvertMouse", "RowMouseSpeed",
@@ -633,7 +644,7 @@
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
-                "RowWindowedMode", "RowVerticalSync", "RowRenderScale", "RowMultisample",
+                "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
             },
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
@@ -855,9 +866,15 @@
         -- refreshing guard: SetMinMaxValues re-clamps the held value and fires OnValueChanged,
         -- and that clamp is wiring, not a player gesture — without the guard every load would
         -- SetCVar the template's 0 clamped into the new range.
-        function OptionsSliderRow_Setup(row, min, max, step, fmt)
+        function OptionsSliderRow_Setup(row, min, max, step, fmt, stops)
             local slider = getglobal(row:GetName() .. "ControlSlider")
             row.fmt = fmt
+            -- A grid that IS a short named ladder passes its names here (Environment Detail's
+            -- Low/Medium/High over 0/1/2): the groove is still the reference's slider, and the
+            -- readout says the stop rather than its index. 1.12's own slider printed no value at
+            -- all — it labelled the two ENDS — but every slider row in this kit carries a readout,
+            -- and "1" is the one thing that seat could say that means nothing to a player.
+            row.stops = stops
             row.refreshing = 1
             slider:SetMinMaxValues(min, max)
             slider:SetValueStep(step)
@@ -957,6 +974,15 @@
         function OptionsRow_FormatValue(row, value)
             if row.fmt == "raw" then
                 return string.format("%d", math.floor(value + 0.5))
+            end
+            -- A named ladder reads out its stop's name (see OptionsSliderRow_Setup). The index is
+            -- clamped, not wrapped: the slider itself has already clamped a config value from
+            -- outside the range, so this only ever guards a stops table shorter than the grid.
+            if row.stops then
+                local i = math.floor(value + 0.5) + 1
+                if i < 1 then i = 1 end
+                if i > table.getn(row.stops) then i = table.getn(row.stops) end
+                return row.stops[i]
             end
             -- A row whose stored value is a FACTOR but whose meaning is a distance: show the
             -- distance (decision 1140 — cameraDistanceMaxFactor over the 15 yd base). The number
@@ -2235,10 +2261,11 @@
                                      retired by the director in 0961 and back by their call in
                                      1513, now that the one number moves the far-clip wall AND how
                                      much terrain is resident, as it does in the reference.
-                                     Environment Detail (0992) is the same table's WorldDetail row
+                                     Environment Detail is the same table's WorldDetail row
                                      (0..2 step 1, label ENVIRONMENT_DETAIL) over the clutter-density
-                                     knob, worn as the dropdown row — the shape call is the
-                                     template's comment. -->
+                                     knob. 0992 wore it as a dropdown; 1649 puts it back on the
+                                     SLIDER the reference actually uses, keeping 0992's stop names
+                                     in the readout seat. -->
                                 <Frame name="$parentGraphics" hidden="true">
                                     <Anchors>
                                         <Anchor point="TOPLEFT"/>
@@ -2272,7 +2299,7 @@
                                                 OptionsSliderRow_Setup(self, 177, 777, 60, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowWorldDetail" inherits="OptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
@@ -2283,42 +2310,54 @@
                                                 -- The stop names are the era preset ladder's (its
                                                 -- quality dropdowns say Low/Medium/High); 1.12's
                                                 -- slider had no stop labels to quote.
-                                                OptionsDropdownRow_Setup(self, {
-                                                    { text = "Low", value = "0" },
-                                                    { text = "Medium", value = "1" },
-                                                    { text = "High", value = "2" },
-                                                })
+                                                OptionsSliderRow_Setup(self, 0, 2, 1, nil,
+                                                    { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowWindowedMode" inherits="OptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowDisplayMode" inherits="OptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- Windowed Mode: 1.12's own Video Options checkbox
-                                                -- over gxWindow, label and tooltip key both the
-                                                -- reference's GlobalStrings (WINDOWED_MODE /
-                                                -- OPTION_TOOLTIP_WINDOWED_MODE).
+                                                -- Display Mode (1650): MODERN CLASSIC's row, not
+                                                -- 1.12's, because 1627 already gave us modern
+                                                -- Classic's two states and a checkbox could only
+                                                -- name one of them.
                                                 --
-                                                -- The row is the reference's; UNCHECKED is not.
-                                                -- There it mode-sets the display at gxResolution;
-                                                -- here it raises a BORDERLESS fullscreen window,
-                                                -- and no exclusive mode exists to reach (decision
-                                                -- 1627 -- Wayland cannot do one at all, and WoW
-                                                -- itself dropped exclusive fullscreen in 8.0.1).
+                                                -- Blizzard_SettingsDefinitions_Shared/Graphics.lua
+                                                -- (live, classic AND classic_era, all identical):
+                                                -- a BOOLEAN proxy rendered as a dropdown, with
+                                                -- exactly two entries -- container:Add(true,
+                                                -- VIDEO_OPTIONS_WINDOWED_FULLSCREEN) and
+                                                -- container:Add(false, VIDEO_OPTIONS_WINDOWED).
+                                                -- There is no Fullscreen entry anywhere in it;
+                                                -- 8.0.1 removed the exclusive mode those clients
+                                                -- had, which is the same reason 1627 ships none.
+                                                --
+                                                -- It rides gxWindow, OUR persisted CVar, not the
+                                                -- gxMaximize the modern client uses -- that client
+                                                -- deleted gxWindow entirely and had to move; we
+                                                -- did not, and repointing would orphan every
+                                                -- config.toml already holding the row for nothing.
+                                                -- Polarity is gxWindow's own: "0" is not-windowed,
+                                                -- which 1627 redefined as the borderless window.
                                                 --
                                                 -- Not deferred, for the same reason as Vertical
                                                 -- Sync below: the reference row carries
                                                 -- gxRestart = 1 and ours applies on the click.
-                                                OptionsRow_OnLoad(self, "gxWindow", "Windowed Mode",
-                                                    "OPTION_TOOLTIP_WINDOWED_MODE")
+                                                OptionsRow_OnLoad(self, "gxWindow", "Display Mode",
+                                                    "BENILLA_TOOLTIP_DISPLAY_MODE")
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Windowed (Fullscreen)", value = "0" },
+                                                    { text = "Windowed", value = "1" },
+                                                })
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowVerticalSync" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWindowedMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWindowedMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Vertical Sync: 1.12's own Video Options checkbox
@@ -2340,12 +2379,15 @@
                                                 -- Render Scale (decision 1639) -- benilla's own
                                                 -- row, no 1.12 counterpart: the reference renders
                                                 -- straight to the backbuffer and has no second
-                                                -- image to size. Seated directly above
-                                                -- Multisampling because the two are the page's
-                                                -- antialiasing pair and a player weighing one
-                                                -- against the other should see them together --
-                                                -- and because above 100% this row IS antialiasing,
-                                                -- on a client whose gxMultisample ships off (1629).
+                                                -- image to size. It CLOSES the page, and it is
+                                                -- the only antialiasing control on it: the
+                                                -- reference's own Multisampling row was pulled
+                                                -- 2026-08-27 (decision 1648, the director's call).
+                                                -- gxMultisample survives as a CVar and $WOW_MSAA
+                                                -- -- what went is the row, because multisampling
+                                                -- cannot touch the alpha-tested cutouts that carry
+                                                -- most of this game's visible aliasing, and above
+                                                -- 100% this row can.
                                                 --
                                                 -- 50-200%, narrower than the CVar's own clamp
                                                 -- (RENDER_SCALE_RANGE, 0.25-4.0). That clamp stops
@@ -2365,82 +2407,6 @@
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
                                                 OptionsSliderRow_Setup(self, 0.5, 2.0, 0.05)
                                                 self.deferred = 1
-                                            </OnLoad></Scripts>
-                                        </Frame>
-                                        <Frame name="$parentRowMultisample" inherits="OptionsDropdownRowTemplate">
-                                            <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            </Anchors>
-                                            <Scripts><OnLoad>
-                                                -- Multisampling: 1.12's own Video Options dropdown
-                                                -- (OptionsFrameMultiSampleDropDown, id 4), over
-                                                -- gxMultisample. Label and tooltip key are the
-                                                -- reference's GlobalStrings (MULTISAMPLE =
-                                                -- "Multisampling" / OPTION_TOOLTIP_MULTISAMPLING).
-                                                --
-                                                -- The STOPS ARE THE DEVICE'S, not a fixed ladder:
-                                                -- built here from GetMultisampleFormats(), which
-                                                -- is what this GPU actually accepts (decision
-                                                -- 1631's enumeration, the same one that clamps a
-                                                -- typed gxMultisample). That is the reference's
-                                                -- design too -- its list comes from a D3D
-                                                -- CheckDeviceMultiSampleType sweep or a GL
-                                                -- wglGetPixelFormatAttribivARB sweep -- and it is
-                                                -- why the row cannot offer a mode that would kill
-                                                -- the client. An Apple GPU shows three stops
-                                                -- (1x/2x/4x); a machine with 8x shows four.
-                                                --
-                                                -- NOT marked deferred. That flag stages a value
-                                                -- until Apply (uiScale's mid-drag rescale is what
-                                                -- it exists for); this row writes live like every
-                                                -- other. What it cannot do is take effect live:
-                                                -- gxMultisample is LATCHED (decision 1629 -- the
-                                                -- camera reads its sample count once, at spawn),
-                                                -- exactly as the reference's own row is, whose
-                                                -- callback echoes "set pending gxRestart". The
-                                                -- CVar moves and persists on the click; the
-                                                -- picture changes at the next launch.
-                                                OptionsRow_OnLoad(self, "gxMultisample", "Multisampling",
-                                                    "OPTION_TOOLTIP_MULTISAMPLING")
-                                                local stops = {}
-                                                local fmt = { GetMultisampleFormats() }
-                                                -- Three varargs per entry, the walk OptionsFrame.lua
-                                                -- l.354 does (`for i=1, arg.n, 3`) -- and then we
-                                                -- use ONE of the three.
-                                                --
-                                                -- 1.12 formats all three (MULTISAMPLING_FORMAT_
-                                                -- STRING = "%d-bit color %d-bit depth %dx
-                                                -- multisample") because in 2004 they VARIED: its
-                                                -- D3D CheckDeviceMultiSampleType sweep really did
-                                                -- enumerate 16-bit and 32-bit colour modes, so the
-                                                -- colour and depth figures were part of the
-                                                -- choice. Ours cannot vary -- every entry carries
-                                                -- the one pair `view::dropdown_bit_depths` returns,
-                                                -- the swapchain's format and Depth32Float, fixed
-                                                -- in our code and not by luck of hardware. Quoting
-                                                -- them on every row would reproduce the FORMAT of
-                                                -- a fact we no longer have, and it overflowed the
-                                                -- capsule doing it (the director's 08-27 shot).
-                                                -- The full triple is on the record in 1632; the
-                                                -- row shows what a player is actually choosing.
-                                                --
-                                                -- "Off", not "1x": 1 is the encoding of NO
-                                                -- multisampling, not one sample of it -- VERIFIED
-                                                -- at 0x59989b (D3D leaves MultiSampleType
-                                                -- D3DMULTISAMPLE_NONE) and 0x59de35 (GL never
-                                                -- emits the SAMPLE_BUFFERS/SAMPLES pair). Short
-                                                -- values are this page's own grammar too: the
-                                                -- label carries the noun and the capsule carries
-                                                -- the value ("Environment Detail [ High ]").
-                                                for i = 1, table.getn(fmt), 3 do
-                                                    local n = fmt[i + 2]
-                                                    table.insert(stops, {
-                                                        text = (n > 1) and (n .. "x") or "Off",
-                                                        value = tostring(n),
-                                                    })
-                                                end
-                                                OptionsDropdownRow_Setup(self, stops)
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

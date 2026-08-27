@@ -139,9 +139,15 @@ impl Default for ClutterConfig {
     fn default() -> Self {
         let env = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f32>().ok());
         Self {
-            // Default ×3 = frillDensity 48 = the client's High world-detail preset, which matches the
-            // reference (the user's reference runs High). ×1 would be the CVar's bare default (16/Low).
-            density: env("WOW_CLUTTER_DENSITY").unwrap_or(3.0).max(0.0),
+            // Default ×2 = frillDensity 32 = the panel's Medium (1649). It was ×3/High, matched to
+            // the director's OWN reference install, which runs High — a setting on their machine,
+            // not a default of the game's: `frillDensity` registers at 16, and a first launch has
+            // `hwDetect` overwrite it from `VideoHardware.dbc` to 24 on any D3D9-class part and 8
+            // on the weakest. Both are below Medium, and 24 is not on a panel stop at all, so every
+            // stop is a divergence; High was simply the dearest one, and this is alpha-tested
+            // overdraw on the ground — the thing a bandwidth-bound part has least of. Medium is the
+            // nearest stop no sparser than a fresh install, and the row is one drag from High.
+            density: env("WOW_CLUTTER_DENSITY").unwrap_or(2.0).max(0.0),
             scale: env("WOW_CLUTTER_SCALE").unwrap_or(1.0).max(0.01),
             alpha_ref: env("WOW_CLUTTER_ALPHA")
                 .unwrap_or(DETAIL_DOODAD_ALPHA_REF)

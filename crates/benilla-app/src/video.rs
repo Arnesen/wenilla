@@ -1,7 +1,7 @@
 //! Player-facing **video settings** — the knobs that reach the window and the presentation path.
 //!
 //! Two, both of them 1.12's own CVars over the Graphics page: **Display Mode** (`gxWindow`, the
-//! *Windowed Mode* row) and **VSync** (`gxVSync`, the *Vertical Sync* row).
+//! *Display Mode* row) and **VSync** (`gxVSync`, the *Vertical Sync* row).
 //!
 //! # Display mode — the reference's CVar, deliberately not the reference's meaning (decision 1627)
 //!
@@ -25,7 +25,13 @@
 //! And the industry moved: SDL3 deleted `SDL_WINDOW_FULLSCREEN_DESKTOP` and made borderless-desktop
 //! what a fullscreen window *is* unless you opt into a mode with `SDL_SetWindowFullscreenMode`;
 //! WoW itself removed exclusive fullscreen in **8.0.1**, leaving Windowed and Windowed
-//! (Fullscreen). Bevy's own `WindowMode::Fullscreen` arm is a liability besides — it `expect`s a
+//! (Fullscreen) — VERIFIED at the source, not from the patch notes: Blizzard's own
+//! `Blizzard_SettingsDefinitions_Shared/Graphics.lua` (live, `classic` and `classic_era`, all
+//! identical) registers Display Mode as a **boolean** proxy and builds its dropdown from exactly
+//! two entries, `VIDEO_OPTIONS_WINDOWED_FULLSCREEN` and `VIDEO_OPTIONS_WINDOWED`. **Our two states
+//! are modern Classic's two states**, which is why 1650 wears them as that client's dropdown
+//! rather than 1.12's checkbox. (Modern hangs the boolean on `gxMaximize`, having deleted
+//! `gxWindow` outright; we keep `gxWindow`, which is the CVar our configs already persist.) Bevy's own `WindowMode::Fullscreen` arm is a liability besides — it `expect`s a
 //! monitor at creation and `panic!`s on a live change that cannot resolve one
 //! (`bevy_winit::winit_windows:91`, `system.rs:333`).
 //!

@@ -114,8 +114,18 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     (crate::vplates::CVAR_FRIENDS, "0"),
     // World detail (0992): 1.12's video-panel var (the ENVIRONMENT_DETAIL slider, 0..2) over
     // the clutter-density knob — 0 is the client's bare frillDensity baseline (×1 = 16 visits),
-    // each step +1×; the "2" default IS ClutterConfig's shipped ×3 (the reference's High).
-    ("WorldDetail", "2"),
+    // each step +1×, so 0/1/2 are the 16/32/48 `SetWorldDetail` itself writes.
+    //
+    // **"1", not "2" (1649).** This shipped at High because that is the panel's top stop, not
+    // because the reference runs there. It does not: `frillDensity` registers at **16**, and on a
+    // first launch `hwDetect` overwrites it from `VideoHardware.dbc` — **24** on any D3D9-class
+    // part (fallback row 170) and **8** on the weakest (row 168). Both sit BELOW this panel's
+    // Medium, and the fresh-install 24 is not on a stop at all: the reference's own slider cannot
+    // express what its hardware detection chose. So every stop we could pick is a divergence, and
+    // High was the most expensive one available — 3x the registered default and 2x what a fresh
+    // install actually draws. Medium is the nearest stop that is still no sparser than the
+    // reference's own fresh install, which is the side to err on for a knob about ground cover.
+    ("WorldDetail", "1"),
     // Mouse Sensitivity (1140): 1.12's own `mousespeed` slider (UIOptionsFrameSliders, 0.5..1.5
     // step 0.05), a MULTIPLIER over the camera's own per-pixel rate — which was a frozen constant
     // until this row. Default "1" is the shipped feel exactly, welded to LookConfig::default().
@@ -209,10 +219,12 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // `gxRestart = 1` does not apply (wgpu swaps the presentation interval live, so the box takes
     // effect on click), and `$WOW_NOVSYNC=1` overrides it session-only, below.
     ("gxVSync", "1"),
-    // **Display mode** (decision 1627) — 1.12's own `gxWindow`, the Video Options *Windowed Mode*
-    // checkbox (`WINDOWED_MODE` / `OPTION_TOOLTIP_WINDOWED_MODE` are both in the reference's
-    // GlobalStrings; see `reference/1.12-globals.tsv`). The knob is
-    // [`crate::video::VideoConfig::display`], which the window's `mode` follows.
+    // **Display mode** (decisions 1627, 1650) — 1.12's own `gxWindow`, worn since 1650 as modern
+    // Classic's two-entry *Display Mode* dropdown rather than 1.12's *Windowed Mode* checkbox: the
+    // two states 1627 settled on ARE that client's two (its own `Graphics.lua` builds the list from
+    // `VIDEO_OPTIONS_WINDOWED_FULLSCREEN` and `VIDEO_OPTIONS_WINDOWED`, and nothing else), and a
+    // checkbox could only name one of them. The knob is [`crate::video::VideoConfig::display`],
+    // which the window's `mode` follows.
     //
     // Default **"0" = not windowed**, which is the reference's own default and every shipped
     // game's — but "0" does NOT mean what it means in 1.12. The reference mode-sets the display;
@@ -1207,8 +1219,10 @@ mod tests {
         assert_eq!(d[crate::vplates::CVAR_FRIENDS] != 0.0, plates.friends);
         assert!(plates.enemies && !plates.friends, "the shipped boot pair");
         // ClutterConfig::default() reads $WOW_CLUTTER_DENSITY; the registered default mirrors
-        // the env-less ×3 literal (clutter.rs: "Default ×3 = High") on the panel's 0..2 scale.
-        assert_eq!(d["WorldDetail"], 2.0);
+        // the env-less ×2 literal (clutter.rs: "Default ×2 = Medium", 1649) on the panel's 0..2
+        // scale. The weld is the point: the CVar's default and the engine's must be the same
+        // ground cover, or a fresh config writes a row the world does not agree with.
+        assert_eq!(d["WorldDetail"], 1.0);
         // The bubble pair (1139) welds to BubbleConfig's defaults — including the "1" that
         // deliberately disagrees with the binary's registered `ChatBubblesParty` "0" (0598).
         let bubbles = BubbleConfig::default();
