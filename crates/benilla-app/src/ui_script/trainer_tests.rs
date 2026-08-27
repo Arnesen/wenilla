@@ -230,12 +230,12 @@ fn shipped_trainer_frame_drives_end_to_end() {
 
     // Row 1 renders the "Arms" header (its name, no indent); row 2 the first service.
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService1Name:GetText()")
+        s.eval::<String>("return BenillaTrainerService1Text:GetText()")
             .unwrap(),
         "Arms"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Name:GetText()")
+        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
             .unwrap(),
         "  Heroic Strike"
     );
@@ -318,7 +318,7 @@ fn clicking_a_header_row_collapses_its_group() {
     // Full tree: 2 headers + 4 services = 6 rows; row 2 is Heroic Strike.
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Name:GetText()")
+        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
             .unwrap(),
         "  Heroic Strike"
     );
@@ -329,7 +329,7 @@ fn clicking_a_header_row_collapses_its_group() {
         .unwrap();
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 4);
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Name:GetText()")
+        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
             .unwrap(),
         "Fury",
         "Arms folded; its header (row 1) now abuts the Fury header (row 2)"
@@ -475,11 +475,11 @@ fn wheel_over_a_row_scrolls_the_list() {
     s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    let row1 = "return BenillaTrainerService1Name:GetText()";
+    let row1 = "return BenillaTrainerService1Text:GetText()";
     // At the top: row 1 is the "Arms" header, row 2 the first service.
     assert_eq!(s.eval::<String>(row1).unwrap(), "Arms");
     assert_eq!(
-        s.eval::<String>("return BenillaTrainerService2Name:GetText()")
+        s.eval::<String>("return BenillaTrainerService2Text:GetText()")
             .unwrap(),
         "  Service 01"
     );
@@ -506,16 +506,34 @@ fn wheel_over_a_row_scrolls_the_list() {
     assert_eq!(s.eval::<String>(row1).unwrap(), "  Service 01");
 }
 
-/// The selected service row's text renders white (HIGHLIGHT), legible against its colour glow — a
-/// deliberate divergence from the ref (which whitens only the subtext, keeping the name state-coloured).
-/// Selecting the unavailable Cleave (red when unselected) whitens its name; selecting away restores it.
+/// The selected service row's name renders white (HIGHLIGHT), legible against its colour glow — and
+/// so does a HOVERED one. Both are the reference's own behaviour, through one mechanism: the row's
+/// name is the button's `<ButtonText>` under a `<HighlightFont inherits="GameFontHighlight">`, the
+/// engine swaps that instance in while the cursor is on the row, and `LockHighlight()` pins it for
+/// the selection (Blizzard_TrainerUI.lua l.183). `SetTextColor` writes the NORMAL instance only, so
+/// the state colour cannot follow the label into either state — which is exactly why it goes white.
+///
+/// An earlier revision of this test called the white name "a deliberate divergence from the ref
+/// (which whitens only the subtext)". The ref whitens the subtext *by hand* precisely BECAUSE the
+/// subtext is a child FontString the lock cannot reach; the name it leaves to the lock. Ours could
+/// not, because the name was a child FontString too and the engine's highlighted label fell back to
+/// the normal state's colour — so the white was hand-painted here and absent on hover entirely
+/// (decision 1605).
 #[test]
-fn selected_service_row_text_is_white() {
+fn a_selected_or_hovered_service_row_paints_its_name_white() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
     s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The name really is the button's own label now — a child FontString would leave
+    // GetFontString() nil and no per-state font could reach it.
+    assert!(
+        s.eval::<bool>("return BenillaTrainerService1:GetFontString() ~= nil")
+            .unwrap(),
+        "the row name is the Button's ButtonText, the only region per-state fonts reach"
+    );
 
     // Cleave (index 3) is unavailable → red when not selected. Select it → its name goes white.
     s.run("SelectTrainerService(3); BenillaTrainerFrame_Update()")
@@ -533,6 +551,31 @@ fn selected_service_row_text_is_white() {
     assert!(
         text_has_color(&s.extract(), "Cleave", [0.9, 0.0, 0.0]),
         "an unselected unavailable row is red again"
+    );
+
+    // Now hover it, selecting nothing: the HighlightFont instance takes over and the row lights up.
+    let (x, y) = text_center(&s.extract(), "Cleave");
+    s.mouse_move(x, y);
+    s.resolve();
+    assert!(
+        text_has_color(&s.extract(), "Cleave", [1.0, 1.0, 1.0]),
+        "a hovered row's name renders white, with no script doing it"
+    );
+    assert!(
+        text_has_color(&s.extract(), "Heroic Strike", [1.0, 1.0, 1.0]),
+        "and the SELECTED row stays white while another is hovered"
+    );
+
+    // Cursor off the list: the hovered row falls back to its state colour, the selected one holds.
+    s.mouse_move(1000.0, 20.0);
+    s.resolve();
+    assert!(
+        text_has_color(&s.extract(), "Cleave", [0.9, 0.0, 0.0]),
+        "cursor away: red again"
+    );
+    assert!(
+        text_has_color(&s.extract(), "Heroic Strike", [1.0, 1.0, 1.0]),
+        "the selection's white is the LOCK, not the hover"
     );
 }
 
@@ -767,7 +810,8 @@ fn recipe_menu() -> TrainerState {
 /// (`ClassTrainerFrameTemplates.xml`'s `<ButtonText>` at width 0 + the per-row
 /// `SetPoint("LEFT", <row>Text, "RIGHT", 10, 0)`), read off the player's chain.
 ///
-/// The mutation check is the first assertion: put a `<Size>` back on `$parentName` and the request
+/// The mutation check is the first assertion: put a `<Size>` back on the row's `<ButtonText>` and
+/// the request
 /// carries a wrap width, the long name measures two lines, and its height passes the row height.
 #[test]
 fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
@@ -818,7 +862,7 @@ fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
     let row_of = |s: &mut UiScript, needle: &str| -> i64 {
         s.eval::<i64>(&format!(
             "for i = 1, 11 do local b = getglobal('BenillaTrainerService' .. i) \
-             local t = b.name:GetText() if t and strfind(t, '{needle}', 1, 1) then return i end \
+             local t = b:GetText() if t and strfind(t, '{needle}', 1, 1) then return i end \
              end return 0"
         ))
         .unwrap()
@@ -830,7 +874,8 @@ fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
     let geom = |s: &mut UiScript, row: i64| -> (f32, f32, f32, f32) {
         s.eval::<(f32, f32, f32, f32)>(&format!(
             "local b = getglobal('BenillaTrainerService{row}') \
-             return b.name:GetHeight(), b.name:GetRight(), b.subtext:GetLeft(), b:GetHeight()"
+             local n = b:GetFontString() \
+             return n:GetHeight(), n:GetRight(), b.subtext:GetLeft(), b:GetHeight()"
         ))
         .unwrap()
     };

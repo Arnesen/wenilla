@@ -158,6 +158,7 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
+mod world_backdrop;
 mod world_state;
 mod world_state_ui;
 
@@ -224,6 +225,7 @@ use ui_trade::UiTradePlugin;
 use ui_tradeskill::UiTradeSkillPlugin;
 use ui_trainer::UiTrainerPlugin;
 use ui_unit::UiUnitPlugin;
+use world_backdrop::WorldBackdropPlugin;
 
 // The `benilla` launcher shim (the bin package) is this library's only caller: it stamps the
 // build id at compile time and hands it into [`run`]. Re-exported so the shim needs no bevy
@@ -532,6 +534,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The player-UI quad pass (decision 0068 §2): its own composited-above-the-world,
     // below-the-egui-dev-overlays camera + sorted-quad renderer. `$WOW_UI_DEMO=1` seeds a proof scene.
     .add_plugins(PlayerUiPlugin)
+    // The world's frame, rendered off-screen and handed to the UI pass as its first quad — the
+    // seam that puts the UI-over-world blend back into gamma bytes (0161/0254's last piece).
+    // Registered AFTER the UI pass: it writes `UiQuads`, which that plugin owns.
+    .add_plugins(WorldBackdropPlugin)
     // The HUD minimap (decision 0203 phase 1): fills the `<Minimap>` widget's extracted hole with
     // the streamed tile window + mask + player arrow, and feeds the zone text.
     .add_plugins(minimap::MinimapPlugin)

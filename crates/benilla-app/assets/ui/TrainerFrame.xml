@@ -276,9 +276,15 @@
                 if index <= numServices then
                     local name, subText, serviceType, isExpanded = GetTrainerServiceInfo(index)
                     if not name then name = UNKNOWN_LABEL end
+                    -- Every row is unlocked here and the selected one re-locked below (ref l.183/190).
+                    -- The lock is what paints a selected row's name white: the template's
+                    -- `<HighlightFont inherits="GameFontHighlight">` instance wins over the state
+                    -- colour SetTextColor writes, which reaches the NORMAL instance only. It reaches
+                    -- nothing else on a service row — the branch below blanks that row's fold glow.
+                    button:UnlockHighlight()
                     if serviceType == "header" then
-                        button.name:SetText(name)
-                        button.name:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+                        button:SetText(name)
+                        button:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
                         button.subtext:SetText("")
                         if isExpanded then
                             button:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
@@ -289,20 +295,24 @@
                     else
                         button:SetNormalTexture("")
                         button.foldHighlight:SetTexture("")
-                        button.name:SetText("  " .. name)
+                        button:SetText("  " .. name)
                         if subText and subText ~= "" then
                             button.subtext:SetText(format(PARENS_TEMPLATE, subText))
                         else
                             button.subtext:SetText("")
                         end
+                        -- The rank rides the NAME's right edge, wherever the name ended (ref l.157,
+                        -- B253's flow row) — re-anchored every repaint because the name's width is
+                        -- the thing that changes.
+                        button.subtext:SetPoint("LEFT", getglobal(button:GetName() .. "Text"), "RIGHT", 10, 0)
                         if serviceType == "available" then
-                            button.name:SetTextColor(0, 1.0, 0)
+                            button:SetTextColor(0, 1.0, 0)
                             button.subR, button.subG, button.subB = 0, 0.6, 0
                         elseif serviceType == "used" then
-                            button.name:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
+                            button:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
                             button.subR, button.subG, button.subB = 0.5, 0.5, 0.5
                         else
-                            button.name:SetTextColor(0.9, 0, 0)
+                            button:SetTextColor(0.9, 0, 0)
                             button.subR, button.subG, button.subB = 0.6, 0, 0
                         end
                         button.subtext:SetTextColor(button.subR, button.subG, button.subB)
@@ -311,7 +321,8 @@
                     button:Show()
                 else
                     button.serviceIndex = nil
-                    button.name:SetText("")
+                    button:UnlockHighlight()
+                    button:SetText("")
                     button.subtext:SetText("")
                     button:SetNormalTexture("")
                     button.foldHighlight:SetTexture("")
@@ -341,12 +352,15 @@
                 end
                 hl:SetPoint("TOPLEFT", selButton, "TOPLEFT", 0, 0)
                 hl:Show()
-                -- The selected row's text goes white (HIGHLIGHT) — a deliberate divergence from the ref,
-                -- which whitens only the subtext + LockHighlight and leaves the name state-coloured: the
-                -- director wants the whole selected row legible against its colour glow (a red/gray glow
-                -- swallows red/gray text). Runs AFTER the per-row state colouring above, so it wins for
-                -- the selected row; subR/subG/subB go white too so a hover-then-leave keeps it white.
-                selButton.name:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                -- The whole selected row goes white, and it is the ref's own pair of moves (l.183-184):
+                -- LockHighlight for the NAME (the button's label, so the white comes from its
+                -- HighlightFont instance, not from a repaint that the next Update would undo) and an
+                -- explicit whiten for the SUBTEXT, which is a child FontString the lock cannot reach.
+                -- An earlier revision called the white name a deliberate divergence "the ref does not
+                -- do"; the ref does it, through the lock this window had no engine method for at the
+                -- time (decision 1605). subR/subG/subB go white too so a hover-then-leave keeps the
+                -- subtext white.
+                selButton:LockHighlight()
                 selButton.subtext:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
                 selButton.subR, selButton.subG, selButton.subB =
                     HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b
@@ -558,14 +572,33 @@
         <Size><AbsDimension x="293" y="16"/></Size>
         <Layers>
             <Layer level="ARTWORK">
-                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
-                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="22" y="0"/></Offset></Anchor></Anchors>
-                </FontString>
-                <FontString name="$parentSubText" inherits="GameFontNormalSmall" justifyH="LEFT">
-                    <Anchors><Anchor point="LEFT" relativeTo="$parentName" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
-                </FontString>
+                <!-- NO <Anchors> — Update SetPoints this to the row's own label every repaint, the
+                     ref's own move (`skillSubText:SetPoint("LEFT", <row>Text, "RIGHT", 10, 0)`,
+                     Blizzard_TrainerUI.lua l.157). A `relativeTo="$parentText"` here CANNOT work and
+                     fails quietly: `<Layers>` is loader step 5 and the `<ButtonText>` is step 5b, so
+                     the label does not exist yet and the anchor falls back to the row (the loader
+                     does warn — `resolve_target`'s "does not resolve" line). The ref anchors it at
+                     runtime for its own reason anyway: the rank must follow a name whose width is
+                     only known once the name is measured (B253). -->
+                <FontString name="$parentSubText" inherits="GameFontNormalSmall" justifyH="LEFT"/>
             </Layer>
         </Layers>
+        <!-- THE SERVICE NAME IS THE BUTTON'S OWN ButtonText (the ref's `ClassTrainerSkill<n>Text`),
+             under the base's font TRIO — that is what turns a row white under the cursor and holds
+             the selected row white, with no script involved: `GameFontHighlight` is white, the engine
+             swaps the highlighted font instance in on hover, and `LockHighlight()` pins it for the
+             selection. It was a `$parentName` FontString until decision 1605, on a stale note that
+             `Button:SetTextColor`/`LockHighlight` had no engine method. Carries NO `<Size>` — B253's
+             flow row: the name measures to its own text and `$parentSubText` follows its right edge,
+             which is the reference's own `<ButtonText>`-at-width-0 plus per-row
+             `SetPoint("LEFT", <row>Text, "RIGHT", 10, 0)`. TradeSkillFrame.xml and CraftFrame.xml are
+             the twins (both fixed-column, so both keep an explicit width). -->
+        <ButtonText name="$parentText" justifyH="LEFT">
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="22" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormal" justifyH="LEFT"/>
+        <HighlightFont inherits="GameFontHighlight" justifyH="LEFT"/>
+        <DisabledFont inherits="GameFontDisable" justifyH="LEFT"/>
         <!-- The +/- fold slot + its hover glow: meaningful for header rows (Update sets +/- there),
              blanked for services. -->
         <NormalTexture file="Interface\Buttons\UI-MinusButton-UP">
@@ -578,7 +611,6 @@
         </HighlightTexture>
         <Scripts>
             <OnLoad>
-                self.name = getglobal(self:GetName() .. "Name")
                 self.subtext = getglobal(self:GetName() .. "SubText")
                 self.foldHighlight = self:GetHighlightTexture()
             </OnLoad>

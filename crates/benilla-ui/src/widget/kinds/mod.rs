@@ -441,7 +441,9 @@ pub struct ButtonState {
     /// object — the client's per-state CFontString font swap (UIPanelButtonTemplate's gold
     /// normal / white highlight / gray disabled label). `None` = keep the label's own paint.
     pub normal_font: Option<String>,
-    /// See [`ButtonState::normal_font`] — the hovered state (falls back to `normal_font`).
+    /// See [`ButtonState::normal_font`] — the highlighted state (hovered **or**
+    /// [`locked_highlight`](ButtonState::locked_highlight)). `None` means the button has no
+    /// highlight instance at all and the label stays on the normal one, colour included.
     pub highlight_font: Option<String>,
     /// See [`ButtonState::normal_font`] — the disabled state.
     pub disabled_font: Option<String>,
@@ -462,13 +464,18 @@ pub struct ButtonState {
     /// (`info.textR/G/B`, isTitle's NORMAL-yellow and notClickable's HIGHLIGHT-white recolors of
     /// a disabled row). `None` = the state font's paint.
     pub normal_color: Option<[f32; 4]>,
-    /// See [`ButtonState::normal_color`] — the hovered state (falls back to `normal_color`).
+    /// See [`ButtonState::normal_color`] — the highlighted state. It does **not** fall back to
+    /// `normal_color`: each state is its own font instance, so a `SetTextColor` cannot reach the
+    /// highlighted label (which is why `UIDropDownMenu.lua` always pairs the two setters).
     pub highlight_color: Option<[f32; 4]>,
     /// See [`ButtonState::normal_color`] — the disabled state.
     pub disabled_color: Option<[f32; 4]>,
-    /// `LockHighlight()` — the HighlightTexture draws regardless of hover until
+    /// `LockHighlight()` — the button reads as highlighted regardless of hover until
     /// `UnlockHighlight()` (ref `CButton::LockHighlight`; the dropdown kit keeps a checked row's
-    /// highlight lit).
+    /// highlight lit). That covers BOTH halves of the highlighted look: the HighlightTexture
+    /// ([`Self::region_visible`]) and the label's font instance (`script::extract`). The list
+    /// windows lean on the second alone — a tradeskill/craft/trainer recipe row blanks its
+    /// highlight texture to `""` and locks the selected row anyway, purely for the white label.
     pub locked_highlight: bool,
 }
 

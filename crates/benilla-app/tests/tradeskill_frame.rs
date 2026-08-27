@@ -11,7 +11,8 @@
 //! text, a REAL menu-row click driving the exclusive filter, the "All" row restoring it).
 
 use benilla_ui::script::{
-    TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState, UiScript,
+    CraftRecipe, CraftState, CraftTooltip, TradeSkillDifficulty, TradeSkillReagent,
+    TradeSkillRecipe, TradeSkillState, UiScript,
 };
 
 const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
@@ -466,4 +467,232 @@ fn a_row_click_shows_the_selection_glow_and_a_row_hover_shows_nothing() {
             "{f} must not exist"
         );
     }
+}
+
+/// **The recipe list lights its rows white — under the cursor, and on the selected one.** The
+/// director put the real client's Blacksmithing window next to ours: there, the hovered row and the
+/// selected row are both white, while every other recipe wears its difficulty colour. Ours wore the
+/// difficulty colour everywhere, hover and selection included.
+///
+/// One mechanism does both, and it is the row BUTTON's, not a script's.
+/// `ClassTrainerSkillButtonTemplate` — the base under this window's rows, Craft's and the class
+/// trainer's — declares `<HighlightFont inherits="GameFontHighlight">` (white) beside its
+/// `<NormalFont>`, and `TradeSkillFrame_Update` paints each row with
+/// `skillButton:SetTextColor(difficulty)` and then calls `LockHighlight()` on the selected one
+/// (Blizzard_TradeSkillUI.lua l.113/144). A `SetTextColor` writes the NORMAL font instance only, so
+/// it cannot reach a highlighted label — which is exactly why the reference's rows still turn white.
+///
+/// Ours could not, for two reasons that had to be fixed together (decision 1605): the row's label
+/// was a child `$parentName` FontString rather than the button's own `<ButtonText>`, so no per-state
+/// font could reach it; and the engine's highlighted label fell back to the normal state's colour,
+/// so even a ButtonText would have stayed orange. This test is the end-to-end pin — it reads the
+/// colour off the extracted text quad, not off any Lua state, so it fails if either half regresses.
+#[test]
+fn a_hovered_or_selected_recipe_row_paints_its_label_white() {
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_screen_size(1024.0, 768.0);
+    s.set_trade_skill(Some(state()));
+    s.fire_event("TRADE_SKILL_SHOW", vec![]);
+
+    // Row 1 is the "Mail" header; rows 2 and 3 are its two Medium recipes, and opening the window
+    // auto-selects the first of them.
+    assert_eq!(
+        s.eval::<i64>("return GetTradeSkillSelectionIndex()")
+            .unwrap(),
+        2,
+        "the show-time auto-selection landed on the first recipe"
+    );
+
+    // The label really is the button's own ButtonText now — a child FontString would leave
+    // GetFontString() nil and take every per-state font with it.
+    assert!(
+        s.eval::<bool>("return BenillaTradeSkillSkill2:GetFontString() ~= nil")
+            .unwrap(),
+        "the row label is the Button's ButtonText, the only region per-state fonts reach"
+    );
+
+    let row_color = |s: &mut UiScript, n: i64| -> [f32; 4] {
+        let text = s
+            .eval::<String>(&format!("return BenillaTradeSkillSkill{n}:GetText()"))
+            .unwrap();
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                benilla_ui::script::QuadContent::Text {
+                    text: Some(t),
+                    color,
+                    ..
+                } if t == text => color,
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no text quad for row {n} (\"{text}\")"))
+    };
+    let park_cursor_off_the_list = |s: &mut UiScript| {
+        s.resolve();
+        s.mouse_move(1000.0, 20.0);
+    };
+    let hover_row = |s: &mut UiScript, n: i64| {
+        s.resolve();
+        let (x, y) = (
+            s.eval::<f64>(&format!(
+                "return (BenillaTradeSkillSkill{n}:GetLeft() + BenillaTradeSkillSkill{n}:GetRight()) / 2"
+            ))
+            .unwrap(),
+            s.eval::<f64>(&format!(
+                "return (BenillaTradeSkillSkill{n}:GetTop() + BenillaTradeSkillSkill{n}:GetBottom()) / 2"
+            ))
+            .unwrap(),
+        );
+        s.mouse_move(x as f32, y as f32);
+    };
+
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    const MEDIUM: [f32; 4] = [1.0, 1.0, 0.0, 1.0]; // TradeSkillTypeColor["medium"], the book's own
+
+    park_cursor_off_the_list(&mut s);
+    assert_eq!(
+        row_color(&mut s, 2),
+        WHITE,
+        "the SELECTED row is white with the cursor nowhere near it — LockHighlight, not a repaint"
+    );
+    assert_eq!(
+        row_color(&mut s, 3),
+        MEDIUM,
+        "an unselected, unhovered recipe wears its difficulty colour"
+    );
+
+    hover_row(&mut s, 3);
+    assert_eq!(
+        row_color(&mut s, 3),
+        WHITE,
+        "hovered: the HighlightFont instance is in force over SetTextColor's difficulty paint"
+    );
+    assert_eq!(
+        row_color(&mut s, 2),
+        WHITE,
+        "and the selected row stays lit while another row is hovered"
+    );
+
+    // Click row 3: the white follows the selection, and row 2 falls back to its difficulty colour.
+    s.run("BenillaTradeSkillSkill3:Click()").unwrap();
+    pump(&mut s);
+    park_cursor_off_the_list(&mut s);
+    assert_eq!(
+        s.eval::<i64>("return GetTradeSkillSelectionIndex()")
+            .unwrap(),
+        3
+    );
+    assert_eq!(row_color(&mut s, 3), WHITE, "the new selection is white");
+    assert_eq!(
+        row_color(&mut s, 2),
+        MEDIUM,
+        "the old selection is UNLOCKED back to its difficulty colour, not left lit"
+    );
+}
+
+/// **The craft list lights the same way, off the same base template.** `CraftButtonTemplate` and
+/// `TradeSkillSkillButtonTemplate` both inherit `ClassTrainerSkillButtonTemplate`, so its
+/// `<HighlightFont inherits="GameFontHighlight">` is one mechanism serving both windows — and
+/// `Craft_Update` locks its selected row exactly as the tradeskill one does (Blizzard_CraftUI.lua
+/// l.234). Ours had the same `$parentName`-FontString workaround in both files, so fixing only the
+/// window the director was looking at would have left the enchanting book wrong beside it
+/// (decision 1605).
+#[test]
+fn a_hovered_or_selected_craft_row_paints_its_label_white() {
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_screen_size(1024.0, 768.0);
+
+    let recipe = |spell_id: u32, name: &str| CraftRecipe {
+        spell_id,
+        name: name.into(),
+        sub_name: String::new(),
+        difficulty: TradeSkillDifficulty::Medium,
+        num_available: 1,
+        icon: Some("Interface\\Icons\\Spell_Holy_Heal".into()),
+        description: None,
+        needs_item_target: false,
+        reagents: vec![],
+        tools: vec![],
+        tooltip: CraftTooltip::Spell(spell_id),
+        spell_level: 0,
+    };
+    s.set_craft(Some(CraftState {
+        name: "Enchanting".into(),
+        rank: 100,
+        max_rank: 150,
+        craft_type: 3,
+        recipes: vec![
+            recipe(7420, "Enchant Bracer - Minor Health"),
+            recipe(7426, "Enchant Chest - Minor Absorption"),
+        ],
+    }));
+    s.fire_event("CRAFT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    assert!(
+        s.eval::<bool>("return BenillaCraft1:GetFontString() ~= nil")
+            .unwrap(),
+        "the craft row name is the Button's ButtonText"
+    );
+
+    let row_color = |s: &mut UiScript, n: i64| -> [f32; 4] {
+        let text = s
+            .eval::<String>(&format!("return BenillaCraft{n}:GetText()"))
+            .unwrap();
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                benilla_ui::script::QuadContent::Text {
+                    text: Some(t),
+                    color,
+                    ..
+                } if t == text => color,
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no text quad for craft row {n} (\"{text}\")"))
+    };
+
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    const MEDIUM: [f32; 4] = [1.0, 1.0, 0.0, 1.0]; // CraftTypeColor["medium"]
+
+    // Row 1 is the show-time selection; row 2 is not.
+    s.run("SelectCraft(1); BenillaCraftFrame_Update()").unwrap();
+    s.resolve();
+    s.mouse_move(1000.0, 20.0);
+    assert_eq!(
+        row_color(&mut s, 1),
+        WHITE,
+        "the selected craft row is white"
+    );
+    assert_eq!(
+        row_color(&mut s, 2),
+        MEDIUM,
+        "an unselected one wears its difficulty colour"
+    );
+
+    // Hover row 2.
+    s.resolve();
+    let (x, y) = (
+        s.eval::<f64>("return (BenillaCraft2:GetLeft() + BenillaCraft2:GetRight()) / 2")
+            .unwrap(),
+        s.eval::<f64>("return (BenillaCraft2:GetTop() + BenillaCraft2:GetBottom()) / 2")
+            .unwrap(),
+    );
+    s.mouse_move(x as f32, y as f32);
+    assert_eq!(row_color(&mut s, 2), WHITE, "hovered: white");
+
+    // And the selection follows a click, releasing the old row's lock.
+    s.run("SelectCraft(2); BenillaCraftFrame_Update()").unwrap();
+    s.resolve();
+    s.mouse_move(1000.0, 20.0);
+    assert_eq!(row_color(&mut s, 2), WHITE);
+    assert_eq!(
+        row_color(&mut s, 1),
+        MEDIUM,
+        "the old selection is UNLOCKED, not left lit"
+    );
 }

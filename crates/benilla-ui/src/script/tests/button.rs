@@ -485,6 +485,117 @@ fn button_label_repaints_by_state_font_object() {
     assert!((c[0] - 0.1).abs() < 1e-6 && (c[1] - 0.2).abs() < 1e-6);
 }
 
+/// **The highlighted label is its own font instance — and `LockHighlight` enters it.** The two
+/// halves of the recipe-list look the director asked for: a row turns white under the cursor, and
+/// the SELECTED row stays white with the cursor elsewhere.
+///
+/// Both are one mechanism in the reference. `ClassTrainerSkillButtonTemplate` (the base under
+/// TradeSkill's, Craft's and the class trainer's rows) declares
+/// `<HighlightFont inherits="GameFontHighlight">`, and each window paints its rows by difficulty
+/// with `skillButton:SetTextColor(...)` — orange, yellow, green, gray. If a `SetTextColor` reached
+/// the highlighted state, hovering a row would leave it orange; it does not, because the highlight
+/// instance is a different font instance and the normal one's colour cannot reach it. That is the
+/// first assertion below.
+///
+/// The second is `LockHighlight`. `TradeSkillFrame_Update` blanks a recipe row's highlight texture
+/// (`getglobal("TradeSkillSkill"..i.."Highlight"):SetTexture("")`, Blizzard_TradeSkillUI.lua l.131)
+/// and *then* locks the row it selected (l.144) — with no texture left to pin, the lock can only be
+/// reaching the label. Craft (Blizzard_CraftUI.lua l.234) and the trainer
+/// (Blizzard_TrainerUI.lua l.183) do the same.
+#[test]
+fn a_locked_or_hovered_button_wears_its_highlight_font_over_its_normal_color() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.register_font_object(
+        "RowNormal",
+        FontObject {
+            color: Some([1.0, 0.82, 0.0, 1.0]),
+            height: Some(12.0),
+            ..Default::default()
+        },
+    );
+    s.register_font_object(
+        "RowHighlight",
+        FontObject {
+            color: Some([1.0, 1.0, 1.0, 1.0]),
+            height: Some(12.0),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        b = CreateFrame("Button", "RowBtn")
+        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetSize(100, 20)
+        b:SetText("Rough Copper Vest")
+        b:SetTextFontObject("RowNormal")
+        b:SetHighlightFontObject("RowHighlight")
+        -- The difficulty paint every one of the three list windows applies to every row.
+        b:SetTextColor(1.0, 0.5, 0.25)
+    "#,
+    )
+    .unwrap();
+
+    let label_color = |s: &mut crate::script::UiScript| {
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Text {
+                    text: Some(t),
+                    color,
+                    ..
+                } if t == "Rough Copper Vest" => Some(color),
+                _ => None,
+            })
+            .expect("label text quad")
+    };
+
+    s.resolve();
+    s.mouse_move(400.0, 300.0); // nowhere near the row
+    assert_eq!(
+        label_color(&mut s),
+        Some([1.0, 0.5, 0.25, 1.0]),
+        "at rest the row wears the difficulty colour SetTextColor gave it"
+    );
+
+    s.resolve();
+    s.mouse_move(150.0, 110.0); // over the row
+    assert_eq!(
+        label_color(&mut s),
+        Some([1.0, 1.0, 1.0, 1.0]),
+        "hovered: the HIGHLIGHT instance is in force, and the normal colour cannot reach it"
+    );
+
+    // Cursor away again, but the row is the selected one.
+    s.resolve();
+    s.mouse_move(400.0, 300.0);
+    s.run("b:LockHighlight()").unwrap();
+    assert_eq!(
+        label_color(&mut s),
+        Some([1.0, 1.0, 1.0, 1.0]),
+        "locked: white with the cursor elsewhere — the selected recipe row"
+    );
+    s.run("b:UnlockHighlight()").unwrap();
+    assert_eq!(
+        label_color(&mut s),
+        Some([1.0, 0.5, 0.25, 1.0]),
+        "unlocked: back to the difficulty colour"
+    );
+
+    // A button with no highlight instance keeps the normal one whole, hover or not — the shape
+    // every plain labelled Button in the corpus has.
+    s.run(r#"b:SetHighlightFontObject(nil); b:SetText("Rough Copper Vest")"#)
+        .unwrap();
+    s.resolve();
+    s.mouse_move(150.0, 110.0);
+    assert_eq!(
+        label_color(&mut s),
+        Some([1.0, 0.5, 0.25, 1.0]),
+        "no <HighlightFont> → hover changes nothing"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// **`Button:GetTextWidth` / `GetTextHeight`** — the reference's own Button text-extent readers
 /// (`0x782290` / `0x782390`; wow-re `widget-api-batch-benilla.md` Q8 carves them present on Button
 /// and `GetStringWidth` **absent**). Both forward to the label FontString's own extent slots, which

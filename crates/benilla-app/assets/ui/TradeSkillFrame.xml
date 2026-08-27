@@ -110,19 +110,22 @@
                onto the ONE input-box instance in `BenillaTradeSkillFrame_OnLoad`
                (`function box:SetNumber(n) self:SetText(tostring(floor(n or 0))) end`), so every call
                site below still reads `TradeSkillInputBox:SetNumber(...)` exactly like the reference.
-             - `Button:SetTextColor`/`:LockHighlight`/`:UnlockHighlight` have no native method (grepped;
-               `benilla-ui/src/script/button.rs` ships texture-pairs/SetText/Enable/Disable/
-               RegisterForClicks/SetButtonState/Click only) — row coloring routes through a named child
-               FontString (`$parentName`, TrainerFrame.xml's own row-template shape) instead of the
-               button itself; the persistent selection glow is the separate
-               `BenillaTradeSkillHighlightFrame` (TrainerFrame.xml's own selection-highlight precedent)
-               instead of Lock/UnlockHighlight — no independent hover glow is added beyond it
-               (TrainerFrame's own rows carry none either). **The Frame is the thing shown, hidden and
+             - (CLOSED — the row is the reference's shape now.) An earlier revision of this bullet
+               recorded `Button:SetTextColor`/`:LockHighlight`/`:UnlockHighlight` as having no engine
+               method, and routed row colouring through a child `$parentName` FontString instead of
+               the button's own label. The engine has shipped all three for a long time; the note went
+               stale and the workaround outlived it, which cost this window the white hover/selected
+               label the real client has (decision 1605). The row now carries a `<ButtonText>` under
+               the base's `<NormalFont>/<HighlightFont>/<DisabledFont>` trio, Update calls
+               `button:SetTextColor` / `LockHighlight` / `UnlockHighlight` exactly where the ref does
+               (l.113/127/144/146), and the white text is the HighlightFont instance, not a repaint.
+               **The selection is still TWO things.** The orange bar is
+               `BenillaTradeSkillHighlightFrame` — and **the Frame is what is shown, hidden and
                positioned; `BenillaTradeSkillHighlight` is only its texture, and only ever gets
-               `SetVertexColor`** (ref l.99/142-143 vs l.200) — Update addressed the texture for all
+               `SetVertexColor`** (ref l.99/142-143 vs l.200). Update addressed the texture for all
                four until decision 1598, which left the frame `hidden="true"` for the window's whole
-               life and meant NO selection ever painted. CraftFrame.xml/TrainerFrame.xml already split
-               the two correctly; this window was the outlier.
+               life and meant NO selection ever painted. The white label is the row's own highlight
+               lock, and the two are independent: 1598 restored the bar and the row stayed unlit.
              - `SecondsToTime`/`BuildColoredListString` (ref `UIParent.lua`) have no engine equivalent
                (they're Lua-side FrameXML utilities, not C API) — transcribed as GUARDED GLOBALS
                (`if not X then function X(...) ... end end`), BuffFrame.xml's own
@@ -441,16 +444,13 @@
                         button.skillIndex = skillIndex
                         local color = TradeSkillTypeColor[skillType]
                         if color then
-                            button.name:SetTextColor(color.r, color.g, color.b)
+                            button:SetTextColor(color.r, color.g, color.b)
                         end
                         -- Header row (ref l.118-127, wow-re `tradeskill` TU-B): the group name
                         -- verbatim, no "[n]" suffix, the +/- fold icon + its hover glow swapped on
-                        -- isExpanded. UnlockHighlight() (ref l.127) is dropped — no native
-                        -- Lock/UnlockHighlight (this file's header comment, deviation 7); the
-                        -- persistent selection glow below is the separate BenillaTradeSkillHighlight
-                        -- texture, never this button's own highlight lock.
+                        -- isExpanded.
                         if skillType == "header" then
-                            button.name:SetText(skillName)
+                            button:SetText(skillName)
                             if isExpanded then
                                 button:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
                             else
@@ -461,17 +461,29 @@
                             button:SetNormalTexture("")
                             getglobal(button:GetName() .. "Highlight"):SetTexture("")
                             if (numAvailable or 0) == 0 then
-                                button.name:SetText(" " .. skillName)
+                                button:SetText(" " .. skillName)
                             else
-                                button.name:SetText(" " .. skillName .. " [" .. numAvailable .. "]")
+                                button:SetText(" " .. skillName .. " [" .. numAvailable .. "]")
                             end
                         end
                         button:Show()
                         -- The selection glow only ever lands on a recipe row — SetSelection never
                         -- selects a header (deviation 1), so `selection` can't be one's index.
+                        --
+                        -- TWO separate things paint a selected row, and the ref does both here
+                        -- (l.142-146): the orange bar is BenillaTradeSkillHighlightFrame, and the
+                        -- WHITE LABEL is the row's own LockHighlight() — the base's
+                        -- `<HighlightFont inherits="GameFontHighlight">` over the difficulty colour
+                        -- SetTextColor just wrote. The lock reaches nothing else on a recipe row: the
+                        -- branch above blanked that row's HighlightTexture. Unlocking every other row
+                        -- covers both of the ref's own UnlockHighlight calls at once — l.146's for a
+                        -- passed-over recipe and l.127's for a header, which can never be `selection`.
                         if selection == skillIndex then
                             highlight:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
                             highlight:Show()
+                            button:LockHighlight()
+                        else
+                            button:UnlockHighlight()
                         end
                     end
                 else
@@ -827,17 +839,16 @@
         own row hover IS a real ref behavior") on the strength of it. Both are corrected: no OnEnter.
         Since `$parentSubText` is empty for every row of this window, the base's own hover recolour is
         invisible here too, so the row carries no hover script at all.
+
+        **The row still lights up on hover, and no script does it.** That is the base's
+        `<HighlightFont inherits="GameFontHighlight">` — the button's own highlighted font instance,
+        swapped in by the engine while the cursor is on the row and held by `LockHighlight()` on the
+        selected one. Reading 1598's "bare on hover" as "nothing happens on hover" is the trap this
+        paragraph exists to close: what the reference has no trace of is a *tooltip*, not the white
+        label (decision 1605).
     -->
     <Button name="BenillaTradeSkillSkillButtonTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="293" y="16"/></Size>
-        <Layers>
-            <Layer level="ARTWORK">
-                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
-                    <Size><AbsDimension x="267" y="16"/></Size>
-                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="22" y="0"/></Offset></Anchor></Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
         <!-- The +/- fold slot + its hover glow (TrainerFrame.xml's own BenillaTrainerServiceTemplate
              shape): Update sets the NormalTexture to +/- for a header row and blanks it for a recipe
              row (ref l.122-132); the named HighlightTexture is addressed by `getglobal(name.."Highlight")`
@@ -852,8 +863,23 @@
             <Size><AbsDimension x="16" y="16"/></Size>
             <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
         </HighlightTexture>
+        <!-- THE ROW LABEL IS THE BUTTON'S OWN ButtonText, not a child FontString — that is what
+             carries the white-on-hover/white-on-selected look (decision 1605). The base declares the
+             font TRIO, and the per-state instance is the whole mechanism: `GameFontHighlight` is white,
+             so a row `SetTextColor`'d to its difficulty still turns white under the cursor, and
+             `LockHighlight()` on the selected row holds it white with the cursor elsewhere. It was a
+             `$parentName` FontString in ARTWORK until 1605, back when this file's deviation 7 recorded
+             `Button:SetTextColor`/`LockHighlight` as having no engine method — long since untrue.
+             Kept at this file's own LEFT+22 / 267×16 rather than the base's `$parentHighlight`-relative
+             `x=0,y=13` auto-size, so the switch moved no pixel. -->
+        <ButtonText name="$parentText">
+            <Size><AbsDimension x="267" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="22" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormal" justifyH="LEFT"/>
+        <HighlightFont inherits="GameFontHighlight" justifyH="LEFT"/>
+        <DisabledFont inherits="GameFontDisable" justifyH="LEFT"/>
         <Scripts>
-            <OnLoad>self.name = getglobal(self:GetName() .. "Name")</OnLoad>
             <OnClick>BenillaTradeSkillSkillButton_OnClick(self, arg1)</OnClick>
         </Scripts>
     </Button>

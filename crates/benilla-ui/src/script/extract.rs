@@ -210,9 +210,9 @@ impl UiScript {
                     }
                     // A Button's state textures show by interaction state (the texture-array
                     // "current" pointer): a non-current state texture emits no quad this frame.
-                    // The ButtonText additionally re-points to the current STATE's font object
-                    // (disabled > hovered > normal; hover falls back to normal) — the client's
-                    // per-state label font swap (UIPanelButtonTemplate's gold/white/gray trio).
+                    // The ButtonText additionally re-points to the current STATE's font instance
+                    // (disabled > highlighted > normal) — the client's per-state label font swap
+                    // (UIPanelButtonTemplate's gold/white/gray trio).
                     let mut state_font: Option<&FontObject> = None;
                     let mut state_color: Option<[f32; 4]> = None;
                     // `Button:SetFont` — the face/size/flags written on the button's own embedded
@@ -230,24 +230,50 @@ impl UiScript {
                             continue;
                         }
                         if bs.text == Some(rh) {
-                            let name = if !bs.enabled {
-                                bs.disabled_font.as_ref()
-                            } else if hovered {
-                                bs.highlight_font.as_ref().or(bs.normal_font.as_ref())
+                            // The label inherits ONE of the button's three embedded font instances
+                            // WHOLE (normal `+0x33c` / highlight `+0x3b8` / disabled `+0x434`): the
+                            // client swaps which instance the label reads, it does not merge axes
+                            // across them. So the object and the colour are picked as a PAIR, and a
+                            // state with no font object of its own is not in force at all — the
+                            // label stays on the normal instance, face and colour together.
+                            //
+                            // The pairing is the load-bearing half, and it is what this used to get
+                            // wrong (the colour fell back to `normal_color` while the font did not).
+                            // `UIDropDownMenu.lua` sets every row colour through `SetTextColor`
+                            // **and** `SetHighlightTextColor` with the same values (l.216-220,
+                            // l.829-830) — a second call it would never need if the first reached
+                            // the hovered state. The tradeskill list leans on the other direction:
+                            // its rows are `SetTextColor`'d to the recipe's difficulty and still
+                            // turn white under the cursor, because `<HighlightFont
+                            // inherits="GameFontHighlight">` is the instance in force there
+                            // (`ClassTrainerFrameTemplates.xml` l.74) and a normal-instance colour
+                            // cannot reach it.
+                            //
+                            // `LockHighlight()` counts as highlighted HERE too, not only for the
+                            // HighlightTexture in `region_visible`. `TradeSkillFrame_Update` blanks
+                            // a recipe row's highlight texture to `""` and *then* locks the row it
+                            // selected (Blizzard_TradeSkillUI.lua l.131/144) — with no texture left
+                            // to pin, the lock's only possible effect on that row is this label
+                            // swap, which is the white text on the selected recipe. Craft
+                            // (l.234) and the class trainer (l.183) lock the same way.
+                            //
+                            // INFERRED, not byte-verified: that an unset state instance leaves the
+                            // label on the normal one. A null slot in the *texture* array draws
+                            // nothing (decision 0227) and a font instance with no object cannot
+                            // work that way — a disabled button with no `<DisabledFont>` still
+                            // shows its label. Every state-colour caller in our own UI ships the
+                            // matching font object, so the two readings agree on all of them.
+                            let highlighted = hovered || bs.locked_highlight;
+                            let (name, color) = if !bs.enabled && bs.disabled_font.is_some() {
+                                (bs.disabled_font.as_ref(), bs.disabled_color)
+                            } else if bs.enabled && highlighted && bs.highlight_font.is_some() {
+                                (bs.highlight_font.as_ref(), bs.highlight_color)
                             } else {
-                                bs.normal_font.as_ref()
+                                (bs.normal_font.as_ref(), bs.normal_color)
                             };
                             state_font = name.and_then(|n| model.font_object(n));
                             button_font = bs.font.as_ref();
-                            // The per-state color override (Button:Set*TextColor) — hover falls
-                            // back to the normal color, mirroring the font fallback above.
-                            state_color = if !bs.enabled {
-                                bs.disabled_color
-                            } else if hovered {
-                                bs.highlight_color.or(bs.normal_color)
-                            } else {
-                                bs.normal_color
-                            };
+                            state_color = color;
                         }
                     }
                     // A TITLE REGION NEVER DRAWS. It is a hit rectangle, not a visual: wow-re
