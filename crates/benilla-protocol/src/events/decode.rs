@@ -11,6 +11,40 @@ fn v3(v: Vector3d) -> [f32; 3] {
     [v.x, v.y, v.z]
 }
 
+/// **Who cast it** — the caster slot of `SMSG_SPELL_START`/`SMSG_SPELL_GO`, corrected for the one
+/// case where vmangos leaves that slot EMPTY.
+///
+/// Both packets carry a guid pair: slot 1 is *the cast item's guid when one is in play, else the
+/// caster's own* (`WriteGuidHelper(data, m_CastItem)` / `else … m_caster`, `Spell.cpp:4475-4477` and
+/// `4509-4511`), slot 2 is the caster. But slot 2 is written from **`m_casterUnit`**
+/// (`Spell.cpp:4479`, `Spell.cpp:4513`) — and `m_casterUnit` is a `Unit*` that the GameObject
+/// constructor never sets: `Spell::Spell(GameObject*, …)` initialises `m_caster(caster),
+/// m_casterGo(caster)` and leaves the default `Unit* const m_casterUnit = nullptr` (`Spell.cpp:102`,
+/// `Spell.h:368`) standing. `WriteGuidHelper(data, nullptr)` writes `ObjectGuid().WriteAsPacked()`
+/// (`Spell.cpp:4441-4453`) — a lone zero mask byte — so **every spell a GameObject casts arrives
+/// with caster guid 0**.
+///
+/// That is not a rare shape. `GameObject::Use` keeps `WorldObject* spellCaster = this` for a
+/// `GAMEOBJECT_TYPE_SPELLCASTER` (22) and casts through the GameObject overload
+/// (`GameObject.cpp`, `spellCaster->ToGameObject()` → `new Spell(pGo, …)`): the Priest's
+/// **Lightwell** (GO 181102, spell 7001 "Lightwell Renew" on the clicker) is the canonical one, and
+/// a guid the index can never hold cost that cast its whole visual body — the impact kit, its sound
+/// and its effect model — because [`crate::events::SessionEvent::SpellGo`]'s consumer resolves the
+/// caster before it plays anything. Slot 1 already carries the answer whenever slot 2 is empty:
+/// with no cast item it IS `m_caster`, GameObject included. So an empty caster slot falls back to
+/// it, which also stops the object being mistaken for a **cast item** by the `item_caster`
+/// derivation below (they are equal, so nothing is derived).
+///
+/// A Unit caster can never reach this: `Spell::Spell(Unit*, …)` sets `m_casterUnit(caster)`
+/// (`Spell.cpp:60`) and a live `Unit*` has a non-zero guid.
+fn spell_caster(item_or_caster: u64, caster_slot: u64) -> u64 {
+    if caster_slot == 0 {
+        item_or_caster
+    } else {
+        caster_slot
+    }
+}
+
 /// Decode one server packet into zero or more [`SessionEvent`]s. Pure: no I/O, no state. Packets the
 /// client doesn't model yield an empty list.
 pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
@@ -166,25 +200,31 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::AiReaction { unit, reaction }]
         }
         ServerPacket::SpellStart(s) => vec![SessionEvent::SpellStart {
-            caster: s.caster,
+            caster: spell_caster(s.item_or_caster, s.caster),
             spell_id: s.spell_id,
             cast_flags: s.cast_flags,
             cast_time_ms: s.cast_time_ms,
             target: s.targets.unit_target,
             ammo_display_id: s.ammo_display_id,
         }],
-        ServerPacket::SpellGo(s) => vec![SessionEvent::SpellGo {
-            caster: s.caster,
-            spell_id: s.spell_id,
-            cast_flags: s.cast_flags,
-            hits: s.hits,
-            misses: s.misses,
-            target: s.targets.unit_target,
-            go_target: s.targets.go_target,
-            dest: s.targets.dest.map(|d| [d.x, d.y, d.z]),
-            ammo_display_id: s.ammo_display_id,
-            item_caster: (s.item_or_caster != s.caster).then_some(s.item_or_caster),
-        }],
+        ServerPacket::SpellGo(s) => {
+            let caster = spell_caster(s.item_or_caster, s.caster);
+            vec![SessionEvent::SpellGo {
+                caster,
+                spell_id: s.spell_id,
+                cast_flags: s.cast_flags,
+                hits: s.hits,
+                misses: s.misses,
+                target: s.targets.unit_target,
+                go_target: s.targets.go_target,
+                dest: s.targets.dest.map(|d| [d.x, d.y, d.z]),
+                ammo_display_id: s.ammo_display_id,
+                // Against the RESOLVED caster, not the raw slot: a GameObject's cast puts its own
+                // guid in slot 1, and comparing that with the empty slot 2 would label the object
+                // an item and route the cast down the item-use lane.
+                item_caster: (s.item_or_caster != caster).then_some(s.item_or_caster),
+            }]
+        }
         ServerPacket::SpellChainTargets(c) => vec![SessionEvent::SpellChainTargets {
             caster: c.caster,
             spell_id: c.spell_id,

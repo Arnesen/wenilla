@@ -646,7 +646,12 @@
             -- CheckButton 7 → 8 → 13 → 18 → 37 → 46 → 38 → 51 → 68), with the rows we have no
             -- mechanism for skipped rather than stubbed:
             --   · 7  Simple Chat        — needs FCF_Set_SimpleChat's re-layout (0288 §2)
-            --   · 8  Lock Chat Settings — needs drag/undock/resize to lock (0288 §2)
+            --   · 8  Lock Chat Settings — the ONE row here whose machinery now exists: 1594
+            --        built the move, the resize and the blanket `CHAT_LOCKED` switch this
+            --        checkbox drives (`FCF_Set_ChatLocked`/`FCF_Get_ChatLocked`, gating both
+            --        verbs). It is unbuilt because nobody has asked for it, not because it
+            --        would be inert — and the per-window lock the tab menu carries is the one
+            --        a player actually reaches for. Ships when it is wanted
             --   · 51 Auto-join Guild Recruitment Channel — carries **no cvar, uvar or func in the
             --        reference either** (UIOptionsFrame.lua l.51 is a bare `{ index = 51 }`), so
             --        it is inert there; a working row here would be an invention, not a fix

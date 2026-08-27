@@ -98,6 +98,18 @@
 // `linear_to_srgb` has no decode to undo: the texel passes through as-is. The alpha-test arm
 // ignores this flag — its target is the un-encoded composite, so it decodes explicitly instead.
 @group(2) @binding(10) var<uniform> gamma_texel: u32;
+// The **UV window this quad may sample** — `(u_min, v_min, u_max, v_max)`, already inset by half a
+// texel by the producer; an axis whose `min > max` is left unclamped. The atlas-cell guard,
+// decision 1608.
+//
+// `CLAMP_TO_EDGE` clamps at the IMAGE's edge, not at a `SetTexCoord` crop's, so a magnified atlas
+// cell's outermost destination pixels sample half a texel past the crop and linear-filter in the
+// NEIGHBOURING cell. `POIIcons` cell 15 (the generic zone landmark) is fully transparent and the
+// cell above it is a coffin whose bottom row is opaque black: the world map drew a ~24%-black
+// hairline along the top edge of every zone POI. Clamping here makes a cell sample exactly what a
+// standalone clamped texture of it would. Producers leave it off for UVs that run past `[0,1]` —
+// that is the backdrop's tiling idiom, not a cell.
+@group(2) @binding(11) var<uniform> uv_clamp: vec4<f32>;
 
 // ITU-R BT.601 luma — the `PARAM c[0]` of that shader, read as raw f32 words: `0x3E991687`,
 // `0x3F1645A2`, `0x3DE978D5`. Not `(0.3, 0.3, 0.3)`, not `(0.3, 0.59, 0.11)` (this file's own first
@@ -128,7 +140,13 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let t = textureSample(quad_texture, quad_sampler, in.uv);
+    // Branchless so the sample stays in uniform control flow (implicit derivatives), and the
+    // bounds are sorted before `clamp` so a DISABLED (`min > max`) axis never forms an
+    // ill-ordered range — `select` evaluates both arms.
+    let lo = min(uv_clamp.xy, uv_clamp.zw);
+    let hi = max(uv_clamp.xy, uv_clamp.zw);
+    let uv = select(in.uv, clamp(in.uv, lo, hi), uv_clamp.xy <= uv_clamp.zw);
+    let t = textureSample(quad_texture, quad_sampler, uv);
 #ifdef VERTEX_COLORS
     let c = in.color;
 #else

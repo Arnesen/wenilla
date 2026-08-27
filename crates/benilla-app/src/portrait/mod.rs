@@ -836,24 +836,37 @@ fn feed_gx_aspect(
 /// touched); only the camera skips, so the held frame is always one the pose just produced.
 ///
 /// `boothHalfRate` is **benilla's own CVar** (the reference has no second view to rate-limit —
-/// its doll draws in the main pass, 1069's known rent). **Default OFF since 1559**: 1444 shipped
-/// it on and named the condition for the reverse — "whether a 30 fps doll *reads* right is the
-/// director's call (§7)" — and B312 is that call. Every frame is the faithful default; the
-/// ~1.6 ms/frame is one `/script SetCVar("boothHalfRate", 1)` away.
+/// its doll draws in the main pass, 1069's known rent). **Default ON (half-rate) — restored by
+/// 1607.** 1444 shipped it on; 1559 turned it off on the director's look-call (a full-rate doll
+/// reads as smoother); the 08-25 weak-GPU perf reports (B329) then measured what that costs — a
+/// body-pane booth's off-screen pass every frame, ~1.6 ms at 1600×900 and **7.6 ms at 4K**
+/// (`sess/perfregress` A/B), paid on exactly the weak GPUs that reported. The director retested
+/// the 30 fps doll and it reads fine, so the cheaper default is back. Full-rate is one
+/// `/script SetCVar("boothHalfRate", 0)` away for anyone who wants the smoother cadence.
 ///
-/// Turning it on no longer slows the item effects. Booth-lane emitters used to freeze on the
-/// camera's own `is_active` bit and so ticked once per *drawn* frame — the draw-set law read
-/// onto a skip the reference never makes. They key on
+/// Half-rate no longer slows the item effects (why 1559's revert was safe to make, and this one).
+/// Booth-lane emitters used to freeze on the camera's own `is_active` bit and so ticked once per
+/// *drawn* frame — the draw-set law read onto a skip the reference never makes. They key on
 /// [`benilla_world::particles::ViewThrottled`] now: a paced camera's scene is still live, so the
-/// sim runs at full rate and only the render is halved (1559).
+/// sim runs at full rate and only the render is halved (1559). So B312 does not return: only the
+/// doll's animation *cadence* in the pane drops to 30 fps, never its item/weapon effects.
 ///
 /// The glue screens (`live_scene`) are exempt: a fullscreen create/select scene at 30 fps is
 /// not a pane crop, and those screens have no world behind them to pay for.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct PaneRate {
-    /// Off by default — see the type's doc. The registered CVar's "0" is welded to this in
-    /// `cvars::tests`, so the shipped default cannot drift from the registered one.
+    /// The registered CVar is welded to this in `cvars::tests`, so the shipped default cannot
+    /// drift from the registered one.
     pub(crate) half: bool,
+}
+
+impl Default for PaneRate {
+    /// Half-rate (1607) — see the type's doc. `Default` is hand-written rather than derived so the
+    /// shipped default is not silently `false`; the welded `cvars::tests` assert pins it to the
+    /// registered CVar either way.
+    fn default() -> Self {
+        Self { half: true }
+    }
 }
 
 /// The two **framing inputs** a body booth reads, in one param: the pane geometry the UI extract

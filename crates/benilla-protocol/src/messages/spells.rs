@@ -170,8 +170,9 @@ fn read_ammo(r: &mut impl Read) -> io::Result<u32> {
 /// One decoded `SMSG_SPELL_START` — a non-triggered cast began, instants included (`cast_time_ms ==
 /// 0` — the precast trigger, decision 0099 phase 1). VERIFIED vmangos `Spell::SendSpellStart`
 /// (`Spell.cpp:4468-4503`): `item_or_caster` pguid (the cast item's guid when one is in play, else
-/// the caster's own — `WriteGuidHelper`, `Spell.cpp:4453-4466`) · `caster` pguid (`m_casterUnit`,
-/// always the casting Unit) · `u32 spellId` · `u16 castFlags` (always `CAST_FLAG_UNKNOWN2` 0x2, +
+/// the caster's own — `WriteGuidHelper`, `Spell.cpp:4453-4466`) · `caster` pguid (`m_casterUnit` —
+/// **empty, i.e. guid 0, whenever the caster is a GameObject**, which never sets that member;
+/// [`crate::events`]' `spell_caster` is what resolves the pair) · `u32 spellId` · `u16 castFlags` (always `CAST_FLAG_UNKNOWN2` 0x2, +
 /// `CAST_FLAG_AMMO` 0x20 for a ranged spell) · `u32` remaining cast-time ms (`m_timer`) ·
 /// [`SpellCastTargets`] · the ammo block iff `castFlags & 0x20`.
 #[derive(Debug, Clone, PartialEq)]
@@ -214,7 +215,8 @@ const SPELL_MISS_REFLECT: u8 = 11;
 
 /// One decoded `SMSG_SPELL_GO` — the cast launched. VERIFIED vmangos `Spell::SendSpellGo`
 /// (`Spell.cpp:4505-4538`) + its target-list writer `WriteSpellGoTargets` (`Spell.cpp:4608-4659`):
-/// the same guid pair + spellId as [`SpellStart`] · `u16 castFlags` (always `CAST_FLAG_UNKNOWN9`
+/// the same guid pair + spellId as [`SpellStart`] (caster slot 2 empty for a GameObject caster —
+/// see there) · `u16 castFlags` (always `CAST_FLAG_UNKNOWN9`
 /// 0x100, + `CAST_FLAG_AMMO` 0x20 for a ranged spell) · `u8` hit count + that many **raw** (unpacked)
 /// `u64` hit guids · `u8` miss count + that many `{u64 guid, u8 SpellMissInfo, u8 reflectResult iff
 /// the reason is `SPELL_MISS_REFLECT`}` · [`SpellCastTargets`] · the ammo block iff `castFlags &

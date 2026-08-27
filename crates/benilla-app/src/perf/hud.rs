@@ -163,9 +163,18 @@ pub(super) fn refresh_hud_snapshot(
 ///
 /// **Asked of the frame, not recomputed from its numbers.** Its row pitch and anchor live in
 /// `assets/ui/WorldStateFrame.xml`; mirroring them here would be two copies to keep in step, so
-/// this reads the resolved edge the layout actually produced (`GetBottom` — local units, y-up,
-/// and benilla has no `uiScale` CVar so UIParent's are screen px). One tiny chunk at 4 Hz, only
-/// while the HUD is drawing — the same shape as [`crate::hover_log`]'s tooltip probe.
+/// this reads the resolved edge the layout actually produced (`GetBottom`, y-up). One tiny chunk
+/// at 4 Hz, only while the HUD is drawing — the same shape as [`crate::hover_log`]'s tooltip
+/// probe.
+///
+/// **Two coordinate spaces meet here, and mixing them is the whole trap.** The layout answers in
+/// WoW UI units — a screen that is always `768/uiScale` units tall whatever the window is
+/// (decision 0582's seam) — while the pill lays itself out in window px. Subtracting one from the
+/// other is right only in the single case where the seam scale happens to be 1 (a 768 px-tall
+/// window at uiScale 1) and wrong by `windowH − 768` everywhere else — which on the director's
+/// window seated the pill back on top of the readout's third row while every test at 768 passed.
+/// So the chunk answers a **fraction of the screen**, which belongs to neither space, and the
+/// caller multiplies by the window height it actually draws in.
 ///
 /// **Its own cost, stated (1370's rule for this overlay):** an edge read settles the layout, so on
 /// a frame where something has written anchors since the last resolve this pays one graph solve
@@ -174,14 +183,16 @@ pub(super) fn refresh_hud_snapshot(
 pub(crate) fn top_centre_claimed(script: &UiScript, win_h: f32) -> f32 {
     const CHUNK: &str = r#"
         local f = WorldStateAlwaysUpFrame
-        if f and f:IsVisible() and f:GetBottom() then return f:GetBottom() end
-        return -1
+        if not (f and f:IsVisible()) then return -1 end
+        local bottom, screen = f:GetBottom(), GetScreenHeight()
+        if not bottom or not screen or screen <= 0 then return -1 end
+        return (screen - bottom) / screen
     "#;
-    let bottom: f32 = script.eval::<f64>(CHUNK).unwrap_or(-1.0) as f32;
-    if bottom < 0.0 {
+    let frac: f32 = script.eval::<f64>(CHUNK).unwrap_or(-1.0) as f32;
+    if !(0.0..=1.0).contains(&frac) {
         return 0.0;
     }
-    (win_h - bottom).clamp(0.0, win_h)
+    frac * win_h
 }
 
 /// The pill as ~20 quads on the player-UI pass (decision 1453). The append lane is rebuilt every

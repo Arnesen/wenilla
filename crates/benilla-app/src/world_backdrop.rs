@@ -69,6 +69,10 @@ pub(crate) struct WorldBackdrop {
     pub(crate) image: Handle<Image>,
     /// The size the image was last built at, in physical px — the resize gate.
     size: UVec2,
+    /// The scale factor the camera's target was last stamped with — the re-stamp gate, and the
+    /// number that keeps every logical↔physical conversion on the world camera honest. See
+    /// [`retarget_world_camera`].
+    scale_factor: f32,
 }
 
 /// A fresh backdrop image at `size` physical px. See the module doc for the format's two halves.
@@ -106,7 +110,13 @@ fn setup_backdrop(
         .map(window_physical_size)
         .unwrap_or(UVec2::new(1280, 720));
     let image = images.add(new_backdrop_image(size));
-    commands.insert_resource(WorldBackdrop { image, size });
+    commands.insert_resource(WorldBackdrop {
+        image,
+        size,
+        // Deliberately not the window's: `retarget_world_camera` stamps the real one and must see
+        // a mismatch on its first run, before any camera exists to point at the image.
+        scale_factor: f32::NAN,
+    });
 }
 
 /// Keep the backdrop the window's size. A stale-sized backdrop would still *work* (the quad covers
@@ -131,22 +141,55 @@ fn track_window_size(
     }
 }
 
-/// Point the world camera at the backdrop instead of the swapchain.
+/// Point the world camera at the backdrop instead of the swapchain — **carrying the window's own
+/// scale factor**.
 ///
 /// A system rather than a component on the spawn, because there are two spawn sites for the same
 /// camera (the real one and `player::setup`'s no-client-data fallback) and neither should have to
 /// know about the composite lane. `benilla-worldview` is unaffected — it links `benilla-world`, not
 /// this crate, and has no UI camera to composite with, so its world camera keeps the swapchain.
 ///
-/// `Added` rather than a per-frame compare: `RenderTarget` carries no `PartialEq`, and nothing in
-/// the tree rewrites a world camera's target once set (the only other `Camera` writer is the gate
-/// that flips `is_active`). Retarget it when it appears, and leave it alone after.
+/// **The scale factor is the load-bearing half.** A camera's logical↔physical conversions all go
+/// through its target's `RenderTargetInfo`: a WINDOW target reports the window's physical size and
+/// the window's scale factor, so `logical_viewport_size` is the window's LOGICAL size — which is
+/// the space `Window::cursor_position` reports in, and the space every caller here works in
+/// (`capture::pick_probe`'s header says it outright: *"`viewport_to_world` works in logical units
+/// and a Retina capture is 2× the logical window"*). `From<Handle<Image>>` builds an
+/// `ImageRenderTarget` with `scale_factor: 1.0`, and this backdrop is sized in **physical** px — so
+/// the moment the world camera was retargeted at it, its logical viewport became the PHYSICAL size
+/// and every conversion silently gained a factor of the display's scale.
+///
+/// On a 2× display that aims every world pick ray at a quarter of the screen: the ray for a cursor
+/// at the centre goes to the upper-left quadrant. It hit the whole client at once — the GameObject
+/// pick (the cog that "barely appears" and the right-click that "does nothing half the time" —
+/// B169's fourth half), the unit pick and its occlusion ray, and the `world_to_viewport` side
+/// (chat bubbles, `target::scan`). Stamping the window's real scale factor restores the
+/// pre-composite semantics for all of them at once, which is why it lives here and not as a
+/// conversion at each of the eight call sites.
+///
+/// Re-stamped when the factor changes, not only on `Added`: dragging the window between a Retina
+/// and a non-Retina display changes it mid-session.
 fn retarget_world_camera(
-    backdrop: Res<WorldBackdrop>,
-    mut cameras: Query<&mut RenderTarget, Added<WorldCamera>>,
+    mut backdrop: ResMut<WorldBackdrop>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    added: Query<(), Added<WorldCamera>>,
+    mut cameras: Query<&mut RenderTarget, With<WorldCamera>>,
 ) {
+    let scale_factor = windows
+        .single()
+        .map_or(1.0, |w| w.resolution.scale_factor());
+    // `!=` on the stored NAN seed is true, so the first run always stamps.
+    #[allow(clippy::float_cmp)]
+    let moved_display = scale_factor != backdrop.scale_factor;
+    if !moved_display && added.is_empty() {
+        return;
+    }
+    backdrop.scale_factor = scale_factor;
     for mut current in &mut cameras {
-        *current = RenderTarget::Image(backdrop.image.clone().into());
+        *current = RenderTarget::Image(bevy::camera::ImageRenderTarget {
+            handle: backdrop.image.clone(),
+            scale_factor,
+        });
     }
 }
 
@@ -226,6 +269,63 @@ mod tests {
         let usage = image.texture_descriptor.usage;
         assert!(usage.contains(TextureUsages::RENDER_ATTACHMENT));
         assert!(usage.contains(TextureUsages::TEXTURE_BINDING));
+    }
+
+    /// **The world camera's target carries the WINDOW's scale factor, not `1.0`** — the pick
+    /// regression of 2026-08-26 (B169's fourth half).
+    ///
+    /// `From<Handle<Image>>` builds an `ImageRenderTarget` with `scale_factor: 1.0`, and this
+    /// backdrop is sized in PHYSICAL px. A camera whose target says "physical size, scale 1"
+    /// reports that physical size as its LOGICAL viewport — but every caller works in logical
+    /// units, because that is what `Window::cursor_position` reports in. So on a 2× display the
+    /// world's pick ray for a centred cursor went to the upper-left quadrant, and the cog "barely
+    /// appeared" while right-click "did nothing half the time". It hit all eight
+    /// `viewport_to_world`/`world_to_viewport` sites at once, not just the GameObject pick.
+    ///
+    /// The scale factor is re-stamped when it CHANGES, not only on `Added`: dragging the window
+    /// from a Retina display to a non-Retina one changes it mid-session, and a stale factor is the
+    /// same defect with a different constant.
+    #[test]
+    fn the_world_cameras_target_carries_the_windows_scale_factor() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>();
+        let window = |sf: f32| {
+            let mut w = Window::default();
+            w.resolution.set_scale_factor(sf);
+            w
+        };
+        app.world_mut().spawn((window(2.0), PrimaryWindow));
+        app.add_systems(Startup, setup_backdrop)
+            .add_systems(Update, retarget_world_camera);
+        let cam = app
+            .world_mut()
+            .spawn((WorldCamera, RenderTarget::default()))
+            .id();
+        app.update();
+
+        let stamped = |app: &App, e: Entity| match app.world().entity(e).get::<RenderTarget>() {
+            Some(RenderTarget::Image(t)) => t.scale_factor,
+            _ => panic!("the world camera must target the backdrop image"),
+        };
+        assert_eq!(
+            stamped(&app, cam),
+            2.0,
+            "a 2× display: the target must report the window's scale factor, or every logical \
+             cursor position is read as a physical one and the pick ray misses by 2×"
+        );
+        // …and it follows the window across displays.
+        let mut w = app.world_mut().query::<&mut Window>();
+        w.single_mut(app.world_mut())
+            .unwrap()
+            .resolution
+            .set_scale_factor(1.0);
+        app.update();
+        assert_eq!(
+            stamped(&app, cam),
+            1.0,
+            "moving to a 1× display re-stamps: a stale factor is the same defect, inverted"
+        );
     }
 
     /// Physical, not logical: the backdrop matches the swapchain 1:1 so the UI pass's sample is an

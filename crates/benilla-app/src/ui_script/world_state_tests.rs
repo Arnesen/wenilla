@@ -321,7 +321,13 @@ fn the_bindings_answer_the_reference_shape() {
 /// resolved bottom once it is up.
 #[test]
 fn the_readout_tells_the_dev_pill_how_much_of_the_top_it_uses() {
-    const SCREEN_H: f32 = 768.0;
+    // NOT 768. The layout answers in WoW UI units — a screen that is always 768 units tall
+    // whatever the window is (decision 0582) — and the pill draws in window px, so a probe that
+    // subtracts one from the other is right only when the two happen to coincide. Feeding a
+    // window height that is NOT the virtual one is the whole point of this test: it is what the
+    // director's client does, and the first version of this probe put the pill back on top of the
+    // readout's third row there while passing every test at 768.
+    const SCREEN_H: f32 = 900.0;
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     s.resolve();
@@ -355,8 +361,9 @@ fn the_readout_tells_the_dev_pill_how_much_of_the_top_it_uses() {
     // The frame's own geometry, read back the way the probe reads it: the container's top offset
     // plus one row per pushed row. Asserted against the XML rather than restated as constants.
     let expected: f32 = s
-        .eval::<f64>("return 20 + WORLD_STATE_ROW_HEIGHT * 2 + 15")
-        .expect("the frame's own numbers") as f32;
+        .eval::<f64>("return (20 + WORLD_STATE_ROW_HEIGHT * 2 + 15) / GetScreenHeight()")
+        .expect("the frame's own numbers") as f32
+        * SCREEN_H;
     assert!(
         (claimed - expected).abs() < 0.5,
         "the claim is the readout's resolved bottom: {claimed} vs {expected}"

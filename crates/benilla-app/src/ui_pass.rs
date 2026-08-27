@@ -207,6 +207,25 @@ pub(crate) struct UiQuad {
     /// two filtered edges are complementary — which is B141's "odd black lines" (they recoloured
     /// with the backing quad, which is how they were caught). Splits the batch run.
     pub alpha_test: Option<f32>,
+    /// **The UV window this quad may sample**, already inset by half a texel — `None` = the
+    /// sampler's own `ClampToEdge` is the whole story (decision 1608).
+    ///
+    /// A `SetTexCoord` crop into an ATLAS is not a texture: `CLAMP_TO_EDGE` clamps at the
+    /// image's edge, not the cell's, so a magnified cell's outermost row of destination pixels
+    /// samples half a texel PAST its crop and linear-filters in whatever the neighbouring cell
+    /// authored there. `Interface\Minimap\POIIcons` is the case that forced this: cell 15 (the
+    /// generic zone-level landmark) is fully transparent, the cell directly above it is the
+    /// coffin whose bottom row is OPAQUE BLACK, and the world map drew a ~24%-black hairline
+    /// across the top edge of every zone POI — the director's "black horizontal lines".
+    ///
+    /// Set it and the fragment clamps into `[u_min, v_min, u_max, v_max]`, which is exactly what
+    /// a standalone clamped texture of that cell would sample. The producer decides *whether* a
+    /// crop is a cell (see the extract's `uv_clamp_window`): an axis whose UVs run past `[0,1]`
+    /// is the reference's TILING idiom and must never be clamped, which is why the window is
+    /// disabled **per axis** rather than per quad.
+    ///
+    /// Splits the batch run like `additive`/`circular` — it rides the material, not the vertex.
+    pub uv_clamp: Option<[f32; 4]>,
     /// CPU-clip stand-in for a real scissor rect (see the module doc). `None` = unclipped.
     pub clip: Option<Rect>,
     /// Rotate the quad's corners by this many radians **clockwise on screen** about the rect's
@@ -255,6 +274,7 @@ impl Default for UiQuad {
             premultiplied: false,
             gamma_texel: false,
             alpha_test: None,
+            uv_clamp: None,
             clip: None,
             rotation: 0.0,
             mask: None,
@@ -399,6 +419,10 @@ pub(crate) struct UiQuadMaterial {
     #[texture(5)]
     #[sampler(6)]
     mask: Option<Handle<Image>>,
+    /// The half-texel-inset UV window the fragment may sample — `(u_min, v_min, u_max, v_max)`,
+    /// **per axis**, with `min > max` on an axis disabling that axis. See [`UiQuad::uv_clamp`].
+    #[uniform(11)]
+    uv_clamp: Vec4,
 }
 
 impl UiQuadMaterial {
@@ -424,6 +448,8 @@ impl UiQuadMaterial {
             gamma_texel: 0,
             mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
             mask: None,
+            // A tile samples its whole image; there is no cell to stay inside of.
+            uv_clamp: UV_CLAMP_OFF,
         }
     }
 }
@@ -675,6 +701,7 @@ struct Run {
     gamma_texel: bool,
     alpha_test: Option<f32>,
     mask: Option<UiQuadMask>,
+    uv_clamp: Option<[f32; 4]>,
     positions: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
@@ -694,6 +721,7 @@ impl Run {
             gamma_texel: q.gamma_texel,
             alpha_test: q.alpha_test,
             mask: q.mask.clone(),
+            uv_clamp: q.uv_clamp,
             positions: Vec::new(),
             uvs: Vec::new(),
             colors: Vec::new(),
@@ -856,7 +884,12 @@ type MatKey = (
     u32,
     Option<AssetId<Image>>,
     [u32; 4],
+    [u32; 4],
 );
+
+/// The [`UiQuadMaterial::uv_clamp`] that clamps NEITHER axis — `min > max` on an axis is the
+/// shader's per-axis "off", so `(1,1)` against `(0,0)` disables both.
+const UV_CLAMP_OFF: Vec4 = Vec4::new(1.0, 1.0, 0.0, 0.0);
 
 /// Retire every pooled batch entity (blank frame / no drawable content). Mesh handles and the
 /// material cache stay — assets referenced only by the pool cost nothing to keep and come back
@@ -1060,6 +1093,7 @@ fn rebuild_ui_mesh(
                 && r.gamma_texel == q.gamma_texel
                 && r.alpha_test == q.alpha_test
                 && r.mask == q.mask
+                && r.uv_clamp == q.uv_clamp
         });
         if !same_run {
             runs.push(Run::new(texture, q));
@@ -1123,6 +1157,7 @@ fn rebuild_ui_mesh(
             );
         }
         let alpha_ref = run.alpha_test.unwrap_or(0.0);
+        let uv_clamp = run.uv_clamp.map_or(UV_CLAMP_OFF, Vec4::from_array);
         let key: MatKey = (
             run.texture.id(),
             run.additive,
@@ -1133,6 +1168,7 @@ fn rebuild_ui_mesh(
             alpha_ref.to_bits(),
             mask.as_ref().map(bevy::asset::Handle::id),
             mask_rect.to_array().map(f32::to_bits),
+            uv_clamp.to_array().map(f32::to_bits),
         );
         // The per-slot skip gate (decision 1361). A rebuild fires for the WHOLE quad stream the
         // moment anything differs — and one continuously-animating quad (the resting blink on
@@ -1254,6 +1290,7 @@ fn rebuild_ui_mesh(
                     gamma_texel: u32::from(run.gamma_texel),
                     mask_rect,
                     mask,
+                    uv_clamp,
                 })
             })
             .clone();

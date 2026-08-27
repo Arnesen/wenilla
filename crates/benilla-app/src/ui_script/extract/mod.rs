@@ -45,6 +45,111 @@ fn ui_diff_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_UI_DIFF").is_some())
 }
 
+/// `WOW_UI_PICK=<x>,<y>[,<r>]` — **what drew this pixel?** The UI's answer to the world hover
+/// inspector. Every converted quad whose screen rect covers that point (or, with `r`, comes
+/// within `r` px of it — how a hairline thinner than the probe is caught) names itself once: the
+/// `ZTarget` (frame or region handle), the rect, the paint key, and the content — a texture's
+/// BLP path and crop included. Coordinates are LOGICAL window px, y-down from the top-left, the
+/// same space [`convert_entry`]'s `rect` lives in (a 2x-scale capture's device pixel is half
+/// this). Each `z_key` reports once per run, so a 200-frame capture prints the list once.
+///
+/// Built for a hairline nobody could name (the world map's dark seams): without it, "which
+/// region is that one dark row" costs a bisect through FrameXML with a rebuild per guess.
+fn ui_pick_point() -> Option<(Vec2, f32)> {
+    static AT: std::sync::OnceLock<Option<(Vec2, f32)>> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| {
+        let raw = std::env::var("WOW_UI_PICK").ok()?;
+        let mut it = raw.split(',');
+        let x: f32 = it.next()?.trim().parse().ok()?;
+        let y: f32 = it.next()?.trim().parse().ok()?;
+        let r = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0.0);
+        Some((Vec2::new(x, y), r))
+    })
+}
+
+/// One `[ui-pick]` line per covering quad — see [`ui_pick_point`]. Deduped by paint key so a
+/// steady UI reports its stack once, not once a frame.
+fn report_ui_pick(eq: &benilla_ui::script::ExtractedQuad, rect: Rect, at: Vec2, r: f32) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static SEEN: std::sync::OnceLock<Mutex<HashSet<u64>>> = std::sync::OnceLock::new();
+    if !rect.inflate(r).contains(at) {
+        return;
+    }
+    if !SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut s| s.insert(eq.z))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let what = match &eq.content {
+        QuadContent::Frame => "frame-slot".to_string(),
+        QuadContent::Minimap { .. } => "minimap".to_string(),
+        QuadContent::Cooldown { .. } => "cooldown".to_string(),
+        QuadContent::Texture {
+            path,
+            color,
+            tex_coords,
+            ..
+        } => format!(
+            "texture {:?} color={color:?} crop={tex_coords:?}",
+            path.as_deref().unwrap_or("<none>")
+        ),
+        other => format!("{other:?}"),
+    };
+    info!(
+        "[ui-pick] {:?} z={} rect=({:.2},{:.2})-({:.2},{:.2}) alpha={:.3} {what}",
+        eq.target, eq.z, rect.min.x, rect.min.y, rect.max.x, rect.max.y, eq.alpha,
+    );
+}
+
+/// The half-texel-inset UV window a **cropped** quad may sample — [`UiQuad::uv_clamp`]'s producer
+/// (decision 1608), `None` when neither axis needs one.
+///
+/// `CLAMP_TO_EDGE` clamps at the IMAGE's edge; a `SetTexCoord` crop into an ATLAS has no such
+/// guard, so a magnified cell's outermost destination pixels sample half a texel past the crop and
+/// linear-filter in whatever the neighbouring cell authored. Half a texel of inset is exactly where
+/// a standalone clamped texture of that cell stops — the edge texel's CENTRE.
+///
+/// Decided **per axis**, and the two tests are the whole law:
+/// - an axis running past `[0,1]` is the reference's TILING idiom (`SetTexCoord(0, n, 0, 1)` on the
+///   stance shelf repeats the art n times); insetting it would walk the art along the run, so it is
+///   left alone — the same bounded-axis rule [`benilla_ui::script::inset_atlas_bleed`] applies to
+///   the `Backdrop` slices;
+/// - an axis spanning the whole texture needs nothing: the sampler's own clamp already is this.
+fn uv_clamp_window(uv: &UvRect, size: (u32, u32)) -> Option<[f32; 4]> {
+    let mut out = [1.0, 1.0, 0.0, 0.0]; // both axes off — `min > max` (see `UiQuad::uv_clamp`)
+    let mut any = false;
+    for (axis, texels) in [(0usize, size.0), (1usize, size.1)] {
+        if texels < 2 {
+            continue; // a 1-texel axis has no interior to inset toward
+        }
+        let (lo, hi) = uv.corners.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| {
+            (lo.min(c[axis]), hi.max(c[axis]))
+        });
+        // Outside the texture (tiling), or the whole of it (the sampler's clamp is the window).
+        if lo < -0.001 || hi > 1.001 || (lo <= 0.001 && hi >= 0.999) {
+            continue;
+        }
+        let half = 0.5 / texels as f32;
+        // A crop under one texel wide has no interior either: pin both bounds to its centre, which
+        // is the one texel it means.
+        let (lo, hi) = match hi - lo > 2.0 * half {
+            true => (lo + half, hi - half),
+            false => {
+                let mid = 0.5 * (lo + hi);
+                (mid, mid)
+            }
+        };
+        out[axis] = lo;
+        out[axis + 2] = hi;
+        any = true;
+    }
+    any.then_some(out)
+}
+
 /// One line naming why the extract gate did not skip this frame — the input that differed, and for
 /// the render list the first entry that moved. A settled UI is what makes the paint pass free; when
 /// it is never settled, this says what is moving.
@@ -858,6 +963,9 @@ fn convert_entry(
     // WoW UI space is y-up from the bottom-left in 768-virtual units; the quad pass is
     // y-down window px from the top-left — scale ×s, then flip through the window height.
     let rect = Rect::new(r.left * s, h - r.top * s, r.right * s, h - r.bottom * s);
+    if let Some((at, r)) = ui_pick_point() {
+        report_ui_pick(&eq, rect, at, r);
+    }
     // The ScrollFrame clip (decision 0112), through the same conversion as `rect` —
     // `UiQuad::clip` is the CPU-clip stand-in `ui_pass` already applies uniformly to
     // every quad (texture, backdrop, and glyph alike), so this is the entire app-side plumb.
@@ -1057,6 +1165,16 @@ fn convert_entry(
                 }
                 _ => None,
             };
+            // The atlas-cell guard (decision 1608): a `SetTexCoord` crop is a cell of a sheet,
+            // and bilinear magnification reaches past it into the neighbour unless the fragment
+            // is told where the cell ends. The world map's zone POIs are the case that forced it
+            // — `POIIcons` cell 15 is fully transparent and the cell above it is a coffin whose
+            // bottom row is opaque black, so every zone landmark wore a black hairline.
+            let uv_clamp = handle
+                .as_ref()
+                .and_then(|h| images.get(h))
+                .map(|img| img.texture_descriptor.size)
+                .and_then(|sz| uv_clamp_window(&uv, (sz.width, sz.height)));
             // A pathless Texture region is a solid color; a textured one tints by it.
             let mut color = color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
             color[3] *= eq.alpha;
@@ -1065,6 +1183,7 @@ fn convert_entry(
                 z_key: eq.z,
                 texture: handle,
                 uv,
+                uv_clamp,
                 color,
                 additive,
                 clip,
@@ -1263,6 +1382,71 @@ fn cursor_icon_quad(pos: Vec2, texture: Handle<Image>) -> UiQuad {
         z_key: u64::MAX,
         texture: Some(texture),
         ..default()
+    }
+}
+
+/// The atlas-cell guard's law (decision 1608) — see [`uv_clamp_window`]. Each case is a shape the
+/// shipped UI actually draws, and the three that return `None` are the three ways a crop is not a
+/// cell.
+#[cfg(test)]
+mod uv_clamp_tests {
+    use super::{uv_clamp_window, UvRect};
+
+    /// The bug's own numbers: `POIIcons` is 128², a world-map POI samples cell (7,1), and the
+    /// window has to stop half a texel (`0.5/128`) inside it — a hair below texel row 16's centre
+    /// is where the coffin above stopped leaking in.
+    #[test]
+    fn a_poi_icons_cell_stops_half_a_texel_inside_itself() {
+        let uv = UvRect::from_tex_coords([0.875, 1.0, 0.125, 0.25]);
+        let w = uv_clamp_window(&uv, (128, 128)).expect("an atlas cell is clamped");
+        let half = 0.5 / 128.0;
+        assert!((w[0] - (0.875 + half)).abs() < 1e-6, "u_min {}", w[0]);
+        assert!((w[1] - (0.125 + half)).abs() < 1e-6, "v_min {}", w[1]);
+        assert!((w[2] - (1.0 - half)).abs() < 1e-6, "u_max {}", w[2]);
+        assert!((w[3] - (0.25 - half)).abs() < 1e-6, "v_max {}", w[3]);
+    }
+
+    /// The whole texture is already clamped by the sampler — a window here would only cost a
+    /// batch split.
+    #[test]
+    fn the_whole_texture_asks_for_no_window() {
+        assert!(uv_clamp_window(&UvRect::FULL, (128, 128)).is_none());
+    }
+
+    /// `SetTexCoord(0, n, 0, 1)` on an n-slot strip is the reference's TILING idiom (the stance
+    /// shelf): the repeating axis keeps its exact period, the bounded one still gets its window.
+    #[test]
+    fn a_tiling_axis_is_left_alone_while_its_bounded_partner_is_not() {
+        let uv = UvRect::from_tex_coords([0.0, 3.0, 0.0, 0.5]);
+        let w = uv_clamp_window(&uv, (64, 64)).expect("the v axis is a bounded crop");
+        assert!(w[0] > w[2], "u tiles, so its axis must read as OFF: {w:?}");
+        assert!((w[1] - 0.5 / 64.0).abs() < 1e-6);
+        assert!((w[3] - (0.5 - 0.5 / 64.0)).abs() < 1e-6);
+    }
+
+    /// A mirrored slice (`left > right` — the PlayerFrame ring) is still one cell: the window is
+    /// built from the corner EXTENTS, so the flip survives it untouched.
+    #[test]
+    fn a_mirrored_slice_is_clamped_by_its_extents() {
+        let uv = UvRect::from_tex_coords([0.5, 0.25, 0.0, 1.0]);
+        let w = uv_clamp_window(&uv, (64, 64)).expect("a mirrored cell is still a cell");
+        assert!((w[0] - (0.25 + 0.5 / 64.0)).abs() < 1e-6);
+        assert!((w[2] - (0.5 - 0.5 / 64.0)).abs() < 1e-6);
+        assert!(
+            w[1] > w[3],
+            "v spans the whole texture, so it reads as OFF: {w:?}"
+        );
+    }
+
+    /// A crop thinner than one texel has no interior to inset toward — both bounds pin to its
+    /// centre, which is the single texel it means (and stays a VALID, enabled range).
+    #[test]
+    fn a_sub_texel_crop_pins_to_the_texel_it_names() {
+        let uv = UvRect::from_tex_coords([0.5, 0.505, 0.0, 1.0]);
+        let w = uv_clamp_window(&uv, (64, 64)).expect("still a crop");
+        assert!((w[0] - 0.5025).abs() < 1e-6);
+        assert!(w[0] <= w[2], "the axis must stay enabled: {w:?}");
+        assert!((w[2] - 0.5025).abs() < 1e-6);
     }
 }
 

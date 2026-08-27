@@ -410,8 +410,10 @@ pub(super) fn spell_go(
     // the server answered a `CMSG_GAMEOBJ_USE` with. `caster_indexed=false` is the load-bearing
     // case — every impact, sound and effect model below hangs off `index.0.get(&caster)`, so a
     // caster we never streamed drops the whole visual silently. A GameObject IS the caster for a
-    // SPELLCASTER-type object (vmangos leaves `spellCaster = this` for type 22), which is why this
-    // reads the index rather than assuming a unit.
+    // SPELLCASTER-type object (vmangos leaves `spellCaster = this` for type 22), and it reaches
+    // here as a real guid only because the decode seam resolves the pair: vmangos writes the caster
+    // slot from a null `m_casterUnit` for such a cast and the wire carries guid **0**
+    // (`benilla_protocol::events`' `spell_caster`).
     if benilla_assets::trace::enabled_for("use") {
         benilla_assets::trace::line(
             "use",

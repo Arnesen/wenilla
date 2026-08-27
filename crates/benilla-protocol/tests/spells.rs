@@ -500,6 +500,56 @@ fn spell_visual_wire_golden() {
         other => panic!("ground spell go event, got {other:?}"),
     }
 
+    // SMSG_SPELL_GO for a **GameObject caster** — the Priest's Lightwell (GO entry 181102) casting
+    // spell 7001 "Lightwell Renew" on the player who clicked it. `GameObject::Use` keeps
+    // `spellCaster = this` for `GAMEOBJECT_TYPE_SPELLCASTER` (22) and builds the GameObject
+    // overload, whose ctor leaves `Unit* const m_casterUnit = nullptr` standing (`Spell.cpp:102`,
+    // `Spell.h:368`) — so `SendSpellGo`'s slot-2 write `WriteGuidHelper(data, m_casterUnit)`
+    // (`Spell.cpp:4513`) emits `ObjectGuid().WriteAsPacked()`: a lone zero mask byte, guid 0.
+    // Slot 1 still carries the object (no cast item → `m_caster`). The event layer must resolve the
+    // pair, or the cast has no caster the world index can ever hold and loses its whole visual body.
+    const LIGHTWELL: u64 = 0xF110_02C3_6E00_0123; // HIGHGUID_GAMEOBJECT | entry 181102 << 24 | 0x123
+    let body = hx(concat!(
+        "fb23016ec30210f1", // item_or_caster pguid: the GameObject (mask 0xfb — byte 2 is zero)
+        "00",               // caster pguid: EMPTY — vmangos wrote a null `m_casterUnit`
+        "591b0000",         // spellId 7001 (Lightwell Renew)
+        "0001",             // castFlags 0x100 (CAST_FLAG_UNKNOWN9)
+        "01",               // hit count 1
+        "4500000000000000", // hit: the clicking player (raw u64)
+        "00",               // miss count 0
+        "0200",             // SpellCastTargets mask: TARGET_FLAG_UNIT
+        "0145",             // …the same player, packed
+    ));
+    let packet = messages::parse_server(messages::opcode::SMSG_SPELL_GO, &body).unwrap();
+    match &packet {
+        ServerPacket::SpellGo(g) => {
+            // The message layer stays a faithful decode: slot 2 really is empty on the wire.
+            assert_eq!((g.item_or_caster, g.caster), (LIGHTWELL, 0));
+        }
+        other => panic!("lightwell spell go, got {}", other.name()),
+    }
+    match decode(packet).pop().unwrap() {
+        SessionEvent::SpellGo {
+            caster,
+            spell_id,
+            hits,
+            target,
+            item_caster,
+            ..
+        } => {
+            assert_eq!(
+                caster, LIGHTWELL,
+                "an empty caster slot falls back to slot 1 — the GameObject IS the caster"
+            );
+            assert_eq!((spell_id, hits, target), (7001, vec![0x45], Some(0x45)));
+            assert_eq!(
+                item_caster, None,
+                "the object is the caster, not a cast item — the derivation reads the RESOLVED caster"
+            );
+        }
+        other => panic!("lightwell spell go event, got {other:?}"),
+    }
+
     // SMSG_SPELL_FAILED_OTHER: raw (unpacked) guid + spellId (vmangos `Spell::SendInterrupted`).
     let body = hx(concat!("4200000000000000", "85000000"));
     let packet = messages::parse_server(messages::opcode::SMSG_SPELL_FAILED_OTHER, &body).unwrap();

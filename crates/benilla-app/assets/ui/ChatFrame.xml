@@ -643,9 +643,10 @@
         -- Remove), a **DISPLAY** header over Font Size and Background, a **FILTERS** header over
         -- seven message-group submenus, and Join New Channel.
         --
-        -- benilla ships the DISPLAY block, and that is the honest tree rather than a first pass:
-        -- every window verb needs the window management 0288 §2 deliberately left out (there is
-        -- no lock, no rename, no undock, no create/close), and the FILTERS block needs a runtime
+        -- benilla ships the Lock/Unlock row (1594 built the move, the resize and both lock
+        -- scopes under it) and the DISPLAY block, and that is the honest tree rather than a first
+        -- pass: the OTHER three window verbs still need the window management 0288 §2 left out
+        -- (there is no rename, no undock, no create/close), and the FILTERS block needs a runtime
         -- message-group editor over `ui_chat::frames`' registration, which is its own feature and
         -- not the one B246 reports missing. Each block lands with the machinery under it.
         --
