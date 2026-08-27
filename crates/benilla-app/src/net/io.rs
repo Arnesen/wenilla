@@ -967,6 +967,9 @@ fn writer_loop(
                     ClientCommand::GroupSetLeader { guid } => w.group_set_leader(guid),
                     ClientCommand::GroupLeave => w.group_disband(),
                     ClientCommand::GroupRaidConvert => w.group_raid_convert(),
+                    ClientCommand::RequestPartyMemberStats { guid } => {
+                        w.request_party_member_stats(guid)
+                    }
                     ClientCommand::LootMethod {
                         method,
                         master,

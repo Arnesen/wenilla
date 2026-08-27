@@ -534,6 +534,7 @@ pub(super) fn spawn_glue_booth(
             root,
             target: image,
             baked: None,
+            baked_guid: None,
             snap: None,
             shown: false,
             show_rev: 0,

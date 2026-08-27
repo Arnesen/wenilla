@@ -604,6 +604,60 @@ fn a_track_press_seats_the_thumb_and_keeps_dragging() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **A slider row's readout sits on its label's line.** The row shows one setting as two
+/// `GameFontNormal` strings — the name at the left, the value at the right — and a reader takes
+/// them as a single line; ours were **3 units apart** at every UI scale (≈4 px on a maximised
+/// 1440p window, which is where B232 photographed them).
+///
+/// The cause is a nudge that leaked from the art onto the text: the readout hangs off
+/// `$parentControl`, and the control was seated at the row's `CENTER(-80, +3)` — the +3 lifting
+/// the 17-tall groove and its 32 px thumb inside the 26-tall row. Anything anchored to the
+/// control inherited a seat that exists for a texture. The nudge now lives on the two art frames
+/// it was for (`$parentGroove`, `$parentSlider`), so the bar does not move by a pixel and the
+/// number falls onto the label's line — asserted here on both halves, over every slider row the
+/// window has: a label/value line, and the groove still riding 3 units high of the row.
+#[test]
+fn a_slider_rows_readout_sits_on_its_labels_line() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    for (page, rows) in [
+        ("Controls", &["RowMouseSpeed", "RowMaxCameraDistance"][..]),
+        (
+            "Audio",
+            &["RowMaster", "RowSound", "RowMusic", "RowAmbience"][..],
+        ),
+        ("Graphics", &["RowUiScale", "RowFarclip"][..]),
+    ] {
+        s.run(&format!("OptionsFrameCategoryListRow{page}:Click()"))
+            .unwrap();
+        s.resolve(); // seat the rects before reading them
+        let mid = |frame: &str| -> f32 {
+            let top: f32 = s.eval(&format!("return {frame}:GetTop()")).unwrap();
+            let bottom: f32 = s.eval(&format!("return {frame}:GetBottom()")).unwrap();
+            (top + bottom) * 0.5
+        };
+        for row in rows {
+            let base = format!("OptionsFrameContainerBody{page}{row}");
+            // The two strings are the assertion: same font, same row, one line. (Both are
+            // regions, so both rects arrive in the same space — the comparison needs no scale.)
+            let (label, value) = (
+                mid(&format!("{base}Label")),
+                mid(&format!("{base}ControlValue")),
+            );
+            assert!(
+                (label - value).abs() < 0.01,
+                "{base}: the readout sits {:.2} off its label's line",
+                value - label
+            );
+            // …and the art it used to ride is exactly where it was: 3 units high of the row.
+            assert!(
+                (mid(&format!("{base}ControlGroove")) - mid(&base) - 3.0).abs() < 0.01,
+                "{base}: the groove left its seat"
+            );
+        }
+    }
+}
+
 /// The Audio harness: the real registered CVar set on the table before the XML loads, exactly
 /// the app's boot order (register → seed → load → select).
 fn audio_harness() -> UiScript {
@@ -1337,6 +1391,89 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **Render Scale** (decision 1639) — benilla's own Graphics row, seated directly above
+/// Multisampling because above 100 % it *is* antialiasing, on a client whose `gxMultisample`
+/// ships off (1629).
+///
+/// Three things this pins, each of which was a real choice:
+///
+/// - **It reads the CVar and shows a percentage.** 1.0 must render as "100%", because the whole
+///   point of the row is that the number in front of the player means something without a manual.
+/// - **It is DEFERRED.** Committing live would rebuild the world's render target on every drag
+///   tick — tens of megabytes, thirty times across one sweep of the handle. Staging to Apply makes
+///   that exactly one rebuild. (`uiScale` above it defers for a different reason; the flag is the
+///   same.)
+/// - **It is not mute.** Every other tooltip on this window resolves an `OPTION_TOOLTIP_*` out of
+///   1.12's GlobalStrings, and a benilla row with no counterpart there has so far gone silent (the
+///   nameplate pair). This one carries a description under a `BENILLA_` prefix — the reference's
+///   namespace stays the reference's — because the dial's first reviewer said outright that they
+///   could not tell what it did.
+#[test]
+fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
+    let mut s = audio_harness();
+    s.set_cvar_host("renderScale", "1");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowRenderScaleLabel:GetText()")
+            .unwrap(),
+        "Render Scale"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowRenderScaleControlValue:GetText()"
+        )
+        .unwrap(),
+        "100%",
+        "off has to read as 100%, not as 1"
+    );
+    // The player's range is 50–200 %, narrower than the CVar's own clamp (0.25–4.0, which leaves
+    // room for the supersampling instrument). A row that offered the whole clamp would put 400 %
+    // in front of someone who only wanted their frame rate back.
+    assert!(s
+        .eval::<bool>(
+            "local lo, hi = OptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:GetMinMaxValues()              return math.abs(lo - 0.5) < 0.0001 and math.abs(hi - 2.0) < 0.0001"
+        )
+        .unwrap());
+    // Not mute: the row resolves a description, unlike the other benilla-own rows.
+    assert!(s
+        .eval::<bool>("return BENILLA_TOOLTIP_RENDER_SCALE ~= nil")
+        .unwrap());
+    let _ = s.take_cvar_changes();
+
+    // The move stages and shows Apply; it does NOT rebuild the render target.
+    s.run("OptionsFrameContainerBodyGraphicsRowRenderScaleControlSlider:SetValue(0.75)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowRenderScaleControlValue:GetText()"
+        )
+        .unwrap(),
+        "75%"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "a deferred row must not write the CVar on the move"
+    );
+    assert!(s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+
+    // Apply commits once.
+    s.run("OptionsFrameApplyButton:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("renderScale".to_string(), "0.75".to_string())]
+    );
+    assert!(!s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Pending edits are PANEL-wide like era's modified table: they survive a category switch
 /// (the row redisplays the pending value on return, era's GetValue-returns-pending) and die
 /// only when the window hides — the reopened window reads the committed truth.
@@ -1996,6 +2133,23 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             untipped.push(row.to_string());
             continue;
         }
+        // The one deliberate exception (decision 1639). Render Scale has no 1.12 counterpart
+        // and so no `OPTION_TOOLTIP_*` to resolve, but it is the row that most needs a
+        // description — its first reviewer said outright they could not tell what it did. It
+        // carries one under a `BENILLA_` prefix so the reference's namespace stays the
+        // reference's, which is exactly what this guard is here to protect. Everything the
+        // guard was built to catch — an invented or typo'd `OPTION_TOOLTIP_` key that silently
+        // resolves to nothing — is untouched by the carve-out.
+        if key == "BENILLA_TOOLTIP_RENDER_SCALE" {
+            assert_eq!(
+                row, "GraphicsRowRenderScale",
+                "{row}: not this row's string"
+            );
+            let text: String = s.eval(&format!("return {key}")).unwrap();
+            assert!(!text.is_empty(), "{row}: {key} resolves to nothing");
+            checked += 1;
+            continue;
+        }
         assert!(
             key.starts_with("OPTION_TOOLTIP_"),
             "{row}: {key} is not a 1.12 option-tooltip key"
@@ -2024,7 +2178,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    assert_eq!(checked, 55, "every tipped row carries a live 1.12 key");
+    // 55 of the 56 are 1.12's own; the 56th is Render Scale, whose description is benilla's
+    // (1639) and whose carve-out is above.
+    assert_eq!(checked, 56, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2129,7 +2285,9 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // (the lock 1136, Always Show
     // ActionBars 1500), the Chat page's 1 (Remove Chat Hover Delay, 1589) and 6 API rows (Show
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
-    assert_eq!(raised, 55, "every row but Auto Loot has a 1.12 description");
+    // …plus the Graphics page's Render Scale (1639), the one row whose description is
+    // benilla's own rather than a 1.12 GlobalString — see the tooltip-key guard above.
+    assert_eq!(raised, 56, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a

@@ -1452,6 +1452,15 @@ pub(crate) enum ClientCommand {
     /// Convert the party into a raid (`CMSG_GROUP_RAID_CONVERT`, leader only; echoes back as a
     /// `SMSG_GROUP_LIST` with `group_type` raid).
     GroupRaidConvert,
+    /// Ask the server for one party/raid member's whole stat block
+    /// (`CMSG_REQUEST_PARTY_MEMBER_STATS`; answered by `SMSG_PARTY_MEMBER_STATS_FULL`).
+    ///
+    /// **Sent from exactly two edges, both the reference's** (decision 1640, wow-re
+    /// `ui/scratch/party-oor-stats-and-portrait-law.md` §2): the moment a member's object leaves
+    /// the object manager (`net::apply::group::member_deactivated`), and the GROUP_LIST seat of a
+    /// member new to the roster whose object we do not hold (`seat_new_records`). There is no
+    /// timer and no Lua binding — a periodic poll would be ours, not the client's.
+    RequestPartyMemberStats { guid: u64 },
     /// Set the loot rules (`CMSG_LOOT_METHOD`): `method` 0..4, `master` guid (master loot only),
     /// `threshold` quality 2..4. Leader only; echoes back as a fresh `SMSG_GROUP_LIST`.
     LootMethod {

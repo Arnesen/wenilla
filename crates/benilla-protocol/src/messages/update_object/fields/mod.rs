@@ -819,7 +819,7 @@ impl ObjectFields {
 mod player;
 mod unit;
 
-pub use unit::OwnerFallback;
+pub use unit::{power_display_scale, OwnerFallback};
 
 #[cfg(test)]
 mod tests;

@@ -243,9 +243,14 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         if (!wrap_y) {
             uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
         }
-        let c_repeat = textureSample(tex_array, samp_repeat, in.uv, layer);
-        let c_clamp = textureSample(tex_array, samp_clamp, in.uv, layer);
-        let c_mixed = textureSample(tex_array, samp_repeat, uv_mixed, layer);
+        // `view.mip_bias` (decision 1639) — the render-scale LOD compensation, 0.0 at native.
+        // Carried here as well as in wow_model.wgsl because this lane draws the same statics
+        // through its own sampler rather than through `pbr_input_from_standard_material`, which
+        // applies the bias for free; a lane that skipped it would blur out of step with the
+        // entity path drawing the identical art.
+        let c_repeat = textureSampleBias(tex_array, samp_repeat, in.uv, layer, view.mip_bias);
+        let c_clamp = textureSampleBias(tex_array, samp_clamp, in.uv, layer, view.mip_bias);
+        let c_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias);
         if (wrap_x && wrap_y) {
             base = c_repeat;
         } else if (!wrap_x && !wrap_y) {

@@ -29,6 +29,12 @@ pub(super) struct FedParty {
     loot: Option<GroupLootInfo>,
     invite: Option<String>,
     units: [Option<UnitState>; 4],
+    /// Each `party1..party4` slot's `(member guid, is their object streamed)` — the edge
+    /// `PARTY_MEMBER_ENABLE`/`DISABLE` fire on (decision 1640). The **guid rides along** because
+    /// the events are an *object's* activation, not a slot's: a slot whose occupant changed is a
+    /// roster edge, and firing ENABLE there would announce an arrival nobody made. Guid `0` is an
+    /// empty slot.
+    presence: [(u64, bool); 4],
     /// The whole roster-level snapshot last pushed — `set_party`'s own diff (1439; it used to
     /// re-push, allocations and all, every frame).
     pushed_party: Option<PartyState>,
@@ -260,13 +266,13 @@ pub(super) fn feed_party(
     // party1..party4 unit snapshots + their per-field UNIT_* transitions — pushed on diff (1439;
     // an identical snapshot re-pushed is invisible to the VM, so only a change pays the clone).
     for (i, token) in PARTY_TOKENS.iter().enumerate() {
-        let snap = slots.get(i).map(|m| {
+        let member = slots.get(i);
+        let snap = member.map(|m| {
             member_unit_state(
                 m,
                 group.stats.get(&m.guid),
+                index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
                 &group,
-                &index,
-                &stores,
                 own_group.clone(),
             )
         });
@@ -277,6 +283,36 @@ pub(super) fn feed_party(
                 crate::ui_unit::fire_transitions(&mut script, token, fed.units[i].as_ref(), cur);
             }
             fed.units[i] = snap;
+        }
+        // ── PARTY_MEMBER_ENABLE / PARTY_MEMBER_DISABLE (decision 1640) ──────────────────────
+        //
+        // The pair the reference fires from the very hooks decision 1640 built the rest of this
+        // arc on: `PARTY_MEMBER_DISABLE` (`0xdd`) at the end of the deactivate virtual
+        // `0x5e9aa0`, `PARTY_MEMBER_ENABLE` (`0xdc`) from the activate leg `0x4e85d0(mode 1)` —
+        // i.e. exactly this slot's object entering or leaving the object manager, with the
+        // **1-based slot index** as the (string) argument.
+        //
+        // Fired here rather than at the net edge because this is where the VM is, and because the
+        // slot number is a party-slot fact, not an object one. **Nothing in 1.12.1's FrameXML
+        // reads them** — `PartyMemberFrame_OnEvent`'s two arms are commented out in the shipped
+        // Lua — so this is addon-facing fidelity, and it is deliberately not the wire the frame's
+        // own repaint rides (that is `UNIT_*` + `PARTY_MEMBERS_CHANGED`, above).
+        let presence = member.map_or((0, false), |m| (m.guid, index.0.contains_key(&m.guid)));
+        if fed.presence[i] != presence {
+            gate.audit("feed_party", "a party-slot presence edge");
+            // Only the **same** member's object crossing the boundary is an activation. Not on
+            // the first observation after a VM reset either: a fresh VM starting at `false`
+            // against a member who has been standing there all along would announce an arrival
+            // that did not happen (the `READY_CHECK` rule, one system down).
+            if !vm_reset && presence.0 != 0 && fed.presence[i].0 == presence.0 {
+                let event = if presence.1 {
+                    "PARTY_MEMBER_ENABLE"
+                } else {
+                    "PARTY_MEMBER_DISABLE"
+                };
+                script.fire_event(event, vec![ScriptValue::Str((i + 1).to_string())]);
+            }
+            fed.presence[i] = presence;
         }
     }
 
@@ -312,9 +348,8 @@ pub(super) fn feed_party(
                 Some(member_unit_state(
                     m,
                     group.stats.get(guid),
+                    index.0.get(guid).and_then(|e| stores.get(*e).ok()),
                     &group,
-                    &index,
-                    &stores,
                     own_group.clone(),
                 ))
             }
@@ -661,25 +696,55 @@ fn raid_roster(
 fn member_unit_state(
     m: &GroupMemberEntry,
     stats: Option<&PartyMemberStatsInfo>,
+    // The member's live descriptor, if their object is in the manager — the reference's
+    // `0x468460`, resolved by the caller. Taking the *answer* rather than the index+query pair
+    // is what makes the out-of-range leg (the whole of report B334) testable at all.
+    store: Option<&ObjectStore>,
     group: &GroupState,
-    index: &GuidIndex,
-    stores: &Query<&ObjectStore>,
     own_group: Option<String>,
 ) -> UnitState {
-    let mut s = match index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()) {
+    let mut s = match store {
         // In visibility range: the live descriptor is the truth (the server keeps it current).
         Some(store) => crate::ui_unit::snapshot(store, Some(m.name.clone()), 0),
-        // Out of range: the PARTY_MEMBER_STATS snapshot (vmangos only sends these to members
-        // who can't see the subject — the two sources are complementary by construction).
+        // Out of range: **the roster record** — which is not only the `PARTY_MEMBER_STATS` wire
+        // any more (decision 1640). It is seeded from the member's own live descriptor at the
+        // instant their object leaves the manager (`0x5f0880`, `net::apply::group::
+        // member_deactivated`), seated with the `1/1` placeholder when they join the roster
+        // unseen (`0x4e82d0`), and patched by the wire afterwards — so this leg never reads the
+        // `0/0` report B334 is about, and there is always a record to read.
+        //
+        // The reference's own getter chain, in order (`ui/scratch/party-oor-stats-and-portrait-
+        // law.md` §3): live descriptor → party record → pet record → 0. The pet leg is not
+        // reachable here (a `partyN` token is a player guid; the `partypetN` tokens resolve
+        // nowhere in benilla yet), so this is the whole of it.
         None => UnitState {
             exists: true,
             name: Some(m.name.clone()),
             health: stats.and_then(|s| s.cur_hp).map_or(0, u32::from),
             max_health: stats.and_then(|s| s.max_hp).map_or(0, u32::from),
             level: stats.and_then(|s| s.level).map_or(0, u32::from),
-            power_type: stats.and_then(|s| s.power_type).unwrap_or(0),
-            power: stats.and_then(|s| s.cur_power).map_or(0, u32::from),
-            max_power: stats.and_then(|s| s.max_power).map_or(0, u32::from),
+            power_type: stats.map_or(0, PartyMemberStatsInfo::shown_power_type),
+            // **Divided, like the live leg** — `UnitMana` applies the raw→display scale on its
+            // record path too (`0x517744`-`0x51775e`), which this arm did not: a warrior out of
+            // range read ten times the rage of one in range.
+            power: stats.map_or(0, PartyMemberStatsInfo::shown_power),
+            max_power: stats.map_or(0, PartyMemberStatsInfo::shown_max_power),
+            // **The record's status bits, for the two predicates the RE actually pins to it**:
+            // `UnitIsDead 0x517b5d` reads `+0x08 & 4` and `UnitIsGhost 0x517c32` reads `& 8` on
+            // the no-object leg. They matter because they are *fresher than the roster byte*: the
+            // roster only moves on a `SMSG_GROUP_LIST`, while this byte is rewritten by the
+            // descriptor snapshot at the despawn edge and by every stats delta after it — so a
+            // member who was dead when they walked over the hill reads dead, where the last
+            // roster echo still had them alive.
+            //
+            // Connected / AFK / DND / PvP / FFA deliberately stay the roster's below: wow-re's §3
+            // table carves the no-object path for the health, power, level and dead/ghost/
+            // connected getters, and says nothing about `UnitIsAFK` and kin. Taking the record
+            // for those would be a guess, and vmangos only flags the status byte on the AFK/DND/
+            // PvP/FFA toggles anyway — never on death, which is exactly why the two above are the
+            // pair worth reading.
+            dead: stats.is_some_and(|s| s.status.unwrap_or(0) & member_status::DEAD != 0),
+            ghost: stats.is_some_and(|s| s.status.unwrap_or(0) & member_status::GHOST != 0),
             ..Default::default()
         },
     };
@@ -1363,6 +1428,107 @@ pub(crate) fn synthetic_raid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The out-of-range party frame reads the roster record** (decision 1640, report B334) —
+    /// the reference's `UnitHealth`/`UnitMana`/`UnitLevel` no-object leg, `0x496400` into
+    /// `0xbc70b0 + slot·0x148`.
+    ///
+    /// Two things this pins, and both were wrong before it. The bars come off the record at all
+    /// (they used to read the wire-only snapshot and map an absent field to `0`, which is the
+    /// blanked frame Goudy reported); and the power pair is **divided** by the raw→display scale
+    /// on this leg exactly as on the live one — a warrior's rage rides the wire ×10, so without
+    /// the divide an out-of-range warrior reads ten times an in-range one.
+    #[test]
+    fn an_out_of_range_member_reads_the_record_and_divides_its_rage() {
+        let m = GroupMemberEntry {
+            name: "Thalyn".into(),
+            guid: 0x1234,
+            status: member_status::ONLINE,
+            flags: 0,
+        };
+        let record = PartyMemberStatsInfo {
+            cur_hp: Some(2400),
+            max_hp: Some(3000),
+            level: Some(41),
+            power_type: Some(1), // POWER_RAGE
+            cur_power: Some(570),
+            max_power: Some(1000),
+            ..PartyMemberStatsInfo::default()
+        };
+        let s = member_unit_state(&m, Some(&record), None, &GroupState::default(), None);
+        assert_eq!(
+            (s.health, s.max_health),
+            (2400, 3000),
+            "the bars keep their numbers"
+        );
+        assert_eq!(s.level, 41);
+        assert_eq!(
+            (s.power_type, s.power, s.max_power),
+            (1, 57, 100),
+            "rage reads 57/100, not 570/1000 — `UnitMana`'s record leg divides too (0x517744)"
+        );
+        assert!(s.exists && s.is_player && s.is_connected);
+
+        // And a member with no record at all still reads as an existing, connected player — the
+        // seat law means this cannot happen for a real roster, but the mapping must not invent
+        // numbers when it does.
+        let bare = member_unit_state(&m, None, None, &GroupState::default(), None);
+        assert_eq!((bare.health, bare.max_health, bare.power), (0, 0, 0));
+        assert!(bare.exists);
+    }
+
+    /// **The record's dead/ghost bits are read out of range** — `UnitIsDead 0x517b5d` (`+0x08 &
+    /// 4`) and `UnitIsGhost 0x517c32` (`& 8`), the two predicates wow-re's §3 table pins to the
+    /// no-object leg.
+    ///
+    /// The falsifier is the roster byte's staleness: it only moves on a `SMSG_GROUP_LIST`, and
+    /// vmangos never flags the party status byte on death (`Player.cpp`'s five setters are the
+    /// AFK/DND/PvP/FFA toggles). So a member who was dead at the moment they walked out of range
+    /// is dead in the record — written there by the despawn snapshot — and alive in the roster
+    /// echo that predates it. Read only the roster and their frame stays lit.
+    #[test]
+    fn an_out_of_range_members_dead_and_ghost_come_off_the_record() {
+        let m = GroupMemberEntry {
+            name: "Thalyn".into(),
+            guid: 0x1234,
+            // The stale roster echo: online, alive.
+            status: member_status::ONLINE,
+            flags: 0,
+        };
+        let dead = PartyMemberStatsInfo {
+            status: Some(member_status::ONLINE | member_status::DEAD),
+            ..PartyMemberStatsInfo::default()
+        };
+        let s = member_unit_state(&m, Some(&dead), None, &GroupState::default(), None);
+        assert!(
+            s.dead,
+            "the record says dead even though the roster echo does not"
+        );
+        assert!(!s.ghost);
+
+        let ghost = PartyMemberStatsInfo {
+            status: Some(member_status::ONLINE | member_status::GHOST),
+            ..PartyMemberStatsInfo::default()
+        };
+        let s = member_unit_state(&m, Some(&ghost), None, &GroupState::default(), None);
+        assert!(s.ghost);
+        assert!(!s.dead, "a released ghost is not `dead` — the 0308 §1 trio");
+
+        // The roster byte still wins when IT is the one carrying the bit (an offline member whose
+        // record was never filled): the overlay ORs, it does not replace.
+        let stale = GroupMemberEntry {
+            status: member_status::ONLINE | member_status::DEAD,
+            ..m.clone()
+        };
+        let s = member_unit_state(
+            &stale,
+            Some(&PartyMemberStatsInfo::placeholder(true)),
+            None,
+            &GroupState::default(),
+            None,
+        );
+        assert!(s.dead);
+    }
 
     /// A repeat answer is an edge even when it repeats *nothing* — the rule the Raid Info button
     /// hangs off, and the one that was missing (1561).

@@ -28,7 +28,13 @@ const STAND_STATE_DEAD: u8 = 7;
 ///
 /// Applied by `UnitMana`/`UnitManaMax` only — the raw accessors stay raw, and the pet happiness
 /// bucket thresholds are on the RAW scale, which is why both forms have to exist (decision 1034).
-fn power_display_scale(ty: u8) -> u32 {
+///
+/// **Two callers, because the getters have two sources** (decision 1640): the live descriptor
+/// legs below, and the party roster record's ([`crate::messages::PartyMemberStatsInfo::shown_power`])
+/// — `UnitMana 0x517670` divides by this on *both* its object leg (`0x51770f`) and its
+/// record leg (`0x517744`-`0x51775e`), so an out-of-range warrior's rage is not ten times
+/// an in-range one's.
+pub fn power_display_scale(ty: u8) -> u32 {
     match ty {
         1 => 10,   // rage
         4 => 1000, // happiness

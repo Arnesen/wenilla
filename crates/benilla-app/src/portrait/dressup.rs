@@ -155,6 +155,7 @@ pub(super) fn spawn_dressup_booth(
             root,
             target: image,
             baked: None,
+            baked_guid: None,
             snap: None,
             shown: false,
             show_rev: 0,

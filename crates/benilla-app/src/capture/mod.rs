@@ -885,6 +885,16 @@ fn hold_clock(mut clock: ResMut<Time<Virtual>>) {
     clock.pause();
 }
 
+/// The three scene-population queries the `FPS_PROBE` line prints — bundled because they are one
+/// concern (how much world is resident, and how much of it survived the cull) and because
+/// `drive_capture` sits against Bevy's 16-parameter ceiling, which `cvars::KnobParams` hit first.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ProbeCensus<'w, 's> {
+    particles: Query<'w, 's, &'static benilla_world::particles::ParticleEmitter>,
+    parts: Query<'w, 's, &'static ViewVisibility, With<benilla_world::model_render::ModelPart>>,
+    entities: Query<'w, 's, ()>,
+}
+
 /// Drive the capture lifecycle: wait for streaming, settle, screenshot, exit.
 #[allow(clippy::too_many_arguments)]
 fn drive_capture(
@@ -898,9 +908,7 @@ fn drive_capture(
     // `ResMut` for one reason: re-anchoring the clock at the probe's release — see `Phase::Aging`.
     mut time: ResMut<Time<bevy::time::Real>>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
-    particles: Query<&benilla_world::particles::ParticleEmitter>,
-    parts: Query<&ViewVisibility, With<benilla_world::model_render::ModelPart>>,
-    entities: Query<()>,
+    census: ProbeCensus,
     fx_req: Option<Res<FxViewRequest>>,
     wfx_req: Option<Res<waterfx::WaterFxView>>,
     mut fx_state: Option<ResMut<FxViewState>>,
@@ -913,6 +921,9 @@ fn drive_capture(
     mut clock: ResMut<Time<Virtual>>,
     // Switched to `Automatic` at the probe's release point — see `Phase::Aging`.
     mut time_strategy: ResMut<TimeUpdateStrategy>,
+    // `Option`: the glue-screen capture path builds no composite lane, so there is no backdrop to
+    // ask how big the world was — and those scenarios have no world to price anyway.
+    backdrop: Option<Res<crate::world_backdrop::WorldBackdrop>>,
 ) {
     // The wall-clock ceiling, checked before anything else and in every phase — `Building` is
     // where the drawable starvation was caught, but `FxAging` waits on a fixture that may never
@@ -1113,7 +1124,8 @@ fn drive_capture(
                 v.sort_by(f32::total_cmp);
                 let at = |q: f32| v[(((v.len() - 1) as f32) * q).round() as usize];
                 let mean = v.iter().sum::<f32>() / v.len() as f32;
-                let (emitters, active, live) = particles
+                let (emitters, active, live) = census
+                    .particles
                     .iter()
                     .fold((0usize, 0usize, 0usize), |(e, a, l), p| {
                         (e + 1, a + usize::from(p.live() > 0), l + p.live())
@@ -1122,13 +1134,20 @@ fn drive_capture(
                     .single()
                     .map(|w| (w.physical_width(), w.physical_height()))
                     .unwrap_or((0, 0));
+                // The pixels the GPU was actually asked for. `px` is the WINDOW, and since 1639
+                // the world need not match it: a probe line that reported only the window would
+                // silently price a 4x supersample as if it were a native frame.
+                let world_px = backdrop.map_or(String::new(), |b| {
+                    let s = b.render_size();
+                    format!(" world_px={}x{}", s.x, s.y)
+                });
                 // Scene population: model submeshes (the per-frame visibility walk's N), how many
                 // survived the cull to render, and the whole-world entity count — the scale terms
                 // behind every O(N) per-frame cost (the Stormwind fps hunt's instrument).
-                let (submeshes, drawn) = parts.iter().fold((0usize, 0usize), |(n, d), v| {
+                let (submeshes, drawn) = census.parts.iter().fold((0usize, 0usize), |(n, d), v| {
                     (n + 1, d + usize::from(v.get()))
                 });
-                let entity_count = entities.iter().len();
+                let entity_count = census.entities.iter().len();
                 // CPU cost per frame across every thread — the load-robust half of the measurement
                 // (`perf::process_cpu_secs`), same fields as the live probe's line.
                 let cpu = match (ctx.probe_cpu_start, crate::perf::process_cpu_secs()) {
@@ -1150,7 +1169,7 @@ fn drive_capture(
                 // Machine-greppable one-liner + a human block. stdout, not the log, so a script can
                 // capture it without log-filter noise.
                 println!(
-                    "FPS_PROBE scenario={} frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} entities={entity_count} px={}x{}{cpu}{present}",
+                    "FPS_PROBE scenario={} frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} entities={entity_count} px={}x{}{world_px}{cpu}{present}",
                     ctx.name,
                     v.len(),
                     at(0.50),

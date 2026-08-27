@@ -10,6 +10,7 @@
 
 use std::io::{self, Read};
 
+use crate::messages::update_object::power_display_scale;
 use crate::wire::{
     read_cstring, read_f32_le, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8,
 };
@@ -208,6 +209,99 @@ pub struct PartyMemberStatsInfo {
     pub pet_max_power: Option<u16>,
     pub pet_auras: Option<Vec<u16>>,
     pub pet_auras_negative: Option<Vec<u16>>,
+}
+
+impl PartyMemberStatsInfo {
+    /// **The `1/1` placeholder** — the record a member *new to the roster* starts life with
+    /// (VERIFIED wow-re `ui/scratch/party-oor-stats-and-portrait-law.md` §2.2: the GROUP_LIST slot
+    /// writer `0x4e82d0` zero-fills the record and then stores `1` into `+0x0a`/`+0x0c`/`+0x0e`/
+    /// `+0x10` at `0x4e833d`-`0x4e8357`). It is what an out-of-range member you have never seen
+    /// shows until their first stats packet lands: a *full* bar, not an empty one. `status` carries
+    /// the roster's own online bit, which is the one field the writer takes from its caller.
+    pub fn placeholder(online: bool) -> Self {
+        Self {
+            status: Some(u8::from(online)),
+            cur_hp: Some(1),
+            max_hp: Some(1),
+            cur_power: Some(1),
+            max_power: Some(1),
+            ..Self::default()
+        }
+    }
+
+    /// **The live-descriptor snapshot** — `0x5f0880`, the record's third writer beside the wire and
+    /// the slot writer (VERIFIED wow-re `object-layer/scratch/party-record-live-snapshot.md` §1).
+    /// The reference runs it at the instant a party/raid member's object leaves the object manager
+    /// (`SMSG_DESTROY_OBJECT` and the `OUT_OF_RANGE` block take the same virtual), immediately
+    /// before asking the server for the member's stats — which is why an out-of-range party frame
+    /// never reads `0/0` at the despawn edge.
+    ///
+    /// Fields, in the binary's own order: `status` (bit0 online — an object you can see belongs to
+    /// an online player, `0x5f088e c6 46 08 01`; bit3 ghost; bit1 PVP; bit4 FFA-PVP; bit2 dead),
+    /// `+0x0a` cur HP, `+0x0c` max HP, `+0x09` power type, `+0x0e`/`+0x10` the power pair,
+    /// `+0x12` level. **Raw** descriptor values, not the `Unit*` getters' display ones: the
+    /// reference copies the field words (`5f08ea 66 8b 51 40`), and the raw→display divide happens
+    /// at the *read*, in [`Self::shown_power`] — the same place the live path does it.
+    ///
+    /// **Three stated deviations** (decision 1640), each a field with no reader in benilla today:
+    /// - `zone` and `position` are **left as they were** rather than overwritten. The reference
+    ///   writes the *viewer's* zone (`[0xb4e314]`) and the object's world position; ours keeps the
+    ///   last wire-reported pair, which the `_FULL` answer to the request corrects within a round
+    ///   trip either way. Nothing draws party dots on the minimap yet — that is the consumer whose
+    ///   arrival makes the position worth plumbing.
+    /// - the 48-slot **aura** block and the **pet** block are not snapshotted: benilla feeds no
+    ///   party-token aura list and resolves no `partypetN` token, so both would be write-only.
+    /// - AFK/DND (`0x40`/`0x80`) are dropped from `status`, exactly as the reference's byte is
+    ///   rewritten whole — those two bits live on the roster entry, which is what the party frame
+    ///   actually overlays.
+    pub fn snapshot_descriptor(&mut self, fields: &crate::messages::update_object::ObjectFields) {
+        let mut status = member_status::ONLINE;
+        if fields.player_is_ghost() {
+            status |= member_status::GHOST;
+        }
+        // `UNIT_FIELD_FLAGS` PvP bit — the same word/bit the tooltip's PvP line reads.
+        if fields.unit_flags() & 0x1000 != 0 {
+            status |= member_status::PVP;
+        }
+        // `PLAYER_FLAGS` bit 7 (`0x5f08be c1 ea 07`).
+        if fields.player_flags() & 0x80 != 0 {
+            status |= member_status::PVP_FFA;
+        }
+        // `[desc+0x40] <= 0` — the raw health, not `unit_reads_dead`: the snapshot has no
+        // dyn-flag leg, so a feigning member's record says alive (`5f08d3 85 c9; 7f 04`).
+        if fields.unit_health().unwrap_or(0) == 0 {
+            status |= member_status::DEAD;
+        }
+        self.status = Some(status);
+        // The record's fields are `u16` (`+0x0a`..`+0x12`), and so is the wire's — the reference
+        // takes the low word of each dword (`66 8b 51 40`), which is a truncation no 1.12
+        // character can reach.
+        let power_type = fields.unit_power_type();
+        self.cur_hp = Some(fields.unit_health().unwrap_or(0) as u16);
+        self.max_hp = Some(fields.unit_max_health().unwrap_or(0) as u16);
+        self.power_type = Some(power_type);
+        self.cur_power = Some(fields.unit_power(power_type).unwrap_or(0) as u16);
+        self.max_power = Some(fields.unit_max_power(power_type).unwrap_or(0) as u16);
+        self.level = Some(fields.unit_level().unwrap_or(0) as u16);
+    }
+
+    /// `UnitPowerType` on the record path — `+0x09`, `0` when the record has never carried one
+    /// (the binding's own miss value).
+    pub fn shown_power_type(&self) -> u8 {
+        self.power_type.unwrap_or(0)
+    }
+
+    /// `UnitMana` on the record path (`0x517744`-`0x51775e`) — the stored power divided by
+    /// [`power_display_scale`], exactly as the live-object leg divides. Without it an out-of-range
+    /// warrior's rage bar reads ten times an in-range one's. Miss ⇒ `0`, the binding's own.
+    pub fn shown_power(&self) -> u32 {
+        u32::from(self.cur_power.unwrap_or(0)) / power_display_scale(self.shown_power_type())
+    }
+
+    /// `UnitManaMax` on the record path (`0x5178af`), the same divide.
+    pub fn shown_max_power(&self) -> u32 {
+        u32::from(self.max_power.unwrap_or(0)) / power_display_scale(self.shown_power_type())
+    }
 }
 
 /// Read the aura tail shared by [`party_member_mask::AURAS`]/`PET_AURAS` (a `u32` bit mask) and

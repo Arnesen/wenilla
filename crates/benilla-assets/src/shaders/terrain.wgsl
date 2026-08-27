@@ -245,10 +245,15 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     let tiled = in.uv * t.params.x;
     // Full RGBA: `.rgb` = diffuse, `.a` = the `_s` texture's per-texel SHEEN MASK (see assets.rs /
     // terrain.rs — the base `.blp` has no alpha, so we load the `_s` variant; matte where no mask).
-    let s0 = textureSample(layer_array, splat_samp, tiled, li.x);
-    let s1 = textureSample(layer_array, splat_samp, tiled, li.y);
-    let s2 = textureSample(layer_array, splat_samp, tiled, li.z);
-    let s3 = textureSample(layer_array, splat_samp, tiled, li.w);
+    // `view.mip_bias` (decision 1639): a render scale below 1 doubles every derivative and so
+    // picks a coarser mip, and that blur is then stretched back up by the resolve. The bias undoes
+    // exactly that shift and is 0.0 at native and above, so this is an identity at scale 1.
+    // Only the LAYER array takes it: `alpha_array`/`shadow_array` are one 64x64 grid per chunk,
+    // built with a single mip level (terrain.rs `array_image`), so no bias could move them.
+    let s0 = textureSampleBias(layer_array, splat_samp, tiled, li.x, view.mip_bias);
+    let s1 = textureSampleBias(layer_array, splat_samp, tiled, li.y, view.mip_bias);
+    let s2 = textureSampleBias(layer_array, splat_samp, tiled, li.z, view.mip_bias);
+    let s3 = textureSampleBias(layer_array, splat_samp, tiled, li.w, view.mip_bias);
     // Alpha + shadow maps are one 64² grid per chunk in 0..1 (NOT tiled), yet they share the layer
     // textures' Repeat sampler. The old "repeat == clamp here" assumption is FALSE under LINEAR
     // filtering: at a chunk edge (uv→0/1) the bilinear footprint WRAPS to the chunk map's opposite

@@ -621,9 +621,20 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::ObjectDestroyed(guid) => {
                 death::forget_corpse(guid, &mut death_net);
+                // The party hook runs FIRST and on the same edge the reference takes it: the
+                // deactivate virtual reads the descriptor that is about to go (decision 1640).
+                let store = index.0.get(&guid).and_then(|e| stores.get(*e).ok());
+                group::member_deactivated(guid, &mut group, store, &net_commands);
                 objects::object_destroyed(guid, &mut commands, &mut index, &mut items)
             }
             SessionEvent::ObjectsRemoved(guids) => {
+                // OUT_OF_RANGE and DESTROY take the same virtual in the reference — so the
+                // snapshot + `CMSG_REQUEST_PARTY_MEMBER_STATS` fire here too, which is the edge
+                // report B334 is actually about: a member walking over the hill.
+                for guid in &guids {
+                    let store = index.0.get(guid).and_then(|e| stores.get(*e).ok());
+                    group::member_deactivated(*guid, &mut group, store, &net_commands);
+                }
                 objects::objects_removed(guids, &mut commands, &mut index)
             }
             SessionEvent::MonsterMove {
@@ -666,17 +677,22 @@ pub(super) fn apply_net_updates(
                 position,
                 orientation,
                 needs_ack,
-            } => session::worldport(
-                map_id,
-                position,
-                orientation,
-                needs_ack,
-                &mut commands,
-                &mut index,
-                &mut aura.6,
-                &aura.7,
-                &mut worldports,
-            ),
+            } => {
+                // Every streamed roster member's object is about to be purged — the same
+                // deactivation the reference runs one object at a time (decision 1640).
+                group::roster_deactivated(&mut group, &index, &stores, &net_commands);
+                session::worldport(
+                    map_id,
+                    position,
+                    orientation,
+                    needs_ack,
+                    &mut commands,
+                    &mut index,
+                    &mut aura.6,
+                    &aura.7,
+                    &mut worldports,
+                )
+            }
             SessionEvent::TransferPending {
                 map_id,
                 transport_entry,
@@ -949,6 +965,7 @@ pub(super) fn apply_net_updates(
                 leader,
                 loot,
                 &mut names,
+                &index,
                 &net_commands,
             ),
             SessionEvent::PartyCommandResult {

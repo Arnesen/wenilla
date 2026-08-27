@@ -50,20 +50,146 @@
 //! Nothing about the world lane changes: FFXGlow keeps its decode, the frame still holds exactly
 //! one, and an opaque world pixel must come out byte-identical to before. That identity is the
 //! regression test, the same one 0161 used.
+//!
+//! ## …and that seam turned out to be a dial: **render scale** (decision 1639)
+//!
+//! Once the world is a picture the UI paints on, the picture does not have to be the window's size.
+//! [`RenderScale`] sizes it — the world renders at `window × scale`, the quad still covers the
+//! window, and **the UI is untouched at native resolution**, because [`emit_backdrop_quad`]
+//! measures the quad in the window's LOGICAL size and nothing here can move that. That is the whole
+//! reason this is worth having rather than "run the game in a smaller window": text, icons and
+//! frame art stay exactly as sharp as they were, and only the 3D pays.
+//!
+//! **Below 1 it buys frames; above 1 it is supersampling** — and above 1 is the half this machine
+//! can measure, since `gxMultisample` defaults to off (1629) and the client therefore ships with no
+//! antialiasing of any kind. At exactly 2.0 the plain bilinear resolve *is* a 2×2 box average (the
+//! destination pixel centre lands on the corner four texels share, weighting each 0.25), so SSAA×2
+//! needs no filter of its own.
+//!
+//! **The one number that must not move is the camera's LOGICAL viewport**, and
+//! [`render_target_for`] is built around holding it fixed — [`retarget_world_camera`] says what
+//! reads it (every pick ray in the client) and why getting it wrong is B169 over again.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
+use bevy::render::camera::MipBias;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::window::PrimaryWindow;
 
 use crate::ui_pass::{UiQuad, UiQuads};
 use benilla_world::view::WorldCamera;
 
+/// The **render scale** — benilla's own CVar `renderScale`, no 1.12 counterpart.
+///
+/// The era's answer to "my machine is too slow" was `gxResolution`: drop the whole backbuffer, UI
+/// and all, and in fullscreen mode-set the display to match. We ship no exclusive mode at all
+/// (decision 1627) and our UI is a separate pass over an off-screen world, so we can offer the
+/// strictly better version of that trade — **shrink the 3D, keep the interface**. It is the same
+/// knob every engine since has grown (Godot's `scaling_3d_scale`, Unity URP's `renderScale`,
+/// Unreal's `r.ScreenPercentage`), and it is the standard lever for the one machine class we have a
+/// real measurement from: the Steam Deck sitting at 94 % GPU busy (B329).
+///
+/// **Default 1.0 — off, and it has to be**, so every visual golden in the tree keeps meaning what
+/// it meant: at 1.0 [`render_target_for`] returns the window's own physical size and the window's
+/// own scale factor, unrounded and unmultiplied, which is bit-for-bit the pre-1639 lane.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct RenderScale(pub(crate) f32);
+
+/// The settable range of [`RenderScale`], shared by the CVar apply and the `$WOW_RENDER_SCALE` env
+/// knob so the two cannot drift.
+///
+/// Wider than a settings row would offer (a slider belongs at 50–200 %, where every engine puts
+/// it): this is the clamp that stops an absurd *value*, not the one that shapes the UI. The upper
+/// end is deliberately past 2 because supersampling is also the instrument — the only way to price
+/// a pixel on a machine whose present is railed at the display's grant (0362, and `crate::video`'s
+/// note that macOS honours neither `AutoNoVsync` nor `Immediate`).
+pub(crate) const RENDER_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.25..=4.0;
+
+/// The per-axis ceiling on the backdrop, in physical px — `wgpu::Limits::default()`'s
+/// `max_texture_dimension_2d`, which is what Bevy asks the adapter for unless `WgpuSettings` says
+/// otherwise.
+///
+/// Not a render-scale concern in origin: a window wider than this has always been a texture wgpu
+/// refuses to create, and before 1639 nothing here looked. The ceiling is applied to the *ratio*
+/// rather than to each axis (see [`render_target_for`]) so hitting it shrinks the picture instead of
+/// reshaping it.
+const MAX_RENDER_AXIS: u32 = 8192;
+
+impl Default for RenderScale {
+    /// `$WOW_RENDER_SCALE` overrides the default, **session-only** — the A/B lever, the same posture
+    /// as `$WOW_MSAA` and `$WOW_FARCLIP`: a value pinned into `config.toml` would make a
+    /// measurement sticky across relaunches.
+    fn default() -> Self {
+        let scale = std::env::var("WOW_RENDER_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .map_or(1.0, |v| {
+                v.clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end())
+            });
+        Self(scale)
+    }
+}
+
+/// The backdrop's size and the world camera's target scale factor, for a window of `px` physical
+/// pixels at `window_factor`, rendered at `scale`.
+///
+/// **Two invariants, and the second is the load-bearing one.**
+///
+/// 1. The image keeps the window's aspect, so the ratio — never an individual axis — is what gets
+///    clamped to [`MAX_RENDER_AXIS`]. Clamping the axes independently would letterbox the world
+///    inside a quad that is still the window's shape.
+/// 2. `size.x / factor` — the camera's LOGICAL viewport width — comes out the window's logical
+///    width, whatever `scale` is. That is why the factor is derived from the size actually built
+///    rather than from `scale`: the `round()` moves the true ratio by up to half a pixel, and it is
+///    the logical number every pick ray is denominated in (see [`retarget_world_camera`]).
+///
+/// At `scale == 1.0` both lines are exact identities in IEEE — `px × 1.0` is `px`, `size.x / px.x`
+/// is `1.0`, `window_factor × 1.0` is `window_factor` — so the pre-1639 numbers come back
+/// bit-for-bit and no golden can move. A test welds that.
+fn render_target_for(px: UVec2, window_factor: f32, scale: f32) -> (UVec2, f32) {
+    let px = px.max(UVec2::ONE);
+    let ceiling = |axis: u32| MAX_RENDER_AXIS as f32 / axis as f32;
+    let scale = scale
+        .clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end())
+        .min(ceiling(px.x))
+        .min(ceiling(px.y));
+    let size = (px.as_vec2() * scale)
+        .round()
+        .as_uvec2()
+        .clamp(UVec2::ONE, UVec2::splat(MAX_RENDER_AXIS));
+    (size, window_factor * size.x as f32 / px.x as f32)
+}
+
+/// The texture LOD bias a render at `effective` scale owes its mipmapped world textures.
+///
+/// Rendering smaller doubles every screen-space derivative, so every sampler picks a **coarser**
+/// mip — and that blur then gets stretched back up by the resolve, on top of the resolution loss.
+/// Every engine that ships a render scale compensates with `log2(scale)`, and every one of them has
+/// to do it in the shader, because WebGPU dropped the sampler's LOD bias: `wgpu::SamplerDescriptor`
+/// (27.0.1) carries `lod_min_clamp`, `lod_max_clamp` and `anisotropy_clamp`, and nothing else.
+///
+/// **Clamped at 0 — downscaling is compensated, upscaling is left alone.** Above 1.0 the smaller
+/// derivatives already pick a *sharper* mip, and that is not an artefact to correct: it is exactly
+/// what makes supersampling work, since the resolve then averages detail that a native-resolution
+/// frame could never have resolved. Feeding it `+log2(scale)` would hand back the blurrier mip and
+/// throw the win away.
+///
+/// Bevy carries the plumbing already: [`MipBias`] on the camera is extracted into the view uniform
+/// (`View::mip_bias`, defaulting 0.0 when absent), and `pbr_input_from_standard_material` applies it
+/// to every sample — so the whole M2/WMO/creature/doodad lane gets this for free and only our own
+/// hand-written samplers had to be taught (`terrain.wgsl`, `static_gx.wgsl`, `liquid.wgsl`, and the
+/// coverage re-sample in `wow_model.wgsl`).
+fn mip_bias(effective: f32) -> f32 {
+    effective.log2().min(0.0)
+}
+
 /// The off-screen image the world camera renders into, and which the UI pass draws first.
 ///
-/// Sized in **physical** pixels to match the swapchain 1:1 — the backdrop quad covers the window
-/// exactly, so the sample is an identity resample and opaque world pixels survive untouched.
+/// Sized in physical pixels **× [`RenderScale`]**; at the default 1.0 that matches the swapchain 1:1
+/// and the UI pass's sample is an identity resample, which is the property the composite lane was
+/// built on and the reason the scale ships off.
 #[derive(Resource)]
 pub(crate) struct WorldBackdrop {
     pub(crate) image: Handle<Image>,
@@ -73,6 +199,15 @@ pub(crate) struct WorldBackdrop {
     /// number that keeps every logical↔physical conversion on the world camera honest. See
     /// [`retarget_world_camera`].
     scale_factor: f32,
+}
+
+impl WorldBackdrop {
+    /// The size the world is actually being rendered at, in physical px — the window's size times
+    /// [`RenderScale`], after the rounding and the axis ceiling. The number an FPS probe has to
+    /// print beside its frame time, since nothing else in the line can imply it.
+    pub(crate) fn render_size(&self) -> UVec2 {
+        self.size
+    }
 }
 
 /// A fresh backdrop image at `size` physical px. See the module doc for the format's two halves.
@@ -104,11 +239,15 @@ fn setup_backdrop(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    scale: Res<RenderScale>,
 ) {
-    let size = windows
-        .single()
-        .map(window_physical_size)
-        .unwrap_or(UVec2::new(1280, 720));
+    let (size, _) = windows.single().map_or((UVec2::new(1280, 720), 1.0), |w| {
+        render_target_for(
+            window_physical_size(w),
+            w.resolution.scale_factor(),
+            scale.0,
+        )
+    });
     let image = images.add(new_backdrop_image(size));
     commands.insert_resource(WorldBackdrop {
         image,
@@ -119,18 +258,27 @@ fn setup_backdrop(
     });
 }
 
-/// Keep the backdrop the window's size. A stale-sized backdrop would still *work* (the quad covers
-/// the window either way) but the sample would stop being 1:1 and opaque world pixels would start
-/// moving under a resample — the one property this whole lane is built to preserve.
-fn track_window_size(
+/// Keep the backdrop at `window × `[`RenderScale`]. A stale-sized backdrop would still *work* (the
+/// quad covers the window either way) — what it would break is the pairing: the size and the
+/// factor [`retarget_world_camera`] stamps are two halves of one number, and a size that moved
+/// without the factor following it is exactly the B169 defect with a different constant.
+///
+/// Runs before the stamp (the plugin's `.chain()`), so the factor is always computed against the
+/// image that now exists.
+fn track_render_size(
     mut backdrop: ResMut<WorldBackdrop>,
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    scale: Res<RenderScale>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
-    let size = window_physical_size(window);
+    let (size, _) = render_target_for(
+        window_physical_size(window),
+        window.resolution.scale_factor(),
+        scale.0,
+    );
     if size == backdrop.size {
         return;
     }
@@ -138,6 +286,17 @@ fn track_window_size(
     if let Some(image) = images.get_mut(&handle) {
         *image = new_backdrop_image(size);
         backdrop.size = size;
+        // Said out loud on every change, because a measurement taken at the wrong scale looks
+        // exactly like a measurement: the pixels the GPU is actually being asked for are the one
+        // term no probe line could infer from the window.
+        info!(
+            "render scale {:.3}: world renders at {}x{} into a {}x{} window",
+            scale.0,
+            size.x,
+            size.y,
+            window.physical_width(),
+            window.physical_height()
+        );
     }
 }
 
@@ -168,28 +327,47 @@ fn track_window_size(
 /// conversion at each of the eight call sites.
 ///
 /// Re-stamped when the factor changes, not only on `Added`: dragging the window between a Retina
-/// and a non-Retina display changes it mid-session.
+/// and a non-Retina display changes it mid-session — and, since 1639, so does moving
+/// [`RenderScale`], which multiplies into exactly the same number.
+///
+/// **Render scale rides here rather than anywhere else precisely because of the paragraph above.**
+/// The camera's logical viewport is `image_size / scale_factor`; scaling both by the same ratio
+/// leaves it — and therefore the projection (`camera_system` feeds `logical_viewport_size` into
+/// `Projection::update`) and every pick ray (`viewport_to_ndc` and `world_to_viewport_core` read
+/// `logical_viewport_rect()` and nothing else) — **arithmetically unchanged**. Picking is not
+/// "still correct after render scale"; it cannot see render scale at all.
+///
+/// The camera also carries the [`MipBias`] that a scaled render owes its textures — see
+/// [`mip_bias`]. Absent, Bevy's view uniform reads 0.0, so the component is inserted every stamp
+/// rather than only when non-zero: a camera left holding last scale's bias is the same class of
+/// stale-pairing bug as a stale factor.
 fn retarget_world_camera(
+    mut commands: Commands,
     mut backdrop: ResMut<WorldBackdrop>,
     windows: Query<&Window, With<PrimaryWindow>>,
     added: Query<(), Added<WorldCamera>>,
-    mut cameras: Query<&mut RenderTarget, With<WorldCamera>>,
+    mut cameras: Query<(Entity, &mut RenderTarget), With<WorldCamera>>,
 ) {
-    let scale_factor = windows
-        .single()
-        .map_or(1.0, |w| w.resolution.scale_factor());
+    let (px, window_factor) = windows.single().map_or((UVec2::ONE, 1.0), |w| {
+        (window_physical_size(w), w.resolution.scale_factor())
+    });
+    // The image's real size, not the requested one: `track_render_size` ran first and may have
+    // clamped, and the factor must describe the texture that exists.
+    let scale_factor = window_factor * backdrop.size.x as f32 / px.x.max(1) as f32;
     // `!=` on the stored NAN seed is true, so the first run always stamps.
     #[allow(clippy::float_cmp)]
-    let moved_display = scale_factor != backdrop.scale_factor;
-    if !moved_display && added.is_empty() {
+    let moved = scale_factor != backdrop.scale_factor;
+    if !moved && added.is_empty() {
         return;
     }
     backdrop.scale_factor = scale_factor;
-    for mut current in &mut cameras {
+    let bias = MipBias(mip_bias(scale_factor / window_factor));
+    for (entity, mut current) in &mut cameras {
         *current = RenderTarget::Image(bevy::camera::ImageRenderTarget {
             handle: backdrop.image.clone(),
             scale_factor,
         });
+        commands.entity(entity).insert(bias.clone());
     }
 }
 
@@ -230,12 +408,14 @@ pub(crate) struct WorldBackdropPlugin;
 
 impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_backdrop).add_systems(
-            Update,
-            (track_window_size, retarget_world_camera, emit_backdrop_quad)
-                .chain()
-                .before(crate::ui_pass::UiQuadAppend),
-        );
+        app.init_resource::<RenderScale>()
+            .add_systems(Startup, setup_backdrop)
+            .add_systems(
+                Update,
+                (track_render_size, retarget_world_camera, emit_backdrop_quad)
+                    .chain()
+                    .before(crate::ui_pass::UiQuadAppend),
+            );
     }
 }
 
@@ -296,8 +476,12 @@ mod tests {
             w
         };
         app.world_mut().spawn((window(2.0), PrimaryWindow));
-        app.add_systems(Startup, setup_backdrop)
-            .add_systems(Update, retarget_world_camera);
+        app.init_resource::<RenderScale>()
+            .add_systems(Startup, setup_backdrop)
+            // Chained exactly as the plugin chains them: since 1639 the stamp reads the size the
+            // resize pass settled on, so a test that ran the stamp alone would be testing a pairing
+            // that never happens.
+            .add_systems(Update, (track_render_size, retarget_world_camera).chain());
         let cam = app
             .world_mut()
             .spawn((WorldCamera, RenderTarget::default()))
@@ -339,6 +523,133 @@ mod tests {
         assert_eq!(
             image.data.as_ref().map(Vec::len),
             TextureFormat::Rgba16Float.pixel_size().ok()
+        );
+    }
+
+    /// **Scale 1.0 is bit-for-bit the pre-1639 lane** — the property every visual golden in the
+    /// tree rests on. Not "within a pixel": the same `UVec2` and the same `f32`, because
+    /// `px × 1.0`, `size.x / px.x` and `f × 1.0` are all exact in IEEE and a rounding introduced
+    /// here would move the whole world by a sub-pixel resample.
+    #[test]
+    fn scale_one_reproduces_the_windows_own_numbers_exactly() {
+        for px in [
+            UVec2::new(1280, 720),
+            UVec2::new(3200, 1800),
+            UVec2::new(1601, 901), // odd on both axes — the case a `/ 2` would round
+        ] {
+            for sf in [1.0, 1.5, 2.0] {
+                assert_eq!(render_target_for(px, sf, 1.0), (px, sf), "{px} at {sf}×");
+            }
+        }
+    }
+
+    /// **The camera's logical viewport does not move** — the whole design, and the invariant that
+    /// makes render scale invisible to picking. `logical = image_size / scale_factor`
+    /// (`bevy_camera`'s `to_logical`), and that is what `viewport_to_ndc` and
+    /// `world_to_viewport_core` read; if it drifts, B169 comes back at the drift's magnitude.
+    ///
+    /// Sub-pixel is the tolerance because the image is integer: the ratio is derived back out of
+    /// the size that was actually built, so x is exact and y carries at most one `round()`.
+    #[test]
+    fn every_scale_keeps_the_logical_viewport_the_windows_own() {
+        for px in [UVec2::new(1280, 720), UVec2::new(3200, 1800)] {
+            for sf in [1.0, 2.0] {
+                let want = px.as_vec2() / sf;
+                for scale in [0.25, 0.5, 0.6667, 0.75, 1.0, 1.25, 2.0, 4.0] {
+                    let (size, factor) = render_target_for(px, sf, scale);
+                    let logical = size.as_vec2() / factor;
+                    assert!(
+                        (logical.x - want.x).abs() < 0.001,
+                        "{px} at {sf}× scaled {scale}: logical width {logical:?}, want {want:?}"
+                    );
+                    assert!(
+                        (logical.y - want.y).abs() < 1.0,
+                        "{px} at {sf}× scaled {scale}: logical height {logical:?}, want {want:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The axis ceiling clamps the **ratio**, so the picture keeps the window's aspect instead of
+    /// being letterboxed inside a quad that is still the window's shape. It binds on an oversized
+    /// window at scale 1.0 too — a >8192 px window was a texture wgpu refuses to create long before
+    /// this dial existed, and nothing here used to look.
+    #[test]
+    fn the_axis_ceiling_shrinks_the_picture_it_does_not_reshape_it() {
+        let px = UVec2::new(3840, 2160);
+        let (size, _) = render_target_for(px, 1.0, 4.0);
+        assert_eq!(size.x, MAX_RENDER_AXIS);
+        let aspect = |v: UVec2| v.x as f32 / v.y as f32;
+        assert!(
+            (aspect(size) - aspect(px)).abs() < 0.001,
+            "aspect kept: {size}"
+        );
+        // …and the clamp is not render scale's alone.
+        let huge = UVec2::new(10240, 4320);
+        let (size, _) = render_target_for(huge, 1.0, 1.0);
+        assert!(
+            size.x <= MAX_RENDER_AXIS && size.y <= MAX_RENDER_AXIS,
+            "{size}"
+        );
+        assert!(
+            (aspect(size) - aspect(huge)).abs() < 0.001,
+            "aspect kept: {size}"
+        );
+    }
+
+    /// **The bias compensates downscaling and leaves supersampling alone.** A negative bias where a
+    /// scale is > 1 would hand back the coarser mip and throw away the only thing SSAA buys; a
+    /// missing one where it is < 1 is the double blur every engine's render scale corrects.
+    #[test]
+    fn the_mip_bias_is_log2_below_one_and_nothing_above_it() {
+        assert!((mip_bias(0.5) - -1.0).abs() < 1e-6);
+        assert!((mip_bias(0.25) - -2.0).abs() < 1e-6);
+        assert_eq!(
+            mip_bias(1.0),
+            0.0,
+            "off must be exactly off — 0.0, not -0.0's cousin"
+        );
+        assert_eq!(mip_bias(2.0), 0.0);
+        assert_eq!(mip_bias(4.0), 0.0);
+    }
+
+    /// End to end on a live `App`: a half-scale world on a 2× display renders into a half-size
+    /// image, stamps a factor of 1.0 — `image / factor` is still the window's logical size — and
+    /// carries `MipBias(-1)`.
+    #[test]
+    fn a_half_scale_world_halves_the_image_the_factor_and_the_mip() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>();
+        let mut w = Window::default();
+        w.resolution.set_scale_factor(2.0);
+        let px = window_physical_size(&w);
+        app.world_mut().spawn((w, PrimaryWindow));
+        app.insert_resource(RenderScale(0.5))
+            .add_systems(Startup, setup_backdrop)
+            .add_systems(Update, (track_render_size, retarget_world_camera).chain());
+        let cam = app
+            .world_mut()
+            .spawn((WorldCamera, RenderTarget::default()))
+            .id();
+        app.update();
+
+        let backdrop = app.world().resource::<WorldBackdrop>();
+        assert_eq!(backdrop.size, UVec2::new(px.x / 2, px.y / 2));
+        match app.world().entity(cam).get::<RenderTarget>() {
+            Some(RenderTarget::Image(t)) => assert!(
+                (t.scale_factor - 1.0).abs() < 1e-6,
+                "half the pixels at half the factor is the same logical viewport: {}",
+                t.scale_factor
+            ),
+            _ => panic!("the world camera must target the backdrop image"),
+        }
+        let bias = app.world().entity(cam).get::<MipBias>().expect("a bias");
+        assert!(
+            (bias.0 - -1.0).abs() < 1e-6,
+            "half scale owes one mip level: {}",
+            bias.0
         );
     }
 }

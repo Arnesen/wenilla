@@ -609,6 +609,19 @@
         -- CENTER-80, child rows +15 indent in the small font). Era rows with no 1.12 CVar +
         -- benilla knob behind them (Enable Sound=Sound_EnableAllSound, Dialog, output device,
         -- channels…) do not ship — the 0950 honest-tree rule applied to settings.
+        -- The one options string that is NOT the reference's (decision 1639). Every other
+        -- tooltip on this window resolves an OPTION_TOOLTIP_* out of 1.12's GlobalStrings, and a
+        -- benilla row with no counterpart there has so far simply gone mute (the nameplate pair).
+        -- Render Scale cannot afford to: the director's own reaction to the dial was "not really
+        -- sure what this does". So it gets a description, under a BENILLA_ prefix rather than an
+        -- invented OPTION_TOOLTIP_ -- the reference's namespace stays the reference's, and an
+        -- addon reading GlobalStrings still finds exactly what 1.12 defined.
+        BENILLA_TOOLTIP_RENDER_SCALE =
+            "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
+            .. "The interface is unaffected at any setting.\n\n"
+            .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
+            .. "smooths edges at the cost of frame rate. Applies when you click Apply."
+
         OPTIONS_PAGE_ROWS = {
             Controls = {
                 "RowStickyTarget", "RowAutoLoot", "RowInvertMouse", "RowMouseSpeed",
@@ -620,7 +633,7 @@
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail",
-                "RowWindowedMode", "RowVerticalSync", "RowMultisample",
+                "RowWindowedMode", "RowVerticalSync", "RowRenderScale", "RowMultisample",
             },
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
@@ -1460,7 +1473,13 @@
          worked but the visible knob is a small target, so 0989's engine track-press law
          seats the thumb under a press anywhere on the bar and drags on from there. The
          readout is era's RIGHT label seat — 6 right of the control (MinimalSlider.xml
-         l.73-77), rounded-percent formatted. -->
+         l.73-77), rounded-percent formatted.
+         THE +3 LIVES ON THE ART, NOT ON THE CONTROL (B232, decision 1641). It seats the
+         17-tall groove and the 32 px thumb inside the 26-tall row, so it belongs to the two
+         frames that draw them — $parentGroove and $parentSlider. It used to sit on
+         $parentControl itself, where the readout inherited it: every slider row drew its number
+         3 units above its own label, one line asked to read as two. The art's seat is unchanged
+         to the pixel; the text is what moved. -->
     <Frame name="OptionsSliderRowTemplate" virtual="true" enableMouse="true">
         <Size><AbsDimension y="26"/></Size>
         <Layers>
@@ -1495,7 +1514,7 @@
             </Frame>
             <Frame name="$parentControl">
                 <Size><AbsDimension x="250" y="40"/></Size>
-                <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-80" y="3"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-80" y="0"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer level="OVERLAY">
                         <FontString name="$parentValue" inherits="GameFontNormal">
@@ -1510,8 +1529,8 @@
                     <Frame name="$parentGroove">
                         <Size><AbsDimension y="17"/></Size>
                         <Anchors>
-                            <Anchor point="LEFT"><Offset><AbsDimension x="19" y="0"/></Offset></Anchor>
-                            <Anchor point="RIGHT"><Offset><AbsDimension x="-19" y="0"/></Offset></Anchor>
+                            <Anchor point="LEFT"><Offset><AbsDimension x="19" y="3"/></Offset></Anchor>
+                            <Anchor point="RIGHT"><Offset><AbsDimension x="-19" y="3"/></Offset></Anchor>
                         </Anchors>
                         <Backdrop bgFile="Interface\Buttons\UI-SliderBar-Background" edgeFile="Interface\Buttons\UI-SliderBar-Border" tile="true">
                             <EdgeSize><AbsValue val="8"/></EdgeSize>
@@ -1521,8 +1540,8 @@
                     </Frame>
                     <Slider name="$parentSlider" orientation="HORIZONTAL" minValue="0" maxValue="1" valueStep="0.05">
                         <Anchors>
-                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="19" y="0"/></Offset></Anchor>
-                            <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-19" y="0"/></Offset></Anchor>
+                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="19" y="3"/></Offset></Anchor>
+                            <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-19" y="3"/></Offset></Anchor>
                         </Anchors>
                         <ThumbTexture name="$parentThumb" file="Interface\Buttons\UI-SliderBar-Button-Horizontal">
                             <Size><AbsDimension x="32" y="32"/></Size>
@@ -2312,10 +2331,46 @@
                                                     "OPTION_TOOLTIP_VERTICAL_SYNC")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowMultisample" inherits="OptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowRenderScale" inherits="OptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Render Scale (decision 1639) -- benilla's own
+                                                -- row, no 1.12 counterpart: the reference renders
+                                                -- straight to the backbuffer and has no second
+                                                -- image to size. Seated directly above
+                                                -- Multisampling because the two are the page's
+                                                -- antialiasing pair and a player weighing one
+                                                -- against the other should see them together --
+                                                -- and because above 100% this row IS antialiasing,
+                                                -- on a client whose gxMultisample ships off (1629).
+                                                --
+                                                -- 50-200%, narrower than the CVar's own clamp
+                                                -- (RENDER_SCALE_RANGE, 0.25-4.0). That clamp stops
+                                                -- an absurd value and leaves room for the
+                                                -- supersampling instrument; this is what a player
+                                                -- should be offered, and it is where every engine
+                                                -- puts the same slider.
+                                                --
+                                                -- DEFERRED, and for the reason the flag exists.
+                                                -- Committing live would rebuild the world's render
+                                                -- target on every drag tick -- tens of megabytes,
+                                                -- thirty times across one sweep of the handle.
+                                                -- Staging to Apply makes that exactly one rebuild,
+                                                -- which is the same answer uiScale's row already
+                                                -- reaches for a different reason.
+                                                OptionsRow_OnLoad(self, "renderScale", "Render Scale",
+                                                    "BENILLA_TOOLTIP_RENDER_SCALE")
+                                                OptionsSliderRow_Setup(self, 0.5, 2.0, 0.05)
+                                                self.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMultisample" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Multisampling: 1.12's own Video Options dropdown

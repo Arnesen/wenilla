@@ -58,7 +58,7 @@
 //! takes ~1 s `nextDrawable` stalls — measured, and pinned at [`crate::capture::probe_uncap_mode`].
 
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
+use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
 
 /// `$WOW_NOVSYNC=1` — the session-only measurement override. It wins over the config for the run
 /// and never reaches `config.toml` (registered in [`crate::cvars`]'s `env_overridden` set), so a
@@ -92,6 +92,37 @@ pub(crate) fn requested_window_size() -> Option<UVec2> {
     let v = std::env::var("WOW_WIN").ok()?;
     let (w, h) = v.split_once('x')?;
     Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
+}
+
+/// `$WOW_DPI=<f32>` — **render at a player's pixel grid, not this machine's.**
+///
+/// Every session here runs on a 2× panel; nearly every text-under-scale report the channel files
+/// comes from a 1080p/1440p one at 1×. That gap is not cosmetic. The two places our text meets the
+/// grid — the raster size (`TextEngine::ppem`, `round(logical × dpi)`) and the per-block vertical
+/// snap (`ui_text::layout::snap_block_top`) — are both *quantizers*, and a quantizer's error is
+/// denominated in device pixels: at 1× the same layout rounds twice as coarsely as it does here.
+/// A defect that is half a pixel at 2× is a whole one at 1×, which is the difference between
+/// invisible and reported (B209, B231, B232 — all from 1×, all reproduced here only by forcing
+/// this).
+///
+/// The override goes on the *window*, so `Window::scale_factor()` — the one number the text engine,
+/// the vplates raster and the world backdrop all read — answers with it, and `WOW_WIN` then means
+/// physical pixels one-to-one. The image a capture writes is byte-for-byte the framebuffer that
+/// player's GPU would scan out; on this display it is simply drawn at half the size.
+///
+/// Absent, nothing changes: the window keeps whatever the display reports.
+pub(crate) fn requested_dpi() -> Option<f32> {
+    let v: f32 = std::env::var("WOW_DPI").ok()?.parse().ok()?;
+    (v.is_finite() && v > 0.0).then_some(v)
+}
+
+/// Apply [`requested_dpi`] to a window resolution — the one place the knob is spent, so the size
+/// that is asked for and the grid it is asked for on cannot drift apart.
+pub(crate) fn at_requested_dpi(res: WindowResolution) -> WindowResolution {
+    match requested_dpi() {
+        Some(dpi) => res.with_scale_factor_override(dpi),
+        None => res,
+    }
 }
 
 /// The display modes benilla ships. **Two, and neither is the reference's mode-setting

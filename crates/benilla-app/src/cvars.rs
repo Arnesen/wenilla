@@ -41,6 +41,7 @@ use crate::ui_loot::LootConfig;
 use crate::ui_script::UiScaleCvar;
 use crate::video::VideoConfig;
 use crate::vplates::VPlateMode;
+use crate::world_backdrop::{RenderScale, RENDER_SCALE_RANGE};
 use benilla_ui::script::UiScript;
 use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
 use benilla_world::clutter::ClutterConfig;
@@ -288,6 +289,19 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // enumeration.
     ("gxColorBits", "32"),
     ("gxDepthBits", "32"),
+    // **Render scale** (decision 1639) — benilla's own CVar, no 1.12 counterpart, in the
+    // `boothHalfRate` / `SoundOutputLimiter` mould: the reference has no such dial because it has
+    // no second buffer to hang one on. The world renders into the composite lane's off-screen image
+    // at `window × this` while the UI stays at native resolution; the knob is
+    // [`crate::world_backdrop::RenderScale`], clamped to its `RENDER_SCALE_RANGE`.
+    //
+    // The era's nearest equivalent is `gxResolution`, which drops the interface along with the
+    // world and, in fullscreen, mode-sets the display — the thing 1627 deliberately stopped doing.
+    //
+    // Default "1" is off, and that is load-bearing rather than cautious: at 1.0 the lane reproduces
+    // its pre-1639 numbers bit-for-bit, so no visual golden in the tree moves. `$WOW_RENDER_SCALE`
+    // overrides it session-only, below.
+    ("renderScale", "1"),
     (crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
@@ -418,6 +432,7 @@ pub(crate) struct KnobParams<'w> {
     zoom: ResMut<'w, ZoomLimit>,
     follow: ResMut<'w, FollowConfig>,
     video: ResMut<'w, VideoConfig>,
+    render_scale: ResMut<'w, RenderScale>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
 }
@@ -447,6 +462,7 @@ impl KnobParams<'_> {
             zoom: &mut self.zoom,
             follow: &mut self.follow,
             video: &mut self.video,
+            render_scale: &mut self.render_scale,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
         }
@@ -471,6 +487,7 @@ struct Knobs<'a> {
     zoom: &'a mut ZoomLimit,
     follow: &'a mut FollowConfig,
     video: &'a mut VideoConfig,
+    render_scale: &'a mut RenderScale,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
 }
@@ -570,6 +587,12 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "gxwindow" => knobs.video.display = crate::video::display_from_flag(v),
         // The body panes' half-rate render (1444) — a flag like every other checkbox here.
         "boothhalfrate" => knobs.pane_rate.half = v != 0.0,
+        // Render scale (1639). Clamped at the knob's edge like every other numeric row; the
+        // backdrop re-sizes on the next frame and the world camera's target factor follows it
+        // in the same pass, which is what keeps the pick rays where they were.
+        "renderscale" => {
+            knobs.render_scale.0 = v.clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end());
+        }
         // Multisampling (1629) — the reference's own `atoi`-then-clamp `[1, 16]` at `0x63b250`.
         // Writing the knob live is faithful, not a bug: the CVar holds the PENDING value (latched),
         // and nothing reads this resource after the world camera's spawn.
@@ -620,6 +643,12 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     // relaunches.
     if std::env::var_os("WOW_MSAA").is_some() {
         persist.env_overridden.insert("gxmultisample".into());
+    }
+    // `$WOW_RENDER_SCALE` is the render-scale A/B lever (1639), and doubly session-only: it is
+    // also the supersampling instrument this machine prices pixels with, and an instrument run
+    // that pinned 4× into the file would come back at 4× the next time the client opened.
+    if std::env::var_os("WOW_RENDER_SCALE").is_some() {
+        persist.env_overridden.insert("renderscale".into());
     }
     let cvars = match stored_config() {
         StoredConfig::Absent => return, // no file, hermetic capture, or no install
@@ -739,6 +768,7 @@ fn sync_cvars(
             zoom,
             follow,
             video,
+            render_scale,
             pane_rate,
             guild_notify,
             msaa,
@@ -775,7 +805,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 36] = [
+        let session: [(&str, String); 37] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -825,6 +855,7 @@ fn sync_cvars(
                 format!("{}x{}", video.windowed.x, video.windowed.y),
             ),
             ("boothHalfRate", flag(pane_rate.half)),
+            ("renderScale", render_scale.0.to_string()),
             ("gxMultisample", msaa.samples.to_string()),
         ];
         for (name, value) in session {
@@ -1086,6 +1117,10 @@ mod tests {
         assert_eq!(d["gxVSync"] != 0.0, VideoConfig::default().vsync);
         // The pane half-rate (1444) welds to the portrait knob's shipped default.
         assert_eq!(d["boothHalfRate"] != 0.0, PaneRate::default().half);
+        // Render scale (1639) welds to OFF. Not a taste default: the whole tree of visual
+        // goldens is denominated in a 1:1 backdrop, so a registered value other than 1 would
+        // silently re-render every one of them through a resample.
+        assert_eq!(d["renderScale"], 1.0);
     }
 
     #[test]
@@ -1114,6 +1149,8 @@ mod tests {
         let mut guild_notify = crate::ui_guild::GuildMemberNotify::default();
         // Literal, not Default: MsaaSetting::default() reads $WOW_MSAA.
         let mut msaa = MsaaSetting { samples: 1 };
+        // Literal for the same reason: RenderScale::default() reads $WOW_RENDER_SCALE.
+        let mut render_scale = RenderScale(1.0);
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -1129,6 +1166,7 @@ mod tests {
             zoom: &mut zoom,
             follow: &mut follow,
             video: &mut video,
+            render_scale: &mut render_scale,
             pane_rate: &mut pane_rate,
             guild_notify: &mut guild_notify,
             msaa: &mut msaa,
@@ -1148,6 +1186,13 @@ mod tests {
         assert_eq!(knobs.msaa.samples, *MSAA_RANGE.end());
         assert!(apply_to_knobs("gxmultisample", "0", &mut knobs));
         assert_eq!(knobs.msaa.samples, *MSAA_RANGE.start());
+        // Render scale takes a fraction and clamps to its own range at both ends (1639).
+        assert!(apply_to_knobs("renderScale", "0.75", &mut knobs));
+        assert_eq!(knobs.render_scale.0, 0.75);
+        assert!(apply_to_knobs("renderscale", "9", &mut knobs));
+        assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.end());
+        assert!(apply_to_knobs("renderscale", "0", &mut knobs));
+        assert_eq!(knobs.render_scale.0, *RENDER_SCALE_RANGE.start());
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
         assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
         assert!(!knobs.sound.music_enabled);
@@ -1336,6 +1381,8 @@ mod tests {
             .init_resource::<ZoomLimit>()
             .init_resource::<FollowConfig>()
             .init_resource::<VideoConfig>()
+            // Literal, not Default: RenderScale::default() reads $WOW_RENDER_SCALE.
+            .insert_resource(RenderScale(1.0))
             .init_resource::<PaneRate>()
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .add_plugins(CvarPlugin);

@@ -287,7 +287,14 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
 
     // Animated frame. For water/ocean this is the DETAIL ripple (RGB ≈ near-black, ALPHA = ripple);
     // for magma/slime it is the OPAQUE BODY texture.
-    let detail = textureSample(frames, frames_samp, apply_scroll(in.uv), frame_layer());
+    // `view.mip_bias`: the render-scale LOD compensation (1639), 0.0 at native and above.
+    let detail = textureSampleBias(
+        frames,
+        frames_samp,
+        apply_scroll(in.uv),
+        frame_layer(),
+        view.mip_bias,
+    );
 
     // Magma / slime (kind.x > 0.5): the animated texture IS the opaque body colour — no depth swatch
     // (the ADT liquid vertex format carries no colour element at all, and the WMO one is a hard

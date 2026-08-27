@@ -665,10 +665,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #ifdef VERTEX_COLORS
     if (m.model_flags.x > 0.5) {
 #ifdef VERTEX_UVS_A
-        base_color.a = textureSample(
+        base_color.a = textureSampleBias(
             pbr_bindings::base_color_texture,
             pbr_bindings::base_color_sampler,
             vo.uv,
+            // The same LOD `pbr_input_from_standard_material` just sampled the colour at — it
+            // applies `view.mip_bias` itself (1639), and coverage read from a different mip than
+            // the colour is a cutout that erodes out of step with the art it masks.
+            view.mip_bias,
         ).a;
 #else
         base_color.a = 1.0;

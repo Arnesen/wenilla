@@ -321,6 +321,63 @@ pub(crate) enum PortraitSource {
     File(String),
 }
 
+/// **The GUID-keyed bake cache** — `0xc0ce7c` (decision 1640; wow-re
+/// `ui/scratch/party-oor-stats-and-portrait-law.md` §4/§5, report B334).
+///
+/// `SetPortraitTexture` on a player GUID whose object the client does not hold does **not** go
+/// straight to the 2D stand-in: it probes this cache by guid and, on a hit with a live handle,
+/// **binds the cached bake** (`0x525c36 call 0x770300`) — the face the member had when you last
+/// saw them. Only a miss loads `TemporaryPortrait-{Male|Female}-{Race}`. So a party member who
+/// walks out of visibility range keeps their portrait, and a member you have never seen falls to
+/// the stand-in: exactly the two halves of the reported behaviour.
+///
+/// **How a bake gets in here.** A booth renders into its own target image and then sleeps, so that
+/// image already *is* a still of the last bake — the retention is a **handover**: at the moment a
+/// party booth loses its member, its target moves in here under that member's guid and the booth
+/// is given a fresh one ([`sync_portraits`]'s empty arm). The UI keeps sampling the same handle it
+/// was sampling a frame earlier, so the frozen face costs no flicker and no copy — one 256²
+/// texture per retained member, allocated only at a handover.
+///
+/// **Two stated deviations from `0xc0ce7c`** (which caches every portrait draw for the whole
+/// session and is emptied only by `ClientDestroyGame 0x401ee0`):
+/// - only the four **party** slots hand over. They are where the observable lives: a target out of
+///   the object manager has already been deselected, and the pet slot takes the reference's own
+///   creature leg. A general cache would pay a texture for every unit ever portraited.
+/// - it is **capped** at [`Self::CAP`] entries, oldest-first, instead of growing all session. The
+///   cap is memory, not policy — and it is not cleared on disconnect either, because a guid's face
+///   does not go stale with the socket; the reference's clear is its graphics graph coming down,
+///   not the cache expiring.
+#[derive(Resource, Default)]
+pub(crate) struct PortraitBakes {
+    faces: HashMap<u64, Handle<Image>>,
+    /// Insertion order, oldest first — the eviction queue for [`Self::CAP`].
+    order: Vec<u64>,
+}
+
+impl PortraitBakes {
+    /// How many members' faces are kept. Four is a full party; the slack covers a roster that
+    /// churns (somebody leaves out of range and is re-invited) without unbounding the memory.
+    const CAP: usize = 8;
+
+    /// The bake standing for `guid` — the cache probe `0x525ba0` makes before it reaches for the
+    /// stand-in.
+    fn get(&self, guid: u64) -> Option<Handle<Image>> {
+        self.faces.get(&guid).cloned()
+    }
+
+    /// Take a booth's target as `guid`'s face. A re-bake replaces the entry (the reference
+    /// re-stores the handle at `+0x24` too), and only a genuinely new guid can evict.
+    fn store(&mut self, guid: u64, face: Handle<Image>) {
+        if self.faces.insert(guid, face).is_none() {
+            self.order.push(guid);
+            if self.order.len() > Self::CAP {
+                let oldest = self.order.remove(0);
+                self.faces.remove(&oldest);
+            }
+        }
+    }
+}
+
 /// The bridge between the booth and the UI: unit token (`"player"`/`"target"`) → what its portrait
 /// region shows. The UI extract pass ([`crate::ui_script`]) reads it for a `SetPortraitTexture`-bound
 /// region; the booth writes it (Live ↔ File transitions included).
@@ -435,6 +492,10 @@ struct Booth {
     root: Entity,
     target: Handle<Image>,
     baked: Option<LookKey>,
+    /// **Whose face is standing in this booth** — the guid the current [`Self::baked`] belongs to,
+    /// for the handover into [`PortraitBakes`] when the booth loses them (decision 1640). Set by
+    /// the party slots alone; `None` on every other booth, which never hands over.
+    baked_guid: Option<u64>,
     /// **Body panes only** — what [`sync_body_booth`] last snapshotted, in place of `baked`.
     /// A body pane is a `<PlayerModel>` widget and re-takes its model on the reference's own
     /// four triggers, never on the world moving something ([`SnapKey`]).
@@ -843,7 +904,7 @@ pub(crate) struct BoothBridge<'w> {
 /// since become that system's overflow bag outright — [`BoothPanes`] is not group-facing at all,
 /// it rides here because there is no room left in the signature.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct PartyBooths<'w> {
+pub(crate) struct PartyBooths<'w, 's> {
     roster: Res<'w, crate::ui_party::GroupState>,
     index: Res<'w, crate::net::GuidIndex>,
     palettes: ResMut<'w, benilla_world::rig_palette::RigPalettes>,
@@ -851,6 +912,17 @@ pub(crate) struct PartyBooths<'w> {
     names: Res<'w, crate::names::NameCache>,
     /// What the UI drew last frame ([`BoothPanes`]) — read by the `"targettarget"` slot alone.
     panes: Res<'w, BoothPanes>,
+    /// The guid-keyed bake cache + what the handover needs to run (decision 1640): a fresh render
+    /// target for the booth that just gave its own away, and that booth camera's
+    /// [`RenderTarget`] to re-point at it.
+    ///
+    /// A query of its own rather than a wider `cams` tuple in [`sync_portraits`]: `aim`'s query
+    /// shape is shared by five booth systems across four files, and this is one system's concern.
+    /// It takes `RenderTarget` mutably where `cams` takes `Transform`/`Projection`, so the two
+    /// never overlap.
+    bakes: ResMut<'w, PortraitBakes>,
+    images: ResMut<'w, Assets<Image>>,
+    targets: Query<'w, 's, (&'static BoothCam, &'static mut RenderTarget)>,
 }
 
 /// Tags a booth camera with its slot token, so the model-sync pass can re-frame it per model.
@@ -958,6 +1030,7 @@ pub(crate) struct PortraitPlugin;
 impl Plugin for PortraitPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PortraitImages>()
+            .init_resource::<PortraitBakes>()
             .init_resource::<PaneRate>()
             .init_resource::<PaperDollBooth>()
             .init_resource::<InspectBooth>()
@@ -1203,6 +1276,7 @@ fn setup_booths(
                 root,
                 target: image,
                 baked: None,
+                baked_guid: None,
                 snap: None,
                 shown: false,
                 show_rev: 0,
@@ -1282,6 +1356,7 @@ fn setup_booths(
                 root,
                 target: image,
                 baked: None,
+                baked_guid: None,
                 snap: None,
                 shown: false,
                 show_rev: 0,
@@ -1645,6 +1720,8 @@ fn sync_portraits(
         // ready" draws the blank. `unseen` carries that art for exactly those tokens; a token that
         // names nobody at all leaves it `None` and the booth empties as before (report B315).
         let mut unseen: Option<String> = None;
+        // The guid this slot names, when the slot is one that retains a bake (decision 1640).
+        let mut occupant: Option<u64> = None;
         let unit: Option<Entity> = match token {
             "player" => self_q.single().ok(),
             "target" => selection.target,
@@ -1697,6 +1774,9 @@ fn sync_portraits(
                     .strip_prefix("party")
                     .and_then(|n| n.parse::<usize>().ok())
                     .and_then(|n| party.roster.party_slots().nth(n - 1));
+                // Whose face this slot is showing — the key the bake handover files it under,
+                // and the key the absent-unit arm probes the cache with (decision 1640).
+                occupant = member.map(|m| m.guid);
                 let entity = member.and_then(|m| party.index.0.get(&m.guid)).copied();
                 if entity.is_none() {
                     unseen = member.map(|m| {
@@ -1714,6 +1794,37 @@ fn sync_portraits(
             continue;
         };
         let Some(unit) = unit else {
+            // ── The bake handover (decision 1640, report B334) ─────────────────────────────
+            //
+            // The booth is about to be emptied, and its target is a *still of the face that was
+            // standing in it* — so before the clear renders over it, that image becomes this
+            // member's entry in the guid cache and the booth is handed a fresh one. The UI is
+            // left sampling the very handle it sampled last frame, which now holds the frozen
+            // bake: the reference's "bind the cached bake" (`0x525c36`), reached without a copy
+            // and without a flicker.
+            //
+            // Keyed on whose bake is STANDING, not on who the slot names now: a slot whose
+            // occupant changed still owes the departed member their face. Only a **settled**
+            // bake is worth keeping — an unfinished one (camera still awake, a texture still in
+            // flight, pipelines still compiling) would freeze a half-rendered face forever, and
+            // the stand-in is the honest answer for it.
+            if let Some(guid) = booth.baked_guid.filter(|_| {
+                booth.baked.is_some()
+                    && booth.wake == 0
+                    && booth.pending.is_empty()
+                    && !booth.pipes_settling
+            }) {
+                let fresh = party.images.add(new_target_image(PORTRAIT_SIZE));
+                for (cam, mut target) in &mut party.targets {
+                    if cam.0 == *token {
+                        *target = RenderTarget::Image(fresh.clone().into());
+                    }
+                }
+                party
+                    .bakes
+                    .store(guid, std::mem::replace(&mut booth.target, fresh));
+            }
+            booth.baked_guid = None;
             // No unit: empty the booth (the frame itself is hidden on UnitExists false; the dark
             // disc behind it never shows).
             if booth.baked.is_some() {
@@ -1730,10 +1841,14 @@ fn sync_portraits(
                 booth.rigged = false;
                 booth.parked = false;
             }
-            // A unit we simply hold no object for takes the ref's 2D stand-in; only a token that
-            // names nobody falls to the emptied render target.
+            // A unit we hold no object for takes the **cached bake if we have ever baked them**
+            // and the ref's 2D stand-in otherwise (`0x525ba0`: hit → bind, miss → the
+            // TemporaryPortrait file); only a token that names nobody falls to the emptied
+            // render target.
             let src = match unseen {
-                Some(file) => PortraitSource::File(file),
+                Some(file) => occupant
+                    .and_then(|g| party.bakes.get(g))
+                    .map_or(PortraitSource::File(file), PortraitSource::Live),
                 None => PortraitSource::Live(booth.target.clone()),
             };
             if portraits.0.get(token) != Some(&src) {
@@ -1758,7 +1873,13 @@ fn sync_portraits(
             continue;
         }
         let key = LookKey::build(&parts, &riders, &billboards, &effects);
-        if booth.baked.as_ref() != Some(&key) {
+        // **A changed occupant is a re-bake even at an identical look** (decision 1640). The key
+        // is built from mesh/material handles, so two party members in the same race, sex and
+        // gear share it — and without this term the booth would keep standing A's bake while
+        // `baked_guid` was quietly re-filed to B, so the handover would put that face in the
+        // cache under the wrong guid and B would never get one of their own. The bake itself is
+        // per-unit; the key alone cannot say so.
+        if booth.baked.as_ref() != Some(&key) || booth.baked_guid != occupant {
             let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
             // The look changed — re-bake: studio-lit twins of the exact dressed materials, posed
             // at Stand on the booth's own throwaway skeleton (the ref bake — riders ride their
@@ -1880,6 +2001,7 @@ fn sync_portraits(
                     .chain(booth_billboards.iter().map(|b| &b.material)),
             );
             booth.baked = Some(key);
+            booth.baked_guid = occupant;
         }
         let live = PortraitSource::Live(booth.target.clone());
         if portraits.0.get(token) != Some(&live) {
@@ -2600,6 +2722,42 @@ fn aim(
 mod tests {
     use super::*;
     use crate::entities::ItemModelKind;
+
+    /// **The cache keeps faces, not slots** (decision 1640, report B334): a re-bake of somebody
+    /// already in it replaces their entry rather than queueing a second one, and only genuinely
+    /// new members can push the oldest out. Get this wrong — count a replace as an insert — and a
+    /// party member whose gear changes a few times evicts the other three.
+    #[test]
+    fn the_bake_cache_replaces_in_place_and_evicts_oldest_first() {
+        let mut bakes = PortraitBakes::default();
+        let mut images = Assets::<Image>::default();
+        // Distinct real handles — a 1² target is the cheapest thing `Assets` will mint.
+        let face = |images: &mut Assets<Image>| images.add(new_target_image(1));
+
+        let faces: Vec<Handle<Image>> =
+            (0..PortraitBakes::CAP).map(|_| face(&mut images)).collect();
+        for (i, f) in faces.iter().enumerate() {
+            bakes.store(i as u64 + 1, f.clone());
+        }
+        // A re-bake of the oldest entry: replaced, and it does NOT move up the eviction queue —
+        // the reference re-stores the handle at `+0x24` and touches no ordering either.
+        let rebaked = face(&mut images);
+        bakes.store(1, rebaked.clone());
+        assert_eq!(bakes.get(1), Some(rebaked));
+        assert_eq!(
+            bakes.order.len(),
+            PortraitBakes::CAP,
+            "a replace is not an insert"
+        );
+
+        // One new member past the cap evicts exactly the oldest.
+        let newcomer = face(&mut images);
+        bakes.store(99, newcomer.clone());
+        assert_eq!(bakes.get(1), None, "the oldest face went");
+        assert_eq!(bakes.get(2), Some(faces[1].clone()), "and only the oldest");
+        assert_eq!(bakes.get(99), Some(newcomer));
+        assert_eq!(bakes.faces.len(), PortraitBakes::CAP);
+    }
 
     fn body_part() -> PortraitPart {
         PortraitPart {

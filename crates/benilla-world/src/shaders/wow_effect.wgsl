@@ -133,7 +133,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     // The gamma-space product — texture bytes × raw authored vertex colour, exactly what the
     // reference multiplies.
-    let c = textureSample(effect_texture, effect_sampler, in.uv) * in.color;
+    // `view.mip_bias`: the render-scale LOD compensation (1639), 0.0 at native and above.
+    let c = textureSampleBias(effect_texture, effect_sampler, in.uv, view.mip_bias) * in.color;
 #ifdef BLEND_ALPHAKEY
     // THE FIXED-FUNCTION ALPHA TEST (EGxRs id 0x08 — `glAlphaFunc(GL_GEQUAL, ref/255)` +
     // `glEnable(GL_ALPHA_TEST)`). `0x70c256` computes the ref from the RAW blend mode, so an
