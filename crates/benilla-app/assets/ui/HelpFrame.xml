@@ -155,6 +155,34 @@
             return fallback or ""
         end
 
+        -- ── Retail-only text, retired (director's call, 2026-08-29) ────────────────────────────
+        -- The Home page is entirely GlobalStrings, executed off the player's own chain — so these
+        -- are Blizzard's 2006 strings, and three of them point at a company that stopped answering
+        -- in 2006. Overridden here, BEFORE the markup below resolves its global-string attributes
+        -- (the loader walks a document's top-level items in order, and `resolve_text` reads the
+        -- live global), which is why this sits above the frames rather than in an OnLoad.
+        --
+        -- Do not spell a key-lookup attribute out in prose anywhere in this file:
+        -- `every_shipped_text_attribute_answers_against_the_real_global_strings` sweeps the raw
+        -- file for that attribute and would try to resolve the example as a real key.
+        --
+        -- Deliberately a SHORT list. Everything else on the page still reads true on any server
+        -- with GMs — what a GM will and will not help with is a policy, not a URL, and rewriting
+        -- policy prose we did not author would be a bigger change than the one asked for.
+        --
+        --   PVP_POLICY_URL        a dead http:// link to worldofwarcraft.com/policy/pvp.shtml.
+        --   HELPFRAME_HOME_ISSUE3 its last sentence exists only to introduce that link, so it goes
+        --                         with it; the PvP guidance before it is kept verbatim.
+        --   HELPFRAME_HOME_TEXT2  "utilise the forums and the website" + two more dead links.
+        --
+        -- Emptying the two FontStrings is enough: the page is one anchor chain (each element hangs
+        -- off the one above), so the button simply rides up into the space they leave.
+        PVP_POLICY_URL = ""
+        HELPFRAME_HOME_TEXT2 = ""
+        HELPFRAME_HOME_ISSUE3 = "Most PVP issues can be resolved through the PVP game mechanics. "
+            .. "GM's will not be able to assist in many cases.  The exceptions to this rule are "
+            .. "any behaviors that fall under the harassment policy of the realm you are playing on."
+
         -- ── Constants (ref-lua l.1-2, l.160-166) ────────────────────────────────────────────────
         HELPFRAME_BULLET_SPACING = -3         -- ref-lua l.1
         HELPFRAME_SECTION_SPACING = -20       -- ref-lua l.2

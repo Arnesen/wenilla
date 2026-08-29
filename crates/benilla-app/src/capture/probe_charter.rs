@@ -336,6 +336,39 @@ fn vm_icon_type(script: &UiScript, pos: usize) -> String {
 /// The texture path `BENILLA_GOSSIP_ICONS.petition` resolves to in the live VM — `""` if the table
 /// or the key is missing, which would mean the row draws the fallback bubble whatever the app
 /// mapped ([`super::probe_binder`]'s second half of the same assert).
+/// The charter's own bag tooltip, line by line — `SetBagItem` on the slot the buy landed in, read
+/// back out of the live VM.
+///
+/// Reported in step 8's detail rather than asserted, for §7's reason: the wording and the ORDER are
+/// a unit test's job, and what a live run adds is only that the petition record travels from the
+/// query response into the bag slot's pushed view at all.
+fn charter_tooltip_lines(script: &UiScript, pos: Option<(i64, u32)>) -> Vec<String> {
+    let Some((bag, slot)) = pos else {
+        return Vec::new();
+    };
+    let chunk = format!(
+        r#"
+        local a = getglobal("BenillaProbeTipAnchor")
+        if not a then
+            a = CreateFrame("Button", "BenillaProbeTipAnchor")
+            a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        end
+        GameTooltip:SetOwner(a, "ANCHOR_RIGHT")
+        GameTooltip:SetBagItem({bag}, {slot})
+        local out = {{}}
+        for i = 1, GameTooltip:NumLines() do
+            local L = getglobal("GameTooltipTextLeft" .. i)
+            if L then table.insert(out, L:GetText() or "") end
+        end
+        return table.concat(out, " | ")
+    "#
+    );
+    script
+        .eval::<String>(&chunk)
+        .map(|s| s.split(" | ").map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 fn vm_petition_texture(script: &UiScript) -> String {
     script
         .eval::<String>("return (BENILLA_GOSSIP_ICONS and BENILLA_GOSSIP_ICONS.petition) or \"\"")
@@ -1061,14 +1094,32 @@ fn charter_probe(
                 return;
             }
             let title = vm_petition_str(&script, 2);
-            if title == probe.renamed {
+            // The bag tooltip has to reach the SAME name, not merely be non-empty. It is fed by a
+            // different path — the container snapshot, whose rebuild is gated (decision 1439) —
+            // so the two can disagree, and requiring convergence is what proves the rename's
+            // record patch reaches the gate rather than only the window. Held inside the step's
+            // own timeout: a tooltip that never catches up FAILs here rather than being reported
+            // as a curiosity.
+            let tip = charter_tooltip_lines(
+                &script,
+                probe.charter.and_then(|(b, sl, _)| lua_bag_pos(b, sl)),
+            );
+            let tip_caught_up = tip.iter().any(|l| l.contains(&probe.renamed));
+            if title == probe.renamed && tip_caught_up {
                 let bought = probe.bought.clone();
+                // The item TOOLTIP's line 3 while we are here — the charter's guild name and
+                // master, which the director reported missing. Reported, not asserted: the plate's
+                // wording and placement are pinned by the unit test
+                // (`charter_lines_sit_between_the_name_and_the_signable_line`); what only a live
+                // run can show is that the petition record actually reaches the bag slot's view,
+                // which is a different question from whether the renderer would print it.
                 probe.pass(
                     8,
                     "rename",
                     format!(
                         "the title changed from {bought:?} to {title:?} — MSG_PETITION_RENAME's \
-                         echo arrived and patched the cached record in place"
+                         echo arrived and patched the cached record in place; the bag tooltip \
+                         reads {tip:?}"
                     ),
                 );
                 probe.phase = Phase::Destroying {

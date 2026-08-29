@@ -319,6 +319,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            petition: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,

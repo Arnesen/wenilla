@@ -43,6 +43,9 @@ pub(super) struct ItemInstance {
     /// [`Self::enchants`] — that list is a *display* view and drops rows the line law hides.
     /// Drives §6's Soulbound override; `false` on every template/link source.
     pub already_bound: bool,
+    /// The petition this charter names — **line 3**, between the NAME and `ITEM_SIGNABLE`. See
+    /// [`crate::script::PetitionSlotView`], which carries the reason its third line is unbuilt.
+    pub petition: Option<crate::script::PetitionSlotView>,
     /// The instance's enchant slots, app-resolved and in slot order (law line 17 / §1-ENCHANT,
     /// decisions 0915/0920) — see [`crate::script::EnchantView`]. Empty on an unenchanted item and
     /// on every template/link source (no instance, nothing enchanted).
@@ -150,6 +153,28 @@ pub(super) fn render_view(
         .and_then(|i| i.name.clone())
         .unwrap_or_else(|| v.name.clone());
     add((name, name_color))?;
+    // Line 3 — the petition block, ABOVE the green line and below the name: "Guild Name: X" then
+    // "Guild Master: Y" for a charter, "Petition: X" / "Created by Y" for a plain petition. The
+    // keys are picked by the record's own charter bit, the same bit `GetPetitionInfo`'s first
+    // return reads.
+    //
+    // Each line is withheld while its source is unresolved rather than printed with a hole: an
+    // uncached owner name shows the title alone, and the repaint fills it in — the creator line's
+    // rule, and the reference's own (its resolve callback repaints the tooltip; ours is the
+    // container re-enter loop).
+    if let Some(p) = inst.and_then(|i| i.petition.as_ref()) {
+        let (title_fmt, creator_fmt) = if p.is_charter {
+            ("Guild Name: %s", "Guild Master: %s")
+        } else {
+            ("Petition: %s", "Created by %s")
+        };
+        if !p.title.is_empty() {
+            add((title_fmt.replacen("%s", &p.title, 1), WHITE))?;
+        }
+        if let Some(owner) = p.owner.as_deref().filter(|o| !o.is_empty()) {
+            add((creator_fmt.replacen("%s", owner, 1), WHITE))?;
+        }
+    }
     // ITEM_SIGNABLE (green) — Flags bit 0x2000 (petitions).
     if v.flags & 0x2000 != 0 {
         add(("<Right Click for Details>".into(), GREEN))?;

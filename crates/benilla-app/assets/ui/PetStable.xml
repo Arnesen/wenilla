@@ -32,13 +32,11 @@
             here, exactly as `PetPaperDollFrame.xml` records for its own pane. `Model_RotateLeft`/
             `Model_RotateRight` (xml l.222/241) become `BenillaPaperDollModel_RotateLeft`/`_Right`,
             the shared helpers `CharacterFrame.xml` defines.
-          - **The booth itself does not exist yet** (the one open dependency): there is no
-            `"stable"` slot in `crates/benilla-app/src/portrait` and no `BenillaStableModel_SetFacing` yaw
-            binding beside the paperdoll/petdoll/inspect three. `BenillaSetBoothTexture` accepts any
-            token and simply resolves to no image, so the pane loads and lays out correctly and
-            draws nothing until the app side lands; the yaw goes through the forwarding shim below
-            so a rotate click cannot raise on a nil global in the meantime. Both are app-side work,
-            deliberately not faked here.
+          - The pane's booth is the `"stable"` slot in `crates/benilla-app/src/portrait`, and its yaw
+            binding is `BenillaStableModel_SetFacing`, the fourth beside the paperdoll/petdoll/
+            inspect three. The app resolves `GetSelectedStablePet()`'s slot into either the live
+            pet's entity or — for a stabled or dismissed pet, which has no world object at all —
+            the creature query's `CreatureDisplayInfo` id, and the booth mirrors whichever it got.
           - **`GetPetIcon()` does not exist in this client** (reference/1.12-globals.tsv has it as
             an engine global; benilla has never needed it). `PetStable_Update` calls it at lua l.51
             and l.161-162 and it is transcribed verbatim rather than guarded: the window's current
@@ -85,17 +83,14 @@
         -- iterate 1..NUM_PET_STABLE_SLOTS and handle 0 on its own.
         NUM_PET_STABLE_SLOTS = 2
 
-        -- ── The model pane's yaw (header, deferral 2) ────────────────────────────────────────────
+        -- ── The model pane's yaw ─────────────────────────────────────────────────────────────────
         -- Every booth pane names its own engine yaw binding in `frame.setFacing`
         -- (`BenillaPaperDollModel_SetFacing`, `BenillaPetPaperDollModel_SetFacing`,
-        -- `BenillaInspectModel_SetFacing`); the stable booth's twin is not built yet. This forwards
-        -- to it the moment it exists and swallows the yaw until then, so `BenillaPaperDollModel_OnLoad`'s
-        -- opening `frame.setFacing(0.61)` and every rotate click stay callable. It is the ONE line
-        -- in this file that changes when the binding lands.
+        -- `BenillaInspectModel_SetFacing`); this pane's is `BenillaStableModel_SetFacing`. The
+        -- named forwarder stays because `frame.setFacing` wants a plain function value and this
+        -- file's OnLoad is where the pane's own name for it belongs.
         function BenillaPetStableModel_SetFacing(radians)
-            if BenillaStableModel_SetFacing then
-                BenillaStableModel_SetFacing(radians)
-            end
+            BenillaStableModel_SetFacing(radians)
         end
 
         -- ── The window ──────────────────────────────────────────────────────────────────────────
@@ -628,9 +623,8 @@
                     <!-- The pane's booth + its yaw. `BenillaPaperDollModel_OnLoad` seeds the
                          reference's own 0.61 default facing and pushes it through `setFacing`; the
                          OnUpdate is the shared held-button continuous spin. The booth token is
-                         "stable" and the yaw goes through this file's forwarding shim — neither the
-                         slot nor the binding exists app-side yet (header, deferral 2), so the pane
-                         lays out and stays inert rather than drawing another window's subject. -->
+                         "stable" and the yaw goes through this file's named forwarder onto
+                         `BenillaStableModel_SetFacing`. -->
                     <OnLoad>
                         this.setFacing = BenillaPetStableModel_SetFacing
                         BenillaPaperDollModel_OnLoad(this)

@@ -314,6 +314,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,
@@ -494,6 +495,7 @@ mod tests {
         slots.insert(
             3,
             ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,

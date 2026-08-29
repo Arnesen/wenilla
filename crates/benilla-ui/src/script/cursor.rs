@@ -657,6 +657,7 @@ mod tests {
         slots.insert(
             1,
             crate::script::container::ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,

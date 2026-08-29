@@ -145,6 +145,13 @@ pub(crate) struct StableModel {
     pub(crate) selected: i32,
     pub(crate) intents: Vec<StableIntent>,
     pub(crate) close: bool,
+    /// The model pane's bake yaw, in radians — the fifth of the pane scalars beside
+    /// `paperdoll_yaw` / `inspect_yaw` / `pet_paperdoll_yaw` / `dressup_yaw`, written by
+    /// `BenillaStableModel_SetFacing` and sampled each frame by the app onto the `"stable"` booth
+    /// slot. It lives on the window's own transient state rather than on [`super::Model`] because
+    /// that is what it is: a pane facing that must survive the snapshot replacement every list
+    /// packet performs, exactly like [`Self::selected`].
+    pub(crate) yaw: f32,
 }
 
 /// The zero state is the client's `0` — "nothing selected" — not `-1`, which is its encoding for
@@ -159,6 +166,9 @@ impl Default for StableModel {
             selected: 0,
             intents: Vec::new(),
             close: false,
+            // `0.0` like every other pane scalar: `BenillaPaperDollModel_OnLoad` seeds the
+            // reference's own 0.61 default through `frame.setFacing` when the window loads.
+            yaw: 0.0,
         }
     }
 }
@@ -200,6 +210,13 @@ impl super::UiScript {
     pub fn stable_selection(&mut self) -> i32 {
         let model = self.model_mut();
         selected_slot(&model.stable)
+    }
+
+    /// The stable model pane's bake yaw (`BenillaStableModel_SetFacing` wrote it) — the exact twin
+    /// of [`Self::paperdoll_yaw`] / [`Self::pet_paperdoll_yaw`], sampled each frame by the app onto
+    /// the `"stable"` booth slot.
+    pub fn stable_yaw(&self) -> f32 {
+        self.model_ref().stable.yaw
     }
 }
 
@@ -556,6 +573,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if allowed {
                 model.stable.intents.push(StableIntent::BuySlot);
             }
+            Ok(())
+        })?,
+    )?;
+
+    // BenillaStableModel_SetFacing(radians) — the stable pane's own bake yaw, the exact twin of
+    // `BenillaPaperDollModel_SetFacing` / `BenillaPetPaperDollModel_SetFacing`. Benilla-named for
+    // the same reason they are: the real client's pane is a live `<PlayerModel>` widget whose
+    // `SetRotation` is a widget method, and our booth still carries one scalar (decision 0208 §5).
+    // `PetStable.xml`'s `BenillaPetStableModel_SetFacing` shim forwards to this.
+    g.set(
+        "BenillaStableModel_SetFacing",
+        lua.create_function(|lua, radians: f32| {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .stable
+                .yaw = radians;
             Ok(())
         })?,
     )?;

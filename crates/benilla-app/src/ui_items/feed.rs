@@ -37,6 +37,10 @@ pub(crate) struct FeedMemory {
     items_templates: gate::Watch,
     cooldown_epoch: gate::Watch,
     names_generation: gate::Watch,
+    /// `PetitionState::records_epoch` — one step per landed or patched petition record, which is
+    /// what a charter slot's tooltip lines are built from. Lazy, so its arrival moves nothing else
+    /// here (the same reason `names_generation` exists one line up).
+    petition_records: gate::Watch,
     /// `Items::enchant_display_epoch` — one step per displayable countdown change (the slot
     /// views read second-floored countdowns), including the last elapse's collapsing push.
     enchant_deadlines: gate::Watch,
@@ -538,6 +542,9 @@ fn resolve_slot(
     cooldowns: &crate::cooldowns::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
     names: &mut crate::names::NameCache,
+    // The petition record cache, for a charter slot's tooltip lines — a LAZY fill, so it is taken
+    // mutably for the same reason `names` is: the read is what issues the query.
+    petitions: &mut crate::ui_petition::PetitionState,
     now: std::time::Instant,
     ui_now: f64,
 ) -> Option<ContainerSlot> {
@@ -618,6 +625,25 @@ fn resolve_slot(
         });
     };
     Some(ContainerSlot {
+        // **Line 3 of the tooltip law** — a charter's guild name and master. Gated on the template's
+        // signable flag, then keyed by the petition id the server stuffs into the item's
+        // `ITEM_FIELD_ENCHANTMENT` slot 0 (`PetitionsHandler.cpp:126`) — which is the same field the
+        // client reads it from (`0x5ef337`), and the same one the tooltip's ENCHANT lines are
+        // forced to skip for exactly this reason (`0x52c9e0 test ah,0x20`). So slot 0 on a charter
+        // is a petition id by contract on both ends, and this is its one consumer here.
+        //
+        // The lookup is lazy: hovering an unopened charter is what sends the query, so the first
+        // hover shows the name and the green line alone. The creator line right below has the same
+        // rule.
+        petition: (t.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0)
+            .then(|| {
+                let id = items
+                    .object(guid)
+                    .and_then(|f| f.item_enchant(0))
+                    .unwrap_or(0);
+                petitions.tooltip_view(id as u32, guid, names, commands)
+            })
+            .flatten(),
         texture: icons
             .and_then(|i| i.catalog.get(t.display_info_id))
             .and_then(|d| d.icon.clone()),
@@ -726,12 +752,19 @@ pub(crate) fn feed_containers(
     mut pending: ResMut<PendingItemOps>,
     mut lock_cleared: ResMut<LockClearedByFailure>,
     mut names: ResMut<crate::names::NameCache>,
-    clock: Res<crate::ui_script::UiClock>,
+    // Paired into one param (the 16-SystemParam ceiling this signature already sits at): the UI
+    // clock, and the petition record cache a charter slot's tooltip lines read — `ResMut` because
+    // that cache is LAZY and the hover is what issues its query.
+    clock_and_petitions: (
+        Res<crate::ui_script::UiClock>,
+        ResMut<crate::ui_petition::PetitionState>,
+    ),
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let (clock, mut petitions) = clock_and_petitions;
     let (memory, vm_reset) = memory.get_reset(&script);
     // The gate (1439): the snapshot below is a function of the self descriptor's slot arrays,
     // the item stores (both epochs — `is_changed` on `Items`/`NameCache`/`Cooldowns` is
@@ -745,6 +778,7 @@ pub(crate) fn feed_containers(
     let templates_moved = memory.items_templates.moved(items.template_epoch());
     let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
     let names_moved = memory.names_generation.moved(names.generation());
+    let petitions_moved = memory.petition_records.moved(petitions.records_epoch());
     // The DISPLAY epoch (see `feed_char`'s twin comment): the snapshot's countdowns are
     // second-floored, so one watch step per displayable change replaces the per-frame hold-open
     // that rebuilt every bag snapshot for the whole life of a ticking enchant.
@@ -775,6 +809,7 @@ pub(crate) fn feed_containers(
             ("cooldowns", cooldowns_moved),
             ("sweep", sweep),
             ("names", names_moved),
+            ("petition-records", petitions_moved),
             ("deadlines", deadlines_moved),
             ("self", self_changed),
             ("icons", icons_changed),
@@ -794,6 +829,7 @@ pub(crate) fn feed_containers(
             // (`sweep_pending`'s own doc) — the slot triple flips to None right then.
             || sweep
             || names_moved
+            || petitions_moved
             || deadlines_moved
             || self_changed
             || icons_changed
@@ -910,6 +946,7 @@ pub(crate) fn feed_containers(
                 &cooldowns,
                 spell_catalog,
                 &mut names,
+                &mut petitions,
                 now,
                 ui_now,
             ) {
@@ -963,6 +1000,7 @@ pub(crate) fn feed_containers(
                     &cooldowns,
                     spell_catalog,
                     &mut names,
+                    &mut petitions,
                     now,
                     ui_now,
                 ) {
@@ -996,6 +1034,7 @@ pub(crate) fn feed_containers(
                 &cooldowns,
                 spell_catalog,
                 &mut names,
+                &mut petitions,
                 now,
                 ui_now,
             ) {
@@ -1045,6 +1084,7 @@ pub(crate) fn feed_containers(
                     &cooldowns,
                     spell_catalog,
                     &mut names,
+                    &mut petitions,
                     now,
                     ui_now,
                 ) {
@@ -1082,6 +1122,7 @@ pub(crate) fn feed_containers(
                 &cooldowns,
                 spell_catalog,
                 &mut names,
+                &mut petitions,
                 now,
                 ui_now,
             ) {

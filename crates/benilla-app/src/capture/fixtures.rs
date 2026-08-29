@@ -1415,6 +1415,7 @@ fn seed_bag_window(
     };
     let slot = |disp: u32, count: u32, id: u32, name: &str, quality: u32| {
         benilla_ui::script::ContainerSlot {
+            petition: None,
             durability: None,
             bar_placeable: true,
             texture: icon(disp),
@@ -1505,6 +1506,7 @@ fn seed_equipped_bags(
     };
     let slot =
         |disp: u32, count: u32, name: &str, quality: u32| benilla_ui::script::ContainerSlot {
+            petition: None,
             durability: None,
             bar_placeable: true,
             texture: icon(disp),

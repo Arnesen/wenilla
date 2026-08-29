@@ -61,6 +61,12 @@ impl Plugin for UiStablePlugin {
                     close_npc_session_out_of_range::<StableOpen>.before(feed_stable),
                     feed_stable.before(UiInput),
                     drain_stable.after(UiInput),
+                    // AFTER the VM ticks, unlike every other booth feed: this one reads the
+                    // *selection*, which a click on a slot writes during `UiInput` — and
+                    // `PetStable_Update`'s own re-pick (`PetStable.lua:44-59`) runs inside the
+                    // event dispatch `feed_stable` performs. Reading it before the tick would show
+                    // the previous pet for a frame after every click.
+                    feed_stable_booth.after(UiInput),
                 ),
             );
     }
@@ -327,6 +333,85 @@ fn drain_stable(
     }
 }
 
+/// Point the stable window's model pane at the pet `GetSelectedStablePet()` names — the app half of
+/// the reference's `SetPetStablePaperdoll` (wow-re `ui/scratch/stable-master-window.md` §7.1).
+///
+/// **The reference's own fork, and it is the whole of this system.** On `[0xb72250] == -1` — the
+/// summoned pet — it resolves the live pet by GUID and takes `[unit+0xb30]`'s model; the resolve
+/// failing (`0x4cb9bc`) falls through to the *same* path everything else takes: map the selection
+/// back to a record, and go through the **creature cache** on that record's creature entry, with a
+/// callback that fires `PET_STABLE_UPDATE_PAPERDOLL` when a late answer lands.
+///
+/// So the pane has two sources and one of them is not a unit at all:
+///
+/// - A **live** pet gets [`StableBooth::unit`], and the pane is the pet paper doll's case exactly
+///   (decision 1057) — the booth mirrors the world body.
+/// - Everything else gets [`StableBooth::display_id`], off the creature query's
+///   [`crate::names::CreatureRecord::display_id`]. That covers every stabled pet *and* slot 0 while
+///   the pet is dismissed or too far to summon: the server still sends its row, and the reference
+///   still draws it.
+///
+/// A selection with no answer yet is `None`/`None`, which empties the pane; the query's arrival
+/// re-points it on a later frame, which is what the reference's cache callback is for.
+fn feed_stable_booth(
+    script: Option<NonSendMut<UiScript>>,
+    open: Res<StableOpen>,
+    bar: Res<crate::ui_pet::PetBar>,
+    pet: crate::ui_pet::PetUnit,
+    names: Res<NameCache>,
+    mut booth: ResMut<crate::portrait::StableBooth>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    // Written every frame, selection or none — a stale yaw would snap the model the moment one is
+    // picked (the pet paper doll's arrangement).
+    booth.yaw = script.stable_yaw();
+
+    // `GetSelectedStablePet()`'s own answer: `0` = the summoned pet, `1..=2` a bought stable slot,
+    // `-1` nothing. Reading the binding's translation rather than the raw petNumber is deliberate —
+    // it is what already degrades a *stale* selection (a pet the latest list no longer holds) to
+    // "nothing" instead of to a wrong slot.
+    let slot = script.stable_selection();
+
+    let live_pet = bar.spells.pet_guid;
+    let (unit, display_id) = stable_subject(
+        slot,
+        (live_pet != 0).then(|| pet.entity(live_pet)).flatten(),
+        &open.pets,
+        |entry| names.creature_record(entry).map(|r| r.display_id),
+    );
+    booth.unit = unit;
+    booth.display_id = display_id;
+}
+
+/// The selection → `(live unit, display id)` fork, pure so the law is testable without a VM, a
+/// wire or a world (module doc on [`feed_stable_booth`] for the reference's shape).
+///
+/// **The live arm consults no row at all** — §7.1's `[0xb72250] == -1` branch reads the live pet's
+/// GUID out of `[0xb714a0]` and takes its model; the stable array is not in that path. So a
+/// summoned pet is drawn from its world body whether or not the list happened to carry its row.
+///
+/// **The display arm is resolved regardless**, because that is the reference's own order: the live
+/// resolve failing (a dismissed pet, an object that has not streamed) falls straight through to the
+/// creature cache, and having the answer already in hand means the pane does not blank for the
+/// frames a pet spends being dismissed. `0` is the template's "no display" and reads as no answer —
+/// the reference's cache miss draws nothing either.
+fn stable_subject(
+    slot: i32,
+    live_pet: Option<Entity>,
+    pets: &[StabledPet],
+    display_of: impl Fn(u32) -> Option<u32>,
+) -> (Option<Entity>, Option<u32>) {
+    let unit = if slot == 0 { live_pet } else { None };
+    let display = u8::try_from(slot)
+        .ok()
+        .and_then(|slot| pets.iter().find(|p| p.slot == slot))
+        .and_then(|row| display_of(row.creature_entry))
+        .filter(|&d| d != 0);
+    (unit, display)
+}
+
 /// Stable refusals staged for the feed to surface on the window's error line — only ever
 /// `ERR_NOT_ENOUGH_MONEY`, the single code the client speaks for (decision 1677).
 #[derive(Resource, Default)]
@@ -336,3 +421,87 @@ pub(crate) struct StableErrors(pub(crate) Vec<String>);
 /// table quotes `0`, which is the same shape as "past the ladder": degraded, never wrong.
 #[derive(Resource)]
 pub(crate) struct StableSlotPrices(pub(crate) benilla_formats::StableSlotPrices);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(slot: u8, entry: u32) -> StabledPet {
+        StabledPet {
+            pet_number: u32::from(slot) + 100,
+            creature_entry: entry,
+            level: 30,
+            name: format!("pet{slot}"),
+            loyalty: 6,
+            slot,
+        }
+    }
+
+    /// One display per entry; entry `9` is the template that ships none.
+    fn display_of(entry: u32) -> Option<u32> {
+        match entry {
+            1 => Some(4449),
+            2 => Some(822),
+            9 => Some(0),
+            _ => None,
+        }
+    }
+
+    /// The whole fork, arm by arm — this is what a blank pane looks like when it is wrong, and no
+    /// build gate can see it.
+    #[test]
+    fn the_selection_forks_between_a_live_body_and_a_bare_display() {
+        let pets = [row(0, 1), row(1, 2)];
+        let live = Entity::from_raw_u32(7).expect("a test entity id");
+
+        // Nothing selected: neither source, so the pane empties.
+        assert_eq!(
+            stable_subject(-1, Some(live), &pets, display_of),
+            (None, None)
+        );
+
+        // Slot 0 with the pet out: the world body, and the display resolved beside it so a dismiss
+        // does not blank the pane.
+        assert_eq!(
+            stable_subject(0, Some(live), &pets, display_of),
+            (Some(live), Some(4449))
+        );
+
+        // Slot 0 with the pet dismissed (a row, no live guid): the display alone — the case that
+        // has no world entity anywhere and the whole reason the stand-in exists.
+        assert_eq!(
+            stable_subject(0, None, &pets, display_of),
+            (None, Some(4449))
+        );
+
+        // A stabled slot NEVER takes the live body, even while a pet is out: the reference's live
+        // arm is gated on the selection being the summoned pet, not on one existing.
+        assert_eq!(
+            stable_subject(1, Some(live), &pets, display_of),
+            (None, Some(822))
+        );
+
+        // A slot with no row (never bought, or empty) and a slot past the window: nothing.
+        assert_eq!(
+            stable_subject(2, Some(live), &pets, display_of),
+            (None, None)
+        );
+    }
+
+    /// A row whose creature query has not answered yet, and one whose template ships display `0`,
+    /// both read as "no answer" — the reference's cache miss, which draws nothing rather than
+    /// drawing wrong.
+    #[test]
+    fn an_unanswered_or_display_less_template_empties_the_pane() {
+        assert_eq!(
+            stable_subject(1, None, &[row(1, 404)], display_of),
+            (None, None),
+            "the query has not landed yet"
+        );
+        assert_eq!(
+            stable_subject(1, None, &[row(1, 9)], display_of),
+            (None, None),
+            "the template ships no display"
+        );
+    }
+}

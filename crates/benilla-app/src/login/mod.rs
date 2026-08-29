@@ -689,20 +689,37 @@ impl Default for LoginForm {
 }
 
 impl LoginForm {
-    /// Give `field` the keyboard **and select everything already in it**.
+    /// Give `field` the keyboard **and select everything already in it** — dropping the selection
+    /// on the box being left.
     ///
-    /// **A knowing divergence** (director's call, 2026-08-28). The reference does neither on a
-    /// click nor a TAB: `CEditBox::OnMouseDown` (`0x77b800`) "focuses unconditionally" and
-    /// `SetFocus` (`0x77e3d0`) only moves the focus — neither highlights (wow-re `ui.md` §1210,
-    /// §1218). But the thing a player does after clicking into a login field is *replace* what is
-    /// there — a remembered account name, a mistyped password — and having to select-all or
-    /// backspace it out first is friction the reference only avoids by being what everyone was
-    /// used to in 2006.
+    /// **A knowing divergence** (director's call, 2026-08-28), and the reference half of it is now
+    /// byte-settled rather than inferred (wow-re `editbox-selection-focus-law.md` §4/§5, §5-VERIFIED,
+    /// dispatched from this work). The reference does the *opposite* on a click: `OnMouseDown`
+    /// (`0x77b800`) hit-tests the click to a byte index, **collapses** the selection onto it
+    /// (`0x77b86f call 0x77ccf0`) and only then calls `SetFocus` — so a fresh click-focus leaves an
+    /// EMPTY selection at the character you clicked. And `SetFocus` itself writes no selection field
+    /// at all; `0x77e3f6` being the only instruction image-wide that grants focus makes *every* focus
+    /// gain selection-neutral, TAB included. Losing focus likewise touches nothing (`0x77af50` raises
+    /// only the cursor dirty bit).
+    ///
+    /// So we diverge in both directions, deliberately: the reference collapses where we select, and
+    /// leaves stale where we collapse. The reason is the same one for both — the thing a player does
+    /// after clicking into a login field is *replace* what is there, a remembered account name or a
+    /// mistyped password, and having to select-all or backspace it out first is friction the
+    /// reference only avoids by being what everyone was used to in 2006.
+    ///
+    /// **A divergence owes both halves.** 1682 shipped only the select; nothing ever unselected,
+    /// so the box you left kept a grey highlight behind you and the screen showed two selections at
+    /// once (the director's report, 2026-08-29). Selecting on focus is only coherent if the
+    /// selection *means* "this is the box the keyboard is in" — which makes collapsing the outgoing
+    /// box not a second feature but the other half of this one. It runs the client's own
+    /// collapse-to-cursor (`0x77ccf0`), the same primitive every delete path uses.
     ///
     /// The selection uses the client's own `HighlightText(0, -1)` (`0x77cca0`), which resets the
     /// blink on its way, so the box still opens on a solid caret — the property the old
     /// `reset_blink()` calls at these sites existed to preserve.
     fn focus(&mut self, field: Field) {
+        self.focused().collapse();
         self.focus = field;
         self.focused().highlight_text(0, -1);
     }
@@ -1039,6 +1056,39 @@ impl DialogKind {
 const REALMLIST_BAD: &str =
     "That is not a server address.\nTry  logon.example.org  or  127.0.0.1:3724";
 
+/// Which of the dialog's two buttons a key press answers, as `(button1, button2)` — the keyboard
+/// half of [`drive_dialog`]'s buttons; the mouse half is OR-ed in beside it. Button 1 is the
+/// affirmative one on every kind (Cancel on the status dialog, Okay on the others); button 2
+/// exists only where the kind declares it. ENTER confirms, ESCAPE dismisses; on a one-button
+/// dialog they are the same button.
+///
+/// **`on_screen` is the whole of the second bug fixed on 2026-08-29.** Pressing ENTER on an empty
+/// login form played the sound and showed nothing, while *clicking* Login showed the dialog
+/// (director's report). The two systems poll the same [`ButtonInput`]: [`login_input`] opened the
+/// error dialog on the ENTER edge, and [`drive_dialog`] — later in the same chained frame, with
+/// `keys` untouched — read *the same* `just_pressed(Enter)` as that dialog's own Okay and closed
+/// it before it had ever been drawn. Both sounds played, which is exactly what was heard.
+///
+/// The reference cannot have this bug because it is event-driven: the ENTER that fires
+/// `AccountLogin_Login` is *dispatched* to the focused edit box (`OnEnterPressed`), and a dialog
+/// that does not exist yet is not in the dispatch. Polling is our seam, so the gate has to be
+/// ours too, and it says the same thing the dispatch does — **a dialog answers only keys pressed
+/// while it was already on screen**. Not "not this frame": on screen. It is passed the same
+/// `fresh` flag that drives the (re)spawn, so the two cannot drift apart.
+fn dialog_keys(kind: DialogKind, on_screen: bool, enter: bool, escape: bool) -> (bool, bool) {
+    if !on_screen {
+        return (false, false);
+    }
+    let button1 = match kind {
+        // The status dialog's one button IS Cancel, so ESCAPE is it. The queue's button is the
+        // same act under another name, so it answers to ESCAPE the same way.
+        DialogKind::Status | DialogKind::Queued => escape,
+        DialogKind::Error => escape || enter,
+        DialogKind::Realmlist => enter,
+    };
+    (button1, kind == DialogKind::Realmlist && escape)
+}
+
 /// The login screen's one dialog (the ref's shared `GlueDialog`): kind + text; the driver spawns/
 /// despawns the tree (respawning on a kind change — the button caption differs) and updates the
 /// text in place.
@@ -1141,8 +1191,13 @@ fn drive_dialog(
 
     // (Re)spawn on the open edge, a kind change (the button caption differs), or a window resize
     // (the tree bakes the glue scale); a text-only change updates the message line in place.
+    //
+    // `fresh` is *this dialog appearing*, as opposed to a resize rebuilding a dialog already up —
+    // and it is the same flag [`dialog_keys`] takes as `!on_screen`, so the frame the dialog is
+    // drawn on and the frame it starts answering keys on are one decision, not two.
     let s = crate::glue::screen_scale(window.single().ok());
-    if dialog.root.is_none() || dialog.spawned != Some(kind) || dialog.spawned_s != s {
+    let fresh = dialog.root.is_none() || dialog.spawned != Some(kind);
+    if fresh || dialog.spawned_s != s {
         if let Some(root) = dialog.root.take() {
             commands.entity(root).despawn();
         }
@@ -1168,21 +1223,17 @@ fn drive_dialog(
         dialog.dirty = false;
     }
 
-    // The buttons (or their keys). Button 1 is the affirmative one on every kind — Cancel on
-    // the status dialog, Okay on the other two — and button 2 exists only where the kind declares
-    // it. ENTER confirms, ESCAPE dismisses; on a one-button dialog they are the same button.
+    // The buttons, from the mouse or the keys. A click needs no `fresh` guard of its own: the
+    // button it would hit did not exist to be clicked on the frame the tree spawned.
     let hit = |want: LoginAction| buttons.iter().any(|(e, a)| *a == want && clicks.hit(e));
-    let enter = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
-    let escape = keys.just_pressed(KeyCode::Escape);
-    let button1 = hit(LoginAction::Dialog)
-        || match kind {
-            // The status dialog's one button IS Cancel, so ESCAPE is it. The queue's button is
-            // the same act under another name, so it answers to ESCAPE the same way.
-            DialogKind::Status | DialogKind::Queued => escape,
-            DialogKind::Error => escape || enter,
-            DialogKind::Realmlist => enter,
-        };
-    let button2 = hit(LoginAction::Dialog2) || (kind == DialogKind::Realmlist && escape);
+    let (key1, key2) = dialog_keys(
+        kind,
+        !fresh,
+        keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter),
+        keys.just_pressed(KeyCode::Escape),
+    );
+    let button1 = hit(LoginAction::Dialog) || key1;
+    let button2 = hit(LoginAction::Dialog2) || key2;
 
     // **Every glue dialog button clicks** — `GlueDialog_OnClick` ends with
     // `PlaySound("gsTitleOptionOK")` for button 1 and button 2 alike, whatever the dialog's type.
@@ -1513,6 +1564,52 @@ mod tests {
         );
     }
 
+    /// **A dialog never answers the key press that opened it.** ENTER on an empty login form
+    /// opened the error dialog in `login_input` and then, later in the *same* frame with the same
+    /// `ButtonInput`, `drive_dialog` read that identical `just_pressed(Enter)` as the dialog's own
+    /// Okay — so the popup appeared and vanished inside one frame and only the two sounds were
+    /// heard (director's report, 2026-08-29). The gate is being on screen, not a frame count.
+    #[test]
+    fn a_dialog_does_not_answer_the_key_that_opened_it() {
+        // The frame it appears on: the key that opened it is not its answer.
+        assert_eq!(
+            dialog_keys(DialogKind::Error, false, true, false),
+            (false, false),
+        );
+        assert_eq!(
+            dialog_keys(DialogKind::Error, false, false, true),
+            (false, false),
+        );
+        // Once it is up, the same press is.
+        assert_eq!(
+            dialog_keys(DialogKind::Error, true, true, false),
+            (true, false),
+        );
+    }
+
+    /// Which key answers which button, per kind: ENTER and ESCAPE are the same (single) button on
+    /// an error dialog; ESCAPE alone works the Cancel-shaped ones; the two-button editor splits
+    /// them, ENTER to Okay and ESCAPE to Cancel.
+    #[test]
+    fn each_dialog_kind_maps_its_own_keys() {
+        for (kind, enter, escape, want) in [
+            (DialogKind::Error, true, false, (true, false)),
+            (DialogKind::Error, false, true, (true, false)),
+            (DialogKind::Status, true, false, (false, false)),
+            (DialogKind::Status, false, true, (true, false)),
+            (DialogKind::Queued, false, true, (true, false)),
+            (DialogKind::Queued, true, false, (false, false)),
+            (DialogKind::Realmlist, true, false, (true, false)),
+            (DialogKind::Realmlist, false, true, (false, true)),
+        ] {
+            assert_eq!(
+                dialog_keys(kind, true, enter, escape),
+                want,
+                "{kind:?} enter={enter} escape={escape}",
+            );
+        }
+    }
+
     /// Opening the editor seats the current address in the box, selected whole — so typing a new
     /// server replaces the old one instead of appending to it.
     #[test]
@@ -1671,9 +1768,24 @@ mod tests {
             "the whole password is selected even though it cannot be read back",
         );
 
+        // **And the box we left is no longer selected.** The other half of the divergence: with
+        // the selection standing for "the keyboard is here", exactly one box can carry one.
+        assert_eq!(
+            form.account.selected_text(),
+            None,
+            "the box that lost the keyboard keeps no highlight",
+        );
+
         // Typing then replaces rather than appends — the point of the divergence.
         form.focused().insert("x");
         assert_eq!(form.password.text, "x");
+
+        form.focus(Field::Account);
+        assert_eq!(
+            form.password.selected_text(),
+            None,
+            "and back the other way"
+        );
     }
 
     /// The code→string map quotes the client's own strings for the vmangos-verified rows.

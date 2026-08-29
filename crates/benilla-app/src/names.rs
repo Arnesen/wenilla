@@ -82,18 +82,10 @@ pub(crate) struct CreatureRecord {
     /// For anything actually on screen the unit's own descriptor field still wins — vmangos picks
     /// among a template's four display ids at spawn, and this is the first.
     ///
-    /// **Stored but not yet read** — the stable window's model pane is the consumer, and it needs a
-    /// booth that renders a creature from a display id with **no world entity** to mirror. Every
-    /// in-world booth today takes an `Option<Entity>` and copies that unit's dressed look
-    /// ([`crate::portrait`]'s `sync_body_booth`); the only display-id path that exists is the glue
-    /// stage's select pet (`portrait::glue_booth`, decisions 1536/1538/1539), which is a different
-    /// system. Wiring the two together is its own arc, named as a deferral in decision 1676 rather
-    /// than half-built here. The field is filled now because the wire already carries it and the
-    /// query is ask-once: dropping it would mean re-querying every template later.
-    #[allow(
-        dead_code,
-        reason = "the stable model pane's booth arc — decision 1676"
-    )]
+    /// **Read by the stable window's model pane** ([`crate::ui_stable`]'s `feed_stable_booth`),
+    /// which is what 1676 deferred and named this field for: the booth points at a
+    /// [`crate::portrait::PortraitStandIn`] built from this id when the selected pet has no world
+    /// object — every stabled pet, and a dismissed one in slot 0.
     pub(crate) display_id: u32,
 }
 

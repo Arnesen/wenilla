@@ -376,6 +376,59 @@ fn auto_unstuck_casts_and_closes() {
     assert!(!s.eval::<bool>("return HelpFrame:IsVisible()").unwrap());
 }
 
+/// **The retail-only text is gone from the Home page** (director's call, 2026-08-29).
+///
+/// The page is entirely GlobalStrings off the player's own chain, so three of its strings still
+/// pointed at `worldofwarcraft.com` — a dead PvP-policy link, and a closing paragraph directing the
+/// player to Blizzard's forums and policy pages. The window overrides them before the markup
+/// resolves.
+///
+/// This test exists because the failure mode is *invisible in a test suite*: nothing breaks if the
+/// override is dropped, the page simply starts advertising dead links again. Asserted on the
+/// rendered FontStrings rather than the globals, so it also catches the markup being re-pointed at
+/// a different key.
+#[test]
+fn the_home_page_advertises_no_dead_retail_links() {
+    let s = setup();
+    s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"Home\")")
+        .unwrap();
+
+    for frame in [
+        "HelpFrameHomePvpPolicyUrl",
+        "HelpFrameHomeText2",
+        "HelpFrameHomeIssue3",
+        "HelpFrameHomeText1",
+    ] {
+        let text = s
+            .eval::<String>(&format!("return {frame}:GetText() or \"\""))
+            .unwrap()
+            .to_lowercase();
+        for dead in [
+            "worldofwarcraft.com",
+            "http://",
+            "www.",
+            ".shtml",
+            "the forums",
+        ] {
+            assert!(
+                !text.contains(dead),
+                "{frame} still carries retail-only text ({dead:?}): {text:?}"
+            );
+        }
+    }
+
+    // The PvP guidance itself is KEPT — only the sentence introducing the link went. A test that
+    // let the whole bullet be emptied would pass on an over-correction, which is the other way to
+    // get this wrong.
+    let pvp = s
+        .eval::<String>("return HelpFrameHomeIssue3:GetText()")
+        .unwrap();
+    assert!(
+        pvp.contains("PVP game mechanics"),
+        "the PvP guidance must survive the link's removal: {pvp:?}"
+    );
+}
+
 /// **The geometry oracle** (decision 0675): every element the transcription shares with the
 /// reference file carries the reference's own `<AbsDimension>` numbers.
 ///

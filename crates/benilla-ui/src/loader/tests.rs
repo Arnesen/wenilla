@@ -876,6 +876,46 @@ mod loader_tests {
         assert!(s.errors().is_empty(), "{:?}", s.errors());
     }
 
+    /// **`autoFocus="false"` is an opt-OUT, and the only reason the attribute is ever written.**
+    ///
+    /// The ctor leaves `flags = 1` — autoFocus ON — so every one of the ten places the shipped
+    /// 1.12.1 chain names the attribute names it to turn the flag *off* (MailFrame ×3,
+    /// MoneyInputFrame ×3, FriendsFrame ×3, AddonList ×1). The flag loop used to call the setter
+    /// only when an attribute parsed as `true`, which made all ten a no-op: harmless while our own
+    /// default was off, and exactly backwards once it matches the client's (decision 1686).
+    ///
+    /// Both directions asserted, because a presence-blind reader passes the `true` half.
+    #[test]
+    fn an_editbox_flag_written_false_in_xml_turns_the_flag_off() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <EditBox name="OptOut" autoFocus="false"/>
+                <EditBox name="OptIn" autoFocus="true"/>
+                <EditBox name="Silent"/>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+        // The box is hidden first so the Show() is a real transition; an autoFocus box takes the
+        // keyboard on show, which is the observable the flag actually drives.
+        for (name, want) in [("OptOut", false), ("OptIn", true), ("Silent", true)] {
+            s.run(&format!(
+                "{name}:Hide(); {name}:ClearFocus(); {name}:Show()"
+            ))
+            .unwrap();
+            assert_eq!(
+                s.eval::<bool>(&format!("return {name}:HasFocus()"))
+                    .unwrap(),
+                want,
+                "{name}: autoFocus should be {want} (absent = the ctor default, ON)",
+            );
+            s.run(&format!("{name}:ClearFocus()")).unwrap();
+        }
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+
     // ── TexCoords + Font objects (decision 0084 engine slice) ───────────────────────────────────
 
     /// `<TexCoords left right top bottom>` on a `<Texture>` parses into the region's UV rect and

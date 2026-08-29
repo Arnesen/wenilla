@@ -100,6 +100,7 @@ fn seed_items(s: &mut UiScript) {
     slots.insert(
         1,
         ContainerSlot {
+            petition: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,

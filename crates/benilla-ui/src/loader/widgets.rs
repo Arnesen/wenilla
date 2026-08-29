@@ -276,10 +276,19 @@ impl Loader<'_> {
     /// `<EditBox>` extras (RF-0082 §"THE STRUCTURAL KEY"/§3): the `letters` cap → SetMaxLetters,
     /// `historyLines` → SetHistoryLines (the submitted-line recall ring), and the config flags
     /// `autoFocus`/`numeric`/`password`/`multiLine`/`ignoreArrows` → their setters.
-    /// A flag absent from the XML stays at its ctor default (`false`) — a **documented divergence**
-    /// from the UI.xsd, whose `autoFocus` default is `true`; benilla applies the C++ ctor default
-    /// (flags=0) uniformly for CreateFrame and XML, since autoFocus never focuses on show and click
-    /// focus is unconditional, so the practical effect is confined to keyboard self-acquire.
+    /// A flag absent from the XML stays at its ctor default, and the ctor's own value is
+    /// `flags = 1` — **`autoFocus` defaults ON**, every other flag off (`0x779a29 mov eax,1` /
+    /// `0x779a2e mov [esi+0x318],eax`; LoadXML's `autoFocus` leg writes nothing for an absent or
+    /// empty attribute, `0x77a0b3`/`0x77a0b8`). So the UI.xsd's `true` default is the client's too,
+    /// and the divergence documented here — benilla applying `flags = 0` uniformly — is retired
+    /// (decision 1686). Its stated justification, "autoFocus never focuses on show", was wow-re's
+    /// own `call`-only-census error, corrected 2026-08-29.
+    ///
+    /// **The flags are read presence-aware.** This loop used to call the setter only when an
+    /// attribute parsed as `true`, so `autoFocus="false"` was a no-op — harmless while the default
+    /// was off, and precisely backwards once it is on: the ten boxes in the shipped chain that opt
+    /// OUT (MailFrame ×3, MoneyInputFrame ×3, FriendsFrame ×3, AddonList ×1) are the only places
+    /// the attribute appears at all.
     /// `<TextInsets>` maps to `SetTextInsets`; `blinkSpeed` → SetBlinkSpeed (the caret
     /// half-period, `E+0x370`). A declared `<FontString>` is ASSIGNED as the box's text region by
     /// the special-fontstring pass (`adopt_text_region` — the engine's LoadXML slot, never a
@@ -326,8 +335,8 @@ impl Loader<'_> {
             ("multiLine", "SetMultiLine"),
             ("ignoreArrows", "SetIgnoreArrows"),
         ] {
-            if el.attr_bool(attr) {
-                self.call(wrapper, method, true, dbg);
+            if let Some(on) = el.attr_bool_opt(attr) {
+                self.call(wrapper, method, on, dbg);
             }
         }
     }

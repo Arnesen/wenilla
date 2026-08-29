@@ -187,6 +187,22 @@ fn a_signers_charter_shows_the_sign_face_and_nine_rows() {
         );
     }
 
+    // The charter's own static furniture — the three labels, the nine rows and the instructions
+    // all draw, not merely hold text.
+    for part in [
+        "PetitionFrameCharterTitle",
+        "PetitionFrameCharterName",
+        "PetitionFrameMasterTitle",
+        "PetitionFrameMasterName",
+        "PetitionFrameMemberTitle",
+        "PetitionFrameMemberName1",
+        "PetitionFrameMemberName9",
+        "PetitionFrameInstructions",
+        "PetitionFrameCancelButton",
+        "PetitionFrameCloseButton",
+    ] {
+        assert!(visible(&s, part), "{part} is on screen");
+    }
     assert!(visible(&s, "PetitionFrameSignButton"));
     assert!(!visible(&s, "PetitionFrameRequestButton"));
     assert!(
@@ -348,6 +364,16 @@ fn the_registrar_opens_on_services_and_purchase_is_a_local_panel_swap() {
     assert!(visible(&s, "GuildRegistrarFrame"));
     assert!(visible(&s, "GuildRegistrarGreetingFrame"));
     assert!(!visible(&s, "GuildRegistrarPurchaseFrame"));
+    // **The two service rows must be VISIBLE, not merely labelled.** This assertion is here
+    // because its absence shipped the bug: the rows inherited `hidden="true"` from a template
+    // modelled on the quest list's POOLED rows, which are shown one at a time by code. These are
+    // static and nothing ever calls `:Show()` on them, so both were permanently invisible — the
+    // window came up as a bare "Available Services" heading over blank parchment — while every
+    // `GetText()` assertion below passed, because a hidden button still knows its own label.
+    // Decision 0672's lesson in another key: a frame that loads is not a frame that draws.
+    for row in ["GuildRegistrarButton1", "GuildRegistrarButton2"] {
+        assert!(visible(&s, row), "{row} is on screen, not just loaded");
+    }
     assert_eq!(
         text(&s, "GuildRegistrarButton1"),
         "Purchase a Guild Charter"
@@ -361,6 +387,18 @@ fn the_registrar_opens_on_services_and_purchase_is_a_local_panel_swap() {
     s.run("GuildRegistrarButton1:Click()").unwrap();
     assert!(visible(&s, "GuildRegistrarPurchaseFrame"));
     assert!(!visible(&s, "GuildRegistrarGreetingFrame"));
+    // The purchase panel's own furniture, for the reason the services rows above are checked: a
+    // window whose parts load but do not draw passes every text assertion.
+    for part in [
+        "GuildRegistrarPurchaseText",
+        "GuildRegistrarCostLabel",
+        "GuildRegistrarMoneyFrame",
+        "GuildRegistrarFrameEditBox",
+        "GuildRegistrarFramePurchaseButton",
+        "GuildRegistrarFrameCancelButton",
+    ] {
+        assert!(visible(&s, part), "{part} is on screen");
+    }
     assert_eq!(calls(&s), "", "the swap sends nothing");
 }
 

@@ -121,7 +121,9 @@ pub(super) fn feed_petition(
             max_signatures: r.required,
             // Nil until the cache has it — and NOT part of the defer condition (module doc).
             originator: names.resolve(o.owner, &commands).map(str::to_string),
-            is_originator: o.owner == me,
+            // The RECORD's owner, which is what the binding compares (`0x4f447a`) — not the
+            // packet's. Identical on any sane server; only one of them is the source.
+            is_originator: r.owner == me,
         })
     });
 

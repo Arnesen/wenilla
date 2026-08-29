@@ -39,10 +39,95 @@ fn autofocus_does_not_focus_on_show_but_self_acquires_first_event() {
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "a");
 }
 
+/// **An `autoFocus` box takes the keyboard when it is shown** — the OnShow vtable override
+/// (`0x81c910` slot +0x30, `0x77a750`), missing here until decision 1686 because wow-re's own
+/// "verified by absence" negative came from a `call`-only census that could not see its tail-`jmp`.
+/// Gated on nothing else holding focus, and the gate is the whole of it — no topmost/best choice.
+#[test]
+fn an_autofocus_box_takes_the_keyboard_when_it_is_shown() {
+    let s = script();
+    s.run(
+        r#"
+        E = CreateFrame("EditBox", "E")
+        E:Hide()
+        E:ClearFocus()
+    "#,
+    )
+    .unwrap();
+    assert!(!s.has_keyboard_focus(), "hidden and unfocused to start");
+
+    s.run("E:Show()").unwrap();
+    assert!(
+        s.eval::<bool>("return E:HasFocus()").unwrap(),
+        "showing an autoFocus box focuses it",
+    );
+
+    // Hiding the box that holds the keyboard releases it (the mirror override, slot +0x34).
+    s.run("E:Hide()").unwrap();
+    assert!(
+        !s.has_keyboard_focus(),
+        "hiding the focused box releases the keyboard",
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The two gates, each shown to bite. A box that opted out does not take the keyboard on show; and
+/// a box that would have is refused while another still holds it — the reference's
+/// `if ([0xcf4dc8] == 0 && (flags & 1))`, both halves.
+#[test]
+fn the_show_focus_is_refused_without_autofocus_or_with_the_keyboard_taken() {
+    let s = script();
+    s.run(
+        r#"
+        OPTED_OUT = CreateFrame("EditBox", "OptedOut")
+        OPTED_OUT:SetAutoFocus(false)
+        OPTED_OUT:Hide()
+        OPTED_OUT:ClearFocus()
+    "#,
+    )
+    .unwrap();
+    s.run("OPTED_OUT:Show()").unwrap();
+    assert!(
+        !s.has_keyboard_focus(),
+        "autoFocus=false is an opt-out that holds on show",
+    );
+
+    // Now give the keyboard away, and show an autoFocus box into an occupied focus.
+    s.run(
+        r#"
+        HOLDER = CreateFrame("EditBox", "Holder")
+        HOLDER:SetFocus()
+        LATE = CreateFrame("EditBox", "Late")
+        LATE:Hide()
+    "#,
+    )
+    .unwrap();
+    s.run("LATE:Show()").unwrap();
+    assert!(
+        s.eval::<bool>("return HOLDER:HasFocus()").unwrap(),
+        "a shown autoFocus box does not steal a focus that is already held",
+    );
+    assert!(!s.eval::<bool>("return LATE:HasFocus()").unwrap());
+
+    // And hiding a box that does NOT hold the keyboard leaves it where it is — `0x77e410`'s own
+    // per-box guard (`cmp ecx,eax; jne ret`), which is what makes the override's unconditional
+    // tail-jmp harmless.
+    s.run("LATE:Hide()").unwrap();
+    assert!(
+        s.eval::<bool>("return HOLDER:HasFocus()").unwrap(),
+        "hiding an unfocused box does not clear somebody else's focus",
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 #[test]
 fn non_autofocus_unfocused_box_ignores_input() {
     let mut s = script();
-    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    // `SetAutoFocus(false)` explicitly: the ctor's `flags = 1` leaves autoFocus **ON** by default
+    // (`0x779a29`/`0x779a2e`, decision 1686), so a bare `CreateFrame("EditBox")` is an autoFocus
+    // box and would self-acquire on the first char. This test is about the other kind.
+    s.run(r#"E = CreateFrame("EditBox", "E"); E:SetAutoFocus(false)"#)
+        .unwrap();
     assert!(!s.char_input("a"), "no focus, no autoFocus → not consumed");
     assert!(!s.editbox_action(EditAction::Move {
         unit: EditUnit::Char,
@@ -250,7 +335,8 @@ fn paste_inserts_at_the_cursor_and_replaces_the_selection() {
 #[test]
 fn paste_into_an_unfocused_box_is_not_consumed() {
     let mut s = script();
-    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    s.run(r#"E = CreateFrame("EditBox", "E"); E:SetAutoFocus(false)"#)
+        .unwrap();
     assert!(!s.paste("hi"), "no focus, no autoFocus → not consumed");
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "");
 }
@@ -458,37 +544,65 @@ fn get_number_parses_the_text() {
 // ── the EditBox override never fires generic OnChar/OnKeyDown (§2) ────────────────────────────
 
 #[test]
-fn key_and_char_paths_never_fire_generic_handlers() {
-    // The law (wow-re `frame-key-script-delivery.md` §1): `CSimpleEditBox` has its OWN input
-    // vtable (`0x77a900` char / `0x77b160` key-down) which handles the event and **never chains to
-    // the base implementation** — so a focused box's typing does not also run a generic `OnChar`
-    // bound on that same box.
-    //
-    // This used to be proved by `SetScript("OnChar", …)` *raising*, which it no longer does
-    // (decision 1319 made the three key names real). The invariant is unchanged and is now
-    // asserted directly: bind the generic handler, type into the focused box, and watch the text
-    // arrive with the handler never called.
+fn typing_fires_the_generic_on_char_with_what_was_inserted() {
+    // **The half of the old law that was wrong** (wow-re, corrected 2026-08-29; decision 1686).
+    // `CSimpleEditBox` has its own input vtable which does not chain to the base — but Insert
+    // itself fires the generic `OnChar` slot (`+0x180`) at `0x77c13c`, through the **varargs**
+    // firer `0x7026f0` with fmt `"%s"` and the spliced string as the argument. The published
+    // negative came from censusing only the fixed-arity firer `0x702690`: one member of a
+    // two-member family.
+    let mut s = script();
+    s.run(
+        r#"
+        got = {}
+        E = CreateFrame("EditBox", "E")
+        E:EnableKeyboard(true)
+        E:SetScript("OnChar", function() table.insert(got, arg1) end)
+        E:SetFocus()
+    "#,
+    )
+    .unwrap();
+    assert!(s.char_input("k"), "the focused box consumed the character");
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "k");
+    assert_eq!(
+        s.eval::<String>("return table.concat(got, ',')").unwrap(),
+        "k",
+        "OnChar fires once, with the inserted string",
+    );
+
+    // `SetText` is NOT an insert path and fires nothing — the seam the reference has too.
+    s.run(r#"E:SetText("zzz")"#).unwrap();
+    assert_eq!(
+        s.eval::<String>("return table.concat(got, ',')").unwrap(),
+        "k",
+        "SetText does not run Insert, so it does not fire OnChar",
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+#[test]
+fn key_paths_never_fire_the_generic_on_key_down() {
+    // The surviving half (wow-re `frame-key-script-delivery.md` §1): the box's own key-down
+    // vtable (`0x77b160`) handles the event and never chains to the base, so a focused box's
+    // typing does not also run a generic `OnKeyDown` bound on that same box. Only the `OnChar`
+    // half of the original claim was corrected — this one was re-censused and stands.
     let mut s = script();
     s.run(
         r#"
         fired = 0
         E = CreateFrame("EditBox", "E")
         E:EnableKeyboard(true)
-        E:SetScript("OnChar", function() fired = fired + 1 end)
+        E:SetScript("OnKeyDown", function() fired = fired + 1 end)
         E:SetFocus()
     "#,
     )
     .unwrap();
     assert!(s.char_input("k"), "the focused box consumed the character");
-    assert_eq!(
-        s.eval::<String>("return E:GetText()").unwrap(),
-        "k",
-        "…by inserting it through its own path"
-    );
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "k");
     assert_eq!(
         s.eval::<i64>("return fired").unwrap(),
         0,
-        "the box's own vtable never chains to the generic OnChar"
+        "the box's own vtable never chains to the generic OnKeyDown"
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
@@ -1119,4 +1233,24 @@ fn max_letters_counts_visible_letters_not_escape_bytes() {
     // count would have blown through, trimming the link's own tail off.
     assert_eq!(text_of(&s), LINK);
     assert_eq!(s.eval::<i64>("return E:GetNumLetters()").unwrap(), 9);
+}
+
+/// **Creating a box is not showing it** — and that is what keeps the on-show self-focus safe now
+/// that autoFocus defaults ON (decision 1686). A frame born visible is not an effective-visibility
+/// *transition*, so it never runs the OnShow override; only a real `Show()` does. Without this,
+/// loading the shipped chain would hand the keyboard to whichever edit box happened to be
+/// constructed first, and typing would go into it instead of to the game.
+///
+/// Pinned because it is load-bearing by *absence*: nothing in the on-show path mentions creation,
+/// so the day frame construction starts firing OnShow, this is the test that says what it costs.
+#[test]
+fn creating_a_box_does_not_focus_it_the_way_showing_one_does() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    assert!(
+        !s.has_keyboard_focus(),
+        "a box born visible has not been SHOWN, so it takes no keyboard",
+    );
+    assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

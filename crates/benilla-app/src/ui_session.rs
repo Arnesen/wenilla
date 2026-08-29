@@ -130,6 +130,12 @@ pub(crate) fn feed_interact_npc(
     // session is already gone. Without this arm the window's portrait is the auctioneer's black
     // disc all over again and its name banner is blank.
     registrar: Option<Res<crate::ui_petition::GuildRegistrarState>>,
+    // The stable master's, while the pet stable is open (decision 1684) — the black disc a THIRD
+    // time, and this one could not have leaned on the gossip arm even by accident: benilla asks a
+    // menuless stable master for its pet list DIRECTLY on the interact leg (decision 1680, the
+    // client's own `0x5f05bc` path), so there is no gossip session behind it at all. The registrar
+    // arm above is the same shape for the same reason.
+    stable: Option<Res<crate::ui_stable::StableOpen>>,
     index: Option<Res<GuidIndex>>,
     mut out: ResMut<InteractNpc>,
 ) {
@@ -142,7 +148,8 @@ pub(crate) fn feed_interact_npc(
         .or_else(|| trade.and_then(|s| s.npc()))
         .or_else(|| bank.and_then(|s| s.npc()))
         .or_else(|| auction.and_then(|s| s.npc()))
-        .or_else(|| registrar.and_then(|s| s.npc()));
+        .or_else(|| registrar.and_then(|s| s.npc()))
+        .or_else(|| stable.and_then(|s| s.npc()));
     // Field 0 is the entity the portrait booth bakes and the facing chain steers by; field 1 is
     // the same NPC's **guid**, which `crate::ui_unit`'s feed needs to resolve the `"npc"` unit
     // token's name (a name lives in the `NameCache`, keyed by guid — there is no way back to one
@@ -262,13 +269,124 @@ mod tests {
             "the auctioneer's own portrait"
         );
 
+        app.world_mut()
+            .resource_mut::<crate::ui_auction::AuctionOpen>()
+            .clear();
+
+        // The stable master's (decision 1684) — the same black disc, reported by the director on
+        // 2026-08-28. Note WHERE it shipped from: this very test already existed, with the
+        // paragraph above it saying every portrait window must be in the chain — and the stable
+        // still went out black, because the guard is **opt-in per session**. A window nobody
+        // remembers to add here is a window nobody's test covers. Worse for this one than for the
+        // auction house: benilla asks a menuless stable master for its list directly on the
+        // interact leg (decision 1680), so there is no gossip session to accidentally carry it.
+        app.init_resource::<crate::ui_stable::StableOpen>();
+        app.world_mut()
+            .resource_mut::<crate::ui_stable::StableOpen>()
+            .open(0x42, 2, vec![]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<InteractNpc>().0,
+            Some(npc),
+            "the stable master's own portrait"
+        );
+
         // Every session closes → None again.
         app.world_mut().resource_mut::<GossipState>().close();
         app.world_mut().resource_mut::<MerchantOpen>().close();
         app.world_mut()
-            .resource_mut::<crate::ui_auction::AuctionOpen>()
+            .resource_mut::<crate::ui_stable::StableOpen>()
             .clear();
         app.update();
         assert_eq!(app.world().resource::<InteractNpc>().0, None);
+    }
+
+    /// **The structural tripwire the three black discs earned** (decision 1684).
+    ///
+    /// The assertions above are opt-in: each names one session, and a window nobody remembers to
+    /// add is a window nobody covers. That is not hypothetical — the auction house shipped a black
+    /// portrait (0x-2026-08-22), the guild registrar was caught only because someone reasoned about
+    /// the gossip close, and the stable master shipped black on 2026-08-28 with this very test
+    /// already in the file telling everyone to add their session to it.
+    ///
+    /// So this one is exhaustive by construction: it reads the app's own sources, finds every
+    /// `impl NpcSession for X`, and requires each `X` to be either **in the `.or` chain** or on the
+    /// **explicit exclusion list** below with a stated reason. A new NPC window cannot be silent —
+    /// it either wires its portrait or it says why it has none.
+    #[test]
+    fn every_npc_session_is_portrait_bound_or_explicitly_excluded() {
+        use std::path::Path;
+
+        /// Sessions that deliberately do NOT own the `"npc"` portrait token, each with the reason
+        /// it does not. Adding a name here is a decision; leaving one out is a black disc.
+        const EXCLUDED: &[(&str, &str)] = &[
+            // Decision 0544: the mail window's icon is authored art, not a unit-model bake, so it
+            // has no portrait to point and must not steal the token from a window that does.
+            ("MailOpen", "its window icon is art, not a unit bake (0544)"),
+            // Reached only from inside an open gossip menu, which is still open behind it and is
+            // the FIRST arm of the chain — so the trainer's own NPC is already the answer. Unlike
+            // the registrar's case, the server does not close the menu first.
+            ("TalentWipeState", "rides the still-open gossip session"),
+            ("BinderState", "rides the still-open gossip session"),
+        ];
+
+        // The chain's own source is the authority on what is wired — not a hand-copied list here,
+        // which would be the very drift this test exists to catch.
+        let this_file = include_str!("ui_session.rs");
+        let chain = this_file
+            .split_once("pub(crate) fn feed_interact_npc")
+            .expect("feed_interact_npc")
+            .1
+            .split_once("\n}\n")
+            .expect("end of feed_interact_npc")
+            .0;
+
+        let mut missing = Vec::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                // This file itself: the trait lives here and no session implements it here, but
+                // the prose above spells the pattern out — so scanning ourselves finds the doc
+                // comment and nothing real.
+                if path.file_name().is_some_and(|f| f == "ui_session.rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).expect("read source");
+                for (_, rest) in src
+                    .match_indices("impl NpcSession for ")
+                    .map(|(i, _)| (i, &src[i + "impl NpcSession for ".len()..]))
+                {
+                    let ty: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if ty.is_empty() || EXCLUDED.iter().any(|(name, _)| *name == ty) {
+                        continue;
+                    }
+                    // Wired = the chain mentions the type. The chain names each session by its
+                    // resource type in a `Res<...>` parameter, so a substring test is exact enough
+                    // and cannot be fooled by a comment (comments naming a type still mean someone
+                    // thought about it, which is the point).
+                    if !chain.contains(&ty) {
+                        missing.push(format!("{ty} (in {})", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these NpcSession windows own no `\"npc\"` portrait and are not on the exclusion \
+             list, so each renders a BLACK DISC where the NPC's face goes — wire them into \
+             `feed_interact_npc`'s chain, or add them to EXCLUDED with a reason: {missing:#?}"
+        );
     }
 }

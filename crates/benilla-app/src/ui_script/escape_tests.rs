@@ -25,6 +25,7 @@ fn one_item_backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            petition: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,
@@ -237,6 +238,7 @@ fn escape_closes_an_open_stack_split_frame() {
     slots.insert(
         1,
         ContainerSlot {
+            petition: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,

@@ -158,7 +158,8 @@ pub use char_stats::{
 pub use chat_send::ChatSend;
 pub use chat_window::ChatWindowLook;
 pub use container::{
-    ContainerMove, ContainerSlot, ContainerState, EnchantView, RandomPropertyView, UiCursorMode,
+    ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
+    RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{
@@ -1119,8 +1120,10 @@ impl UiScript {
     // benilla speaks *key names*, not scancodes — the host maps its window keycodes to these. The
     // routing is the client's exactly: if a box is focused it processes and CONSUMES every event; if
     // none is focused, the topmost effectively-visible `autoFocus` box self-acquires focus and
-    // processes this same event; otherwise nothing is consumed. `autoFocus` never focuses on show —
-    // only this self-acquire path, a click, or Lua `SetFocus` focuses a box.
+    // processes this same event; otherwise nothing is consumed. Today the ways a box gets focus here
+    // are this self-acquire path, a click, and Lua `SetFocus` — the reference has a fourth, an
+    // `autoFocus` box focusing itself on SHOW, which we do not implement yet (the flag's own doc
+    // carries the correction and what it waits on).
 
     /// A typed character (may be multi-byte UTF-8) arriving from the host. Routes per §1/§2 and, on a
     /// focused box, inserts it (numeric/cap/password rules apply) or — for the Ctrl+A control code —

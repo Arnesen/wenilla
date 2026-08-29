@@ -18,6 +18,33 @@ use mlua::{Lua, Value};
 use super::cursor::{self, CursorItem, CursorPayload};
 use super::Model;
 
+/// The charter/petition lines an item tooltip prints under its name — wow-re
+/// `system/ui/scratch/tooltip-content-law.md`'s **line 3**: *"(petition/guild-charter items) Title /
+/// Creator / Num-signatures (white; title wraps) — a resolved petition object; keys
+/// `PETITION_*`/`GUILD_CHARTER_*`"*.
+///
+/// The two key families are picked by [`Self::is_charter`], the same record bit that picks
+/// `GetPetitionInfo`'s first return — so a charter reads *"Guild Name:"* / *"Guild Master:"* and a
+/// plain petition reads *"Petition:"* / *"Created by"*.
+///
+/// **The third line, the signature count, is deliberately NOT here.** The law names it, but neither
+/// the carve nor the packet says where the number comes from: the petition record carries no count,
+/// and the only candidate — the item's `ITEM_FIELD_ENCHANTMENT` slot-0 *charges* dword, which
+/// vmangos's own source documents as "the on-item signature count" — has its write **commented
+/// out** server-side, so it is always zero and the guess could never be falsified here. Omitted
+/// rather than invented; the line is one field away the day someone pins the source.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PetitionSlotView {
+    /// The record's charter bit: `true` picks the `GUILD_CHARTER_*` keys, `false` the `PETITION_*`
+    /// ones.
+    pub is_charter: bool,
+    /// The proposed guild's (or petition's) name.
+    pub title: String,
+    /// The owner's name, app-resolved through the name cache. `None` while that query is in
+    /// flight — the line is withheld, as the creator line is, rather than printed with a hole.
+    pub owner: Option<String>,
+}
+
 /// One occupied bag slot, resolved by the app (icon from ItemDisplayInfo, count/quality from the
 /// item object + template). Plain data.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -78,6 +105,14 @@ pub struct ContainerSlot {
     /// hands over the row's name plus the three facts the line law needs to place and paint it.
     /// Empty = unenchanted, or the enchant DBC never loaded. Decisions 0915/0920.
     pub enchants: Vec<super::EnchantView>,
+    /// The petition this item names, when it is a signable charter — **line 3 of the tooltip's
+    /// emission law**, between the NAME and the green `ITEM_SIGNABLE` line.
+    ///
+    /// `None` for every ordinary item, and also for a charter whose petition record has not
+    /// arrived: the hover is what ISSUES that query, so the first hover of an unopened charter
+    /// shows the name and the green line, and the two guild lines appear on the repaint. Exactly
+    /// [`Self::creator`]'s shape one field up, for exactly its reason.
+    pub petition: Option<PetitionSlotView>,
 }
 
 /// One enchant slot as the tooltip renders it (wow-re `ui/scratch/tooltip-content-law.md` §E3,
@@ -718,6 +753,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,
@@ -883,6 +919,7 @@ mod tests {
         state.slots.insert(
             5,
             ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,

@@ -119,8 +119,17 @@
          `BenillaQuestTitleButtonTemplate` because that one hardwires `QuestTitleButton_OnClick()`
          and would drag this window's load order behind the questgiver's for a fifteen-line shape.
          Same LEFT-anchored title as that template, and for the same reason: the round bullet is
-         cell-centred, so a TOPLEFT-anchored label rides above it (QuestFrame.xml's own note). -->
-    <Button name="BenillaGuildRegistrarServiceTemplate" virtual="true" hidden="true">
+         cell-centred, so a TOPLEFT-anchored label rides above it (QuestFrame.xml's own note).
+
+         **NOT `hidden="true"`, and that is the whole difference from the template it is modelled
+         on.** `BenillaQuestTitleButtonTemplate` carries `hidden` because the quest list is a POOL:
+         its rows are hidden by default and `:Show()`n one at a time as the greeting fills. These
+         two rows are STATIC — the registrar's services never change, nothing ever calls `:Show()`
+         on them — so inheriting `hidden` left both permanently invisible and the window came up as
+         a bare "Available Services" heading over blank parchment. The reference's own
+         `QuestTitleButtonTemplate` (QuestFrameTemplates.xml l.174) has no `hidden` either; the
+         attribute was copied across with the shape. -->
+    <Button name="BenillaGuildRegistrarServiceTemplate" virtual="true">
         <Size><AbsDimension x="285" y="16"/></Size>
         <Layers>
             <Layer level="BACKGROUND">

@@ -206,6 +206,16 @@ pub(crate) struct PetitionState {
     /// gated on it (`0x4f3f89`), so closing a window while your own signature is in flight must
     /// **not** put `MSG_PETITION_DECLINE` on the wire.
     signing: bool,
+    /// One step per landed or patched petition record — the **gate input** the charter tooltip's
+    /// line 3 needs.
+    ///
+    /// The record cache is lazy: the hover is what issues the query, so the answer arriving sets
+    /// nothing any consumer already watches. `ui_items`' bag feed gates its whole snapshot rebuild
+    /// on a list of epochs (decision 1439), and without this counter in that list a charter's guild
+    /// lines are resolved once — to `None`, before the record exists — and never again. The live
+    /// probe is what caught it; every unit test passed, because they push the record and the view
+    /// in the same breath.
+    records_epoch: u64,
     /// Lines composed at apply time, waiting for the feed — which is where the `script` handle
     /// lives, and so the only place a red `UI_ERROR_MESSAGE` can be fired ([`crate::ui_bank`]'s
     /// `BankErrors` shape).
@@ -229,6 +239,14 @@ struct OpenCharter {
 /// One petition's record, from `SMSG_PETITION_QUERY_RESPONSE`.
 #[derive(Clone, Debug, Default)]
 struct Record {
+    /// The charter owner's guid — the record's `+0x8`/`+0xc`.
+    ///
+    /// **The record's owner, not the packet's**, and the distinction is the client's own:
+    /// `GetPetitionInfo`'s `isOriginator` compares the active player against `[edi+0x8]`
+    /// (`0x4f447a`/`0x4f4481`), and `CanSignPetition`'s owner refusal reads `[esi+0x8]`. They hold
+    /// the same value on any sane server — `SMSG_PETITION_SHOW_SIGNATURES` and
+    /// `SMSG_PETITION_QUERY_RESPONSE` both name the owner — but only one of them is the source.
+    owner: u64,
     /// The proposed guild's name.
     name: String,
     /// Free text — always empty on a 1.12 server.
@@ -273,18 +291,55 @@ impl PetitionState {
             .send(ClientCommand::PetitionQuery { petition_id, item });
     }
 
+    /// One step per landed or patched record — see [`Self::records_epoch`]'s own field doc.
+    pub(crate) fn records_epoch(&self) -> u64 {
+        self.records_epoch
+    }
+
     /// `SMSG_PETITION_QUERY_RESPONSE` — fill the cache.
     fn apply_record(&mut self, response: PetitionQueryResponse) {
+        self.records_epoch = self.records_epoch.wrapping_add(1);
         self.querying.remove(&response.petition_id);
         self.records.insert(
             response.petition_id,
             Record {
+                owner: response.owner,
                 name: response.name,
                 body_text: response.body_text,
                 required: response.min_signatures as i32,
                 is_charter: response.flags & 1 != 0,
             },
         );
+    }
+
+    /// The charter tooltip's line-3 view for `petition_id` — the guild name and its master.
+    ///
+    /// **A lazy cache fill, and the hover is what issues the query.** A charter you have never
+    /// opened has no record, so the first hover returns `None` (the plate shows the item's name and
+    /// the green `<Right Click for Details>` line and nothing between) and the answer arriving
+    /// repaints it. That is [`crate::names::NameCache::resolve`]'s rule, the guild-identity cache's
+    /// rule, and the same shape the tooltip's own creator line already has one field up.
+    ///
+    /// `item` rides along because `CMSG_PETITION_QUERY` carries it; vmangos ignores the field, but
+    /// it is sent at its true value like every other field we can fill honestly.
+    pub(crate) fn tooltip_view(
+        &mut self,
+        petition_id: u32,
+        item: u64,
+        names: &mut NameCache,
+        commands: &NetCommands,
+    ) -> Option<benilla_ui::script::PetitionSlotView> {
+        if petition_id == 0 {
+            return None;
+        }
+        self.request_record(petition_id, item, commands);
+        let rec = self.records.get(&petition_id)?;
+        let (is_charter, title, owner_guid) = (rec.is_charter, rec.name.clone(), rec.owner);
+        Some(benilla_ui::script::PetitionSlotView {
+            is_charter,
+            title,
+            owner: names.resolve(owner_guid, commands).map(str::to_string),
+        })
     }
 
     /// Append one signer to the open charter — the owner's half of a successful sign
@@ -503,6 +558,8 @@ pub(crate) mod apply {
             return;
         };
         petition.records.entry(id).or_default().name = rename.name;
+        // A patched title is a changed record: the tooltip's line 3 reads it too.
+        petition.records_epoch = petition.records_epoch.wrapping_add(1);
     }
 }
 

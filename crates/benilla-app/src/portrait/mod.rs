@@ -129,6 +129,15 @@ const INSPECT_SLOT: &str = "inspect";
 /// rather than sharing the `"pet"` portrait slot because that one is a 256² *bust* for the pet unit
 /// frame — different subject framing, different resolution, and a yaw the portrait must never have.
 const PETDOLL_SLOT: &str = "petdoll";
+/// The **stable window**'s model pane (wow-re `ui/scratch/stable-master-window.md` §7.1) — the
+/// fourth body pane, and the only one whose subject may have no world object at all.
+/// `SetPetStablePaperdoll` forks on the selection: `-1` (the summoned pet) resolves the live pet by
+/// GUID and takes its model, anything else maps the petNumber back to a slot and goes through the
+/// **creature cache**, i.e. a bare `CreatureDisplayInfo` id for a pet that is asleep in a stable and
+/// has no unit anywhere. Both forks land in the same booth here: the live one points
+/// [`StableBooth::unit`] at the pet entity ([`PETDOLL_SLOT`]'s case exactly), the cached one points
+/// [`StableBooth::display_id`] at the display and the mirror comes off a [`PortraitStandIn`].
+const STABLE_SLOT: &str = "stable";
 /// World is layer 0, the UI quad pass layer 1; portraits sit on their own high layers so nothing in the
 /// world leaks into a booth and vice-versa (one layer per slot: base, base+1, …).
 const PORTRAIT_LAYER_BASE: usize = 2;
@@ -138,6 +147,8 @@ const PAPERDOLL_LAYER: usize = PORTRAIT_LAYER_BASE + SLOTS.len();
 const INSPECT_LAYER: usize = PAPERDOLL_LAYER + 1;
 /// The pet-doll booth's render layer — the next one past inspect's (the one ladder below).
 const PETDOLL_LAYER: usize = INSPECT_LAYER + 1;
+/// The stable pane's render layer — the next one past the pet doll's, by the ladder rule below.
+const STABLE_LAYER: usize = PETDOLL_LAYER + 1;
 /// The glue booth's render layer — the next one past inspect's. **Every booth layer is computed
 /// HERE**, in one ladder, because they were not: the glue booth (`930b327c`) and the inspect booth
 /// (`ead3b0c9`) each defined "the next layer past the paper doll's" in a different file and landed
@@ -145,7 +156,7 @@ const PETDOLL_LAYER: usize = INSPECT_LAYER + 1;
 /// resolves an emitter's booth camera by *finding the first camera whose layers intersect*, so the
 /// glue scene's 28 emitters addressed the INSPECT camera, which is off at the glue screens, and the
 /// login screen's braziers simulated forever without ever being drawn (decision 0775).
-pub(super) const GLUE_LAYER: usize = PETDOLL_LAYER + 1;
+pub(super) const GLUE_LAYER: usize = STABLE_LAYER + 1;
 /// The **dressing room**'s render layer (decision 1060) — the next one past the glue booth's, by
 /// the same ladder rule.
 pub(super) const DRESSUP_LAYER: usize = GLUE_LAYER + 1;
@@ -165,6 +176,10 @@ pub(crate) const MINIMAP_COMPOSITE_LAYER: usize = WARM_BOOTH_LAYER + 1;
 const _: () = assert!(
     PAPERDOLL_LAYER != INSPECT_LAYER
         && INSPECT_LAYER != PETDOLL_LAYER
+        && PETDOLL_LAYER != STABLE_LAYER
+        && STABLE_LAYER != GLUE_LAYER
+        && PAPERDOLL_LAYER != STABLE_LAYER
+        && INSPECT_LAYER != STABLE_LAYER
         && PETDOLL_LAYER != GLUE_LAYER
         && PAPERDOLL_LAYER != PETDOLL_LAYER
         && PAPERDOLL_LAYER != GLUE_LAYER
@@ -310,6 +325,22 @@ pub(crate) struct PortraitEffects {
     pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
 }
 
+/// Stamped on a **stand-in subject** — a bodiless entity that exists only to be mirrored, whose
+/// [`PortraitPart`] / [`PortraitBillboard`] children are assembled straight from the display cache
+/// ([`crate::entities::Creatures::display_mirror`]) instead of from a unit's attach path.
+///
+/// It is what lets a body booth be pointed at a creature that has **no world object at all** — the
+/// stable window's stabled pet, which is a row in the server's character-pet cache and a
+/// `CreatureDisplayInfo` id, nothing more. The alternative would have been a second bake path
+/// beside [`sync_body_booth`]; a subject entity means the *existing* one runs verbatim, so the
+/// summoned-pet case and the stabled case cannot drift apart in framing, lighting, yaw or settle.
+///
+/// It carries the display id because that is the one thing [`sync_body_booth`] otherwise reads off
+/// the unit's [`crate::entities::NetEntity`] — and a stand-in has none, by construction. Nothing
+/// else about it is a unit: no guid, no transform of consequence, no visibility, no descriptors.
+#[derive(Component)]
+pub(crate) struct PortraitStandIn(pub(crate) u32);
+
 /// What a portrait slot currently shows — the booth's live bake, or the ref's 2D stand-in file
 /// while a unit's model is still streaming in (RE C5).
 #[derive(Clone, PartialEq)]
@@ -435,6 +466,63 @@ impl Default for PetDollBooth {
         Self {
             yaw: 0.61,
             unit: None,
+        }
+    }
+}
+
+/// The stable window's model pane input (wow-re `stable-master-window.md` §7.1) — the
+/// [`PetDollBooth`] shape plus the one thing no other body pane needs: a **subject with no world
+/// object**.
+///
+/// `GetSelectedStablePet()` answers `0` for the summoned pet, `1..=2` for a bought stable slot and
+/// `-1` for nothing, and the reference's `SetPetStablePaperdoll` forks on exactly that: a live pet
+/// is resolved by GUID and its model taken, while a stabled — or merely dismissed — pet is a row in
+/// the server's character-pet cache with nothing but a creature entry, resolved through the
+/// creature cache. So this booth carries both, and [`sync_stable_booth`] prefers the live one:
+///
+/// - `unit` — the summoned pet's entity, when the selection is slot 0 **and** the pet is actually
+///   out and streamed. Then the pane is [`PETDOLL_SLOT`]'s case exactly, mirrored from the world
+///   body, and [`sync_body_booth`] handles it unchanged.
+/// - `display_id` — the selected pet's `CreatureDisplayInfo`, from the creature query
+///   ([`crate::names::CreatureRecord::display_id`]). Used whenever `unit` is `None`: every stabled
+///   pet, and slot 0 while the pet is dismissed or out of range to summon (the server still sends
+///   its row, and the reference still draws it — `0xb72060`, the summoned record's creature entry,
+///   is the fall-through of the live branch's own GUID miss).
+///
+/// Both `None` = nothing selected, or the query has not answered yet, which empties the booth.
+///
+/// ## No pet-family size ramp here, and that is checked rather than assumed
+///
+/// Decision 1538 sizes the *select screen's* pet by `CreatureFamily`'s level ramp. **This pane
+/// applies no scale at all**, because the reference applies none: `SetPetStablePaperdoll`
+/// (`0x4cb870`) writes no scale on either arm; `0x505cb0` only stores the pointer into
+/// `[widget+0x3f0]` and clears `[+0x3e0]`/`[+0x3e4]`; and the record→model build it defers to
+/// (`0x505a70`) walks `CreatureDisplayInfo` → `CreatureModelData` → the model path and calls
+/// `0x4797b0`, which wow-re's `charactermodel` ledger records as the creature **texture-variation**
+/// applier — there is no `fmul` of a scale anywhere on the path. The pane is unnormalized by
+/// construction anyway ([`framing::body_frame`]: a `<PlayerModel>` renders through the model's own
+/// authored camera or a fixed rig, never a bounds fit), so "small model draws small" is already the
+/// law here.
+///
+/// The second reason is internal, and it is the stronger one: the live arm goes through
+/// [`sync_body_booth`] like every other body pane, which applies only [`framing::pane_root_scale`].
+/// Ramping the display arm alone would make **the same pet change size** the moment it was
+/// dismissed — one pane telling two stories.
+#[derive(Resource)]
+pub(crate) struct StableBooth {
+    pub(crate) yaw: f32,
+    pub(crate) unit: Option<Entity>,
+    pub(crate) display_id: Option<u32>,
+}
+
+impl Default for StableBooth {
+    fn default() -> Self {
+        Self {
+            // The reference's own `<PlayerModel>` default facing (UIParent.lua:1422), seeded again
+            // by `BenillaPaperDollModel_OnLoad` the moment the window loads.
+            yaw: 0.61,
+            unit: None,
+            display_id: None,
         }
     }
 }
@@ -1035,6 +1123,8 @@ impl Plugin for PortraitPlugin {
             .init_resource::<PaperDollBooth>()
             .init_resource::<InspectBooth>()
             .init_resource::<PetDollBooth>()
+            .init_resource::<StableBooth>()
+            .init_resource::<StableStandIn>()
             .init_resource::<glue_booth::GluePreview>()
             .init_resource::<glue_booth::GluePreviewBake>()
             .init_resource::<glue_booth::GluePetBake>()
@@ -1065,6 +1155,10 @@ impl Plugin for PortraitPlugin {
                     sync_paperdoll,
                     sync_inspect_booth,
                     sync_petdoll_booth,
+                    // Before the pane that reads it: the stand-in must exist (and have had a frame
+                    // to flush its children) before the booth can mirror it.
+                    sync_stable_standin,
+                    sync_stable_booth,
                     glue_booth::sync_glue_booth,
                     glue_booth::sync_glue_scene,
                     // After the scene's framing: the viewport/clear its law decided (1619).
@@ -1294,17 +1388,18 @@ fn setup_booths(
         );
     }
 
-    // The three **body** booths — the character window's paper doll (decision 0208 §5), the
-    // inspect window's pane (decision 0631 §4) and the pet paper doll's (decision 1057). Same
-    // off-screen pipeline as the portrait slots (transparent target, HDR + the FFXGlow node,
-    // negative order so the bake is ready before the world/UI cameras), but their own 512²
-    // targets, their own layers, and a body-framing projection (aimed per-bake by
-    // `sync_body_booth`). Kept a separate spawn from the portrait loop above so these cameras
-    // stay byte-for-byte what the director approved.
+    // The four **body** booths — the character window's paper doll (decision 0208 §5), the
+    // inspect window's pane (decision 0631 §4), the pet paper doll's (decision 1057) and the
+    // stable window's (wow-re `stable-master-window.md` §7.1). Same off-screen pipeline as the
+    // portrait slots (transparent target, HDR + the FFXGlow node, negative order so the bake is
+    // ready before the world/UI cameras), but their own 512² targets, their own layers, and a
+    // body-framing projection (aimed per-bake by `sync_body_booth`). Kept a separate spawn from
+    // the portrait loop above so these cameras stay byte-for-byte what the director approved.
     for (i, (slot, layer_index)) in [
         (PAPERDOLL_SLOT, PAPERDOLL_LAYER),
         (INSPECT_SLOT, INSPECT_LAYER),
         (PETDOLL_SLOT, PETDOLL_LAYER),
+        (STABLE_SLOT, STABLE_LAYER),
     ]
     .into_iter()
     .enumerate()
@@ -1612,6 +1707,11 @@ struct DressedLook<'w, 's> {
     /// because all three body-pane systems were at Bevy's 16-parameter ceiling.
     dress: Query<'w, 's, &'static crate::entities::DressKey>,
     revs: Query<'w, 's, &'static ModelRevision>,
+    /// A [`PortraitStandIn`] subject's display id — the one thing a bodiless subject carries that
+    /// a world unit reads off its [`crate::entities::NetEntity`] instead. It rides this param for
+    /// the same reason `dress`/`revs` do: all four body-pane systems sit at Bevy's 16-parameter
+    /// ceiling, and this is already the "what does this subject look like" bundle.
+    stand_in: Query<'w, 's, &'static PortraitStandIn>,
 }
 
 impl DressedLook<'_, '_> {
@@ -1674,6 +1774,12 @@ impl DressedLook<'_, '_> {
             }
         }
         (parts, riders, billboards, effects)
+    }
+
+    /// A stand-in subject's display id — `None` for a real world unit, which carries its own on
+    /// its [`crate::entities::NetEntity`].
+    fn stand_in_display(&self, unit: Entity) -> Option<u32> {
+        self.stand_in.get(unit).ok().map(|s| s.0)
     }
 
     /// `unit`'s dress and model revision — `None`/`0` before its equipment has first resolved,
@@ -2159,9 +2265,144 @@ fn sync_petdoll_booth(
     );
 }
 
+/// The stable pane's **stand-in subject** — the bodiless [`PortraitStandIn`] entity that stands
+/// for a pet with no world object (module note on [`StableBooth`]).
+///
+/// Keyed on the **display**, not on the selection: two stabled pets that share a display id are the
+/// same model standing at the same facing, so moving the selection between them is not a re-bake —
+/// and the reference is no different, since its cached branch resolves a creature record and the
+/// two rows resolve to the same one. A *changed* display respawns the entity rather than refilling
+/// it, so the bake's own `SnapKey` (keyed on the subject entity) cannot carry across.
+#[derive(Resource, Default)]
+struct StableStandIn {
+    /// The stand-in, while one exists.
+    entity: Option<Entity>,
+    /// The display it was spawned for.
+    display: Option<u32>,
+    /// Its mirror children are up. `false` while the display's model is still building, which
+    /// simply retries next frame — the glue pet's assembly discipline.
+    built: bool,
+}
+
+/// Keep [`StableStandIn`] pointing at the selected stabled pet: spawn one when the pane wants a
+/// display it has no world body for, fill its mirror children the moment that display's model
+/// finishes building, and despawn it the instant the want changes (a different pet, a live pet to
+/// mirror instead, or nothing selected).
+fn sync_stable_standin(
+    mut commands: Commands,
+    stable: Res<StableBooth>,
+    creatures: Option<Res<Creatures>>,
+    mut state: ResMut<StableStandIn>,
+) {
+    // **The live pet wins.** With a world body to mirror there is nothing for a stand-in to do, and
+    // the reference agrees: `SetPetStablePaperdoll` reaches the creature cache only after the
+    // live-pet-by-GUID resolve has failed (§7.1's fall-through at `0x4cb9bc`).
+    let want = stable.unit.is_none().then_some(stable.display_id).flatten();
+    if state.display != want {
+        if let Some(old) = state.entity.take() {
+            commands.entity(old).despawn();
+        }
+        state.display = want;
+        state.built = false;
+        state.entity = want.map(|display| {
+            commands
+                .spawn((
+                    PortraitStandIn(display),
+                    // Hidden, at the origin: nothing under a stand-in is ever drawn in the world —
+                    // the booth re-spawns its own copies of these meshes on its own layer, which is
+                    // what it does for a real unit too. The pair is here so the transform and
+                    // visibility propagation walk a well-formed tree rather than a rootless one.
+                    Transform::default(),
+                    Visibility::Hidden,
+                ))
+                .id()
+        });
+    }
+    if state.built {
+        return;
+    }
+    let (Some(root), Some(disp), Some(creatures)) = (state.entity, want, creatures.as_deref())
+    else {
+        return;
+    };
+    // `None` while the display's model is still loading (`update_display_models` asked for it on
+    // this same want) — leave `built` false and retry next frame.
+    let Some((parts, cards)) = creatures.display_mirror(disp) else {
+        return;
+    };
+    let (n_parts, n_cards) = (parts.len(), cards.len());
+    commands.entity(root).with_children(|kids| {
+        for part in parts {
+            kids.spawn((Transform::default(), Visibility::Inherited, part));
+        }
+        for card in cards {
+            kids.spawn((Transform::default(), Visibility::Inherited, card));
+        }
+    });
+    state.built = true;
+    debug!(
+        "stable booth: stand-in for display {disp} — {n_parts} part(s), {n_cards} camera-facing"
+    );
+}
+
+/// The stable window's model pane — the pet `GetSelectedStablePet()` names.
+///
+/// The **whole fork is upstream of here**: [`crate::ui_stable`] resolves the selection into either
+/// a live pet entity or a bare display id, and [`sync_stable_standin`] turns the latter into a
+/// subject entity. So this is [`sync_petdoll_booth`] with one `or` — which is the point of the
+/// stand-in: the summoned pet and the stabled pet reach the same bake through the same code, and so
+/// cannot drift apart in framing, lighting, animation or settle.
+#[allow(clippy::too_many_arguments)]
+fn sync_stable_booth(
+    mut commands: Commands,
+    mut booths: ResMut<Booths>,
+    mut portraits: ResMut<PortraitImages>,
+    mut booth_light: ResMut<BoothLight>,
+    creatures: Option<Res<Creatures>>,
+    ent_q: Query<&NetEntity>,
+    look: DressedLook,
+    stable: Res<StableBooth>,
+    stand_in: Res<StableStandIn>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
+    mut env_cache: Local<Option<bool>>,
+    mut last_pose: Local<Option<(f32, f32)>>,
+    mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    framing_in: BoothFraming,
+    anim_data: Option<Res<crate::creature_anim::AnimData>>,
+) {
+    if test_mode(&mut env_cache) {
+        return;
+    }
+    sync_body_booth(
+        &mut palettes,
+        STABLE_SLOT,
+        stable.unit.or(stand_in.entity),
+        stable.yaw,
+        &mut last_pose,
+        framing_in.gx.0,
+        &mut commands,
+        &mut booths,
+        &mut portraits,
+        &mut booth_light,
+        creatures.as_deref(),
+        &ent_q,
+        &look,
+        &mut wow_mats,
+        &mut cams,
+        anim_data.as_deref(),
+        &framing_in.panes,
+    );
+}
+
 /// Bake `unit`'s full-body dressed look into the `slot` booth at `yaw` — the shared body of all
-/// three body booths (decision 0208 §5 for the paper doll, 0631 §4 for inspect, 1057 for the pet
-/// doll). `unit` is `None` when there is nothing to show, which empties the booth.
+/// four body booths (decision 0208 §5 for the paper doll, 0631 §4 for inspect, 1057 for the pet
+/// doll, wow-re `stable-master-window.md` §7.1 for the stable pane). `unit` is `None` when there is
+/// nothing to show, which empties the booth.
+///
+/// `unit` is a **subject**, not necessarily a world unit: a [`PortraitStandIn`] mirrors the same
+/// way and carries its own display id, which is how the stable pane draws a pet that has no object
+/// anywhere ([`StableBooth`]).
 #[allow(clippy::too_many_arguments)]
 fn sync_body_booth(
     palettes: &mut benilla_world::rig_palette::RigPalettes,
@@ -2248,7 +2489,14 @@ fn sync_body_booth(
         booth.show_rev,
         aspect,
     );
-    let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
+    // The display the framing, the rig and the model-root scale all key on. A world unit carries
+    // it on its wire record; a bodiless [`PortraitStandIn`] carries it on itself, and has no wire
+    // record at all — which is the whole of what makes a stabled pet drawable.
+    let display_id = ent_q
+        .get(unit)
+        .ok()
+        .and_then(|n| n.display_id)
+        .or_else(|| look.stand_in_display(unit));
     // Anchors first, before any teardown — a still-loading display must not be framed from
     // fabricated zero bounds (see the portrait site, and `booth_anchors`). Resolved out here rather
     // than inside the bake because the model-root scale below needs them on an otherwise-idle frame
