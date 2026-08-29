@@ -133,9 +133,10 @@ pub fn gm_ticket_create(category: u8, map: u32, pos: [f32; 3], text: &str) -> Ve
 /// edit re-files the ticket under whatever category the byte carries, and getting this field wrong
 /// silently moves a GM's ticket to a different queue rather than merely being ignored.
 ///
-/// The shipped Help window always passes the ticket's existing `HelpFrameOpenTicket.ticketType`
-/// here, so in practice the value is unchanged by an edit — but that is the window's discipline,
-/// not the server's.
+/// benilla's own Help window has no category picker (decision 1687), so it passes back the
+/// category the server last reported for the ticket — precisely so an edit does not overwrite a
+/// re-filing a GM made. That is the window's discipline, not the server's: the opcode itself will
+/// happily move a ticket to whatever byte arrives.
 pub fn gm_ticket_updatetext(category: u8, text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + text.len() + 1);
     out.push(category);

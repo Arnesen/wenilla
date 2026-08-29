@@ -9,18 +9,24 @@
 //! *dropdown*, which has no frame in 1.12 and whose `OnShow` call is commented out. The category
 //! list is DBC data, and it lines up with `GENERAL_HELPFRAME`'s keys row for row:
 //!
-//! | id | name | the frame `HELPFRAME_FRAMES[id]` sends it to |
-//! |---|---|---|
-//! | 1 | Stuck | `HelpFrameGeneral`, configured by `GENERAL_HELPFRAME[1]` (`STUCK_OPTION`) |
-//! | 2 | Behavior/Harassment | `HelpFrameHarassment` |
-//! | 3 | Guild | `HelpFrameGeneral` (`HELPFRAME_GUILD_TITLE`) |
-//! | 4 | Item | `HelpFrameGeneral` (`HELPFRAME_ITEM_TITLE`) |
-//! | 5 | Environmental | `HelpFrameGeneral` (`HELPFRAME_ENVIRONMENTAL_TITLE`) |
-//! | 6 | Non-Quest/Creep | `HelpFrameGeneral` (`HELPFRAME_NONQUEST_TITLE`) |
-//! | 7 | Quest/Quest NPC | `HelpFrameGeneral` (`HELPFRAME_QUEST_TITLE`) |
-//! | 8 | Technical | `HelpFrameGeneral` (`HELPFRAME_TECHNICAL_TITLE`) |
-//! | 9 | Account/Billing | `HelpFrameGeneral` (`HELPFRAME_ACCOUNT_TITLE`) |
-//! | 10 | Character | `HelpFrameGeneral` (`HELPFRAME_CHARACTER_TITLE`) |
+//! | id | name |
+//! |---|---|
+//! | 1 | Stuck |
+//! | 2 | Behavior/Harassment |
+//! | 3 | Guild |
+//! | 4 | Item |
+//! | 5 | Environmental |
+//! | 6 | Non-Quest/Creep |
+//! | 7 | Quest/Quest NPC |
+//! | 8 | Technical |
+//! | 9 | Account/Billing |
+//! | 10 | Character |
+//!
+//! **benilla's own Help window no longer shows this list** (decision 1687): it goes straight from
+//! Home to the ticket box and files under 0, "uncategorised". The catalog still ships, because
+//! `GetGMTicketCategories()` is a real Era binding a third-party addon may call and because these
+//! ids are still what the *server* names a ticket by — an existing ticket's category arrives on
+//! `UPDATE_TICKET` and is echoed back on an edit.
 //!
 //! **The id is the wire value**, not just a list index: the clicked button stores it as
 //! `HelpFrameOpenTicket.ticketType`, and that is what `NewGMTicket(category, text)` puts in

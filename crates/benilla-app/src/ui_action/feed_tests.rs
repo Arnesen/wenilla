@@ -17,7 +17,7 @@ use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
 use super::feed::{feed_actions, MISSING_ITEM_ICON};
-use super::{CastErrors, MountErrors, PlayerActions, UiErrorKeys};
+use super::{CastErrors, MountErrors, PlayerActions, UiErrorKeys, UiErrorTexts};
 use crate::entities::ItemDisplays;
 use crate::items::{test_template, Items};
 use crate::net::{ClientCommand, NetCommands};
@@ -61,6 +61,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<UiErrorKeys>()
+        .init_resource::<UiErrorTexts>()
         .insert_resource(ItemDisplays::icons_for_tests(
             ItemDisplayCatalog::from_displays(displays),
         ))
@@ -308,6 +309,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<UiErrorKeys>()
+        .init_resource::<UiErrorTexts>()
         .insert_resource(NetCommands(tx));
     let mut script = UiScript::new().unwrap();
     script.set_macros(MacroState {
@@ -393,4 +395,80 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     // A frame with nothing moved fires nothing more — the re-fire is gated on the table moving.
     app.update();
     assert_eq!(events(&mut app), 1);
+}
+
+/// **The pre-resolved lines reach the frame, on the arm they asked for** — `UiErrorTexts` end to
+/// end: the queue the net drain writes, through this feed, into the shipped `UIErrorsFrame`'s own
+/// drawn quads.
+///
+/// This is the seam the GM-mode double line lived in. `SMSG_NOTIFICATION` used to be pushed into
+/// the chat feed (a stand-in from before benilla had an errors frame), so vmangos answering
+/// `.gm on` with both a `SendSysMessage` and a `SendNotification` printed the words twice. The
+/// notice belongs here, red — and its `SMSG_AREA_TRIGGER_MESSAGE` sibling here, yellow.
+#[test]
+fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_screen_size(1024.0, 768.0);
+        for file in ["Fonts.xml", "ErrorsFrame.xml"] {
+            let text = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets/ui")
+                    .join(file),
+            )
+            .unwrap();
+            let doc = benilla_ui::framexml::parse(&text).unwrap();
+            let report = benilla_ui::loader::load(&script, &doc, &|_| None);
+            assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+        }
+    }
+
+    // What the net drain queues for one `.gm on` toggle, plus a refused portal.
+    let mut texts = app.world_mut().resource_mut::<UiErrorTexts>();
+    texts.error("GM mode is ON".to_string());
+    texts.info("You must be at least level 58 to enter.".to_string());
+    app.update();
+
+    assert!(
+        app.world().resource::<UiErrorTexts>().0.is_empty(),
+        "the feed drains the queue"
+    );
+
+    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+    assert!(
+        script.errors().is_empty(),
+        "VM errors: {:?}",
+        script.errors()
+    );
+    script.resolve();
+    let mut drawn: Vec<(String, [f32; 4])> = script
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            benilla_ui::script::QuadContent::Text {
+                text: Some(t),
+                color: Some(c),
+                ..
+            } if !t.is_empty() => Some((t.clone(), *c)),
+            _ => None,
+        })
+        .collect();
+    drawn.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        drawn,
+        [
+            // `AddMessage` byte-quantizes every channel (`ftol(v*255 + 0.5)`), so 0.1 draws as
+            // 26/255 — the same arithmetic `ui_script::errors_tests` pins.
+            (
+                "GM mode is ON".to_string(),
+                [1.0, 26.0 / 255.0, 26.0 / 255.0, 1.0]
+            ),
+            (
+                "You must be at least level 58 to enter.".to_string(),
+                [1.0, 1.0, 0.0, 1.0],
+            ),
+        ],
+        "red UI_ERROR_MESSAGE for the notice, yellow UI_INFO_MESSAGE for the area trigger"
+    );
 }

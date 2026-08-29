@@ -748,7 +748,6 @@ pub(crate) fn feed_containers(
     mut equip_errors: ResMut<EquipErrors>,
     // Reason 16's `%s` source (decision 0916); absent = every 16 keeps the generic line.
     bag_families: Option<Res<crate::ui_items::ItemBagFamilies>>,
-    mut error_lines: ResMut<crate::ui_items::UiErrorLines>,
     mut pending: ResMut<PendingItemOps>,
     mut lock_cleared: ResMut<LockClearedByFailure>,
     mut names: ResMut<crate::names::NameCache>,
@@ -798,7 +797,7 @@ pub(crate) fn feed_containers(
         || catalogs.1.as_ref().is_some_and(|r| r.is_changed());
     let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
     let families_changed = bag_families.as_ref().is_some_and(|r| r.is_changed());
-    let errors_held = !equip_errors.0.is_empty() || !error_lines.0.is_empty();
+    let errors_held = !equip_errors.0.is_empty();
     let locks_held = !lock_cleared.0.is_empty() || !pending.is_empty();
     gate::trace(
         "feed_containers",
@@ -913,10 +912,6 @@ pub(crate) fn feed_containers(
         };
         script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
     }
-    for line in error_lines.0.drain(..) {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(line)]);
-    }
-
     // The pending-lock resolving clear (decision 0216 §4 / 0218 §3 "the field-update watcher"):
     // walk the SAME guids the slot loop below is about to read and release any op whose slots have
     // moved on. Folded in with the failure-driven clears `net/apply/loot.rs::inventory_failure`

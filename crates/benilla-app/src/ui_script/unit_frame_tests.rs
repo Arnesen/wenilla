@@ -21,6 +21,12 @@ fn load_xml(s: &UiScript, file: &str) {
 /// The unit frames' production load prefix (ui_script/mod.rs order): fonts + UIParent +
 /// tooltip, then the dropdown kit + unit popups the frames' DropDown children initialize into.
 fn load_unit_frames(s: &UiScript) {
+    // The app runs the real `Interface\FrameXML\GlobalStrings.lua` off the player's chain
+    // BEFORE any XML (`load_global_strings`); this stands in for it, with the one key these
+    // frames resolve at load time — `DEAD` l.898, which both dead-text FontStrings name in
+    // their `text=` attribute. Without it the loader's literal fallback would leave the KEY on
+    // screen, which is the bug this file guards below.
+    s.run(r#"DEAD = "Dead""#).unwrap();
     load_xml(s, "Fonts.xml");
     load_xml(s, "UIParent.xml");
     // The bars' numerals machinery (decision 1082), which the manifest loads immediately ahead of
@@ -134,7 +140,7 @@ fn shipped_unit_frames_drive_end_to_end() {
                and not TargetFramePowerBar:IsVisible()
                and TargetFrameTextureFrameNameText:GetText() == "Young Wolf"
                and TargetFrameTextureFrameLevelText:GetText() == "3"
-               and TargetFrameTextureFrameDeadText:GetText() == "" -- living target: no DEAD text
+               and not TargetFrameTextureFrameDeadText:IsShown() -- living target: no dead word
         "#,
         )
         .unwrap();
@@ -1210,6 +1216,7 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
     let hunter = |health: u32, power: u32, dead: bool| {
         Some(UnitState {
             exists: true,
+            is_connected: true, // CheckDead's second term — a feign is not a link-drop
             name: Some("Nazriel".into()),
             health,
             max_health: 1500,
@@ -1230,7 +1237,7 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
             r#"
             local hb, pb = TargetFrameHealthBar, TargetFramePowerBar
             return hb:GetValue() == 1200 and pb:GetValue() == 300
-               and TargetFrameTextureFrameDeadText:GetText() == ""
+               and not TargetFrameTextureFrameDeadText:IsShown()
         "#,
         )
         .unwrap();
@@ -1254,11 +1261,17 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
             .unwrap(),
         "the mana bar empties, it does not disappear — UnitManaMax 0x5177e0 is ungated"
     );
+    assert!(
+        s.eval::<bool>("return TargetFrameTextureFrameDeadText:IsShown() and true or false")
+            .unwrap(),
+        "TargetFrame_CheckDead's UnitHealth(unit) <= 0 test, tripped by the flag"
+    );
     assert_eq!(
         s.eval::<String>("return TargetFrameTextureFrameDeadText:GetText()")
             .unwrap(),
-        "DEAD",
-        "TargetFrame_CheckDead's UnitHealth(unit) <= 0 test, tripped by the flag"
+        "Dead",
+        "the WORD is the GlobalString `DEAD` (l.898), never the key: a literal \"DEAD\" here \
+         is the caps bug the director caught on Onyxia"
     );
     assert!(
         s.eval::<bool>(r#"return UnitIsDead("target")"#).unwrap(),
@@ -1273,7 +1286,7 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
             r#"
             return TargetFrameHealthBar:GetValue() == 1200
                and TargetFramePowerBar:GetValue() == 300
-               and TargetFrameTextureFrameDeadText:GetText() == ""
+               and not TargetFrameTextureFrameDeadText:IsShown()
                and not UnitIsDead("target")
         "#,
         )

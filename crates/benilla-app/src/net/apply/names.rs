@@ -3,6 +3,8 @@
 //! asked for them). Each `pub(super)` fn here is exactly one arm's body; the match at the call site
 //! stays the dispatcher, one call per arm.
 
+use bevy::prelude::debug;
+
 use crate::names::{CreatureRecord, NameCache};
 
 /// `SMSG_NAME_QUERY_RESPONSE` — a player's name, plus the race/gender/class that ride the same
@@ -22,6 +24,17 @@ pub(super) fn player_name(
 /// `SMSG_PET_NAME_QUERY_RESPONSE` — keyed by pet *number*, not by template entry.
 pub(super) fn pet_name(pet_number: u32, name: String, names: &mut NameCache) {
     names.insert_pet(pet_number, name);
+}
+
+/// `SMSG_INVALIDATE_PLAYER` — drop this guid so the next resolve re-asks (decision 1689).
+///
+/// The name cache has **no TTL** (wow-re `dbcache.md`: eviction is explicit only), so this is the
+/// one thing that unsticks a player's name. It matters more to benilla than it did before the
+/// cache persisted: in memory a stale name lasted a session, on disk it lasts until something
+/// evicts it.
+pub(super) fn invalidate_player(guid: u64, names: &mut NameCache) {
+    debug!("net: invalidating cached name for player {guid:#x}");
+    names.invalidate_player(guid);
 }
 
 /// `SMSG_CREATURE_QUERY_RESPONSE` — the template's name plus the hover line's fields. A `None` name

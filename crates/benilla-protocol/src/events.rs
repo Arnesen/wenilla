@@ -862,6 +862,9 @@ pub enum SessionEvent {
         services: Vec<TrainerSpell>,
         greeting: String,
     },
+    /// Forget a player's cached name (`SMSG_INVALIDATE_PLAYER`, decision 1689) — the name cache's
+    /// only explicit eviction for a player, and the safety valve a *persisted* cache needs.
+    InvalidatePlayer { guid: u64 },
     /// A stable master's pet list (`MSG_LIST_STABLED_PETS`, decision 1676) — the current pet and
     /// the stabled ones, each already carrying its rebased client slot (`0` = current), plus how
     /// many stable slots the player has **bought**. Arrives unprompted when the gossip stable

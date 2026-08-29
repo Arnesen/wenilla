@@ -294,26 +294,33 @@ fn drain_gm_ticket(
     }
 }
 
-/// One drained write → its packet, or `None` for a category that cannot be filed.
+/// The category a `NewGMTicket`/`UpdateGMTicket` argument may put on the wire, or `None`.
+///
+/// **0 is legal and means "uncategorised"** (decision 1687). Our Help window has no category picker
+/// — one click goes from Home to the text box — so it sends 0 deliberately. vmangos accepts it: its
+/// whole validation is `if (packet.ticketType >= GMTICKET_MAX) return;` with `GMTICKET_MAX == 11`
+/// (`GMTicketHandler.cpp:112`; the enum starts at `GMTICKET_STUCK = 1`, `SharedDefines.h:1776`),
+/// and `GmTicket::GetTicketCategoryName` falls through its 1..10 switch to return **"Unknown"**
+/// (`GMTicketMgr.cpp:205-232`). So the GM's notification and queue read "Unknown" — the honest
+/// label, and far better than picking one of the ten real headings and mislabelling every ticket
+/// as an Item or a Stuck.
+///
+/// **Above 10 is still refused**, and that is not tidiness: the server drops those *silently*, with
+/// no response packet at all, so a bad argument would be indistinguishable from a filed ticket. The
+/// range test is deliberately on the **`u32`, before the narrowing** — a category of 256 truncated
+/// into a `u8` lands on 0 and would sail through as "uncategorised" when the caller meant something
+/// else entirely.
+fn category_for_wire(category: u32) -> Option<u8> {
+    (category <= u32::from(GM_TICKET_CATEGORY_MAX)).then_some(category as u8)
+}
+
+/// One drained write → its packet, or `None` when [`category_for_wire`] refuses the category.
 ///
 /// Split out so the verb choice is testable without a world: **the window's own `hasTicket` flag
 /// picks the opcode**, and we must not re-derive it from whether we believe a ticket exists — our
 /// belief can be stale by up to the 10-minute poll.
-///
-/// **The range check is not defensive tidiness — it is the only thing between a bad argument and a
-/// silently misfiled ticket.** The category rides the wire as one byte, and vmangos's whole
-/// validation is `if (packet.ticketType >= GMTICKET_MAX) return;` with `GMTICKET_MAX == 11`
-/// (`GMTicketHandler.cpp:112`; the enum starts at `GMTICKET_STUCK = 1`, `SharedDefines.h:1776`).
-/// So 11 and up are dropped by the server — but **0 is not**: it passes that check and is stored as
-/// `ticket_type = 0`, a heading `GetTicketCategoryName` cannot name. Truncating a nonsense argument
-/// into a `u8` lands exactly there, and a category of 256 truncates to 0 as well. No shipped UI
-/// path can produce one (the buttons carry `GMTicketCategory.dbc` ids, 1..10), so this guards a
-/// third-party addon's argument — and it refuses loudly rather than filing a ticket no GM can
-/// categorise.
 fn client_command_for(write: GmTicketWrite, map: u32, pos: [f32; 3]) -> Option<ClientCommand> {
-    let category = u8::try_from(write.category)
-        .ok()
-        .filter(|c| (1..=GM_TICKET_CATEGORY_MAX).contains(c))?;
+    let category = category_for_wire(write.category)?;
     Some(if write.is_new {
         ClientCommand::GmTicketCreate {
             category,
@@ -585,27 +592,38 @@ mod tests {
         ));
     }
 
-    /// A category the server cannot file is refused here rather than sent.
+    /// **0 rides the wire; anything above 10 does not** (decision 1687).
     ///
-    /// **0 is the one that matters**, and it is the one a naive truncation produces: vmangos only
-    /// rejects `>= 11`, so a zero passes its check and is stored as an unnameable
-    /// `ticket_type = 0` — a ticket filed under nothing, with no error anywhere. 256 truncates to
-    /// 0 in a `u8` and would land in the same place.
+    /// 0 is what our own window sends, because it has no category picker — vmangos renders it
+    /// "Unknown" rather than refusing it. Above 10 the server drops the packet *silently*, so
+    /// letting one through would be indistinguishable from a filed ticket.
+    ///
+    /// The `256` case is the one worth having: it truncates to 0 in a `u8`, so a check written
+    /// after the narrowing would accept it as "uncategorised" when the caller meant category 256.
     #[test]
-    fn a_category_the_server_cannot_file_is_refused_rather_than_sent() {
+    fn zero_is_uncategorised_and_anything_above_ten_is_refused() {
+        assert_eq!(category_for_wire(0), Some(0), "the uncategorised ticket");
+        for good in 1..=10 {
+            assert_eq!(category_for_wire(good), Some(good as u8));
+        }
+        for bad in [11, 255, 256, 99_999] {
+            assert_eq!(
+                category_for_wire(bad),
+                None,
+                "category {bad} must not be sent"
+            );
+        }
+
+        // And the whole path, not just the helper: a refused category produces no packet.
         let write = |category| GmTicketWrite {
             category,
             text: "x".into(),
             is_new: true,
         };
-        for bad in [0, 11, 256, 99_999] {
-            assert!(
-                client_command_for(write(bad), 1, [0.0; 3]).is_none(),
-                "category {bad} must not reach the wire"
-            );
-        }
-        for good in 1..=10 {
-            assert!(client_command_for(write(good), 1, [0.0; 3]).is_some());
-        }
+        assert!(client_command_for(write(256), 1, [0.0; 3]).is_none());
+        assert!(matches!(
+            client_command_for(write(0), 1, [0.0; 3]),
+            Some(ClientCommand::GmTicketCreate { category: 0, .. })
+        ));
     }
 }

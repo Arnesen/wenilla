@@ -95,6 +95,7 @@ mod run_mode;
 mod screenshot;
 mod shaders;
 
+mod name_persist;
 /// Where "the client is going down" may be observed, and why that is `Last` and not `Update`
 /// (decision 1528). Every system that persists state on the way out registers through it.
 mod shutdown;
@@ -176,6 +177,7 @@ use entities::EntitiesPlugin;
 use fishing_line::FishingLinePlugin;
 use footprints::FootprintsPlugin;
 use loading_screen::LoadingScreenPlugin;
+use name_persist::NamePersistPlugin;
 use net::NetPlugin;
 use player::PlayerPlugin;
 use portrait::PortraitPlugin;
@@ -734,6 +736,7 @@ pub fn run(build: BuildId) -> AppExit {
     // copies) read in the reference reader window over the shared ask-once item-text cache.
     .add_plugins(UiItemTextPlugin)
     .add_plugins(UiSavedPlugin)
+    .add_plugins(NamePersistPlugin)
     .add_plugins(UiStablePlugin)
     .add_plugins(UiTrainerPlugin)
     // The taxi map (decision 0484 phases 1-2): the SMSG_SHOWTAXINODES-fed TaxiState resource, the

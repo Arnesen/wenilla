@@ -740,6 +740,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 pets,
             }
         }
+        opcode::SMSG_INVALIDATE_PLAYER => ServerPacket::InvalidatePlayer {
+            guid: read_u64_le(&mut r)?,
+        },
         opcode::SMSG_STABLE_RESULT => {
             let result = stable::read_stable_result(&mut r)?;
             ServerPacket::StableResult { result }

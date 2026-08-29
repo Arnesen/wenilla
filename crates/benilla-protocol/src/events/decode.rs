@@ -364,6 +364,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             services,
             greeting: title,
         }],
+        ServerPacket::InvalidatePlayer { guid } => vec![SessionEvent::InvalidatePlayer { guid }],
         ServerPacket::ListStabledPets {
             npc,
             num_stable_slots,

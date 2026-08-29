@@ -86,36 +86,29 @@ fn open_ticket_args(
     ]
 }
 
-/// **The whole point of the feature, end to end.** The category id travels
-/// `GMTicketCategory.dbc` → `GetGMTicketCategories()` → a `HelpFrameButton*` → the page route →
-/// `HelpFrameOpenTicket.ticketType` → `NewGMTicket`'s wire value. Break any link and every ticket
-/// files under the wrong heading, silently — nothing on screen looks wrong.
+/// **The whole point of decision 1687: one click from Home to the text box.**
+///
+/// The category list and the per-category blurb page are gone, so this walks what is left — open
+/// the window, press the one button, type, submit — and asserts the ticket goes out **uncategorised
+/// (0)**. That last part is the assertion that actually pins 1687: 0 is what makes a GM's queue read
+/// "Unknown" instead of a heading the player never chose.
 #[test]
-fn clicking_a_category_files_a_ticket_under_that_categorys_dbc_id() {
+fn one_click_from_home_files_an_uncategorised_ticket() {
     let mut s = setup();
-    s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"GMHome\")")
-        .unwrap();
-    // Opening the window is itself traffic: its OnShow calls `GetGMStatus()`. Drained here so the
-    // assertion below is about the CLICK and nothing else — the intents are one ordered queue, so
-    // setup traffic and the thing under test share it (decision 1673).
-    let _ = s.take_gm_ticket_intents();
+    s.run("ToggleHelpFrame()").unwrap();
+    let _ = s.take_gm_ticket_intents(); // the OnShow GetGMStatus
 
-    // Row 4 is Item, DBC id 4 — the row's LABEL and its stored id must be the same pair.
-    assert_eq!(
-        s.eval::<String>("return HelpFrameButton4Text:GetText()")
+    assert!(
+        s.eval::<bool>("return HelpFrameHome:IsVisible()").unwrap(),
+        "the window opens on Home"
+    );
+    s.run("HelpFrameHomeIssues:Click()").unwrap();
+    assert!(
+        s.eval::<bool>("return HelpFrameOpenTicket:IsVisible()")
             .unwrap(),
-        "Item"
-    );
-    assert_eq!(
-        s.eval::<i64>("return HelpFrameButton4.ticketType").unwrap(),
-        4,
-        "the button carries the DBC id, not its row number"
+        "one click lands on the editor — no category page in between"
     );
 
-    // Click it, take the page's action button through to the editor, and submit.
-    s.run("HelpFrameButton4:Click()").unwrap();
-    s.run("HelpFrameGeneralButton_OnClick(HelpFrameGeneralButton)")
-        .unwrap();
     s.run("HelpFrameOpenTicketText:SetText(\"My sword vanished.\")")
         .unwrap();
     s.run("HelpFrameOpenTicketSubmit_OnClick()").unwrap();
@@ -123,49 +116,71 @@ fn clicking_a_category_files_a_ticket_under_that_categorys_dbc_id() {
     assert_eq!(
         s.take_gm_ticket_intents(),
         vec![GmTicketIntent::Write(GmTicketWrite {
-            category: 4,
+            category: 0,
             text: "My sword vanished.".into(),
             is_new: true,
         })],
-        "the clicked category's DBC id is what goes on the wire"
+        "a create files under 0 — \"Unknown\" in the GM's queue"
     );
 }
 
-/// The ten shipped rows paint in DBC order, and row 2 routes to its OWN page rather than the
-/// shared one — the single category in the table with a bespoke frame.
+/// **Auto-Unstuck sits on Home now**, beside the ticket button — it used to be the Stuck category's
+/// action button, three pages down, which is nowhere.
+///
+/// Clicked through the real button rather than by calling the handler, because the button's
+/// existence on Home *is* the change.
 #[test]
-fn the_ten_categories_paint_in_dbc_order_and_harassment_has_its_own_page() {
-    let s = setup();
-    s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"GMHome\")")
-        .unwrap();
-    assert_eq!(
-        s.eval::<String>("return HelpFrameButton1Text:GetText()")
-            .unwrap(),
-        "Stuck"
+fn auto_unstuck_is_a_button_on_home() {
+    let mut s = setup();
+    s.run("ToggleHelpFrame()").unwrap();
+    s.run("BenillaHelpFrameHomeUnstick:Click()").unwrap();
+    assert_eq!(s.take_stuck_casts(), 1);
+    assert!(
+        !s.eval::<bool>("return HelpFrame:IsVisible()").unwrap(),
+        "and it closes the window"
     );
-    assert_eq!(
-        s.eval::<String>("return HelpFrameButton10Text:GetText()")
-            .unwrap(),
-        "Character",
-        "all ten rows fit without scrolling"
+}
+
+/// **The two Home buttons do not overlap, and both fit their labels.**
+///
+/// The layout is ours (the reference had one button here), and its whole trick is that the left
+/// button hangs by its TOPRIGHT and the right one off that fixed edge, so fitting them to their
+/// text grows them *away* from the gutter. Nothing else in the suite would notice them landing on
+/// top of each other: a script error inside `OnShow` is swallowed into the VM's error record, so a
+/// fit that never ran still leaves every other test green.
+#[test]
+fn the_two_home_buttons_sit_side_by_side_without_overlapping() {
+    let mut s = setup();
+    s.run("ToggleHelpFrame()").unwrap();
+    s.resolve();
+
+    let edge = |frame: &str, edge: &str| {
+        s.eval::<f32>(&format!("return {frame}:Get{edge}()"))
+            .unwrap_or_else(|e| panic!("{frame}:Get{edge}(): {e}"))
+    };
+    let (ticket_l, ticket_r) = (
+        edge("HelpFrameHomeIssues", "Left"),
+        edge("HelpFrameHomeIssues", "Right"),
+    );
+    let (stuck_l, stuck_r) = (
+        edge("BenillaHelpFrameHomeUnstick", "Left"),
+        edge("BenillaHelpFrameHomeUnstick", "Right"),
     );
 
-    s.run("HelpFrameButton2:Click()").unwrap();
     assert!(
-        s.eval::<bool>("return HelpFrameHarassment:IsVisible()")
-            .unwrap(),
-        "category 2 routes to HelpFrameHarassment"
-    );
-    s.run("HelpFrameButton3:Click()").unwrap();
-    assert!(
-        s.eval::<bool>("return HelpFrameGeneral:IsVisible()")
-            .unwrap(),
-        "category 3 routes to the shared general page"
+        ticket_r <= stuck_l,
+        "the buttons overlap: ticket ends at {ticket_r}, unstick starts at {stuck_l}"
     );
     assert!(
-        !s.eval::<bool>("return HelpFrameHarassment:IsVisible()")
-            .unwrap(),
-        "and the previous page is hidden — one page at a time"
+        ticket_r > ticket_l && stuck_r > stuck_l,
+        "both buttons must have width: {ticket_l}..{ticket_r}, {stuck_l}..{stuck_r}"
+    );
+    // The fit ran: an unfitted button keeps its authored 250px, and "Auto-Unstuck" is nowhere near
+    // that wide. This is what catches an OnShow that silently errored out.
+    assert!(
+        stuck_r - stuck_l < 200.0,
+        "the unstick button was never fitted to its label (width {})",
+        stuck_r - stuck_l
     );
 }
 
@@ -216,35 +231,48 @@ fn an_open_ticket_turns_the_form_into_an_editor_and_a_zero_turns_it_back() {
     );
 }
 
-/// The Submit button picks its verb from the window's own `hasTicket`, which is what the app must
-/// not second-guess: an edit after an answer is an UPDATE, a submit before one is a CREATE.
+/// The Submit button picks its verb from the window's own `hasTicket` — an edit after an answer is
+/// an UPDATE, a submit before one is a CREATE — **and the two legs send different categories**.
+///
+/// That asymmetry is decision 1687's real content, and it is the half a suite would otherwise miss.
+/// A create has nothing to go on and sends 0. An edit sends the server's own category straight
+/// back, because `HandleGMTicketUpdateTextOpcode` overwrites the field with whatever arrives: send
+/// 0 there and a GM who re-filed the ticket onto a real heading watches it drop to "Unknown" the
+/// moment the player fixes a typo. Nothing on screen would ever show that.
 #[test]
-fn submit_sends_create_before_an_answer_and_update_after_one() {
+fn a_create_files_under_zero_and_an_edit_gives_the_server_its_category_back() {
     let mut s = setup();
     s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"OpenTicket\")")
         .unwrap();
-    let _ = s.take_gm_ticket_intents(); // the OnShow GetGMStatus — see the category test
+    let _ = s.take_gm_ticket_intents(); // the OnShow GetGMStatus
+
+    // A stale `ticketType` must NOT leak into a create — the window has no picker, so a create is
+    // uncategorised no matter what is lying around on the frame.
     s.run("HelpFrameOpenTicket.ticketType = 3 HelpFrameOpenTicketText:SetText(\"a\")")
         .unwrap();
     s.run("HelpFrameOpenTicketSubmit_OnClick()").unwrap();
-    assert!(
-        matches!(
-            s.take_gm_ticket_intents().as_slice(),
-            [GmTicketIntent::Write(w)] if w.is_new
-        ),
-        "no ticket known yet — this is a create"
-    );
+    let intents = s.take_gm_ticket_intents();
+    let [GmTicketIntent::Write(create)] = intents.as_slice() else {
+        panic!("expected exactly one write, got {intents:?}");
+    };
+    assert!(create.is_new, "no ticket known yet — this is a create");
+    assert_eq!(create.category, 0, "a create is uncategorised");
 
-    s.fire_event("UPDATE_TICKET", open_ticket_args(3, "a", 0.1, 0.2, 0.01));
+    // The server answers: this ticket is filed under 4 (Item) — a GM moved it there.
+    s.fire_event("UPDATE_TICKET", open_ticket_args(4, "a", 0.1, 0.2, 0.01));
     s.run("HelpFrameOpenTicketText:SetText(\"a, still\")")
         .unwrap();
     s.run("HelpFrameOpenTicketSubmit_OnClick()").unwrap();
     let intents = s.take_gm_ticket_intents();
-    let [GmTicketIntent::Write(write)] = intents.as_slice() else {
+    let [GmTicketIntent::Write(edit)] = intents.as_slice() else {
         panic!("expected exactly one write, got {intents:?}");
     };
-    assert!(!write.is_new, "a ticket is known — this is an update");
-    assert_eq!(write.text, "a, still");
+    assert!(!edit.is_new, "a ticket is known — this is an update");
+    assert_eq!(edit.text, "a, still");
+    assert_eq!(
+        edit.category, 4,
+        "the edit must hand the GM's own category back, not overwrite it with 0"
+    );
 }
 
 /// **The queue gate.** `UPDATE_GM_STATUS(0)` takes the petition queue down, and asking for the
@@ -364,18 +392,6 @@ fn toggling_the_window_opens_it_and_asks_for_the_queue_status() {
     assert!(!s.eval::<bool>("return HelpFrame:IsVisible()").unwrap());
 }
 
-/// The Auto-Unstuck button casts the Stuck spell and closes the window. It is the one control in
-/// this window that does something other than talk about tickets.
-#[test]
-fn auto_unstuck_casts_and_closes() {
-    let mut s = setup();
-    s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(1)")
-        .unwrap();
-    s.run("HelpFrameUnstick_OnClick()").unwrap();
-    assert_eq!(s.take_stuck_casts(), 1);
-    assert!(!s.eval::<bool>("return HelpFrame:IsVisible()").unwrap());
-}
-
 /// **The retail-only text is gone from the Home page** (director's call, 2026-08-29).
 ///
 /// The page is entirely GlobalStrings off the player's own chain, so three of its strings still
@@ -432,9 +448,11 @@ fn the_home_page_advertises_no_dead_retail_links() {
 /// **The geometry oracle** (decision 0675): every element the transcription shares with the
 /// reference file carries the reference's own `<AbsDimension>` numbers.
 ///
-/// **Verified to fail**, as 0675 requires: nudging `TicketStatusFrame`'s width 208 → 209 makes it
-/// report `TicketStatusFrame: ours [(209.0, 52.0), …] != ref [(208.0, 52.0), …]` and fail. It is a
-/// guard, not a comfort.
+/// **Verified to fail**, as 0675 requires, and re-verified after 1687 lowered `min_compared` from
+/// 60 to 28: nudging `TicketStatusFrame`'s width 208 → 209 reports
+/// `TicketStatusFrame: ours [(209.0, 52.0), …] != ref [(208.0, 52.0), …]` and fails. Re-checking
+/// that after shrinking the floor is the point — a guard whose floor drops below what it actually
+/// compares stops guarding and never says so.
 #[test]
 fn the_windows_geometry_matches_the_reference_file() {
     let Some(reference) = super::framexml_diff::reference("HelpFrame.xml") else {
@@ -443,11 +461,16 @@ fn the_windows_geometry_matches_the_reference_file() {
     /// Deliberate deviations, by REFERENCE name. Each earns its reason here; a tolerance would
     /// let a real difference hide, so this is a list and stays a list.
     const EXPECTED: &[&str] = &[
-        // The GM category list is the house FAUX scroll kit, not the reference's ScrollFrame, and
-        // the kit's shared trough replaces the three loose bar textures the reference hangs beside
-        // it (HelpFrame.xml's header, divergence 1). Same for the ticket editor's own trough.
-        "HelpFrameGMScrollFrame",
+        // The ticket editor's scroll frame carries the house kit's shared trough in place of the
+        // three loose bar textures the reference hangs beside it (HelpFrame.xml's header).
         "HelpFrameOpenTicketScrollFrame",
+        // Home's button row is ours: the reference has one button centred under the text, we have
+        // two, so the left one hangs by its TOPRIGHT at -6 rather than centred at 0. Its SIZE still
+        // matches, which is why only the offset differs.
+        "HelpFrameHomeIssues",
     ];
-    super::framexml_diff::assert_geometry_matches("HelpFrame.xml", &reference, EXPECTED, 60);
+    // 1687 deleted the category list and the per-category page, and roughly seventy named elements
+    // went with them — hence 28 rather than 60. The floor still has to bite: it is what stops this
+    // guard quietly comparing nothing after the next window-shrinking change.
+    super::framexml_diff::assert_geometry_matches("HelpFrame.xml", &reference, EXPECTED, 28);
 }

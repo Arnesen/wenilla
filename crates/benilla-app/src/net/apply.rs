@@ -295,9 +295,10 @@ pub(super) fn apply_net_updates(
         ResMut<crate::ui_action::AutoRepeatActive>,
         // Our own running channel (the IsCurrentAction channel leg, decision 0137 phase 4).
         ResMut<crate::ui_cast::ActiveChannel>,
-        // Pre-formatted red error lines (the death durability notice — drained by the
-        // container feed beside EquipErrors).
-        ResMut<crate::ui_items::UiErrorLines>,
+        // Pre-formatted UIErrorsFrame lines — text the wire already resolved, so there is no
+        // GlobalStrings key to look up: the death durability notice, `SMSG_NOTIFICATION`, and
+        // `SMSG_AREA_TRIGGER_MESSAGE`. Drained by `ui_action::feed_actions` beside UiErrorKeys.
+        ResMut<crate::ui_action::UiErrorTexts>,
         // The queued on-next-swing strike (the melee-slot half of the cast tracking) — the
         // wire resolves it here: GO fires it, a failing result/interrupt kills it.
         ResMut<crate::ui_cast::QueuedMeleeSpell>,
@@ -977,9 +978,9 @@ pub(super) fn apply_net_updates(
                 chat::chat_player_not_found(&name, &mut chat_log)
             }
             SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut chat_log),
-            SessionEvent::Notification { text } => chat::notification(text, &mut chat_log),
+            SessionEvent::Notification { text } => chat::notification(text, &mut ui_actions.14),
             SessionEvent::AreaTriggerMessage { text } => {
-                chat::area_trigger_message(text, &mut chat_log)
+                chat::area_trigger_message(text, &mut ui_actions.14)
             }
             SessionEvent::PlayedTime { total, level } => {
                 // BOTH halves, and they are not redundant. The chat breakdown is our stand-in for
@@ -1636,11 +1637,12 @@ pub(super) fn apply_net_updates(
             SessionEvent::TrainerBuyFailed { error, .. } => {
                 npc::trainer_buy_failed(error, &mut ui_actions.8 .0)
             }
+            SessionEvent::InvalidatePlayer { guid } => names::invalidate_player(guid, &mut names),
             SessionEvent::ListStabledPets {
                 npc,
                 num_stable_slots,
                 pets,
-            } => npc::list_stabled_pets(npc, num_stable_slots, pets, &mut stable_open),
+            } => npc::list_stabled_pets(npc, num_stable_slots, pets, &mut stable_open, &mut names),
             SessionEvent::StableResult { result } => npc::stable_result(
                 result,
                 &mut stable_open,

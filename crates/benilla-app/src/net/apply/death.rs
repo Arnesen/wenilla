@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use crate::death::{CorpsePoint, DeathNet, ResurrectOffer};
 use crate::net::MoveModeMessage;
-use crate::ui_items::UiErrorLines;
+use crate::ui_action::UiErrorTexts;
 
 use super::super::SelfGuid;
 
@@ -89,10 +89,8 @@ pub(super) fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
 
 /// `SMSG_DURABILITY_DAMAGE_DEATH` — the red line, verbatim GlobalStrings `DURABILITYDAMAGE_DEATH`
 /// (the `%%` unescaped).
-pub(super) fn durability_damage_death(lines: &mut UiErrorLines) {
-    lines
-        .0
-        .push("Your equipped items suffer a 10% durability loss.".to_string());
+pub(super) fn durability_damage_death(errors: &mut UiErrorTexts) {
+    errors.error("Your equipped items suffer a 10% durability loss.".to_string());
 }
 
 /// **The ack'd movement-mode family** (decision 0866) — root, water-walk, feather-fall, hover. The

@@ -857,6 +857,12 @@ pub enum ServerPacket {
         num_stable_slots: u8,
         pets: Vec<StabledPet>,
     },
+    /// `SMSG_INVALIDATE_PLAYER` — drop this guid from the player-name cache (decision 1689). The
+    /// cache ages nothing out, so this packet is the only thing that unsticks a name short of a
+    /// reconnect; it matters more to benilla than to the reference only because ours now persists.
+    InvalidatePlayer {
+        guid: u64,
+    },
     /// `SMSG_STABLE_RESULT` — the whole answer to a stable/unstable/swap/buy-slot ask (vmangos
     /// `StableResult::AppendBodyTo`). `result` is a [`super::stable::stable_result`] code; success
     /// codes carry no updated list, so repainting the window takes a fresh
@@ -1481,6 +1487,7 @@ impl ServerPacket {
             ServerPacket::TrainerBuyFailed { .. } => "SMSG_TRAINER_BUY_FAILED".into(),
             ServerPacket::ListStabledPets { .. } => "MSG_LIST_STABLED_PETS".into(),
             ServerPacket::StableResult { .. } => "SMSG_STABLE_RESULT".into(),
+            ServerPacket::InvalidatePlayer { .. } => "SMSG_INVALIDATE_PLAYER".into(),
             ServerPacket::LootResponse { .. } => "SMSG_LOOT_RESPONSE".into(),
             ServerPacket::LootError { .. } => "SMSG_LOOT_RESPONSE (error)".into(),
             ServerPacket::LootReleaseResponse { .. } => "SMSG_LOOT_RELEASE_RESPONSE".into(),

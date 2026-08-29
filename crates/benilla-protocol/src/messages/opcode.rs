@@ -787,6 +787,13 @@ pub const CMSG_AUTOBANK_ITEM: u16 = 0x0283; // 643
 // else, so a successful one is a cue to re-ask the list. Bodies in [`super::stable`]
 // (decision 1676). `CMSG_STABLE_REVIVE_PET` (0x0274, 628) is deliberately absent: vmangos's handler
 // is an empty no-op and whether the 5875 client ever sends it is an open RE question.
+/// Forget a cached player name (VERIFIED vmangos `Opcodes_1_12_1.h`: 796) — body `{u64 guid}`.
+/// The client's name cache has **no TTL**: eviction is explicit, and this is the one packet that
+/// does it for a player (wow-re `system/dbcache/dbcache.md` Contracts, remove-by-key `0x556ff0`).
+/// Decision 1689. vmangos never sends it, so this is the mechanism present and correct rather
+/// than a path our own server exercises.
+pub const SMSG_INVALIDATE_PLAYER: u16 = 0x031C; // 796
+
 pub const MSG_LIST_STABLED_PETS: u16 = 0x026F; // 623
 pub const CMSG_STABLE_PET: u16 = 0x0270; // 624
 pub const CMSG_UNSTABLE_PET: u16 = 0x0271; // 625

@@ -8,6 +8,7 @@ use benilla_protocol::messages::{
 };
 use bevy::prelude::*;
 
+use crate::names::NameCache;
 use crate::ui_bank::{BankErrors, BankOpen};
 use crate::ui_gossip::GossipState;
 use crate::ui_merchant::{MerchantErrors, MerchantOpen, MerchantRefusal};
@@ -203,11 +204,33 @@ pub(super) fn list_stabled_pets(
     num_stable_slots: u8,
     pets: Vec<StabledPet>,
     stable_open: &mut StableOpen,
+    names: &mut NameCache,
 ) {
     debug!(
         "net: stable master {npc:#x} listed {} pets ({num_stable_slots} slots bought)",
         pets.len()
     );
+    // **Seed the pet-name cache from the list** (decision 1688). Every row carries the pet's own
+    // number and the name its owner gave it — the exact `(pet_number, name)` pair
+    // `SMSG_PET_NAME_QUERY_RESPONSE` would answer with — so the pet a player unstables has a
+    // resolvable `UnitName("pet")` the moment it is summoned, instead of after a round trip.
+    //
+    // The window this closes is a real one the director hit: `PetStable_Update` sets the current
+    // pet's button tooltip to a bare `UnitName("pet")` (`PetStable.lua:161`, transcribed
+    // unguarded because the reference is unguarded), and hands it to `GameTooltip:SetText`, whose
+    // byte-pinned signature REQUIRES a string (`0x531b90`) and raises otherwise. Nil name ⇒ Lua
+    // error dialog, once per unstable.
+    //
+    // Why the reference does not trip over its own unguarded line: its pet-name cache is
+    // `petnamecache.wdb`, which **persists across sessions**, so a pet you have owned before is
+    // already warm before the packet arrives. benilla has no such file, so a window the reference
+    // has practically closed is wide open for us. Seeding is not a workaround for the missing
+    // cache — it is using the answer the server has already sent us in this very packet.
+    for pet in &pets {
+        if !pet.name.is_empty() {
+            names.insert_pet(pet.pet_number, pet.name.clone());
+        }
+    }
     stable_open.open(npc, num_stable_slots, pets);
 }
 

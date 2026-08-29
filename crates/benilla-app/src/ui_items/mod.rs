@@ -185,12 +185,6 @@ pub(crate) struct EquipError {
 #[derive(Resource, Default)]
 pub(crate) struct EquipErrors(pub Vec<EquipError>);
 
-/// Pre-formatted red error lines from the net drain (`UI_ERROR_MESSAGE` verbatim text — the
-/// death durability notice today; anything whose message isn't a code map). Drained beside
-/// [`EquipErrors`] by the container feed.
-#[derive(bevy::prelude::Resource, Default)]
-pub(crate) struct UiErrorLines(pub Vec<String>);
-
 /// The item guid in a Lua-space bag slot, read off the player descriptor (backpack), the bag
 /// object's own slot array, or — [`EQUIPMENT_BAG`], decision 0208 phase 1b — the player
 /// descriptor's own `INV_SLOT` array directly (`slot0` is already the wire `EQUIPMENT_SLOT_*`
@@ -1029,7 +1023,6 @@ impl Plugin for UiItemsPlugin {
         // The icon source — `ItemDisplayInfo.dbc` — is the `ItemDisplays` resource the equipment
         // renderer already loads (one parse serves the world and the bags).
         app.init_resource::<EquipErrors>()
-            .init_resource::<UiErrorLines>()
             .init_resource::<PendingItemOps>()
             .init_resource::<LockClearedByFailure>()
             // AFTER the chain opens — a bare Startup slot raced AssetSet::Open and, when it

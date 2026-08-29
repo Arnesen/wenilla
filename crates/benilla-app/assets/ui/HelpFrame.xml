@@ -17,17 +17,35 @@
         MainMenuBarMicroButtons and StaticPopup entries reach by, and MicroMenu.xml is a straight
         transcription that now calls the first of them. Same posture as MicroMenu/FriendsFrame.
 
+        ── THE FLOW (decision 1687 — this is where we depart from the reference) ────────────────
+        **Home → the ticket box, one click.** The reference is four pages deep — Home, then a
+        scrolling list of the ten `GMTicketCategory.dbc` rows, then a per-category blurb page
+        re-dressed nine ways, then finally the text box. The director's call (2026-08-29) is that
+        the middle two are a tax on somebody who already knows they want a GM, so they are **gone**,
+        not hidden: Home's own button goes straight to `HelpFrameOpenTicket`, and the client-side
+        Auto-Unstuck the category list used to bury three levels down sits beside it.
+
+        Two pages remain, and `HELPFRAME_FRAMES` has exactly the two keys to match.
+
+        The cost, stated where it is paid: with no picker there is no category to pick, so a ticket
+        this window CREATES carries **0** and a GM's queue reads "Unknown" — see
+        `TICKET_CATEGORY_UNCATEGORIZED` in the script block for why 0 and not one of the ten real
+        ids. An EDIT is the exception, and deliberately so: it sends back the category the server
+        last reported, because the update opcode overwrites the field unconditionally and sending 0
+        there would undo a GM's re-filing every time the player fixes a typo.
+
         ── THE ENGINE SEAM ─────────────────────────────────────────────────────────────────────
         Six bindings, all of them the reference's own declarations: `GetGMTicket()`,
         `NewGMTicket(category, text)`, `UpdateGMTicket(category, text)`, `DeleteGMTicket()`,
-        `GetGMStatus()` and `Stuck()`, plus `GetGMTicketCategories()` — a flat vararg list
-        `id1, name1, id2, name2, …` sourced from `GMTicketCategory.dbc`. That DBC ships exactly ten
-        rows and its ids ARE the wire category values (1 Stuck, 2 Behavior/Harassment, 3 Guild,
-        4 Item, 5 Environmental, 6 Non-Quest/Creep, 7 Quest/Quest NPC, 8 Technical,
-        9 Account/Billing, 10 Character) — which is WHY `HELPFRAME_FRAMES` and `GENERAL_HELPFRAME`
-        below are keyed 1..10: the keys are the DBC ids, so `HelpFrameGM_UpdateCategories`'s
-        `button.key = <id>` transcribes unchanged and a click carries the wire value straight into
-        `NewGMTicket`.
+        `GetGMStatus()` and `Stuck()`.
+
+        The reference's seventh, `GetGMTicketCategories()` — a flat vararg list
+        `id1, name1, id2, name2, …` sourced from `GMTicketCategory.dbc`, ten rows whose ids ARE the
+        wire category values (1 Stuck, 2 Behavior/Harassment, 3 Guild, 4 Item, 5 Environmental,
+        6 Non-Quest/Creep, 7 Quest/Quest NPC, 8 Technical, 9 Account/Billing, 10 Character) — is
+        **no longer called from this window**: the list it fed was the page 1687 removed. The
+        binding, the DBC reader and their tests all still ship, because they are the engine's half
+        and an addon may still ask; what went is this window's only caller.
 
         ── THE STRING TABLE ─────────────────────────────────────────────────────────────────────
         We ship none of Blizzard's text (AuctionFrame.xml's header carries the law):
@@ -59,8 +77,10 @@
             `UIDropDownMenu_Initialize(this, …)` in `_OnLoad` could never have run and
             `UIDropDownMenu_SetSelectedID(HelpFrameOpenTicketDropDown, …)` in `_OnClick` would
             index a nil global. `TICKET_TYPE1..4` (GlobalStrings.lua l.4239-4242) feed only
-            `_Initialize` and are therefore dead with it. The ticket's category comes from the GM
-            category button that was clicked instead (`HelpFrameOpenTicket.ticketType`).
+            `_Initialize` and are therefore dead with it. Still worth recording after 1687, because
+            it answers the obvious question in the other direction: there is no picker on the ticket
+            page for us to have kept — 1.12 never shipped one, and the category used to come from
+            the list page 1687 removed.
         3 · **The `<OnUpdate>ScrollingEdit_OnUpdate()</OnUpdate>` on the ticket editor** (ref-xml
             l.700-702). `ScrollingEdit_OnTextChanged` and `_OnCursorChanged` both ship
             (ScrollTemplates.xml) and are wired below; `_OnUpdate` deliberately does not — it needs
@@ -77,72 +97,103 @@
             is the reference's own second way out. Its two labels ("Edit My Ticket" / "Abandon My
             Ticket") also sit in the engine's fixed 120px buttons — UiPanels.xml's own named
             narrowing.
-
-        ── FRAMES NOTHING REACHES TODAY (transcribed anyway, so nobody "fixes" a non-bug) ───────
-        `HelpFrameStuck` (ref-xml l.1301-1378) and `HelpFrameBug` (ref-xml l.1380-1392) are
-        unreachable in 1.12. Every caller of `HelpFrame_ShowFrame` in the whole extraction passes
-        "Home", "GMHome", "OpenTicket", or a GM category id 1..10 (grepped: ref-lua l.177/504/540,
-        ref-xml l.378/593/975/1105/1255/1285/1373, StaticPopup.lua l.351) — never "Stuck" and never
-        "Bug". `HELPFRAME_FRAMES["Stuck"]` therefore never fires, because ticket category 1
-        ("Stuck") routes through `HELPFRAME_FRAMES[1]` to `HelpFrameGeneral`, which
-        `GENERAL_HELPFRAME[1]` dresses with the unstick button. There is no `HELPFRAME_FRAMES`
-        "Bug" key at all — `HelpFrameBug` is a bare divider frame with no route to it. Both are
-        transcribed because they are the reference's own layout and a later
-        `HelpFrame_ShowFrame("Stuck")` would want them intact.
+        5 · **Five of the seven pages, REMOVED — not stubbed, not hidden, gone** (1687). Deleted
+            with the flow that reached them, each named here with the reference lines it was
+            transcribed from so a later reader can put one back from the reference rather than from
+            memory: `HelpFrameGM` and its ten `HelpFrameButton1..10` rows over
+            `HelpFrameGMScrollFrame` (ref-xml l.399-603) · `HelpFrameGeneral`, its ten bullets, two
+            bullet headings, end paragraph and two action buttons (ref-xml l.755-980) ·
+            `HelpFrameHarassment` and its eight tips (ref-xml l.983-1299) · `HelpFrameStuck`
+            (ref-xml l.1301-1378) · `HelpFrameBug` (ref-xml l.1380-1392). With them went the Lua
+            that existed only to drive them — `GENERAL_HELPFRAME` (the nine dressings, ref-lua
+            l.29-158), `HelpFrame_SetupGeneralFrame` (l.231-349), `HelpFrameButton_OnClick`
+            (l.503-505), `HelpFrameGM_Update` (l.507-509), `HelpFrameGM_UpdateCategories`
+            (l.511-534), `HelpFrameGeneralButton_OnClick` (l.536-542), our own
+            `HelpFrameHarassment_OnLoad` (the reference fills those eight strings from eight XML
+            OnLoad bodies instead), and the four constants none of them left a reader for
+            (`HELPFRAME_BULLET_SPACING`, `HELPFRAME_SECTION_SPACING`, `MAX_GENERAL_BULLETS`,
+            `NUM_GM_CATEGORIES_TO_DISPLAY`) — and three of the four templates,
+            `HelpFrameBulletPointTemplate`, `HelpFrameHomeButtonTemplate` and
+            `GMCategoryButtonTemplate`. Those three are
+            **inheritable surface** (1254's mirror: a name the reference owns must not be hidden),
+            so they were checked before they went rather than after: nothing else in the whole 1.12
+            extraction inherits any of the three, and nothing in the installed addon corpus names
+            one. `HelpFrameDividerTemplate` has a live customer — the ticket page's own divider —
+            and stays.
+            The last two, `HelpFrameStuck` and `HelpFrameBug`, were already unreachable *in the
+            reference* and were transcribed anyway so nobody would "fix" a non-bug; that reason
+            expired with the routes around them. Nothing in the whole extraction passes "Stuck" or
+            "Bug" to `HelpFrame_ShowFrame` (grepped: ref-lua l.177/504/540, ref-xml
+            l.378/593/975/1105/1255/1285/1373, StaticPopup.lua l.351), so the pages could only ever
+            have been reached by an addon calling a key the reference itself never used.
 
         ── DELIBERATE DIVERGENCES (each stated where it stands, listed here so they are countable) ─
-        1 · The GM category list is the house FAUX scroll kit (ScrollTemplates.xml, decisions
-            0247/0250/0251): a plain `<Frame inherits="FauxScrollFrameTemplate">`, not the
-            reference's `<ScrollFrame>`, so its `<OnVerticalScroll>` body (ref-xml l.564-566) has
-            nothing to fire and is replaced by an `updateFunc`. The three loose trough textures the
-            reference hangs beside each bar (ref-xml l.517-560 and l.642-685) become the kit's
-            shared `BenillaScrollTroughTemplate`, whose seat law was derived from exactly these
-            offsets. ReputationFrame.xml's precedent.
-        2 · The ticket editor's scroll frame IS a real `UIPanelScrollFrameTemplate`, so its bar is
+        Renumbered by 1687: three entries went with the pages they described (the GM list's faux
+        scroll kit, the Lua-5.0 vararg spelling — this file has no varargs left — and the dropped
+        `message("Not enough bullets!  Tell Derek")` developer assert). Numbers below are the ones
+        the inline `(header, divergence N)` cites use.
+        1 · The ticket editor's scroll frame IS a real `UIPanelScrollFrameTemplate`, so its bar is
             always up and `BenillaScrollBar_SetShown` (the only thing that seats a trough) never
             runs for it. Its trough is seated explicitly in the frame's OnLoad through the kit's own
-            public `BenillaScrollTrough_Seat`. GuildInfoFrameScrollFrame (FriendsFrame.xml) simply
-            has no trough; that is an omission, not a law, and the reference draws the channel here.
-        3 · "Fit the button to its label" reads the Button's own `GetTextWidth()` (which forwards to
+            public `BenillaScrollTrough_Seat` (the house faux/real scroll kit, ScrollTemplates.xml,
+            decisions 0247/0250/0251; it replaces the three loose trough textures the reference
+            hangs beside the bar at ref-xml l.642-685). GuildInfoFrameScrollFrame (FriendsFrame.xml)
+            simply has no trough; that is an omission, not a law, and the reference draws the
+            channel here.
+        2 · "Fit the button to its label" reads the Button's own `GetTextWidth()` (which forwards to
             the label's unwrapped `GetStringWidth`, script/button.rs) rather than the reference's
             `…Text:GetWidth()`. Same number for a non-wrapping label; the laid-out width is the one
             that feeds itself its own previous output (decision 0997's measured feedback loop). The
             fit also moves from the button's `<OnLoad>` to its page's `<OnShow>`, because a measure
             taken before the atlas has seen the string answers 0 and nothing would re-run it.
-        4 · `TicketStatusFrame_OnEvent`'s "no ticket" leg re-anchors `TemporaryEnchantFrame` back to
+        3 · `TicketStatusFrame_OnEvent`'s "no ticket" leg re-anchors `TemporaryEnchantFrame` back to
             TOPRIGHT **(-175, -13)**, not the reference's (-180, -13) (ref-lua l.498). -175 is what
             BuffFrame.xml (and ref-BuffFrame.xml l.390-394) actually declares, so the reference
             nudges the frame 5px left after every ticket closes and never puts it back. A typo, not
             a mechanism — MicroMenu.xml's precedent for not reproducing one.
-        5 · `HELP_TICKET`'s OnCancel drops the reference's `local currentFrame = this:GetParent()` /
+        4 · `HELP_TICKET`'s OnCancel drops the reference's `local currentFrame = this:GetParent()` /
             `dialogFrame.data = currentFrame` pair (StaticPopup.lua l.357-361). Our engine calls
             `OnCancel(data, reason)` as a plain function with no `this`, and nothing ever reads that
             data — `HELP_TICKET_ABANDON_CONFIRM`'s OnAccept calls `DeleteGMTicket()` with no
             argument. Keeping it would be two lines that can only throw.
-        6 · The reference's Lua-5.0 `arg`/`arg.n` vararg table is written the 5.1-native way,
-            `select("#", ...)` / `select(i, ...)` (this VM is lua51 — TalentFrame.xml's precedent),
-            and its `for k, v in <table> do` generic-for becomes `ipairs`.
-        7 · `elapsedTime = 0` (ref-lua l.164) is dropped: a global assigned once and read nowhere in
+        5 · `elapsedTime = 0` (ref-lua l.164) is dropped: a global assigned once and read nowhere in
             the whole extraction. `refreshTime` (ref-lua l.495/548) becomes a file-local rather than
             a leaked global — it is read by exactly one function in this file.
-        8 · `message("Not enough bullets!  Tell Derek")` (ref-lua l.260/284) is dropped. It is a
-            Blizzard developer assert naming a Blizzard engineer, not UI text, and the branch is
-            unreachable: `MAX_GENERAL_BULLETS` is 10 and the longest configured run is 7.
-        9 · `HelpFrameOpenTicket_OnEvent`'s `ticketFrameHeight`/`twoLineHeight` locals are dropped:
+        6 · `HelpFrameOpenTicket_OnEvent`'s `ticketFrameHeight`/`twoLineHeight` locals are dropped:
             assigned on three legs and read on none, even in the reference — the toast sizes itself
             from its two measured FontStrings. ReputationFrame.xml's precedent.
+        7 · **The Home page's button row is OURS** (1687), and it is the one place in this window
+            where the geometry is not a measurement off the reference. `HelpFrameHomeIssues` keeps
+            its reference size (250x22) and its reference vertical hang (-40 below the last text
+            line), but its anchor point moves TOP → TOPRIGHT at x -6 so a second button can sit
+            beside it: the pair now straddles the text column's centre line instead of one button
+            sitting on it. The -6/+13 arithmetic is not invented — it is the reference's own answer
+            to "two buttons, centred as a pair, under a block of text", lifted from
+            StaticPopupTemplate (ref StaticPopup.xml, our UiPanels.xml transcription of it). Both
+            buttons are fitted to their own labels from the page's OnShow, so each grows *away*
+            from the centre and the gutter between them is fixed however long the labels get.
+            The consequence for the geometry oracle is stated rather than hidden: `HelpFrameHomeIssues`
+            no longer matches the reference's anchor offset, so it is a listed deviation in
+            `help_frame_tests`, not a silent one.
+        8 · **The second Home button is a name we invented, so it wears the prefix** —
+            `BenillaHelpFrameHomeUnstick` (1254's rule, and OptionsFrameTemplates.xml's phrasing of
+            it: a name the reference owns must not be hidden, a name we invent must not collide).
+            1.12 has no such frame, so the bare `HelpFrameHomeUnstick` would have claimed a
+            reference provenance it does not have and added a global to the 1.12 surface under a
+            reference-shaped name. Its LABEL is the reference's own `STUCK_BUTTON_TEXT`
+            (GlobalStrings.lua l.4206, "Auto-Unstuck") and its click is `HelpFrameUnstick_OnClick`,
+            both unchanged — only the seat is new.
 
-        ── TWO FIDELITY NOTES A LATER READER WOULD OTHERWISE MISREAD AS BUGS ────────────────────
+        ── A FIDELITY NOTE A LATER READER WOULD OTHERWISE MISREAD AS A BUG ──────────────────────
         · `HelpFrame_OnEvent`'s `UPDATE_GM_STATUS` arm branches on arg1 == 1 (queue up) and
           arg1 == -1 (queue down AND pop HELP_TICKET_QUEUE_DISABLED). Against the vmangos server
           benilla talks to, `SMSG_GMTICKETSYSTEMSTATUS` only ever carries 0 or 1 — so the -1 leg is
           transcribed faithfully and is simply unreachable here today.
-        · `CATEGORY_TO_NOT_DISPLAY` (ref-lua l.305) suppresses one category's action button. Its
-          ONLY setter in the whole extraction is `Localization.lua`'s `LocalizeFrames()` (l.23,
-          `= 9`) — an enGB-only adjustment that hides the Billing & Account button because EU
-          billing went somewhere else. benilla ships no Localization.lua (GameTime.xml's header
-          makes the same note about `TwentyFourHourTime`), so the global is nil, the guard never
-          fires, and category 9 keeps its button. That is the enUS behaviour.
+
+        (The second note this section used to carry went with 1687: `CATEGORY_TO_NOT_DISPLAY`
+        (ref-lua l.305) suppressed one category page's action button, and there are no category
+        pages. Its only setter in the whole extraction was `Localization.lua`'s enGB
+        `LocalizeFrames()`, which benilla does not ship, so it never fired here either.)
     -->
     <Script><![CDATA[
         -- One GlobalString read. See this file's header: the table is the player's own, executed
@@ -176,18 +227,17 @@
         --   HELPFRAME_HOME_TEXT2  "utilise the forums and the website" + two more dead links.
         --
         -- Emptying the two FontStrings is enough: the page is one anchor chain (each element hangs
-        -- off the one above), so the button simply rides up into the space they leave.
+        -- off the one above), so the button row simply rides up into the space they leave.
         PVP_POLICY_URL = ""
         HELPFRAME_HOME_TEXT2 = ""
         HELPFRAME_HOME_ISSUE3 = "Most PVP issues can be resolved through the PVP game mechanics. "
             .. "GM's will not be able to assist in many cases.  The exceptions to this rule are "
             .. "any behaviors that fall under the harassment policy of the realm you are playing on."
 
-        -- ── Constants (ref-lua l.1-2, l.160-166) ────────────────────────────────────────────────
-        HELPFRAME_BULLET_SPACING = -3         -- ref-lua l.1
-        HELPFRAME_SECTION_SPACING = -20       -- ref-lua l.2
-        MAX_GENERAL_BULLETS = 10              -- ref-lua l.160
-        NUM_GM_CATEGORIES_TO_DISPLAY = 10     -- ref-lua l.161
+        -- ── Constants (ref-lua l.162, l.166) ────────────────────────────────────────────────────
+        -- The reference's other four (HELPFRAME_BULLET_SPACING, HELPFRAME_SECTION_SPACING,
+        -- MAX_GENERAL_BULLETS, NUM_GM_CATEGORIES_TO_DISPLAY) went with the pages that read them —
+        -- header, WHAT IS DELIBERATELY NOT HERE 5.
         GMTICKET_CHECK_INTERVAL = 600         -- ref-lua l.162: 10 minutes
         -- The petition queue starts ASSUMED UP (ref-lua l.166), so the window is usable before the
         -- first UPDATE_GM_STATUS lands. Public because the HELP_TICKET dialog below reads it.
@@ -197,187 +247,57 @@
         -- file-local, not the reference's leaked global: one reader, in this file.
         local refreshTime
 
-        -- ref-lua l.5-8. Defined before GENERAL_HELPFRAME because that table stores it as a value;
-        -- the reference's own comment on this is "Ugly, but needs to be up here".
+        -- ── The category every ticket this window files is filed under (OURS, decision 1687) ────
+        -- With the category list gone there is nothing to pick from, so the window has to say
+        -- "uncategorised" out loud rather than pick a plausible id and be wrong ten times out of
+        -- ten. 0 is that value, and both halves of why are read off vmangos rather than assumed:
+        --
+        --   · **It reaches the server.** `HandleGMTicketCreateOpcode`'s ONLY validation of the
+        --     category is `if (packet.ticketType >= GMTICKET_MAX) return;`
+        --     (Handlers/GMTicketHandler.cpp:112) with `GMTICKET_MAX == 11` — the enum runs
+        --     `GMTICKET_STUCK = 1` (SharedDefines.h:1776) to `GMTICKET_CHARACTER = 10` (l.1785),
+        --     so 11 is the first refused value. The test is a one-sided `>=`, and 0 is on the other
+        --     side of it: it passes, and is stored by the `SetTicketType` two lines later.
+        --     (`CMSG_GMTICKET_UPDATETEXT`'s handler range-checks nothing at all and stores it the
+        --     same way.)
+        --   · **It reads as nothing, not as something wrong.** `GmTicket::GetTicketCategoryName`
+        --     (GMTicketMgr.cpp:205-232) switches on 1..10 and falls through to return "Unknown", and
+        --     that is the string the GM broadcast carries (`SendGMTicketText(LANG_COMMAND_TICKETNEW,
+        --     …, ticket->GetTicketCategoryName(...), …)`). So a GM's queue and the new-ticket
+        --     notification both read "Unknown" — which is the truth — instead of heading the ticket
+        --     with a category the player never chose. Decision 1673 recorded what filing under the
+        --     WRONG id costs: the ticket is silently re-filed under someone else's heading.
+        --
+        -- 1673 also recorded the other side of this: `client_command_for` used to refuse anything
+        -- outside 1..=10, which was right while the only producer was a DBC-keyed button. It now
+        -- admits 0 for this window (that guard is the Rust half, not this file's).
+        local TICKET_CATEGORY_UNCATEGORIZED = 0
+
+        -- ref-lua l.5-8. The reference defines this up here because GENERAL_HELPFRAME stored it as
+        -- a table value ("Ugly, but needs to be up here", its own comment); that table is gone and
+        -- the seat is now Home's own Auto-Unstuck button, but the function is unchanged — it is
+        -- still the client-side unstick (`Stuck()` casts spell 7355, decision 1673) rather than
+        -- anything to do with a ticket.
         function HelpFrameUnstick_OnClick()
             Stuck()
             HideUIPanel(HelpFrame)
         end
 
-        -- ── The category → page routing table (ref-lua l.11-27) ────────────────────────────────
-        -- The numeric keys ARE the GMTicketCategory.dbc ids (this file's header): whatever
-        -- GetGMTicketCategories() hands a button becomes both the page key and the wire category.
-        -- Nine of the ten land on the one HelpFrameGeneral page, which GENERAL_HELPFRAME below
-        -- re-dresses per category; only 2 (Behavior/Harassment) has a page of its own.
+        -- ── The key → page routing table (ref-lua l.11-27) ─────────────────────────────────────
+        -- Two pages, two keys (1687). The reference's other twelve entries — the ten
+        -- GMTicketCategory.dbc ids, "GMHome" and "Stuck" — named the pages that went with them.
+        -- The table stays a table of `{ name = … }` records rather than collapsing to a name→name
+        -- map, because that record shape is what an addon reading HELPFRAME_FRAMES sees, and
+        -- HelpFrame_ShowFrame below still walks it exactly as the reference's does.
         HELPFRAME_FRAMES = {}
-        HELPFRAME_FRAMES[1] = { name = "HelpFrameGeneral" }       -- Stuck
-        HELPFRAME_FRAMES[2] = { name = "HelpFrameHarassment" }    -- Behavior / Harassment
-        HELPFRAME_FRAMES[3] = { name = "HelpFrameGeneral" }       -- Guild
-        HELPFRAME_FRAMES[4] = { name = "HelpFrameGeneral" }       -- Item
-        HELPFRAME_FRAMES[5] = { name = "HelpFrameGeneral" }       -- Environmental
-        HELPFRAME_FRAMES[6] = { name = "HelpFrameGeneral" }       -- Non-Quest NPC / Creep
-        HELPFRAME_FRAMES[7] = { name = "HelpFrameGeneral" }       -- Quest / Quest NPC
-        HELPFRAME_FRAMES[8] = { name = "HelpFrameGeneral" }       -- Technical
-        HELPFRAME_FRAMES[9] = { name = "HelpFrameGeneral" }       -- Account / Billing
-        HELPFRAME_FRAMES[10] = { name = "HelpFrameGeneral" }      -- Character
-        -- Unreachable today (this file's header): category 1 routes to HelpFrameGeneral above, and
-        -- nothing anywhere passes "Stuck". Kept because the page exists and the route is the
-        -- reference's own.
-        HELPFRAME_FRAMES["Stuck"] = { name = "HelpFrameStuck" }
-        HELPFRAME_FRAMES["GMHome"] = { name = "HelpFrameGM" }
         HELPFRAME_FRAMES["Home"] = { name = "HelpFrameHome" }
         HELPFRAME_FRAMES["OpenTicket"] = { name = "HelpFrameOpenTicket" }
 
-        -- ── The nine dressings of the shared general page (ref-lua l.29-158) ───────────────────
-        -- Every string is a gs() read (header). Categories 1..10 minus 2 (its own page); note the
-        -- reference configures no entry for 2, which is exactly why 2 is the one with a page.
-        GENERAL_HELPFRAME = {}
-        -- 1 · Stuck. The only entry with a click override and a second button: its primary action is
-        -- the client-side unstick, and button2 falls through to the normal "page a GM" path
-        -- (HelpFrameGeneralButton_OnClick's else leg). ref-lua l.30-36.
-        GENERAL_HELPFRAME[1] = {
-            title = gs("STUCK_OPTION"),                      -- GlobalStrings l.4207
-            titleText = gs("HELPFRAME_STUCK_TEXT1"),         -- l.2232
-            buttonText = gs("STUCK_BUTTON_TEXT"),            -- l.4206
-            buttonOnClickFunc = HelpFrameUnstick_OnClick,
-            button2Text = gs("STUCK_BUTTON2_TEXT"),          -- l.4205
-        }
-        -- 3 · Guild. ref-lua l.37-47.
-        GENERAL_HELPFRAME[3] = {
-            title = gs("HELPFRAME_GUILD_TITLE"),                    -- l.2179
-            titleText = gs("HELPFRAME_GUILD_TEXT"),                 -- l.2178
-            bulletTitle1 = gs("HELPFRAME_GUILD_BULLET_TITLE1"),     -- l.2176
-            bullets1 = {
-                gs("HELPFRAME_GUILD_BULLET1"),                      -- l.2173
-                gs("HELPFRAME_GUILD_BULLET2"),                      -- l.2174
-                gs("HELPFRAME_GUILD_BULLET3"),                      -- l.2175
-            },
-            buttonText = gs("HELPFRAME_GUILD_BUTTON_TEXT"),         -- l.2177
-        }
-        -- 4 · Item. ref-lua l.48-65.
-        GENERAL_HELPFRAME[4] = {
-            title = gs("HELPFRAME_ITEM_TITLE"),                     -- l.2203
-            titleText = gs("HELPFRAME_ITEM_TEXT"),                  -- l.2202
-            bulletTitle1 = gs("HELPFRAME_ITEM_BULLET_TITLE1"),      -- l.2199
-            bullets1 = {
-                gs("HELPFRAME_ITEM_BULLET1"),                       -- l.2192
-                gs("HELPFRAME_ITEM_BULLET2"),                       -- l.2193
-                gs("HELPFRAME_ITEM_BULLET3"),                       -- l.2194
-                gs("HELPFRAME_ITEM_BULLET4"),                       -- l.2195
-                gs("HELPFRAME_ITEM_BULLET5"),                       -- l.2196
-            },
-            bulletTitle2 = gs("HELPFRAME_ITEM_BULLET_TITLE2"),      -- l.2200
-            bullets2 = {
-                gs("HELPFRAME_ITEM_BULLET6"),                       -- l.2197
-                gs("HELPFRAME_ITEM_BULLET7"),                       -- l.2198
-            },
-            buttonText = gs("HELPFRAME_ITEM_BUTTON_TEXT"),          -- l.2201
-        }
-        -- 5 · Environmental. ref-lua l.66-83.
-        GENERAL_HELPFRAME[5] = {
-            title = gs("HELPFRAME_ENVIRONMENTAL_TITLE"),                  -- l.2168
-            titleText = gs("HELPFRAME_ENVIRONMENTAL_TEXT"),               -- l.2167
-            bulletTitle1 = gs("HELPFRAME_ENVIRONMENTAL_BULLET_TITLE1"),   -- l.2164
-            bullets1 = {
-                gs("HELPFRAME_ENVIRONMENTAL_BULLET1"),                    -- l.2158
-                gs("HELPFRAME_ENVIRONMENTAL_BULLET2"),                    -- l.2159
-                gs("HELPFRAME_ENVIRONMENTAL_BULLET3"),                    -- l.2160
-                gs("HELPFRAME_ENVIRONMENTAL_BULLET4"),                    -- l.2161
-            },
-            bulletTitle2 = gs("HELPFRAME_ENVIRONMENTAL_BULLET_TITLE2"),   -- l.2165
-            bullets2 = {
-                gs("HELPFRAME_ENVIRONMENTAL_BULLET5"),                    -- l.2162
-                gs("HELPFRAME_ENVIRONMENTAL_BULLET6"),                    -- l.2163
-            },
-            buttonText = gs("HELPFRAME_ENVIRONMENTAL_BUTTON_TEXT"),       -- l.2166
-        }
-        -- 6 · Non-Quest NPC / Creep. ref-lua l.84-102.
-        GENERAL_HELPFRAME[6] = {
-            title = gs("HELPFRAME_NONQUEST_TITLE"),                  -- l.2215
-            titleText = gs("HELPFRAME_NONQUEST_TEXT"),               -- l.2214
-            bulletTitle1 = gs("HELPFRAME_NONQUEST_BULLET_TITLE1"),   -- l.2211
-            bullets1 = {
-                gs("HELPFRAME_NONQUEST_BULLET1"),                    -- l.2204
-                gs("HELPFRAME_NONQUEST_BULLET2"),                    -- l.2205
-                gs("HELPFRAME_NONQUEST_BULLET3"),                    -- l.2206
-                gs("HELPFRAME_NONQUEST_BULLET4"),                    -- l.2207
-            },
-            bulletTitle2 = gs("HELPFRAME_NONQUEST_BULLET_TITLE2"),   -- l.2212
-            bullets2 = {
-                gs("HELPFRAME_NONQUEST_BULLET5"),                    -- l.2208
-                gs("HELPFRAME_NONQUEST_BULLET6"),                    -- l.2209
-                gs("HELPFRAME_NONQUEST_BULLET7"),                    -- l.2210
-            },
-            buttonText = gs("HELPFRAME_NONQUEST_BUTTON_TEXT"),       -- l.2213
-        }
-        -- 7 · Quest / Quest NPC. ref-lua l.103-118.
-        GENERAL_HELPFRAME[7] = {
-            title = gs("HELPFRAME_QUEST_TITLE"),                  -- l.2229
-            titleText = gs("HELPFRAME_QUEST_TEXT"),               -- l.2228
-            bulletTitle1 = gs("HELPFRAME_QUEST_BULLET_TITLE1"),   -- l.2225
-            bullets1 = {
-                gs("HELPFRAME_QUEST_BULLET1"),                    -- l.2220
-                gs("HELPFRAME_QUEST_BULLET2"),                    -- l.2221
-                gs("HELPFRAME_QUEST_BULLET3"),                    -- l.2222
-            },
-            bulletTitle2 = gs("HELPFRAME_QUEST_BULLET_TITLE2"),   -- l.2226
-            bullets2 = {
-                gs("HELPFRAME_QUEST_BULLET4"),                    -- l.2223
-                gs("HELPFRAME_QUEST_BULLET5"),                    -- l.2224
-            },
-            buttonText = gs("HELPFRAME_QUEST_BUTTON_TEXT"),       -- l.2227
-        }
-        -- 8 · Technical. The one entry with an endText but NO button: the reference routes technical
-        -- issues to the support site, not to a GM (ref-lua l.119-133 — note it sets `endText` from
-        -- the _BULLET_TITLE2 key, which is that key's real content here).
-        GENERAL_HELPFRAME[8] = {
-            title = gs("HELPFRAME_TECHNICAL_TITLE"),                  -- l.2246
-            titleText = gs("HELPFRAME_TECHNICAL_TEXT"),               -- l.2245
-            bulletTitle1 = gs("HELPFRAME_TECHNICAL_BULLET_TITLE1"),   -- l.2242
-            bullets1 = {
-                gs("HELPFRAME_TECHNICAL_BULLET1"),                    -- l.2235
-                gs("HELPFRAME_TECHNICAL_BULLET2"),                    -- l.2236
-                gs("HELPFRAME_TECHNICAL_BULLET3"),                    -- l.2237
-                gs("HELPFRAME_TECHNICAL_BULLET4"),                    -- l.2238
-                gs("HELPFRAME_TECHNICAL_BULLET5"),                    -- l.2239
-                gs("HELPFRAME_TECHNICAL_BULLET6"),                    -- l.2240
-                gs("HELPFRAME_TECHNICAL_BULLET7"),                    -- l.2241
-            },
-            endText = gs("HELPFRAME_TECHNICAL_BULLET_TITLE2"),        -- l.2243
-        }
-        -- 9 · Account / Billing. ref-lua l.134-145. The reference's bullets1 stops at BULLET3;
-        -- HELPFRAME_ACCOUNT_BULLET4 (l.2141) exists in the string table and is unused — transcribed
-        -- as written rather than "completed".
-        GENERAL_HELPFRAME[9] = {
-            title = gs("HELPFRAME_ACCOUNT_TITLE"),                  -- l.2146
-            titleText = gs("HELPFRAME_ACCOUNT_TEXT"),               -- l.2145
-            bulletTitle1 = gs("HELPFRAME_ACCOUNT_BULLET_TITLE1"),   -- l.2142
-            bullets1 = {
-                gs("HELPFRAME_ACCOUNT_BULLET1"),                    -- l.2138
-                gs("HELPFRAME_ACCOUNT_BULLET2"),                    -- l.2139
-                gs("HELPFRAME_ACCOUNT_BULLET3"),                    -- l.2140
-            },
-            endText = gs("HELPFRAME_ACCOUNT_ENDTEXT"),              -- l.2144
-            buttonText = gs("HELPFRAME_ACCOUNT_BUTTON_TEXT"),       -- l.2143
-        }
-        -- 10 · Character. ref-lua l.146-158.
-        GENERAL_HELPFRAME[10] = {
-            title = gs("HELPFRAME_CHARACTER_TITLE"),                  -- l.2157
-            titleText = gs("HELPFRAME_CHARACTER_TEXT"),               -- l.2156
-            bulletTitle1 = gs("HELPFRAME_CHARACTER_BULLET_TITLE1"),   -- l.2154
-            bullets1 = {
-                gs("HELPFRAME_CHARACTER_BULLET1"),                    -- l.2149
-                gs("HELPFRAME_CHARACTER_BULLET2"),                    -- l.2150
-                gs("HELPFRAME_CHARACTER_BULLET3"),                    -- l.2151
-                gs("HELPFRAME_CHARACTER_BULLET4"),                    -- l.2152
-                gs("HELPFRAME_CHARACTER_BULLET5"),                    -- l.2153
-            },
-            buttonText = gs("HELPFRAME_CHARACTER_BUTTON_TEXT"),       -- l.2155
-        }
-
         -- Fit a button to its label, the reference's arithmetic (`+40`, ref-xml l.375/1341 and
-        -- ref-lua l.307/334) on the house's measure verb. See divergence 3 in the header for why
-        -- this is `GetTextWidth` and not the label's laid-out `GetWidth`.
+        -- ref-lua l.307/334) on the house's measure verb. See divergence 2 in the header for why
+        -- this is `GetTextWidth` and not the label's laid-out `GetWidth`. Both Home buttons run
+        -- through it from that page's OnShow, which is what keeps the pair's gutter honest when a
+        -- locale makes one of the two labels longer.
         function HelpFrameButton_FitToText(button)
             if not button then return end
             button:SetWidth(button:GetTextWidth() + 40)
@@ -413,9 +333,17 @@
             end
         end
 
-        -- ref-lua l.196-229. `key` is either a HELPFRAME_FRAMES key (a category id, "Home",
-        -- "GMHome", "OpenTicket") or something unknown, which falls through to the ticket editor —
-        -- the reference's own default, and what makes a category with no route still openable.
+        -- ref-lua l.196-229. `key` is either a HELPFRAME_FRAMES key ("Home", "OpenTicket") or
+        -- something unknown, which falls through to the ticket editor — the reference's own
+        -- default, and the reason 1687 could take twelve keys out of the table without breaking an
+        -- addon that still passes one: `HelpFrame_ShowFrame(4)` used to open the Item page and now
+        -- opens the ticket box, which is where that click was headed two pages later anyway.
+        --
+        -- `ticketType` is the reference's own second parameter and stays in the signature (it is
+        -- addon-visible API), but no caller in this file passes it any more — the GM category
+        -- button that used to was the only one. An addon that still passes it therefore preloads
+        -- the field the EDIT leg sends back, which is the reference's own meaning for it; a create
+        -- ignores it and sends 0 (see HelpFrameOpenTicketSubmit_OnClick).
         function HelpFrame_ShowFrame(key, ticketType)
             if HelpFrame.openFrame then
                 HelpFrame.openFrame:Hide()
@@ -431,11 +359,7 @@
             local frame
             local frameInfo = HELPFRAME_FRAMES[key]
             if frameInfo then
-                local targetName = frameInfo.name
-                if targetName == "HelpFrameGeneral" then
-                    HelpFrame_SetupGeneralFrame(key)
-                end
-                frame = getglobal(targetName)
+                frame = getglobal(frameInfo.name)
             else
                 frame = getglobal(HELPFRAME_FRAMES["OpenTicket"].name)
             end
@@ -444,139 +368,6 @@
 
             if ticketType then
                 HelpFrameOpenTicket.ticketType = ticketType
-            end
-        end
-
-        -- ref-lua l.231-349. The shared general page re-dressed for one category: a title, body
-        -- text, up to two bullet sections with their own headings, an optional trailing paragraph,
-        -- and up to two action buttons — each element re-anchored to whatever ended up above it,
-        -- which is why this is a chain of SetPoints rather than a static layout.
-        function HelpFrame_SetupGeneralFrame(key)
-            local info = GENERAL_HELPFRAME[key]
-            if not info then
-                return
-            end
-            if info.title then
-                HelpFrameGeneralTitle:SetText(info.title)
-            end
-            if info.titleText then
-                HelpFrameGeneralTitleText:SetText(info.titleText)
-            end
-            if info.bulletTitle1 then
-                HelpFrameBulletTitle1:SetText(info.bulletTitle1)
-            else
-                HelpFrameBulletTitle1:SetText("")
-            end
-
-            local bulletIndex = 1
-            local bullet
-            if info.bullets1 then
-                for index, value in ipairs(info.bullets1) do
-                    bullet = getglobal("HelpFrameGeneralBullet" .. bulletIndex)
-                    -- Unreachable: MAX_GENERAL_BULLETS is 10 and the longest run configured above
-                    -- is 7. The reference's `message(...)` dev assert is dropped (header, 8).
-                    if bullet then
-                        getglobal("HelpFrameGeneralBullet" .. bulletIndex .. "Text"):SetText(value)
-                        bullet:Show()
-                        if index > 1 then
-                            bullet:SetPoint("TOPLEFT", "HelpFrameGeneralBullet" .. (bulletIndex - 1),
-                                "BOTTOMLEFT", 0, HELPFRAME_BULLET_SPACING)
-                        end
-                        bulletIndex = bulletIndex + 1
-                    end
-                end
-            end
-
-            if info.bulletTitle2 then
-                HelpFrameBulletTitle2:Show()
-                HelpFrameBulletTitle2:SetPoint("TOPLEFT",
-                    "HelpFrameGeneralBullet" .. (bulletIndex - 1), "BOTTOMLEFT", -5,
-                    HELPFRAME_SECTION_SPACING)
-                HelpFrameBulletTitle2:SetText(info.bulletTitle2)
-            else
-                HelpFrameBulletTitle2:Hide()
-            end
-
-            if info.bullets2 then
-                for index, value in ipairs(info.bullets2) do
-                    bullet = getglobal("HelpFrameGeneralBullet" .. bulletIndex)
-                    if bullet then
-                        getglobal("HelpFrameGeneralBullet" .. bulletIndex .. "Text"):SetText(value)
-                        bullet:Show()
-                        if index == 1 then
-                            bullet:SetPoint("TOPLEFT", "HelpFrameBulletTitle2", "BOTTOMLEFT", 5,
-                                HELPFRAME_BULLET_SPACING)
-                        else
-                            bullet:SetPoint("TOPLEFT", "HelpFrameGeneralBullet" .. (bulletIndex - 1),
-                                "BOTTOMLEFT", 0, HELPFRAME_BULLET_SPACING)
-                        end
-                        bulletIndex = bulletIndex + 1
-                    end
-                end
-            end
-
-            for i = bulletIndex, MAX_GENERAL_BULLETS do
-                getglobal("HelpFrameGeneralBullet" .. i):Hide()
-            end
-            -- Floor of 2, so a category with NO bullets still has "bullet 1" to anchor under
-            -- (ref-lua l.293; the anchors below all read bulletIndex-1).
-            bulletIndex = max(bulletIndex, 2)
-
-            if info.endText then
-                HelpFrameEndText:SetText(info.endText)
-                HelpFrameEndText:SetPoint("TOPLEFT",
-                    "HelpFrameGeneralBullet" .. (bulletIndex - 1), "BOTTOMLEFT", -5,
-                    HELPFRAME_SECTION_SPACING)
-                HelpFrameEndText:Show()
-            else
-                HelpFrameEndText:Hide()
-            end
-
-            -- The action button. CATEGORY_TO_NOT_DISPLAY is nil here — its only setter is
-            -- Localization.lua's enGB LocalizeFrames(), which benilla does not ship (header note).
-            if info.buttonText
-                and (not (CATEGORY_TO_NOT_DISPLAY and (CATEGORY_TO_NOT_DISPLAY == key))) then
-                HelpFrameGeneralButton:SetText(info.buttonText)
-                HelpFrameButton_FitToText(HelpFrameGeneralButton)
-                if info.endText then
-                    HelpFrameGeneralButton:SetPoint("TOP", "HelpFrameEndText", "BOTTOM", 0,
-                        HELPFRAME_SECTION_SPACING)
-                else
-                    HelpFrameGeneralButton:SetPoint("TOP",
-                        "HelpFrameGeneralBullet" .. (bulletIndex - 1), "BOTTOM", 0,
-                        HELPFRAME_SECTION_SPACING)
-                end
-                HelpFrameGeneralButton.onClick = info.buttonOnClickFunc
-                HelpFrameGeneralButton:Show()
-            else
-                HelpFrameGeneralButton:Hide()
-            end
-
-            -- titleText2 / button2 (ref-lua l.322-348). No configured entry sets titleText2, so the
-            -- -300 x-offset below never runs today; kept because button2 (Stuck's "Page a GM") does.
-            if info.titleText2 then
-                HelpFrameGeneralTitleText2:SetText(info.titleText2)
-                HelpFrameGeneralTitleText2:SetPoint("TOPLEFT", "HelpFrameGeneralButton", "BOTTOM",
-                    -300, HELPFRAME_SECTION_SPACING)
-                HelpFrameGeneralTitleText2:Show()
-            else
-                HelpFrameGeneralTitleText2:Hide()
-            end
-
-            if info.button2Text then
-                HelpFrameGeneralButton2:SetText(info.button2Text)
-                HelpFrameButton_FitToText(HelpFrameGeneralButton2)
-                if info.titleText2 then
-                    HelpFrameGeneralButton2:SetPoint("TOP", "HelpFrameGeneralTitleText2", "BOTTOM",
-                        0, HELPFRAME_SECTION_SPACING)
-                else
-                    HelpFrameGeneralButton2:SetPoint("TOP", "HelpFrameGeneralButton", "BOTTOM", 0,
-                        HELPFRAME_SECTION_SPACING)
-                end
-                HelpFrameGeneralButton2.onClick = info.button2OnClickFunc
-                HelpFrameGeneralButton2:Show()
-            else
-                HelpFrameGeneralButton2:Hide()
             end
         end
 
@@ -599,7 +390,7 @@
         --   arg6 assigned-to-GM flag (0 no, 1 a GM, 2 the escalation queue)
         --   arg7 opened-by-GM flag (0 never, 1 yes)
         function HelpFrameOpenTicket_OnEvent(eventName)
-            -- The GM SURVEY branch, structurally faithful and deliberately inert (header, 1). The
+            -- The GM SURVEY branch, structurally faithful and deliberately inert (header, NOT HERE 1). The
             -- reference dresses the toast as a survey invitation, flashes it, and returns; we take
             -- the same early return so nothing below can misread a survey event as a ticket, but we
             -- neither paint nor flash it, because GMSurveyFrame_LoadUI (the thing the toast would
@@ -612,6 +403,11 @@
             if arg1 and arg1 ~= 0 then
                 -- There IS an open ticket.
                 TicketStatusTitleText:SetText(gs("TICKET_STATUS1"))    -- GlobalStrings l.4238
+                -- The SERVER's category for the ticket that already exists (1687) — a GM may have
+                -- re-filed it off "Unknown" onto a real heading with `.ticket`. Information
+                -- arriving, not a value this window chose: nothing here lets the player pick one.
+                -- An EDIT sends it straight back so that GM's work survives the edit; a CREATE has
+                -- no such value and sends 0. See HelpFrameOpenTicketSubmit_OnClick.
                 HelpFrameOpenTicket.ticketType = arg1
                 HelpFrameOpenTicketText:SetText(arg2)
 
@@ -675,11 +471,30 @@
         end
 
         -- ref-lua l.478-486. Edit vs create is the only difference, and both close the window.
+        --
+        -- **The two legs send DIFFERENT categories, and that is the whole of 1687's care.**
+        --
+        -- A CREATE has nothing to go on — this window never lets the player pick — so it sends
+        -- TICKET_CATEGORY_UNCATEGORIZED and the GM's queue reads "Unknown", which is true.
+        --
+        -- An EDIT sends `HelpFrameOpenTicket.ticketType` back: the category the SERVER last told us
+        -- this ticket is filed under. That is not the window claiming a category, it is the window
+        -- declining to destroy one. `HandleGMTicketUpdateTextOpcode` range-checks nothing and calls
+        -- `SetTicketType(TicketType(packet.type))` unconditionally (vmangos GMTicketHandler.cpp:60),
+        -- so whatever this leg sends BECOMES the ticket's category — send 0 here and a GM who had
+        -- re-filed the ticket onto a real heading watches it drop back to "Unknown" the moment the
+        -- player fixes a typo. Echoing the server's own value is the only leg that leaves a GM's
+        -- work alone; on a ticket the server itself filed as 0, it is 0 either way.
+        --
+        -- The fallback matters for exactly one case: `hasTicket` is set by UPDATE_TICKET, which
+        -- also sets `ticketType`, so the two cannot disagree — but a stale VM (a `/reload` between
+        -- the answer and the click) could leave the field nil, and nil is not a category.
         function HelpFrameOpenTicketSubmit_OnClick()
+            local text = HelpFrameOpenTicketText:GetText()
             if HelpFrameOpenTicket.hasTicket then
-                UpdateGMTicket(HelpFrameOpenTicket.ticketType, HelpFrameOpenTicketText:GetText())
+                UpdateGMTicket(HelpFrameOpenTicket.ticketType or TICKET_CATEGORY_UNCATEGORIZED, text)
             else
-                NewGMTicket(HelpFrameOpenTicket.ticketType, HelpFrameOpenTicketText:GetText())
+                NewGMTicket(TICKET_CATEGORY_UNCATEGORIZED, text)
             end
             HideUIPanel(HelpFrame)
         end
@@ -687,7 +502,7 @@
         -- ── The toast (ref-lua l.488-501) ──────────────────────────────────────────────────────
         -- Entering the world asks for the ticket; every UPDATE_TICKET after that shows or hides the
         -- toast, and the temporary-enchant column steps down out of its way. The -175 restore is
-        -- BuffFrame's own declared anchor, not the reference's -180 (header, 4).
+        -- BuffFrame's own declared anchor, not the reference's -180 (header, divergence 3).
         function TicketStatusFrame_OnEvent(frame)
             if event == "PLAYER_ENTERING_WORLD" then
                 GetGMTicket()
@@ -731,7 +546,7 @@
         -- One function, wired from both.
         function TicketStatus_OnClick()
             if TicketStatusFrame.hasGMSurvey then
-                -- The survey branch (header, 1): the reference opens GMSurveyFrame and hides the
+                -- The survey branch (header, NOT HERE 1): the reference opens GMSurveyFrame and hides the
                 -- toast. Deferred, and deliberately not stubbed into "hide the toast" — that would
                 -- silently eat a survey the player agreed to take.
                 return
@@ -741,78 +556,6 @@
                 StaticPopup_Hide("HELP_TICKET")
             elseif not HelpFrame:IsVisible() then
                 StaticPopup_Show("HELP_TICKET")
-            end
-        end
-
-        -- ── The GM category list (ref-lua l.503-534) ───────────────────────────────────────────
-        function HelpFrameButton_OnClick(button)
-            HelpFrame_ShowFrame(button.key, button.ticketType)
-        end
-
-        function HelpFrameGM_Update()
-            HelpFrameGM_UpdateCategories(GetGMTicketCategories())
-        end
-
-        -- The vararg is a FLAT id/name list, so row i reads the pair at 2*(offset+i)-1. Lua-5.0
-        -- `arg.n`/`arg[i]` written the 5.1 way (header, 6).
-        function HelpFrameGM_UpdateCategories(...)
-            local n = select("#", ...)
-            local offset = FauxScrollFrame_GetOffset(HelpFrameGMScrollFrame)
-            for i = 1, NUM_GM_CATEGORIES_TO_DISPLAY do
-                getglobal("HelpFrameButton" .. i):Hide()
-            end
-            for i = 1, NUM_GM_CATEGORIES_TO_DISPLAY do
-                local index = 2 * (offset + i) - 1
-                local button = getglobal("HelpFrameButton" .. i)
-                local text = getglobal("HelpFrameButton" .. i .. "Text")
-                if index <= n then
-                    -- Both reads are pinned to ONE value: `select(i, ...)` returns the whole tail,
-                    -- and as the last argument of a call that tail would expand.
-                    local id = select(index, ...)
-                    local name = select(index + 1, ...)
-                    text:SetText(name)
-                    -- key AND ticketType are the same DBC id: one picks the page, the other rides
-                    -- the wire (this file's header).
-                    button.key = id
-                    button.ticketType = id
-                    button:Show()
-                else
-                    button:Hide()
-                end
-            end
-            -- n/2 categories, 37px a row. With the ten DBC rows against ten displayed this leaves
-            -- the bar (and its trough) hidden, which is the reference's look too.
-            FauxScrollFrame_Update(HelpFrameGMScrollFrame, n / 2, NUM_GM_CATEGORIES_TO_DISPLAY, 37)
-        end
-
-        -- ref-lua l.536-542. A configured override (only Stuck has one) or the default route into
-        -- the ticket editor.
-        function HelpFrameGeneralButton_OnClick(button)
-            if button.onClick then
-                button.onClick()
-            else
-                HelpFrame_ShowFrame("OpenTicket")
-            end
-        end
-
-        -- The eight harassment tips. Done here rather than in eight XML `<OnLoad>` bodies because
-        -- gs() is this chunk's local — an XML script body is a separate chunk and cannot see it.
-        function HelpFrameHarassment_OnLoad()
-            local tips = {
-                VerbalAbuseTip1 = "VERBAL_HARASSMENT_TEXT2",       -- GlobalStrings l.4460
-                VerbalAbuseTip2 = "VERBAL_HARASSMENT_TEXT3",       -- l.4461
-                VerbalAbuseTip3 = "VERBAL_HARASSMENT_TEXT4",       -- l.4463
-                PhysicalAbuseTip1 = "PHYSICAL_HARASSMENT_TEXT2",   -- l.3066
-                PhysicalAbuseTip2 = "PHYSICAL_HARASSMENT_TEXT3",   -- l.3063
-                PhysicalAbuseTip3 = "PHYSICAL_HARASSMENT_TEXT4",   -- l.3065
-                PhysicalAbuseTip4 = "PHYSICAL_HARASSMENT_TEXT5",   -- l.3064
-                PhysicalAbuseTip5 = "PHYSICAL_HARASSMENT_TEXT6",   -- l.3068
-            }
-            for name, key in pairs(tips) do
-                local label = getglobal(name .. "Text")
-                if label then
-                    label:SetText(gs(key))
-                end
             end
         end
 
@@ -865,7 +608,7 @@
                 end
             end,
             -- The reference stashes the raising frame on the new dialog and never reads it back
-            -- (header, 5).
+            -- (header, divergence 4).
             OnCancel = function()
                 StaticPopup_Show("HELP_TICKET_ABANDON_CONFIRM")
             end,
@@ -874,30 +617,14 @@
         }
     ]]></Script>
 
-    <!-- ── The four templates (ref-xml l.4-126, geometry verbatim) ──────────────────────────────
-         A bullet row: the quest window's bullet glyph with a 548-wide wrapping label beside it.
-         550x12 is the ROW's declared size and is smaller than the label's — the label overflows it
-         downward, which is what lets a two-line bullet still chain from the next one's TOPLEFT
-         anchor at the reference's own -3/-5 spacings. -->
-    <Frame name="HelpFrameBulletPointTemplate" virtual="true">
-        <Size><AbsDimension x="550" y="12"/></Size>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture file="Interface\QuestFrame\UI-Quest-BulletPoint">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                </Texture>
-                <FontString name="$parentText" inherits="GameFontHighlightSmall" justifyH="LEFT">
-                    <Size><AbsDimension x="548" y="0"/></Size>
-                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="17" y="-3"/></Offset></Anchor></Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
-    </Frame>
+    <!-- ── The one surviving template (ref-xml l.38-77, geometry verbatim) ─────────────────────
+         The reference declares four; 1687 deleted the three whose only customers were the pages it
+         removed (header, WHAT IS DELIBERATELY NOT HERE 5). This one keeps a live customer, the
+         ticket page's own divider.
 
-    <!-- The horizontal rule (ref-xml l.38-77): one 256x64 sheet cut into three bands stacked in v
-         (0..0.3125 left cap, 0.3125..0.625 middle, 0.625..0.9375 right cap) and laid end to end.
-         The middle's +1 y-offset is the reference's own. -->
+         The horizontal rule: one 256x64 sheet cut into three bands stacked in v (0..0.3125 left
+         cap, 0.3125..0.625 middle, 0.625..0.9375 right cap) and laid end to end. The middle's +1
+         y-offset is the reference's own. -->
     <Frame name="HelpFrameDividerTemplate" virtual="true">
         <Size><AbsDimension x="577" y="19"/></Size>
         <Layers>
@@ -925,46 +652,11 @@
         </Layers>
     </Frame>
 
-    <!-- A list row (ref-xml l.78-119): bullet glyph, a bold label and a small description under it,
-         with the HelpFrame highlight sheet cropped to its top 0.578125 as the hover. No scripts —
-         the GM variant below adds the only click this template has. -->
-    <Button name="HelpFrameHomeButtonTemplate" virtual="true">
-        <Size><AbsDimension x="568" y="37"/></Size>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <FontString name="$parentText" inherits="GameFontNormal">
-                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="22" y="-4"/></Offset></Anchor></Anchors>
-                </FontString>
-                <FontString name="$parentDescription" inherits="GameFontHighlightSmall">
-                    <Anchors>
-                        <Anchor point="TOPLEFT" relativeTo="$parentText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
-                <Texture file="Interface\QuestFrame\UI-Quest-BulletPoint">
-                    <Size><AbsDimension x="16" y="16"/></Size>
-                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
-                </Texture>
-            </Layer>
-        </Layers>
-        <HighlightTexture file="Interface\HelpFrame\HelpFrameButton-Highlight" alphaMode="ADD">
-            <TexCoords left="0" right="1.0" top="0" bottom="0.578125"/>
-        </HighlightTexture>
-    </Button>
-
-    <!-- ref-xml l.120-126. `$parentDescription` is never filled on this variant: the GM list's rows
-         carry only the DBC category name, which HelpFrameGM_UpdateCategories writes into
-         `$parentText`. That blank second line is the reference's own look. -->
-    <Button name="GMCategoryButtonTemplate" inherits="HelpFrameHomeButtonTemplate" virtual="true">
-        <Scripts>
-            <OnClick>HelpFrameButton_OnClick(self)</OnClick>
-        </Scripts>
-    </Button>
-
     <!-- ── The window (ref-xml l.127-1409) ─────────────────────────────────────────────────────
          640x512 of six plate pieces (four 256x256 quadrant/edge tiles and two 128-wide right-hand
-         caps), the shared dialog header band, and six full-bleed pages that take turns. The
-         `<HitRectInsets>` keeps the right 44px and bottom 13px of the plate out of the mouse rect —
-         the art bleeds past the drawn frame there.
+         caps), the shared dialog header band, and — after 1687 — TWO full-bleed pages that take
+         turns where the reference has seven. The `<HitRectInsets>` keeps the right 44px and bottom
+         13px of the plate out of the mouse rect — the art bleeds past the drawn frame there.
 
          `parent="UIParent"` is the reference's and is kept verbatim (ItemTextFrame.xml's
          precedent); it is inert in this engine, which has no cross-file parent attachment and
@@ -1018,9 +710,10 @@
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-42" y="-3"/></Offset></Anchor></Anchors>
             </Button>
 
-            <!-- ── Page 1 · Home (ref-xml l.236-397) ─────────────────────────────────────────────
-                 The "what a GM can and cannot help with" preamble. Every page is `setAllPoints` +
-                 `hidden`, and HelpFrame_ShowFrame swaps exactly one of them in. -->
+            <!-- ── Page 1 of 2 · Home (ref-xml l.236-397) ────────────────────────────────────────
+                 The "what a GM can and cannot help with" preamble, and — after 1687 — the only
+                 fork in this window: open a ticket, or unstick yourself. Both pages are
+                 `setAllPoints` + `hidden`, and HelpFrame_ShowFrame swaps exactly one of them in. -->
             <Frame name="HelpFrameHome" setAllPoints="true" hidden="true">
                 <Layers>
                     <Layer level="ARTWORK">
@@ -1094,15 +787,43 @@
                     </Layer>
                 </Layers>
                 <Frames>
-                    <!-- ref-xml l.362-381. The reference fits this button to its label in the
-                         button's own OnLoad; ours does it from the page's OnShow (header, 3). -->
-                    <Button name="HelpFrameHomeIssues" inherits="UIPanelButtonTemplate2" text="HELPFRAME_HOME_BUTTON_TEXT">
+                    <!-- ── The button ROW (ref-xml l.362-381 for this button, the pair is OURS) ───
+                         1687: one click from here to the ticket box, and the Auto-Unstuck that
+                         used to be three pages down beside it. Both are laid out by the reference's
+                         OWN answer to "two buttons centred as a pair under a block of text" — its
+                         StaticPopupTemplate (our UiPanels.xml transcription, `$parentButton1/2`):
+                         the left one hangs its TOPRIGHT 6px short of the anchor's centre, the right
+                         one takes its LEFT off that edge +13. Each therefore grows AWAY from the
+                         centre when it is fitted to its own label, so the 13px gutter holds however
+                         long a locale makes either word.
+
+                         The anchor they hang off is HelpFrameHomeText2's BOTTOM — the last element
+                         of the page's chain, and the same node and same -40 the reference's single
+                         button used, so the row sits exactly where that button sat. Header,
+                         divergence 7 (and 8 for the second button's name).
+
+                         The reference fits its button to its label in the button's own OnLoad; ours
+                         does it from the page's OnShow (header, divergence 2). -->
+                    <Button name="HelpFrameHomeIssues" inherits="UIPanelButtonTemplate2" text="Open a Ticket">
                         <Size><AbsDimension x="250" y="22"/></Size>
                         <Anchors>
-                            <Anchor point="TOP" relativeTo="HelpFrameHomeText2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-40"/></Offset></Anchor>
+                            <Anchor point="TOPRIGHT" relativeTo="HelpFrameHomeText2" relativePoint="BOTTOM"><Offset><AbsDimension x="-6" y="-40"/></Offset></Anchor>
                         </Anchors>
                         <Scripts>
-                            <OnClick>HelpFrame_ShowFrame("GMHome")</OnClick>
+                            <OnClick>HelpFrame_ShowFrame("OpenTicket")</OnClick>
+                        </Scripts>
+                    </Button>
+                    <!-- The label is the reference's own STUCK_BUTTON_TEXT (GlobalStrings.lua
+                         l.4206, "Auto-Unstuck") and the click is the reference's own
+                         HelpFrameUnstick_OnClick; only the seat is new, which is why the name wears
+                         the prefix and the label does not. -->
+                    <Button name="BenillaHelpFrameHomeUnstick" inherits="UIPanelButtonTemplate2" text="STUCK_BUTTON_TEXT">
+                        <Size><AbsDimension x="250" y="22"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT" relativeTo="HelpFrameHomeIssues" relativePoint="RIGHT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts>
+                            <OnClick>HelpFrameUnstick_OnClick()</OnClick>
                         </Scripts>
                     </Button>
                     <Button name="HelpFrameHomeCancel" inherits="GameMenuButtonTemplate" text="CANCEL">
@@ -1113,97 +834,14 @@
                     </Button>
                 </Frames>
                 <Scripts>
-                    <OnShow>HelpFrameButton_FitToText(HelpFrameHomeIssues)</OnShow>
+                    <OnShow>
+                        HelpFrameButton_FitToText(HelpFrameHomeIssues)
+                        HelpFrameButton_FitToText(BenillaHelpFrameHomeUnstick)
+                    </OnShow>
                 </Scripts>
             </Frame>
 
-            <!-- ── Page 2 · Page a GM (ref-xml l.399-603) ────────────────────────────────────────
-                 The ten category rows over the faux scroll kit. Ten rows against ten DBC categories
-                 means the bar and its trough stay hidden (FauxScrollFrame_Update's own gate), which
-                 is the reference's look as well. -->
-            <Frame name="HelpFrameGM" setAllPoints="true" hidden="true">
-                <Layers>
-                    <Layer level="BACKGROUND">
-                        <FontString inherits="GameFontHighlightSmall" text="HELPFRAME_HOME_TEXT">
-                            <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-60"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-                <Frames>
-                    <Button name="HelpFrameButton1" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="-80"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton2" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton3" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton4" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton5" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton6" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton7" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton8" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton9" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="HelpFrameButton10" inherits="GMCategoryButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameButton9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                    </Button>
-
-                    <!-- The bar's TROUGH, replacing the reference's three loose textures
-                         (ref-xml l.517-560). No anchors of its own: it seats itself on its bar the
-                         first time BenillaScrollBar_SetShown touches it, at the very hang those
-                         reference offsets define. Declared BEFORE the faux frame so it draws
-                         beneath the bar. -->
-                    <Frame name="HelpFrameGMScrollFrameScrollBarTrough" inherits="BenillaScrollTroughTemplate"/>
-                    <!-- ref-xml l.504-568: 540x410 at the page's TOPRIGHT(-80,-54). A plain
-                         `<Frame>` on the house faux kit, so the reference's `<OnVerticalScroll>`
-                         (`FauxScrollFrame_OnVerticalScroll(37, HelpFrameGM_Update)`) has nothing to
-                         fire and becomes `updateFunc` instead (header, 1). The instance's OnLoad
-                         REPLACES the template's, so ScrollFrame_OnLoad is re-issued here. -->
-                    <Frame name="HelpFrameGMScrollFrame" inherits="FauxScrollFrameTemplate">
-                        <Size><AbsDimension x="540" y="410"/></Size>
-                        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-80" y="-54"/></Offset></Anchor></Anchors>
-                        <Scripts>
-                            <OnLoad>
-                                ScrollFrame_OnLoad()
-                                self.updateFunc = HelpFrameGM_Update
-                            </OnLoad>
-                        </Scripts>
-                    </Frame>
-
-                    <Button name="HelpFrameGMCancel" inherits="GameMenuButtonTemplate" text="CANCEL">
-                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-53" y="21"/></Offset></Anchor></Anchors>
-                        <Scripts>
-                            <OnClick>HideUIPanel(HelpFrame)</OnClick>
-                        </Scripts>
-                    </Button>
-                    <Button name="HelpFrameGMBack" inherits="GameMenuButtonTemplate" text="BACK">
-                        <Anchors>
-                            <Anchor point="RIGHT" relativeTo="HelpFrameGMCancel" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                        </Anchors>
-                        <Scripts>
-                            <OnClick>HelpFrame_ShowFrame("Home")</OnClick>
-                        </Scripts>
-                    </Button>
-                </Frames>
-                <Scripts>
-                    <OnShow>HelpFrameGM_Update()</OnShow>
-                </Scripts>
-            </Frame>
-
-            <!-- ── Page 3 · The ticket editor (ref-xml l.605-753) ────────────────────────────────
+            <!-- ── Page 2 of 2 · The ticket editor (ref-xml l.605-753) ───────────────────────────
                  `letters="500"` is the reference's own cap and is kept verbatim; note the client
                  engine separately truncates the outgoing description to 1999 characters before the
                  packet leaves, so the box's limit is the tighter of the two and the engine cap sits
@@ -1223,7 +861,7 @@
                     <!-- This bar is on a REAL scroll frame, so it is always up and
                          BenillaScrollBar_SetShown — the only thing that seats a trough — never runs
                          for it. Seated explicitly below through the kit's own public seat verb
-                         (header, 2), replacing the reference's three loose textures at
+                         (header, divergence 1), replacing the reference's three loose textures at
                          ref-xml l.642-685. -->
                     <Frame name="HelpFrameOpenTicketScrollFrameScrollBarTrough" inherits="BenillaScrollTroughTemplate"/>
                     <ScrollFrame name="HelpFrameOpenTicketScrollFrame" inherits="UIPanelScrollFrameTemplate">
@@ -1242,7 +880,7 @@
                         <ScrollChild>
                             <!-- ref-xml l.689-708. 541 wide inside a 540 view, which is the
                                  reference's own arithmetic. The `<OnUpdate>ScrollingEdit_OnUpdate()`
-                                 the reference wires here is deliberately absent (header, 3).
+                                 the reference wires here is deliberately absent (header, NOT HERE 3).
                                  No `autoFocus` attribute, exactly as the reference declares none —
                                  but the consequence differs: the UI.xsd defaults it TRUE, while
                                  this engine applies the C++ ctor default (flags=0, off) uniformly
@@ -1291,331 +929,12 @@
                     <OnEvent>HelpFrameOpenTicket_OnEvent(event)</OnEvent>
                     <!-- The reference's `<OnShow>` body is its own commented-out
                          `HelpFrameOpenTicketDropDown_OnShow()` (ref-xml l.750) — the dead dropdown
-                         (header, 2). Nothing replaces it: the editor is filled by UPDATE_TICKET,
+                         (header, NOT HERE 2). Nothing replaces it: the editor is filled by UPDATE_TICKET,
                          which the Cancel path above and TicketStatusFrame's world-entry poll both
                          provoke. -->
                 </Scripts>
             </Frame>
 
-            <!-- ── Page 4 · The shared general page (ref-xml l.755-980) ──────────────────────────
-                 Nine of the ten categories land here; HelpFrame_SetupGeneralFrame re-dresses and
-                 re-anchors everything below before the page is shown. BulletTitle2 and EndText
-                 declare a bare TOPLEFT (0,0) because that anchor is always replaced in Lua. -->
-            <Frame name="HelpFrameGeneral" setAllPoints="true" hidden="true">
-                <Layers>
-                    <Layer level="ARTWORK">
-                        <FontString name="HelpFrameGeneralTitle" inherits="GameFontNormalLarge" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="25" y="-65"/></Offset></Anchor></Anchors>
-                        </FontString>
-                        <FontString name="HelpFrameGeneralTitleText" inherits="GameFontHighlight" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors>
-                                <Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor>
-                            </Anchors>
-                        </FontString>
-                        <!-- Declared on the same anchor as its sibling above (ref-xml l.782-793) and
-                             re-seated in Lua when a category actually uses it. None does today. -->
-                        <FontString name="HelpFrameGeneralTitleText2" inherits="GameFontHighlight" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors>
-                                <Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor>
-                            </Anchors>
-                        </FontString>
-                        <FontString name="HelpFrameBulletTitle1" inherits="GameFontNormal" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors>
-                                <Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor>
-                            </Anchors>
-                        </FontString>
-                        <FontString name="HelpFrameBulletTitle2" inherits="GameFontNormal" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                        <FontString name="HelpFrameEndText" inherits="GameFontHighlightSmall" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-                <Frames>
-                    <Frame name="HelpFrameGeneralBullet1" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameBulletTitle1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet2" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet3" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet4" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet5" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet6" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet7" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet8" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet9" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <Frame name="HelpFrameGeneralBullet10" inherits="HelpFrameBulletPointTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="HelpFrameGeneralBullet9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
-                    </Frame>
-                    <!-- Both action buttons declare the same throwaway TOP (0,15); the setup
-                         function seats them under whatever the page ended up with. -->
-                    <Button name="HelpFrameGeneralButton" inherits="UIPanelButtonTemplate2">
-                        <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="15"/></Offset></Anchor></Anchors>
-                        <Scripts>
-                            <OnClick>HelpFrameGeneralButton_OnClick(self)</OnClick>
-                        </Scripts>
-                    </Button>
-                    <Button name="HelpFrameGeneralButton2" inherits="UIPanelButtonTemplate2">
-                        <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="15"/></Offset></Anchor></Anchors>
-                        <Scripts>
-                            <OnClick>HelpFrameGeneralButton_OnClick(self)</OnClick>
-                        </Scripts>
-                    </Button>
-                    <Button name="HelpFrameGeneralCancel" inherits="GameMenuButtonTemplate" text="CANCEL">
-                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-53" y="21"/></Offset></Anchor></Anchors>
-                        <Scripts>
-                            <OnClick>HideUIPanel(HelpFrame)</OnClick>
-                        </Scripts>
-                    </Button>
-                    <Button name="HelpFrameGeneralBack" inherits="GameMenuButtonTemplate" text="BACK">
-                        <Anchors>
-                            <Anchor point="RIGHT" relativeTo="HelpFrameGeneralCancel" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                        </Anchors>
-                        <Scripts>
-                            <OnClick>HelpFrame_ShowFrame("GMHome")</OnClick>
-                        </Scripts>
-                    </Button>
-                </Frames>
-            </Frame>
-
-            <!-- ── Page 5 · Harassment (ref-xml l.983-1299) ──────────────────────────────────────
-                 The one category with a page of its own (id 2): two sections, each a heading, a
-                 definition, a "the following are NOT" list, and its own report button. Both buttons
-                 go to the same place. The eight tip strings are filled from Lua (this file's
-                 HelpFrameHarassment_OnLoad) rather than from eight XML OnLoad bodies. -->
-            <Frame name="HelpFrameHarassment" setAllPoints="true" hidden="true">
-                <Layers>
-                    <Layer level="BACKGROUND">
-                        <FontString name="HelpFrameHarassmentText" inherits="GameFontHighlight" text="HARASSMENT_TEXT">
-                            <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-60"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-                <Frames>
-                    <Frame name="HelpFrameVerbalHarassment">
-                        <Size><AbsDimension x="564" y="165"/></Size>
-                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="-86"/></Offset></Anchor></Anchors>
-                        <Layers>
-                            <Layer level="BACKGROUND">
-                                <FontString name="$parentText" inherits="GameFontNormal" text="VERBAL_HARASSMENT" justifyH="LEFT">
-                                    <Size><AbsDimension x="560" y="0"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor></Anchors>
-                                </FontString>
-                                <FontString name="$parentDescription" inherits="GameFontHighlightSmall" text="VERBAL_HARASSMENT_DESCRIPTION" justifyH="LEFT">
-                                    <Size><AbsDimension x="560" y="0"/></Size>
-                                    <Anchors>
-                                        <Anchor point="TOPLEFT" relativeTo="$parentText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor>
-                                    </Anchors>
-                                </FontString>
-                                <FontString name="$parentTipText" inherits="GameFontNormalSmall" text="VERBAL_HARASSMENT_TEXT1" justifyH="LEFT">
-                                    <Size><AbsDimension x="560" y="0"/></Size>
-                                    <Anchors>
-                                        <Anchor point="TOPLEFT" relativeTo="$parentDescription" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor>
-                                    </Anchors>
-                                </FontString>
-                            </Layer>
-                        </Layers>
-                        <Frames>
-                            <Frame name="VerbalAbuseTip1" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentTipText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="VerbalAbuseTip2" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="VerbalAbuseTip1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="VerbalAbuseTip3" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="VerbalAbuseTip2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Button name="HelpFrameVerbalHarassmentButton" inherits="UIPanelButtonTemplate2" text="REPORT_VERBAL_HARASSMENT">
-                                <Size><AbsDimension x="200" y="22"/></Size>
-                                <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="15"/></Offset></Anchor></Anchors>
-                                <Scripts>
-                                    <OnClick>HelpFrame_ShowFrame("OpenTicket")</OnClick>
-                                </Scripts>
-                            </Button>
-                        </Frames>
-                    </Frame>
-                    <Frame name="HelpFrameHarassmentDivider2" inherits="HelpFrameDividerTemplate">
-                        <Anchors>
-                            <Anchor point="TOPLEFT" relativeTo="HelpFrameVerbalHarassment" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-9" y="13"/></Offset></Anchor>
-                        </Anchors>
-                    </Frame>
-                    <Frame name="HelpFramePhysicalHarassment">
-                        <Size><AbsDimension x="568" y="220"/></Size>
-                        <Anchors>
-                            <Anchor point="TOPLEFT" relativeTo="HelpFrameHarassmentDivider2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="9" y="5"/></Offset></Anchor>
-                        </Anchors>
-                        <Layers>
-                            <Layer level="BACKGROUND">
-                                <FontString name="$parentText" inherits="GameFontNormal" text="PHYSICAL_HARASSMENT" justifyH="LEFT">
-                                    <Size><AbsDimension x="564" y="0"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor></Anchors>
-                                </FontString>
-                                <FontString name="$parentDescription" inherits="GameFontHighlightSmall" text="PHYSICAL_HARASSMENT_DESCRIPTION" justifyH="LEFT">
-                                    <Size><AbsDimension x="564" y="0"/></Size>
-                                    <Anchors>
-                                        <Anchor point="TOPLEFT" relativeTo="$parentText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor>
-                                    </Anchors>
-                                </FontString>
-                                <FontString name="$parentTipText" inherits="GameFontNormalSmall" text="PHYSICAL_HARASSMENT_TEXT1" justifyH="LEFT">
-                                    <Size><AbsDimension x="564" y="0"/></Size>
-                                    <Anchors>
-                                        <Anchor point="TOPLEFT" relativeTo="$parentDescription" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor>
-                                    </Anchors>
-                                </FontString>
-                            </Layer>
-                        </Layers>
-                        <Frames>
-                            <Frame name="PhysicalAbuseTip1" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentTipText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="PhysicalAbuseTip2" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="PhysicalAbuseTip1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="PhysicalAbuseTip3" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="PhysicalAbuseTip2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="PhysicalAbuseTip4" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="PhysicalAbuseTip3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="PhysicalAbuseTip5" inherits="HelpFrameBulletPointTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="PhysicalAbuseTip4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Button name="HelpFramePhysicalHarassmentButton" inherits="UIPanelButtonTemplate2" text="REPORT_PHYSICAL_HARASSMENT">
-                                <Size><AbsDimension x="200" y="22"/></Size>
-                                <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="15"/></Offset></Anchor></Anchors>
-                                <Scripts>
-                                    <OnClick>HelpFrame_ShowFrame("OpenTicket")</OnClick>
-                                </Scripts>
-                            </Button>
-                        </Frames>
-                    </Frame>
-                    <Button name="HelpFrameHarassmentCancel" inherits="GameMenuButtonTemplate" text="CANCEL">
-                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-53" y="21"/></Offset></Anchor></Anchors>
-                        <Scripts>
-                            <OnClick>HideUIPanel(HelpFrame)</OnClick>
-                        </Scripts>
-                    </Button>
-                    <Button name="HelpFrameHarassmentBack" inherits="GameMenuButtonTemplate" text="BACK">
-                        <Anchors>
-                            <Anchor point="RIGHT" relativeTo="HelpFrameHarassmentCancel" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                        </Anchors>
-                        <Scripts>
-                            <OnClick>HelpFrame_ShowFrame("GMHome")</OnClick>
-                        </Scripts>
-                    </Button>
-                    <!-- Declared last, as the reference does (ref-xml l.1289-1297) — it anchors to
-                         the page itself, so nothing depends on its position in the list. -->
-                    <Frame name="HelpFrameHarassmentDivider" inherits="HelpFrameDividerTemplate">
-                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="12" y="-70"/></Offset></Anchor></Anchors>
-                    </Frame>
-                </Frames>
-                <Scripts>
-                    <OnLoad>HelpFrameHarassment_OnLoad()</OnLoad>
-                </Scripts>
-            </Frame>
-
-            <!-- ── Page 6 · Stuck (ref-xml l.1301-1378) — UNREACHABLE TODAY, and that is not a bug.
-                 Nothing anywhere passes "Stuck" to HelpFrame_ShowFrame: category id 1 is "Stuck" on
-                 the wire and routes through HELPFRAME_FRAMES[1] to the general page, which
-                 GENERAL_HELPFRAME[1] dresses with this same title, text and unstick button. This
-                 page is the reference's own layout and a later HelpFrame_ShowFrame("Stuck") would
-                 want it, so it is transcribed rather than dropped. See this file's header. -->
-            <Frame name="HelpFrameStuck" setAllPoints="true" hidden="true">
-                <Layers>
-                    <Layer level="ARTWORK">
-                        <FontString name="HelpFrameStuckTitle" inherits="GameFontNormalLarge" text="STUCK_OPTION" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="25" y="-65"/></Offset></Anchor></Anchors>
-                        </FontString>
-                        <FontString name="HelpFrameStuckText1" inherits="GameFontHighlight" text="HELPFRAME_STUCK_TEXT1" justifyH="LEFT">
-                            <Size><AbsDimension x="550" y="0"/></Size>
-                            <Anchors>
-                                <Anchor point="TOPLEFT" relativeTo="HelpFrameStuckTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor>
-                            </Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-                <Frames>
-                    <Button name="HelpFrameStuckStuck" inherits="UIPanelButtonTemplate2" text="STUCK_BUTTON_TEXT">
-                        <Anchors>
-                            <Anchor point="TOP" relativeTo="HelpFrameStuckText1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-25"/></Offset></Anchor>
-                        </Anchors>
-                        <Scripts>
-                            <OnClick>
-                                Stuck()
-                                HideUIPanel(HelpFrame)
-                            </OnClick>
-                        </Scripts>
-                    </Button>
-                    <Button name="HelpFrameStuckCancel" inherits="GameMenuButtonTemplate" text="CANCEL">
-                        <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-53" y="21"/></Offset></Anchor></Anchors>
-                        <Scripts>
-                            <OnClick>HideUIPanel(HelpFrame)</OnClick>
-                        </Scripts>
-                    </Button>
-                    <Button name="HelpFrameStuckBack" inherits="GameMenuButtonTemplate" text="BACK">
-                        <Anchors>
-                            <Anchor point="RIGHT" relativeTo="HelpFrameStuckCancel" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                        </Anchors>
-                        <Scripts>
-                            <OnClick>HelpFrame_ShowFrame("GMHome")</OnClick>
-                        </Scripts>
-                    </Button>
-                </Frames>
-                <Scripts>
-                    <OnShow>HelpFrameButton_FitToText(HelpFrameStuckStuck)</OnShow>
-                </Scripts>
-            </Frame>
-
-            <!-- ── Page 7 · Bug (ref-xml l.1380-1392) — UNREACHABLE, and emptier still. There is no
-                 HELPFRAME_FRAMES "Bug" key at all, so no caller could reach it even by name; the
-                 page is a single divider with nothing above or below it, which is what the
-                 reference ships. Transcribed for the same reason as Stuck above. -->
-            <Frame name="HelpFrameBug" setAllPoints="true" hidden="true">
-                <Frames>
-                    <Frame name="HelpFrameBugDivider" inherits="HelpFrameDividerTemplate">
-                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="12" y="-223"/></Offset></Anchor></Anchors>
-                    </Frame>
-                </Frames>
-            </Frame>
         </Frames>
         <Scripts>
             <OnLoad>HelpFrame_OnLoad(self)</OnLoad>
