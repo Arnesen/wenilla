@@ -4,7 +4,7 @@
 # Cargo.lock IS committed (this workspace produces binaries).
 
 # The wasm-bindgen build output (`scripts/web-build.sh`) — regenerated
-# from `crates/benilla-web` + `web/index.html`/`web/wasi_stubs.js` on every build, and the .wasm
+# from `crates/wenilla` + `web/index.html`/`web/wasi_stubs.js` on every build, and the .wasm
 # alone can run tens of MB.
 /web/dist/
 

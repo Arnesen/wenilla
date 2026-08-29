@@ -45,7 +45,7 @@ async fn serves_a_known_file_and_404s_a_missing_one() {
         return;
     };
     let chain = Arc::new(Chain::open(&data_dir).expect("open chain"));
-    let app = benilla_webhost::data::router(chain);
+    let app = wenilla_host::data::router(chain);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

@@ -1,7 +1,7 @@
 //! [`Conn`] over a browser `WebSocket` — the web body of the transport seam.
 //!
 //! A page cannot open a TCP socket, so the world and realmd connections ride a WebSocket to the
-//! proxy `benilla-webhost` runs, which relays the bytes to the real server. The scheme is fixed
+//! proxy `wenilla-host` runs, which relays the bytes to the real server. The scheme is fixed
 //! (and shared with the host): `{ws-origin}/ws/{port}?host=…`, binary frames, one TCP read chunk
 //! per frame, either side's close closing the other. `?host=` is carried for the proxy's log only —
 //! the upstream it dials is its own `--upstream` flag, so a page cannot aim it at an arbitrary host.

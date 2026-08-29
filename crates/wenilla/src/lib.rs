@@ -3,7 +3,7 @@
 //! build-id stamp so a commit dirties this crate and not `benilla-app` (decision 0993).
 //!
 //! `web/index.html` loads the `wasm-bindgen --target web` glue this crate compiles to
-//! (`scripts/benilla-web.sh build`), which calls `init()` then this module's exported [`start`] —
+//! (`scripts/web-build.sh`), which calls `init()` then this module's exported [`start`] —
 //! `#[wasm_bindgen(start)]` also runs it automatically the moment the module finishes
 //! instantiating, so the two are equivalent; the page calls it explicitly only to control
 //! sequencing with `wasi_stubs.js`'s `bind(memory)` (see that file's own header for why the wasm

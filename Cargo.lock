@@ -836,35 +836,6 @@ name = "benilla-wdt"
 version = "0.1.0"
 
 [[package]]
-name = "benilla-web"
-version = "0.1.0"
-dependencies = [
- "benilla-app",
- "benilla-buildstamp",
- "console_error_panic_hook",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "benilla-webhost"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "benilla-formats",
- "clap",
- "futures-util",
- "percent-encoding",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "benilla-wmo"
 version = "0.1.0"
 dependencies = [
@@ -8114,6 +8085,35 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
+name = "wenilla"
+version = "0.1.0"
+dependencies = [
+ "benilla-app",
+ "benilla-buildstamp",
+ "console_error_panic_hook",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "wenilla-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "benilla-formats",
+ "clap",
+ "futures-util",
+ "percent-encoding",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "wgpu"

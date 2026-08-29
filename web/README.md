@@ -1,4 +1,4 @@
-# benilla in a browser
+# wenilla — benilla in a browser
 
 The same client, compiled to WebAssembly: log in, pick a character, and play a 1.12.1
 server from a browser tab — no install. Everything a browser cannot do natively is replaced
@@ -6,7 +6,7 @@ behind a seam the native build already had:
 
 | native | browser |
 |---|---|
-| raw TCP to realmd/mangosd | a WebSocket to `benilla-webhost`, which proxies it to the server (`benilla-protocol::transport::Conn`) |
+| raw TCP to realmd/mangosd | a WebSocket to `wenilla-host`, which proxies it to the server (`benilla-protocol::transport::Conn`) |
 | the MPQ patch chain on disk | single files fetched from `GET /data/<name>`, answered from the real `Data/` by the host (`benilla-formats::Chain` on wasm) — the MPQs never leave the server |
 | Lua 5.1 in C, `longjmp` for errors | the same C, compiled against the wasi-sdk sysroot with LLVM's wasm SJLJ; 64-bit `lua_Integer` kept (`third_party/mlua-sys`) |
 | `WOW_USER`/`WOW_PASS`/`WOW_CHAR`/`WOW_HOST` env | the page's query string: `?user=…&pass=…&char=…&host=…` |
@@ -28,12 +28,12 @@ behind a seam the native build already had:
 
 ```bash
 scripts/web-setup.sh          # once
-scripts/web-build.sh          # → web/dist/ (index.html, benilla_web.js, benilla_web_bg.wasm, .br/.gz)
-cargo run --release -p benilla-webhost -- --www web/dist --data /path/to/WoW/Data --upstream 127.0.0.1
+scripts/web-build.sh          # → web/dist/ (index.html, wenilla.js, wenilla_bg.wasm, .br/.gz)
+cargo run --release -p wenilla-host -- --www web/dist --data /path/to/WoW/Data --upstream 127.0.0.1
 # then open http://127.0.0.1:8090/
 ```
 
-`benilla-webhost` (`crates/benilla-webhost`) is the whole server side: static files
+`wenilla-host` (`crates/wenilla-host`) is the whole server side: static files
 (precompressed), `GET /data/{name}` (`HEAD` too; `GET /data/__index` lists the chain), and
 `GET /ws/{port}` — a WebSocket↔TCP proxy that only ever dials `--upstream` on 3724 or 8085.
 Put it behind any https front (a reverse proxy, `tailscale serve`, …) to reach it from other

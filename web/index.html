@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>benilla</title>
+<title>wenilla</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
   #benilla { display: block; width: 100vw; height: 100vh; }
@@ -59,10 +59,10 @@
 </script>
 <canvas id="benilla"></canvas>
 <script type="module">
-  import init from './benilla_web.js';
+  import init from './wenilla.js';
   import { bind } from './wasi_stubs.js';
   // `init()` instantiates the wasm module, which runs `#[wasm_bindgen(start)] start()` as part of
-  // instantiation (`benilla-web/src/lib.rs`) — that's the whole boot, canvas included
+  // instantiation (`wenilla/src/lib.rs`) — that's the whole boot, canvas included
   // (`boot.rs` binds to `#benilla` by id, so no query/lookup belongs here). `bind(w.memory)` comes
   // AFTER `init()` on purpose: the wasm Lua VM's WASI shims (`wasi_stubs.js`'s own header) can only
   // zero a WASI caller's out-pointers once the module's linear memory exists to write into, and

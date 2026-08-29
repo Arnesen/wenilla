@@ -14,6 +14,27 @@
 > on. The best way to contribute is to join the [Discord](https://discord.gg/wJSJx467G4) and report
 > the bugs you find. Questions and ideas are welcome in the same place.
 
+## wenilla — this fork: benilla in a browser tab
+
+This fork's `web` branch adds **wenilla**: the same client compiled to WebAssembly, so a 1.12.1
+server can be played from a browser with nothing installed — login, character select and the
+world, with the full FrameXML/Lua UI, over a WebSocket. Nothing is rewritten: raw TCP becomes a
+WebSocket through a small host (`wenilla-host`), the MPQ chain becomes single files fetched over
+HTTP, and the C Lua 5.1 VM is compiled for wasm with the wasi-sdk sysroot. WebGPU is required
+for the world; the host proxies only to the server you point it at, and never sends the MPQs.
+
+```bash
+scripts/web-setup.sh                                   # once: wasm target, wasm-bindgen, wasi-sdk (no sudo)
+scripts/web-build.sh                                   # → web/dist/
+cargo run --release -p wenilla-host -- --www web/dist --data /path/to/WoW/Data
+# open http://127.0.0.1:8090/
+```
+
+See [`web/README.md`](web/README.md) for the how and the porting notes. Everything else
+below is upstream benilla's README, unchanged; upstream is
+[samwhosung/benilla](https://github.com/samwhosung/benilla), and the web work is meant to be
+upstreamable piece by piece.
+
 benilla speaks the original 1.12.1 protocol, so it connects to any server the real client could,
 and reads its game data at runtime from your own 1.12.1 install. Every file format and the network
 protocol are implemented from scratch, with no original client code, no third-party WoW crates,

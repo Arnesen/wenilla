@@ -1,6 +1,6 @@
 //! Web-target chain plumbing: `wasm32-unknown-unknown` has no filesystem, so [`crate::Chain`]
 //! answers every read/existence/listing question with an HTTP call against the Data URL scheme a
-//! companion web host (`benilla-webhost`, Lane H) serves — `GET {origin}/data/{encoded name}`,
+//! companion web host (`wenilla-host`, Lane H) serves — `GET {origin}/data/{encoded name}`,
 //! `HEAD` for existence, `GET /data/__index` for the name list. This module is that HTTP shim.
 //!
 //! [`encode_name`] is plain string math with no browser dependency, so it is exercised natively

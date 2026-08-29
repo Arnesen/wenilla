@@ -19,7 +19,7 @@ default = ["dev"]
 # depends on it and the player build simply says less. Enabled here rather than in `benilla-app`
 # so `benilla-worldview` — the enforcer, whose entire output is these names — carries it too.
 dev = ["benilla-formats/dev", "benilla-assets/dev", "bevy/debug"]
-# The browser render backend, chosen by the launcher (`benilla-web`): WebGL2 runs everywhere but has
+# The browser render backend, chosen by the launcher (`wenilla`): WebGL2 runs everywhere but has
 # no storage buffers (the shared light blob and the skin palettes are storage — decision 0278), so
 # the world needs WebGPU; WebGL2 stays selectable for the glue screens and as the census baseline.
 # Mutually exclusive — bevy asserts if both are on.

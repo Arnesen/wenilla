@@ -46,7 +46,7 @@ fn decode(s: &str) -> Option<String> {
 /// no matter what the right default is per platform.
 ///
 /// Native: `localhost`, decision 0539's original default, unchanged. Web: the page's own
-/// hostname — `benilla-webhost`'s proxy always runs beside the game server it forwards to, so
+/// hostname — `wenilla-host`'s proxy always runs beside the game server it forwards to, so
 /// whatever host served this page is already the right one to open `/ws/{port}` against; a
 /// browser tab has no `localhost`-as-loopback concept worth defaulting to instead (the page did
 /// not load from the player's own machine).

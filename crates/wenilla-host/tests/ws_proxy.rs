@@ -38,7 +38,7 @@ async fn relays_binary_frames_both_ways_and_closes_with_the_upstream() {
     let echo_port = spawn_echo_server().await;
     // The allowlist is by port, so the test builds its own router with the echo port allowed —
     // production's fixed {3724, 8085} set lives in main.rs, not in ws::router itself.
-    let app = benilla_webhost::ws::router("127.0.0.1", [echo_port]);
+    let app = wenilla_host::ws::router("127.0.0.1", [echo_port]);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
