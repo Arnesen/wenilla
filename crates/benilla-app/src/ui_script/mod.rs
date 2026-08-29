@@ -917,6 +917,12 @@ mod friends_tests;
 #[cfg(test)]
 mod guild_tests;
 
+/// The GM help window and its ticket toast (decision 1673). Its own module because every test in
+/// it pushes a `GMTicketCategory.dbc` catalog and drives the ticket wire's own event vocabulary,
+/// which none of the neighbouring windows share.
+#[cfg(test)]
+mod help_frame_tests;
+
 /// The social window's fourth tab — the raid pane and its grid (decision 1549). Its own module for
 /// `guild_tests`' reason: every test in it pushes a RAID roster first, which a file about the
 /// friends list must not be in the business of.

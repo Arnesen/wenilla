@@ -29,12 +29,13 @@
         bar plate doesn't paint over them. Same shape the bag bar next door already uses.
 
         SCOPE / real-client divergences (noted, not bugs):
-        - ONE button has no panel to open yet: Help (no HelpFrame). It is drawn, hovers, and
-          highlights like the rest, but its click is a no-op — the same "art only, wired the day the
-          panel lands" call the page up/down arrows on this same bar already make. Deliberately NOT
-          greyed with the ref's `-Disabled` art: a dead grey button mid-row reads as a broken bar,
-          and the point of this slice is that the bar reads whole. It is one OnClick line from live.
-          (Socials went live with decision 0668, Main Menu with 0674.)
+        - EVERY button now opens something. Help was the last "art only, wired the day the panel
+          lands" one, and HelpFrame.xml is that panel — its click is `ToggleHelpFrame()` and its
+          pushed arm is in UpdateMicroButtons below, exactly as the ref writes both. (Socials went
+          live with decision 0668, Main Menu with 0674, Help with the HelpFrame transcription.)
+          The bar was deliberately never greyed with the ref's `-Disabled` art while the gap
+          lasted: a dead grey button mid-row reads as a broken bar, and it really was one OnClick
+          line from live.
         - The "(key)" suffix is LIVE since 0997: `button.binding` carries the binding ACTION
           name (TOGGLECHARACTER0, TOGGLESPELLBOOK, ...) and the tooltip looks the key up through
           GetBindingKey at hover time — the ref MicroButtonTooltipText's own contract, restored
@@ -173,15 +174,23 @@
         -- ref UpdateMicroButtons (l.20-84): each button reflects whether its panel is up. The
         -- MainMenu arm is the ref's own six-way test (l.47-58) minus the five frames that don't
         -- exist here — GameMenuFrame is the one that does (decision 0674), and it is the one the
-        -- reference lists first. Its keyring arm has no frame here; the still-unwired Help button
-        -- simply never pushes.
+        -- reference lists first. Its keyring arm (l.79-83) still has no frame here.
+        --
+        -- The Help arm is the ref's l.72-76, live since HelpFrame.xml landed. It calls BACK into
+        -- this function from its own OnShow and OnHide, which is the ref's wiring too and is why
+        -- the reference's HelpFrame is the one panel that does not need an event to stay in sync.
         function UpdateMicroButtons()
             BenillaMicroButton_SetPushed(CharacterMicroButton, BenillaMicro_PanelShown("CharacterFrame"))
             BenillaMicroButton_SetPushed(SpellbookMicroButton, BenillaMicro_PanelShown("SpellBookFrame"))
             BenillaMicroButton_SetPushed(TalentMicroButton, BenillaMicro_PanelShown("BenillaTalentFrame"))
             BenillaMicroButton_SetPushed(QuestLogMicroButton, BenillaMicro_PanelShown("QuestLogFrame"))
+            -- ref l.60-64. Missing since the Socials button went live with decision 0668: the
+            -- window opened but its button never read pushed. Spotted while wiring Help, which is
+            -- the same arm one line down; fixed here rather than left for a bug report.
+            BenillaMicroButton_SetPushed(SocialsMicroButton, BenillaMicro_PanelShown("FriendsFrame"))
             BenillaMicroButton_SetPushed(WorldMapMicroButton, BenillaMicro_PanelShown("WorldMapFrame"))
             BenillaMicroButton_SetPushed(MainMenuMicroButton, BenillaMicro_PanelShown("GameMenuFrame"))
+            BenillaMicroButton_SetPushed(HelpMicroButton, BenillaMicro_PanelShown("HelpFrame"))
         end
 
         -- ref CharacterMicroButton_SetPushed/_SetNormal (l.109-117): the portrait shifts its window
@@ -358,13 +367,19 @@
         </Scripts>
     </Button>
 
-    <!-- No HelpFrame yet (SCOPE note). -->
+    <!-- The GM help window (HelpFrame.xml). `ToggleHelpFrame()` is the ref's own OnClick
+         (ref-MainMenuBarMicroButtons.xml l.217-219) and it is the whole wiring: the toggle takes
+         care of the panel manager, and the panel's own OnShow/OnHide call UpdateMicroButtons back
+         so this button's pushed state follows it however the window was opened or closed.
+         It takes no binding — 1.12 has no TOGGLEHELP action — so the tooltip shows the bare
+         label, which is the ref's behaviour for this one too. -->
     <Button name="HelpMicroButton" inherits="BenillaMicroButtonTemplate">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="MainMenuMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
         <Scripts>
             <OnLoad>BenillaMicroButton_OnLoad(self, "Help", HELP_BUTTON, nil, NEWBIE_TOOLTIP_HELP)</OnLoad>
+            <OnClick>ToggleHelpFrame()</OnClick>
         </Scripts>
     </Button>
 </Ui>

@@ -666,6 +666,22 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::ServerUnixTime { unix_time }]
         }
         ServerPacket::BindPoint { area, .. } => vec![SessionEvent::BindPoint { area }],
+        ServerPacket::GmTicketAnswer { ticket } => vec![SessionEvent::GmTicket { ticket }],
+        ServerPacket::GmTicketCreated { response } => {
+            vec![SessionEvent::GmTicketCreated { response }]
+        }
+        ServerPacket::GmTicketUpdated { response } => {
+            vec![SessionEvent::GmTicketUpdated { response }]
+        }
+        ServerPacket::GmTicketDeleted { response } => {
+            vec![SessionEvent::GmTicketDeleted { response }]
+        }
+        ServerPacket::GmTicketSystemStatus { status } => {
+            vec![SessionEvent::GmTicketSystemStatus { status }]
+        }
+        ServerPacket::GmTicketStatusUpdate { status } => {
+            vec![SessionEvent::GmTicketStatusUpdate { status }]
+        }
         ServerPacket::BinderConfirm { binder } => vec![SessionEvent::BinderConfirm { binder }],
         ServerPacket::TalentWipeConfirm { trainer, cost } => {
             vec![SessionEvent::TalentWipeConfirm { trainer, cost }]

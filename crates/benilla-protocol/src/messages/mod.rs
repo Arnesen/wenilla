@@ -29,6 +29,7 @@ mod combat_log;
 mod death;
 mod duel;
 mod gameobject;
+mod gm_ticket;
 mod gossip;
 mod group;
 mod guild;
@@ -110,6 +111,10 @@ pub use duel::{
     read_duel_winner, DuelRequested, DuelWinner,
 };
 pub use gameobject::{gameobj_use, gameobject_query, GameObjectQueryInfo};
+pub use gm_ticket::{
+    gm_ticket_create, gm_ticket_updatetext, GmTicket, GMTICKET_QUEUE_ENABLED,
+    GMTICKET_STATUS_DEFAULT, GMTICKET_STATUS_HASTEXT, RESERVED_FOR_FUTURE_USE,
+};
 pub use gossip::{
     gossip_hello, gossip_select_option, npc_text_query, select_greeting, GossipOption, GossipPoi,
     NpcTextBlock, QuestOption, NPC_TEXT_BLOCKS,
@@ -256,6 +261,15 @@ pub const AUTH_ALREADY_LOGGING_IN: u8 = 0x19;
 pub const AUTH_LOGIN_SERVER_NOT_FOUND: u8 = 0x1A;
 /// The realm is full and we are **queued**, not refused — the one code here that is not an ending.
 pub const AUTH_WAIT_QUEUE: u8 = 0x1B;
+// The tail past the queue. These five are exactly the codes the client's `OKAY_WITH_URL` table
+// (`0x803740`, 5 records, stride 0x24) keys on — banned/no-time/db-busy/suspended/parental — which
+// is why the URL dialog is reachable ONLY from this enum and never from realmd.
+pub const AUTH_BANNED: u8 = 0x1C;
+pub const AUTH_ALREADY_ONLINE: u8 = 0x1D;
+pub const AUTH_NO_TIME: u8 = 0x1E;
+pub const AUTH_DB_BUSY: u8 = 0x1F;
+pub const AUTH_SUSPENDED: u8 = 0x20;
+pub const AUTH_PARENTAL_CONTROL: u8 = 0x21;
 /// `LogoutResult::Success` (`SMSG_LOGOUT_RESPONSE`).
 pub const LOGOUT_SUCCESS: u32 = 0x0;
 /// Chat `Language` wire ids (VERIFIED vmangos `SharedDefines.h:256-261`): the faction tongues.

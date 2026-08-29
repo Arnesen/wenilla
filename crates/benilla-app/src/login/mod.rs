@@ -247,6 +247,30 @@ fn world_refusal_text(strings: &GlueStrings, code: u8) -> &str {
         m::AUTH_SERVER_SHUTTING_DOWN => ("AUTH_SERVER_SHUTTING_DOWN", "Server Shutting Down"),
         m::AUTH_ALREADY_LOGGING_IN => ("AUTH_ALREADY_LOGGING_IN", "Already Logging In"),
         m::AUTH_LOGIN_SERVER_NOT_FOUND => ("AUTH_LOGIN_SERVER_NOT_FOUND", "Invalid Login Server"),
+        // The tail past the queue. These five are exactly the rows of the client's `OKAY_WITH_URL`
+        // table (`0x803740`), which is why the URL dialog is reachable only from THIS enum: the
+        // lookup is a linear search over a ClientServices code and realmd's results never enter it.
+        // benilla shows the text without the URL button — `LaunchURL` is a shell-out we do not do,
+        // and its whitelist (`0x85cc34`) is ten worldofwarcraft.com/blizzard.com domains that have
+        // not served these pages in fifteen years.
+        m::AUTH_BANNED => (
+            "AUTH_BANNED",
+            "This account has been banned for violating the Terms of Use Agreement",
+        ),
+        m::AUTH_ALREADY_ONLINE => ("AUTH_ALREADY_ONLINE", "This character is still logged on"),
+        m::AUTH_NO_TIME => (
+            "AUTH_NO_TIME",
+            "Your World of Warcraft subscription has expired",
+        ),
+        m::AUTH_DB_BUSY => ("AUTH_DB_BUSY", "This session has timed out"),
+        m::AUTH_SUSPENDED => (
+            "AUTH_SUSPENDED",
+            "This account has been temporarily suspended for violating the Terms of Use Agreement",
+        ),
+        m::AUTH_PARENTAL_CONTROL => (
+            "AUTH_PARENTAL_CONTROL",
+            "Access to this account has been blocked by parental controls.",
+        ),
         // `AUTH_OK` never reaches here (it is the success path) and `AUTH_WAIT_QUEUE` is not a
         // refusal at all; anything else is a code this client does not know.
         _ => ("AUTH_FAILED", "Authentication failed"),
@@ -254,27 +278,90 @@ fn world_refusal_text(strings: &GlueStrings, code: u8) -> &str {
     strings.text(key, fallback)
 }
 
-/// The **realmd** logon-proof refusal, borrowed straight out of the table.
+/// The **realmd** logon-proof refusal, in the client's own words — the LONG `LOGIN_*` family.
+///
+/// **This table was wrong in every row until decision 1679**, and wrong in an instructive way: the
+/// codes were right and the *string family* was not. Decision 0539 §6 built it by reading vmangos'
+/// `AuthCodes.h`, which names the wire bytes but says nothing about what the client displays, and
+/// `GlueStrings.lua` happens to define two plausible families whose keys read alike. So a bad
+/// password showed the terse `AUTH_UNKNOWN_ACCOUNT` ("Unknown account") — a real reference string,
+/// in the wrong slot.
+///
+/// VERIFIED (wow-re `system/glue/scratch/login-failure-dialogs.md`, §5 cross-checked): the client
+/// keeps **two** login-status enums with **two** key tables, and they are conflated precisely
+/// because both raise the dialog through `OPEN_STATUS_DIALOG`. realmd's results resolve against
+/// table `0x836b78` — the long `LOGIN_*` family; the world server's resolve against `0x85cae8` —
+/// the short `AUTH_*` family ([`world_refusal_text`]). The chain is grunt opcode table `0x85e278`
+/// → `Logon::OnAuthResult 0x5b2c90` (byte-index table `0x5b2ea4` + jump table `0x5b2e78`) →
+/// `CGlueMgr::OnLoginState 0x46b0f0` → `CGlueMgr::UpdateLoginDialog 0x46b140`.
+///
+/// Two consequences worth stating outright:
+///
+/// **0x04 and 0x05 share one jump-table arm** — byte-identical, both `LOGIN_UNKNOWN_ACCOUNT`. The
+/// reference client structurally *cannot* say "wrong password" on a logon refusal, and
+/// `LOGIN_INCORRECT_PASSWORD` is dead surface it never reaches. That also retires the emulator lore
+/// that the client locks out after 0x05 (vmangos sends 0x04 for both to avoid it): there is no
+/// lockout — no disabled button, no delay, nothing persisted. Its one counter is gated on a
+/// `securityFlags` byte that is zero on vmangos and cmangos, and only escalates the same string
+/// toward its `_PIN`/`_CALL` variants.
+///
+/// **Anything past 0x0F is clamped**, not passed through: the byte-index table saturates at 0xFF,
+/// which lands on the arm that shows `DISCONNECTED`. So 0x10/0x11/0x12 and every unknown future
+/// code read as a disconnect rather than as an authentication message.
 fn logon_refusal_text(strings: &GlueStrings, code: Option<u8>) -> &str {
     let (key, fallback): (&str, &str) = match code {
-        None => ("LOGIN_FAILED", "Unable to connect"),
-        Some(0x03) => ("AUTH_BANNED", "This account has been banned"),
-        // vmangos sends 0x04 for unknown account AND wrong password (its AuthCodes.h comment:
-        // the client locks out after an 0x05).
-        Some(0x04) => ("AUTH_UNKNOWN_ACCOUNT", "Unknown account"),
-        Some(0x05) => ("AUTH_INCORRECT_PASSWORD", "Incorrect Password"),
-        Some(0x06) => ("AUTH_ALREADY_ONLINE", "This account is already logged in"),
-        Some(0x07) => ("AUTH_NO_TIME", "Your subscription has expired"),
-        Some(0x08) => ("AUTH_DB_BUSY", "This session has timed out"),
-        Some(0x09) => ("AUTH_VERSION_MISMATCH", "Wrong client version"),
-        Some(0x0B) => ("LOGIN_FAILED", "Unable to connect"),
-        Some(0x0C) => (
-            "AUTH_SUSPENDED",
-            "This account has been temporarily suspended",
+        // A transport failure never had a code; the client's own answer for the codes that mean
+        // "no usable connection" is the same string, so they share this row.
+        // 0x01/0x02 (unknown0/1), 0x0B (invalid server), 0x0D (no access).
+        None | Some(0x01) | Some(0x02) | Some(0x0B) | Some(0x0D) => {
+            ("LOGIN_FAILED", "Unable to connect")
+        }
+        Some(0x03) => (
+            "LOGIN_BANNED",
+            "This World of Warcraft account has been closed and is no longer available for use.  \
+             Please go to http://www.worldofwarcraft.com/misc/banned.html for further information. ",
         ),
-        Some(0x0D) => ("AUTH_REJECT", "Login unavailable"),
-        Some(0x0F) => ("AUTH_PARENTAL_CONTROL", "Blocked by parental controls"),
-        Some(_) => ("AUTH_FAILED", "Authentication failed"),
+        // BOTH the unknown account and the wrong password — see the doc above.
+        Some(0x04) | Some(0x05) => (
+            "LOGIN_UNKNOWN_ACCOUNT",
+            "The information you have entered is not valid.  Please check the spelling of the \
+             account name and password.  If you need help in retrieving a lost or stolen password \
+             and account, see www.worldofwarcraft.com for more information.",
+        ),
+        Some(0x06) => (
+            "LOGIN_ALREADYONLINE",
+            "This account is already logged into World of Warcraft.  Please check the spelling and \
+             try again.",
+        ),
+        Some(0x07) => (
+            "LOGIN_NOTIME",
+            "You have used up your prepaid time for this account. Please purchase more to continue \
+             playing",
+        ),
+        Some(0x08) => (
+            "LOGIN_DBBUSY",
+            "Could not log in to World of Warcraft at this time.  Please try again later.",
+        ),
+        Some(0x09) => (
+            "LOGIN_BADVERSION",
+            "Unable to validate game version.  This may be caused by file corruption or the \
+             interference of another program.  Please visit www.blizzard.com/support/wow/ for more \
+             information and possible solutions to this issue.",
+        ),
+        Some(0x0C) => (
+            "LOGIN_SUSPENDED",
+            "This World of Warcraft account has been temporarily suspended.  Please go to \
+             http://www.worldofwarcraft.com/misc/banned.html for further information.",
+        ),
+        Some(0x0F) => (
+            "LOGIN_PARENTALCONTROL",
+            "Access to this account has been blocked by parental controls.  Your settings may be \
+             changed in your account preferences at http://www.worldofwarcraft.com.",
+        ),
+        // 0x0A (version update) is IGNORED on the proof (`0x5bada2`) and never reaches a dialog;
+        // it only means anything on the challenge, where it is the patch-download state. Every
+        // remaining code clamps to the disconnect arm.
+        Some(_) => ("DISCONNECTED", "Disconnected from server"),
     };
     strings.text(key, fallback)
 }
@@ -1340,15 +1427,39 @@ mod tests {
     }
 
     /// The code→string map quotes the client's own strings for the vmangos-verified rows.
+    /// The realmd map, against the byte-verified table (wow-re `login-failure-dialogs.md`).
+    ///
+    /// Every row of this changed in decision 1679: the codes were always right and the string
+    /// FAMILY was always wrong, so each of these used to answer with the terse `AUTH_*` twin of
+    /// the string it now gives.
     #[test]
     fn fail_text_maps_the_verified_codes() {
         let strings = GlueStrings::default(); // empty table → the fallback literals
         let logon = |b| fail_text(&strings, Some(LoginRefusal::Logon(b)), None);
-        assert_eq!(logon(0x04), "Unknown account");
-        assert_eq!(logon(0x05), "Incorrect Password");
+
+        // 0x04 and 0x05 share one jump-table arm — the client cannot say "wrong password", and
+        // this is the string a player actually gets for a typo.
+        assert!(logon(0x04).starts_with("The information you have entered is not valid."));
+        assert_eq!(logon(0x05), logon(0x04), "one arm, byte-identical");
+        assert!(logon(0x04).contains("account name and password"));
+
+        // The four "no usable connection" codes share `LOGIN_FAILED` with a bare transport failure.
         assert_eq!(fail_text(&strings, None, None), "Unable to connect");
-        assert_eq!(logon(0x09), "Wrong client version");
-        assert_eq!(logon(0xEE), "Authentication failed");
+        for code in [0x01, 0x02, 0x0B, 0x0D] {
+            assert_eq!(logon(code), "Unable to connect", "code {code:#04x}");
+        }
+
+        assert!(logon(0x03).contains("has been closed"));
+        assert!(logon(0x06).contains("already logged into"));
+        assert!(logon(0x09).contains("Unable to validate game version"));
+        assert!(logon(0x0C).contains("temporarily suspended"));
+        assert!(logon(0x0F).contains("parental controls"));
+
+        // Past 0x0F the byte-index table saturates onto the disconnect arm — so an unknown code
+        // reads as a disconnect, not as an authentication message.
+        for code in [0x10, 0x11, 0x12, 0xEE] {
+            assert_eq!(logon(code), "Disconnected from server", "code {code:#04x}");
+        }
     }
 
     /// **The two result enums are different enums**, and the same byte must not mean the same
@@ -1362,7 +1473,9 @@ mod tests {
         let logon = |b| fail_text(&strings, Some(LoginRefusal::Logon(b)), None);
         let world = |b| fail_text(&strings, Some(LoginRefusal::World(b)), None);
 
-        assert_eq!(logon(0x0C), "This account has been temporarily suspended");
+        // 0x0C: "suspended" to realmd, and to the world server it is AUTH_OK — success, which
+        // never reaches a refusal string at all.
+        assert!(logon(0x0C).contains("temporarily suspended"));
         assert_eq!(world(m::AUTH_BILLING_ERROR), "Billing system error");
         assert_ne!(logon(0x0C), world(0x0C));
 
@@ -1375,6 +1488,10 @@ mod tests {
             world(m::AUTH_UNAVAILABLE),
             "System unavailable - Please try again later"
         );
+        // The five codes the reference's URL dialog keys on — reachable only from this enum.
+        assert!(world(m::AUTH_BANNED).contains("banned"));
+        assert!(world(m::AUTH_SUSPENDED).contains("temporarily suspended"));
+        assert!(world(m::AUTH_PARENTAL_CONTROL).contains("parental controls"));
         // A code this client does not know still lands on the authored catch-all.
         assert_eq!(world(0xEE), "Authentication failed");
     }
@@ -1404,10 +1521,8 @@ mod tests {
             "the name resolved to nothing — this one IS the address",
         );
         // A refusal still wins its own authored string; the dial verdict only speaks for the dial.
-        assert_eq!(
-            fail_text(&strings, Some(LoginRefusal::Logon(0x05)), None),
-            "Incorrect Password",
-        );
+        assert!(fail_text(&strings, Some(LoginRefusal::Logon(0x05)), None)
+            .starts_with("The information you have entered is not valid."));
     }
 
     /// Save → load → clear round-trips through the dot-file (the ref's Get/SetSavedAccountName).

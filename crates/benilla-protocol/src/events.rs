@@ -12,7 +12,7 @@
 use crate::messages::{
     ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
     AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline, DamageShield,
-    EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
+    EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GmTicket, GossipOption,
     GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
     GuildQueryResponse, GuildRoster, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
     LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
@@ -372,6 +372,25 @@ pub enum SessionEvent {
     /// The player's hearthstone bind point (`SMSG_BINDPOINTUPDATE`): the AreaTable id the
     /// `$z` token names ("Returns you to <area>.").
     BindPoint { area: u32 },
+    /// The player's open GM ticket, or `None` for the ordinary "you have no ticket" answer
+    /// (`SMSG_GMTICKET_GETTICKET`; decision 1673). **Every one of these is an answer, including a
+    /// `None`** — the Help window re-polls every 10 minutes and must re-fire `UPDATE_TICKET` each
+    /// time even when nothing changed, so the consumer counts these rather than diffing them.
+    GmTicket { ticket: Option<Box<GmTicket>> },
+    /// The answer to filing a ticket (`SMSG_GMTICKET_CREATE`): 2 = created, 3 = refused,
+    /// 1 = one already exists (vmangos never sends 1 and sometimes sends nothing at all).
+    GmTicketCreated { response: u32 },
+    /// The answer to editing a ticket (`SMSG_GMTICKET_UPDATETEXT`): 4 = saved, 5 = refused.
+    GmTicketUpdated { response: u32 },
+    /// The answer to abandoning a ticket (`SMSG_GMTICKET_DELETETICKET`): 9 = deleted. Also arrives
+    /// unsolicited when a GM runs `.ticket delete`.
+    GmTicketDeleted { response: u32 },
+    /// Whether the petition queue is taking tickets (`SMSG_GMTICKETSYSTEMSTATUS`): 1 = yes.
+    /// Drives `UPDATE_GM_STATUS`, and through it the Help window's "page a GM" gate.
+    GmTicketSystemStatus { status: i32 },
+    /// A GM touched the ticket (`SMSG_GM_TICKET_STATUS_UPDATE`): 1 = updated, 2 = closed,
+    /// 3 = a survey is offered. vmangos never sends it; cmangos makes it the notification model.
+    GmTicketStatusUpdate { status: u32 },
     /// An innkeeper is asking whether to make this your home (`SMSG_BINDER_CONFIRM`) — the
     /// question the `CONFIRM_BINDER` dialog puts on screen. `binder` is the innkeeper's guid, and
     /// it must be echoed in `CMSG_BINDER_ACTIVATE` for the bind to happen at all (decision 1331).

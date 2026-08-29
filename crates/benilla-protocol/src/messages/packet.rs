@@ -8,7 +8,7 @@ use super::{
     ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
     AuctionOwnerNotification, CastOutcome, ChannelNotify, Character, ChatMessage, CorpseLocation,
     DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate,
-    GameObjectQueryInfo, GossipOption, GossipPoi, GroupLootInfo, GroupMemberEntry,
+    GameObjectQueryInfo, GmTicket, GossipOption, GossipPoi, GroupLootInfo, GroupMemberEntry,
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
     LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
@@ -216,6 +216,39 @@ pub enum ServerPacket {
         position: Vector3d,
         map: u32,
         area: u32,
+    },
+    /// `SMSG_GMTICKET_GETTICKET` — the player's open GM ticket, or `None` for the ordinary
+    /// "you have no ticket" answer (decision 1673). **Not always solicited**: vmangos pushes a
+    /// fresh one at the ticket's author when a GM views, escalates or completes it
+    /// (`GMTicketMgr.cpp:153-159`), which is how a reply reaches the player at all in 1.12.
+    GmTicketAnswer {
+        ticket: Option<Box<GmTicket>>,
+    },
+    /// `SMSG_GMTICKET_CREATE` — the answer to filing a ticket: 2 = created, 3 = refused,
+    /// 1 = you already have one (decision 1673). vmangos never sends 1 (an existing ticket just
+    /// yields 3), and answers several refusals with **silence** rather than a code at all.
+    GmTicketCreated {
+        response: u32,
+    },
+    /// `SMSG_GMTICKET_UPDATETEXT` — the answer to editing a ticket: 4 = saved, 5 = refused.
+    GmTicketUpdated {
+        response: u32,
+    },
+    /// `SMSG_GMTICKET_DELETETICKET` — the answer to abandoning a ticket: 9 = deleted.
+    /// Also arrives **unsolicited** when a GM runs `.ticket delete` (`TicketCommands.cpp:100-103`).
+    GmTicketDeleted {
+        response: u32,
+    },
+    /// `SMSG_GMTICKETSYSTEMSTATUS` — 1 = the petition queue is taking tickets, 0 = it is not.
+    /// Answers `CMSG_GMTICKET_SYSTEMSTATUS`; cmangos also broadcasts it to every session when a
+    /// GM toggles the queue, vmangos never does.
+    GmTicketSystemStatus {
+        status: i32,
+    },
+    /// `SMSG_GM_TICKET_STATUS_UPDATE` — a GM touched the ticket: 1 = updated, 2 = closed,
+    /// 3 = a survey is offered. Never sent by vmangos; the core of cmangos's notification model.
+    GmTicketStatusUpdate {
+        status: u32,
     },
     /// `SMSG_BINDER_CONFIRM` — an innkeeper is *asking* whether to make this your home
     /// (decision 1331). The body is the innkeeper's guid, which must come back in
@@ -1310,6 +1343,12 @@ impl ServerPacket {
             ServerPacket::TimeSpeed { .. } => "SMSG_LOGIN_SETTIMESPEED".into(),
             ServerPacket::QueryTimeResponse { .. } => "SMSG_QUERY_TIME_RESPONSE".into(),
             ServerPacket::BindPoint { .. } => "SMSG_BINDPOINTUPDATE".into(),
+            ServerPacket::GmTicketAnswer { .. } => "SMSG_GMTICKET_GETTICKET".into(),
+            ServerPacket::GmTicketCreated { .. } => "SMSG_GMTICKET_CREATE".into(),
+            ServerPacket::GmTicketUpdated { .. } => "SMSG_GMTICKET_UPDATETEXT".into(),
+            ServerPacket::GmTicketDeleted { .. } => "SMSG_GMTICKET_DELETETICKET".into(),
+            ServerPacket::GmTicketSystemStatus { .. } => "SMSG_GMTICKETSYSTEMSTATUS".into(),
+            ServerPacket::GmTicketStatusUpdate { .. } => "SMSG_GM_TICKET_STATUS_UPDATE".into(),
             ServerPacket::BinderConfirm { .. } => "SMSG_BINDER_CONFIRM".into(),
             ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
             ServerPacket::TalentWipeConfirm { .. } => "MSG_TALENT_WIPE_CONFIRM".into(),

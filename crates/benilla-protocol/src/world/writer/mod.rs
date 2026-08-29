@@ -29,6 +29,7 @@
 //! | [`items`] | bags and equipment: use, equip, swap/split/destroy, the template ask |
 //! | [`loot`] | the loot window: open, take, coin, close, roll |
 //! | [`death`] | the corpse run: release, corpse query, reclaim, spirit healer, res answer |
+//! | [`gm_ticket`] | the Help window: file, edit, ask, abandon, queue status |
 //! | [`gossip`] | the front door to every NPC service window |
 //! | [`vendor`] | buy, sell, buy back, repair |
 //! | [`bank`] | open, buy a slot, deposit, withdraw |
@@ -65,6 +66,7 @@ mod chat;
 mod death;
 mod duel;
 mod gameobject;
+mod gm_ticket;
 mod gossip;
 mod group;
 mod guild;

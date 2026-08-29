@@ -803,6 +803,18 @@ fn writer_loop(
                     ClientCommand::RepairItem { vendor, item_guid } => {
                         w.repair_item(vendor, item_guid)
                     }
+                    ClientCommand::GmTicketCreate {
+                        category,
+                        map,
+                        pos,
+                        text,
+                    } => w.gm_ticket_create(category, map, pos, &text),
+                    ClientCommand::GmTicketUpdate { category, text } => {
+                        w.gm_ticket_updatetext(category, &text)
+                    }
+                    ClientCommand::GmTicketGet => w.gm_ticket_get(),
+                    ClientCommand::GmTicketDelete => w.gm_ticket_delete(),
+                    ClientCommand::GmTicketSystemStatus => w.gm_ticket_system_status(),
                     ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
                     ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
                     ClientCommand::BankerActivate { guid } => w.banker_activate(guid),

@@ -116,6 +116,7 @@ mod ui_dressup;
 mod ui_duel;
 mod ui_follow;
 mod ui_gamma;
+mod ui_gm_ticket;
 mod ui_gossip;
 mod ui_guild;
 mod ui_hide;
@@ -193,6 +194,7 @@ use ui_chat::UiChatPlugin;
 use ui_craft::UiCraftPlugin;
 use ui_duel::UiDuelPlugin;
 use ui_follow::UiFollowPlugin;
+use ui_gm_ticket::UiGmTicketPlugin;
 use ui_gossip::UiGossipPlugin;
 use ui_guild::UiGuildPlugin;
 use ui_item_text::UiItemTextPlugin;
@@ -599,6 +601,11 @@ pub fn run(build: BuildId) -> AppExit {
     // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
     // packet in the flow that actually binds anything.
     .add_plugins(UiBinderPlugin)
+    // The GM trouble-ticket flow (decision 1673): the Help window's five sends, the UPDATE_TICKET
+    // answer ticket behind its 10-minute poll, and the GMTicketCategory.dbc list its "page a GM"
+    // rows are built from. Beside the binder because it is the same feed/drain shape, and after it
+    // because both want UiInput ordering and this reads better grouped.
+    .add_plugins(UiGmTicketPlugin)
     // Auto-follow's UI seam: the popup's Follow row + `FollowUnit`/`FollowByName` inbound, and
     // the AUTOFOLLOW_BEGIN/END pair that drives the centre-screen status line outbound.
     .add_plugins(UiFollowPlugin)

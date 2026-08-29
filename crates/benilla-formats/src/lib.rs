@@ -46,6 +46,10 @@ mod macro_icons;
 pub use unit_blood::{load_blood_catalog, BloodCatalog};
 mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
+mod gm_ticket_category;
+pub use gm_ticket_category::{
+    load_gm_ticket_categories, GmTicketCategory, GmTicketCategoryCatalog,
+};
 mod itembagfamily;
 pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
 mod itemclass;

@@ -12,10 +12,10 @@ use crate::wire::{
 
 use super::{
     action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
-    duel, gameobject, gossip, group, guild, items, loot, mail, mirror_timer, monster_move,
-    movement, opcode, page_text, pet, progression, pvp, quest, social, spellbook, spells, stable,
-    taxi, trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo,
-    MoveMode, ServerPacket, SpeedKind,
+    duel, gameobject, gm_ticket, gossip, group, guild, items, loot, mail, mirror_timer,
+    monster_move, movement, opcode, page_text, pet, progression, pvp, quest, social, spellbook,
+    spells, stable, taxi, trade, trainer, update_object, vendor, world_state, Character,
+    CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -287,6 +287,26 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 area,
             }
         }
+        // The GM trouble-ticket answers (decision 1673). The three response opcodes share one
+        // 4-byte body and therefore one reader; only the opcode says which verb was answered.
+        opcode::SMSG_GMTICKET_GETTICKET => ServerPacket::GmTicketAnswer {
+            ticket: gm_ticket::read_gm_ticket(&mut r)?.map(Box::new),
+        },
+        opcode::SMSG_GMTICKET_CREATE => ServerPacket::GmTicketCreated {
+            response: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
+        opcode::SMSG_GMTICKET_UPDATETEXT => ServerPacket::GmTicketUpdated {
+            response: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
+        opcode::SMSG_GMTICKET_DELETETICKET => ServerPacket::GmTicketDeleted {
+            response: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
+        opcode::SMSG_GMTICKET_SYSTEMSTATUS => ServerPacket::GmTicketSystemStatus {
+            status: gm_ticket::read_gm_ticket_system_status(&mut r)?,
+        },
+        opcode::SMSG_GM_TICKET_STATUS_UPDATE => ServerPacket::GmTicketStatusUpdate {
+            status: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
         opcode::SMSG_BINDER_CONFIRM => ServerPacket::BinderConfirm {
             binder: binder::read_binder_confirm(&mut r)?,
         },

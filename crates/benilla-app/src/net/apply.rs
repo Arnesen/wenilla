@@ -237,6 +237,11 @@ pub(super) fn apply_net_updates(
                 // The minimap ping (decision 1596) — a group member's `MSG_MINIMAP_PING` seats the
                 // world point here and the minimap renderer derives everything else from it.
                 ResMut<crate::minimap::MinimapPing>,
+                // The GM ticket (decision 1673) — `SMSG_GMTICKET_GETTICKET` replaces the held
+                // ticket here and BUMPS AN ANSWER COUNTER, which is what `crate::ui_gm_ticket`
+                // diffs on: the Help window re-polls every 10 minutes and an unchanged answer
+                // still has to re-fire `UPDATE_TICKET`.
+                ResMut<crate::ui_gm_ticket::GmTicketState>,
             ),
         ),
     ),
@@ -412,6 +417,7 @@ pub(super) fn apply_net_updates(
                 mut auction_open,
                 guild_notify,
                 mut ping,
+                mut gm_ticket,
             ),
         ),
     ) = caches;
@@ -525,6 +531,7 @@ pub(super) fn apply_net_updates(
                     &mut duel,
                     &mut social,
                     &mut guild,
+                    &mut gm_ticket,
                     &mut aura.6,
                     &mut disconnects,
                 );
@@ -749,6 +756,35 @@ pub(super) fn apply_net_updates(
                 });
             }
             SessionEvent::BinderConfirm { binder: npc } => binder.ask(npc),
+            // The GM ticket answers (decision 1673). The GETTICKET arm takes EVERY answer,
+            // including `None` ("you have no ticket") and including an unsolicited one pushed by a
+            // GM's `.ticket view`/`escalate`/`complete` — they are indistinguishable on the wire
+            // and want identical handling.
+            SessionEvent::GmTicket { ticket } => gm_ticket.answer(ticket),
+            SessionEvent::GmTicketSystemStatus { status } => gm_ticket.answer_queue(status),
+            // A GM touched the ticket. Value 1 makes the reference re-ask (`0x5e7932`), the same
+            // leg the create/update success codes take; 2 (closed) and 3 (survey offered) are
+            // recorded and not acted on — 3 is the survey trigger and that window is deferred.
+            // vmangos never sends this packet at all, so on our server the arm is dead; cmangos
+            // makes it the whole notification model, which is why it is parsed rather than dropped.
+            SessionEvent::GmTicketStatusUpdate { status } => {
+                crate::ui_gm_ticket::apply::status_update(status, &mut gm_ticket)
+            }
+            // The three response codes have no consumer in the shipped 1.12 UI — no event, no
+            // handler. Logged so a refusal is visible in a session log rather than silent; the
+            // `ERR_TICKET_*` display path is still unpinned (see `ui_gm_ticket::apply`).
+            // Create-ok (2) and update-ok (4) make the ENGINE re-ask for the ticket — the
+            // reference's own `0x5e4479` arm, and the reason the shipped UI needs no handler for
+            // either opcode. Without it a filed ticket goes unseen until the 10-minute poll.
+            SessionEvent::GmTicketCreated { response } => {
+                crate::ui_gm_ticket::apply::write_response("create", response, 2, &mut gm_ticket)
+            }
+            SessionEvent::GmTicketUpdated { response } => {
+                crate::ui_gm_ticket::apply::write_response("update", response, 4, &mut gm_ticket)
+            }
+            SessionEvent::GmTicketDeleted { response } => {
+                crate::ui_gm_ticket::apply::response("delete", response)
+            }
             // A zero trainer guid is vmangos's "you have no talents to reset" refusal, not a
             // question — there is nothing to ask about, so nothing goes on screen (decision 1580;
             // `crate::ui_talent_wipe`'s header carries why the reference instead re-sends here).

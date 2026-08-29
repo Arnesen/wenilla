@@ -26,9 +26,10 @@
     <Script><![CDATA[
         -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only
         -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard, Petition,
-        -- GuildRegistrar, Battlefield, Help, Cinematic, WorldStateScore, Minigame) join as their
-        -- windows land (audited row-by-row against the bytes, decision 1507). Two have since left
-        -- that list: the doublewide AuctionFrame with decision 1511, PetStableFrame with 1676.
+        -- GuildRegistrar, Battlefield, Cinematic, WorldStateScore, Minigame) join as their windows
+        -- land (audited row-by-row against the bytes, decision 1507). Three have since left that
+        -- list: the doublewide AuctionFrame with decision 1511, PetStableFrame with 1676, and
+        -- HelpFrame with 1673 — all three are rows below.
         UIPanelWindows = {}
         UIPanelWindows["GossipFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["MerchantFrame"] = { area = "left", pushable = 0 }
@@ -155,6 +156,17 @@
         -- the client. (The ref's l.17-18 register SoundOptionsFrame/UIOptionsFrame the same way;
         -- those panels are this one window's category rows now, so the rows have no frames.)
         UIPanelWindows["OptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
+        -- The GM help window (HelpFrame.xml) — the ref's own registration verbatim
+        -- (`UIPanelWindows["HelpFrame"] = { area = "center", pushable = 0, whileDead = 1 }`,
+        -- UIParent.lua l.35): the THIRD native-center row, and the first one that is not part of
+        -- the settings shell. Same MODE as the two above — it keeps its own screen-CENTER anchor,
+        -- closes every other window on the way in, and while it holds the slot ShowUIPanel refuses
+        -- every non-center panel (`CanOpenPanels` below). That is deliberate here rather than
+        -- incidental: petitioning a GM is a full stop, not something you do beside your bags.
+        -- whileDead, because being dead somewhere you cannot leave is one of the things you page a
+        -- GM about — and it is what lets the ticket toast's HELP_TICKET dialog reach the window
+        -- from a corpse. (The ref's l.40 WorldStateScoreFrame row is center too; no frame here.)
+        UIPanelWindows["HelpFrame"] = { area = "center", pushable = 0, whileDead = 1 }
         -- (0997's KeyBindingFrame row is gone — decision 1008 folded key bindings into the
         -- options window above, the 1.15 layout's own placement; KeyBindingsPage.xml.)
         -- The world map (decision 0203 phase 2) — the ref's own line verbatim (UIParent.lua l.30)

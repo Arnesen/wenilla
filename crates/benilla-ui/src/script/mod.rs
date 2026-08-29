@@ -71,6 +71,7 @@ mod extract;
 mod follow;
 pub(crate) mod font;
 mod font_block;
+mod gm_ticket;
 mod gossip;
 mod guild;
 mod handler_prof;
@@ -168,6 +169,7 @@ pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
 pub use follow::FollowRequest;
+pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
 pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
@@ -543,6 +545,7 @@ impl UiScript {
         social::install(&lua)?;
         guild::install(&lua)?;
         binder::install(&lua)?;
+        gm_ticket::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;
         session::install(&lua)?;

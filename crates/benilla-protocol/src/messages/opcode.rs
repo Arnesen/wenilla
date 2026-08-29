@@ -728,6 +728,47 @@ pub const CMSG_BINDER_ACTIVATE: u16 = 0x01B5; // 437
 pub const SMSG_PLAYERBOUND: u16 = 0x0158; // 344
 pub const SMSG_BINDER_CONFIRM: u16 = 0x02EB; // 747
 
+// The GM trouble-ticket set (VERIFIED vmangos `Opcodes_1_12_1.h` + `Opcodes.cpp:608-630`; decision
+// 1673). Five request/answer pairs behind the Help window, and the client asks for all of them —
+// there is no ticket state pushed at login, so `CMSG_GMTICKET_GETTICKET` right after world entry is
+// the client's own (seen in the 1.12.1 retail sniff, answered `TicketStatus: 10 (NoText)`).
+//
+// **Two of these answers can also arrive UNSOLICITED on vmangos**, which is why they are decoded
+// rather than correlated to a pending ask: `.ticket viewid`/`viewname`/`escalate`/`complete` push a
+// fresh `SMSG_GMTICKET_GETTICKET` at the ticket's author (`GMTicketMgr.cpp:153-159`,
+// `TicketCommands.cpp:265,443-452`), and `.ticket delete <id>` pushes a
+// `SMSG_GMTICKET_DELETETICKET` = `TICKET_DELETED` (`TicketCommands.cpp:100-103`).
+//
+// **And two requests can be answered with SILENCE**, which is why nothing in the client blocks on a
+// reply: `HandleGMTicketCreateOpcode` simply returns — no packet at all — when the queue is off,
+// when the player is under `GMTickets.MinLevel`, or when the category is >= 11
+// (`GMTicketHandler.cpp:91,106-113`), and delete-with-no-ticket likewise returns silently (`:73-86`).
+// Bodies in [`super::gm_ticket`].
+pub const CMSG_GMTICKET_CREATE: u16 = 0x0205; // 517
+pub const SMSG_GMTICKET_CREATE: u16 = 0x0206; // 518
+pub const CMSG_GMTICKET_UPDATETEXT: u16 = 0x0207; // 519
+pub const SMSG_GMTICKET_UPDATETEXT: u16 = 0x0208; // 520
+pub const CMSG_GMTICKET_GETTICKET: u16 = 0x0211; // 529
+pub const SMSG_GMTICKET_GETTICKET: u16 = 0x0212; // 530
+pub const CMSG_GMTICKET_DELETETICKET: u16 = 0x0217; // 535
+pub const SMSG_GMTICKET_DELETETICKET: u16 = 0x0218; // 536
+pub const CMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021A; // 538
+pub const SMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021B; // 539
+
+/// The GM's own ticket-state push (VERIFIED vmangos `Opcodes_1_12_1.h`: 808). Body is a bare `u32`:
+/// 1 = updated, 2 = closed, 3 = a survey is offered.
+///
+/// **vmangos never constructs this packet on any path** — it is registered in its opcode table and
+/// nothing in its source sends it — so on the server benilla talks to this arm is dead. cmangos-
+/// classic makes it the core of its notification model (escalation, first GM read, re-sort, text
+/// update, assignment, queue toggle, close), which is why it is parsed rather than dropped.
+///
+/// It is decoded for one reason beyond completeness: the reference engine answers value 1 by
+/// re-asking for the ticket (`0x5e7932`, wow-re §5), the same leg the create/update success codes
+/// take. Values 2 and 3 are recorded but not acted on — 3 is the GM-survey trigger, and the survey
+/// window is deferred (decision 1673).
+pub const SMSG_GM_TICKET_STATUS_UPDATE: u16 = 0x0328; // 808
+
 // The bank set (VERIFIED vmangos `Opcodes_1_12_1.h`: 439,440-441,642-643).
 // `CMSG_BANKER_ACTIVATE` right-clicks a pure banker;
 // `SMSG_SHOW_BANK` also arrives unprompted from the `GOSSIP_OPTION_BANKER` gossip option. Slot

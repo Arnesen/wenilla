@@ -164,6 +164,7 @@ pub(super) fn disconnected(
     duel: &mut crate::ui_duel::DuelState,
     social: &mut crate::ui_social::SocialState,
     guild: &mut crate::ui_guild::GuildState,
+    gm_ticket: &mut crate::ui_gm_ticket::GmTicketState,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
 ) {
@@ -247,6 +248,11 @@ pub(super) fn disconnected(
     // lazily, and keeping a cache alive across a socket only to save one query is not worth the
     // one wrong name a renamed guild would show.
     *guild = crate::ui_guild::GuildState::default();
+    // The GM ticket is login-scoped too (decision 1673), and for a sharper reason than most: the
+    // ticket belongs to the CHARACTER, and the next login may be a different one. Its answer
+    // counters go with it, so the first `SMSG_GMTICKET_GETTICKET` of the new session re-fires
+    // `UPDATE_TICKET` rather than being diffed away against the old character's answer count.
+    gm_ticket.clear_session();
     // The death stores are session-scoped too: a reclaim expiry, resurrect offer, or corpse
     // marker must not survive the socket (the reconnect re-sends the reclaim delay when dead).
     *death_net = crate::death::DeathNet::default();

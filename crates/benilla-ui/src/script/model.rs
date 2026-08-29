@@ -1321,6 +1321,19 @@ pub(crate) struct Model {
     /// `ConfirmBinder()` calls queued since the app last drained them — each is one
     /// `CMSG_BINDER_ACTIVATE`. A COUNT for [`Self::played_time_asks`]'s reason: the intent carries
     /// no payload (the app holds the innkeeper's guid), so two calls are two sends.
+    /// The `GMTicketCategory.dbc` rows behind `GetGMTicketCategories()` — `(id, name)` in file
+    /// order, pushed once by the app ([`super::UiScript::set_gm_ticket_categories`]). The ids are
+    /// the wire values, so this is an ordered pair list rather than an indexable table
+    /// (decision 1673).
+    pub(crate) gm_ticket_categories: Vec<(u32, String)>,
+    /// Every ticket verb the window called since the app's last drain, **in call order** — ask,
+    /// status-ask, delete, create, edit, one packet each. ONE queue rather than a counter per verb
+    /// so that `DeleteGMTicket(); GetGMTicket()` in a single chunk reaches the wire in that order;
+    /// per-verb drains cannot express it, and the get would answer with the pre-delete state
+    /// (decision 1673).
+    pub(crate) gm_ticket_intents: Vec<super::gm_ticket::GmTicketIntent>,
+    /// `Stuck()` calls queued — each is one cast of spell 7355, the Help window's Auto-Unstuck.
+    pub(crate) stuck_casts: u32,
     pub(crate) binder_confirms: u32,
     /// Is an innkeeper's bind question still live and in range — the answer `CheckBinderDist()`
     /// gives, pushed by the app each frame ([`super::UiScript::set_binder_pending`]). The
@@ -1658,6 +1671,9 @@ impl Model {
             screenshot_asks: 0,
             realm_name: String::new(),
             bind_location: String::new(),
+            gm_ticket_categories: Vec::new(),
+            gm_ticket_intents: Vec::new(),
+            stuck_casts: 0,
             binder_confirms: 0,
             binder_pending: false,
             framerate: 0.0,

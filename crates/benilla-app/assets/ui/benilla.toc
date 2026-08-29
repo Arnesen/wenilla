@@ -429,6 +429,22 @@ MacroFrame.xml
 # UiPanels (ShowUIPanel/HideUIPanel + the UIPanelWindows row that seats it and gets it closed
 # by ESC). Before GameMenuFrame, which is deliberately last.
 ScriptLogFrame.xml
+# The GM help window + the ticket-status toast (the HelpFrame.xml transcription): the third
+# **center**-area UIPanelWindows row, so it opens like the game menu and the options window and
+# shuts every other panel on the way in. It heads the SHELL TAIL for that reason — Help, then the
+# options pair, then the game menu last — and it goes ahead of KeyBindingsPage.xml rather than
+# between it and OptionsFrame.xml, because those two are a hard must-load-before pair and nothing
+# should be wedged into it. Every dependency is far above: UiPanels (ShowUIPanel/HideUIPanel, the
+# UIPanelWindows row, and the StaticPopup engine its three ticket dialogs register into),
+# UIPanelTemplates (UIPanelCloseButton, UIPanelButtonTemplate2, GameMenuButtonTemplate and the
+# real UIPanelScrollFrameTemplate the ticket editor is built on), ScrollTemplates (the faux kit
+# behind the GM category list, its shared trough, and the ScrollingEdit pair), GameTooltip (the
+# toast wears the tooltip backdrop colours at OnLoad) and MicroMenu (whose Help button calls this
+# file's ToggleHelpFrame, and whose UpdateMicroButtons this file calls back on show/hide — both
+# resolved at call time, so that pair could sit either way round). The one seat that is a REAL
+# requirement rather than legibility is **after BuffFrame.xml**: the toast re-anchors
+# TemporaryEnchantFrame out of its own way, and that frame is declared there.
+HelpFrame.xml
 # The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
 # the templates + script of the Options window's Keybindings category, over the
 # engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12

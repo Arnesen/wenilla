@@ -323,6 +323,14 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_BINDER").is_ok() {
                 app.add_plugins(crate::capture::ProbeBinderPlugin);
             }
+            // The GM trouble-ticket live probe: `WOW_PROBE_GMTICKET=1` drives the whole five-opcode
+            // ticket wire through the live VM's own bindings — queue status, clean slate, file, edit,
+            // abandon — and prints the row the server must have stored so the operator can check the
+            // map/position the client never reads back (decision 1673's end-to-end instrument; see
+            // `capture::ProbeGmTicketPlugin`).
+            if std::env::var("WOW_PROBE_GMTICKET").is_ok() {
+                app.add_plugins(crate::capture::ProbeGmTicketPlugin);
+            }
             // The world-book live probe: `WOW_PROBE_BOOK=1` teleports to the Old Town plaque and
             // measures what having the item-text reader open costs per frame, closed vs open —
             // B240's instrument (see `capture::ProbeBookPlugin`).
