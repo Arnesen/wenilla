@@ -9,3 +9,10 @@ description = "WoW 1.12.1 (build 5875) SRP6 client + vanilla world-header crypto
 num-bigint = "0.4.6"
 sha1.workspace = true
 rand = "0.8.6"
+
+# `rand` draws its entropy through `getrandom`, which refuses wasm32-unknown-unknown unless told
+# where the randomness comes from — in a browser that is `crypto.getRandomValues`, behind the "js"
+# feature. Without it the whole crate graph fails to compile for the web target, so the SRP6
+# handshake (whose client secret and proof seed are the draws in question) cannot be built at all.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

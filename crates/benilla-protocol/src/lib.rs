@@ -25,10 +25,10 @@ pub use messages::{
 };
 pub use world::{WardenRequired, WorldReader, WorldSession, WorldWriter, WORLD_PORT};
 
-use std::net::TcpStream;
-
 use anyhow::{anyhow, Context, Result};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_LENGTH};
+
+use crate::transport::Conn;
 
 /// The realmd (auth/login) server port — the stock one a vmangos `realmd` listens on, which our
 /// deploy maps straight through (`3724:3724` in the compose file at `vmangos-deploy`).
@@ -72,11 +72,18 @@ pub struct Logon {
     pub realms: Vec<RealmInfo>,
 }
 
+/// Perform the full SRP6 logon against a vanilla `realmd` and fetch the realm list — the blocking
+/// twin of [`logon_async`], for the CLIs/probes and the native net thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
+    futures_lite::future::block_on(logon_async(host, username, password))
+}
+
 /// Perform the full SRP6 logon against a vanilla `realmd` and fetch the realm list.
 ///
 /// Flow: logon challenge → server challenge (B, g, N, salt) → SRP6 → logon proof → verify the
 /// server's proof (M2) → request + read the realm list.
-pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
+pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<Logon> {
     // `host` may carry an explicit `:port` (`WOW_HOST=play.example.com:3724`); bare hosts get
     // [`AUTH_PORT`].
     let (host, port) = host_port(host, AUTH_PORT);
@@ -97,12 +104,14 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
     let (mut stream, reply, server_public_key) = {
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
-            let mut stream = TcpStream::connect((host, port))
+            let mut stream = Conn::connect(host, port)
+                .await
                 .with_context(|| format!("connecting to {host}:{port}"))?;
             auth::write_logon_challenge(&mut stream, &username.to_uppercase(), CLIENT_BUILD)
                 .context("sending logon challenge")?;
-            let reply =
-                auth::read_challenge_reply(&mut stream).context("reading logon challenge reply")?;
+            let reply = auth::read_challenge_reply(&mut stream)
+                .await
+                .context("reading logon challenge reply")?;
             let server_public_key = PublicKey::from_le_bytes(reply.server_public_key)
                 .map_err(|e| anyhow!("invalid server public key: {e}"))?;
             let stable = server_public_key.is_width_stable();
@@ -136,7 +145,9 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
     .context("sending logon proof")?;
 
     // 5. Verify the server's proof (M2); on success we hold the session key.
-    let server_proof = auth::read_proof_reply(&mut stream).context("reading logon proof reply")?;
+    let server_proof = auth::read_proof_reply(&mut stream)
+        .await
+        .context("reading logon proof reply")?;
     let client = challenge
         .verify_server_proof(server_proof)
         .map_err(|e| anyhow!("server proof mismatch (wrong password?): {e}"))?;
@@ -144,7 +155,9 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
 
     // 6. Realm list.
     auth::write_realm_list_request(&mut stream).context("requesting realm list")?;
-    let realms = auth::read_realm_list(&mut stream).context("reading realm list")?;
+    let realms = auth::read_realm_list(&mut stream)
+        .await
+        .context("reading realm list")?;
 
     Ok(Logon {
         session_key,

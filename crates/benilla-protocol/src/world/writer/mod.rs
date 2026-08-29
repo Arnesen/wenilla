@@ -46,10 +46,10 @@
 //! | [`social`] | friends, ignores, and `/who` |
 //! | [`area_trigger`] | the one "I walked into trigger N" report |
 
-use std::net::TcpStream;
-
 use anyhow::Result;
 use benilla_srp::vanilla_header::EncrypterHalf;
+
+use crate::transport::ConnWriter;
 
 use super::send_packet;
 
@@ -89,11 +89,12 @@ mod trade;
 mod trainer;
 mod vendor;
 
-/// Write half of a split [`WorldSession`](super::WorldSession) — owns a cloned socket + the encrypter. Used to send our own
+/// Write half of a split [`WorldSession`](super::WorldSession) — owns the write half of the
+/// connection + the encrypter. Used to send our own
 /// movement (`MSG_MOVE_*`). The active player must already be the confirmed mover (see
 /// [`WorldSession::set_active_mover`](super::WorldSession::set_active_mover)). Coordinates are raw WoW yards; `orientation` is radians.
 pub struct WorldWriter {
-    pub(super) stream: TcpStream,
+    pub(super) writer: ConnWriter,
     pub(super) encrypter: EncrypterHalf,
     /// The language every chat send carries — the logged-in character's faction tongue,
     /// inherited from the session at split (set by `WorldSession::player_login` off the roster's
@@ -108,6 +109,6 @@ impl WorldWriter {
     /// family modules goes through here, so there is exactly one place framing/encryption happens.
     /// Visible to them because a private item is in scope throughout its module's descendants.
     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
-        send_packet(&mut self.stream, Some(&mut self.encrypter), opcode, body)
+        send_packet(&mut self.writer, Some(&mut self.encrypter), opcode, body)
     }
 }

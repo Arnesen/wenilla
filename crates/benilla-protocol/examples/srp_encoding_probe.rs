@@ -18,11 +18,13 @@
 //! (default 10) failures inside that window and then answers `0x08 WOW_FAIL_DB_BUSY`; the probe
 //! drains the window rather than counting the lockout as a proof failure.
 
-use std::net::TcpStream;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use benilla_protocol::auth::{self, AuthReject};
+// The login readers are awaited (the transport seam, so the same code runs in a browser); this
+// probe stays a straight-line CLI and drives each of them to completion where it stands.
+use benilla_protocol::transport::Conn;
 use num_bigint::BigUint;
 use rand::{thread_rng, RngCore};
 use sha1::{Digest, Sha1};
@@ -270,11 +272,12 @@ fn handshake(
     want: Want,
     tries: u32,
 ) -> Result<(Attempt, Outcome)> {
-    let mut s = TcpStream::connect((host, AUTH_PORT))
+    let mut s = futures_lite::future::block_on(Conn::connect(host, AUTH_PORT))
         .with_context(|| format!("connecting to {host}:{AUTH_PORT}"))?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
     auth::write_logon_challenge(&mut s, user, BUILD).context("sending logon challenge")?;
-    let reply = auth::read_challenge_reply(&mut s).context("reading logon challenge reply")?;
+    let reply = futures_lite::future::block_on(auth::read_challenge_reply(&mut s))
+        .context("reading logon challenge reply")?;
 
     // `B` is not ours to choose: drop the connection — sending no proof, so realmd records nothing —
     // and let the caller redial until the server hands one of the shape we want.
@@ -287,7 +290,7 @@ fn handshake(
 
     auth::write_logon_proof(&mut s, &attempt.a_pub, &attempt.m1, &reply.crc_salt)
         .context("sending logon proof")?;
-    let outcome = match auth::read_proof_reply(&mut s) {
+    let outcome = match futures_lite::future::block_on(auth::read_proof_reply(&mut s)) {
         Ok(m2) => Outcome::Accepted {
             m2_fixed: m2 == attempt.expected_m2(Enc::Fixed),
             m2_minimal: m2 == attempt.expected_m2(Enc::Minimal),

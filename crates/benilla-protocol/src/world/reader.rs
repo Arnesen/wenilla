@@ -1,24 +1,36 @@
-use std::io::Read;
-use std::net::TcpStream;
-
 use anyhow::{anyhow, Result};
 use benilla_srp::vanilla_header::DecrypterHalf;
 
 use crate::messages::{self, ServerPacket};
+use crate::transport::{ConnReader, ReadExactAsync};
 
 use super::recv_packet;
 
-/// Read half of a split [`WorldSession`](super::WorldSession) — owns a cloned socket + the decrypter. Lives on the network
-/// thread, streaming decoded [`crate::SessionEvent`]s (via [`Self::poll`]).
+/// Read half of a split [`WorldSession`](super::WorldSession) — owns the read half of the
+/// connection + the decrypter. Lives on the network thread (native) or in the sequencer task
+/// (web), streaming decoded [`crate::SessionEvent`]s (via [`Self::poll_async`]).
 pub struct WorldReader {
-    pub(super) stream: TcpStream,
+    pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
 }
 
 impl WorldReader {
-    /// Read + decrypt one server packet (blocking).
+    /// Read + decrypt one server packet (blocking) — the native twin of [`Self::recv_async`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recv(&mut self) -> Result<ServerPacket> {
-        recv_packet(&mut self.stream, Some(&mut self.decrypter))
+        futures_lite::future::block_on(self.recv_async())
+    }
+
+    /// Read + decrypt one server packet.
+    pub async fn recv_async(&mut self) -> Result<ServerPacket> {
+        recv_packet(&mut self.reader, Some(&mut self.decrypter)).await
+    }
+
+    /// Read one packet and decode it into a [`crate::Poll`] (blocking) — the native twin of
+    /// [`Self::poll_async`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll(&mut self) -> Result<crate::Poll> {
+        futures_lite::future::block_on(self.poll_async())
     }
 
     /// Read one packet and decode it into a [`crate::Poll`]: the typed [`crate::SessionEvent`]s it
@@ -28,9 +40,9 @@ impl WorldReader {
     ///
     /// `recv_packet` reads the whole body into a buffer before parsing, so a parse error leaves the
     /// stream aligned — we skip that packet rather than tear down the session.
-    pub fn poll(&mut self) -> Result<crate::Poll> {
+    pub async fn poll_async(&mut self) -> Result<crate::Poll> {
         let mut header = [0u8; 4];
-        if let Err(e) = self.stream.read_exact(&mut header) {
+        if let Err(e) = self.reader.read_exact_async(&mut header).await {
             return Err(anyhow!("world stream closed: {e}"));
         }
         self.decrypter.decrypt(&mut header);
@@ -38,7 +50,7 @@ impl WorldReader {
         let opcode = u16::from_le_bytes([header[2], header[3]]);
         let body_len = size.saturating_sub(2) as usize;
         let mut body = vec![0u8; body_len];
-        if let Err(e) = self.stream.read_exact(&mut body) {
+        if let Err(e) = self.reader.read_exact_async(&mut body).await {
             return Err(anyhow!("world stream closed: {e}"));
         }
         match messages::parse_server(opcode, &body) {

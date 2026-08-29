@@ -5,14 +5,59 @@
 //!
 //! Opcodes: `CMD_AUTH_LOGON_CHALLENGE = 0x00`, `CMD_AUTH_LOGON_PROOF = 0x01`, `CMD_REALM_LIST = 0x10`.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::Ipv4Addr;
 
 use anyhow::{bail, Result};
 use sha1::{Digest, Sha1};
 
-use crate::wire::{read_array, read_cstring, read_f32_le, read_u16_le, read_u32_le, read_u8};
+use crate::transport::ReadExactAsync;
 use crate::RealmInfo;
+
+// ── The awaited wire readers ──────────────────────────────────────────────────────────────────────
+//
+// [`crate::wire`]'s readers take `impl Read`, which the browser cannot supply: a WebSocket frame
+// arrives on the very event loop a blocking read would be sitting on. These are the same four
+// encodings this protocol needs, byte for byte, over [`ReadExactAsync`] instead — every login field
+// is fixed-width or length-prefixed, so each one is a `read_exact` and the parsing below is
+// unchanged. Private: the world protocol reads its bodies out of a buffer, so this is the only
+// place that decodes straight off the wire.
+
+/// Read a fixed-length byte array.
+async fn read_array_async<const N: usize>(r: &mut impl ReadExactAsync) -> std::io::Result<[u8; N]> {
+    let mut b = [0u8; N];
+    r.read_exact_async(&mut b).await?;
+    Ok(b)
+}
+
+async fn read_u8_async(r: &mut impl ReadExactAsync) -> std::io::Result<u8> {
+    Ok(read_array_async::<1>(r).await?[0])
+}
+
+async fn read_u16_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<u16> {
+    Ok(u16::from_le_bytes(read_array_async::<2>(r).await?))
+}
+
+async fn read_u32_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<u32> {
+    Ok(u32::from_le_bytes(read_array_async::<4>(r).await?))
+}
+
+async fn read_f32_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<f32> {
+    Ok(f32::from_bits(read_u32_le_async(r).await?))
+}
+
+/// Read a NUL-terminated string (the realm list's names and addresses).
+async fn read_cstring_async(r: &mut impl ReadExactAsync) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let b = read_u8_async(r).await?;
+        if b == 0 {
+            break;
+        }
+        bytes.push(b);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
 
 const CMD_AUTH_LOGON_CHALLENGE: u8 = 0x00;
 const CMD_AUTH_LOGON_PROOF: u8 = 0x01;
@@ -103,42 +148,42 @@ pub fn write_logon_challenge(
 }
 
 /// Read the challenge reply, returning the SRP6 inputs (or erroring on a non-success result).
-pub fn read_challenge_reply(r: &mut impl Read) -> Result<ChallengeReply> {
-    let opcode = read_u8(r)?;
+pub async fn read_challenge_reply(r: &mut impl ReadExactAsync) -> Result<ChallengeReply> {
+    let opcode = read_u8_async(r).await?;
     if opcode != CMD_AUTH_LOGON_CHALLENGE {
         bail!("expected CMD_AUTH_LOGON_CHALLENGE (0x00), got {opcode:#x}");
     }
-    let _protocol_version = read_u8(r)?;
-    let result = read_u8(r)?;
+    let _protocol_version = read_u8_async(r).await?;
+    let result = read_u8_async(r).await?;
     if result != 0 {
         return Err(AuthReject { code: result }.into());
     }
-    let server_public_key = read_array::<32>(r)?;
-    let generator_len = read_u8(r)?;
+    let server_public_key = read_array_async::<32>(r).await?;
+    let generator_len = read_u8_async(r).await?;
     let mut generator = vec![0u8; generator_len as usize];
-    r.read_exact(&mut generator)?;
+    r.read_exact_async(&mut generator).await?;
     let generator = match generator.first() {
         Some(&g) => g,
         None => bail!("server sent an empty generator"),
     };
-    let prime_len = read_u8(r)? as usize;
+    let prime_len = read_u8_async(r).await? as usize;
     let mut prime = vec![0u8; prime_len];
-    r.read_exact(&mut prime)?;
+    r.read_exact_async(&mut prime).await?;
     let large_safe_prime: [u8; 32] = prime
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("large safe prime was {prime_len} bytes, expected 32"))?;
-    let salt = read_array::<32>(r)?;
+    let salt = read_array_async::<32>(r).await?;
     // Consume the rest of the packet so the stream stays aligned for the next message — login packets
     // are NOT length-framed, so leftover bytes desync the very next read. crc_salt[16] feeds the
     // integrity proof (not SRP6); security_flag (+ the PIN block if set) is unused but must still be
     // read off.
-    let crc_salt = read_array::<16>(r)?;
-    let security_flag = read_u8(r)?;
+    let crc_salt = read_array_async::<16>(r).await?;
+    let security_flag = read_u8_async(r).await?;
     if security_flag & 0x01 != 0 {
         // PIN: pin_grid_seed (u32) + pin_salt[16]. (vmangos sends security_flag = 0; handled anyway.)
-        let _pin_grid_seed = read_u32_le(r)?;
-        let _pin_salt = read_array::<16>(r)?;
+        let _pin_grid_seed = read_u32_le_async(r).await?;
+        let _pin_salt = read_array_async::<16>(r).await?;
     }
     Ok(ChallengeReply {
         server_public_key,
@@ -239,18 +284,18 @@ pub fn write_logon_proof(
 }
 
 /// Read the proof reply, returning the server's proof `M2` (or erroring on a non-success result).
-pub fn read_proof_reply(r: &mut impl Read) -> Result<[u8; 20]> {
-    let opcode = read_u8(r)?;
+pub async fn read_proof_reply(r: &mut impl ReadExactAsync) -> Result<[u8; 20]> {
+    let opcode = read_u8_async(r).await?;
     if opcode != CMD_AUTH_LOGON_PROOF {
         bail!("expected CMD_AUTH_LOGON_PROOF (0x01), got {opcode:#x}");
     }
-    let result = read_u8(r)?;
+    let result = read_u8_async(r).await?;
     if result != 0 {
         // A wrong password fails HERE (the server can't verify M1): vmangos answers 0x04.
         return Err(AuthReject { code: result }.into());
     }
-    let server_proof = read_array::<20>(r)?;
-    let _hardware_survey_id = read_u32_le(r)?;
+    let server_proof = read_array_async::<20>(r).await?;
+    let _hardware_survey_id = read_u32_le_async(r).await?;
     Ok(server_proof)
 }
 
@@ -262,24 +307,24 @@ pub fn write_realm_list_request(w: &mut impl Write) -> std::io::Result<()> {
 }
 
 /// Read `CMD_REALM_LIST_Server` into the advertised realms.
-pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
-    let opcode = read_u8(r)?;
+pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInfo>> {
+    let opcode = read_u8_async(r).await?;
     if opcode != CMD_REALM_LIST {
         bail!("expected CMD_REALM_LIST (0x10), got {opcode:#x}");
     }
-    let _size = read_u16_le(r)?;
-    let _header_padding = read_u32_le(r)?;
-    let number_of_realms = read_u8(r)?;
+    let _size = read_u16_le_async(r).await?;
+    let _header_padding = read_u32_le_async(r).await?;
+    let number_of_realms = read_u8_async(r).await?;
     let mut realms = Vec::with_capacity(number_of_realms as usize);
     for _ in 0..number_of_realms {
-        let realm_type = read_u32_le(r)?;
-        let _flag = read_u8(r)?;
-        let name = read_cstring(r)?;
-        let address = read_cstring(r)?;
-        let population = read_f32_le(r)?;
-        let characters = read_u8(r)?;
-        let _category = read_u8(r)?;
-        let _realm_id = read_u8(r)?;
+        let realm_type = read_u32_le_async(r).await?;
+        let _flag = read_u8_async(r).await?;
+        let name = read_cstring_async(r).await?;
+        let address = read_cstring_async(r).await?;
+        let population = read_f32_le_async(r).await?;
+        let characters = read_u8_async(r).await?;
+        let _category = read_u8_async(r).await?;
+        let _realm_id = read_u8_async(r).await?;
         realms.push(RealmInfo {
             name,
             address,
@@ -288,7 +333,7 @@ pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
             realm_type,
         });
     }
-    let _footer_padding = read_u16_le(r)?; // consume so the stream stays aligned (see challenge reply)
+    let _footer_padding = read_u16_le_async(r).await?; // consume so the stream stays aligned (see challenge reply)
     Ok(realms)
 }
 
