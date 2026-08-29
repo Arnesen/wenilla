@@ -54,3 +54,10 @@ objc2-foundation = "0.2"
 # `sel!`, for the two selectors `mac_quit` swaps. The pin objc2-app-kit 0.2 itself builds against,
 # so this adds a name to the manifest and nothing to the graph.
 objc2 = "0.5"
+
+# WebGL2 is bevy's wasm32 render backend (no WebGPU fallback here). `bevy.workspace = true` above
+# already carries it transitively (`default_platform` bundles it for every target), but named
+# explicitly on the wasm32 target table per the plan's feature-unification note — this crate and
+# `benilla-app` must resolve `bevy` to the SAME feature set or cargo builds two copies.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { workspace = true, features = ["webgl2"] }

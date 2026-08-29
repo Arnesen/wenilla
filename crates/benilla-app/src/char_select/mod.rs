@@ -429,7 +429,7 @@ fn apply_roster_policy(
             // seat exists because `WOW_CHAR` is also an *unattended* marker
             // ([`crate::run_mode::unattended_login`]), so using it to reach the world would switch
             // the very branch a session test is trying to exercise. Same fast path, no marker.
-            None => std::env::var("WOW_CHAR").ok().or_else(|| {
+            None => crate::webenv::var("WOW_CHAR").or_else(|| {
                 std::env::var("WOW_LOGIN_SMOKE")
                     .ok()
                     .and_then(|s| crate::login::smoke_character(&s))

@@ -229,8 +229,8 @@ fn drive_policy(
         // owns it, so "the harness logs in for us" and "the harness logs back in for us" can never
         // be two different answers.
         if crate::run_mode::unattended_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
-            let user = std::env::var("WOW_USER").unwrap_or_else(|_| "one".into());
-            let pass = std::env::var("WOW_PASS").unwrap_or_else(|_| "pone".into());
+            let user = crate::webenv::var("WOW_USER").unwrap_or_else(|| "one".into());
+            let pass = crate::webenv::var("WOW_PASS").unwrap_or_else(|| "pone".into());
             // The account guard (decision 0649): a vmangos login KICKS whoever holds the account,
             // so an unattended run from a pool slot must not authenticate as the director's `one`
             // or a neighbouring slot's probe. Only the *automated* path is gated — a typed login

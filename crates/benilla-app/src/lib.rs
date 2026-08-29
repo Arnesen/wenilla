@@ -158,6 +158,11 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
+/// The web build's env-var stand-in (a browser tab has no process environment) — see the
+/// module doc. `pub` because the plan's "Env/config on web" interface names it as
+/// `benilla_app::webenv::var` by that exact path; every in-crate caller still just writes
+/// `crate::webenv::var` like any other module.
+pub mod webenv;
 mod world_backdrop;
 mod world_state;
 mod world_state_ui;
