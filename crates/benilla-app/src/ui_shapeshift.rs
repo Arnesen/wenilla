@@ -35,7 +35,8 @@
 //! remainders re-push only on a [`Cooldowns::generation`] change (`state.rs`'s own churn gate) —
 //! the engine extrapolates the sweep from the absolute start between pushes.
 
-use std::time::Instant;
+// `bevy::platform::time::Instant`, not `std::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `std::time::Instant` — a plain alias for it everywhere else.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 

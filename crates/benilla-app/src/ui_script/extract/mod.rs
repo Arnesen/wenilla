@@ -672,7 +672,13 @@ pub(super) fn drive_script(
     // `Instant::now()` at a conversion site instead re-measures the tick→feed scheduling gap
     // every frame and wobbles the derived start by that jitter (the resource's own doc).
     *ui_clock = super::UiClock {
-        anchor: time.last_update().unwrap_or_else(std::time::Instant::now),
+        // `Time<Real>::last_update()` returns `bevy_platform::time::Instant`, which on wasm32 is
+        // `web_time::Instant` (the `web` Bevy feature default_platform pulls in) — a distinct
+        // type from `std::time::Instant` there, unlike on native where they're the same type by
+        // alias. Fall back with Bevy's own `Instant::now` so this compiles on both.
+        anchor: time
+            .last_update()
+            .unwrap_or_else(bevy::platform::time::Instant::now),
         ui_now: script.now(),
     };
     let us_tick = lap();

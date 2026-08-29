@@ -7,7 +7,8 @@
 //! `SMSG_PET_SPELLS`. So the feed does no admission and no ordering: it *renders* the ten words
 //! the last packet delivered. The slot law it renders them by is [`super`]'s.
 
-use std::time::Instant;
+// `bevy::platform::time::Instant`, not `std::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `std::time::Instant` — a plain alias for it everywhere else.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 

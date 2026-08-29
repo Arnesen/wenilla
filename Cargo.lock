@@ -605,6 +605,7 @@ dependencies = [
  "half",
  "image",
  "include_dir",
+ "js-sys",
  "kira",
  "libc",
  "mint",
@@ -618,6 +619,8 @@ dependencies = [
  "smithay-clipboard",
  "symphonia",
  "toml",
+ "wasm-bindgen",
+ "web-sys",
  "wgpu",
 ]
 
@@ -705,6 +708,7 @@ dependencies = [
 name = "benilla-srp"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "num-bigint",
  "rand 0.8.6",
  "sha1",
@@ -3529,8 +3533,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -4610,8 +4616,6 @@ dependencies = [
 [[package]]
 name = "mlua-sys"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f1c3a7fc7580227ece249fd90aa2fa3b39eb2b49d3aec5e103b3e85f2c3dfc8"
 dependencies = [
  "cc",
  "cfg-if",

@@ -51,7 +51,16 @@ const STATE_DIR: &str = "benilla-config";
 /// The one benilla-state folder, or `None` when persistence is off (a hermetic capture run, or a
 /// platform with no discoverable executable path). Existence is NOT guaranteed — [`write_atomic`]
 /// creates it on first write; readers just try their file and treat absent as defaults.
+// The wasm32 early return below makes the rest of the function genuinely unreachable there
+// (by design — see its own comment); `cfg_attr` keeps that lint quiet only on the target it
+// actually applies to, so a real unreachable branch on native would still warn.
+#[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
 pub(crate) fn home() -> Option<PathBuf> {
+    // No persistence on web yet (no filesystem, no `BENILLA_HOME`/exe-relative folder to speak
+    // of) — every caller already treats `None` as "defaults, don't write", which is exactly what
+    // a browser tab should do until an OPFS-backed `home()` lands.
+    #[cfg(target_arch = "wasm32")]
+    return None;
     if std::env::var_os("WOW_CAPTURE").is_some() {
         return None; // hermetic: captures neither read nor write player state
     }

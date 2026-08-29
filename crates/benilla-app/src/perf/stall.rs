@@ -80,7 +80,14 @@ fn beat(mut exits: MessageReader<AppExit>) {
     HEARTBEAT_MS.store(since_start_ms().max(1), Ordering::SeqCst);
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
 pub(super) fn plugin(app: &mut App) {
+    // No watchdog thread on wasm32 (single-threaded there without COOP/COEP + SharedArrayBuffer,
+    // and there is no `sample`/`_exit` to shell out to on a browser tab anyway) — a hung main
+    // thread on web just freezes the tab, which needs no separate diagnosis. The injectors below
+    // are standing test affordances for exercising the native watchdog, so they stay off too.
+    #[cfg(target_arch = "wasm32")]
+    return;
     // The injectors are armed FIRST, deliberately: they are how the wedge is reproduced, and the
     // one A/B this instrument exists to support is "same wedge, watchdog off — does the process
     // still hang?". Registered after the `WOW_STALL_SAMPLE=0` gate, as they were until 1637, that

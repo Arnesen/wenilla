@@ -26,6 +26,10 @@ use kira::backend::cpal::CpalBackendSettings;
 use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
 use kira::effect::volume_control::{VolumeControlBuilder, VolumeControlHandle};
 use kira::listener::ListenerHandle;
+// kira drops its whole streaming module on wasm32 (no decode threads there — `sound.rs`'s own
+// `#[cfg(not(target_arch = "wasm32"))]` on `pub mod streaming`), so the type only exists to
+// import on native. The wasm32 stand-ins live just below the `pub(crate) use` block they replace.
+#[cfg(not(target_arch = "wasm32"))]
 use kira::sound::streaming::StreamingSoundData;
 use kira::sound::FromFileError;
 use kira::track::{SendTrackBuilder, SendTrackHandle, SpatialTrackBuilder};
@@ -41,8 +45,48 @@ pub(crate) use benilla_formats::SoundProvider;
 // for removal — which lands once the track's sounds finish, see `play_3d`'s
 // `persist_until_sounds_finish`, so a fade-then-drop still gets to fade).
 pub(crate) use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use kira::sound::streaming::StreamingSoundHandle;
 pub(crate) use kira::track::SpatialTrackHandle;
+
+/// wasm32's stand-in for [`StreamingSoundData`]/[`StreamingSoundHandle`]: kira has no decode
+/// thread to stream on there, so every "streaming" sound (music/ambience) is decoded fully up
+/// front as a [`StaticSoundData`] instead (`stream_from_bytes`'s wasm arm, below). These wrap a
+/// static sound behind the streaming names so `glue.rs`/`zone.rs` — and every doc comment in this
+/// module — read the same on both targets; `Error` stays a phantom parameter purely so the call
+/// sites that spell out `StreamingSoundHandle<FromFileError>` don't need a `#[cfg]` of their own.
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct StreamingSoundData<Error>(StaticSoundData, std::marker::PhantomData<Error>);
+
+#[cfg(target_arch = "wasm32")]
+impl<Error> StreamingSoundData<Error> {
+    pub(crate) fn volume(self, volume: impl Into<kira::Value<Decibels>>) -> Self {
+        Self(self.0.volume(volume), self.1)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct StreamingSoundHandle<Error>(StaticSoundHandle, std::marker::PhantomData<Error>);
+
+#[cfg(target_arch = "wasm32")]
+impl<Error> StreamingSoundHandle<Error> {
+    /// The four [`StaticSoundHandle`] methods this module and its callers actually use — the
+    /// full control surface (`pause`/`seek_to`/`set_loop_region`/…) is identical between kira's
+    /// static and streaming handles (both expand the same `handle_param_setters!` macro), so
+    /// forwarding grows here the moment a caller needs more.
+    pub(crate) fn set_volume(&mut self, volume: impl Into<kira::Value<Decibels>>, tween: Tween) {
+        self.0.set_volume(volume, tween);
+    }
+    pub(crate) fn state(&self) -> kira::sound::PlaybackState {
+        self.0.state()
+    }
+    pub(crate) fn position(&self) -> f64 {
+        self.0.position()
+    }
+    pub(crate) fn stop(&mut self, tween: Tween) {
+        self.0.stop(tween);
+    }
+}
 
 /// An immediate (zero-duration) parameter change. kira requires a tween on every setter; the
 /// WoW-side ramps (volume rates, crossfades) are our own math updated per frame, so the backend
@@ -371,6 +415,7 @@ impl Mixer {
     /// Decode-stream a long sound (music/ambience MP3s) on the main track. The data wraps the
     /// *compressed* bytes (a few MB off the MPQ chain) — kira decodes incrementally on its own
     /// thread; nothing is pre-decoded to PCM.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn play_stream(
         &mut self,
         data: StreamingSoundData<FromFileError>,
@@ -378,6 +423,20 @@ impl Mixer {
         self.manager
             .play(data)
             .map_err(|e| anyhow::anyhow!("play stream: {e}"))
+    }
+
+    /// wasm32 twin: `data` is already a fully-decoded [`StaticSoundData`] wearing the streaming
+    /// name (see [`StreamingSoundData`]'s doc) — play it as one and re-wrap the handle.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn play_stream(
+        &mut self,
+        data: StreamingSoundData<FromFileError>,
+    ) -> Result<StreamingSoundHandle<FromFileError>> {
+        let handle = self
+            .manager
+            .play(data.0)
+            .map_err(|e| anyhow::anyhow!("play stream: {e}"))?;
+        Ok(StreamingSoundHandle(handle, std::marker::PhantomData))
     }
 }
 
@@ -538,17 +597,24 @@ impl Mixer {
     /// Drain the backend's health queues. Cheap and non-blocking (two ring-buffer pops per
     /// frame); the queues are bounded, so *not* draining them is what loses information.
     pub(crate) fn poll_health(&mut self) -> MixHealth {
-        let backend = self.manager.backend_mut();
-        while let Some(load) = backend.pop_cpu_usage() {
-            self.health.load = load;
-            self.health.peak_load = self.health.peak_load.max(load);
-            if load >= 1.0 {
-                self.health.overruns += 1;
+        // kira's wasm32 `CpalBackend` has no `pop_cpu_usage`/`pop_error` — its cpal backend there
+        // is Web Audio under the hood and doesn't expose the diagnostics API these read. Rather
+        // than fabricate a load/error count kira never gives it, the meter just reports nothing
+        // on web (`health` starts and stays at its `Default`).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let backend = self.manager.backend_mut();
+            while let Some(load) = backend.pop_cpu_usage() {
+                self.health.load = load;
+                self.health.peak_load = self.health.peak_load.max(load);
+                if load >= 1.0 {
+                    self.health.overruns += 1;
+                }
             }
-        }
-        while let Some(err) = backend.pop_error() {
-            self.health.stream_errors += 1;
-            warn!("audio: stream error — {err}");
+            while let Some(err) = backend.pop_error() {
+                self.health.stream_errors += 1;
+                warn!("audio: stream error — {err}");
+            }
         }
         self.health
     }
@@ -612,8 +678,19 @@ pub(crate) fn loop_from_bytes(bytes: Vec<u8>) -> Result<StaticSoundData> {
 
 /// Wrap compressed audio bytes for decode-streaming (music/ambience). The bytes go in behind
 /// [`PromotingSource`] — the decode-thread QoS fix (decision 1109) — never a bare cursor.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn stream_from_bytes(bytes: Vec<u8>) -> Result<StreamingSoundData<FromFileError>> {
     StreamingSoundData::from_media_source(PromotingSource(std::io::Cursor::new(bytes)))
+        .context("opening stream")
+}
+
+/// wasm32 twin: no decode thread exists to promote (see [`PromotingSource`]'s doc — the whole
+/// reason it exists), so the compressed bytes are decoded to PCM synchronously, up front, on
+/// whatever thread calls this (the main thread, same as [`sfx_from_bytes`] already does).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn stream_from_bytes(bytes: Vec<u8>) -> Result<StreamingSoundData<FromFileError>> {
+    StaticSoundData::from_cursor(std::io::Cursor::new(bytes))
+        .map(|data| StreamingSoundData(data, std::marker::PhantomData))
         .context("opening stream")
 }
 

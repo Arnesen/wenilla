@@ -9,3 +9,11 @@ description = "WoW 1.12.1 (build 5875) SRP6 client + vanilla world-header crypto
 num-bigint = "0.4.6"
 sha1.workspace = true
 rand = "0.8.6"
+
+# `rand` 0.8 pulls `getrandom` 0.2 for its OS entropy source, which refuses to build for
+# `wasm32-unknown-unknown` at all unless told which browser API to use (the "js" feature, calling
+# `crypto.getRandomValues` through `wasm-bindgen`) — there is no default because a bare wasm32
+# binary has no syscall to reach for. Native targets are unaffected: this only adds an edge under
+# the wasm32 target table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

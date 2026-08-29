@@ -35,11 +35,6 @@ trace_chrome = ["bevy/trace_chrome"]
 
 [dependencies]
 anyhow.workspace = true
-# OS clipboard access for the UI EditBox copy/cut/paste chords (chat input). Already in the tree via
-# bevy_egui; pinned to the same 3.x so there's one copy. Read on the main thread (the UI key feed is
-# a NonSend system) — required for the macOS NSPasteboard path. Covers macOS, Windows, and Linux/BSD
-# under X11; the Wayland backend is `smithay-clipboard` below (decision 0702).
-arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
 wgpu.workspace = true
@@ -117,6 +112,14 @@ mint = "0.5"
 # `gossip-npctext-law.md` — the reference re-rolls in its gossip handler), so the app needs a uniform
 # source. Pinned to 0.8: the version `benilla-srp` already depends on, so this adds no crate.
 rand = "0.8"
+
+# OS clipboard access for the UI EditBox copy/cut/paste chords (chat input). Already in the tree via
+# bevy_egui; pinned to the same 3.x so there's one copy. Read on the main thread (the UI key feed is
+# a NonSend system) — required for the macOS NSPasteboard path. Covers macOS, Windows, and Linux/BSD
+# under X11; the Wayland backend is `smithay-clipboard` below (decision 0702). Native-only: arboard
+# has no wasm32 backend at all (`textinput/clipboard.rs` falls back to no pasteboard there).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = "3"
 
 [dev-dependencies]
 # The WMO portal-cull audit's raw-face instruments (`WOW_PIN_COL`): the pin probe compares the
