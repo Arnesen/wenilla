@@ -53,6 +53,11 @@ pub const SMSG_DESTROY_OBJECT: u16 = 0x00AA;
 // runs UNACKED, vmangos re-anchors object visibility to the flying cinematic camera
 // (`Player::UpdateCinematic`), despawning everything around the body — so the client must answer.
 pub const SMSG_TRIGGER_CINEMATIC: u16 = 0x00FA;
+/// Sent when playback advances from one camera of a multi-camera `CinematicSequences` row to the
+/// next — empty body, exactly like the completion ack. VERIFIED in the reference at `0x48efe0`
+/// (`NextCamera`): it bumps the camera index, and the send is `push 0xfb; call 0x418190` with
+/// nothing written between the CDataStore open and `call 0x5ab630`.
+pub const CMSG_NEXT_CINEMATIC_CAMERA: u16 = 0x00FB;
 pub const CMSG_COMPLETE_CINEMATIC: u16 = 0x00FC;
 pub const SMSG_MONSTER_MOVE: u16 = 0x00DD;
 pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;

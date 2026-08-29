@@ -134,6 +134,9 @@ pub(super) fn apply_net_updates(
         // The possession handoff (`SMSG_CLIENT_CONTROL_UPDATE`): control of a unit granted or
         // revoked. Forwarded verbatim — only the controller knows the pose it would have to park.
         MessageWriter<super::ClientControlMessage>,
+        // A cinematic to play (`SMSG_TRIGGER_CINEMATIC`) — `crate::cinematic` owns both the
+        // playback and the ack that has to answer it (decision 0196).
+        MessageWriter<super::CinematicTriggeredMessage>,
     ),
     // One tuple param (the 16-SystemParam ceiling): the ask-once query caches + the gossip/merchant
     // state the net drain fills for the NPC-interaction windows (decision 0081).
@@ -453,6 +456,7 @@ pub(super) fn apply_net_updates(
         mut server_said,
         mut self_moves,
         mut client_control,
+        mut cinematics,
     ) = session_msgs;
     // Descriptor seeds/deltas for objects created *earlier in this same drain* can't land on their
     // entities yet (the spawn `Command` hasn't run), so they accumulate here and flush once at the end.
@@ -499,7 +503,7 @@ pub(super) fn apply_net_updates(
                 session::char_action_result(action, code, &mut char_actions)
             }
             SessionEvent::CinematicTriggered { cinematic_id } => {
-                session::cinematic_triggered(cinematic_id, &net_commands)
+                session::cinematic_triggered(cinematic_id, &mut cinematics)
             }
             SessionEvent::Connected {
                 self_guid: guid,

@@ -59,4 +59,17 @@ impl WorldWriter {
     pub fn complete_cinematic(&mut self) -> Result<()> {
         self.send(opcode::CMSG_COMPLETE_CINEMATIC, &[])
     }
+
+    /// Advance a multi-camera cinematic to its next shot (`CMSG_NEXT_CINEMATIC_CAMERA`, empty
+    /// body) — see the opcode's own note. Sent *between* cameras; the run still ends with exactly
+    /// one [`complete_cinematic`](Self::complete_cinematic).
+    ///
+    /// No shipped 1.12 `CinematicSequences` row carries a second camera, so this never fires
+    /// against a stock server today. It exists because the sequencing is the *client's*, not the
+    /// data's: a row with two cameras is one the client must play as a single continuous
+    /// cinematic, and playing it silently — without the packet the reference sends at `0x48efe0`
+    /// — is the kind of drift that only surfaces on a server shipping its own DBCs.
+    pub fn next_cinematic_camera(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_NEXT_CINEMATIC_CAMERA, &[])
+    }
 }

@@ -277,7 +277,11 @@ pub struct EffectDrawSpec {
     pub blend: EffectBlend,
     pub fog: EffectFog,
     /// Multiply this draw's RGB by the scene's matte light — `clamp(ambient + diffuse·max(N·L,0))`
-    /// against a camera-facing normal, the same term `wow_model.wgsl` applies to a mesh.
+    /// against the **world up axis**, the same term `wow_model.wgsl` applies to a mesh. The
+    /// reference's quad writer uploads one constant normal for the whole draw — world +Z carried
+    /// into eye space, against a light carried into the same frame, so the product is the
+    /// view-invariant `worldUp · worldLightDir` (wow-re `part-lit-normal-space.md`; decision 1696
+    /// supersedes 0975's camera-facing reading).
     ///
     /// The lane is unlit by default and every family but one passes `false`: ribbons, decals, the
     /// rings/reticle and precipitation are all authored to burn at their own colour. **M2 particle

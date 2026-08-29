@@ -1029,6 +1029,7 @@ fn writer_loop(
                     ClientCommand::Logout => w.logout_request(),
                     ClientCommand::LogoutCancel => w.logout_cancel(),
                     ClientCommand::CompleteCinematic => w.complete_cinematic(),
+                    ClientCommand::NextCinematicCamera => w.next_cinematic_camera(),
                     ClientCommand::MoveModeAck {
                         guid,
                         counter,

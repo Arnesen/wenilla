@@ -118,6 +118,7 @@ impl Plugin for NetPlugin {
             .add_message::<CharListMessage>()
             .add_message::<CharActionResultMessage>()
             .add_message::<EnteredWorldMessage>()
+            .add_message::<CinematicTriggeredMessage>()
             .add_message::<ServerSaidMessage>()
             .add_message::<LoggedOutMessage>()
             .add_message::<LoginStageMessage>()
@@ -1686,12 +1687,16 @@ pub(crate) enum ClientCommand {
     },
     /// `/played` (`CMSG_PLAYED_TIME`).
     PlayedTime,
-    /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`). benilla doesn't
-    /// play cinematics yet, so the Net drain answers every `SMSG_TRIGGER_CINEMATIC` immediately —
-    /// the skip a real player's ESC sends. Without the ack, vmangos anchors object visibility to
+    /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`) — sent by
+    /// [`crate::cinematic`] when playback ends or the player ESCs out of it, and immediately for a
+    /// trigger it cannot resolve to a shot. Without the ack, vmangos anchors object visibility to
     /// the flying cinematic camera (a first login's race intro) and every NPC around the body
-    /// despawns until relog. A future cinematic arc moves this send to the playback's end.
+    /// despawns until relog (decision 0196).
     CompleteCinematic,
+    /// Advance a multi-camera cinematic to its next shot (`CMSG_NEXT_CINEMATIC_CAMERA`) — see
+    /// [`benilla_protocol::WorldWriter::next_cinematic_camera`]. No shipped 1.12 sequence has a
+    /// second camera, so this rides only a server with its own DBCs.
+    NextCinematicCamera,
     /// **Acknowledge a granted mover mode** — root, water-walk, feather-fall or hover (decisions
     /// 0308, 0866): the echoed `counter` + our live pose, on the opcode
     /// [`MoveMode::ack_opcode`] picks. Sent by the controller the frame the
@@ -2089,6 +2094,14 @@ pub(crate) struct CharActionResultMessage {
 /// [`crate::char_select::ClientState`] to `InWorld`.
 #[derive(Message)]
 pub(crate) struct EnteredWorldMessage;
+
+/// The server asked us to play a cinematic (`SMSG_TRIGGER_CINEMATIC`) — a `CinematicSequences.dbc`
+/// id. Read by [`crate::cinematic`], which owns the playback *and* the ack (decision 0196: the ack
+/// is not optional, only late).
+#[derive(Message)]
+pub(crate) struct CinematicTriggeredMessage {
+    pub(crate) cinematic_id: u32,
+}
 
 /// One `CHAT_MSG_SYSTEM` line — the server's own answer to a GM dot-command ("You set god mode to
 /// on for …", "There is no such command", "Player not found!"). It has always been *logged*

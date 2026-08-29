@@ -1,0 +1,63 @@
+<Ui>
+    <!--
+        The cinematic frame — what makes InCinematic() true, and the ESC that skips a fly-by.
+        Transcribed from the reference's Interface\FrameXML\CinematicFrame.xml + .lua (decision
+        1602 permits it); the engine half is crate::cinematic.
+
+        This frame is load-bearing for exactly one thing, and it is not a picture: it is the WHOLE
+        skip path. In the reference, StopCinematic (0x48b970) has zero native callers and no
+        Bindings.xml row — the only thing that ever calls it is the OnKeyDown below, reached
+        because this fullscreen frame is keyboard-enabled and showing. No frame on screen means no
+        way out of a 102-second Night Elf intro.
+
+        THE BLACK BARS ARE NOT HERE, deliberately. The reference draws them as two textures on this
+        frame; we draw them as Bevy UI nodes in crate::cinematic instead, because a cinematic hides
+        the HUD through UiHidden — which kills both of ui_pass's quad lanes wholesale, and the
+        FrameXML layer is one of them. Bars declared here would go dark along with the action bars
+        they exist to replace. The bar LAW is unchanged and still the reference's (only a screen
+        wider than 4:3 gets bars; the picture is cropped to 2:1, the remainder split evenly) — it
+        just lives where it can be drawn. See `drive_letterbox`.
+
+        So this frame draws nothing at all. It is kept rather than replaced with an engine-side key
+        handler because the skip path IS a frame in the reference: keeping it means ESC works for
+        the same reason it works there, and an addon that hooks CinematicFrame still finds it.
+
+        RunBinding("SCREENSHOT") is kept as the reference has it: while this frame eats the
+        keyboard, the screenshot key is the one binding that still has to get through.
+    -->
+    <Script><![CDATA[
+        function CinematicFrame_OnLoad()
+            this:RegisterEvent("CINEMATIC_START");
+            this:RegisterEvent("CINEMATIC_STOP");
+        end
+
+        function CinematicFrame_OnEvent()
+            if ( event == "CINEMATIC_START" ) then
+                ShowUIPanel(this, 1);
+                return;
+            end
+            if ( event == "CINEMATIC_STOP" ) then
+                HideUIPanel(this);
+                return;
+            end
+        end
+    ]]></Script>
+    <Frame name="CinematicFrame" setAllPoints="true" hidden="true" enableKeyboard="true" enableMouse="true">
+        <Scripts>
+            <OnLoad>
+                CinematicFrame_OnLoad();
+            </OnLoad>
+            <OnEvent>
+                CinematicFrame_OnEvent();
+            </OnEvent>
+            <OnKeyDown>
+                local screenshotKey = GetBindingKey("SCREENSHOT");
+                if ( arg1 == "ESCAPE" ) then
+                    StopCinematic();
+                elseif ( screenshotKey and (arg1 == screenshotKey) ) then
+                    RunBinding("SCREENSHOT");
+                end
+            </OnKeyDown>
+        </Scripts>
+    </Frame>
+</Ui>

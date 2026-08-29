@@ -26,7 +26,7 @@
     <Script><![CDATA[
         -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only
         -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard,
-        -- Battlefield, Cinematic, WorldStateScore, Minigame) join as their windows land (audited
+        -- Battlefield, WorldStateScore, Minigame) join as their windows land (audited
         -- row-by-row against the bytes, decision 1507). Four have since left that list: the
         -- doublewide AuctionFrame with decision 1511, PetStableFrame with 1676, HelpFrame with
         -- 1673, and Petition + GuildRegistrar with 1672 — all of them are rows below.
@@ -184,6 +184,13 @@
         -- was the ONE window that still opened (director-reported). Routing its toggle through
         -- ShowUIPanel is what subjects it to the same rules as everything else.
         UIPanelWindows["WorldMapFrame"] = { area = "full", pushable = 0, whileDead = 1 }
+        -- The cinematic letterbox (CinematicFrame.xml) — the ref's own line verbatim
+        -- (UIParent.lua l.31). The row is what makes CINEMATIC_START's `ShowUIPanel(this, 1)`
+        -- actually seat the frame: unregistered, ShowUIPanel takes its bare-`Show()` branch and
+        -- the bars would appear without the panel manager ever closing what they cover. `full`
+        -- because a fly-by owns the screen, and no `whileDead` — the ref gives it none, and a
+        -- cinematic is not something a corpse needs.
+        UIPanelWindows["CinematicFrame"] = { area = "full", pushable = 0 }
 
         -- UIChildWindows — the ref's own table verbatim (UIParent.lua l.44-50; its comment:
         -- windows that "rely on a parent frame to be open. If the parent closes or a pushable
@@ -939,8 +946,10 @@
         --     child under the text, shown per entry, with the buttons dropping to -24 to clear it
         --     and the frame growing 16px. The AMOUNT is not the engine's — the entry's own
         --     OnShow/the event arm calls MoneyFrame_Update, exactly as the reference does.
-        --   · Accepted but v1-inert: exclusive, interruptCinematic (cinematics are acked
-        --     instantly — 0196), notClosableByLogout, preferredIndex.
+        --   · interruptCinematic is LIVE as of the cinematic arc: a dialog without it is
+        --     refused while one plays, the ref's own l.1454 gate (it was inert only while
+        --     0196 acked every cinematic instantly, so nothing could be playing).
+        --   · Accepted but v1-inert: exclusive, notClosableByLogout, preferredIndex.
         --   · text_arg1/2 stash on the DIALOG frame (the ref stashes them on the Text region;
         --     our regions don't carry Lua fields).
         --   · GetText("SECONDS"/"MINUTES") localization collapses to English singular/plural.
@@ -1024,6 +1033,17 @@
             -- The whileDead gate (ref l.1447-1452). UnitIsDeadOrGhost lands with the death arc's
             -- ghost predicate — guarded like CursorHasItem in ToggleGameMenu until then.
             if UnitIsDeadOrGhost and UnitIsDeadOrGhost("player") and not info.whileDead then
+                if info.OnCancel then
+                    info.OnCancel()
+                end
+                return nil
+            end
+
+            -- The cinematic gate (ref l.1454-1459), the whileDead gate's twin: a fly-by owns the
+            -- screen, so a dialog that has not declared itself worth interrupting one is cancelled
+            -- rather than raised over it. `InCinematic` is guarded like the predicate above so a
+            -- VM without the binding behaves as it did before.
+            if InCinematic and InCinematic() and not info.interruptCinematic then
                 if info.OnCancel then
                     info.OnCancel()
                 end

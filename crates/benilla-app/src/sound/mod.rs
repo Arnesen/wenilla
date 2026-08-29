@@ -15,6 +15,7 @@ use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
 
 mod anim_events;
+mod cinematic;
 mod combat;
 mod creature;
 mod emote;
@@ -389,6 +390,7 @@ impl Plugin for SoundPlugin {
         kit::plugin(app);
         liquid_loop::plugin(app);
         zone::plugin(app);
+        cinematic::plugin(app);
         gameobject::plugin(app);
         anim_events::plugin(app);
         spell::plugin(app);

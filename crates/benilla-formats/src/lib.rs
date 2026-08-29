@@ -34,10 +34,15 @@ pub use characters::{
     StartOutfitItem,
 };
 mod camera_shakes;
+mod cinematics;
 mod creatures;
 mod dbc;
 mod unit_blood;
 pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog};
+pub use cinematics::{
+    camera_model_path, load_cinematics, CinematicCameraRow, CinematicCatalog, CinematicPath,
+    CinematicSequence, CinematicView, SEQUENCE_CAMERAS,
+};
 pub use creatures::{
     load_creature_catalog, CreatureCatalog, CreatureModel, FootprintParams, NpcAppearance,
 };

@@ -48,6 +48,7 @@ mod capture;
 mod char_create;
 mod char_select;
 mod chat_bubble;
+mod cinematic;
 mod combat_text;
 mod cooldowns;
 mod creature_anim;
@@ -171,6 +172,7 @@ use bevy::prelude::*;
 use blob_shadow::BlobShadowPlugin;
 use bowstring::BowstringPlugin;
 use camera_shake::CameraShakePlugin;
+use cinematic::CinematicPlugin;
 use creature_anim::CreatureAnimPlugin;
 use cursor::CursorPlugin;
 use entities::EntitiesPlugin;
@@ -515,6 +517,10 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(go_anim::plugin)
     // Avatar + camera + input.
     .add_plugins(PlayerPlugin)
+    // Cinematic fly-bys (`SMSG_TRIGGER_CINEMATIC`): the race intro a first login plays, and the
+    // GameObject cameras. Takes the world camera for the duration — hence after PlayerPlugin,
+    // whose `control` it overrides within the same stage (decision 0196's deferred arc).
+    .add_plugins(CinematicPlugin)
     // The real client's hardware mouse cursor (native NSCursor on macOS).
     .add_plugins(CursorPlugin)
     // Net↔ECS bridge: spawns the world thread, exposes the snapshot + writer resources. In capture

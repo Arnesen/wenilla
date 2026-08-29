@@ -77,10 +77,6 @@ struct VertexOutput {
     // View-space depth (+ in front of the camera) — the fog/farclip planar eye-Z (exact on
     // the cam-relative path, where the view transform is pure rotation).
     @location(2) view_z: f32,
-    // World-space offset from the eye — what `EFFECT_LIT` builds its camera-facing normal from.
-    // Already exactly `v.position` on the free-floating path (0733 §2's rebase); the decal path
-    // carries absolute verts, so it subtracts the eye back out.
-    @location(3) world_offset: vec3<f32>,
 };
 
 @vertex
@@ -97,7 +93,6 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.clip_position = view.clip_from_world * vec4<f32>(v.position, 1.0);
     // Fog/farclip eye-Z via the full affine transform (yards-scale — rounding is irrelevant).
     out.view_z = -(view.view_from_world * vec4<f32>(v.position, 1.0)).z;
-    out.world_offset = v.position - view.world_position;
 #else
     // Free-floating families: cam-relative verts (0733 §2). view_from_world = [R | −R·cam];
     // for a cam-relative point the translation column is exactly the subtraction prepare
@@ -109,7 +104,6 @@ fn vertex(v: Vertex) -> VertexOutput {
     ) * v.position;
     out.clip_position = view.clip_from_view * vec4<f32>(view_pos, 1.0);
     out.view_z = -view_pos.z;
-    out.world_offset = v.position;
 #endif
     out.uv = v.uv;
     out.color = v.color;
@@ -163,15 +157,28 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // unlit is a full-white cutout against shaded terrain (the Zul'Gurub waterfall foam).
     //
     // The term is the fixed-function matte `wow_model.wgsl` applies to a mesh —
-    // `clamp(ambient + diffuse·max(N·L, 0))` — against the CAMERA-FACING normal the reference's
-    // quad writer uploads for these emitters. On the cam-relative path a vertex position IS its
-    // offset from the eye in world axes, so the direction back to the camera is its negation;
-    // the degenerate at-the-eye case falls back to the sun-facing normal (full light), which is
-    // the limit the billboard approaches anyway.
-    let to_eye = -in.world_offset;
-    let len2 = dot(to_eye, to_eye);
+    // `clamp(ambient + diffuse·max(N·L, 0))` — and **N is the WORLD UP axis, one constant for the
+    // whole draw** (wow-re `part-lit-normal-space.md`, §5-converged). The quad writer stores the
+    // same triple into all four vertices of every quad from a single per-draw global
+    // (`0xcf5878..80`, nine identical stores across the head/tail legs), and that global is set
+    // once per draw by `0x7b3fd0` from **row 2 of the VIEW matrix** (`0x58b0b0` = GetView, not
+    // GetWorld) — i.e. world +Z carried into eye space. The light is carried into the same frame
+    // (`0x71bce0` pre-multiplies the M2 light direction by `CM2Scene+0x9c`, and `glLightfv` is
+    // issued under the VIEW slot alone), so the rotation cancels and the product the hardware
+    // computes is exactly `worldUp · worldLightDir` — **invariant as the camera orbits**.
+    //
+    // We had a camera-facing normal here, read off a parenthetical in `part-scene-multipliers.md`
+    // §1 that was written about an emitter that is UNLIT and has since been corrected at the bytes
+    // (its polarity was inverted too: the LIT leg is the one that binds a real normal stream —
+    // vertex format 4, normal at +0x0c — while an UNLIT emitter's format has no normal element at
+    // all). It made this multiplier swing with the viewer: in Onyxia's Lair, where the trap dust is
+    // lit and additive, `ambient (0.22,0.26,0.29)` → `ambient + diffuse (1.00,0.93,0.74)` — a ~4×
+    // brightness change from nothing but turning the camera (decision 1696).
+    //
+    // N and L must be in the SAME frame; that is where the invariance comes from. Both are world
+    // here (Bevy axes: WoW's +Z up is Bevy +Y).
     let L = -normalize(wow_light.light_sun.xyz);
-    let N = select(L, to_eye * inverseSqrt(len2), len2 > 1e-12);
+    let N = vec3<f32>(0.0, 1.0, 0.0);
     let lit = clamp(
         wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * max(dot(N, L), 0.0),
         vec3<f32>(0.0),

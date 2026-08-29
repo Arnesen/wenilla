@@ -146,3 +146,144 @@ pub(crate) fn track_quat(b: &[u8], track_ofs: usize) -> M2QuatTrack {
         ])
     })
 }
+
+/// One key of a **cubic** M2 track — the reference's `M2SplineKey<T>`: the value plus its in/out
+/// tangents, `{value@+0, in_tan@+1·sizeof(T), out_tan@+2·sizeof(T)}` (VERIFIED wow-re
+/// `animation/scratch/kern-inner.md` §2a: the vec3 key is stride `0x24`
+/// `{value@+0, inTan@+0xc, outTan@+0x18}`, the scalar-float key stride `0xc`
+/// `{value@+0, inTan@+4, outTan@+8}`).
+///
+/// **The wide key is the stride whatever `interp` says.** The reference's cubic element loops
+/// address every key as `payload + k*0x24` (`0x716b51`) / `payload + k*0xc` (`0x7173cc`) *before*
+/// the four-way interp dispatch, and the STEP/LINEAR legs then read the `value` sub-field of that
+/// same wide key. Real art relies on it: `Cameras\FlyByDwarf.m2`'s roll track is authored
+/// `interp = 0` and still carries a 12-byte key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct M2SplineKey<V> {
+    pub value: V,
+    pub in_tan: V,
+    pub out_tan: V,
+}
+
+/// A cubic `C3Vector` track — the M2Camera **position**/**target** tracks.
+pub type M2Vec3SplineTrack = M2Track<M2SplineKey<[f32; 3]>>;
+/// A cubic scalar-float track — the M2Camera **roll** track.
+pub type M2ScalarSplineTrack = M2Track<M2SplineKey<f32>>;
+
+/// A value a cubic track can hold: the four basis weights are scalars, so the leaf only has to
+/// know how to build `Σ wᵢ·Pᵢ` componentwise.
+pub trait CubicValue: Copy {
+    /// `w0·p0 + w1·p1 + w2·p2 + w3·p3`.
+    fn combine(w: [f32; 4], p: [Self; 4]) -> Self;
+    /// The LINEAR leg, in the reference's own form `a + (b − a)·t` (`0x716cf1`) — not the
+    /// algebraically equal `(1−t)·a + t·b`, which rounds differently in f32.
+    fn lerp(a: Self, b: Self, t: f32) -> Self;
+}
+
+impl CubicValue for f32 {
+    fn combine(w: [f32; 4], p: [Self; 4]) -> Self {
+        w[0] * p[0] + w[1] * p[1] + w[2] * p[2] + w[3] * p[3]
+    }
+    fn lerp(a: Self, b: Self, t: f32) -> Self {
+        a + (b - a) * t
+    }
+}
+
+impl CubicValue for [f32; 3] {
+    fn combine(w: [f32; 4], p: [Self; 4]) -> Self {
+        std::array::from_fn(|j| w[0] * p[0][j] + w[1] * p[1][j] + w[2] * p[2][j] + w[3] * p[3][j])
+    }
+    fn lerp(a: Self, b: Self, t: f32) -> Self {
+        std::array::from_fn(|j| a[j] + (b[j] - a[j]) * t)
+    }
+}
+
+impl<V: CubicValue> M2Track<M2SplineKey<V>> {
+    /// Sample this cubic track at absolute global-timeline `ms`, **end-clamped** at both ends.
+    ///
+    /// The four-way `interp` dispatch is the reference's own, and it is the *cubic element loops'*
+    /// dispatch — not the two-way `cmp word[track],0; jne <linear>` the bone/TRS loops collapse to
+    /// (VERIFIED wow-re `animation/scratch/tracks.md` deviation #2: the switch is per-loop, by
+    /// track type). Byte-verified bases, `kern-inner.md` §2a(i)/(ii) with `t` the key-interval
+    /// fraction:
+    ///
+    /// - `0` **STEP** — `value[k0]`, no tangent read (`0x716b5f`).
+    /// - `1` **LINEAR** — `value[k0] + (value[k1] − value[k0])·t` (`0x716cf1`).
+    /// - `2` **BÉZIER** — the cubic Bernstein basis over control points
+    ///   `{value[k0], outTan[k0], inTan[k1], value[k1]}`: `B0 = (1−t)³`, `B1 = 3t(1−t)²`,
+    ///   `B2 = 3t²(1−t)`, `B3 = t³` (`0x716c41`). This is what every shipped `Cameras\*.m2`
+    ///   fly-by authors on its position and target tracks.
+    /// - `3` **HERMITE** — `h00·value[k0] + h10·outTan[k0] + h01·value[k1] + h11·inTan[k1]` with
+    ///   `h00 = 2t³−3t²+1`, `h10 = t³−2t²+t`, `h01 = 3t²−2t³`, `h11 = t³−t²` (`0x716b9e`).
+    ///
+    /// Note which tangent each control point comes from: the **outgoing** tangent of the key
+    /// being left and the **incoming** tangent of the key being entered. Swapping them looks
+    /// almost right and drifts wrong exactly where the path curves hardest.
+    pub fn sample_ms(&self, ms: u32) -> Option<V> {
+        let first = self.keys.first()?;
+        let last = self.keys.last()?;
+        if ms <= first.0 {
+            return Some(first.1.value);
+        }
+        if ms >= last.0 {
+            return Some(last.1.value);
+        }
+        // The key pair bracketing `ms` (keys are time-ascending within a band).
+        let k1 = self.keys.partition_point(|&(t, _)| t <= ms);
+        let (t0, a) = self.keys[k1 - 1];
+        let (t1, b) = self.keys[k1];
+        let t = if t1 > t0 {
+            (ms - t0) as f32 / (t1 - t0) as f32
+        } else {
+            0.0
+        };
+        let (t2, t3) = (t * t, t * t * t);
+        Some(match self.interp {
+            0 => a.value,
+            1 => V::lerp(a.value, b.value, t),
+            2 => V::combine(
+                [
+                    (1.0 - t) * (1.0 - t) * (1.0 - t),
+                    3.0 * t * (1.0 - t) * (1.0 - t),
+                    3.0 * t2 * (1.0 - t),
+                    t3,
+                ],
+                [a.value, a.out_tan, b.in_tan, b.value],
+            ),
+            _ => V::combine(
+                [
+                    2.0 * t3 - 3.0 * t2 + 1.0,
+                    t3 - 2.0 * t2 + t,
+                    3.0 * t2 - 2.0 * t3,
+                    t3 - t2,
+                ],
+                [a.value, a.out_tan, b.value, b.in_tan],
+            ),
+        })
+    }
+}
+
+fn rd_spline<V>(
+    b: &[u8],
+    o: usize,
+    step: usize,
+    rd: impl Fn(&[u8], usize) -> Option<V>,
+) -> Option<M2SplineKey<V>> {
+    Some(M2SplineKey {
+        value: rd(b, o)?,
+        in_tan: rd(b, o + step)?,
+        out_tan: rd(b, o + 2 * step)?,
+    })
+}
+
+/// Read a cubic `C3Vector` track (key stride `0x24`) — the M2Camera position/target tracks.
+pub(crate) fn track_spline_vec3(b: &[u8], track_ofs: usize) -> M2Vec3SplineTrack {
+    track_read(b, track_ofs, 0x24, |b, o| rd_spline(b, o, 12, rd_vec3))
+}
+
+/// Read a cubic scalar-float track (key stride `0xc`) — the M2Camera roll track.
+pub(crate) fn track_spline_f32(b: &[u8], track_ofs: usize) -> M2ScalarSplineTrack {
+    track_read(b, track_ofs, 0xc, |b, o| {
+        rd_spline(b, o, 4, |b, o| b.f32_at(o))
+    })
+}

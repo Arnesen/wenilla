@@ -30,12 +30,15 @@ mod track;
 
 pub use error::Error;
 pub use model::{
-    M2ArrayString, M2Attachment, M2BlendMode, M2Bone, M2BoneFlags, M2EventMarker, M2Format,
-    M2Header, M2Material, M2Model, M2PlayableAnim, M2RawData, M2RenderFlags, M2Texture,
+    M2ArrayString, M2Attachment, M2BlendMode, M2Bone, M2BoneFlags, M2Camera, M2EventMarker,
+    M2Format, M2Header, M2Material, M2Model, M2PlayableAnim, M2RawData, M2RenderFlags, M2Texture,
     M2TextureTransform, M2TextureType, M2Vertex, C2, C3,
 };
 pub use skin::{Skin, SkinBatch, SkinSection};
-pub use track::{M2QuatTrack, M2ScalarTrack, M2Track, M2Vec3Track};
+pub use track::{
+    CubicValue, M2QuatTrack, M2ScalarSplineTrack, M2ScalarTrack, M2SplineKey, M2Track,
+    M2Vec3SplineTrack, M2Vec3Track,
+};
 
 use std::ffi::CString;
 use std::io::Cursor;
@@ -43,7 +46,7 @@ use std::io::Cursor;
 use benilla_bytes::{capped, ByteExt};
 
 use error::Result;
-use track::{track_fix16, track_quat, track_vec3_timed};
+use track::{track_fix16, track_quat, track_spline_f32, track_spline_vec3, track_vec3_timed};
 
 /// Read a `C3Vector` (3×f32) at `o`, bounds-checked. `None` iff any of the three reads would run
 /// past the end — callers map that to their own [`Error::Truncated`].
@@ -503,6 +506,8 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
             texture_transform_lookup,
             global_sequences,
             bones: bone_list,
+            cameras: parse_cameras(b),
+            camera_lookup: parse_camera_lookup(b),
             raw_data: M2RawData {
                 texture_lookup_table: tlt,
                 bounding_triangles: bt_bytes,
@@ -526,6 +531,78 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
             version,
         },
     })
+}
+
+/// Parse the MD20 **camera** array — header `count@0x124` / `offset@0x128`, stride `0x7c` (see
+/// [`M2Camera`] for the byte-verified field map).
+///
+/// **The one reader for those offsets.** [`parse_m2`] fills [`M2Model::cameras`] with it, and
+/// callers that want a camera *without* paying for a whole model parse (the portrait/pane framing
+/// on the asset-load path, the cinematic fly-bys) call it directly — so the record layout is
+/// written down once. The header offsets are absolute rather than walked because every version
+/// [`parse_m2`] accepts (256–263) carries the identical array order up to this point.
+///
+/// Bounds-tolerant throughout: a truncated table yields the records that fit, and a model with no
+/// camera array yields an empty `Vec` (the overwhelmingly common case).
+pub fn parse_cameras(b: &[u8]) -> Vec<M2Camera> {
+    let (Some(count), Some(ofs)) = (b.u32_at(0x124), b.u32_at(0x128)) else {
+        return Vec::new();
+    };
+    let avail = b.len().saturating_sub(ofs as usize);
+    let mut out = Vec::with_capacity(capped(count as usize, 0x7c, avail));
+    for i in 0..count as usize {
+        let rec = ofs as usize + i * 0x7c;
+        // A record is read whole or not at all — a file whose camera array is cut short yields the
+        // records that fit, never a half-read one with default tracks standing in for the tail.
+        if rec.checked_add(0x7c).is_none_or(|end| end > b.len()) {
+            break;
+        }
+        let (Some(camera_type), Some(fov), Some(far_clip), Some(near_clip)) = (
+            b.u32_at(rec).map(|v| v as i32),
+            b.f32_at(rec + 0x04),
+            b.f32_at(rec + 0x08),
+            b.f32_at(rec + 0x0c),
+        ) else {
+            break;
+        };
+        // The bases are plain `[f32; 3]` (not `C3`) so they add to their track's sampled value
+        // componentwise, the way the reference's publish pass composes them.
+        let (Some(position_base), Some(target_base)) = (
+            rd_c3(b, rec + 0x2c).map(|c| [c.x, c.y, c.z]),
+            rd_c3(b, rec + 0x54).map(|c| [c.x, c.y, c.z]),
+        ) else {
+            break;
+        };
+        out.push(M2Camera {
+            camera_type,
+            fov,
+            far_clip,
+            near_clip,
+            positions: track_spline_vec3(b, rec + 0x10),
+            position_base,
+            target: track_spline_vec3(b, rec + 0x38),
+            target_base,
+            roll: track_spline_f32(b, rec + 0x60),
+        });
+    }
+    out
+}
+
+/// Parse the MD20 **CameraLookup** table — header `count@0x12c` / `offset@0x130`, `u16` entries.
+/// See [`M2Model::camera_lookup`] for what it selects.
+pub fn parse_camera_lookup(b: &[u8]) -> Vec<u16> {
+    let (Some(count), Some(ofs)) = (b.u32_at(0x12c), b.u32_at(0x130)) else {
+        return Vec::new();
+    };
+    let avail = b.len().saturating_sub(ofs as usize);
+    let mut out = Vec::with_capacity(capped(count as usize, 2, avail));
+    for i in 0..count as usize {
+        let Some(v) = b.u16_at(ofs as usize + i * 2) else {
+            break;
+        };
+        out.push(v);
+    }
+    out
 }
 
 /// The model-space **Z** of an M2 attachment selected by **attachment id** (not array index) — the

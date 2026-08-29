@@ -47,6 +47,15 @@ pub enum SessionRequest {
     /// Queuing an intent the app runs outside any VM call is that same guard in this engine's
     /// shape (wow-re `system/ui/scratch/savedvariables-protocol.md` §2, byte-verified).
     ReloadUi,
+    /// `StopCinematic()` — skip the cinematic that is playing.
+    ///
+    /// **The only skip path there is.** In the reference this binding (`0x48b970`) has *zero*
+    /// native callers: nothing in the engine calls it, and it is absent from `Bindings.xml`, so
+    /// ESC reaches it purely through `CinematicFrame`'s own `OnKeyDown` handler while that
+    /// fullscreen frame holds keyboard focus. A cinematic with no `CinematicFrame` on screen is
+    /// therefore un-skippable — which is why benilla starts playback only once the in-game UI
+    /// exists.
+    StopCinematic,
 }
 
 impl super::UiScript {
@@ -63,7 +72,7 @@ impl super::UiScript {
     }
 }
 
-/// Register the five session globals — the four exit verbs, and `ReloadUI`.
+/// Register the session globals — the four exit verbs, `ReloadUI`, and the cinematic skip.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
@@ -73,6 +82,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         ("CancelLogout", SessionRequest::CancelLogout),
         ("ForceQuit", SessionRequest::ForceQuit),
         ("ReloadUI", SessionRequest::ReloadUi),
+        ("StopCinematic", SessionRequest::StopCinematic),
     ] {
         g.set(
             name,
@@ -83,6 +93,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })?,
         )?;
     }
+
+    // `InCinematic()` — the reference's `0x48c930`: reads the "a cinematic is playing" global and
+    // answers the **number 1** while one is, `nil` otherwise (both legs push exactly one result).
+    // Era convention, not `true`/`false`.
+    g.set(
+        "InCinematic",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.in_cinematic {
+                mlua::Value::Integer(1)
+            } else {
+                mlua::Value::Nil
+            })
+        })?,
+    )?;
 
     Ok(())
 }

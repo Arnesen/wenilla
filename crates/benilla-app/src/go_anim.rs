@@ -749,9 +749,14 @@ fn drive_go_anim(
                             // The arm is therefore re-issued every ~`span` ms with a fresh
                             // `variationIdx = -1` roll, for ever. For a single-variation id that
                             // is the loop it always was, restarted at its own band start; for a
-                            // chain it is the whole point — Onyxia's traps re-roll every 867 ms,
-                            // so ~10 % of ~200 of them light a 5 s lava plume at any moment
-                            // instead of one flurry at stream-in.
+                            // chain it is the whole point — Onyxia's traps re-roll every 867 ms at
+                            // a 10 % weight, and with a 5 s ember life that leaves **47 % of them
+                            // holding a live plume at any instant** (measured, `WOW_PARTICLE_CENSUS`
+                            // in the lair: 49 of 104), instead of one flurry at stream-in. The
+                            // period, the re-roll and `R = 1` from a `(0,0)` replay pair are all
+                            // byte-converged across two independent §5 rounds; what is *not*
+                            // settled is which per-frame advance list a GameObject's model rides
+                            // (wow-re `gameobject-anim-arm.md` §6's named residual).
                             active.set_repeat(RepeatAnimation::Never);
                             match play {
                                 Play::Motion(_) => {

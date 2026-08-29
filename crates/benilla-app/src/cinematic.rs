@@ -1,0 +1,508 @@
+//! **Cinematic playback** — the race-intro fly-by, and every other `SMSG_TRIGGER_CINEMATIC`.
+//!
+//! A cinematic is an in-engine camera flight, not a movie: the trigger carries a
+//! `CinematicSequences.dbc` id, the row names its `CinematicCamera.dbc` shots, and each shot is an
+//! authored eye/target/roll path in a `Cameras\*.m2` planted at a world origin and facing. The
+//! parsing, the world transform and the Bézier evaluation all live in
+//! [`benilla_formats::CinematicPath`]; this module is the *playback* — when it starts, what it
+//! takes over while it runs, and how it ends.
+//!
+//! # What the reference does, and what we match
+//!
+//! Byte-verified in wow-re (the cinematic dispatch, 2026-08-29), and the reason each piece here is
+//! shaped the way it is:
+//!
+//! - **A trigger that arrives before the world is up is deferred, not dropped.** The reference
+//!   stashes the sequence id in a single-slot latch (`0xc4d75c`) whenever its world-load gate is
+//!   still closed, and starts it the instant the gate opens (`0x5deb78`). Last write wins; there
+//!   is no queue. [`Cinematic::pending`] is that latch, and the gate here is the loading screen —
+//!   a first login's intro would otherwise play its opening seconds behind the cover, with no UI
+//!   to ESC out of.
+//! - **The camera path is armed as an ordinary M2 animation** (`0x7121a0`, sequence 0, rate 1.0)
+//!   and the shot ends when the scene clock reaches the sequence band's end — `M2Sequence.end −
+//!   .start`, which is [`CinematicPath::duration_ms`]. Every shipped fly-by is `flags` bit 0 =
+//!   clamp, i.e. plays **once and freezes**; it does not loop. (`Scry_cam`, which is not a race
+//!   intro, is the one file authored to loop — a difference we inherit for free by ending on the
+//!   band rather than on the flag.)
+//! - **Between the shots of a multi-camera row the client sends `CMSG_NEXT_CINEMATIC_CAMERA`**
+//!   (`0x48efe0`), and a camera id of `0` **ends** the cinematic rather than being skipped. No
+//!   shipped row has a second camera, so this path is exercised only by a server with its own
+//!   DBCs — which is exactly why it is written rather than assumed away.
+//! - **ESC is not an engine binding.** `StopCinematic` has zero native callers in the reference:
+//!   the only skip path is `CinematicFrame.xml`'s own `OnKeyDown`, which is why benilla's copy of
+//!   that frame (`assets/ui/CinematicFrame.xml`) carries the same handler and why the Lua binding
+//!   queues [`SessionRequest::StopCinematic`](benilla_ui::script::SessionRequest) rather than
+//!   reaching in here.
+//! - **The ack ends the run, once.** `CMSG_COMPLETE_CINEMATIC` goes out on a natural end and on an
+//!   ESC skip alike (`0x48f080`). Decision 0196 is why it can never be dropped: unacked, vmangos
+//!   re-anchors object visibility to its own copy of the flying camera and everything around the
+//!   body despawns until relog.
+//!
+//! # What we deliberately do differently
+//!
+//! The reference defers both the start and the stop by **0.25 s** through a scheduled fade
+//! (`0x4c0d10`, the constant at `[0x804550]`). benilla plays the shot immediately and acks
+//! immediately: the fade is a transition effect we have not built, and faking its *delay* without
+//! its *picture* would only add latency. Noted rather than silently dropped — it is the one timing
+//! difference from the reference on this path.
+//!
+//! # What playback takes over
+//!
+//! Three things, all released on the way out. The **camera** (this module writes the
+//! [`WorldCamera`] pose and FOV after `control` has seated it, the same slot
+//! `apply_camera_shake` uses); the **streaming focus**, which has to follow the camera rather than
+//! the body, because a Tauren's shot opens 1741 yards from where the body stands and would
+//! otherwise fly over unstreamed terrain; and the **UI's cinematic flag**, which drives
+//! `CinematicFrame`'s letterbox and makes `InCinematic()` answer truthfully so `StaticPopup`
+//! suppresses dialogs the way the reference's does.
+
+use std::time::Duration;
+
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_formats::{CinematicCatalog, CinematicPath};
+use benilla_ui::script::UiScript;
+use benilla_world::schedule::WorldStage;
+use benilla_world::view::{WorldCamera, CAM_FOVY};
+use bevy::prelude::*;
+
+use crate::char_select::ClientState;
+use crate::loading_screen::LoadingScreen;
+use crate::net::{CinematicTriggeredMessage, ClientCommand, NetCommands};
+use crate::player::PlayerControlSet;
+
+/// Both cinematic DBCs, read once at startup.
+#[derive(Resource, Default)]
+pub(crate) struct Cinematics(pub(crate) CinematicCatalog);
+
+/// The shot being played, plus the deferred-start latch.
+#[derive(Resource, Default)]
+pub(crate) struct Cinematic {
+    /// The sequence a trigger asked for but the world was not ready to show — the reference's
+    /// single-slot latch (`0xc4d75c`), last write wins, no queue.
+    pending: Option<u32>,
+    playing: Option<Playing>,
+}
+
+/// One cinematic in flight.
+struct Playing {
+    /// The `CinematicSequences.dbc` id, for logging.
+    sequence_id: u32,
+    /// The row's shots, in order. Non-empty (a sequence that resolves to nothing is acked at the
+    /// trigger and never becomes a `Playing`).
+    shots: Vec<CinematicPath>,
+    /// Which shot is on screen.
+    index: usize,
+    /// Time inside the current shot.
+    elapsed: Duration,
+}
+
+impl Playing {
+    fn shot(&self) -> &CinematicPath {
+        &self.shots[self.index]
+    }
+}
+
+impl Cinematic {
+    /// Is a cinematic on screen right now? The engine half of `InCinematic()`.
+    pub(crate) fn is_playing(&self) -> bool {
+        self.playing.is_some()
+    }
+
+    /// The shot on screen: `(sequence id, shot index, narration sound id)`. The identity pair is
+    /// what lets a follower tell "still the same shot" from "the next one", which is the question
+    /// the narration channel actually asks.
+    pub(crate) fn playing_shot(&self) -> Option<(u32, usize, u32)> {
+        let play = self.playing.as_ref()?;
+        Some((play.sequence_id, play.index, play.shot().sound_id))
+    }
+}
+
+/// One of the two letterbox bars — full-width, black, top or bottom.
+///
+/// **Bevy UI nodes, not FrameXML quads, and that is the whole point.** The HUD is hidden during a
+/// cinematic through [`UiHidden`], which kills both of `ui_pass`'s quad lanes wholesale — the
+/// FrameXML layer, the minimap, chat bubbles, combat text, all of it together. Bars drawn as
+/// FrameXML textures would go dark with everything else. The glue and loading screens already sit
+/// on the other side of that line (`ui_hide`'s own list: "the glue/loading screens (Bevy UI nodes,
+/// not quads)"), so the letterbox joins them there.
+///
+/// `CinematicFrame` still exists and still shows — it is what makes `InCinematic()` true, fires
+/// the events, and owns the ESC handler. It just no longer paints the bars, because while it is
+/// up the lane it paints into is dark.
+#[derive(Component)]
+struct LetterboxBar;
+
+pub(crate) struct CinematicPlugin;
+
+impl Plugin for CinematicPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Cinematic>()
+            .add_systems(
+                Startup,
+                (load_catalog.after(AssetSet::Open), spawn_letterbox),
+            )
+            .add_systems(
+                Update,
+                // One chain, all three steps in the same frame: the net drain has already run
+                // (`WorldStage::Net` precedes `Input`), so a trigger can arrive, start and be
+                // driven without ever showing a frame of the follow camera in between. And they
+                // run *after* `control` has seated that camera, so the pose written here is the
+                // last word on it — the same slot `apply_camera_shake` takes.
+                (take_trigger, start_pending, drive)
+                    .chain()
+                    .in_set(WorldStage::Input)
+                    .after(PlayerControlSet),
+            )
+            // The UI edge runs after the driver settled this frame's state, and only once there
+            // IS a UI: firing CINEMATIC_START into a VM with no `CinematicFrame` yet would raise
+            // no letterbox and leave nothing listening for the ESC that ends the shot.
+            .add_systems(
+                Update,
+                feed_ui
+                    .in_set(WorldStage::Input)
+                    .after(drive)
+                    .run_if(not(crate::ui_script::ingame_ui_pending)),
+            )
+            // A cinematic cannot outlive the world it was flying over: leaving drops it silently,
+            // with no ack, exactly as the reference's own leave-world teardown does (`0x490a80`
+            // clears the in-cinematic flag and sends no `CMSG_COMPLETE_CINEMATIC` — the socket is
+            // going away anyway).
+            // The screen's two takeovers — the HUD going dark and the bars coming in — ride the
+            // same edge as everything else, after the driver has settled this frame's state.
+            .add_systems(
+                Update,
+                drive_letterbox.in_set(WorldStage::Input).after(drive),
+            )
+            .add_systems(OnExit(ClientState::InWorld), abandon_on_leaving_world);
+    }
+}
+
+/// The two bars, spawned once and parked hidden — the loading cover's own shape.
+fn spawn_letterbox(mut commands: Commands) {
+    for top in [true, false] {
+        commands.spawn((
+            LetterboxBar,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: if top { Val::Px(0.0) } else { Val::Auto },
+                bottom: if top { Val::Auto } else { Val::Px(0.0) },
+                width: Val::Percent(100.0),
+                height: Val::Px(0.0),
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+            // Above the world and the UI quads, below the loading cover (1000): a cinematic that
+            // runs into a zone load should be covered by the load, not paint over it.
+            GlobalZIndex(900),
+            Visibility::Hidden,
+        ));
+    }
+}
+
+/// Raise the letterbox and darken the HUD while a shot is on screen; put both back after.
+///
+/// The bar height is the reference's own law, the one `CinematicFrame` carries in Lua: only a
+/// screen wider than 4:3 gets bars, and there the picture is cropped to **2:1** — `width/2`,
+/// capped at the screen height, with the remainder split evenly. Computed here per frame so a
+/// window resized mid-cinematic stays letterboxed correctly.
+fn drive_letterbox(
+    cine: Res<Cinematic>,
+    mut hidden: ResMut<crate::ui_hide::UiHidden>,
+    mut bars: Query<(&mut Node, &mut Visibility), With<LetterboxBar>>,
+    windows: Query<&Window>,
+    mut ours: Local<bool>,
+) {
+    let playing = cine.is_playing();
+    // Only ever un-hide a UI *we* hid: a player who pressed ALT-Z before the cinematic keeps
+    // their choice when it ends.
+    if playing && !hidden.0 {
+        hidden.0 = true;
+        *ours = true;
+        info!("cinematic: HUD hidden for playback");
+    } else if !playing && *ours {
+        hidden.0 = false;
+        *ours = false;
+        info!("cinematic: HUD restored");
+    }
+
+    let height = playing
+        .then(|| windows.iter().next())
+        .flatten()
+        .map_or(0.0, |w| {
+            let (width, screen) = (w.width(), w.height().max(1.0));
+            if width / screen <= 4.0 / 3.0 {
+                return 0.0;
+            }
+            ((screen - (width / 2.0).min(screen)) / 2.0).max(0.0)
+        });
+    if *ours && height > 0.0 {
+        // Once per cinematic, not per frame: the measured crop, so the letterbox is a number in
+        // the log rather than something only an eye can confirm.
+        debug!("cinematic: letterbox bar {height:.1} px");
+    }
+    for (mut node, mut vis) in &mut bars {
+        let want = if height > 0.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
+        if node.height != Val::Px(height) {
+            node.height = Val::Px(height);
+        }
+    }
+}
+
+fn load_catalog(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
+    let Some(assets) = assets else { return };
+    let mut chain = assets.chain.lock_recover();
+    match benilla_formats::load_cinematics(&mut chain) {
+        Ok(cat) => {
+            info!(
+                "cinematic: {} sequences, {} cameras",
+                cat.sequence_count(),
+                cat.camera_count()
+            );
+            commands.insert_resource(Cinematics(cat));
+        }
+        // Graceful absence, the standing posture: with no catalog every trigger falls through to
+        // the immediate ack, which is exactly the pre-playback behaviour decision 0196 shipped.
+        Err(e) => warn!("cinematic: tables failed to load: {e:#}"),
+    }
+}
+
+/// Latch a triggered cinematic (or ack it immediately, if it names nothing we can play).
+fn take_trigger(
+    mut triggered: MessageReader<CinematicTriggeredMessage>,
+    mut cine: ResMut<Cinematic>,
+    catalog: Option<Res<Cinematics>>,
+    net: Option<Res<NetCommands>>,
+) {
+    for msg in triggered.read() {
+        let id = msg.cinematic_id;
+        let playable = catalog
+            .as_deref()
+            .is_some_and(|c| !c.0.shots(id).is_empty());
+        if !playable {
+            // Nothing to play — ack on the spot rather than leaving the server flying a path
+            // nobody is watching (decision 0196).
+            warn!("cinematic: {id} names no shot we can play — acking it");
+            ack(net.as_deref());
+            continue;
+        }
+        cine.pending = Some(id);
+    }
+}
+
+/// Start a latched cinematic once the world is actually up.
+fn start_pending(
+    mut cine: ResMut<Cinematic>,
+    catalog: Option<Res<Cinematics>>,
+    assets: Option<Res<WorldAssets>>,
+    screen: Option<Res<LoadingScreen>>,
+    net: Option<Res<NetCommands>>,
+    state: Res<State<ClientState>>,
+) {
+    let Some(id) = cine.pending else { return };
+    // The reference's world-load gate. Ours is the loading cover plus being in the world at all:
+    // starting under the cover would burn the opening seconds behind black, and `CinematicFrame`
+    // (the letterbox, and the only ESC route out) does not exist until the in-game UI has loaded.
+    if *state.get() != ClientState::InWorld || screen.is_some_and(|s| s.covering()) {
+        return;
+    }
+    let (Some(catalog), Some(assets)) = (catalog, assets) else {
+        return;
+    };
+    cine.pending = None;
+
+    let rows: Vec<_> = catalog.0.shots(id).into_iter().cloned().collect();
+    let mut chain = assets.chain.lock_recover();
+    let mut shots = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match CinematicPath::load(&mut chain, row) {
+            Ok(p) => shots.push(p),
+            // One unreadable shot does not have to sink the whole cinematic: play what parses.
+            Err(e) => warn!("cinematic: camera {} failed to load: {e:#}", row.id),
+        }
+    }
+    if shots.is_empty() {
+        warn!("cinematic: {id} had no loadable shot — acking it");
+        ack(net.as_deref());
+        return;
+    }
+    info!(
+        "cinematic: playing {id} — {} shot(s), {} ms",
+        shots.len(),
+        shots.iter().map(|s| s.duration_ms).sum::<u32>()
+    );
+    cine.playing = Some(Playing {
+        sequence_id: id,
+        shots,
+        index: 0,
+        elapsed: Duration::ZERO,
+    });
+}
+
+/// Advance the shot and seat the camera on it; hand over to the next shot, or end the cinematic.
+///
+/// Runs **after** `control` has seated the follow camera, the same slot `apply_camera_shake` uses:
+/// the pose written here is this frame's, over a base the controller rewrote from scratch, so
+/// nothing accumulates and the *pose* needs no restore — the next frame's `control` simply seats
+/// it again.
+///
+/// The **FOV does** need one, and it is taken here rather than left to a neighbour. `scoped_view`
+/// happens to rewrite the projection unconditionally every frame ahead of `control`, so today the
+/// narrow cinematic FOV would be undone anyway — but that is its ordering, not our release, and a
+/// reorder would leave the world permanently telephoto with nothing pointing at why. Ending a
+/// cinematic puts [`CAM_FOVY`] back itself; the spyglass re-asserts its own value next frame if
+/// one is up.
+fn drive(
+    mut cine: ResMut<Cinematic>,
+    time: Res<Time>,
+    net: Option<Res<NetCommands>>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<WorldCamera>>,
+    windows: Query<&Window>,
+    mut was_playing: Local<bool>,
+) {
+    let release_fov = |camera: &mut Query<(&mut Transform, &mut Projection), With<WorldCamera>>| {
+        if let Ok((_, mut projection)) = camera.single_mut() {
+            if let Projection::Perspective(p) = projection.as_mut() {
+                p.fov = CAM_FOVY;
+            }
+        }
+    };
+
+    // Every exit lands here: the natural end below releases immediately, and the two that happen
+    // outside this system — an ESC skip, and leaving the world — are caught on the next frame by
+    // this edge. One release path, so no exit can be the one that forgets.
+    let Some(play) = cine.playing.as_mut() else {
+        if std::mem::take(&mut *was_playing) {
+            release_fov(&mut camera);
+        }
+        return;
+    };
+    *was_playing = true;
+    play.elapsed += time.delta();
+
+    // Walk past any shot this frame's delta ran clean through (a long stall, a debugger pause),
+    // so a hitch cannot leave a finished shot on screen or skip the packet between two of them.
+    while play.elapsed.as_millis() as u32 >= play.shot().duration_ms {
+        let over = play.elapsed - Duration::from_millis(u64::from(play.shot().duration_ms));
+        if play.index + 1 >= play.shots.len() {
+            let id = play.sequence_id;
+            cine.playing = None;
+            info!("cinematic: {id} finished");
+            ack(net.as_deref());
+            *was_playing = false;
+            release_fov(&mut camera);
+            return;
+        }
+        play.index += 1;
+        play.elapsed = over;
+        if let Some(net) = net.as_deref() {
+            let _ = net.0.send(ClientCommand::NextCinematicCamera);
+        }
+    }
+
+    let Ok((mut cam, mut projection)) = camera.single_mut() else {
+        return;
+    };
+    let shot = play.shot();
+    let view = shot.sample(play.elapsed.as_millis() as u32);
+    let eye = benilla_assets::coords::wow_to_bevy(view.eye);
+    let target = benilla_assets::coords::wow_to_bevy(view.target);
+
+    // The roll is authored about the view axis, and around whole turns rather than around zero —
+    // `FlyByDwarf` holds a constant 2π — so it is applied as an angle and never tested for zero.
+    // The WoW→Bevy basis is a proper rotation (determinant +1), so the sign carries across
+    // unchanged.
+    let forward = (target - eye).normalize_or_zero();
+    let up = if forward == Vec3::ZERO {
+        Vec3::Y
+    } else {
+        Quat::from_axis_angle(forward, view.roll) * Vec3::Y
+    };
+    cam.translation = eye;
+    if forward != Vec3::ZERO {
+        cam.look_at(target, up);
+    }
+
+    // The authored FOV is a **diagonal** opening angle in the reference's convention, and it is
+    // not uniform across the corpus — the Undead intro is 90° where the other nine are 45° — so
+    // it is read per shot and converted against the live viewport, never assumed.
+    let aspect = windows
+        .iter()
+        .next()
+        .map_or(4.0 / 3.0, |w| w.width() / w.height().max(1.0));
+    if let Projection::Perspective(p) = projection.as_mut() {
+        p.fov = shot.vertical_fov(aspect);
+    }
+}
+
+/// ESC, or anything else that asks for the skip: end the cinematic and ack it.
+///
+/// The reference sends the same `CMSG_COMPLETE_CINEMATIC` here as it does on a natural end — a
+/// skip is indistinguishable from a completion on the wire, which is what made decision 0196's
+/// instant-ack legitimate in the first place.
+pub(crate) fn stop(cine: &mut Cinematic, net: Option<&NetCommands>) {
+    if let Some(play) = cine.playing.take() {
+        info!("cinematic: {} stopped", play.sequence_id);
+        ack(net);
+    }
+    // A trigger still waiting on the world is dropped too: the player has said "not this".
+    if cine.pending.take().is_some() {
+        ack(net);
+    }
+}
+
+/// Leaving the world drops a cinematic without acking — the socket is going away with it.
+fn abandon_on_leaving_world(mut cine: ResMut<Cinematic>) {
+    if let Some(play) = cine.playing.take() {
+        info!("cinematic: {} abandoned (left the world)", play.sequence_id);
+    }
+    cine.pending = None;
+}
+
+/// Fire the `CINEMATIC_START`/`CINEMATIC_STOP` edges and keep `InCinematic()` honest.
+///
+/// Edge-fired off what **this VM** has heard, the `death.rs` posture: a fresh VM's memo is empty,
+/// so a `/reload` mid-cinematic re-fires `CINEMATIC_START` into the rebuilt frame tree and the
+/// letterbox comes back up rather than staying lost for the rest of the shot.
+fn feed_ui(
+    cine: Res<Cinematic>,
+    script: Option<NonSendMut<UiScript>>,
+    mut published: Local<crate::ui_script::VmMemo<Option<bool>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let playing = cine.is_playing();
+    // VM-scoped (decision 1290): the memo is memory *about a VM*, so a `/reload` mid-cinematic
+    // resets it and the edge re-fires into the rebuilt frame tree — which is the whole point,
+    // because the new tree's `CinematicFrame` is hidden and knows nothing about the shot still on
+    // screen. A plain `Local` here would leave the letterbox down and ESC dead for the rest of a
+    // 102-second intro.
+    let published = published.get(&script);
+    if *published == Some(playing) {
+        return;
+    }
+    *published = Some(playing);
+    script.set_in_cinematic(playing);
+    script.fire_event(
+        if playing {
+            "CINEMATIC_START"
+        } else {
+            "CINEMATIC_STOP"
+        },
+        vec![],
+    );
+}
+
+fn ack(net: Option<&NetCommands>) {
+    if let Some(net) = net {
+        let _ = net.0.send(ClientCommand::CompleteCinematic);
+    }
+}

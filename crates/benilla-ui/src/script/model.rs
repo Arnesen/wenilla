@@ -1168,6 +1168,13 @@ pub(crate) struct Model {
     pub(crate) rest_state: u8,
     pub(crate) rest_pool: u32,
     pub(crate) resting: bool,
+    /// Is a cinematic playing? What `InCinematic()` reports, pushed by the cinematic plugin.
+    ///
+    /// Read by more than the letterbox: `StaticPopup_Show` refuses any dialog whose entry lacks
+    /// `interruptCinematic` while this is set, exactly as the reference's `StaticPopup.lua:1454`
+    /// does — which is what stops a "your character will be logged out" box from landing on top
+    /// of a first login's race intro.
+    pub(crate) in_cinematic: bool,
     /// Exhaustion.dbc as the rest bindings consume it — rest-state byte → (localized name,
     /// factor), the table `GetRestState` indexes directly and whose row 1 scales
     /// `GetXPExhaustion` (wow-re rested-xp-bindings.md; decision 1087). Seeded with the shipped
@@ -1700,6 +1707,7 @@ impl Model {
             rest_state: 2,
             rest_pool: 0,
             resting: false,
+            in_cinematic: false,
             exhaustion: [
                 (1, ("Rested".to_string(), 2.0)),
                 (2, ("Normal".to_string(), 1.0)),

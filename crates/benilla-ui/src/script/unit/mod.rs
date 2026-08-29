@@ -359,6 +359,11 @@ impl super::UiScript {
         model.resting = resting;
     }
 
+    /// Push whether a cinematic is playing — what `InCinematic()` answers.
+    pub fn set_in_cinematic(&mut self, playing: bool) {
+        self.model_mut().in_cinematic = playing;
+    }
+
     /// Push Exhaustion.dbc — `(rest-state byte, localized name, factor)` rows for the
     /// `GetRestState`/`GetXPExhaustion` bindings (they read the table exactly as `0x48d350` /
     /// `0x48d3f0` read the client's own copy; decision 1087). Called once at startup off the
