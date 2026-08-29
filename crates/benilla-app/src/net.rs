@@ -121,6 +121,7 @@ impl Plugin for NetPlugin {
             .add_message::<ServerSaidMessage>()
             .add_message::<LoggedOutMessage>()
             .add_message::<LoginStageMessage>()
+            .add_message::<LoginQueuedMessage>()
             .add_message::<LoginFailedMessage>()
             .add_message::<DisconnectedMessage>()
             .add_systems(
@@ -2111,6 +2112,15 @@ pub(crate) struct LoggedOutMessage;
 #[derive(Message, Clone, Copy)]
 pub(crate) struct LoginStageMessage {
     pub(crate) stage: benilla_protocol::LoginStage,
+}
+
+/// We are **queued** for a full realm (decision 1681) — one per `AUTH_WAIT_QUEUE` packet, while
+/// the world handshake is still parked. Not a failure: the attempt is live and the queue ends
+/// either with a roster or with a real failure.
+#[derive(Message, Clone)]
+pub(crate) struct LoginQueuedMessage {
+    pub(crate) position: Option<u32>,
+    pub(crate) realm: Option<String>,
 }
 
 /// The session ended (socket death, logout's teardown edge) — bridged from the Net drain's

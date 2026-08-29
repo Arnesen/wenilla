@@ -12,7 +12,7 @@ use crate::ui_bank::{BankErrors, BankOpen};
 use crate::ui_gossip::GossipState;
 use crate::ui_merchant::{MerchantErrors, MerchantOpen, MerchantRefusal};
 use crate::ui_quest::QuestGiver;
-use crate::ui_stable::StableOpen;
+use crate::ui_stable::{StableErrors, StableOpen};
 use crate::ui_taxi::TaxiState;
 use crate::ui_trainer::{TrainerErrors, TrainerOpen};
 
@@ -211,30 +211,56 @@ pub(super) fn list_stabled_pets(
     stable_open.open(npc, num_stable_slots, pets);
 }
 
-/// The answer to a stable verb (`SMSG_STABLE_RESULT`) — one byte, and the *whole* answer: no
-/// success carries an updated list (VERIFIED vmangos, every `HandleStable*` path ends in
-/// `SendStableResult` and nothing else). So a success **must** be followed by a re-request or the
-/// window would go on showing the pre-action arrangement — a pet that is now stabled still standing
-/// in slot 0. That re-request is forced by the server's behaviour, not a choice.
+/// The answer to a stable verb (`SMSG_STABLE_RESULT`) — one byte, and the client's whole response
+/// to it is a five-way jump table (wow-re `system/ui/scratch/stable-master-window.md` §5, VERIFIED
+/// off the raw remap/jump bytes at `0x4cadac`/`0x4cad98`; decision 1677):
 ///
-/// The refusal half is where the client's own behaviour is still open (decision 1676): benilla
-/// surfaces `ERR_MONEY` on the error line and swallows the generic `ERR_STABLE`, which carries no
-/// reason at all — dead player, out of range, no free bought slot, untameable, and "you already
-/// have a pet" are one indistinguishable code. What the reference does with each is a wow-re carve
-/// item; showing a wrong-but-confident sentence for a code that means five things would be worse
-/// than the silence.
-pub(super) fn stable_result(result: u8, stable_open: &mut StableOpen, net_commands: &NetCommands) {
+/// | code | what the client does |
+/// |---|---|
+/// | 1 | `DisplayError(0x25)` = **`ERR_NOT_ENOUGH_MONEY`** — the only code that says anything |
+/// | 2–7 | **absolutely nothing** — vmangos's catch-all `STABLE_ERR_STABLE = 6` included |
+/// | 8, 9 | re-request the list |
+/// | 10 | **`inc` the local purchased-slot count**, then re-request |
+/// | 11 | fire `PET_STABLE_UPDATE` (no vmangos counterpart — nothing in 1.12 sends it) |
+/// | 0, ≥12 | nothing |
+///
+/// The re-request is not a benilla convenience: no success carries an updated list, so without it
+/// the window would go on showing the pre-action arrangement.
+///
+/// **Code 10's local increment happens BEFORE the guid test**, so a buy-slot success arriving with
+/// no stable master open still bumps the count without refreshing. That ordering is reproduced
+/// deliberately — it is what makes the purchase row correct if the window is reopened, and the
+/// alternative would be to invent a tidier client than the one being reimplemented.
+pub(super) fn stable_result(
+    result: u8,
+    stable_open: &mut StableOpen,
+    errors: &mut StableErrors,
+    net_commands: &NetCommands,
+) {
     use benilla_protocol::messages::stable_result as code;
-    let Some(npc) = stable_open.npc else {
-        debug!("net: stable result {result} with no open stable — ignored");
-        return;
-    };
+    // Ahead of the guid test, exactly as `0x4cacf3` sits ahead of `0x4cad05`.
+    if result == code::SUCCESS_BUY_SLOT {
+        stable_open.num_stable_slots = stable_open.num_stable_slots.saturating_add(1);
+    }
     match result {
+        // The one code that speaks. Its text is the reference's own `GlobalStrings` value for
+        // `ERR_NOT_ENOUGH_MONEY`, reached through `DisplayError` row 0x25.
+        code::ERR_MONEY => {
+            debug!("net: stable purchase refused — not enough money");
+            errors.0.push("You don't have enough money.".to_string());
+        }
         code::SUCCESS_STABLE | code::SUCCESS_UNSTABLE | code::SUCCESS_BUY_SLOT => {
+            let Some(npc) = stable_open.npc else {
+                debug!("net: stable success {result} with no open stable — no re-list");
+                return;
+            };
             debug!("net: stable action succeeded (code {result}) — re-listing");
             let _ = net_commands.0.send(ClientCommand::ListStabledPets { npc });
         }
-        _ => debug!("net: stable action refused (code {result})"),
+        // Codes 2–7 (the generic ERR_STABLE among them), 0 and ≥12: the client shows NOTHING.
+        // Not an omission — the catch-all is one code for six causes, and the reference declines to
+        // guess which.
+        _ => debug!("net: stable result {result} — no client-visible effect"),
     }
 }
 

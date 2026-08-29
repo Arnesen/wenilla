@@ -131,6 +131,43 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
         &markup_spans(spec.text, spec.color, spec.wrap),
         spec.size,
         spec.wrap,
+        Justify::Left,
+        font,
+        s,
+    )
+}
+
+/// [`outlined_text`], **centred** — for a wrapped paragraph the reference centres.
+///
+/// A separate door rather than a field on [`GlueText`] because centring is the exception here, and
+/// naming it at the one call site that wants it is cheaper and clearer than a fifth field on
+/// thirty-three literals. The justification has to reach all nine strings (the eight outline copies
+/// share the layout), so it cannot be inserted onto the real text afterwards.
+///
+/// **Which way round is faithful is not obvious**, so: a `FontString` with no `justifyH` defaults
+/// to **CENTER**, and `GlueDialogText` (`GlueDialog.xml:56`) omits it — so the dialog is centred.
+/// Every *other* wrapped glue string in the shipped XML sets `justifyH="LEFT"` explicitly
+/// (`CharacterCreate.xml`'s race/class/faction bodies, `AddonList.xml`'s title/notes/deps), which
+/// is why [`outlined_text`] stays left and this is the exception rather than the default.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn outlined_text_centered<W: Bundle, T: Bundle>(
+    parent: &mut ChildSpawnerCommands,
+    node: Node,
+    wrapper_extra: W,
+    text_extra: T,
+    spec: GlueText,
+    font: &Handle<Font>,
+    s: f32,
+) -> Entity {
+    outlined_spans(
+        parent,
+        node,
+        wrapper_extra,
+        text_extra,
+        &markup_spans(spec.text, spec.color, spec.wrap),
+        spec.size,
+        spec.wrap,
+        Justify::Center,
         font,
         s,
     )
@@ -216,16 +253,20 @@ fn outlined_spans<W: Bundle, T: Bundle>(
     spans: &[(String, Color)],
     size: f32,
     wrap: bool,
+    justify: Justify,
     font: &Handle<Font>,
     s: f32,
 ) -> Entity {
+    // Both fields set, so no `..default()` — `TextLayout` has exactly these two, and clippy's
+    // `needless_update` is right that spelling a rest-pattern here only hides the next field
+    // Bevy adds.
     let layout = TextLayout {
         linebreak: if wrap {
             LineBreak::WordBoundary
         } else {
             LineBreak::NoWrap
         },
-        ..default()
+        justify,
     };
     let tf = TextFont {
         font: font.clone(),

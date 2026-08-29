@@ -36,7 +36,9 @@
 use benilla_protocol::messages::StabledPet;
 use bevy::prelude::*;
 
-use benilla_ui::script::{StableIntent, StablePetSlot, StableState, UiScript, NUM_STABLE_SLOTS};
+use benilla_ui::script::{
+    ScriptValue, StableIntent, StablePetSlot, StableState, UiScript, NUM_STABLE_SLOTS,
+};
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
@@ -48,17 +50,19 @@ pub(crate) struct UiStablePlugin;
 
 impl Plugin for UiStablePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<StableOpen>().add_systems(
-            Update,
-            (
-                // Range-close before the feed so the clear becomes PET_STABLE_CLOSED the same
-                // frame; push before the input pass so an open/close is on screen the same frame;
-                // drain after it (the trainer/merchant/gossip ordering).
-                close_npc_session_out_of_range::<StableOpen>.before(feed_stable),
-                feed_stable.before(UiInput),
-                drain_stable.after(UiInput),
-            ),
-        );
+        app.init_resource::<StableOpen>()
+            .init_resource::<StableErrors>()
+            .add_systems(
+                Update,
+                (
+                    // Range-close before the feed so the clear becomes PET_STABLE_CLOSED the same
+                    // frame; push before the input pass so an open/close is on screen the same frame;
+                    // drain after it (the trainer/merchant/gossip ordering).
+                    close_npc_session_out_of_range::<StableOpen>.before(feed_stable),
+                    feed_stable.before(UiInput),
+                    drain_stable.after(UiInput),
+                ),
+            );
     }
 }
 
@@ -74,6 +78,14 @@ pub(crate) struct StableOpen {
     pub(crate) num_stable_slots: u8,
     /// The wire rows, each already carrying its rebased client slot index.
     pub(crate) pets: Vec<StabledPet>,
+    /// A list packet has landed and the feed has not yet turned it into `PET_STABLE_SHOW`.
+    ///
+    /// The distinction this latch draws is the carve's: `PET_STABLE_SHOW` fires **unconditionally
+    /// at the tail of every `MSG_LIST_STABLED_PETS` handler** (`0x4cac9b`) — every list, not just
+    /// the first — while `PET_STABLE_UPDATE`/`_PADERDOLL` fire from the **creature-cache
+    /// callbacks** (`0x4cb3bf`, `0x4cba5f`), i.e. exactly when a late template answer fills a row
+    /// in. Our two-step resolve has the same two edges, so the events land on the same causes.
+    pub(crate) fresh_list: bool,
 }
 
 impl StableOpen {
@@ -82,12 +94,14 @@ impl StableOpen {
         self.npc = Some(npc);
         self.num_stable_slots = num_stable_slots;
         self.pets = pets;
+        self.fresh_list = true;
     }
 
     pub(crate) fn clear(&mut self) {
         self.npc = None;
         self.num_stable_slots = 0;
         self.pets.clear();
+        self.fresh_list = false;
     }
 }
 
@@ -161,12 +175,14 @@ fn resolve_pet(
 }
 
 /// Build the Lua-facing snapshot from [`StableOpen`] — `None` when no stable is open.
+#[allow(clippy::too_many_arguments)]
 fn snapshot(
     open: &StableOpen,
     names: &mut NameCache,
     families: Option<&PetFamilyTables>,
     stats: Option<&PetStatTables>,
     next_slot_cost: u32,
+    has_live_pet: bool,
     commands: &NetCommands,
 ) -> Option<StableState> {
     open.npc?;
@@ -188,6 +204,7 @@ fn snapshot(
         num_stable_slots: u32::from(open.num_stable_slots),
         next_slot_cost,
         slots,
+        has_live_pet,
     })
 }
 
@@ -196,12 +213,15 @@ fn snapshot(
 #[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn feed_stable(
     script: Option<NonSendMut<UiScript>>,
-    open: Res<StableOpen>,
+    // ResMut only to consume the fresh-list latch; the feed never authors stable content.
+    mut open: ResMut<StableOpen>,
+    bar: Res<crate::ui_pet::PetBar>,
     families: Option<Res<PetFamilyTables>>,
     stats: Option<Res<PetStatTables>>,
     prices: Option<Res<StableSlotPrices>>,
     commands: Res<NetCommands>,
     mut names: ResMut<NameCache>,
+    mut errors: ResMut<StableErrors>,
     mut last: Local<crate::ui_script::VmMemo<Option<StableState>>>,
     mut last_npc: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
@@ -210,6 +230,10 @@ fn feed_stable(
     };
     let last = last.get(&script);
     let last_npc = last_npc.get(&script);
+    // Refusals surface as the client's red error line (the trainer/merchant path's exact shape).
+    for text in errors.0.drain(..) {
+        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+    }
 
     // The next slot's price is the client's own job (the wire never sends it) — `StableSlotPrices`
     // row `purchased + 1`, the bank's arrangement. `0` past the table, a state in which the
@@ -219,16 +243,21 @@ fn feed_stable(
         .and_then(|p| p.0.next_slot_price(open.num_stable_slots))
         .unwrap_or(0);
 
+    // The client's own `[0xb714a0]|[0xb714a4]` test — a LIVE pet guid, which a dismissed pet does
+    // not have even though the server still sends its slot-0 row.
+    let has_live_pet = bar.spells.pet_guid != 0;
     let fresh = snapshot(
         &open,
         &mut names,
         families.as_deref(),
         stats.as_deref(),
         next_slot_cost,
+        has_live_pet,
         &commands,
     );
     let switched = npc_switched(*last_npc, open.npc);
-    if fresh == *last && !switched {
+    let fresh_list = std::mem::take(&mut open.fresh_list);
+    if fresh == *last && !switched && !fresh_list {
         return;
     }
     // PUSH before firing: `fire_event` dispatches the Lua handlers synchronously, so the snapshot
@@ -242,17 +271,23 @@ fn feed_stable(
         script.fire_event("PET_STABLE_CLOSED", vec![]);
         script.fire_event("PET_STABLE_SHOW", vec![]);
         let _ = script.take_stable_close();
+    } else if fresh_list && fresh.is_some() {
+        // **Every list fires SHOW**, not just the first (`0x4cac9b` is unconditional). The window
+        // is already visible for a refresh, and the reference's own `ShowUIPanel` early-return is
+        // what makes that idempotent rather than a re-open.
+        script.fire_event("PET_STABLE_SHOW", vec![]);
     } else {
         match (&*last, &fresh) {
-            (None, Some(_)) => script.fire_event("PET_STABLE_SHOW", vec![]),
-            // The paperdoll event rides the content change: the reference repaints the model pane
-            // from it, and a stabled pet's icon/family arriving late is exactly when it must.
+            // A content change with no new list is a late creature-query answer filling a row in —
+            // the client's cache-callback edge, and the only thing those callbacks fire.
             (Some(_), Some(_)) => {
                 script.fire_event("PET_STABLE_UPDATE", vec![]);
                 script.fire_event("PET_STABLE_UPDATE_PAPERDOLL", vec![]);
             }
             (Some(_), None) => script.fire_event("PET_STABLE_CLOSED", vec![]),
-            (None, None) => {}
+            // A first snapshot with no list latch cannot happen (the latch is set by the packet
+            // that creates it); a None→None is nothing at all.
+            (None, _) => {}
         }
     }
     *last = fresh;
@@ -291,6 +326,11 @@ fn drain_stable(
         open.clear();
     }
 }
+
+/// Stable refusals staged for the feed to surface on the window's error line — only ever
+/// `ERR_NOT_ENOUGH_MONEY`, the single code the client speaks for (decision 1677).
+#[derive(Resource, Default)]
+pub(crate) struct StableErrors(pub(crate) Vec<String>);
 
 /// `StableSlotPrices.dbc`, loaded once at startup — the purchase row's price oracle. A missing
 /// table quotes `0`, which is the same shape as "past the ladder": degraded, never wrong.

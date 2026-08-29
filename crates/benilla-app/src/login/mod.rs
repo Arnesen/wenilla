@@ -20,6 +20,7 @@
 //! [`screen`] (the authored layout, transcribed from `AccountLogin.xml`), [`smoke`] (the
 //! `WOW_LOGIN_SMOKE` headless prover).
 
+mod queue;
 mod screen;
 mod smoke;
 
@@ -37,8 +38,8 @@ use benilla_protocol::{DialFailure, LoginRefusal, LoginStage};
 use crate::char_select::ClientState;
 use crate::glue_strings::GlueStrings;
 use crate::net::{
-    CharListMessage, DisconnectedMessage, LoginAbandon, LoginFailedMessage, LoginRequest,
-    LoginStageMessage, LoginSubmit,
+    CharListMessage, DisconnectedMessage, LoginAbandon, LoginFailedMessage, LoginQueuedMessage,
+    LoginRequest, LoginStageMessage, LoginSubmit,
 };
 use crate::portrait::{GluePreview, GlueScene};
 use crate::sound::GlueSound;
@@ -178,6 +179,36 @@ impl Attempt<'_> {
     }
 }
 
+/// The millisecond clock the queue ring is stamped with — the app's own elapsed time, which is
+/// what the reference's `GetTickCount` is here. Only differences matter to the estimate, so an
+/// arbitrary epoch is fine; `u32` keeps the wrapping arithmetic the same width the reference used.
+fn queue_now_ms(time: &Time) -> u32 {
+    time.elapsed().as_millis() as u32
+}
+
+/// What a Login press should do — the reference's two guards, as a verdict.
+///
+/// Extracted from [`login_input`] so the validation can be tested without standing a screen up,
+/// and so the click sound has somewhere to live that is not inside one of its branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginPress {
+    NeedAccount,
+    NeedPassword,
+    Submit,
+}
+
+/// The account box is checked first, so a wholly empty form asks for the account name — which is
+/// the order the reference's dialogs come in.
+fn login_press(form: &LoginForm) -> LoginPress {
+    if form.account.text.is_empty() {
+        LoginPress::NeedAccount
+    } else if form.password.text.is_empty() {
+        LoginPress::NeedPassword
+    } else {
+        LoginPress::Submit
+    }
+}
+
 /// The `LOGIN_STATE_*` glue string for a stage (the connecting dialog's text).
 fn stage_text(strings: &GlueStrings, stage: LoginStage) -> &str {
     match stage {
@@ -211,11 +242,12 @@ fn fail_text(
         };
         return format!("{headline}\n{}", dial.address);
     }
-    match refusal {
-        Some(LoginRefusal::World(code)) => world_refusal_text(strings, code).to_string(),
-        Some(LoginRefusal::Logon(code)) => logon_refusal_text(strings, Some(code)).to_string(),
-        None => logon_refusal_text(strings, None).to_string(),
-    }
+    let authored = match refusal {
+        Some(LoginRefusal::World(code)) => world_refusal_text(strings, code),
+        Some(LoginRefusal::Logon(code)) => logon_refusal_text(strings, Some(code)),
+        None => logon_refusal_text(strings, None),
+    };
+    without_dead_url(authored).into_owned()
 }
 
 /// **The world server's** `SMSG_AUTH_RESPONSE` refusal, in the client's own words.
@@ -276,6 +308,42 @@ fn world_refusal_text(strings: &GlueStrings, code: u8) -> &str {
         _ => ("AUTH_FAILED", "Authentication failed"),
     };
     strings.text(key, fallback)
+}
+
+/// Cut the **dead web address** off the tail of an authored failure string (director's call,
+/// 2026-08-28).
+///
+/// Every long `LOGIN_*`/`AUTH_*` string ends by pointing the player at a Blizzard page —
+/// `www.worldofwarcraft.com`, `worldofwarcraft.com/misc/banned.html`. None has served anything in
+/// fifteen years, and none was ever about *this* server: benilla's player is on somebody's private
+/// realm, where "see www.worldofwarcraft.com for more information" is not merely stale but
+/// misdirection. The rest of the sentence is still worth reading, so the address is cut at its
+/// **clause**, not its sentence — `"…a lost or stolen password and account, see
+/// www.worldofwarcraft.com for more information."` becomes `"…a lost or stolen password and
+/// account."`
+///
+/// Find the first web address, walk back to the clause boundary before it (a comma or a full
+/// stop), end there. **With no boundary to walk back to the string is left exactly as it is** —
+/// that guard is what stops `AUTH_BANNED` ("…violating the Terms of Use Agreement -
+/// www.worldofwarcraft.com/termsofuse.shtml…"), whose address sits behind a dash with no clause
+/// break before it, from being trimmed away to nothing.
+fn without_dead_url(text: &str) -> std::borrow::Cow<'_, str> {
+    let Some(url) = ["www.", "http://", "https://"]
+        .iter()
+        .filter_map(|p| text.find(p))
+        .min()
+    else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let head = &text[..url];
+    let Some(cut) = head.rfind([',', '.']) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let kept = head[..cut].trim_end();
+    if kept.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(format!("{kept}."))
 }
 
 /// The **realmd** logon-proof refusal, in the client's own words — the LONG `LOGIN_*` family.
@@ -376,6 +444,7 @@ fn drive_policy(
     strings: Option<Res<GlueStrings>>,
     time: Res<Time>,
     mut stages: MessageReader<LoginStageMessage>,
+    mut queued: MessageReader<LoginQueuedMessage>,
     mut failures: MessageReader<LoginFailedMessage>,
     mut disconnects: MessageReader<DisconnectedMessage>,
     mut exit: MessageWriter<AppExit>,
@@ -442,6 +511,32 @@ fn drive_policy(
         if matches!(dialog.kind, Some(DialogKind::Status)) {
             dialog.set_text(stage_text(strings, msg.stage));
         }
+    }
+    // **The queue** (decision 1681): each packet is one sample, and the first one turns the
+    // connecting dialog into the queue dialog. A queue is not a failure — the attempt is still in
+    // flight and `in_flight` deliberately stays set, so nothing resubmits underneath it.
+    for msg in queued.read() {
+        if !matches!(dialog.kind, Some(DialogKind::Queued)) {
+            dialog.open_queued(msg.realm.clone());
+        }
+        if let Some(position) = msg.position {
+            dialog.queue.sample(position, queue_now_ms(&time));
+        }
+        info!(
+            "login: queued for {} at position {}",
+            msg.realm.as_deref().unwrap_or("the realm"),
+            msg.position
+                .map_or_else(|| "unknown".to_string(), |p| p.to_string()),
+        );
+    }
+    // The countdown is live between packets, so the text is recomputed every frame it is up.
+    if matches!(dialog.kind, Some(DialogKind::Queued)) {
+        let text = dialog.queue.text(
+            queue_now_ms(&time),
+            dialog.queue_realm.clone().as_deref(),
+            strings,
+        );
+        dialog.set_text(&text);
     }
     for msg in failures.read() {
         attempt.intent.in_flight = false;
@@ -561,7 +656,7 @@ fn to_select_on_roster(
 // ── The screen's form state + input ──────────────────────────────────────────────────────────────
 
 /// Which edit box has the focus.
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Field {
     #[default]
     Account,
@@ -594,6 +689,24 @@ impl Default for LoginForm {
 }
 
 impl LoginForm {
+    /// Give `field` the keyboard **and select everything already in it**.
+    ///
+    /// **A knowing divergence** (director's call, 2026-08-28). The reference does neither on a
+    /// click nor a TAB: `CEditBox::OnMouseDown` (`0x77b800`) "focuses unconditionally" and
+    /// `SetFocus` (`0x77e3d0`) only moves the focus — neither highlights (wow-re `ui.md` §1210,
+    /// §1218). But the thing a player does after clicking into a login field is *replace* what is
+    /// there — a remembered account name, a mistyped password — and having to select-all or
+    /// backspace it out first is friction the reference only avoids by being what everyone was
+    /// used to in 2006.
+    ///
+    /// The selection uses the client's own `HighlightText(0, -1)` (`0x77cca0`), which resets the
+    /// blink on its way, so the box still opens on a solid caret — the property the old
+    /// `reset_blink()` calls at these sites existed to preserve.
+    fn focus(&mut self, field: Field) {
+        self.focus = field;
+        self.focused().highlight_text(0, -1);
+    }
+
     /// The box that currently owns the keyboard.
     fn focused(&mut self) -> &mut EditBoxState {
         match self.focus {
@@ -621,8 +734,10 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
     form.account.set_text(&saved);
     form.password.set_text("");
     // `SetFocus` starts the caret solid — the screen never opens mid-blink-off (`set_text` alone
-    // wouldn't do it: it no-ops when the saved name is already in the box).
-    form.focused().reset_blink();
+    // wouldn't do it: it no-ops when the saved name is already in the box) — and selects, so a
+    // remembered account name is typed over rather than appended to.
+    let focus = form.focus;
+    form.focus(focus);
     preview.scene = Some(GlueScene::MainMenu);
     preview.look = None;
     preview.yaw = 0.0;
@@ -673,17 +788,10 @@ fn login_input(
         // gave, without costing this system a second query.
         if interaction.is_changed() && *interaction == Interaction::Pressed {
             match action {
-                // A click takes the focus the same way TAB does — including the solid caret the
-                // fresh focus starts on, so the box you just clicked never answers with a blank
-                // half-period.
-                LoginAction::FocusAccount => {
-                    form.focus = Field::Account;
-                    form.focused().reset_blink();
-                }
-                LoginAction::FocusPassword => {
-                    form.focus = Field::Password;
-                    form.focused().reset_blink();
-                }
+                // A click takes the focus the same way TAB does — the solid caret, and the
+                // select-all that makes the next keystroke replace what is in the box.
+                LoginAction::FocusAccount => form.focus(Field::Account),
+                LoginAction::FocusPassword => form.focus(Field::Password),
                 _ => {}
             }
         }
@@ -698,7 +806,12 @@ fn login_input(
             // The realmlist control (1667) — the button and the address readout under it are
             // the same action, so clicking either opens the editor.
             LoginAction::Realmlist => {
-                sounds.write(GlueSound("gsClick"));
+                // `gsLoginNewAccount` — what the reference plays for the other buttons in this
+                // corner (`AccountLogin_ManageAccount`, `AccountLogin_LaunchCommunitySite`), which
+                // is the closest authored answer for a button it does not have. It replaces a
+                // `gsClick` I invented in 1667: no such SoundEntries kit exists, so that press was
+                // silently playing nothing at all.
+                sounds.write(GlueSound("gsLoginNewAccount"));
                 if attempt.realmlist.pinned_by_env() {
                     // A harness/dev run owns the address for the session (`cvars`' env-override
                     // law). Say so rather than opening an editor whose Okay would be a silent
@@ -772,11 +885,11 @@ fn login_input(
             continue;
         }
         if ev.state == ButtonState::Pressed && ev.key_code == KeyCode::Tab {
-            form.focus = match form.focus {
+            let next = match form.focus {
                 Field::Account => Field::Password,
                 Field::Password => Field::Account,
             };
-            form.focused().reset_blink();
+            form.focus(next);
         }
     }
 
@@ -790,24 +903,39 @@ fn login_input(
     }
 
     if do_login && !attempt.intent.in_flight {
-        // The ref's own guards: empty account / empty password get their dialog, no wire.
-        if form.account.text.is_empty() {
-            dialog.open_error(strings.text("LOGIN_ENTER_NAME", "Please enter your account name."));
-        } else if form.password.text.is_empty() {
-            dialog.open_error(strings.text("LOGIN_ENTER_PASSWORD", "Please enter your password."));
-        } else {
-            sounds.write(GlueSound("gsLogin"));
-            // `AccountLogin_Login`: save or clear the account name per the checkbox, clear the
-            // password box after grabbing it.
-            if form.save {
-                save_account(&form.account.text);
-            } else {
-                save_account("");
+        // **`gsLogin` first, always** — `AccountLogin_Login` plays it before it calls
+        // `DefaultServerLogin`, so the reference clicks even when the attempt is about to be
+        // refused for an empty box. Ours played it only on the path that reached the wire, so a
+        // Login press with a field still blank was silent and the dialog appeared out of nowhere
+        // (the director's "the sound of the popup is sometimes missing"). It sits OUTSIDE the
+        // match on purpose: a sound that is structurally unconditional cannot go missing on some
+        // branch again.
+        sounds.write(GlueSound("gsLogin"));
+        match login_press(&form) {
+            // The ref's own guards: empty account / empty password get their dialog, no wire.
+            LoginPress::NeedAccount => {
+                dialog.open_error(
+                    strings.text("LOGIN_ENTER_NAME", "Please enter your account name."),
+                );
             }
-            let (user, pass) = (form.account.text.clone(), form.password.text.clone());
-            form.password.set_text("");
-            dialog.open_status(strings.text("LOGIN_STATE_CONNECTING", "Connecting"));
-            attempt.send(&user, &pass, true);
+            LoginPress::NeedPassword => {
+                dialog.open_error(
+                    strings.text("LOGIN_ENTER_PASSWORD", "Please enter your password."),
+                );
+            }
+            LoginPress::Submit => {
+                // `AccountLogin_Login`: save or clear the account name per the checkbox, clear the
+                // password box after grabbing it.
+                if form.save {
+                    save_account(&form.account.text);
+                } else {
+                    save_account("");
+                }
+                let (user, pass) = (form.account.text.clone(), form.password.text.clone());
+                form.password.set_text("");
+                dialog.open_status(strings.text("LOGIN_STATE_CONNECTING", "Connecting"));
+                attempt.send(&user, &pass, true);
+            }
         }
     }
     if do_quit && !*quit {
@@ -869,6 +997,12 @@ fn drive_quit(arm: Option<Res<QuitArm>>, time: Res<Time>, mut exit: MessageWrite
 pub(super) enum DialogKind {
     Status,
     Error,
+    /// **Queued for a full realm** (decision 1681). The reference has no queue dialog *type*: it
+    /// opens the ordinary `CANCEL` status dialog and re-texts it every frame, relabelling the one
+    /// button to `CHANGE_REALM`. This is that, as a kind — the relabel is the only thing that
+    /// distinguishes it from [`Self::Status`], and a kind is how this screen spells "different
+    /// button caption".
+    Queued,
     /// The realmlist editor (decision 1667) — the reference's `GlueDialog` `hasEditBox` shape,
     /// which is how the shipped dialog asks for a typed value (`GlueDialog.lua`: it shows
     /// `GlueDialogEditBox` and re-heights the box to
@@ -888,6 +1022,8 @@ impl DialogKind {
     pub(super) fn buttons(self, strings: &GlueStrings) -> (&str, Option<&str>) {
         match self {
             DialogKind::Status => (strings.text("CANCEL", "Cancel"), None),
+            // The reference's own relabel: leaving a queue is "Change Realm", not "Cancel".
+            DialogKind::Queued => (strings.text("CHANGE_REALM", "Change Realm"), None),
             DialogKind::Error => (strings.text("OKAY", "Okay"), None),
             DialogKind::Realmlist => (
                 strings.text("OKAY", "Okay"),
@@ -917,6 +1053,11 @@ pub(crate) struct LoginDialog {
     /// (decision 0704). Only meaningful while a [`DialogKind::has_edit_box`] dialog is up; it is
     /// rebuilt from the current value on every open, so a cancelled edit leaves nothing behind.
     pub(super) edit: EditBoxState,
+    /// The queue's sample ring and the realm it is for — live only while [`DialogKind::Queued`]
+    /// is up, and rebuilt from empty on every fresh queue so a second login never inherits the
+    /// first one's estimate.
+    pub(super) queue: queue::QueueEstimate,
+    queue_realm: Option<String>,
     /// The kind the spawned tree was built for.
     spawned: Option<DialogKind>,
     /// The glue scale the spawned tree was built at — a resize rebuilds it.
@@ -931,6 +1072,14 @@ impl LoginDialog {
     fn open_error(&mut self, text: &str) {
         self.kind = Some(DialogKind::Error);
         self.set_text(text);
+    }
+    /// Enter the queue: a fresh ring (a second login must not inherit the first one's estimate)
+    /// and the realm's name for the `_NAME` text variants.
+    fn open_queued(&mut self, realm: Option<String>) {
+        self.kind = Some(DialogKind::Queued);
+        self.queue = queue::QueueEstimate::default();
+        self.queue_realm = realm;
+        self.set_text("");
     }
     /// Open the realmlist editor over `current`, with the caret at the end of it and the whole
     /// value selected — the reference's `hasEditBox` dialogs open ready to be typed over, and a
@@ -976,6 +1125,7 @@ fn drive_dialog(
     buttons: Query<(Entity, &LoginAction)>,
     clicks: Res<crate::glue::GlueClicks>,
     mut texts: Query<&mut Text, With<screen::DialogText>>,
+    mut sounds: MessageWriter<GlueSound>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     let empty = GlueStrings::default();
@@ -1026,13 +1176,22 @@ fn drive_dialog(
     let escape = keys.just_pressed(KeyCode::Escape);
     let button1 = hit(LoginAction::Dialog)
         || match kind {
-            // The status dialog's one button IS Cancel, so ESCAPE is it.
-            DialogKind::Status => escape,
+            // The status dialog's one button IS Cancel, so ESCAPE is it. The queue's button is
+            // the same act under another name, so it answers to ESCAPE the same way.
+            DialogKind::Status | DialogKind::Queued => escape,
             DialogKind::Error => escape || enter,
             DialogKind::Realmlist => enter,
         };
     let button2 = hit(LoginAction::Dialog2) || (kind == DialogKind::Realmlist && escape);
 
+    // **Every glue dialog button clicks** — `GlueDialog_OnClick` ends with
+    // `PlaySound("gsTitleOptionOK")` for button 1 and button 2 alike, whatever the dialog's type.
+    // Ours played nothing at all. Emitted here, once, before the kinds diverge, so no arm can
+    // forget it (and so the realmlist editor's Okay-that-refuses still clicks: the reference plays
+    // the sound on the press, not on the outcome).
+    if button1 || button2 {
+        sounds.write(GlueSound("gsTitleOptionOK"));
+    }
     if kind == DialogKind::Realmlist && button1 {
         // Okay: take the typed address, or say why it cannot be taken and stay open with the text
         // as typed — the fix is then an edit, not a retype.
@@ -1048,7 +1207,7 @@ fn drive_dialog(
         return;
     }
     if button1 || button2 {
-        if kind == DialogKind::Status {
+        if matches!(kind, DialogKind::Status | DialogKind::Queued) {
             // Cancel: the next stage boundary discards the attempt; a canceled manual attempt
             // must not silently resubmit later.
             abandon.0.fetch_add(1, Ordering::SeqCst);
@@ -1167,6 +1326,7 @@ mod tests {
                 std::sync::atomic::AtomicU64::new(0),
             )))
             .add_message::<LoginStageMessage>()
+            .add_message::<LoginQueuedMessage>()
             .add_message::<LoginFailedMessage>()
             .add_message::<DisconnectedMessage>()
             .add_systems(Update, drive_policy);
@@ -1424,6 +1584,96 @@ mod tests {
             refusal_exits(false),
             "an attempt nobody typed still exits non-zero: decision 1371's leg guarantee",
         );
+    }
+
+    /// **The dead web address comes off** (director's call) — at the clause, so the sentence in
+    /// front of it survives.
+    #[test]
+    fn a_dead_url_is_cut_at_its_clause() {
+        // The reported one, verbatim from `GlueStrings.lua`.
+        assert_eq!(
+            without_dead_url(
+                "The information you have entered is not valid.  Please check the spelling of the \
+                 account name and password.  If you need help in retrieving a lost or stolen \
+                 password and account, see www.worldofwarcraft.com for more information.",
+            ),
+            "The information you have entered is not valid.  Please check the spelling of the \
+             account name and password.  If you need help in retrieving a lost or stolen password \
+             and account.",
+        );
+        // A whole trailing sentence goes when the address is what the sentence is for.
+        assert_eq!(
+            without_dead_url(
+                "This World of Warcraft account has been closed and is no longer available for \
+                 use.  Please go to http://www.worldofwarcraft.com/misc/banned.html for further \
+                 information. ",
+            ),
+            "This World of Warcraft account has been closed and is no longer available for use.",
+        );
+        // Nothing to cut: left exactly alone, and borrowed rather than rebuilt.
+        let clean = "You have used up your prepaid time for this account.";
+        assert!(matches!(
+            without_dead_url(clean),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(without_dead_url(clean), clean);
+    }
+
+    /// The guard that stops the trim eating a string whose address has no clause in front of it —
+    /// `AUTH_BANNED`, where the URL sits behind a dash. Better untrimmed than truncated to nothing.
+    #[test]
+    fn an_address_with_no_clause_boundary_is_left_alone() {
+        let banned = "This account has been banned for violating the Terms of Use Agreement - \
+                      www.worldofwarcraft.com/termsofuse.shtml. Please contact our GM department.";
+        assert_eq!(without_dead_url(banned), banned);
+        // …and the degenerate case cannot produce an empty dialog.
+        assert_eq!(without_dead_url("www.example.com"), "www.example.com");
+        assert_eq!(without_dead_url(". www.example.com"), ". www.example.com");
+    }
+
+    /// The Login press's two guards, in the reference's order: a wholly empty form asks for the
+    /// account name first.
+    #[test]
+    fn the_login_press_asks_for_the_account_before_the_password() {
+        let mut form = LoginForm::default();
+        assert_eq!(login_press(&form), LoginPress::NeedAccount);
+        form.account.set_text("one");
+        assert_eq!(login_press(&form), LoginPress::NeedPassword);
+        form.password.set_text("pone");
+        assert_eq!(login_press(&form), LoginPress::Submit);
+        // And a password-only form still asks for the account, not the password.
+        let mut only_pass = LoginForm::default();
+        only_pass.password.set_text("pone");
+        assert_eq!(login_press(&only_pass), LoginPress::NeedAccount);
+    }
+
+    /// **Focusing a box selects it** (director's call, diverging from the reference) — and leaves
+    /// the caret solid, which is what the `reset_blink` calls this replaced were for.
+    #[test]
+    fn focusing_a_box_selects_all_of_it() {
+        let mut form = LoginForm::default();
+        form.account.set_text("remembered");
+        form.password.set_text("secret");
+
+        form.focus(Field::Account);
+        assert_eq!(form.focus, Field::Account);
+        assert_eq!(form.account.selected_text().as_deref(), Some("remembered"));
+        assert!(form.account.caret_shown, "a fresh focus starts solid");
+
+        // TAB to the other box selects that one whole too. Checked as a RANGE, not as text: a
+        // password box's `selected_text` hands back the `*` mask, because the real characters are
+        // never rendered or copied (decision 0704's box law) — which is the correct answer and
+        // exactly why the assertion cannot ask for them.
+        form.focus(Field::Password);
+        assert_eq!(
+            (form.password.sel_start, form.password.sel_end),
+            (0, form.password.text.len()),
+            "the whole password is selected even though it cannot be read back",
+        );
+
+        // Typing then replaces rather than appends — the point of the divergence.
+        form.focused().insert("x");
+        assert_eq!(form.password.text, "x");
     }
 
     /// The code→string map quotes the client's own strings for the vmangos-verified rows.

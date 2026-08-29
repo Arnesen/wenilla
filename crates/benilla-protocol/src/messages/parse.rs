@@ -159,9 +159,42 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_AUTH_CHALLENGE => ServerPacket::AuthChallenge {
             server_seed: read_u32_le(&mut r)?,
         },
-        opcode::SMSG_AUTH_RESPONSE => ServerPacket::AuthResponse {
-            result: read_u8(&mut r)?,
-        },
+        opcode::SMSG_AUTH_RESPONSE => {
+            // **The client's own grammar** (VERIFIED, handler `0x5b41b0`; wow-re
+            // `system/glue/scratch/login-failure-dialogs.md`):
+            //
+            //   u8 code
+            //   if (code == AUTH_OK || code == AUTH_WAIT_QUEUE) && remaining >= 5:
+            //       u32 billingTimeRemaining, u8 billingPlanFlags, u32 billingTimeRested
+            //   if code == AUTH_WAIT_QUEUE:
+            //       u32 position
+            //
+            // The client **branches on the remaining length**, which is what makes both shapes the
+            // mangos family sends parse correctly: the short `{u8, u32}` leaves 4 bytes (`4 < 5`,
+            // billing skipped, position at body offset 1) and the long
+            // `{u8, u32, u8, u32, u32}` leaves 13 (billing read, position at offset 10).
+            //
+            // The threshold is **5 guarding a 9-byte group** — not a size check, just "is there
+            // more here than a bare position?". Copied rather than tidied: a body of 6..=9 bytes
+            // hits it and mis-parses, and matching the client's mistakes is the point of a
+            // faithful parser.
+            //
+            // ONE DELIBERATE DIVERGENCE: where a truncated body leaves the client's position
+            // *unwritten* — silently redisplaying the previous queue position from an
+            // uninitialised process-lifetime global — ours reports `None`. Rendering a stale
+            // position as current is a bug we decline to reproduce.
+            let result = read_u8(&mut r)?;
+            let queued = result == super::AUTH_WAIT_QUEUE;
+            if (result == super::AUTH_OK || queued) && r.len() >= 5 {
+                let _billing_time_remaining = read_u32_le(&mut r)?;
+                let _billing_plan_flags = read_u8(&mut r)?;
+                let _billing_time_rested = read_u32_le(&mut r)?;
+            }
+            ServerPacket::AuthResponse {
+                result,
+                queue_position: queued.then(|| read_u32_le(&mut r).ok()).flatten(),
+            }
+        }
         opcode::SMSG_CHAR_ENUM => {
             let count = read_u8(&mut r)?;
             let mut characters = Vec::with_capacity(count as usize);

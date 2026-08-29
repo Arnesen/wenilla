@@ -16,6 +16,16 @@ use super::{recv_packet, send_packet};
 /// Generous — a local vmangos answers in milliseconds; this only bounds the pathological stall.
 const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The read bound while **queued** — a different question from the handshake's.
+///
+/// [`HANDSHAKE_READ_TIMEOUT`] is 10 s because every handshake step should answer promptly. Sitting
+/// in a login queue is the one step that should not: the server speaks when our place moves, which
+/// on a full realm can be minutes apart. Keeping the handshake bound would abort every queue that
+/// mattered. The real client bounds this not at all (it is event-driven and simply waits), but an
+/// unbounded blocking read here would make a server that dies mid-queue indistinguishable from a
+/// long wait, so the wait is generous rather than infinite.
+const QUEUE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// The server requires Warden, which benilla does not implement — raised by
 /// [`WorldSession::connect`] and recoverable through the `anyhow` chain with
 /// `err.downcast_ref::<WardenRequired>()`, so the login screen can say so plainly.
@@ -91,6 +101,29 @@ impl WorldSession {
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
     ) -> Result<Self> {
+        Self::connect_queued(addr, username, session_key, &mut |_| true)
+    }
+
+    /// [`Self::connect`], reporting our place in the **login queue** as it moves.
+    ///
+    /// `on_queue` fires once per `AUTH_WAIT_QUEUE` the server sends — `None` when the packet
+    /// carried no readable position — and the call returns only once we are admitted (`AUTH_OK`),
+    /// refused, or the socket fails. The queue is a wait, not an outcome, so it is a callback
+    /// rather than a return value: the screen has to be able to show the position *while* the
+    /// handshake is still parked here.
+    ///
+    /// **Returning `false` abandons the queue** and fails the connect. That is the only way out of
+    /// a wait that can last minutes: every other stage of the handshake is bounded tightly enough
+    /// that a cancel is honoured at its next boundary, and a queue is not. Abandoning is checked
+    /// once per packet rather than per frame — the reference tears the socket down on the next
+    /// tick, which is finer-grained, but it costs a player at most one server update.
+    pub fn connect_queued(
+        addr: impl ToSocketAddrs,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+    ) -> Result<Self> {
+        let mut queued = false;
         let mut stream = TcpStream::connect(addr).context("connecting to world server")?;
         // **Nagle off** (decision 0617). VERIFIED in the reference client: `0x5bca60` calls
         // `setsockopt(s, 6 /* IPPROTO_TCP */, 1 /* TCP_NODELAY */, &1, 4)` unconditionally on its game
@@ -158,8 +191,26 @@ impl WorldSession {
         // honest message at the login screen.
         loop {
             match session.recv()? {
-                ServerPacket::AuthResponse { result } if result == messages::AUTH_OK => break,
-                ServerPacket::AuthResponse { result } => {
+                ServerPacket::AuthResponse { result, .. } if result == messages::AUTH_OK => break,
+                // **Queued, not refused** — the realm is full and we keep our place in line. Report
+                // the position and go back to reading; the server re-sends as we move up and ends
+                // the wait with an `AUTH_OK`. Treating this as an ending (which it was until now)
+                // meant benilla could not log into a busy server at all.
+                ServerPacket::AuthResponse {
+                    result,
+                    queue_position,
+                } if result == messages::AUTH_WAIT_QUEUE => {
+                    if !queued {
+                        queued = true;
+                        session
+                            .set_read_timeout(Some(QUEUE_READ_TIMEOUT))
+                            .context("relaxing the read timeout for the login queue")?;
+                    }
+                    if !on_queue(queue_position) {
+                        bail!("login queue abandoned");
+                    }
+                }
+                ServerPacket::AuthResponse { result, .. } => {
                     return Err(WorldAuthReject { code: result }.into())
                 }
                 ServerPacket::Other {
@@ -167,6 +218,13 @@ impl WorldSession {
                 } => return Err(WardenRequired.into()),
                 _ => continue,
             }
+        }
+        // Admitted. The rest of the handshake is prompt again, so it gets the prompt bound back —
+        // leaving the queue's 300 s in place would make a stalled roster step look like a long wait.
+        if queued {
+            session
+                .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))
+                .context("restoring the handshake read timeout after the queue")?;
         }
 
         Ok(session)

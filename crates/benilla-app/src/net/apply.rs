@@ -121,6 +121,8 @@ pub(super) fn apply_net_updates(
         MessageWriter<super::MoveModeMessage>,
         // The login screen's dialog + reconnect-policy feed (decision 0539).
         MessageWriter<super::LoginStageMessage>,
+        // The login queue's position feed (decision 1681).
+        MessageWriter<super::LoginQueuedMessage>,
         MessageWriter<super::LoginFailedMessage>,
         MessageWriter<super::DisconnectedMessage>,
         // The server's own answer to a GM dot-command, readable rather than only logged — the
@@ -279,7 +281,12 @@ pub(super) fn apply_net_updates(
         ResMut<crate::ui_cast::CastBarFeed>,
         ResMut<crate::pending_item_ops::PendingItemOps>,
         ResMut<crate::pending_item_ops::LockClearedByFailure>,
-        ResMut<crate::ui_trainer::TrainerErrors>,
+        // Nested pair (the tuple is at the ceiling): the two NPC-service windows' error queues,
+        // each drained onto its window's red line by its own feed.
+        (
+            ResMut<crate::ui_trainer::TrainerErrors>,
+            ResMut<crate::ui_stable::StableErrors>,
+        ),
         ResMut<crate::ui_cast::PendingCast>,
         // The cooldown store + the Spell.dbc catalog its wire laws read, and the live
         // auto-repeat state the bar's flash rides (decision 0137 phase 4).
@@ -439,6 +446,7 @@ pub(super) fn apply_net_updates(
         mut speed_changes,
         mut move_modes,
         mut login_stages,
+        mut login_queued,
         mut login_failures,
         mut disconnects,
         mut server_said,
@@ -474,6 +482,9 @@ pub(super) fn apply_net_updates(
     for ev in events.0.try_iter() {
         match ev {
             SessionEvent::LoginStage { stage } => session::login_stage(stage, &mut login_stages),
+            SessionEvent::LoginQueued { position, realm } => {
+                login_queued.write(crate::net::LoginQueuedMessage { position, realm });
+            }
             SessionEvent::LoginFailed {
                 refusal,
                 reason,
@@ -1623,16 +1634,19 @@ pub(super) fn apply_net_updates(
                 npc::trainer_buy_succeeded(trainer, spell_id, &mut trainer_open, &net_commands)
             }
             SessionEvent::TrainerBuyFailed { error, .. } => {
-                npc::trainer_buy_failed(error, &mut ui_actions.8)
+                npc::trainer_buy_failed(error, &mut ui_actions.8 .0)
             }
             SessionEvent::ListStabledPets {
                 npc,
                 num_stable_slots,
                 pets,
             } => npc::list_stabled_pets(npc, num_stable_slots, pets, &mut stable_open),
-            SessionEvent::StableResult { result } => {
-                npc::stable_result(result, &mut stable_open, &net_commands)
-            }
+            SessionEvent::StableResult { result } => npc::stable_result(
+                result,
+                &mut stable_open,
+                &mut ui_actions.8 .1,
+                &net_commands,
+            ),
             SessionEvent::TaxiNodesShown {
                 flightmaster,
                 nearest_node,

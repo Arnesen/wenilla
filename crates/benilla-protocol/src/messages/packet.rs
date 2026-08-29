@@ -80,6 +80,9 @@ pub enum ServerPacket {
     },
     AuthResponse {
         result: u8,
+        /// Our place in the login queue, when `result` is [`super::AUTH_WAIT_QUEUE`] — `None` for
+        /// every other result, and also for a queue packet whose body was too short to carry one.
+        queue_position: Option<u32>,
     },
     CharEnum {
         characters: Vec<Character>,

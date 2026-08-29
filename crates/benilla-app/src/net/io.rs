@@ -329,7 +329,26 @@ fn run(
         .unwrap_or_else(|| format!("{}:{}", host_port(&req.host, WORLD_PORT).0, WORLD_PORT));
 
     stage(LoginStage::Handshaking);
-    let mut session = match WorldSession::connect(&world_addr, &req.user, logon.session_key) {
+    // The realm we are dialing, for the queue dialog to name — the roster that would otherwise
+    // carry it is on the far side of the queue, which is exactly when the name is wanted.
+    let realm_name = realm.as_ref().map(|r| r.name.clone());
+    // Report our place, and keep waiting only while the attempt is still wanted. A queue can
+    // last minutes, so unlike every other handshake stage it has to test the abandon generation
+    // itself — otherwise a Cancel would close the dialog while this thread quietly held its place
+    // in line and then walked into the world anyway.
+    let mut on_queue = |position: Option<u32>| {
+        let _ = events_tx.send(SessionEvent::LoginQueued {
+            position,
+            realm: realm_name.clone(),
+        });
+        !canceled()
+    };
+    let mut session = match WorldSession::connect_queued(
+        &world_addr,
+        &req.user,
+        logon.session_key,
+        &mut on_queue,
+    ) {
         Ok(s) => s,
         Err(e) => {
             if canceled() {
@@ -351,6 +370,11 @@ fn run(
             return fail(None, format!("world handshake with {world_addr}: {e:#}"));
         }
     };
+    // The handshake can now block for minutes (the queue), so a cancel that landed while it did
+    // must not be overtaken by the roster it is about to fetch.
+    if canceled() {
+        return Ok(Cycle::Repark);
+    }
 
     // The roster (creating a starter character on a fresh account so PLAYER_LOGIN has a target).
     // Failures here are still pre-roster: surface as LoginFailed, re-park. (An immediately-run

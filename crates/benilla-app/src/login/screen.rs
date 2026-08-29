@@ -22,8 +22,8 @@ use crate::char_select::wow_font;
 use crate::glue::art::{GlueArt, BACKDROP, GOLD};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
 use crate::glue::widgets::{
-    abs, glue_button, glue_edit_box, outlined_text, overlay, paint_glue_field, ArtSwap,
-    GlueBtnKind, GlueFieldPart, GlueText, Hilight,
+    abs, glue_button, glue_edit_box, outlined_text, outlined_text_centered, overlay,
+    paint_glue_field, ArtSwap, GlueBtnKind, GlueFieldPart, GlueText, Hilight,
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{PortraitImages, PortraitSource, GLUE_SLOT};
@@ -748,8 +748,11 @@ pub(super) fn spawn_dialog(
                         overlay(),
                     ));
                 }
-                // The message (GlueFontNormalLarge 18 at TOP (0,−16), width 440, wrapping).
-                outlined_text(
+                // The message (GlueFontNormalLarge 18 at TOP (0,−16), width 440, wrapping) —
+                // **centred**, which `GlueDialogText` gets by omitting `justifyH` (a FontString's
+                // default is CENTER; every other wrapped glue string in the shipped XML asks for
+                // LEFT explicitly). It read left-aligned until the director's eye caught it.
+                outlined_text_centered(
                     b,
                     Node {
                         width: px(440.0),

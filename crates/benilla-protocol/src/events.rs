@@ -144,6 +144,15 @@ pub enum SessionEvent {
     /// A login attempt progressed to `stage` (decision 0539) — IO-thread-emitted, like
     /// [`Self::CharacterList`], never wire-decoded.
     LoginStage { stage: LoginStage },
+    /// **We are queued for a full realm** (`SMSG_AUTH_RESPONSE(AUTH_WAIT_QUEUE)`) — a wait, not
+    /// an outcome. Emitted once per queue packet while the world handshake is parked; the attempt
+    /// is still live and ends normally with a roster (admitted) or a failure. `position` is `None`
+    /// when the packet carried no readable one. `realm` is the realm we are queued for, so the
+    /// screen can name it without waiting for the roster that is on the far side of the queue.
+    LoginQueued {
+        position: Option<u32>,
+        realm: Option<String>,
+    },
     /// A login attempt failed before the roster (decision 0539): `code` is the server's auth
     /// result byte ([`crate::auth::AuthReject`]) when the server *refused* us, `None` for a
     /// transport failure (dial/handshake error). The IO thread is re-parked pre-logon; the app

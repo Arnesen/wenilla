@@ -25,15 +25,31 @@
 //! is the icon of a pet that is *not* summoned: it comes from the creature query's display id,
 //! which is why that field stopped being discarded (decision 1676).
 //!
-//! ## The drag is FRAME-LOCAL, not the cursor
+//! ## The drag rides the cursor at mode 10
 //!
-//! `PickupStablePet` does **not** put anything on the global cursor. wow-re's exhaustive census of
-//! every write to the payload-mode global `[0xb4d900]`
-//! (`system/ui/scratch/cursor-dragdrop-payload.md` §1) enumerates the modes — item, money, spell,
-//! pet action, macro, the three displayId previews, class/talent ability — and **there is no
-//! stable-pet mode**. So a picked-up stable pet is state the stable window keeps to itself
-//! ([`StableModel::pickup`]), and no other surface can ever be holding one. Building this on
-//! [`super::cursor::CursorPayload`] would have invented a mode the client does not have.
+//! `PickupStablePet` puts the pet on the **global cursor** under payload mode 10
+//! ([`super::cursor::CursorPayload::StablePet`]), carrying the stable index the grab recorded.
+//!
+//! This corrects what benilla shipped first. The original build made the drag frame-local on the
+//! strength of wow-re's payload-mode table, which recorded mode 10 as "class/talent ability (DBC)"
+//! — so the census read as "there is no stable-pet mode". The stable-master carve found that
+//! `0x495020` **is** the stabled-pet grab and that `[0xb4d900] = 10` is written at exactly one site
+//! image-wide, inside it; wow-re corrected its own note in the same round
+//! (`system/ui/scratch/stable-master-window.md` §9). Decision 1677.
+//!
+//! ## Two return conventions that are the API, not details
+//!
+//! `ClickStablePet` returns **exactly one value, always**, and which one is keyed *solely* on
+//! whether the cursor was holding a pet — never on whether a packet went out:
+//!
+//! - **a plain click** (no payload) is a pure select and pushes the number `1.0` on all three of
+//!   its legs, so it is **always truthy** and the reference always repaints;
+//! - **a drop** pushes **nil** on every leg, including the ones that send a packet, so the
+//!   reference never repaints from the drop — the repaint comes from the server's next list.
+//!
+//! Getting this backwards is invisible in a test that only checks the packets and very visible in
+//! play: the window would repaint off a stale snapshot on every drag and skip the repaint on every
+//! click.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -83,6 +99,13 @@ pub struct StableState {
     pub next_slot_cost: u32,
     /// The three window slots; index `0` is the current pet.
     pub slots: [Option<StablePetSlot>; NUM_STABLE_SLOTS],
+    /// The player has a **live** pet out — the client's own `[0xb714a0]|[0xb714a4]` guid test, the
+    /// gate that forks a stabled pet's drop between swap and unstable (§6.2).
+    ///
+    /// **Deliberately not `slots[0].is_some()`.** A dismissed pet, or one left out of range, still
+    /// has a slot-0 row from the server's character-pet cache while the live guid is zero — so the
+    /// two disagree exactly there, and the client follows the guid.
+    pub has_live_pet: bool,
 }
 
 impl StableState {
@@ -113,26 +136,27 @@ pub enum StableIntent {
 #[derive(Debug)]
 pub(crate) struct StableModel {
     pub(crate) state: Option<StableState>,
-    /// The selected slot, or `-1` for none — `GetSelectedStablePet()`'s exact return, including its
-    /// sentinel, because the reference tests `== -1` directly (`PetStable.lua:44`).
+    /// The selection, held **as the client holds it** (`[0xb72250]`): `-1` = the summoned pet,
+    /// `0` = nothing, otherwise a **petNumber**.
+    ///
+    /// A petNumber rather than a slot index because that is what the binary stores, and it is what
+    /// makes a *stale* selection degrade correctly: `GetSelectedStablePet` searches the array for
+    /// the number and answers `-1` when the pet is no longer there (§7.1's fall-through).
     pub(crate) selected: i32,
-    /// The slot a drag started from, `None` when nothing is being dragged.
-    pub(crate) pickup: Option<u8>,
     pub(crate) intents: Vec<StableIntent>,
     pub(crate) close: bool,
 }
 
-/// **`selected` starts at `-1`, not at `0`** — a derived `Default` would make it `0`, and `0` is a
-/// real slot (the current pet). The reference reads the sentinel to decide whether to pick a slot
-/// for the player at all (`PetStable.lua:44-59`): defaulted to `0`, a freshly opened window would
-/// believe the current pet was already chosen and would never auto-select a stabled one for a
-/// hunter with no pet out — the window would open showing nothing, with no way to tell why.
+/// The zero state is the client's `0` — "nothing selected" — not `-1`, which is its encoding for
+/// *the summoned pet*. The Lua-facing `-1` that `PetStable.lua:44` tests is
+/// [`super::UiScript::stable_selection`]'s translation of this, not this field (§7.1).
 impl Default for StableModel {
     fn default() -> Self {
         Self {
             state: None,
-            selected: -1,
-            pickup: None,
+            // `0` is "nothing selected" in the client's own encoding — NOT `-1`, which means the
+            // summoned pet. The window's zero state is the reset `0x4caad3` writes.
+            selected: 0,
             intents: Vec::new(),
             close: false,
         }
@@ -142,17 +166,20 @@ impl Default for StableModel {
 impl super::UiScript {
     /// Push (or clear, with `None`) the open stable's snapshot.
     ///
-    /// **Clearing resets the window's transient state too** — selection and any half-finished drag.
-    /// A stale selection surviving a close would have the next stable master open on slot 2
-    /// highlighted before its list arrived. A *content* change deliberately does not reset it: the
-    /// list is re-requested after every successful action, and losing the selection on each one
-    /// would fight the player.
+    /// **Every list message clears the selection**, and that is the client's own behaviour
+    /// (`0x4cadf8` writes `[0xb72250] = 0` on each one), not a simplification. The first build kept
+    /// it across a refresh on the reasoning that benilla re-lists after every action and a reset
+    /// would "fight the player" — the carve says the reference re-lists on exactly the same
+    /// successes and clears every time. It does not fight anything, because `PetStable_Update`
+    /// immediately re-picks: the current pet if there is one, else the first occupied slot
+    /// (`PetStable.lua:44-59`). Keeping a selection across a list is what would be wrong — it can
+    /// name a pet the new list no longer contains.
     pub fn set_stable(&mut self, state: Option<StableState>) {
         let mut model = self.model_mut();
-        if state.is_none() {
-            model.stable.selected = -1;
-            model.stable.pickup = None;
-        }
+        model.stable.selected = 0;
+        // The held payload is NOT dropped here: closing the window clears only the stable-master
+        // guid in the reference (`0x4cae10`), and a picked-up pet lives on the shared cursor, whose
+        // own ClearCursor arms own it.
         model.stable.state = state;
     }
 
@@ -167,9 +194,37 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().stable.close)
     }
 
-    /// The selected slot (`-1` = none) — what the app's booth points the model pane at.
+    /// `GetSelectedStablePet()`'s answer — **`0` = the summoned pet, `1..=2` a stable slot, `-1`
+    /// nothing** — translated out of the petNumber the model holds, exactly as `0x4cb800` does
+    /// (find the number in the array, `inc eax`; a number no longer present falls through to `-1`).
     pub fn stable_selection(&mut self) -> i32 {
-        self.model_mut().stable.selected
+        let model = self.model_mut();
+        selected_slot(&model.stable)
+    }
+}
+
+/// The petNumber→slot translation behind `GetSelectedStablePet` (§7.1).
+fn selected_slot(m: &StableModel) -> i32 {
+    match m.selected {
+        -1 => 0,
+        0 => -1,
+        pet_number => m
+            .state
+            .as_ref()
+            .and_then(|s| {
+                s.slots
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .find(|(_, slot)| {
+                        slot.as_ref()
+                            .is_some_and(|p| i64::from(p.pet_number) == i64::from(pet_number))
+                    })
+                    .map(|(i, _)| i as i32)
+            })
+            // A selection whose pet is gone after a refresh degrades to "nothing", never to a
+            // wrong slot — the loop's own fall-through at `0x4cb84c`.
+            .unwrap_or(-1),
     }
 }
 
@@ -180,29 +235,48 @@ fn slot_index(i: i64) -> Option<usize> {
     usize::try_from(i).ok().filter(|&i| i < NUM_STABLE_SLOTS)
 }
 
-/// Commit a drag from `from` onto `to`, returning the verb it becomes — the **one** place the
-/// stable's move law lives.
+/// Commit a drag from slot `from` onto slot `to` — the **one** place the stable's move law lives,
+/// now read off the binary (`ClickStablePet 0x4cb420` regime B, wow-re
+/// `system/ui/scratch/stable-master-window.md` §6.2; decision 1677).
 ///
-/// **INFERRED, pending the wow-re carve of `ClickStablePet 0x4ca…` (decision 1676).** The verb set
-/// is VERIFIED (vmangos's three handlers and their preconditions); what is *not* yet read off the
-/// binary is how the reference client picks among them. This mapping is derived from the server's
-/// own constraints, each arm justified:
+/// The first build inferred this from the server's constraint set and got the shape right and the
+/// **three edges wrong**. Each of them is a real case:
 ///
-/// - **current → a stable slot** is `CMSG_STABLE_PET`. The destination index is *discarded*: the
-///   wire carries no slot and `HandleStablePet` takes the first free one, so dropping on slot 2
-///   while slot 1 is empty puts the pet in slot 1. That is the server's behaviour, not a
-///   simplification here.
-/// - **a stable slot → current** is `Swap` when a pet is out and `Unstable` when none is
-///   (`HandleUnstablePet` refuses outright if the player has a pet, even an unsummoned one).
-/// - **stable → stable** has no opcode in 5875 at all, so it can only be a no-op.
+/// 1. **The summoned pet onto an OCCUPIED stable slot sends `SWAP`, not `STABLE`.** "Drag out ⇒
+///    stable it" only holds when the target slot is empty. The inferred version sent `STABLE` for
+///    both, which vmangos then refuses whenever both bought slots are full — the pet stays put and
+///    nothing says why.
+/// 2. **A drop onto an UNPURCHASED slot sends nothing**, and is still a completed drop (cursor
+///    cleared, falsy return).
+/// 3. **A stabled pet onto the summoned slot forks on the LIVE PET GUID**, not on whether slot 0
+///    has a row. A dismissed pet has a row and no guid, and the client sends `UNSTABLE` there —
+///    the inferred version read the row and sent `SWAP`.
 ///
-/// If the carve says the client instead ignores the drop target and acts on the *source* alone,
-/// only this function changes.
-fn drag_verb(from: u8, to: u8, has_current_pet: bool, pet_number: u32) -> Option<StableIntent> {
+/// Stable→stable remains a no-op: 5875 has no opcode for it, which the first build did get right.
+fn drag_verb(from: u8, to: u8, state: &StableState) -> Option<StableIntent> {
+    if from == to {
+        return None;
+    }
+    let occupied = |i: u8| state.slots.get(usize::from(i)).and_then(|s| s.as_ref());
     match (from, to) {
-        (0, 1..) => Some(StableIntent::Stable),
-        (1.., 0) if has_current_pet => Some(StableIntent::Swap(pet_number)),
-        (1.., 0) => Some(StableIntent::Unstable(pet_number)),
+        // The summoned pet is held.
+        (0, _) => match occupied(to) {
+            // …onto an occupied stable slot: trade places.
+            Some(target) => Some(StableIntent::Swap(target.pet_number)),
+            // …onto an empty slot the player owns: stable it (the server picks the destination).
+            None if u32::from(to) <= state.num_stable_slots => Some(StableIntent::Stable),
+            // …onto a slot they have not bought: nothing.
+            None => None,
+        },
+        // A stabled pet is held, dropped on the summoned slot.
+        (_, 0) => occupied(from).map(|held| {
+            if state.has_live_pet {
+                StableIntent::Swap(held.pet_number)
+            } else {
+                StableIntent::Unstable(held.pet_number)
+            }
+        }),
+        // Stable slot → stable slot: no opcode exists in 5875.
         _ => None,
     }
 }
@@ -211,10 +285,10 @@ fn drag_verb(from: u8, to: u8, has_current_pet: bool, pet_number: u32) -> Option
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // GetStablePetInfo(i) → icon, name, level, family, loyalty — five returns, or a bare nil for an
-    // empty slot (the reference tests `if ( icon )` on the first and `if ( GetStablePetInfo(i) )`
-    // on the call itself, so both shapes must read as absent). `family` substitutes "" rather than
-    // nil: the reference concatenates it into the level line unguarded (`PetStable.lua:100`).
+    // GetStablePetInfo(i) → icon, name, level, family, loyalty — **5 values on every reachable
+    // exit** (`0x4cb280`: `eax = 5` at both returns). A miss pushes `nil, nil, 0.0, nil, nil`, NOT
+    // nothing: the reference both tests the call for truthiness and destructures all five, and a
+    // bare nil would make `level` nil where the client answers 0.
     g.set(
         "GetStablePetInfo",
         lua.create_function(|lua, i: i64| {
@@ -223,7 +297,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 slot_index(i).and_then(|i| model.stable.state.as_ref()?.slots[i].clone())
             };
             let Some(pet) = pet else {
-                return Ok(MultiValue::new());
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Number(0.0),
+                    Value::Nil,
+                    Value::Nil,
+                ]));
             };
             Ok(MultiValue::from_vec(vec![
                 match &pet.icon {
@@ -231,8 +311,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     None => Value::Nil,
                 },
                 Value::String(lua.create_string(&pet.name)?),
-                Value::Integer(i64::from(pet.level)),
-                Value::String(lua.create_string(pet.family.as_deref().unwrap_or(""))?),
+                Value::Number(f64::from(pet.level)),
+                match &pet.family {
+                    Some(f) => Value::String(lua.create_string(f)?),
+                    None => Value::Nil,
+                },
                 match &pet.loyalty {
                     Some(l) => Value::String(lua.create_string(l)?),
                     None => Value::Nil,
@@ -309,66 +392,135 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetSelectedStablePet",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(i64::from(model.stable.selected))
+            // NOT the raw field: the model holds the client's petNumber encoding, and this binding
+            // is its translation to slot indices (`selected_slot`).
+            Ok(i64::from(selected_slot(&model.stable)))
         })?,
     )?;
 
-    // ClickStablePet(i) → did anything change (the reference repaints only on true).
+    // ClickStablePet(i) → **exactly one value, always**, and which one is keyed SOLELY on whether
+    // the cursor held a pet — never on whether a packet went out (§6.2).
     //
-    // Two jobs, because the reference wires this to BOTH `OnClick` and `OnReceiveDrag`: commit a
-    // drag if one is in flight, otherwise select. The commit half's verb choice is `drag_verb`'s —
-    // and INFERRED until the carve lands (see there).
+    //   plain click  -> pure select, no packet, pushes 1.0 on ALL THREE legs  => always TRUTHY
+    //   drop         -> clears the cursor, pushes nil on EVERY leg            => always FALSY
+    //
+    // So the reference repaints on every click and on NO drop; a drop's repaint arrives with the
+    // server's next list. The first build had this inverted (true on a committed drag, false on a
+    // no-op) — invisible to a packet-only test, and in play a window that repaints off a stale
+    // snapshot on every drag and skips the repaint on every click.
     g.set(
         "ClickStablePet",
         lua.create_function(|lua, i: i64| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let Some(to) = slot_index(i) else {
-                return Ok(false);
+                // Out of range still takes the select leg's "nothing" arm below.
+                if !matches!(
+                    model.cursor,
+                    Some(super::cursor::CursorPayload::StablePet(_))
+                ) {
+                    model.stable.selected = 0;
+                    return Ok(Value::Number(1.0));
+                }
+                super::cursor::clear_cursor(&mut model);
+                return Ok(Value::Nil);
             };
             let to = to as u8;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let Some(state) = model.stable.state.as_ref() else {
-                return Ok(false);
-            };
 
-            if let Some(from) = model.stable.pickup {
-                // A drag lands. It is consumed whatever it turns into — including the
-                // stable→stable no-op, which must still put the cursor down rather than leave the
-                // window holding a pet nothing can drop.
-                let has_current = state.slots[0].is_some();
-                let pet_number = state.slots[from as usize]
+            // Regime B — a drop.
+            if let Some(super::cursor::CursorPayload::StablePet(held)) = model.cursor.clone() {
+                let from = held.slot;
+                let intent = model
+                    .stable
+                    .state
                     .as_ref()
-                    .map_or(0, |p| p.pet_number);
-                model.stable.pickup = None;
-                if from == to || pet_number == 0 {
-                    return Ok(false);
-                }
-                if let Some(intent) = drag_verb(from, to, has_current, pet_number) {
+                    .and_then(|state| drag_verb(from, to, state));
+                super::cursor::clear_cursor(&mut model);
+                if let Some(intent) = intent {
                     model.stable.intents.push(intent);
                 }
-                return Ok(true);
+                return Ok(Value::Nil);
             }
 
-            // A plain click selects. Selecting the already-selected slot changes nothing, and
-            // saying so keeps the reference from repainting the whole window on every click.
-            if model.stable.selected == i32::from(to) {
-                return Ok(false);
-            }
-            model.stable.selected = i32::from(to);
-            Ok(true)
+            // Regime A — a plain click: pure select, always truthy.
+            let pet_number = model
+                .stable
+                .state
+                .as_ref()
+                .and_then(|s| s.slots[usize::from(to)].as_ref())
+                .map(|p| p.pet_number);
+            model.stable.selected = match (to, pet_number) {
+                // Slot 0 selects the summoned pet by its own sentinel, not by a petNumber.
+                (0, _) => -1,
+                (_, Some(n)) => n as i32,
+                // An empty (or unowned) slot selects NOTHING, rather than the slot itself.
+                (_, None) => 0,
+            };
+            Ok(Value::Number(1.0))
         })?,
     )?;
 
-    // PickupStablePet(i) — begin a frame-local drag (module doc: NOT the global cursor). Picking up
-    // an empty slot is ignored, exactly as the reference's own empty buttons carry no pet to drag.
+    // PickupStablePet(i) — the mode-10 grab. **0 Lua values, always.**
+    //
+    // The client's gate is the family ICON path, not occupancy (`0x495010`: resolve the record,
+    // require a non-empty `CreatureFamily` icon, then set the payload). Ours is the resolved icon,
+    // which is the same test one step later: no icon, no grab.
     g.set(
         "PickupStablePet",
         lua.create_function(|lua, i: i64| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let occupied = slot_index(i)
-                .and_then(|i| Some(model.stable.state.as_ref()?.slots[i].is_some()))
-                .unwrap_or(false);
-            if occupied {
-                model.stable.pickup = Some(i as u8);
+            let texture = slot_index(i)
+                .and_then(|i| model.stable.state.as_ref()?.slots[i].as_ref())
+                .and_then(|p| p.icon.clone());
+            if let Some(texture) = texture {
+                model.cursor = Some(super::cursor::CursorPayload::StablePet(
+                    super::cursor::CursorStablePet {
+                        slot: i as u8,
+                        texture,
+                    },
+                ));
+                super::cursor::queue_cursor_update(&mut model);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // StablePet() — 0 args, and it makes no Lua call at all in the reference: its only gate is a
+    // stable master being open, which for us is the snapshot's existence. Not called by the shipped
+    // FrameXML (the drag path sends this verb); it exists because the binding does.
+    g.set(
+        "StablePet",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if model.stable.state.is_some() {
+                model.stable.intents.push(StableIntent::Stable);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // UnstablePet(i) — carries a gate the drag path does NOT (§7.1): it requires no charmed unit
+    // and **no pet out**, and bails SILENTLY otherwise, with no packet and no error. Its unsigned
+    // bound also rejects index 0 outright, where the drag path treats 0 as the summoned pet.
+    g.set(
+        "UnstablePet",
+        lua.create_function(|lua, i: i64| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let pet_number = model
+                .stable
+                .state
+                .as_ref()
+                .filter(|s| !s.has_live_pet)
+                .and_then(|s| {
+                    slot_index(i)
+                        .filter(|&i| i != 0)
+                        .and_then(|i| s.slots[i].as_ref())
+                })
+                .map(|p| p.pet_number);
+            if let Some(pet_number) = pet_number {
+                model
+                    .stable
+                    .intents
+                    .push(StableIntent::Unstable(pet_number));
             }
             Ok(())
         })?,
@@ -383,13 +535,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, _model: Value| Ok(()))?,
     )?;
 
-    // BuyStableSlot() — queue the purchase. The server prices and picks the slot; a refusal comes
-    // back as SMSG_STABLE_RESULT's ERR_MONEY.
+    // BuyStableSlot() — 0 args, with the client's own **silent** local gates in order (§7.1): a
+    // stable master open · the hard cap `slots != 2` · a price row exists · **affordability**.
+    // None of them shows a message; the reference disables the button instead. Applying them here
+    // rather than trusting the button matters because an addon can call the binding directly, and
+    // the server's refusal for the cap is the same indistinguishable ERR_STABLE as everything else.
     g.set(
         "BuyStableSlot",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.stable.intents.push(StableIntent::BuySlot);
+            // Affordability reads the VM's own purse — the same `model.money` the reference's
+            // `GetMoney()` returns and its own button-state ladder compares (`PetStable.lua:203`),
+            // rather than a second copy of the number in the stable snapshot.
+            let money = model.money;
+            let allowed = model.stable.state.as_ref().is_some_and(|s| {
+                s.num_stable_slots as usize != NUM_STABLE_SLOTS - 1
+                    && s.next_slot_cost != 0
+                    && u64::from(s.next_slot_cost) <= money
+            });
+            if allowed {
+                model.stable.intents.push(StableIntent::BuySlot);
+            }
             Ok(())
         })?,
     )?;
@@ -425,17 +591,25 @@ mod tests {
         }
     }
 
-    /// A hunter with a pet out and one stabled, one slot bought.
-    fn open(s: &mut UiScript) {
-        s.set_stable(Some(StableState {
+    fn state(slots: [Option<StablePetSlot>; NUM_STABLE_SLOTS]) -> StableState {
+        StableState {
             num_stable_slots: 1,
             next_slot_cost: 50_000,
-            slots: [Some(pet(7, "Rex", 41)), Some(pet(8, "Bruiser", 38)), None],
-        }));
+            slots,
+            has_live_pet: true,
+        }
     }
 
-    /// The read surface, through the reference's own destructuring. A closed window answers the
-    /// absent shape everywhere rather than erroring — the frame's OnLoad runs before any list.
+    /// A hunter with a pet out and one stabled, one slot bought.
+    fn open(s: &mut UiScript) {
+        s.set_stable(Some(state([
+            Some(pet(7, "Rex", 41)),
+            Some(pet(8, "Bruiser", 38)),
+            None,
+        ])));
+    }
+
+    /// The read surface, through the reference's own destructuring.
     #[test]
     fn the_read_surface_answers_the_reference_calls() {
         let mut s = UiScript::new().unwrap();
@@ -443,7 +617,6 @@ mod tests {
         assert_eq!(s.eval::<i64>("return GetNumStablePets()").unwrap(), 0);
         assert_eq!(s.eval::<i64>("return GetNextStableSlotCost()").unwrap(), 0);
         assert_eq!(s.eval::<i64>("return GetSelectedStablePet()").unwrap(), -1);
-        assert!(s.eval::<bool>("return GetStablePetInfo(0) == nil").unwrap());
 
         open(&mut s);
         assert_eq!(s.eval::<i64>("return GetNumStableSlots()").unwrap(), 1);
@@ -467,12 +640,7 @@ mod tests {
                 "(Loyalty Level 6) Best Friend".into()
             )
         );
-        // The empty third slot reads absent on both tests the reference makes.
-        assert!(s.eval::<bool>("return GetStablePetInfo(2) == nil").unwrap());
-        // An out-of-range index is absent too, not an error.
-        assert!(s.eval::<bool>("return GetStablePetInfo(9) == nil").unwrap());
 
-        // The diet list, as BuildListString receives it.
         assert_eq!(
             s.eval::<(String, String)>("return GetStablePetFoodTypes(1)")
                 .unwrap(),
@@ -483,119 +651,240 @@ mod tests {
             .unwrap());
     }
 
-    /// A plain click selects, and reports whether anything changed — the reference repaints only
-    /// on true, so a click on the already-selected slot must answer false or the window redraws
-    /// itself on every click.
+    /// **`GetStablePetInfo` returns five values on EVERY exit** (`eax = 5` at both returns), with a
+    /// miss pushing `nil, nil, 0, nil, nil`. The reference both tests the call for truthiness and
+    /// destructures all five, so a bare nil would leave `level` nil where the client answers 0 —
+    /// and would silently change the arity an addon sees.
     #[test]
-    fn a_plain_click_selects_once() {
+    fn a_missing_pet_still_answers_five_values() {
         let mut s = UiScript::new().unwrap();
         open(&mut s);
-        assert!(s.eval::<bool>("return ClickStablePet(1)").unwrap());
-        assert_eq!(s.eval::<i64>("return GetSelectedStablePet()").unwrap(), 1);
-        assert!(!s.eval::<bool>("return ClickStablePet(1)").unwrap());
-        assert!(s.eval::<bool>("return ClickStablePet(0)").unwrap());
+        for call in ["GetStablePetInfo(2)", "GetStablePetInfo(9)"] {
+            assert_eq!(
+                s.eval::<i64>(&format!("return select('#', {call})"))
+                    .unwrap(),
+                5,
+                "{call} arity"
+            );
+            // Still falsy on the reference's own `if ( GetStablePetInfo(i) )` test.
+            assert!(s.eval::<bool>(&format!("return not {call}")).unwrap());
+            assert_eq!(
+                s.eval::<i64>(&format!("local _, _, l = {call} return l"))
+                    .unwrap(),
+                0,
+                "{call} level is 0, not nil"
+            );
+        }
+    }
+
+    /// **A plain click always returns truthy**, on all three of its legs — including a re-click of
+    /// the same slot and a click on an empty one. The reference repaints on the return, so a
+    /// falsy answer anywhere here is a window that stops repainting on click.
+    #[test]
+    fn every_plain_click_returns_truthy() {
+        let mut s = UiScript::new().unwrap();
+        open(&mut s);
+        for call in [
+            "ClickStablePet(1)",
+            "ClickStablePet(1)",
+            "ClickStablePet(0)",
+            "ClickStablePet(2)",
+        ] {
+            assert!(
+                s.eval::<bool>(&format!("return {call} and true or false"))
+                    .unwrap(),
+                "{call}"
+            );
+        }
+        assert!(
+            s.take_stable_intents().is_empty(),
+            "selecting sends nothing"
+        );
+    }
+
+    /// The selection's three encodings, read back through `GetSelectedStablePet`'s translation:
+    /// slot 0 answers 0, an occupied stable slot answers its index, and an **empty** slot selects
+    /// nothing (`-1`) rather than itself.
+    #[test]
+    fn the_selection_translates_back_to_slot_indices() {
+        let mut s = UiScript::new().unwrap();
+        open(&mut s);
+        s.eval::<()>("ClickStablePet(0)").unwrap();
         assert_eq!(s.eval::<i64>("return GetSelectedStablePet()").unwrap(), 0);
-        // Selecting queues nothing on the wire.
+        s.eval::<()>("ClickStablePet(1)").unwrap();
+        assert_eq!(s.eval::<i64>("return GetSelectedStablePet()").unwrap(), 1);
+        s.eval::<()>("ClickStablePet(2)").unwrap();
+        assert_eq!(
+            s.eval::<i64>("return GetSelectedStablePet()").unwrap(),
+            -1,
+            "an empty slot selects nothing, not itself"
+        );
+    }
+
+    /// A selection is held as a **petNumber**, so a refresh that no longer contains that pet
+    /// degrades to "nothing" rather than to a wrong slot — and every list clears it anyway.
+    #[test]
+    fn a_list_clears_the_selection_and_a_stale_pet_degrades() {
+        let mut s = UiScript::new().unwrap();
+        open(&mut s);
+        s.eval::<()>("ClickStablePet(1)").unwrap();
+        assert_eq!(s.stable_selection(), 1);
+
+        // Every list message clears it (`0x4cadf8`) — the reference re-picks in PetStable_Update.
+        open(&mut s);
+        assert_eq!(s.stable_selection(), -1, "a list clears the selection");
+    }
+
+    /// **A drop always returns nil**, on every leg — the ones that send a packet included. The
+    /// reference therefore never repaints from a drop; the repaint arrives with the server's next
+    /// list. This is the convention the first build had inverted.
+    #[test]
+    fn every_drop_returns_falsy_even_when_it_sends() {
+        let mut s = UiScript::new().unwrap();
+        open(&mut s);
+        // A drop that DOES send.
+        assert!(s
+            .eval::<bool>("PickupStablePet(1) return ClickStablePet(0) == nil")
+            .unwrap());
+        assert_eq!(s.take_stable_intents(), vec![StableIntent::Swap(8)]);
+
+        // A drop that sends nothing is equally falsy.
+        assert!(s
+            .eval::<bool>("PickupStablePet(1) return ClickStablePet(1) == nil")
+            .unwrap());
         assert!(s.take_stable_intents().is_empty());
     }
 
-    /// Dragging the current pet onto a stable slot stables it — and the destination is *not* sent,
-    /// because the wire cannot carry one.
+    /// **The summoned pet onto an OCCUPIED stable slot is a SWAP, not a STABLE** — the first of the
+    /// three edges the inferred law got wrong. Sending STABLE there is refused by the server
+    /// whenever both bought slots are full, and nothing says why.
     #[test]
-    fn dragging_the_current_pet_out_stables_it() {
+    fn dropping_onto_an_occupied_slot_swaps() {
         let mut s = UiScript::new().unwrap();
         open(&mut s);
-        s.eval::<()>("PickupStablePet(0) ClickStablePet(2)")
+        s.eval::<()>("PickupStablePet(0) ClickStablePet(1)")
             .unwrap();
-        assert_eq!(s.take_stable_intents(), vec![StableIntent::Stable]);
+        assert_eq!(s.take_stable_intents(), vec![StableIntent::Swap(8)]);
     }
 
-    /// Dragging a stabled pet onto the current slot forks on whether a pet is already out: a swap
-    /// when one is, a plain unstable when none is. The server refuses an unstable outright while a
-    /// pet exists, so picking the wrong one here fails every drag for a hunter with a pet.
+    /// …and onto an EMPTY slot the player owns it is a STABLE, whose destination the wire cannot
+    /// carry; onto one they have **not bought**, nothing at all — but the cursor still clears.
     #[test]
-    fn dragging_a_stabled_pet_in_forks_on_having_a_pet() {
+    fn an_unpurchased_slot_takes_the_drop_and_sends_nothing() {
+        let mut s = UiScript::new().unwrap();
+        // Slot 1 bought and empty, slot 2 unbought.
+        s.set_stable(Some(state([Some(pet(7, "Rex", 41)), None, None])));
+        s.eval::<()>("PickupStablePet(0) ClickStablePet(1)")
+            .unwrap();
+        assert_eq!(s.take_stable_intents(), vec![StableIntent::Stable]);
+
+        s.eval::<()>("PickupStablePet(0) ClickStablePet(2)")
+            .unwrap();
+        assert!(s.take_stable_intents().is_empty(), "slot 2 is not bought");
+        // The drop completed: the cursor is empty, so the next click SELECTS.
+        assert!(s.eval::<bool>("return ClickStablePet(1) and true").unwrap());
+        assert!(s.take_stable_intents().is_empty());
+    }
+
+    /// **The stabled→summoned fork reads the LIVE PET GUID, not slot 0's row** — the third edge.
+    /// A dismissed pet still has a row from the server's character-pet cache while the guid is
+    /// zero, and the client sends UNSTABLE there.
+    #[test]
+    fn the_fork_follows_the_live_pet_not_the_row() {
         let mut s = UiScript::new().unwrap();
         open(&mut s);
         s.eval::<()>("PickupStablePet(1) ClickStablePet(0)")
             .unwrap();
         assert_eq!(s.take_stable_intents(), vec![StableIntent::Swap(8)]);
 
-        // Same drag with slot 0 empty — the hunter has no pet out.
-        s.set_stable(Some(StableState {
-            num_stable_slots: 1,
-            next_slot_cost: 50_000,
-            slots: [None, Some(pet(8, "Bruiser", 38)), None],
-        }));
+        // The same list, but the pet is dismissed: the row survives, the guid does not.
+        let mut dismissed = state([Some(pet(7, "Rex", 41)), Some(pet(8, "Bruiser", 38)), None]);
+        dismissed.has_live_pet = false;
+        s.set_stable(Some(dismissed));
         s.eval::<()>("PickupStablePet(1) ClickStablePet(0)")
             .unwrap();
-        assert_eq!(s.take_stable_intents(), vec![StableIntent::Unstable(8)]);
+        assert_eq!(
+            s.take_stable_intents(),
+            vec![StableIntent::Unstable(8)],
+            "a row without a live guid unstables"
+        );
     }
 
-    /// A drag that has no verb still puts the pet down. Stable→stable has no opcode in 5875, and a
-    /// drag onto its own slot is a cancel; neither may leave the window holding a pet forever.
+    /// Stable→stable has no opcode in 5875, and an empty slot carries nothing to grab.
     #[test]
-    fn a_verbless_drag_is_still_consumed() {
+    fn stable_to_stable_is_a_no_op_and_empty_slots_do_not_grab() {
         let mut s = UiScript::new().unwrap();
         s.set_stable(Some(StableState {
             num_stable_slots: 2,
-            next_slot_cost: 0,
             slots: [None, Some(pet(8, "Bruiser", 38)), None],
+            ..state([None, None, None])
         }));
         s.eval::<()>("PickupStablePet(1) ClickStablePet(2)")
             .unwrap();
         assert!(s.take_stable_intents().is_empty());
-        // The pickup is gone, so the NEXT click selects rather than committing a stale drag.
-        assert!(s.eval::<bool>("return ClickStablePet(1)").unwrap());
-        assert_eq!(s.eval::<i64>("return GetSelectedStablePet()").unwrap(), 1);
+
+        // An empty slot never arms a grab, so the following click is a select.
+        s.eval::<()>("PickupStablePet(2)").unwrap();
+        assert!(s.eval::<bool>("return ClickStablePet(0) and true").unwrap());
         assert!(s.take_stable_intents().is_empty());
     }
 
-    /// An empty slot carries nothing to drag, so picking it up leaves no pickup armed — otherwise
-    /// the next click would commit a move for a pet that does not exist.
+    /// `BuyStableSlot`'s gates are the client's own, and all silent: the hard cap, and
+    /// affordability.
     #[test]
-    fn an_empty_slot_cannot_be_picked_up() {
+    fn buy_stable_slot_gates_locally_and_silently() {
         let mut s = UiScript::new().unwrap();
+        s.set_money(1_000_000);
         open(&mut s);
-        s.eval::<()>("PickupStablePet(2) ClickStablePet(0)")
-            .unwrap();
-        assert!(s.take_stable_intents().is_empty());
-        assert_eq!(s.eval::<i64>("return GetSelectedStablePet()").unwrap(), 0);
-    }
-
-    /// The purchase and close intents, and the close's state reset: a selection must not survive
-    /// into the next stable master's window.
-    #[test]
-    fn purchase_and_close_intents_drain() {
-        let mut s = UiScript::new().unwrap();
-        open(&mut s);
-        s.eval::<()>("ClickStablePet(1) BuyStableSlot()").unwrap();
+        s.eval::<()>("BuyStableSlot()").unwrap();
         assert_eq!(s.take_stable_intents(), vec![StableIntent::BuySlot]);
-        assert!(s.take_stable_intents().is_empty(), "drain clears");
 
+        // Too poor.
+        s.set_money(10);
+        s.set_stable(Some(state([None, None, None])));
+        s.eval::<()>("BuyStableSlot()").unwrap();
+        assert!(s.take_stable_intents().is_empty(), "unaffordable is silent");
+
+        // Both slots owned — the hard cap (and money restored, so only the cap can refuse).
+        s.set_money(1_000_000);
+        let mut full = state([None, None, None]);
+        full.num_stable_slots = 2;
+        s.set_stable(Some(full));
+        s.eval::<()>("BuyStableSlot()").unwrap();
+        assert!(s.take_stable_intents().is_empty(), "the cap is silent");
+    }
+
+    /// `UnstablePet` carries a gate the drag path does not: no pet out, else silence. And its
+    /// unsigned bound rejects index 0, where the drag path reads 0 as the summoned pet.
+    #[test]
+    fn the_unstable_binding_gates_where_the_drag_path_does_not() {
+        let mut s = UiScript::new().unwrap();
+        open(&mut s); // has_live_pet = true
+        s.eval::<()>("UnstablePet(1)").unwrap();
+        assert!(s.take_stable_intents().is_empty(), "a pet is out — silent");
+
+        let mut dismissed = state([None, Some(pet(8, "Bruiser", 38)), None]);
+        dismissed.has_live_pet = false;
+        s.set_stable(Some(dismissed));
+        s.eval::<()>("UnstablePet(0)").unwrap();
+        assert!(s.take_stable_intents().is_empty(), "index 0 is rejected");
+        s.eval::<()>("UnstablePet(1)").unwrap();
+        assert_eq!(s.take_stable_intents(), vec![StableIntent::Unstable(8)]);
+    }
+
+    /// The close intent, and that closing does NOT drop a held pet — the reference's close clears
+    /// only the stable-master guid.
+    #[test]
+    fn close_drains_and_leaves_the_cursor_alone() {
+        let mut s = UiScript::new().unwrap();
+        open(&mut s);
         assert!(!s.take_stable_close());
         s.eval::<()>("ClosePetStables()").unwrap();
         assert!(s.take_stable_close());
         assert!(!s.take_stable_close(), "drain clears");
-
-        assert_eq!(s.stable_selection(), 1);
-        s.set_stable(None);
-        assert_eq!(s.stable_selection(), -1, "a close forgets the selection");
     }
 
-    /// A content refresh — which benilla does after every successful action — must KEEP the
-    /// selection. Resetting it there would move the player's highlight on every button press.
-    #[test]
-    fn a_refresh_keeps_the_selection() {
-        let mut s = UiScript::new().unwrap();
-        open(&mut s);
-        s.eval::<()>("ClickStablePet(1)").unwrap();
-        open(&mut s);
-        assert_eq!(s.stable_selection(), 1);
-    }
-
-    /// `SetPetStablePaperdoll` exists and is harmless — the reference calls it at four sites, and a
-    /// missing global would be a Lua error mid-repaint.
+    /// `SetPetStablePaperdoll` exists and is harmless — the reference calls it at four sites.
     #[test]
     fn the_paperdoll_setter_is_callable() {
         let s = UiScript::new().unwrap();

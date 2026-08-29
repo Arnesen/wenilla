@@ -163,7 +163,7 @@ pub use container::{
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
-    EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::MultisampleFormat;
 pub use death::{DeathAction, DeathUiState};

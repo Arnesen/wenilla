@@ -213,7 +213,10 @@ fn play_item_gesture_sounds(
         CursorPayload::Spell(_)
         | CursorPayload::Action(_)
         | CursorPayload::Macro(_)
-        | CursorPayload::PetAction(_) => {
+        | CursorPayload::PetAction(_)
+        // Mode 10 joins them: the stabled-pet grab `0x495010` calls the same generic path and
+        // names no per-item kit (decision 1677).
+        | CursorPayload::StablePet(_) => {
             let kit_id = match gesture {
                 CursorGesture::Gain => INTERFACESOUND_CURSORGRABOBJECT,
                 CursorGesture::Loss => INTERFACESOUND_CURSORDROPOBJECT,

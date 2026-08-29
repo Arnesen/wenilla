@@ -707,6 +707,24 @@ fn interact_command(
         CursorKind::Buy if npc_flags & cursor_mode::npc_flags::AUCTIONEER != 0 => {
             Some(ClientCommand::AuctionHello { auctioneer: guid })
         }
+        // A stable master asks for its own pet list — the client sends `MSG_LIST_STABLED_PETS`
+        // ITSELF on the bit-13 interact leg (`0x5f05a1` → `0x5f05bc` → `0x5e02a0`, whose sole
+        // caller that is), and the window opens when the reply lands. This corrects decision
+        // 1676's "server-initiated, off the gossip option": that is how it opens against vmangos
+        // (`GOSSIP_OPTION_STABLEPET` → `SendStablePet`), but it is not what the client does.
+        //
+        // Gated on the gossip bit being absent, which is the honest bound: the cursor ladder above
+        // is first-match-wins and reaches its STABLEMASTER leg only when no lower service bit is
+        // set, but the reference's *interaction* dispatcher is a different function whose own
+        // ordering the carve did not enumerate. A stable master carrying a gossip menu therefore
+        // keeps the menu — where its own stable option asks the server for the same list — and one
+        // without a menu takes this leg, which is the case the bare bit-13 test exists for.
+        CursorKind::Speak
+            if npc_flags & cursor_mode::npc_flags::STABLEMASTER != 0
+                && npc_flags & cursor_mode::npc_flags::GOSSIP == 0 =>
+        {
+            Some(ClientCommand::ListStabledPets { npc: guid })
+        }
         CursorKind::Speak | CursorKind::Buy | CursorKind::Trainer | CursorKind::Interact => {
             Some(ClientCommand::GossipHello { guid })
         }
@@ -978,6 +996,32 @@ mod tests {
         assert!(matches!(
             interact_command(CursorKind::Buy, 0x51, cursor_mode::npc_flags::AUCTIONEER),
             Some(ClientCommand::AuctionHello { auctioneer: 0x51 })
+        ));
+    }
+
+    /// The stable-master split (decision 1677): the client asks for the pet list **itself** on the
+    /// bit-13 interact leg — it is not purely server-initiated, which is what 1676 had. A stable
+    /// master carrying a gossip menu keeps the menu, whose own stable option asks the server for
+    /// the same list; one without a menu takes this leg.
+    #[test]
+    fn interact_routes_a_menuless_stable_master_to_the_pet_list() {
+        use cursor_mode::CursorKind;
+        assert!(matches!(
+            interact_command(
+                CursorKind::Speak,
+                0x64,
+                cursor_mode::npc_flags::STABLEMASTER
+            ),
+            Some(ClientCommand::ListStabledPets { npc: 0x64 })
+        ));
+        // With a gossip menu, the universal hello still wins — the menu carries the stable option.
+        assert!(matches!(
+            interact_command(
+                CursorKind::Speak,
+                0x64,
+                cursor_mode::npc_flags::STABLEMASTER | cursor_mode::npc_flags::GOSSIP
+            ),
+            Some(ClientCommand::GossipHello { guid: 0x64 })
         ));
     }
 
