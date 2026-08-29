@@ -5,6 +5,37 @@
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
   #benilla { display: block; width: 100vw; height: 100vh; }
 </style>
+<script>
+  // Sound: the browser suspends any AudioContext created before the first user gesture (autoplay
+  // policy), and the mixer (kira/cpal) creates its at startup and never resumes it — so the tab
+  // stayed silent. Remember every context the page creates and resume them on the first
+  // click/key, which is the only place a browser lets that happen.
+  (() => {
+    const contexts = [];
+    for (const name of ['AudioContext', 'webkitAudioContext']) {
+      const Orig = window[name];
+      if (!Orig) continue;
+      const Patched = function (...args) {
+        const ctx = new Orig(...args);
+        contexts.push(ctx);
+        return ctx;
+      };
+      Patched.prototype = Orig.prototype;
+      window[name] = Patched;
+    }
+    const resume = () => {
+      console.log(`audio: gesture — ${contexts.length} context(s): ${contexts.map((c) => c.state).join(',') || 'none'}`);
+      for (const ctx of contexts) {
+        if (ctx.state !== 'running') {
+          ctx.resume().then(() => console.log(`audio: context resumed (${ctx.state})`), () => {});
+        }
+      }
+    };
+    for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
+      window.addEventListener(ev, resume, { capture: true, passive: true });
+    }
+  })();
+</script>
 <script type="importmap">{"imports":{"wasi_snapshot_preview1":"./wasi_stubs.js"}}</script>
 <script>
   // WGSL compile errors are otherwise invisible: wgpu's browser backend never asks the module for
