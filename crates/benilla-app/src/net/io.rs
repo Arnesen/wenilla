@@ -23,8 +23,14 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// Not `std::time::Instant`: a browser has no monotonic clock behind that name (it panics), and this
+// one is the ping clock's stopwatch. `bevy::platform` is std's `Instant` natively and `performance
+// .now()` in a page.
+use bevy::platform::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 use benilla_protocol::{
@@ -85,7 +91,7 @@ pub(crate) struct LoginRequest {
 /// `0x537ff0`: the connection drain arms the next ping 30 s out). vmangos *kicks* a player socket
 /// whose pings repeat faster than 27 s apart more than twice (`WorldSocket::_HandlePing`), so this
 /// must never shrink below that.
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The ping clock — shared between the write thread (which stamps each `CMSG_PING`) and the app's
 /// event drain (which matches the `SMSG_PONG` echo against it to measure the round trip). One
@@ -103,7 +109,7 @@ pub(crate) struct PingClock {
 
 /// Cap on consecutive "command dropped/failed" warns per connection epoch, so a movement stream
 /// during an outage can't flood the log. Reset when a fresh writer arrives.
-const SEND_WARN_CAP: u32 = 8;
+pub(super) const SEND_WARN_CAP: u32 = 8;
 
 /// Connection parameters, from env (`WOW_HOST` as `host[:port]`, `WOW_CHAR`). Credentials are NOT here anymore
 /// (decision 0539): they arrive per-attempt over the login channel — the app's policy owns the
@@ -151,6 +157,13 @@ pub(super) struct NetHandles {
     pub(super) login: async_channel::Sender<LoginRequest>,
     pub(super) login_abandon: Arc<AtomicU64>,
     pub(super) ping: Arc<Mutex<PingClock>>,
+    /// The write half's two inputs — **web only**. A page has no threads, so what
+    /// [`writer_loop`] owns natively is owned instead by `crate::net`'s per-frame pump, and these
+    /// are how it gets hold of them.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) writer_rx: Receiver<WorldWriter>,
+    #[cfg(target_arch = "wasm32")]
+    pub(super) commands_rx: Receiver<ClientCommand>,
 }
 
 /// Spawn the background read thread (with its park/cycle loop) and the single long-lived write
@@ -161,71 +174,49 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let (pick_tx, pick_rx) = async_channel::unbounded::<CharRequest>();
     let (login_tx, login_rx) = async_channel::unbounded::<LoginRequest>();
+    // The writer outlives connections; the sequencer hands it each new WorldWriter across here.
+    let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WorldWriter>();
     let login_abandon = Arc::new(AtomicU64::new(0));
     let ping_clock = Arc::new(Mutex::new(PingClock::default()));
     if connect {
-        // The writer thread outlives connections; the read thread hands it each new WorldWriter.
-        let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WorldWriter>();
-        let clock = Arc::clone(&ping_clock);
-        let abandon = Arc::clone(&login_abandon);
-        thread::Builder::new()
-            .name("wow-net-write".into())
-            .spawn(move || {
-                // Latency-sensitive: movement packets queue here (thread QoS, decision 0609).
-                benilla_world::thread_qos::promote_current_thread(
-                    benilla_world::thread_qos::QosClass::UserInitiated,
-                );
-                writer_loop(&cmd_rx, writer_rx, &clock)
-            })
-            .expect("spawn wow-net-write thread");
-        thread::Builder::new()
-            .name("wow-net".into())
-            .spawn(move || {
-                benilla_world::thread_qos::promote_current_thread(
-                    benilla_world::thread_qos::QosClass::UserInitiated,
-                );
-                // The same dedicated thread as ever, now turning the sequencer future over with
-                // `block_on`: every await inside it is a blocking socket read, so this is the old
-                // loop with an `.await` written where the call used to be.
-                futures_lite::future::block_on(async move {
-                    loop {
-                        match run(&cfg, &events_tx, &writer_tx, &pick_rx, &login_rx, &abandon).await
-                        {
-                            Ok(Cycle::Exit) => return,
-                            Ok(Cycle::Repark) => {}
-                            Ok(Cycle::LoggedOut) => {
-                                // Clean logout: the Disconnected tears the streamed world down app-side
-                                // (decision 0065's path); the app's pending credentials re-park us live.
-                                if events_tx
-                                    .send(SessionEvent::Disconnected {
-                                        reason: "logged out".into(),
-                                        end: SessionEnd::LoggedOut,
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                // A live-stream failure — including a displacement kick, which reaches
-                                // us as a bare EOF and nothing else (decision 1262). No sleep: what
-                                // happens next is the app's policy, not this thread's (0539 §3).
-                                bevy::log::error!("net: {e:#}");
-                                if events_tx
-                                    .send(SessionEvent::Disconnected {
-                                        reason: format!("disconnected: {e:#}"),
-                                        end: SessionEnd::Lost,
-                                    })
-                                    .is_err()
-                                {
-                                    return; // app exited mid-failure
-                                }
-                            }
-                        }
-                    }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let clock = Arc::clone(&ping_clock);
+            let abandon = Arc::clone(&login_abandon);
+            thread::Builder::new()
+                .name("wow-net-write".into())
+                .spawn(move || {
+                    // Latency-sensitive: movement packets queue here (thread QoS, decision 0609).
+                    benilla_world::thread_qos::promote_current_thread(
+                        benilla_world::thread_qos::QosClass::UserInitiated,
+                    );
+                    writer_loop(&cmd_rx, writer_rx, &clock)
                 })
-            })
-            .expect("spawn wow-net thread");
+                .expect("spawn wow-net-write thread");
+            thread::Builder::new()
+                .name("wow-net".into())
+                .spawn(move || {
+                    benilla_world::thread_qos::promote_current_thread(
+                        benilla_world::thread_qos::QosClass::UserInitiated,
+                    );
+                    // The same dedicated thread as ever, now turning the sequencer future over:
+                    // every await inside it is a blocking socket read, so this is the old loop with
+                    // an `.await` written where the call used to be.
+                    futures_lite::future::block_on(sequencer(
+                        cfg, events_tx, writer_tx, pick_rx, login_rx, abandon,
+                    ));
+                })
+                .expect("spawn wow-net thread");
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // No threads in a page: the sequencer is one task on the browser's own event loop, and
+            // the writer is drained by a Bevy system instead of a sibling thread (`crate::net`).
+            let abandon = Arc::clone(&login_abandon);
+            wasm_bindgen_futures::spawn_local(sequencer(
+                cfg, events_tx, writer_tx, pick_rx, login_rx, abandon,
+            ));
+        }
     }
     // When not connecting (capture mode), the receivers/`events_tx` drop here: outbound sends
     // become harmless `Err`s (every call site ignores them) and the event stream stays empty forever.
@@ -236,6 +227,57 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
         login: login_tx,
         login_abandon,
         ping: ping_clock,
+        #[cfg(target_arch = "wasm32")]
+        writer_rx,
+        #[cfg(target_arch = "wasm32")]
+        commands_rx: cmd_rx,
+    }
+}
+
+/// The sequencer's outer loop: run one connection cycle, say how it ended, park again. Shared by
+/// both spawns — a thread under `block_on` natively, a `spawn_local` task on the web — so the two
+/// targets cannot drift on what a lost connection or a clean logout means.
+async fn sequencer(
+    cfg: NetConfig,
+    events_tx: Sender<SessionEvent>,
+    writer_tx: Sender<WorldWriter>,
+    pick_rx: async_channel::Receiver<CharRequest>,
+    login_rx: async_channel::Receiver<LoginRequest>,
+    abandon: Arc<AtomicU64>,
+) {
+    loop {
+        match run(&cfg, &events_tx, &writer_tx, &pick_rx, &login_rx, &abandon).await {
+            Ok(Cycle::Exit) => return,
+            Ok(Cycle::Repark) => {}
+            Ok(Cycle::LoggedOut) => {
+                // Clean logout: the Disconnected tears the streamed world down app-side (decision
+                // 0065's path); the app's pending credentials re-park us live.
+                if events_tx
+                    .send(SessionEvent::Disconnected {
+                        reason: "logged out".into(),
+                        end: SessionEnd::LoggedOut,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(e) => {
+                // A live-stream failure — including a displacement kick, which reaches us as a bare
+                // EOF and nothing else (decision 1262). No sleep: what happens next is the app's
+                // policy, not this task's (0539 §3).
+                bevy::log::error!("net: {e:#}");
+                if events_tx
+                    .send(SessionEvent::Disconnected {
+                        reason: format!("disconnected: {e:#}"),
+                        end: SessionEnd::Lost,
+                    })
+                    .is_err()
+                {
+                    return; // app exited mid-failure
+                }
+            }
+        }
     }
 }
 
@@ -526,11 +568,15 @@ async fn run(
     }
 }
 
-/// The single write thread: `select!` between app commands, writer swaps from the read thread, and
+/// The single write thread (native only — a page has no threads; `crate::net`'s `web_writer_pump`
+/// is the browser's answer, and it drains the same two channels through the same [`dispatch`]).
+///
+/// `select!` between app commands, writer swaps from the read thread, and
 /// the 30 s keepalive tick ([`PING_INTERVAL`] — the real client's ping cadence). While disconnected
 /// (no writer yet, or the socket died under the current one), commands drop with a capped warn and
 /// the tick no-ops — they are meaningless without a live session, and the server re-syncs our state
 /// from the reconnect handshake anyway. Ends when the app drops every command sender.
+#[cfg(not(target_arch = "wasm32"))]
 fn writer_loop(
     cmd_rx: &Receiver<ClientCommand>,
     mut writer_rx: Receiver<WorldWriter>,

@@ -620,6 +620,7 @@ dependencies = [
  "smithay-clipboard",
  "symphonia",
  "toml",
+ "wasm-bindgen-futures",
  "wgpu",
 ]
 

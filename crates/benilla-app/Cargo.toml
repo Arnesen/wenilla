@@ -160,3 +160,8 @@ objc2-app-kit = { version = "0.2", features = [
     "NSEvent",
 ] }
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeometry"] }
+
+# The web build has no threads: the net sequencer is one `spawn_local` task on the browser's event
+# loop, and the write half is pumped by a Bevy system instead of a sibling thread.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
