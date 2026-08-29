@@ -30,3 +30,16 @@ benilla-wmo = { path = "../benilla-wmo" }
 
 [dev-dependencies]
 glam = "0.31"
+
+# `Chain` fetches over HTTP instead of reading MPQ archives on the web target (no filesystem there)
+# — see `src/web.rs`. Pinned exact per the wasm plan's global constraint: a newer wasm-bindgen crate
+# than the installed 0.2.122 CLI emits glue the CLI can't match.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.122"
+web-sys = { version = "0.3.99", features = [
+    "Window",
+    "Location",
+    "XmlHttpRequest",
+    "XmlHttpRequestResponseType",
+] }
+serde_json = "1"

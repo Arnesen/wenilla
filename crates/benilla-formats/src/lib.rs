@@ -27,6 +27,10 @@ pub use tga::tga_to_rgba;
 /// *where*, that opens it.
 mod install;
 pub use install::{candidates, wow_data};
+/// Web-target chain plumbing (HTTP in place of a filesystem) — see the module header for the Data
+/// URL scheme it implements against. Always compiled (`encode_name` is plain Rust and tested
+/// natively); the browser-only pieces are gated to `wasm32` inside the module itself.
+pub mod web;
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile,
