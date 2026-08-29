@@ -70,9 +70,11 @@ pub(crate) fn scenario_active() -> bool {
 /// asks once, at the wire edge, and every reader acts on the verdict it carries — so the teardown,
 /// the screen flip and the credential policy cannot answer it three different ways.
 pub(crate) fn unattended_login() -> bool {
+    // Through `webenv`, not `std::env`: in a browser these arrive as the page's query string
+    // (`?user=…&pass=…&char=…`), and this answer decides the start screen before any plugin runs.
     ["WOW_USER", "WOW_PASS", "WOW_CHAR"]
         .iter()
-        .any(|k| std::env::var_os(k).is_some())
+        .any(|k| crate::webenv::var(k).is_some())
 }
 
 /// **Which screen the client starts on.** A player starts at the login screen, always; a capture
