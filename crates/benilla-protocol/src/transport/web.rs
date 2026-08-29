@@ -94,7 +94,12 @@ struct Socket {
 impl Drop for Socket {
     fn drop(&mut self) {
         // Both halves are gone, so nothing will read this connection again — close it rather than
-        // leaving the proxy holding an upstream socket for a session no one is in.
+        // leaving the proxy holding an upstream socket for a session no one is in. The handlers
+        // come off FIRST: `close()` fires a `close` event afterwards, and a `Closure` that has been
+        // dropped by then throws ("closure invoked after being dropped") instead of being ignored.
+        self.ws.set_onmessage(None);
+        self.ws.set_onclose(None);
+        self.ws.set_onerror(None);
         let _ = self.ws.close();
     }
 }
