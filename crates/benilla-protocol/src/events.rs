@@ -17,10 +17,11 @@ use crate::messages::{
     GuildQueryResponse, GuildRoster, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
     LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
     MirrorTimerStart, MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog,
-    PetMode, PetSpells, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
-    QuestRequestItems, QuestTemplate, SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss,
-    StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
-    VendorItem, WhoResults, XpGain,
+    PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
+    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestDetails,
+    QuestGiverList, QuestOfferReward, QuestRequestItems, QuestTemplate, SpellDamageLog,
+    SpellEnergizeLog, SpellHealLog, SpellLogMiss, StabledPet, TaxiMask, TradeStatus,
+    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -1180,6 +1181,34 @@ pub enum SessionEvent {
     /// The guild's "founded on / N members / N accounts" summary (`SMSG_GUILD_INFO`) — a separate
     /// ask from the roster, sharing no fields with it.
     GuildInfo(GuildInfo),
+    /// A guild registrar's charter list (`SMSG_PETITION_SHOWLIST`) — what opens the registrar
+    /// window. Always one row at 1.12; `npc` is the registrar every later verb names.
+    PetitionShowList(PetitionShowList),
+    /// Who has signed a charter (`SMSG_PETITION_SHOW_SIGNATURES`). **Two meanings in one packet**:
+    /// the answer to our own ask, or somebody offering us theirs — a consumer tells them apart by
+    /// whether `owner` is us, and nothing else does.
+    ///
+    /// It carries neither the proposed guild's name nor the signature requirement. Those live only
+    /// on [`Self::PetitionQueryResponse`], keyed by `petition_id` — the same two-caches shape the
+    /// guild roster has with [`Self::GuildQueryResponse`].
+    PetitionShowSignatures(PetitionShowSignatures),
+    /// The verdict on one signature (`SMSG_PETITION_SIGN_RESULTS`). Sent to **both** the signer and
+    /// the charter's owner on success, and both copies name the *signer*, so a consumer cannot tell
+    /// which copy it holds from the packet alone.
+    PetitionSignResults(PetitionSignResults),
+    /// A petition's record (`SMSG_PETITION_QUERY_RESPONSE`) — the proposed guild name and the
+    /// signature requirement. The lazy cache fill behind the charter window's title.
+    PetitionQueryResponse(PetitionQueryResponse),
+    /// The verdict on a turn-in (`SMSG_TURN_IN_PETITION_RESULTS`) — a bare code, with no charter
+    /// named. **Silence is a real outcome**: a name collision answers with an
+    /// [`Self::GuildCommandResult`] and no results packet at all.
+    TurnInPetitionResults { result: u32 },
+    /// Somebody declined our charter (`MSG_PETITION_DECLINE`) — their guid, delivered to the
+    /// charter's owner only.
+    PetitionDeclined { player: u64 },
+    /// A charter rename that took (`MSG_PETITION_RENAME`) — the server's echo, sent only on
+    /// success. A rejected name arrives as a [`Self::GuildCommandResult`] instead.
+    PetitionRenamed(PetitionRename),
     /// The taxi map (`SMSG_SHOWTAXINODES`, decision 0484): `flightmaster` is the NPC the menu
     /// opened on, `nearest_node` the node it sits at, `known_mask` the full known-node bitmask
     /// ([`TaxiMask::is_known`]). The wire's window-framing constant carries no state and is

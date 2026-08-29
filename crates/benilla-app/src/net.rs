@@ -1964,6 +1964,65 @@ pub(crate) enum ClientCommand {
     GuildInfoText {
         text: String,
     },
+    // ── The petition family (writer bodies in benilla-protocol `world/writer/petition.rs`,
+    //    decision 1672) — FOUNDING a guild, which at 1.12 shares nothing with the band above but
+    //    its error channel: a refusal on any of these comes back as `SMSG_GUILD_COMMAND_RESULT`.
+    //
+    //    **A charter is addressed by its ITEM guid**, not by a petition id, everywhere except the
+    //    record query. And almost none of these is acked positively: buying answers with the new
+    //    item alone, offering answers the TARGET, renaming echoes only if it took. Nothing here may
+    //    be treated as applied at the send.
+    /// Ask a petitioner NPC for its charter list (`CMSG_PETITION_SHOWLIST`). The gossip row pushes
+    /// the same answer unasked, so this is the direct re-open, not the only way in.
+    #[allow(dead_code)]
+    PetitionShowList {
+        npc: u64,
+    },
+    /// Buy a guild charter under a name (`CMSG_PETITION_BUY`). Answered by nothing at all on
+    /// success — only the new item arrives.
+    PetitionBuy {
+        npc: u64,
+        name: String,
+    },
+    /// Open a charter and list its signatures (`CMSG_PETITION_SHOW_SIGNATURES`). Sent by the
+    /// item-use fork when a charter is clicked, and again to refresh after a signature lands.
+    PetitionShowSignatures {
+        item: u64,
+    },
+    /// Sign somebody's charter (`CMSG_PETITION_SIGN`). `byte` is the optional Lua argument's wire
+    /// byte, whose client-side default is **1**; the server reads and discards it.
+    PetitionSign {
+        item: u64,
+        byte: i8,
+    },
+    /// Show our charter to a player so they can sign it (`CMSG_OFFER_PETITION`) — the success path
+    /// answers *them*, not us.
+    OfferPetition {
+        item: u64,
+        player: u64,
+    },
+    /// Turn a completed charter in (`CMSG_TURN_IN_PETITION`). Owner only; a name collision answers
+    /// with a guild command result and **no** turn-in result at all.
+    TurnInPetition {
+        item: u64,
+    },
+    /// Ask for a petition's record by id (`CMSG_PETITION_QUERY`) — the only packet carrying the
+    /// proposed guild's name and its signature requirement.
+    PetitionQuery {
+        petition_id: u32,
+        item: u64,
+    },
+    /// Rename a charter (`MSG_PETITION_RENAME`); echoed back only on success.
+    PetitionRename {
+        item: u64,
+        name: String,
+    },
+    /// Decline a charter offered to us (`MSG_PETITION_DECLINE`) — we send the item guid, the owner
+    /// receives ours.
+    #[allow(dead_code)]
+    PetitionDecline {
+        item: u64,
+    },
     // ── The taxi/flight-master family (decision 0484 phase 1; writer bodies in
     //    benilla-protocol `messages::taxi`) ──────────────────────────────────────────────────
     /// Ask a nearby flight master's known status (`CMSG_TAXINODE_STATUS_QUERY`): the guid of the

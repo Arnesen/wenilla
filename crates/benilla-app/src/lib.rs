@@ -139,6 +139,7 @@ mod ui_pet;
 mod ui_pet_book;
 mod ui_pet_doll;
 mod ui_pet_stats;
+mod ui_petition;
 mod ui_quest;
 mod ui_quest_log;
 mod ui_reputation;
@@ -213,6 +214,7 @@ use ui_pet::UiPetPlugin;
 use ui_pet_book::UiPetBookPlugin;
 use ui_pet_doll::UiPetDollPlugin;
 use ui_pet_stats::UiPetStatsPlugin;
+use ui_petition::UiPetitionPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
 use ui_saved::UiSavedPlugin;
@@ -617,6 +619,10 @@ pub fn run(build: BuildId) -> AppExit {
     // membership verbs, and the `ERR_GUILD_*` lines. Right after the social session, whose
     // FriendsFrame it shares a window with and whose ignore list its sign-on lines consult.
     .add_plugins(UiGuildPlugin)
+    // Founding a guild (decision 1672): the guild registrar and the charter window — the slice
+    // 1257 §2 left out. Right after the guild session, whose error channel its refusals ride and
+    // whose roster its success produces.
+    .add_plugins(UiPetitionPlugin)
     .add_plugins(UiTooltipPlugin)
     // The character-window feed (decision 0208): the combat-stats/inventory snapshots + events
     // the paper doll reads, and the paper-doll booth's yaw mirror.

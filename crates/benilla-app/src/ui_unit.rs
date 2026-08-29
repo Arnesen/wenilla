@@ -1041,6 +1041,9 @@ fn feed_units(
     // (decision 1257): a lookup that misses is what sends the `CMSG_GUILD_QUERY`, exactly as a
     // `NameCache::resolve` miss sends the name query above.
     mut guild: ResMut<crate::ui_guild::GuildState>,
+    // The NPC the player is interacting with, for the `"npc"` token below. `Option` for the same
+    // reason `index` and `factions` are: a UI-only harness runs this feed with no session plugin.
+    interact: Option<Res<crate::ui_session::InteractNpc>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1270,6 +1273,67 @@ fn feed_units(
     if tot_dirty {
         gate.audit("feed_units", "the target-of-target snapshot");
         script.set_unit("targettarget", tot.clone());
+    }
+
+    // `"npc"` — the unit the player is interacting with, resolved through the SAME interaction guid
+    // the real client's token reads (`CGGameUI`'s `[0xb4e2d0]`, what `CGGameUI::SetInteractNPC`
+    // writes; wow-re confirms the guild registrar's own opener is one of that function's fourteen
+    // callers). `crate::ui_session::InteractNpc` is benilla's model of exactly that cell, so the
+    // token and the portrait booth cannot disagree about who "npc" is.
+    //
+    // **It had no feed at all until decision 1678**, and the gap was invisible because nothing
+    // called it: `TaxiFrame.xml` and `TradeFrame.xml` both take the NPC's name from an event
+    // argument instead and say in their own comments that they are deviating from the reference's
+    // `UnitName("NPC")` to do it. `GuildRegistrarFrame.xml` is the first window here to ship the
+    // reference's line unchanged — and it painted a blank name banner, because
+    // `GUILD_REGISTRAR_SHOW` is verified to carry no arguments, so there is nothing else for it to
+    // read. The probe caught it; a one-frame-lag theory was the first (wrong) explanation.
+    //
+    // No `guild` leg, for `"targettarget"`'s reason: nothing asks an NPC for its guild, and the
+    // lookup is the lazy cache whose miss SENDS a query.
+    let npc = interact
+        .as_deref()
+        .and_then(|i| Some((i.0?, i.1?)))
+        .and_then(|(entity, guid)| {
+            let store = stores.get(entity).ok()?;
+            let name = names.resolve(guid, &commands).map(str::to_string);
+            let reaction = ring_reaction(
+                factions.as_deref(),
+                &reputations,
+                Some(store),
+                self_pair.map(|(s, _)| s),
+            ) + 1;
+            let mut s = snapshot(store, name, reaction);
+            s.guid = guid;
+            s.is_connected = true;
+            s.raid_target = group.raid_target_index(guid);
+            s.faction_group = faction_group(store, factions.as_deref());
+            s.can_attack = crate::target::can_attack(
+                Some(store),
+                factions.as_deref(),
+                &reputations,
+                self_pair.map(|(s, _)| s),
+            );
+            enrich_unit(
+                &mut s,
+                guid,
+                &names,
+                store,
+                factions.as_deref(),
+                self_pair.map(|(s, _)| s),
+            );
+            Some(s)
+        });
+    // "Absence IS data" again: closing an NPC window must clear the token, or the next window's
+    // first frame paints the last NPC's name.
+    let npc_dirty = match (&npc, memo.last.get("npc")) {
+        (Some(cur), Some(prev)) => cur != prev,
+        (None, None) => false,
+        _ => true,
+    };
+    if npc_dirty {
+        gate.audit("feed_units", "the interaction-NPC snapshot");
+        script.set_unit("npc", npc.clone());
     }
 
     // The XP bar's feed: push our own avatar's PLAYER_XP / PLAYER_NEXT_LEVEL_XP (both PRIVATE, only

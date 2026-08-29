@@ -45,6 +45,7 @@ mod packet;
 mod page_text;
 mod parse;
 mod pet;
+mod petition;
 mod pose;
 mod progression;
 mod pvp;
@@ -171,6 +172,13 @@ pub use pet::{
     PET_COMMAND_FOLLOW, PET_COMMAND_STAY, PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE,
     PET_REACT_DEFENSIVE, PET_REACT_PASSIVE, PET_STATE_BAR_DISABLED, PET_TYPE_SPELL_FIRST,
     PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
+};
+pub use petition::{
+    offer_petition, petition_buy, petition_decline, petition_query, petition_rename,
+    petition_result, petition_show_list, petition_show_signatures, petition_sign, turn_in_petition,
+    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowListEntry,
+    PetitionShowSignatures, PetitionSignResults, PetitionSignature, CHARTER_DISPLAY_ID,
+    CHARTER_ITEM_ENTRY, CHARTER_NAME_MAX_LENGTH, ITEM_FLAG_CHARTER, MAX_PETITION_SIGNATURES,
 };
 pub use pose::{set_sheathed, stand_state_change};
 pub use progression::{

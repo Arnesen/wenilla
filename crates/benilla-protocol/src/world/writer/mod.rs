@@ -76,6 +76,7 @@ mod loot;
 mod mail;
 mod names;
 mod pet;
+mod petition;
 mod player_flags;
 mod pose;
 mod progression;

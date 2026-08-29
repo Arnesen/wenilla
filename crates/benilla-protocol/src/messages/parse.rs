@@ -13,8 +13,8 @@ use crate::wire::{
 use super::{
     action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
     duel, gameobject, gm_ticket, gossip, group, guild, items, loot, mail, mirror_timer,
-    monster_move, movement, opcode, page_text, pet, progression, pvp, quest, social, spellbook,
-    spells, stable, taxi, trade, trainer, update_object, vendor, world_state, Character,
+    monster_move, movement, opcode, page_text, pet, petition, progression, pvp, quest, social,
+    spellbook, spells, stable, taxi, trade, trainer, update_object, vendor, world_state, Character,
     CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
@@ -1071,6 +1071,31 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             name: guild::read_guild_decline(&mut r)?,
         },
         opcode::SMSG_GUILD_INFO => ServerPacket::GuildInfo(guild::read_guild_info(&mut r)?),
+        // The petition family (bodies in `petition`) — founding a guild, which at 1.12 is an
+        // entirely different wire from the guild family above. Note `SMSG_PETITION_SHOW_SIGNATURES`
+        // answers two different asks, and the two `MSG_` opcodes read a *different* body from the
+        // one they write (see `petition`'s own docs).
+        opcode::SMSG_PETITION_SHOWLIST => {
+            ServerPacket::PetitionShowList(petition::read_petition_show_list(&mut r)?)
+        }
+        opcode::SMSG_PETITION_SHOW_SIGNATURES => {
+            ServerPacket::PetitionShowSignatures(petition::read_petition_show_signatures(&mut r)?)
+        }
+        opcode::SMSG_PETITION_SIGN_RESULTS => {
+            ServerPacket::PetitionSignResults(petition::read_petition_sign_results(&mut r)?)
+        }
+        opcode::SMSG_PETITION_QUERY_RESPONSE => {
+            ServerPacket::PetitionQueryResponse(petition::read_petition_query_response(&mut r)?)
+        }
+        opcode::SMSG_TURN_IN_PETITION_RESULTS => ServerPacket::TurnInPetitionResults {
+            result: petition::read_turn_in_petition_results(&mut r)?,
+        },
+        opcode::MSG_PETITION_DECLINE => ServerPacket::PetitionDeclined {
+            player: petition::read_petition_decline(&mut r)?,
+        },
+        opcode::MSG_PETITION_RENAME => {
+            ServerPacket::PetitionRenamed(petition::read_petition_rename(&mut r)?)
+        }
         // The observer speed legs (decision 0441): a unit we don't control changed speed — a
         // creature or mid-spline player (SPLINE family), or a freely-moving player (MOVE_SET
         // family, which carries a fresh pose too). No ack on either.

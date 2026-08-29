@@ -146,9 +146,12 @@ impl WorldCursor {
 
 /// Vanilla `UNIT_NPC_FLAGS` bits (vmangos `UnitDefines.h`, 1.12 values — later expansions differ).
 /// REPAIR (0x4000) exists but the classifier never consults it (falls `je 0x4826cb`).
-/// `pub(super)` so the right-click dispatch ([`super::click`]) reuses BANKER to split the shared
-/// Buy cursor kind (banker vs auctioneer) without a duplicate table (decision 0604).
-pub(super) mod npc_flags {
+/// `pub(crate)` so the right-click dispatch ([`super::click`]) reuses BANKER to split the shared
+/// Buy cursor kind (banker vs auctioneer) without a duplicate table (decision 0604), and so a live
+/// probe scans for a service NPC by the same bits the cursor classifies with instead of keeping a
+/// private copy ([`crate::capture::ProbeCharterPlugin`] and PETITIONER) — a duplicated flag table
+/// is how B249's icon map went stale.
+pub(crate) mod npc_flags {
     pub const GOSSIP: u32 = 0x1;
     pub const QUESTGIVER: u32 = 0x2;
     pub const VENDOR: u32 = 0x4;

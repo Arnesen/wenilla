@@ -25,11 +25,11 @@
     -->
     <Script><![CDATA[
         -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only
-        -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard, Petition,
-        -- GuildRegistrar, Battlefield, Cinematic, WorldStateScore, Minigame) join as their windows
-        -- land (audited row-by-row against the bytes, decision 1507). Three have since left that
-        -- list: the doublewide AuctionFrame with decision 1511, PetStableFrame with 1676, and
-        -- HelpFrame with 1673 — all three are rows below.
+        -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard,
+        -- Battlefield, Cinematic, WorldStateScore, Minigame) join as their windows land (audited
+        -- row-by-row against the bytes, decision 1507). Four have since left that list: the
+        -- doublewide AuctionFrame with decision 1511, PetStableFrame with 1676, HelpFrame with
+        -- 1673, and Petition + GuildRegistrar with 1672 — all of them are rows below.
         UIPanelWindows = {}
         UIPanelWindows["GossipFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["MerchantFrame"] = { area = "left", pushable = 0 }
@@ -125,6 +125,15 @@
         -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
         -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
         UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }
+        -- The two guild-charter windows (decision 1672), the ref's own UIParent.lua l.33-34
+        -- verbatim. They are ordinary left-slot rivals of each other and of the gossip menu, all
+        -- pushable 0 — which is exactly right: selecting the registrar's gossip row makes the
+        -- server close the menu and push the charter list, so the registrar replacing the gossip
+        -- window in the same slot IS the handoff. Both must be registered or ShowUIPanel degrades
+        -- to a bare Show() in no slot, which is what left the item-text reader interleaved with a
+        -- gossip window in B288 (1507).
+        UIPanelWindows["GuildRegistrarFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["PetitionFrame"] = { area = "left", pushable = 0 }
         -- The macro window (decision 0983, MacroFrame.xml) — the ref's own registration line
         -- verbatim (`UIPanelWindows["MacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }`,
         -- Blizzard_MacroUI.lua:7). whileDead is the ref's and it earns its keep: writing a macro

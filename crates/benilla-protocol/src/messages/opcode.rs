@@ -942,7 +942,8 @@ pub const CMSG_DEL_IGNORE: u16 = 0x006D; // 109
 // The numbers are two contiguous runs plus two strays: the query pair sits with the other ask-once
 // caches at 0x54/0x55, the core family runs 0x81-0x93 immediately after the group family, rank
 // administration was appended at 0x231-0x235, and the guild info text at 0x2FC. The
-// charter/petition/tabard opcodes that *found* a guild are a separate slice and are not here.
+// charter/petition opcodes that *found* a guild are their own family, below; the tabard
+// opcodes that dress one are not built.
 pub const CMSG_GUILD_QUERY: u16 = 0x0054; // 84
 pub const SMSG_GUILD_QUERY_RESPONSE: u16 = 0x0055; // 85
 /// vmangos registers this `STATUS_NEVER` (`Opcodes.cpp:210`): at 1.12 a guild is founded through
@@ -974,6 +975,39 @@ pub const CMSG_GUILD_DEL_RANK: u16 = 0x0233; // 563
 pub const CMSG_GUILD_SET_PUBLIC_NOTE: u16 = 0x0234; // 564
 pub const CMSG_GUILD_SET_OFFICER_NOTE: u16 = 0x0235; // 565
 pub const CMSG_GUILD_INFO_TEXT: u16 = 0x02FC; // 764
+
+// The petition family — the guild-charter flow that FOUNDS a guild (VERIFIED vmangos
+// `Opcodes_1_12_1.h:444-456`, `:705-706` + `Server/Packets/Petition.{h,cpp}`,
+// `Handlers/PetitionsHandler.cpp`; the handler table is `Opcodes.cpp:528-540` and `:800-801`).
+// Bodies in [`super::petition`]; decision 1672.
+//
+// Two shapes to know. The three `MSG_` opcodes are genuinely bidirectional with *different*
+// bodies each way — decline sends an item guid and receives a player guid — so each has its own
+// reader and its own builder rather than one shared body. And `MSG_DELETE_GUILD_CHARTER` (0x2C0)
+// is deliberately **absent**: vmangos registers it `INVALID_PACKET(…, Unhandled)`
+// (`Opcodes.cpp:800`) and has no handler at all, because destroying a charter runs through the
+// ordinary item-destroy path, which cascades into deleting the petition (`Player.cpp:10811-10817`,
+// `Item.cpp:515-516`). Declaring it would model traffic that nothing on either end sends.
+pub const CMSG_PETITION_SHOWLIST: u16 = 0x01BB; // 443
+pub const SMSG_PETITION_SHOWLIST: u16 = 0x01BC; // 444
+pub const CMSG_PETITION_BUY: u16 = 0x01BD; // 445
+pub const CMSG_PETITION_SHOW_SIGNATURES: u16 = 0x01BE; // 446
+/// The answer to **two** different asks — our own `CMSG_PETITION_SHOW_SIGNATURES`, and someone
+/// else's `CMSG_OFFER_PETITION` aimed at us. Only its `owner` field tells the two apart.
+pub const SMSG_PETITION_SHOW_SIGNATURES: u16 = 0x01BF; // 447
+pub const CMSG_PETITION_SIGN: u16 = 0x01C0; // 448
+pub const SMSG_PETITION_SIGN_RESULTS: u16 = 0x01C1; // 449
+/// Bidirectional with different bodies: we send the charter **item's** guid, the owner receives
+/// the declining **player's** guid.
+pub const MSG_PETITION_DECLINE: u16 = 0x01C2; // 450
+pub const CMSG_OFFER_PETITION: u16 = 0x01C3; // 451
+pub const CMSG_TURN_IN_PETITION: u16 = 0x01C4; // 452
+pub const SMSG_TURN_IN_PETITION_RESULTS: u16 = 0x01C5; // 453
+pub const CMSG_PETITION_QUERY: u16 = 0x01C6; // 454
+pub const SMSG_PETITION_QUERY_RESPONSE: u16 = 0x01C7; // 455
+/// Bidirectional, and here the two bodies agree: `u64 item` + the new name, both ways. The echo
+/// comes back only on success.
+pub const MSG_PETITION_RENAME: u16 = 0x02C1; // 705
 
 // The group/party family — invite/accept/decline/kick/leader/disband, the loot-method setting, the
 // roster push (`SMSG_GROUP_LIST`), party command feedback, live member stats for the party/raid

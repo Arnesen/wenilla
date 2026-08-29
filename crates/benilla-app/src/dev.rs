@@ -331,6 +331,13 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_GMTICKET").is_ok() {
                 app.add_plugins(crate::capture::ProbeGmTicketPlugin);
             }
+            // The guild-charter live probe: `WOW_PROBE_CHARTER=1` GM-hops to the Stormwind guild
+            // registrar, asserts the charter row's icon reads "petition", buys a charter through the
+            // registrar's own window, opens it with a real bag right-click and renames it — decision
+            // 1672's end-to-end instrument (see `capture::ProbeCharterPlugin`).
+            if std::env::var("WOW_PROBE_CHARTER").is_ok() {
+                app.add_plugins(crate::capture::ProbeCharterPlugin);
+            }
             // The world-book live probe: `WOW_PROBE_BOOK=1` teleports to the Old Town plaque and
             // measures what having the item-text reader open costs per frame, closed vs open —
             // B240's instrument (see `capture::ProbeBookPlugin`).

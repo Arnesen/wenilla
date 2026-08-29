@@ -12,12 +12,13 @@ use super::{
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
     LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
-    MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, PvpCredit,
-    QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems,
-    QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown,
-    SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, StabledPet,
-    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
-    WhoResults, XpGain,
+    MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
+    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
+    PetitionSignResults, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
+    QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind,
+    SpellChainTargets, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog,
+    SpellLogMiss, SpellStart, StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
+    TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -1133,6 +1134,31 @@ pub enum ServerPacket {
     /// `SMSG_GUILD_INFO` — the "founded on / N members / N accounts" summary; a separate ask from
     /// the roster, with no overlapping fields.
     GuildInfo(GuildInfo),
+    /// `SMSG_PETITION_SHOWLIST` — a guild registrar's charter list. In 1.12 always one row, and
+    /// the packet that opens the registrar window.
+    PetitionShowList(PetitionShowList),
+    /// `SMSG_PETITION_SHOW_SIGNATURES` — who has signed a charter. Answers **two** different asks
+    /// (our own show-signatures, and someone else's offer aimed at us); only `owner` tells them
+    /// apart.
+    PetitionShowSignatures(PetitionShowSignatures),
+    /// `SMSG_PETITION_SIGN_RESULTS` — the verdict on one signature. Sent to *both* parties on
+    /// success, and both copies name the signer.
+    PetitionSignResults(PetitionSignResults),
+    /// `SMSG_PETITION_QUERY_RESPONSE` — a petition's record: the proposed guild name and the
+    /// signature requirement, neither of which is on any other packet.
+    PetitionQueryResponse(PetitionQueryResponse),
+    /// `SMSG_TURN_IN_PETITION_RESULTS` — a bare result code. A name collision produces no packet
+    /// at all, so silence is a real outcome.
+    TurnInPetitionResults {
+        result: u32,
+    },
+    /// `MSG_PETITION_DECLINE` inbound — the guid of the player who declined our charter. Sent only
+    /// to the charter's owner.
+    PetitionDeclined {
+        player: u64,
+    },
+    /// `MSG_PETITION_RENAME` inbound — the server's echo of a rename that took. Only on success.
+    PetitionRenamed(PetitionRename),
     /// A `SMSG_SPLINE_SET_*_SPEED` — a speed change on a unit we don't control (a creature, or a
     /// player mid-spline): `[packed guid][f32 speed]`, no counter, no ack (decision 0441 — how an
     /// observed unit's mounted speed reaches us).
@@ -1527,6 +1553,13 @@ impl ServerPacket {
             ServerPacket::GuildInvite { .. } => "SMSG_GUILD_INVITE".into(),
             ServerPacket::GuildDecline { .. } => "SMSG_GUILD_DECLINE".into(),
             ServerPacket::GuildInfo(..) => "SMSG_GUILD_INFO".into(),
+            ServerPacket::PetitionShowList(..) => "SMSG_PETITION_SHOWLIST".into(),
+            ServerPacket::PetitionShowSignatures(..) => "SMSG_PETITION_SHOW_SIGNATURES".into(),
+            ServerPacket::PetitionSignResults(..) => "SMSG_PETITION_SIGN_RESULTS".into(),
+            ServerPacket::PetitionQueryResponse(..) => "SMSG_PETITION_QUERY_RESPONSE".into(),
+            ServerPacket::TurnInPetitionResults { .. } => "SMSG_TURN_IN_PETITION_RESULTS".into(),
+            ServerPacket::PetitionDeclined { .. } => "MSG_PETITION_DECLINE".into(),
+            ServerPacket::PetitionRenamed(..) => "MSG_PETITION_RENAME".into(),
             ServerPacket::SplineSpeedChange { kind, .. } => {
                 format!("SMSG_SPLINE_SET_{kind:?}_SPEED")
             }

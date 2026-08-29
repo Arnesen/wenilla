@@ -242,6 +242,12 @@ pub(super) fn apply_net_updates(
                 // diffs on: the Help window re-polls every 10 minutes and an unchanged answer
                 // still has to re-fire `UPDATE_TICKET`.
                 ResMut<crate::ui_gm_ticket::GmTicketState>,
+                // The guild-charter session (decision 1672) — two resources because only the
+                // registrar half is NPC-bound: `SMSG_PETITION_SHOWLIST` opens the registrar, and
+                // `SMSG_PETITION_SHOW_SIGNATURES` opens the item-bound charter window, which must
+                // survive walking away from the registrar.
+                ResMut<crate::ui_petition::GuildRegistrarState>,
+                ResMut<crate::ui_petition::PetitionState>,
             ),
         ),
     ),
@@ -418,6 +424,8 @@ pub(super) fn apply_net_updates(
                 guild_notify,
                 mut ping,
                 mut gm_ticket,
+                mut registrar,
+                mut petition,
             ),
         ),
     ) = caches;
@@ -1123,6 +1131,50 @@ pub(super) fn apply_net_updates(
                 crate::ui_guild::apply::decline(&mut chat_log, &name)
             }
             SessionEvent::GuildInfo(info) => crate::ui_guild::apply::info(&mut chat_log, info),
+            // ── The petition family (decision 1672): founding a guild. The registrar half is an
+            // NPC window, the charter half is item-bound, and they are two resources for that
+            // reason — see `ui_petition`'s module doc.
+            SessionEvent::PetitionShowList(list) => {
+                // The registrar's two `UNIT_NPC_FLAGS` gates are on LIVE NPC state rather than on
+                // the packet, so the flags are read here — this pass holds the store. An unstreamed
+                // guid reads `None` and fails the gate, as the client's own resolve does.
+                let flags = index
+                    .0
+                    .get(&list.npc)
+                    .and_then(|e| stores.get(*e).ok())
+                    .map(|s| s.0.unit_npc_flags());
+                crate::ui_petition::apply::show_list(&mut registrar, list, flags)
+            }
+            SessionEvent::PetitionShowSignatures(sigs) => {
+                // An ignored owner suppresses the ENTIRE update — no record fetch, no list, no
+                // event, no error line (`0x5eeefe`). Consulted before anything else happens.
+                let ignored = social.is_ignored(sigs.owner);
+                crate::ui_petition::apply::show_signatures(
+                    &mut petition,
+                    sigs,
+                    ignored,
+                    &net_commands,
+                )
+            }
+            SessionEvent::PetitionQueryResponse(response) => {
+                crate::ui_petition::apply::query_response(&mut petition, response)
+            }
+            SessionEvent::PetitionSignResults(results) => crate::ui_petition::apply::sign_results(
+                &mut petition,
+                &mut names,
+                self_guid.0.unwrap_or(0),
+                results,
+                &net_commands,
+            ),
+            SessionEvent::TurnInPetitionResults { result } => {
+                crate::ui_petition::apply::turn_in_results(&mut petition, &mut registrar, result)
+            }
+            SessionEvent::PetitionDeclined { player } => {
+                crate::ui_petition::apply::declined(&mut petition, &names, player)
+            }
+            SessionEvent::PetitionRenamed(rename) => {
+                crate::ui_petition::apply::renamed(&mut petition, rename)
+            }
             SessionEvent::LootResponse {
                 guid,
                 loot_type,

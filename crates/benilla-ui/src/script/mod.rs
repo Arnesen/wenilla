@@ -98,6 +98,7 @@ mod net_stats;
 mod object;
 mod party;
 mod pet;
+mod petition;
 mod pointer;
 mod pvp;
 mod quest;
@@ -175,6 +176,11 @@ pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use petition::{
+    validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
+    PETITION_TYPE_PETITION,
+};
+
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
@@ -544,6 +550,7 @@ impl UiScript {
         party::install(&lua)?;
         social::install(&lua)?;
         guild::install(&lua)?;
+        petition::install(&lua)?;
         binder::install(&lua)?;
         gm_ticket::install(&lua)?;
         duel::install(&lua)?;

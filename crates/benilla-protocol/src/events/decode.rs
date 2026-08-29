@@ -567,6 +567,23 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }
         ServerPacket::GuildDecline { name } => vec![SessionEvent::GuildDecline { name }],
         ServerPacket::GuildInfo(info) => vec![SessionEvent::GuildInfo(info)],
+        ServerPacket::PetitionShowList(list) => vec![SessionEvent::PetitionShowList(list)],
+        ServerPacket::PetitionShowSignatures(sigs) => {
+            vec![SessionEvent::PetitionShowSignatures(sigs)]
+        }
+        ServerPacket::PetitionSignResults(results) => {
+            vec![SessionEvent::PetitionSignResults(results)]
+        }
+        ServerPacket::PetitionQueryResponse(response) => {
+            vec![SessionEvent::PetitionQueryResponse(response)]
+        }
+        ServerPacket::TurnInPetitionResults { result } => {
+            vec![SessionEvent::TurnInPetitionResults { result }]
+        }
+        ServerPacket::PetitionDeclined { player } => {
+            vec![SessionEvent::PetitionDeclined { player }]
+        }
+        ServerPacket::PetitionRenamed(rename) => vec![SessionEvent::PetitionRenamed(rename)],
         ServerPacket::DestroyObject { guid } => vec![SessionEvent::ObjectDestroyed(guid)],
         ServerPacket::TriggerCinematic { cinematic_id } => {
             vec![SessionEvent::CinematicTriggered { cinematic_id }]

@@ -1,0 +1,346 @@
+<Ui>
+    <!--
+        benilla's guild registrar (decision 1672) — the window the "How do I form a guild?" gossip
+        row opens, and the only place a guild charter can be bought or turned in.
+
+        The geometry and art are the real `GuildRegistrarFrame.xml`'s (extracted at
+        `WoW/_extracted_framexml/GuildRegistrarFrame.{xml,lua}`; `ref l.N` cites are into those).
+        Every global, frame name, event, texture, string and number below is the reference's and is
+        the contract addons bind to (1260's rule, still the rule after 1602 retired the
+        transcription gate): what is ours is the expression — named functions instead of inline
+        handler bodies, the service rows over one small local template, and this comment.
+
+        TWO PANELS ON ONE CHROME, exactly as the reference has it (ref l.116, l.196):
+
+          GUILD_REGISTRAR_SHOW   → the window opens on GuildRegistrarGreetingFrame — the two
+                                   service rows, "Purchase a Guild Charter" and "Register a Guild
+                                   Charter".
+          Purchase clicked       → GuildRegistrarPurchaseFrame swaps in: the explanatory text, the
+                                   cost, and the guild-name box. NOT a second window and NOT a
+                                   server round trip — `GuildRegistrar_ShowPurchaseFrame` is a pure
+                                   local swap (ref l.8-12).
+          GUILD_REGISTRAR_CLOSED → the window hides.
+
+        WHY THE COST IS READ AT PANEL-SWAP TIME AND NOT AT SHOW TIME: the reference calls
+        `MoneyFrame_Update("GuildRegistrarMoneyFrame", GetGuildCharterCost())` inside
+        `GuildRegistrar_ShowPurchaseFrame` (ref l.10) — the greeting panel never displays a price.
+        Ours does the same, and it matters here: `GetGuildCharterCost()` answers from the *open
+        registrar's* showlist row, so reading it before a registrar is open would paint a 0.
+
+        THE WINDOW IS NOT SELF-CLOSING ON PURCHASE BY ACCIDENT. Both the Purchase button and the
+        edit box's Enter key hide the whole panel after sending (ref l.253-257, l.312-315) — a buy
+        is one-shot, and the charter arrives as an item rather than as any answer to this window.
+        That is the reference's own behaviour and it is quoted, not invented.
+
+        UIPanel slot system (decision 0084 §2): carries NO hardcoded <Anchors> — ShowUIPanel seats
+        it in the left slot from `UIPanelWindows["GuildRegistrarFrame"]` (UiPanels.xml), which is
+        the reference's own registration (`UIParent.lua:33`, area="left", pushable=0). Hiding it
+        goes through HideUIPanel so the slot is released and ESC reaches it.
+    -->
+
+    <Script><![CDATA[
+        -- ── The registrar's strings (GlobalStrings.lua, verbatim) ──────────────────────────────
+        -- The `text=` attributes below name these KEYS rather than spelling the words, which is
+        -- what the reference's own XML does and what the loader resolves (0991). In a real session
+        -- the app has already run the shipped GlobalStrings.lua, so these lines are the
+        -- standalone-load copy — same values, same file, line numbers named. `X = X or "…"`
+        -- throughout, never a bare `=`, for FriendsFrame.xml's reason: CANCEL and PURCHASE are
+        -- generic names the real string table already owns, and a bare assignment would overwrite
+        -- the shipped value with this copy on every load.
+        AVAILABLE_SERVICES = AVAILABLE_SERVICES or "Available Services"           -- l.128
+        COSTS_LABEL = COSTS_LABEL or "Cost:"                                      -- l.870
+        PURCHASE = PURCHASE or "Purchase"                                         -- l.3128
+        CANCEL = CANCEL or "Cancel"                                               -- l.465
+        GUILD_CHARTER_PURCHASE = GUILD_CHARTER_PURCHASE or "Purchase a Guild Charter" -- l.2058
+        GUILD_CHARTER_REGISTER = GUILD_CHARTER_REGISTER or "Register a Guild Charter" -- l.2059
+        GUILD_REGISTRAR_PURCHASE_TEXT = GUILD_REGISTRAR_PURCHASE_TEXT or "To create a guild you must purchase this charter, get 9 unique player signatures, and return the charter to me.  Please enter the desired name for your guild." -- l.2107
+
+        -- ref GuildRegistrarFrame.lua:1-6. Every show starts on the services list: the purchase
+        -- panel is a transient sub-view, so re-opening the window must not land on a half-filled
+        -- name box from last time.
+        function GuildRegistrar_OnShow()
+            GuildRegistrarGreetingFrame:Show()
+            GuildRegistrarPurchaseFrame:Hide()
+            SetPortraitTexture(GuildRegistrarFramePortrait, "npc")
+            GuildRegistrarFrameNpcNameText:SetText(UnitName("npc"))
+        end
+
+        -- ref GuildRegistrarFrame.lua:8-12. A pure local panel swap — no packet, no round trip.
+        -- The cost is read HERE rather than on show because this is the only panel that displays
+        -- one (see the file header).
+        function GuildRegistrar_ShowPurchaseFrame()
+            GuildRegistrarPurchaseFrame:Show()
+            GuildRegistrarGreetingFrame:Hide()
+            MoneyFrame_Update("GuildRegistrarMoneyFrame", GetGuildCharterCost())
+        end
+
+        -- The buy, shared by the Purchase button and the box's Enter key (ref l.253-257 and
+        -- l.312-315, which carry the same three lines twice). Hiding the panel after sending is
+        -- the reference's own behaviour: a buy is one-shot and its answer is an item arriving, not
+        -- anything this window will be told.
+        function GuildRegistrar_Purchase(name)
+            BuyGuildCharter(name)
+            HideUIPanel(GuildRegistrarFrame)
+            GuildRegistrar_RefocusChat()
+        end
+
+        -- The reference indexes `ChatFrameEditBox` bare (ref l.256, l.314, l.317). Ours nil-guards
+        -- it, this house's convention everywhere it is touched from outside ChatFrame.xml
+        -- (FriendsFrame.xml's four dialogs, BagFrame.xml) — an unguarded index is a real error line
+        -- for anyone who loads this window without the chat frame, which the reference never has to
+        -- consider because there FrameXML is all-or-nothing. The refocus itself stays
+        -- UNCONDITIONAL when the box exists: the popups' extra `IsVisible()` test is a rule about
+        -- dialogs, not about this window, and borrowing it would change behaviour rather than
+        -- harden it.
+        function GuildRegistrar_RefocusChat()
+            if ChatFrameEditBox then
+                ChatFrameEditBox:SetFocus()
+            end
+        end
+
+        -- ref l.318-327. The show arm's `IsVisible` re-test is the reference's own: ShowUIPanel can
+        -- refuse (another window owns the slot, or the player is dead), and a registrar session the
+        -- server thinks is open with no window on screen is a stuck NPC — so the client closes it
+        -- back out immediately.
+        function GuildRegistrar_OnEvent(event)
+            if event == "GUILD_REGISTRAR_SHOW" then
+                ShowUIPanel(GuildRegistrarFrame)
+                if not GuildRegistrarFrame:IsVisible() then
+                    CloseGuildRegistrar()
+                end
+            elseif event == "GUILD_REGISTRAR_CLOSED" then
+                HideUIPanel(GuildRegistrarFrame)
+            end
+        end
+    ]]></Script>
+
+    <!-- One service row (ref inherits="QuestTitleButtonTemplate", QuestFrameTemplates.xml l.174-213):
+         a bullet plus the service name. Local rather than QuestFrame.xml's
+         `BenillaQuestTitleButtonTemplate` because that one hardwires `QuestTitleButton_OnClick()`
+         and would drag this window's load order behind the questgiver's for a fifteen-line shape.
+         Same LEFT-anchored title as that template, and for the same reason: the round bullet is
+         cell-centred, so a TOPLEFT-anchored label rides above it (QuestFrame.xml's own note). -->
+    <Button name="BenillaGuildRegistrarServiceTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="285" y="16"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture file="Interface\QuestFrame\UI-Quest-BulletPoint">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <HighlightTexture file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD"/>
+        <ButtonText>
+            <Size><AbsDimension x="275" y="0"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="20" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="QuestFont" justifyH="LEFT"/>
+    </Button>
+
+    <Frame name="GuildRegistrarFrame" toplevel="true" parent="UIParent" movable="true" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <!-- ref l.16-19: the window's own dead zone at the right edge and along the bottom, so a
+             drag on the parchment's painted border does not grab the window. -->
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="70"/></HitRectInsets>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- The NPC's face (ref l.21-31), filled by SetPortraitTexture on show. -->
+                <Texture name="GuildRegistrarFramePortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- The quest-greeting parchment, four quadrant slabs (ref l.34-65) — the same art
+                     GossipFrame and QuestFrame wear, at the same 384x512. -->
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-BotLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-BotRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                </Texture>
+                <!-- ref l.66-79. Defined but never written by the shipped UI; kept because it is a
+                     name an addon can reach. -->
+                <FontString name="GuildRegistrarText" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="270" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-10"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The title banner (ref l.83-107): the NPC's name, two frame levels above the
+                 parchment so it is not painted over. -->
+            <Frame name="GuildRegistrarNpcNameFrame">
+                <Size><AbsDimension x="300" y="14"/></Size>
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GuildRegistrarFrame" relativePoint="TOP"><Offset><AbsDimension x="0" y="-23"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="GuildRegistrarFrameNpcNameText" inherits="GameFontHighlight"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>this:SetFrameLevel(this:GetFrameLevel() + 2)</OnLoad>
+                </Scripts>
+            </Frame>
+
+            <Button name="GuildRegistrarFrameCloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="CENTER" relativeTo="GuildRegistrarFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-42" y="-30"/></Offset></Anchor>
+                </Anchors>
+            </Button>
+
+            <!-- ── Panel 1: the services list ─────────────────────────────────────────────── -->
+            <Frame name="GuildRegistrarGreetingFrame" setAllPoints="true" hidden="true">
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="AvailableServicesText" inherits="QuestTitleFont" text="AVAILABLE_SERVICES" justifyH="LEFT">
+                            <Size><AbsDimension x="300" y="0"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="35" y="-100"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <!-- The torn-parchment patch along the bottom edge (ref l.127-138). -->
+                        <Texture file="Interface\QuestFrame\UI-Quest-BotLeftPatch">
+                            <Size><AbsDimension x="128" y="64"/></Size>
+                            <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="22" y="68"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="GuildRegistrarFrameGoodbyeButton" inherits="UIPanelButtonTemplate" text="CANCEL">
+                        <Size><AbsDimension x="75" y="22"/></Size>
+                        <Anchors>
+                            <Anchor point="BOTTOMRIGHT" relativeTo="GuildRegistrarFrame" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-40" y="72"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts><OnClick>HideUIPanel(GuildRegistrarFrame)</OnClick></Scripts>
+                    </Button>
+                    <Button name="GuildRegistrarButton1" inherits="BenillaGuildRegistrarServiceTemplate" text="GUILD_CHARTER_PURCHASE">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="AvailableServicesText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-10" y="-10"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts><OnClick>GuildRegistrar_ShowPurchaseFrame()</OnClick></Scripts>
+                    </Button>
+                    <Button name="GuildRegistrarButton2" inherits="BenillaGuildRegistrarServiceTemplate" text="GUILD_CHARTER_REGISTER">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="GuildRegistrarButton1" relativePoint="BOTTOMLEFT"/>
+                        </Anchors>
+                        <!-- Turn the charter in. Takes no argument: the engine finds the charter in
+                             the bags, because the wire wants an item guid and Lua has no way to
+                             name one. A player with no charter gets ERR_NO_GUILD_CHARTER and no
+                             packet leaves (`ui_petition::feed`'s drain). -->
+                        <Scripts><OnClick>TurnInGuildCharter()</OnClick></Scripts>
+                    </Button>
+                    <!-- The reference's third row, "Design a Guild Crest", is COMMENTED OUT in the
+                         shipped file (ref l.183-194) and its `GUILD_CREST_DESIGN` string does not
+                         exist in 1.12's GlobalStrings — tabard design runs off its own NPC gossip
+                         option, not this window. Not shipped here either, deliberately: the
+                         reference's own dead code is not a gap to fill. -->
+                </Frames>
+            </Frame>
+
+            <!-- ── Panel 2: buy a charter ─────────────────────────────────────────────────── -->
+            <Frame name="GuildRegistrarPurchaseFrame" setAllPoints="true" hidden="true">
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <FontString name="GuildRegistrarPurchaseText" inherits="QuestFont" text="GUILD_REGISTRAR_PURCHASE_TEXT" justifyH="LEFT">
+                            <Size><AbsDimension x="270" y="0"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="35" y="-95"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="GuildRegistrarCostLabel" inherits="GameFontNormal" text="COSTS_LABEL">
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativeTo="GuildRegistrarPurchaseText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- The shared money kit (MoneyFrame.xml), STATIC type — a read-only price, no
+                         click-to-edit. GetGuildCharterCost() answers in copper, which is this
+                         kit's whole vocabulary. -->
+                    <Frame name="GuildRegistrarMoneyFrame" inherits="MoneyFrameTemplate">
+                        <Anchors>
+                            <Anchor point="LEFT" relativeTo="GuildRegistrarCostLabel" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts>
+                            <OnLoad>
+                                MoneyFrame_OnLoad()
+                                MoneyFrame_SetType("STATIC")
+                            </OnLoad>
+                        </Scripts>
+                    </Frame>
+                    <Button name="GuildRegistrarFrameCancelButton" inherits="UIPanelButtonTemplate" text="CANCEL">
+                        <Size><AbsDimension x="75" y="22"/></Size>
+                        <Anchors>
+                            <Anchor point="BOTTOMRIGHT" relativeTo="GuildRegistrarFrame" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-40" y="72"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts><OnClick>HideUIPanel(GuildRegistrarFrame)</OnClick></Scripts>
+                    </Button>
+                    <Button name="GuildRegistrarFramePurchaseButton" inherits="UIPanelButtonTemplate" text="PURCHASE">
+                        <Size><AbsDimension x="85" y="22"/></Size>
+                        <Anchors>
+                            <Anchor point="BOTTOMLEFT" relativeTo="GuildRegistrarFrame"><Offset><AbsDimension x="22" y="72"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts><OnClick>GuildRegistrar_Purchase(GuildRegistrarFrameEditBox:GetText())</OnClick></Scripts>
+                    </Button>
+                    <!-- 24 letters is the server's own MAX_CHARTER_NAME, so the box cannot compose
+                         a name the server will reject for length (ref l.271). -->
+                    <EditBox name="GuildRegistrarFrameEditBox" letters="24" historyLines="1">
+                        <Size><AbsDimension x="130" y="32"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="GuildRegistrarCostLabel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture file="Interface\ChatFrame\UI-ChatInputBorder-Left">
+                                    <Size><AbsDimension x="75" y="32"/></Size>
+                                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                                    <TexCoords left="0" right="0.29296875" top="0" bottom="1.0"/>
+                                </Texture>
+                                <Texture file="Interface\ChatFrame\UI-ChatInputBorder-Right">
+                                    <Size><AbsDimension x="75" y="32"/></Size>
+                                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
+                                    <TexCoords left="0.70703125" right="1.0" top="0" bottom="1.0"/>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEnterPressed>GuildRegistrar_Purchase(this:GetText())</OnEnterPressed>
+                            <OnEscapePressed>GuildRegistrar_RefocusChat()</OnEscapePressed>
+                        </Scripts>
+                        <FontString inherits="ChatFontNormal"/>
+                    </EditBox>
+                </Frames>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                this:RegisterEvent("GUILD_REGISTRAR_SHOW")
+                this:RegisterEvent("GUILD_REGISTRAR_CLOSED")
+            </OnLoad>
+            <OnEvent>GuildRegistrar_OnEvent(event)</OnEvent>
+            <OnShow>
+                GuildRegistrar_OnShow()
+                PlaySound("igQuestListOpen")
+            </OnShow>
+            <!-- CloseGuildRegistrar() on hide is load-bearing, not tidiness: it is what clears the
+                 engine's registrar session, so the next GUILD_REGISTRAR_SHOW is a real open (and
+                 GetGuildCharterCost() stops quoting a price for a registrar nobody is talking to).
+                 Same shape as GossipFrame's CloseGossip(). -->
+            <OnHide>
+                PlaySound("igQuestListClose")
+                CloseGuildRegistrar()
+            </OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

@@ -100,7 +100,7 @@ pub(crate) fn close_npc_session_out_of_range<T: NpcSession>(
 /// window open, so the booth empties; the ring is hidden with its window then, so the dark disc
 /// never shows.
 #[derive(Resource, Default)]
-pub(crate) struct InteractNpc(pub(crate) Option<Entity>);
+pub(crate) struct InteractNpc(pub(crate) Option<Entity>, pub(crate) Option<u64>);
 
 /// Collapse the portrait-bound sessions into [`InteractNpc`] each frame: the open one's guid,
 /// resolved to its entity. One deterministic writer (not one publish-system per session), so there is
@@ -123,6 +123,13 @@ pub(crate) fn feed_interact_npc(
     // here is what left `AuctionPortraitTexture` a black disc: the window asks for `"npc"` in its
     // OnShow like every other NPC window, and nothing was answering.
     auction: Option<Res<crate::ui_auction::AuctionOpen>>,
+    // The guild registrar's, while the charter window is open (decision 1672) — same booth path,
+    // and it is NOT covered by the gossip arm above: the server closes the gossip menu before it
+    // sends `SMSG_PETITION_SHOWLIST` (`Player.cpp:12428-12431` — `CloseGossip()` then
+    // `SendPetitionShowList`), so by the time `GuildRegistrar_OnShow` asks for `"npc"` the gossip
+    // session is already gone. Without this arm the window's portrait is the auctioneer's black
+    // disc all over again and its name banner is blank.
+    registrar: Option<Res<crate::ui_petition::GuildRegistrarState>>,
     index: Option<Res<GuidIndex>>,
     mut out: ResMut<InteractNpc>,
 ) {
@@ -134,8 +141,15 @@ pub(crate) fn feed_interact_npc(
         .or_else(|| taxi.and_then(|s| s.npc()))
         .or_else(|| trade.and_then(|s| s.npc()))
         .or_else(|| bank.and_then(|s| s.npc()))
-        .or_else(|| auction.and_then(|s| s.npc()));
+        .or_else(|| auction.and_then(|s| s.npc()))
+        .or_else(|| registrar.and_then(|s| s.npc()));
+    // Field 0 is the entity the portrait booth bakes and the facing chain steers by; field 1 is
+    // the same NPC's **guid**, which `crate::ui_unit`'s feed needs to resolve the `"npc"` unit
+    // token's name (a name lives in the `NameCache`, keyed by guid — there is no way back to one
+    // from an entity). Both are set together and cleared together; a guid whose entity is not
+    // streamed still names the unit, which is why they are two fields rather than one lookup.
     out.0 = guid.and_then(|g| index.and_then(|i| i.0.get(&g).copied()));
+    out.1 = guid;
 }
 
 #[cfg(test)]

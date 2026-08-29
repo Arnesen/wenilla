@@ -402,6 +402,16 @@ GroupLootFrame.xml
 # MerchantFrame (the BenillaMoney coin helpers live there) and GossipFrame (shared parchment
 # art conventions); its title/panel-button labels use the auto-centred ButtonText slot.
 QuestFrame.xml
+# The two guild-charter windows (decision 1672): the guild registrar — the window the "How do I
+# form a guild?" gossip row opens — and the charter itself, the sheet nine people sign. Loaded
+# here, right after QuestFrame, because both wear the QuestGreeting parchment and its QuestFont /
+# QuestTitleFont objects and read as that family; they need UiPanels (the panel manager seats both,
+# and PetitionFrame registers its RENAME_GUILD dialog on the shared popup engine), MoneyFrame (the
+# registrar's price rides MoneyFrameTemplate, resolved at LOAD — decision 1580's ordering rule) and
+# UIPanelTemplates (the close/action buttons), all far above. The registrar must come first: no
+# load-order dependency links them, but the flow does, and the pair reads in the order it is used.
+GuildRegistrarFrame.xml
+PetitionFrame.xml
 # The quest log window (decision 0088 arc, the quest-log slice): durable player state, not an
 # NPC session — loaded after MerchantFrame (the BenillaMoney coin helpers it reuses) and
 # alongside QuestFrame (same arc); the 'L' binding (ui_script/input.rs) calls its

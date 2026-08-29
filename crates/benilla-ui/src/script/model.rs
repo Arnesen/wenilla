@@ -6,9 +6,10 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 use super::{
     auction, backdrop, bank, char_stats, chat_window, colorselect, container, craft, cursor, death,
     duel, follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant,
-    party, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider, social,
-    spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState,
-    FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    party, petition, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider,
+    social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot,
+    AuraState, FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest,
+    UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -452,6 +453,16 @@ pub(crate) struct Model {
     /// the app's last [`super::UiScript::take_guild_requests`] drain — the outbound seam
     /// ([`guild`]).
     pub(crate) guild_requests: Vec<guild::GuildRequest>,
+    /// The guild-charter snapshot the app pushes (the registrar's price and the open petition —
+    /// decision 1672): `GetPetitionInfo`/`GetPetitionNameInfo`/`GetGuildCharterCost`/… read it
+    /// ([`petition`]). Names and the proposed guild's title are already resolved, because in the
+    /// real client too they come from caches the engine owns and not from the packet that opens
+    /// the window.
+    pub(crate) petition: petition::PetitionState,
+    /// Charter intents (`BuyGuildCharter`/`SignPetition`/`TurnInGuildCharter`/…) queued since the
+    /// app's last [`super::UiScript::take_petition_requests`] drain — the outbound seam
+    /// ([`petition`]).
+    pub(crate) petition_requests: Vec<petition::PetitionRequest>,
     /// Whisper targets `ChatFrame_SendTell` queued since the app's last
     /// [`super::UiScript::take_tell_requests`] drain — the app opens its chat edit box prefilled
     /// `/w <name> ` (the unit popup's WHISPER action; [`party`] registers the global).
@@ -1472,6 +1483,8 @@ impl Model {
             guild: guild::GuildState::default(),
             guild_control: guild::GuildRankEdit::default(),
             guild_requests: Vec::new(),
+            petition: petition::PetitionState::default(),
+            petition_requests: Vec::new(),
             tell_requests: Vec::new(),
             open_chat_requests: Vec::new(),
             chat_window_looks: [chat_window::ChatWindowLook::DEFAULT;

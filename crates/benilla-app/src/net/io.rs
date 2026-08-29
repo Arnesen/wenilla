@@ -1090,6 +1090,20 @@ fn writer_loop(
                         w.guild_set_officer_note(&name, &note)
                     }
                     ClientCommand::GuildInfoText { text } => w.guild_info_text(&text),
+                    // The petition family (decision 1672) — founding a guild.
+                    ClientCommand::PetitionShowList { npc } => w.petition_show_list(npc),
+                    ClientCommand::PetitionBuy { npc, name } => w.petition_buy(npc, &name),
+                    ClientCommand::PetitionShowSignatures { item } => {
+                        w.petition_show_signatures(item)
+                    }
+                    ClientCommand::PetitionSign { item, byte } => w.petition_sign(item, byte),
+                    ClientCommand::OfferPetition { item, player } => w.offer_petition(item, player),
+                    ClientCommand::TurnInPetition { item } => w.turn_in_petition(item),
+                    ClientCommand::PetitionQuery { petition_id, item } => {
+                        w.petition_query(petition_id, item)
+                    }
+                    ClientCommand::PetitionRename { item, name } => w.petition_rename(item, &name),
+                    ClientCommand::PetitionDecline { item } => w.petition_decline(item),
                     ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
                     ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
                     ClientCommand::ActivateTaxi {
