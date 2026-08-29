@@ -30,13 +30,24 @@ strip=(--remove-name-section --remove-producers-section)
 wasm-bindgen --target web --no-typescript "${strip[@]}" --out-dir "${DIST}" "${WASM}"
 cp web/index.html web/wasi_stubs.js "${DIST}/"
 
+# binaryen's wasm-opt -O3 (scripts/web-setup.sh puts it in tools/binaryen): ~35 s, and the
+# client is CPU-bound on its one wasm thread, so this is a speed pass, not a size pass —
+# measured +6 % frame rate in-world (docs: wenilla perf notes, 2026-08-29). The feature flags
+# match what rustc emitted; without them wasm-opt refuses the module. Skipped when absent.
+WASM_OPT="${WASM_OPT:-$(pwd)/tools/binaryen/bin/wasm-opt}"
+command -v "${WASM_OPT}" >/dev/null || WASM_OPT="$(command -v wasm-opt || true)"
+if [ -n "${WASM_OPT}" ] && [ "${WEB_DEBUG:-0}" != 1 ]; then
+  "${WASM_OPT}" -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+    --enable-mutable-globals --enable-reference-types --enable-multivalue \
+    "${DIST}/wenilla_bg.wasm" -o "${DIST}/wenilla_bg.wasm.opt" && mv "${DIST}/wenilla_bg.wasm.opt" "${DIST}/wenilla_bg.wasm"
+else
+  echo "wasm-opt not found (scripts/web-setup.sh fetches binaryen) — shipping the unoptimised module"
+fi
+
 # Precompressed siblings for wenilla-host's precompressed_br()/gzip(): ~90 MB of wasm goes
 # over the wire as ~15 MB without per-request CPU. brotli -q 5 is the speed/size knee.
 for f in "${DIST}"/*.wasm "${DIST}"/*.js; do
   command -v brotli >/dev/null && brotli -f -q 5 "$f" -o "$f.br"
   command -v gzip >/dev/null && gzip -kf -6 "$f"
 done
-if command -v wasm-opt >/dev/null; then
-  wasm-opt -Os "${DIST}/wenilla_bg.wasm" -o "${DIST}/wenilla_bg.wasm.opt" && mv "${DIST}/wenilla_bg.wasm.opt" "${DIST}/wenilla_bg.wasm"
-fi
 ls -la "${DIST}"

@@ -121,8 +121,10 @@ impl Default for RenderScale {
     /// as `$WOW_MSAA` and `$WOW_FARCLIP`: a value pinned into `config.toml` would make a
     /// measurement sticky across relaunches.
     fn default() -> Self {
-        let scale = std::env::var("WOW_RENDER_SCALE")
-            .ok()
+        // Through `webenv` so the browser build has the same lever as `?render_scale=0.75` — the
+        // one knob that matters there: the world is GPU-bound at a 2560×1600 DPR-scaled canvas on
+        // an iGPU (87 fps → 154 fps at ~40 % of the pixels, measured 2026-08-29).
+        let scale = crate::webenv::var("WOW_RENDER_SCALE")
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite())
             .map_or(1.0, |v| {

@@ -764,15 +764,20 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     // `$WOW_RENDER_SCALE` is the render-scale A/B lever (1639), and doubly session-only: it is
     // also the supersampling instrument this machine prices pixels with, and an instrument run
     // that pinned 4× into the file would come back at 4× the next time the client opened.
-    if std::env::var_os("WOW_RENDER_SCALE").is_some() {
+    if crate::webenv::var("WOW_RENDER_SCALE").is_some() {
         persist.env_overridden.insert("renderscale".into());
     }
     let cvars = match stored_config() {
-        StoredConfig::Absent => return, // no file, hermetic capture, or no install
+        StoredConfig::Absent => {
+            // No file, hermetic capture, or no install — the URL levers still apply.
+            apply_query_overrides(&mut knobs);
+            return;
+        }
         StoredConfig::Bad(msg) => {
             // A malformed file is preserved, not clobbered: nothing loads, but nothing saves
             // over it either until a change actually happens — and the warn names the file.
             warn!("{msg}");
+            apply_query_overrides(&mut knobs);
             return;
         }
         StoredConfig::Table(t) => t,
@@ -794,7 +799,29 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
         apply_to_knobs(name, value, &mut knobs);
     }
     persist.file = cvars;
+    apply_query_overrides(&mut knobs);
 }
+
+/// **Browser build only:** any registered CVar named in the page's query string
+/// (`?farclip=150&worlddetail=0&renderScale=0.75`) overrides the stored value for this session —
+/// the web twin of the `$WOW_*` A/B levers above, and the only way to hand a slow device a
+/// setting from a link. Session-only for the same reason: nothing here marks the persist dirty,
+/// so the file keeps the player's own value.
+#[cfg(target_arch = "wasm32")]
+fn apply_query_overrides(knobs: &mut Knobs) {
+    for (name, _) in REGISTERED {
+        // `webenv::var` strips `WOW_` and lowercases, so the query key is the CVar's own name.
+        let Some(value) = crate::webenv::var(&format!("WOW_{name}")) else {
+            continue;
+        };
+        if apply_to_knobs(name, &value, knobs) {
+            info!("config: {name} = {value} from the page URL (this session only)");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_query_overrides(_knobs: &mut Knobs) {}
 
 /// What the one read of `config.toml` found.
 enum StoredConfig {

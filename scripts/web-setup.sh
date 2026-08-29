@@ -41,6 +41,26 @@ else
   curl -sL "${url}" | tar xz --strip-components=1 -C "${WASI_DIR}"
 fi
 
+echo "== binaryen (wasm-opt -O3: the client is CPU-bound on its one wasm thread; +6 % measured)"
+BINARYEN_VERSION="${BINARYEN_VERSION:-130}"
+if [ -x tools/binaryen/bin/wasm-opt ]; then
+  echo "already at tools/binaryen"
+else
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64)  bplat=x86_64-linux ;;
+    Linux-aarch64) bplat=aarch64-linux ;;
+    Darwin-arm64)  bplat=arm64-macos ;;
+    Darwin-x86_64) bplat=x86_64-macos ;;
+    *) bplat="" ;;
+  esac
+  if [ -n "${bplat}" ]; then
+    mkdir -p tools/binaryen
+    curl -sL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${bplat}.tar.gz" | tar xz --strip-components=1 -C tools/binaryen
+  else
+    echo "  no binaryen release for this host — web-build.sh will skip wasm-opt"
+  fi
+fi
+
 echo "== optional: brotli/gzip for precompressed output"
 command -v brotli >/dev/null || echo "  brotli not found — web-build.sh will skip .br siblings (the host then serves plain files)"
 echo "ready: scripts/web-build.sh"

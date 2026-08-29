@@ -51,6 +51,13 @@ own accounts (a second login on one account kicks the first, as in the real clie
   one entry per file keyed by its path (`benilla:/benilla-config/config.toml`, …). Per browser
   and per origin, like a `benilla-config/` beside each native install; the server never sees it.
   Clearing site data resets it.
+- **Performance** — the client is CPU-bound on its single wasm thread (Bevy's task pools are
+  single-threaded on `wasm32`): ~11 ms/frame in an outdoor scene on a laptop iGPU, scaling
+  with visible objects, not pixels. `scripts/web-build.sh` runs `wasm-opt -O3` (+6 %). Any CVar
+  can be pinned from the URL for that session (`?renderScale=0.75&farclip=200&worlddetail=0`) —
+  `renderScale` helps a weak GPU, the others a weak CPU. On a high-refresh display an 11 ms
+  frame alternates between 2 and 3 refresh intervals, which reads as judder; a 60 Hz mode is
+  smoother until the web build is multithreaded.
 - **Debugging a crash**: the panic hook prints to the console; `WEB_DEBUG=1 scripts/web-build.sh`
   keeps the wasm name section so the stack trace has symbols. `index.html` also prints the real
   WGSL compile diagnostics (wgpu's browser backend does not ask for them).
