@@ -49,8 +49,21 @@ use std::path::{Path, PathBuf};
 /// See the module header for the resolution order and why each step is there. Cheap enough to call
 /// at a use site (three `is_dir` stats at worst) — there is deliberately no cache, because a
 /// `OnceLock` would freeze the answer across a `$WOW_DATA` change.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn wow_data() -> Option<PathBuf> {
     candidates().into_iter().find(|c| c.is_dir())
+}
+
+/// The web target's answer is not a ladder at all: there is no filesystem to probe candidates
+/// against, and every chain file is fetched over HTTP against the Data URL scheme a companion web
+/// host answers (Lane A ↔ Lane H of the wasm plan), always rooted at `/data` on this page's own
+/// origin. [`crate::Chain::open`] on wasm ignores whatever path it's handed and asks
+/// [`crate::web::data_base`] directly — this still returns `Some` so call sites written against
+/// the native "is there an install?" contract (`wow_data().is_some()`) get the right answer on web
+/// too, without needing their own `cfg`.
+#[cfg(target_arch = "wasm32")]
+pub fn wow_data() -> Option<PathBuf> {
+    Some(PathBuf::from("/data"))
 }
 
 /// Every place [`wow_data`] looks, in order, whether or not it exists — the resolver's own
