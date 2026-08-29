@@ -3,6 +3,11 @@
 **/*.rs.bk
 # Cargo.lock IS committed (this workspace produces binaries).
 
+# The wasm-bindgen build output (`scripts/benilla-web.sh build`, wowclassic repo) — regenerated
+# from `crates/benilla-web` + `web/index.html`/`web/wasi_stubs.js` on every build, and the .wasm
+# alone can run tens of MB.
+/web/dist/
+
 # --- Blizzard-owned content: NEVER commit ---
 # A legally-installed 1.12.1 client, read at runtime; not redistributed.
 /WoW

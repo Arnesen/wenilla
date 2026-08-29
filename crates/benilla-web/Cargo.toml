@@ -1,0 +1,25 @@
+[package]
+name = "benilla-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The browser entry point: a wasm-bindgen `#[start]` that boots benilla-app inside the canvas `web/index.html` gives it — benilla's third launcher shim, after `benilla` and `benilla-worldview` (decision 1160), and like them just carries the build-id stamp so a commit dirties this ~20-line crate instead of the app"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# `default-features = false`, same load-bearing reason as the `benilla` shim's own dependency on
+# this crate: without it, `cargo build --target wasm32-unknown-unknown -p benilla-web
+# --no-default-features` would still pull benilla-app's OWN defaults (a path dep gets its own
+# feature resolution), silently linking the dev instruments into the page everyone visits.
+benilla-app = { path = "../benilla-app", default-features = false }
+# Pinned exact (workspace-wide rule, `docs/BENILLA-WASM-SPIKE.md`'s plan): a newer wasm-bindgen
+# crate plus the 0.2.122 CLI `scripts/benilla-web.sh` invokes emits broken glue — verified.
+wasm-bindgen = "=0.2.122"
+# Routes a Rust panic to `console.error` instead of the default "unreachable executed" the browser
+# shows with no message at all — the only way a wasm crash is diagnosable from just the page.
+console_error_panic_hook = "0.1"
+
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }

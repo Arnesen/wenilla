@@ -735,6 +735,16 @@ name = "benilla-wdt"
 version = "0.1.0"
 
 [[package]]
+name = "benilla-web"
+version = "0.1.0"
+dependencies = [
+ "benilla-app",
+ "benilla-buildstamp",
+ "console_error_panic_hook",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "benilla-wmo"
 version = "0.1.0"
 dependencies = [
