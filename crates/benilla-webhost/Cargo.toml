@@ -20,6 +20,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 # once. `sink`/`std` only: no futures executor of our own, tokio already is one.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tower-http = { version = "0.7", features = ["fs", "compression-br", "compression-gzip", "set-header", "trace"] }
+# Only for `ServiceBuilder`, to layer compression + a Cache-Control override onto `ServeDir` —
+# tower-http's own layers need something to stack them with.
+tower = "0.5"
 percent-encoding = "2.3"
 serde_json = "1"
 tracing = "0.1"
