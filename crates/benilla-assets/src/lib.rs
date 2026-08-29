@@ -68,6 +68,13 @@ pub const MPQ_SOURCE: &str = "mpq";
 /// one open chain ([`Chain`] reads through fresh per-call handles, so this is `Send + Sync`).
 #[derive(Clone)]
 pub struct MpqAssetReader {
+    // On `wasm32` this field is written (by `open`, so a caller building one behaves identically
+    // on both targets) but never read: `read` below talks to the web host directly with an async
+    // `fetch` rather than through `Chain`'s synchronous `XMLHttpRequest`, because `AssetReader` is
+    // already async everywhere Bevy calls it and blocking the main thread inside an `async fn`
+    // would be silly when it doesn't have to (`Chain::read`'s sync XHR exists for the ~60 call
+    // sites that read the chain synchronously off the main thread, which this isn't one of).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     chain: Arc<Chain>,
 }
 
@@ -82,6 +89,7 @@ impl MpqAssetReader {
 }
 
 impl AssetReader for MpqAssetReader {
+    #[cfg(not(target_arch = "wasm32"))]
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
         let raw = path
             .to_str()
@@ -97,6 +105,30 @@ impl AssetReader for MpqAssetReader {
             .chain
             .read(internal)
             .map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))?;
+        Ok(VecReader::new(bytes))
+    }
+
+    // The web target has no filesystem, so there is no `Chain::contains` pre-check to make cheaply
+    // — a fetch is the only way to find out either answer, so `read` just does the one fetch and
+    // turns a 404 into `NotFound` (see `wasm_fetch`).
+    #[cfg(target_arch = "wasm32")]
+    async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        let raw = path
+            .to_str()
+            .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?;
+        // Same sampler-marker strip as the native path — it's part of the asset identity, not the
+        // archive name the web host resolves.
+        let stripped = strip_sampler_marker(raw);
+        let internal = stripped.as_deref().unwrap_or(raw);
+        let url = format!(
+            "{}/{}",
+            benilla_formats::web::data_base(),
+            benilla_formats::web::encode_name(internal)
+        );
+        let bytes = wasm_fetch(&url).await.map_err(|e| match e {
+            WasmFetchError::NotFound => AssetReaderError::NotFound(path.to_path_buf()),
+            WasmFetchError::Other(msg) => AssetReaderError::Io(Arc::new(std::io::Error::other(msg))),
+        })?;
         Ok(VecReader::new(bytes))
     }
 
@@ -116,6 +148,49 @@ impl AssetReader for MpqAssetReader {
     async fn is_directory<'a>(&'a self, _path: &'a Path) -> Result<bool, AssetReaderError> {
         Ok(false)
     }
+}
+
+/// What can go wrong fetching one asset over the web host's Data URL scheme — collapsed to the two
+/// shapes [`MpqAssetReader::read`] cares about: "the asset genuinely isn't there" (a 404, which
+/// Bevy needs as [`AssetReaderError::NotFound`] to fall back to default meta / report a load
+/// error cleanly) versus everything else (network failure, a non-`Response` from `fetch`, a body
+/// read that failed), which is a plain I/O error.
+#[cfg(target_arch = "wasm32")]
+enum WasmFetchError {
+    NotFound,
+    Other(String),
+}
+
+/// One `GET` of `url` via the browser's async `fetch`, used only from the wasm `AssetReader::read`
+/// above. `Chain::read` (native) uses a *synchronous* `XMLHttpRequest` instead, because it is
+/// called from ~60 non-async call sites; this path has no such constraint — `AssetReader` is
+/// `async fn` on every target — so it uses the ordinary async `fetch`/`Response::array_buffer`
+/// pair rather than sync XHR's `text/plain; charset=x-user-defined` byte-smuggling trick.
+#[cfg(target_arch = "wasm32")]
+async fn wasm_fetch(url: &str) -> std::result::Result<Vec<u8>, WasmFetchError> {
+    use wasm_bindgen::JsCast;
+
+    let window = web_sys::window()
+        .ok_or_else(|| WasmFetchError::Other("no window: fetch is browser-only".to_string()))?;
+    let resp_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
+        .await
+        .map_err(|e| WasmFetchError::Other(format!("{e:?}")))?;
+    let resp: web_sys::Response = resp_value
+        .dyn_into()
+        .map_err(|_| WasmFetchError::Other("fetch() did not resolve to a Response".to_string()))?;
+    if resp.status() == 404 {
+        return Err(WasmFetchError::NotFound);
+    }
+    if !resp.ok() {
+        return Err(WasmFetchError::Other(format!("HTTP {}", resp.status())));
+    }
+    let array_buffer = resp
+        .array_buffer()
+        .map_err(|e| WasmFetchError::Other(format!("{e:?}")))?;
+    let buf = wasm_bindgen_futures::JsFuture::from(array_buffer)
+        .await
+        .map_err(|e| WasmFetchError::Other(format!("{e:?}")))?;
+    Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
 /// The sampler-mode marker separator in an `mpq://` texture URL (see [`texture_url`]).
