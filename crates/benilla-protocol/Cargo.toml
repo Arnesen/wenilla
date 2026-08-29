@@ -10,6 +10,9 @@ anyhow.workspace = true
 clap.workspace = true
 benilla-srp = { path = "../benilla-srp" }
 flate2 = "1.0"
+# The transport seam's reads are `async` so the browser body can suspend on the JS event loop; the
+# native sequencer drives the very same futures to completion with `block_on` on its own thread.
+futures-lite = "2.6.1"
 sha1.workspace = true
 
 [dev-dependencies]
