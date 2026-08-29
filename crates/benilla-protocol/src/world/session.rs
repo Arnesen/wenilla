@@ -1,10 +1,9 @@
-use std::net::{TcpStream, ToSocketAddrs};
-
 use anyhow::{anyhow, bail, Context, Result};
 use benilla_srp::vanilla_header::{HeaderCrypto, ProofSeed};
 use benilla_srp::{NormalizedString, SESSION_KEY_LENGTH};
 
 use crate::messages::{self, opcode, Character, MoveMode, ServerPacket};
+use crate::transport::Conn;
 
 use super::movement::{client_uptime_ms, movement_info, MOVEMENT_FLAG_FORWARD};
 use super::reader::WorldReader;
@@ -41,7 +40,7 @@ impl std::error::Error for WardenRequired {}
 
 /// An authenticated world-server session with 1.12 header obfuscation active.
 pub struct WorldSession {
-    stream: TcpStream,
+    conn: Conn,
     crypto: HeaderCrypto,
     /// The roster's guid → race, remembered from [`Self::char_enum`] so [`Self::player_login`]
     /// can derive the character's faction tongue without the caller's help.
@@ -54,15 +53,30 @@ pub struct WorldSession {
 }
 
 impl WorldSession {
-    /// Connect to the world server and complete the auth handshake, leaving header obfuscation
-    /// enabled. `username` must be the same account used at logon; `session_key` is what
-    /// [`crate::logon`] returned.
+    /// Connect to the world server and complete the auth handshake (blocking) — the native twin of
+    /// [`Self::connect_async`], for the CLIs/probes and the native net thread.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn connect(
-        addr: impl ToSocketAddrs,
+        addr: &str,
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
     ) -> Result<Self> {
-        let mut stream = TcpStream::connect(addr).context("connecting to world server")?;
+        futures_lite::future::block_on(Self::connect_async(addr, username, session_key))
+    }
+
+    /// Connect to the world server and complete the auth handshake, leaving header obfuscation
+    /// enabled. `addr` is `host[:port]` (the realm list's own address form; a bare host gets
+    /// [`WORLD_PORT`](crate::WORLD_PORT)). `username` must be the same account used at logon;
+    /// `session_key` is what [`crate::logon_async`] returned.
+    pub async fn connect_async(
+        addr: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+    ) -> Result<Self> {
+        let (host, port) = crate::host_port(addr, super::WORLD_PORT);
+        let mut stream = Conn::connect(host, port)
+            .await
+            .context("connecting to world server")?;
         // **Nagle off** (decision 0617). VERIFIED in the reference client: `0x5bca60` calls
         // `setsockopt(s, 6 /* IPPROTO_TCP */, 1 /* TCP_NODELAY */, &1, 4)` unconditionally on its game
         // socket (WSOCK32 ordinal 21, IAT slot `0x7ff6f8`; a sibling helper at `0x43dda0` toggles the
@@ -84,7 +98,7 @@ impl WorldSession {
             .context("setting handshake read timeout")?;
 
         // 1. SMSG_AUTH_CHALLENGE (unencrypted) carries the server seed.
-        let server_seed = match recv_packet(&mut stream, None)? {
+        let server_seed = match recv_packet(&mut stream, None).await? {
             ServerPacket::AuthChallenge { server_seed } => server_seed,
             other => bail!("expected SMSG_AUTH_CHALLENGE, got {}", other.name()),
         };
@@ -112,7 +126,7 @@ impl WorldSession {
             .context("sending CMSG_AUTH_SESSION")?;
 
         let mut session = WorldSession {
-            stream,
+            conn: stream,
             crypto,
             roster_races: Default::default(),
             chat_language: messages::LANGUAGE_COMMON,
@@ -128,7 +142,7 @@ impl WorldSession {
         // Refusing at the handshake trades an unplayable 30-second kick/reconnect cycle for one
         // honest message at the login screen.
         loop {
-            match session.recv()? {
+            match session.recv_async().await? {
                 ServerPacket::AuthResponse { result } if result == messages::AUTH_OK => break,
                 ServerPacket::AuthResponse { result } => {
                     bail!("world auth rejected: result {result:#x}")
@@ -146,32 +160,41 @@ impl WorldSession {
     /// Set a read timeout on the underlying socket (e.g. so a debug read-loop can stop when the
     /// world goes quiet). `None` clears it (blocking reads).
     pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> Result<()> {
-        self.stream
+        self.conn
             .set_read_timeout(timeout)
             .context("setting world socket read timeout")
     }
 
-    /// Read + decrypt + parse one server packet.
+    /// Read + decrypt + parse one server packet (blocking) — the native twin of
+    /// [`Self::recv_async`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recv(&mut self) -> Result<ServerPacket> {
-        recv_packet(&mut self.stream, Some(self.crypto.decrypter()))
+        futures_lite::future::block_on(self.recv_async())
     }
 
-    /// Send a client packet (encrypted header + plaintext body).
+    /// Read + decrypt + parse one server packet.
+    pub async fn recv_async(&mut self) -> Result<ServerPacket> {
+        recv_packet(&mut self.conn, Some(self.crypto.decrypter())).await
+    }
+
+    /// Send a client packet (encrypted header + plaintext body). Synchronous on every target — a
+    /// write is a buffered hand-off on both bodies of the transport seam.
     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
-        send_packet(
-            &mut self.stream,
-            Some(self.crypto.encrypter()),
-            opcode,
-            body,
-        )
+        send_packet(&mut self.conn, Some(self.crypto.encrypter()), opcode, body)
+    }
+
+    /// Request the character list (blocking) — the native twin of [`Self::char_enum_async`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn char_enum(&mut self) -> Result<Vec<Character>> {
+        futures_lite::future::block_on(self.char_enum_async())
     }
 
     /// Request the character list and return it (remembering each character's race, so
     /// [`Self::player_login`] can pick the right chat tongue).
-    pub fn char_enum(&mut self) -> Result<Vec<Character>> {
+    pub async fn char_enum_async(&mut self) -> Result<Vec<Character>> {
         self.send(opcode::CMSG_CHAR_ENUM, &[])?;
         loop {
-            match self.recv()? {
+            match self.recv_async().await? {
                 ServerPacket::CharEnum { characters } => {
                     self.roster_races = characters.iter().map(|c| (c.guid, c.race)).collect();
                     return Ok(characters);
@@ -190,10 +213,16 @@ impl WorldSession {
     /// Create a character (the create screen's request, or the create-if-empty starter that unblocks
     /// `PLAYER_LOGIN` on a fresh account). Returns the `SMSG_CHAR_CREATE` result byte (`WorldResult`)
     /// for the caller to inspect ([`messages::CHAR_CREATE_SUCCESS`], a `CHAR_NAME_*` code, …).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create_character(&mut self, req: &messages::CharCreateReq) -> Result<u8> {
+        futures_lite::future::block_on(self.create_character_async(req))
+    }
+
+    /// Create a character — the awaited twin of [`Self::create_character`].
+    pub async fn create_character_async(&mut self, req: &messages::CharCreateReq) -> Result<u8> {
         self.send(opcode::CMSG_CHAR_CREATE, &messages::char_create(req))?;
         loop {
-            match self.recv()? {
+            match self.recv_async().await? {
                 ServerPacket::CharCreate { result } => return Ok(result),
                 _ => continue,
             }
@@ -203,10 +232,16 @@ impl WorldSession {
     /// Delete a character (`CMSG_CHAR_DELETE`, full u64 guid — only valid at character select,
     /// never while in-world). Returns the `SMSG_CHAR_DELETE` result byte
     /// ([`messages::CHAR_DELETE_SUCCESS`] on success) for the caller to inspect.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn delete_character(&mut self, guid: u64) -> Result<u8> {
+        futures_lite::future::block_on(self.delete_character_async(guid))
+    }
+
+    /// Delete a character — the awaited twin of [`Self::delete_character`].
+    pub async fn delete_character_async(&mut self, guid: u64) -> Result<u8> {
         self.send(opcode::CMSG_CHAR_DELETE, &messages::full_guid(guid))?;
         loop {
-            match self.recv()? {
+            match self.recv_async().await? {
                 ServerPacket::CharDelete { result } => return Ok(result),
                 _ => continue,
             }
@@ -232,6 +267,17 @@ impl WorldSession {
     /// client is a *confirmed mover*, which this establishes (the real client sends it at login).
     pub fn set_active_mover(&mut self, guid: u64) -> Result<()> {
         self.send(opcode::CMSG_SET_ACTIVE_MOVER, &messages::full_guid(guid))
+    }
+
+    /// [`Self::player_login`], awaited. It only writes — the awaited twin exists so the sequencer's
+    /// handshake reads as one uninterrupted `.await` chain rather than switching idiom mid-stride.
+    pub async fn player_login_async(&mut self, guid: u64) -> Result<()> {
+        self.player_login(guid)
+    }
+
+    /// [`Self::set_active_mover`], awaited — same reason as [`Self::player_login_async`].
+    pub async fn set_active_mover_async(&mut self, guid: u64) -> Result<()> {
+        self.set_active_mover(guid)
     }
 
     /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body) — the
@@ -782,21 +828,15 @@ impl WorldSession {
     pub fn into_split(self) -> Result<(WorldReader, WorldWriter)> {
         // The handshake is over — clear its read timeout (decision 0065): the streaming phase reads
         // block indefinitely (a quiet world is legal; connection liveness is the caller's loop).
-        self.stream
+        self.conn
             .set_read_timeout(None)
             .context("clearing handshake read timeout")?;
-        let read_stream = self
-            .stream
-            .try_clone()
-            .context("cloning world socket for split")?;
+        let (reader, writer) = self.conn.split().context("splitting the world connection")?;
         let (encrypter, decrypter) = self.crypto.split();
         Ok((
-            WorldReader {
-                stream: read_stream,
-                decrypter,
-            },
+            WorldReader { reader, decrypter },
             WorldWriter {
-                stream: self.stream,
+                writer,
                 encrypter,
                 chat_language: self.chat_language,
             },
@@ -807,6 +847,11 @@ impl WorldSession {
     /// `SMSG_LOGOUT_COMPLETE` (instant for GM / rested). The server persists the character on logout,
     /// so a follow-up [`Self::char_enum`] reflects the saved position. Requires a read timeout (so the
     /// poll loop can give up); returns once logged out or `timeout` elapses.
+    ///
+    /// Native only: the deadline is a `std::time::Instant`, which a browser has no clock for, and
+    /// the in-app logout is the writer's `CMSG_LOGOUT_REQUEST` + the streamed `SMSG_LOGOUT_COMPLETE`
+    /// rather than this synchronous wait. The CLIs and probes are its only callers.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn logout(&mut self, timeout: std::time::Duration) -> Result<()> {
         self.send(opcode::CMSG_LOGOUT_REQUEST, &[])?;
         let deadline = std::time::Instant::now() + timeout;

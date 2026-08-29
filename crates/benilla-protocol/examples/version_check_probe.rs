@@ -24,12 +24,15 @@
 //! Usage: `cargo run -p benilla-protocol --example version_check_probe -- <host[:port]> <user> <pass> [install-dir]`
 //! (the local strict-mode realmd of decision 1263 is `127.0.0.1:3725`; the ordinary one is 3724.)
 
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+// The login readers are awaited (the transport seam, so the same code runs in a browser); this
+// probe stays a straight-line CLI and drives each of them to completion where it stands.
+use benilla_protocol::transport::Conn;
 use benilla_protocol::{auth, host_port, AuthReject, AUTH_PORT, CLIENT_BUILD};
+use futures_lite::future::block_on;
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge};
 use sha1::{Digest, Sha1};
 
@@ -61,12 +64,13 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
     // Redial past an ambiguously-serialized `B` exactly as `logon` does, so a 0x04 here means a bad
     // password and never an encoding coin-flip (see `benilla-srp`, "Encoding-unambiguous handshakes").
     for _ in 0..8 {
-        let mut stream = TcpStream::connect((host, port))
+        let mut stream = block_on(Conn::connect(host, port))
             .with_context(|| format!("connecting to {host}:{port}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         auth::write_logon_challenge(&mut stream, &user.to_uppercase(), CLIENT_BUILD)
             .context("sending logon challenge")?;
-        let reply = auth::read_challenge_reply(&mut stream).context("reading challenge reply")?;
+        let reply = block_on(auth::read_challenge_reply(&mut stream))
+            .context("reading challenge reply")?;
         let b = PublicKey::from_le_bytes(reply.server_public_key)
             .map_err(|e| anyhow!("invalid server public key: {e}"))?;
         if !b.is_width_stable() {
@@ -93,7 +97,7 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
         )
         .context("sending logon proof")?;
 
-        return match auth::read_proof_reply(&mut stream) {
+        return match block_on(auth::read_proof_reply(&mut stream)) {
             Ok(_) => Ok(None),
             Err(e) => match e.downcast_ref::<AuthReject>() {
                 Some(r) => Ok(Some(r.code)),
@@ -198,11 +202,11 @@ fn main() -> Result<()> {
 
     // Report the challenge itself first: our digest is only valid for the one salt every mangos-family
     // realmd sends, so a server issuing anything else explains a `zeros` result on the computed arm.
-    let mut stream =
-        TcpStream::connect((host, port)).with_context(|| format!("connecting to {host}:{port}"))?;
+    let mut stream = block_on(Conn::connect(host, port))
+        .with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     auth::write_logon_challenge(&mut stream, &user.to_uppercase(), CLIENT_BUILD)?;
-    let crc_salt = auth::read_challenge_reply(&mut stream)?.crc_salt;
+    let crc_salt = block_on(auth::read_challenge_reply(&mut stream))?.crc_salt;
     drop(stream); // no proof follows, so realmd records nothing for this dial
     let hex: String = crc_salt.iter().map(|b| format!("{b:02x}")).collect();
     let known = auth::version_proof(&crc_salt, &[0u8; 32]) != [0u8; 20];

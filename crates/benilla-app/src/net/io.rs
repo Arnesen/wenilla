@@ -23,8 +23,14 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// Not `std::time::Instant`: a browser has no monotonic clock behind that name (it panics), and this
+// one is the ping clock's stopwatch. `bevy::platform` is std's `Instant` natively and `performance
+// .now()` in a page.
+use bevy::platform::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 use benilla_protocol::{
@@ -85,7 +91,7 @@ pub(crate) struct LoginRequest {
 /// `0x537ff0`: the connection drain arms the next ping 30 s out). vmangos *kicks* a player socket
 /// whose pings repeat faster than 27 s apart more than twice (`WorldSocket::_HandlePing`), so this
 /// must never shrink below that.
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The ping clock — shared between the write thread (which stamps each `CMSG_PING`) and the app's
 /// event drain (which matches the `SMSG_PONG` echo against it to measure the round trip). One
@@ -103,7 +109,7 @@ pub(crate) struct PingClock {
 
 /// Cap on consecutive "command dropped/failed" warns per connection epoch, so a movement stream
 /// during an outage can't flood the log. Reset when a fresh writer arrives.
-const SEND_WARN_CAP: u32 = 8;
+pub(super) const SEND_WARN_CAP: u32 = 8;
 
 /// Connection parameters, from env (`WOW_HOST` as `host[:port]`, `WOW_CHAR`). Credentials are NOT here anymore
 /// (decision 0539): they arrive per-attempt over the login channel — the app's policy owns the
@@ -144,10 +150,20 @@ enum Cycle {
 pub(super) struct NetHandles {
     pub(super) events: Receiver<SessionEvent>,
     pub(super) commands: Sender<ClientCommand>,
-    pub(super) pick: Sender<CharRequest>,
-    pub(super) login: Sender<LoginRequest>,
+    // The two park channels are `async_channel`: they are the points the sequencer *waits* at, and
+    // a browser task cannot block a thread to wait. The ECS side never waits on them — it
+    // `try_send`s into unbounded queues — so nothing above this line changed shape.
+    pub(super) pick: async_channel::Sender<CharRequest>,
+    pub(super) login: async_channel::Sender<LoginRequest>,
     pub(super) login_abandon: Arc<AtomicU64>,
     pub(super) ping: Arc<Mutex<PingClock>>,
+    /// The write half's two inputs — **web only**. A page has no threads, so what
+    /// [`writer_loop`] owns natively is owned instead by `crate::net`'s per-frame pump, and these
+    /// are how it gets hold of them.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) writer_rx: Receiver<WorldWriter>,
+    #[cfg(target_arch = "wasm32")]
+    pub(super) commands_rx: Receiver<ClientCommand>,
 }
 
 /// Spawn the background read thread (with its park/cycle loop) and the single long-lived write
@@ -156,67 +172,51 @@ pub(super) struct NetHandles {
 pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-    let (pick_tx, pick_rx) = crossbeam_channel::unbounded::<CharRequest>();
-    let (login_tx, login_rx) = crossbeam_channel::unbounded::<LoginRequest>();
+    let (pick_tx, pick_rx) = async_channel::unbounded::<CharRequest>();
+    let (login_tx, login_rx) = async_channel::unbounded::<LoginRequest>();
+    // The writer outlives connections; the sequencer hands it each new WorldWriter across here.
+    let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WorldWriter>();
     let login_abandon = Arc::new(AtomicU64::new(0));
     let ping_clock = Arc::new(Mutex::new(PingClock::default()));
     if connect {
-        // The writer thread outlives connections; the read thread hands it each new WorldWriter.
-        let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WorldWriter>();
-        let clock = Arc::clone(&ping_clock);
-        let abandon = Arc::clone(&login_abandon);
-        thread::Builder::new()
-            .name("wow-net-write".into())
-            .spawn(move || {
-                // Latency-sensitive: movement packets queue here (thread QoS, decision 0609).
-                benilla_world::thread_qos::promote_current_thread(
-                    benilla_world::thread_qos::QosClass::UserInitiated,
-                );
-                writer_loop(&cmd_rx, writer_rx, &clock)
-            })
-            .expect("spawn wow-net-write thread");
-        thread::Builder::new()
-            .name("wow-net".into())
-            .spawn(move || {
-                benilla_world::thread_qos::promote_current_thread(
-                    benilla_world::thread_qos::QosClass::UserInitiated,
-                );
-                loop {
-                    match run(&cfg, &events_tx, &writer_tx, &pick_rx, &login_rx, &abandon) {
-                        Ok(Cycle::Exit) => return,
-                        Ok(Cycle::Repark) => {}
-                        Ok(Cycle::LoggedOut) => {
-                            // Clean logout: the Disconnected tears the streamed world down app-side
-                            // (decision 0065's path); the app's pending credentials re-park us live.
-                            if events_tx
-                                .send(SessionEvent::Disconnected {
-                                    reason: "logged out".into(),
-                                    end: SessionEnd::LoggedOut,
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            // A live-stream failure — including a displacement kick, which reaches
-                            // us as a bare EOF and nothing else (decision 1262). No sleep: what
-                            // happens next is the app's policy, not this thread's (0539 §3).
-                            bevy::log::error!("net: {e:#}");
-                            if events_tx
-                                .send(SessionEvent::Disconnected {
-                                    reason: format!("disconnected: {e:#}"),
-                                    end: SessionEnd::Lost,
-                                })
-                                .is_err()
-                            {
-                                return; // app exited mid-failure
-                            }
-                        }
-                    }
-                }
-            })
-            .expect("spawn wow-net thread");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let clock = Arc::clone(&ping_clock);
+            let abandon = Arc::clone(&login_abandon);
+            thread::Builder::new()
+                .name("wow-net-write".into())
+                .spawn(move || {
+                    // Latency-sensitive: movement packets queue here (thread QoS, decision 0609).
+                    benilla_world::thread_qos::promote_current_thread(
+                        benilla_world::thread_qos::QosClass::UserInitiated,
+                    );
+                    writer_loop(&cmd_rx, writer_rx, &clock)
+                })
+                .expect("spawn wow-net-write thread");
+            thread::Builder::new()
+                .name("wow-net".into())
+                .spawn(move || {
+                    benilla_world::thread_qos::promote_current_thread(
+                        benilla_world::thread_qos::QosClass::UserInitiated,
+                    );
+                    // The same dedicated thread as ever, now turning the sequencer future over:
+                    // every await inside it is a blocking socket read, so this is the old loop with
+                    // an `.await` written where the call used to be.
+                    futures_lite::future::block_on(sequencer(
+                        cfg, events_tx, writer_tx, pick_rx, login_rx, abandon,
+                    ));
+                })
+                .expect("spawn wow-net thread");
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // No threads in a page: the sequencer is one task on the browser's own event loop, and
+            // the writer is drained by a Bevy system instead of a sibling thread (`crate::net`).
+            let abandon = Arc::clone(&login_abandon);
+            wasm_bindgen_futures::spawn_local(sequencer(
+                cfg, events_tx, writer_tx, pick_rx, login_rx, abandon,
+            ));
+        }
     }
     // When not connecting (capture mode), the receivers/`events_tx` drop here: outbound sends
     // become harmless `Err`s (every call site ignores them) and the event stream stays empty forever.
@@ -227,6 +227,57 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
         login: login_tx,
         login_abandon,
         ping: ping_clock,
+        #[cfg(target_arch = "wasm32")]
+        writer_rx,
+        #[cfg(target_arch = "wasm32")]
+        commands_rx: cmd_rx,
+    }
+}
+
+/// The sequencer's outer loop: run one connection cycle, say how it ended, park again. Shared by
+/// both spawns — a thread under `block_on` natively, a `spawn_local` task on the web — so the two
+/// targets cannot drift on what a lost connection or a clean logout means.
+async fn sequencer(
+    cfg: NetConfig,
+    events_tx: Sender<SessionEvent>,
+    writer_tx: Sender<WorldWriter>,
+    pick_rx: async_channel::Receiver<CharRequest>,
+    login_rx: async_channel::Receiver<LoginRequest>,
+    abandon: Arc<AtomicU64>,
+) {
+    loop {
+        match run(&cfg, &events_tx, &writer_tx, &pick_rx, &login_rx, &abandon).await {
+            Ok(Cycle::Exit) => return,
+            Ok(Cycle::Repark) => {}
+            Ok(Cycle::LoggedOut) => {
+                // Clean logout: the Disconnected tears the streamed world down app-side (decision
+                // 0065's path); the app's pending credentials re-park us live.
+                if events_tx
+                    .send(SessionEvent::Disconnected {
+                        reason: "logged out".into(),
+                        end: SessionEnd::LoggedOut,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(e) => {
+                // A live-stream failure — including a displacement kick, which reaches us as a bare
+                // EOF and nothing else (decision 1262). No sleep: what happens next is the app's
+                // policy, not this task's (0539 §3).
+                bevy::log::error!("net: {e:#}");
+                if events_tx
+                    .send(SessionEvent::Disconnected {
+                        reason: format!("disconnected: {e:#}"),
+                        end: SessionEnd::Lost,
+                    })
+                    .is_err()
+                {
+                    return; // app exited mid-failure
+                }
+            }
+        }
     }
 }
 
@@ -236,16 +287,16 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
 /// socket dies (`Err`), the character logs out ([`Cycle::LoggedOut`]), or the app drops a channel
 /// end ([`Cycle::Exit`]). Every pre-roster failure emits [`SessionEvent::LoginFailed`] and
 /// re-parks ([`Cycle::Repark`]) — never a retry loop; resubmission is the app's policy.
-fn run(
+async fn run(
     cfg: &NetConfig,
     events_tx: &Sender<SessionEvent>,
     writer_tx: &Sender<WorldWriter>,
-    pick_rx: &Receiver<CharRequest>,
-    login_rx: &Receiver<LoginRequest>,
+    pick_rx: &async_channel::Receiver<CharRequest>,
+    login_rx: &async_channel::Receiver<LoginRequest>,
     abandon: &AtomicU64,
 ) -> Result<Cycle> {
-    // ── The pre-logon park (decision 0539): block for credentials. ──────────────────────────────
-    let Ok(req) = login_rx.recv() else {
+    // ── The pre-logon park (decision 0539): wait for credentials. ───────────────────────────────
+    let Ok(req) = login_rx.recv().await else {
         return Ok(Cycle::Exit);
     };
     // The attempt is live until the abandon generation moves past its submit-time value (Cancel
@@ -275,7 +326,7 @@ fn run(
 
     // Logon (the dial + SRP6 exchange — one blocking sequence against realmd).
     stage(LoginStage::Connecting);
-    let logon = match benilla_protocol::logon(&cfg.host, &req.user, &req.pass) {
+    let logon = match benilla_protocol::logon_async(&cfg.host, &req.user, &req.pass).await {
         Ok(l) => l,
         Err(e) => {
             if canceled() {
@@ -300,26 +351,27 @@ fn run(
         .unwrap_or_else(|| format!("{}:{}", host_port(&cfg.host, WORLD_PORT).0, WORLD_PORT));
 
     stage(LoginStage::Handshaking);
-    let mut session = match WorldSession::connect(&world_addr, &req.user, logon.session_key) {
-        Ok(s) => s,
-        Err(e) => {
-            if canceled() {
-                return Ok(Cycle::Repark);
+    let mut session =
+        match WorldSession::connect_async(&world_addr, &req.user, logon.session_key).await {
+            Ok(s) => s,
+            Err(e) => {
+                if canceled() {
+                    return Ok(Cycle::Repark);
+                }
+                // A Warden refusal is the server's own answer, not a transport fault — say it plainly
+                // rather than wrapping it in handshake noise.
+                if let Some(w) = e.downcast_ref::<WardenRequired>() {
+                    return fail_terminal(w.to_string());
+                }
+                return fail(None, format!("world handshake with {world_addr}: {e:#}"));
             }
-            // A Warden refusal is the server's own answer, not a transport fault — say it plainly
-            // rather than wrapping it in handshake noise.
-            if let Some(w) = e.downcast_ref::<WardenRequired>() {
-                return fail_terminal(w.to_string());
-            }
-            return fail(None, format!("world handshake with {world_addr}: {e:#}"));
-        }
-    };
+        };
 
     // The roster (creating a starter character on a fresh account so PLAYER_LOGIN has a target).
-    // Failures here are still pre-roster: surface as LoginFailed, re-park. (An immediately-run
-    // closure, so the `?`-shaped sequence borrows `session` only for the call.)
-    let mut characters = match (|| -> Result<Vec<benilla_protocol::Character>> {
-        let mut characters = session.char_enum()?;
+    // Failures here are still pre-roster: surface as LoginFailed, re-park. (An immediately-awaited
+    // block, so the `?`-shaped sequence borrows `session` only for its own duration.)
+    let roster = async {
+        let mut characters = session.char_enum_async().await?;
         if characters.is_empty() {
             let name = cfg.character.as_deref().unwrap_or("One");
             let starter = messages::CharCreateReq {
@@ -333,14 +385,16 @@ fn run(
                 hair_color: 0,
                 facial_hair: 0,
             };
-            match session.create_character(&starter)? {
+            match session.create_character_async(&starter).await? {
                 messages::CHAR_CREATE_SUCCESS | messages::CHAR_CREATE_NAME_IN_USE => {}
                 other => bail!("character creation failed: result {other:#x}"),
             }
-            characters = session.char_enum()?;
+            characters = session.char_enum_async().await?;
         }
-        Ok(characters)
-    })() {
+        Ok::<Vec<benilla_protocol::Character>, anyhow::Error>(characters)
+    }
+    .await;
+    let mut characters = match roster {
         Ok(c) => c,
         Err(e) => {
             if canceled() {
@@ -377,15 +431,21 @@ fn run(
     // meanwhile, the login below fails → the caller cycles → a fresh roster → the app auto-resends
     // its pick — self-healing, no keep-alive needed (decision 0193).
     let guid = loop {
-        let Ok(req) = pick_rx.recv() else {
+        let Ok(req) = pick_rx.recv().await else {
             return Ok(Cycle::Exit);
         };
         let (action, code) = match req {
             CharRequest::Enter(guid) => break guid,
             // Select's Back (decision 0539): drop the parked session, return to the login park.
             CharRequest::Abandon => return Ok(Cycle::Repark),
-            CharRequest::Create(create) => (CharAction::Create, session.create_character(&create)?),
-            CharRequest::Delete(target) => (CharAction::Delete, session.delete_character(target)?),
+            CharRequest::Create(create) => (
+                CharAction::Create,
+                session.create_character_async(&create).await?,
+            ),
+            CharRequest::Delete(target) => (
+                CharAction::Delete,
+                session.delete_character_async(target).await?,
+            ),
         };
         // Success (create's SUCCESS or delete's SUCCESS) changed the roster — re-enumerate and
         // re-emit it *before* the result, so the screen already has the fresh list when it reacts.
@@ -394,7 +454,7 @@ fn run(
             CharAction::Delete => code == messages::CHAR_DELETE_SUCCESS,
         };
         if changed {
-            characters = session.char_enum()?;
+            characters = session.char_enum_async().await?;
             if events_tx
                 .send(SessionEvent::CharacterList {
                     characters: characters.clone(),
@@ -417,8 +477,8 @@ fn run(
         .find(|c| c.guid == guid)
         .map(|c| c.name.clone())
         .unwrap_or_default();
-    session.player_login(guid)?;
-    session.set_active_mover(guid)?;
+    session.player_login_async(guid).await?;
+    session.set_active_mover_async(guid).await?;
 
     let (mut reader, writer) = session.into_split()?;
     if events_tx
@@ -440,7 +500,7 @@ fn run(
     // aligned); a long run of consecutive skips means the stream desynced — guard against a busy spin.
     let (mut skip_run, mut skip_logged) = (0u32, 0u32);
     loop {
-        let polled = reader.poll()?;
+        let polled = reader.poll_async().await?;
         note_inbound(); // one packet off the wire, parsed or not — the census counts liveness
         match polled {
             Poll::Events { opcode, events } => {
@@ -508,11 +568,15 @@ fn run(
     }
 }
 
-/// The single write thread: `select!` between app commands, writer swaps from the read thread, and
+/// The single write thread (native only — a page has no threads; `crate::net`'s `web_writer_pump`
+/// is the browser's answer, and it drains the same two channels through the same [`dispatch`]).
+///
+/// `select!` between app commands, writer swaps from the read thread, and
 /// the 30 s keepalive tick ([`PING_INTERVAL`] — the real client's ping cadence). While disconnected
 /// (no writer yet, or the socket died under the current one), commands drop with a capped warn and
 /// the tick no-ops — they are meaningless without a live session, and the server re-syncs our state
 /// from the reconnect handshake anyway. Ends when the app drops every command sender.
+#[cfg(not(target_arch = "wasm32"))]
 fn writer_loop(
     cmd_rx: &Receiver<ClientCommand>,
     mut writer_rx: Receiver<WorldWriter>,
@@ -571,477 +635,7 @@ fn writer_loop(
                     }
                     continue;
                 };
-                let result = match cmd {
-                    ClientCommand::Move {
-                        kind,
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    } => w.send_movement(
-                        kind.opcode(),
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    ),
-                    ClientCommand::MoveSplineDone {
-                        flags,
-                        pos,
-                        orientation,
-                        spline_id,
-                    } => w.move_spline_done(flags, pos, orientation, spline_id),
-                    ClientCommand::ForceSpeedAck {
-                        kind,
-                        guid,
-                        counter,
-                        speed,
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    } => w.force_speed_change_ack(
-                        kind,
-                        guid,
-                        counter,
-                        speed,
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    ),
-                    ClientCommand::SetActiveMover { guid } => w.set_active_mover(guid),
-                    ClientCommand::NotActiveMover {
-                        guid,
-                        flags,
-                        pos,
-                        orientation,
-                        fall_time,
-                    } => w.move_not_active_mover(guid, flags, pos, orientation, fall_time),
-                    ClientCommand::FarSight { engage } => w.far_sight(engage),
-                    ClientCommand::TeleportAck { guid, counter } => w.teleport_ack(guid, counter),
-                    ClientCommand::WorldportAck => w.worldport_ack(),
-                    ClientCommand::SetSelection { guid } => w.set_selection(guid),
-                    ClientCommand::CancelAutoRepeat => w.cancel_auto_repeat(),
-                    ClientCommand::CancelCast { spell_id } => w.cancel_cast(spell_id),
-                    ClientCommand::CancelChannelling { spell_id } => w.cancel_channelling(spell_id),
-                    ClientCommand::Chat { kind, target, text } => match kind {
-                        ChatKind::Say => w.send_chat(&text),
-                        ChatKind::Yell => w.send_yell(&text),
-                        ChatKind::Emote => w.send_emote_chat(&text),
-                        ChatKind::Whisper => {
-                            w.send_whisper(target.as_deref().unwrap_or_default(), &text)
-                        }
-                        ChatKind::Party => w.send_party(&text),
-                        ChatKind::Raid => w.send_raid(&text),
-                        ChatKind::RaidLeader => w.send_raid_leader(&text),
-                        ChatKind::RaidWarning => w.send_raid_warning(&text),
-                        ChatKind::Guild => w.send_guild(&text),
-                        ChatKind::Officer => w.send_officer(&text),
-                        ChatKind::Battleground => w.send_battleground(&text),
-                        ChatKind::BattlegroundLeader => w.send_battleground_leader(&text),
-                        ChatKind::Afk => w.send_afk(&text),
-                        ChatKind::Dnd => w.send_dnd(&text),
-                        ChatKind::Channel => {
-                            w.send_channel(target.as_deref().unwrap_or_default(), &text)
-                        }
-                    },
-                    // The addon lane (decision 1235). The distribution arrived as an enum and the
-                    // map is TOTAL — no "unknown, guess SAY" arm exists, which is what the enum
-                    // seam is for — so the whole arm is one call.
-                    ClientCommand::AddonMessage { distribution, text } => {
-                        w.send_addon_message(super::addon_wire_chat_type(distribution), &text)
-                    }
-                    ClientCommand::JoinChannel { name, password } => {
-                        w.join_channel(&name, &password)
-                    }
-                    ClientCommand::LeaveChannel { name } => w.leave_channel(&name),
-                    ClientCommand::ChannelList { name } => w.channel_list(&name),
-                    ClientCommand::RandomRoll { min, max } => w.random_roll(min, max),
-                    ClientCommand::PlayedTime => w.played_time(),
-                    ClientCommand::NameQuery { guid } => w.name_query(guid),
-                    ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
-                    ClientCommand::PetNameQuery { pet_number, guid } => {
-                        w.pet_name_query(pet_number, guid)
-                    }
-                    ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
-                    ClientCommand::UseItem {
-                        bag_index,
-                        slot,
-                        spell_index,
-                        target,
-                    } => w.use_item(bag_index, slot, spell_index, target),
-                    ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
-                    ClientCommand::AutoEquipItem { bag_index, slot } => {
-                        w.auto_equip_item(bag_index, slot)
-                    }
-                    ClientCommand::SetAmmo { entry } => w.set_ammo(entry),
-                    ClientCommand::SwapInvItem { src_slot, dst_slot } => {
-                        w.swap_inv_item(src_slot, dst_slot)
-                    }
-                    ClientCommand::SwapItem {
-                        dst_bag,
-                        dst_slot,
-                        src_bag,
-                        src_slot,
-                    } => w.swap_item(dst_bag, dst_slot, src_bag, src_slot),
-                    ClientCommand::SplitItem {
-                        src_bag,
-                        src_slot,
-                        dst_bag,
-                        dst_slot,
-                        count,
-                    } => w.split_item(src_bag, src_slot, dst_bag, dst_slot, count),
-                    ClientCommand::DestroyItem {
-                        bag_index,
-                        slot,
-                        count,
-                    } => w.destroy_item(bag_index, slot, count),
-                    ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
-                    ClientCommand::CastSpellAtDest { spell_id, dest } => {
-                        w.cast_spell_at_dest(spell_id, dest)
-                    }
-                    ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
-                    ClientCommand::SetActionButton { button, packed } => {
-                        w.set_action_button(button, packed)
-                    }
-                    ClientCommand::SetActionBarToggles { toggles } => {
-                        w.set_actionbar_toggles(toggles)
-                    }
-                    ClientCommand::PetAction {
-                        pet_guid,
-                        packed,
-                        target_guid,
-                    } => w.pet_action(pet_guid, packed, target_guid),
-                    ClientCommand::PetSetAction { pet_guid, entries } => {
-                        w.pet_set_action(pet_guid, &entries)
-                    }
-                    ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
-                    ClientCommand::PetCancelAura { pet_guid, spell_id } => {
-                        w.pet_cancel_aura(pet_guid, spell_id)
-                    }
-                    ClientCommand::PetSpellAutocast {
-                        pet_guid,
-                        spell_id,
-                        enabled,
-                    } => w.pet_spell_autocast(pet_guid, spell_id, enabled),
-                    ClientCommand::PetAbandon { pet_guid } => w.pet_abandon(pet_guid),
-                    ClientCommand::PetRename { pet_guid, name } => w.pet_rename(pet_guid, &name),
-                    ClientCommand::AttackSwing { guid } => w.attack_swing(guid),
-                    ClientCommand::AttackStop => w.attack_stop(),
-                    ClientCommand::SetSheathed { state } => w.set_sheathed(state),
-                    ClientCommand::StandStateChange { state } => w.stand_state_change(state),
-                    ClientCommand::MountSpecial => w.mount_special(),
-                    ClientCommand::TextEmote { text_id, target } => w.text_emote(text_id, target),
-                    ClientCommand::GossipHello { guid } => w.gossip_hello(guid),
-                    ClientCommand::GossipSelectOption { guid, option } => {
-                        // v1 sends no code — coded options are greyed, never selected (decision 0081).
-                        w.gossip_select_option(guid, option, None)
-                    }
-                    ClientCommand::NpcTextQuery { text_id, guid } => w.npc_text_query(text_id, guid),
-                    ClientCommand::ListInventory { guid } => w.list_inventory(guid),
-                    ClientCommand::BuyItem {
-                        vendor,
-                        entry,
-                        count,
-                    } => w.buy_item(vendor, entry, count),
-                    ClientCommand::SellItem {
-                        vendor,
-                        item_guid,
-                        count,
-                    } => w.sell_item(vendor, item_guid, count),
-                    ClientCommand::BuybackItem { vendor, slot } => w.buyback_item(vendor, slot),
-                    ClientCommand::RepairItem { vendor, item_guid } => {
-                        w.repair_item(vendor, item_guid)
-                    }
-                    ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
-                    ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
-                    ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
-                    ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
-                    ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
-                    ClientCommand::AutoStoreBankItem { bag, slot } => {
-                        w.autostore_bank_item(bag, slot)
-                    }
-                    ClientCommand::TrainerList { trainer } => w.trainer_list(trainer),
-                    ClientCommand::TrainerBuySpell { trainer, spell_id } => {
-                        w.trainer_buy_spell(trainer, spell_id)
-                    }
-                    ClientCommand::LearnTalent { talent_id, rank } => {
-                        w.learn_talent(talent_id, rank)
-                    }
-                    ClientCommand::UnlearnSkill { skill_id } => w.unlearn_skill(skill_id),
-                    ClientCommand::SetFactionAtWar {
-                        rep_list_id,
-                        at_war,
-                    } => w.set_faction_at_war(rep_list_id, at_war),
-                    ClientCommand::SetFactionInactive {
-                        rep_list_id,
-                        inactive,
-                    } => w.set_faction_inactive(rep_list_id, inactive),
-                    ClientCommand::SetWatchedFaction { rep_list_id } => {
-                        w.set_watched_faction(rep_list_id)
-                    }
-                    ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
-                    ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
-                    ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),
-                    ClientCommand::PageTextQuery { page_id, guid } => {
-                        w.page_text_query(page_id, guid)
-                    }
-                    ClientCommand::CastSpellGameObject { spell_id, go_guid } => {
-                        w.cast_spell_gameobject(spell_id, go_guid)
-                    }
-                    ClientCommand::CastSpellItem {
-                        spell_id,
-                        item_guid,
-                    } => w.cast_spell_item(spell_id, item_guid),
-                    ClientCommand::Loot { guid } => w.loot(guid),
-                    ClientCommand::AutostoreLootItem { slot } => w.autostore_loot_item(slot),
-                    ClientCommand::LootMoney => w.loot_money(),
-                    ClientCommand::LootRelease { guid } => w.loot_release(guid),
-                    ClientCommand::LootRoll {
-                        looted_target,
-                        item_slot,
-                        roll_type,
-                    } => w.loot_roll(looted_target, item_slot, roll_type),
-                    ClientCommand::QuestgiverQuery { npc, quest } => {
-                        w.questgiver_query_quest(npc, quest)
-                    }
-                    ClientCommand::QuestgiverAccept { npc, quest } => {
-                        w.questgiver_accept_quest(npc, quest)
-                    }
-                    ClientCommand::QuestgiverComplete { npc, quest } => {
-                        w.questgiver_complete_quest(npc, quest)
-                    }
-                    ClientCommand::QuestgiverRequestReward { npc, quest } => {
-                        w.questgiver_request_reward(npc, quest)
-                    }
-                    ClientCommand::QuestgiverChooseReward { npc, quest, choice } => {
-                        w.questgiver_choose_reward(npc, quest, choice)
-                    }
-                    ClientCommand::QuestQuery { quest } => w.quest_query(quest),
-                    ClientCommand::QuestgiverStatusQuery { npc } => w.questgiver_status_query(npc),
-                    ClientCommand::QuestlogRemove { slot } => w.questlog_remove_quest(slot),
-                    ClientCommand::GetMailList { mailbox } => w.get_mail_list(mailbox),
-                    ClientCommand::SendMail {
-                        mailbox,
-                        receiver,
-                        subject,
-                        body,
-                        item_guid,
-                        money,
-                        cod,
-                    } => w.send_mail(
-                        mailbox, &receiver, &subject, &body,
-                        // stationery/package: vmangos discards both — player mail is always
-                        // stored MAIL_STATIONERY_DEFAULT (41, decision 0544) regardless of what
-                        // rides the wire here.
-                        41, 0, item_guid, money, cod,
-                    ),
-                    ClientCommand::MailTakeMoney { mailbox, mail_id } => {
-                        w.mail_take_money(mailbox, mail_id)
-                    }
-                    ClientCommand::MailTakeItem { mailbox, mail_id } => {
-                        w.mail_take_item(mailbox, mail_id)
-                    }
-                    ClientCommand::MailMarkAsRead { mailbox, mail_id } => {
-                        w.mail_mark_as_read(mailbox, mail_id)
-                    }
-                    ClientCommand::MailReturnToSender { mailbox, mail_id } => {
-                        w.mail_return_to_sender(mailbox, mail_id)
-                    }
-                    ClientCommand::MailDelete { mailbox, mail_id } => {
-                        w.mail_delete(mailbox, mail_id)
-                    }
-                    ClientCommand::MailCreateTextItem { mailbox, mail_id } => {
-                        w.mail_create_text_item(mailbox, mail_id)
-                    }
-                    ClientCommand::ItemTextQuery { text_id, mail_id } => {
-                        w.item_text_query(text_id, mail_id)
-                    }
-                    ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
-                    // The auction house arc (decision 1511 P0) — the CMSG verbs onto the
-                    // P0 writers; the auctioneer guid rides on every one.
-                    ClientCommand::AuctionHello { auctioneer } => w.auction_hello(auctioneer),
-                    ClientCommand::AuctionListItems {
-                        auctioneer,
-                        list_from,
-                        searched_name,
-                        level_min,
-                        level_max,
-                        slot_id,
-                        main_category,
-                        sub_category,
-                        quality,
-                        usable,
-                    } => w.auction_list_items(
-                        auctioneer,
-                        list_from,
-                        &searched_name,
-                        level_min,
-                        level_max,
-                        slot_id,
-                        main_category,
-                        sub_category,
-                        quality,
-                        usable,
-                    ),
-                    ClientCommand::AuctionListOwnerItems {
-                        auctioneer,
-                        list_from,
-                    } => w.auction_list_owner_items(auctioneer, list_from),
-                    ClientCommand::AuctionListBidderItems {
-                        auctioneer,
-                        list_from,
-                        auction_ids,
-                    } => w.auction_list_bidder_items(auctioneer, list_from, &auction_ids),
-                    ClientCommand::AuctionSellItem {
-                        auctioneer,
-                        item_guid,
-                        bid,
-                        buyout,
-                        etime_minutes,
-                    } => w.auction_sell_item(auctioneer, item_guid, bid, buyout, etime_minutes),
-                    ClientCommand::AuctionPlaceBid {
-                        auctioneer,
-                        auction_id,
-                        price,
-                    } => w.auction_place_bid(auctioneer, auction_id, price),
-                    ClientCommand::AuctionRemoveItem {
-                        auctioneer,
-                        auction_id,
-                    } => w.auction_remove_item(auctioneer, auction_id),
-                    ClientCommand::QueryTime => w.query_time(),
-                    // The inspect request (decision 0631) — no reply is awaited; see the writer.
-                    ClientCommand::Inspect { target } => w.inspect(target),
-                    // The inspect-honor query (decision 1512) — this one IS answered; the reply
-                    // rides the same opcode back.
-                    ClientCommand::InspectHonorStats { target } => w.inspect_honor_stats(target),
-                    // The player-trade arc (decision 0592) — the CMSG verbs onto the P0 writers.
-                    ClientCommand::InitiateTrade { target } => w.initiate_trade(target),
-                    ClientCommand::BeginTrade => w.begin_trade(),
-                    ClientCommand::AcceptTrade => w.accept_trade(),
-                    ClientCommand::UnacceptTrade => w.unaccept_trade(),
-                    ClientCommand::CancelTrade => w.cancel_trade(),
-                    ClientCommand::SetTradeGold { copper } => w.set_trade_gold(copper),
-                    ClientCommand::SetTradeItem {
-                        trade_slot,
-                        bag,
-                        slot,
-                    } => w.set_trade_item(trade_slot, bag, slot),
-                    ClientCommand::ClearTradeItem { trade_slot } => w.clear_trade_item(trade_slot),
-                    ClientCommand::Logout => w.logout_request(),
-                    ClientCommand::LogoutCancel => w.logout_cancel(),
-                    ClientCommand::CompleteCinematic => w.complete_cinematic(),
-                    ClientCommand::MoveModeAck {
-                        guid,
-                        counter,
-                        mode,
-                        apply,
-                        flags,
-                        pos,
-                        orientation,
-                    } => w.move_mode_ack(guid, counter, mode, apply, flags, (pos, orientation)),
-                    ClientCommand::RepopRequest => w.repop_request(),
-                    ClientCommand::CorpseQuery => w.corpse_query(),
-                    ClientCommand::ReclaimCorpse { corpse } => w.reclaim_corpse(corpse),
-                    ClientCommand::SpiritHealerActivate { npc } => w.spirit_healer_activate(npc),
-                    ClientCommand::ResurrectResponse { caster, accept } => {
-                        w.resurrect_response(caster, accept)
-                    }
-                    ClientCommand::GroupInvite { name } => w.group_invite(&name),
-                    ClientCommand::GroupAccept => w.group_accept(),
-                    ClientCommand::GroupDecline => w.group_decline(),
-                    ClientCommand::GroupUninvite { name } => w.group_uninvite(&name),
-                    ClientCommand::GroupSetLeader { guid } => w.group_set_leader(guid),
-                    ClientCommand::GroupLeave => w.group_disband(),
-                    ClientCommand::GroupRaidConvert => w.group_raid_convert(),
-                    ClientCommand::RequestPartyMemberStats { guid } => {
-                        w.request_party_member_stats(guid)
-                    }
-                    ClientCommand::LootMethod {
-                        method,
-                        master,
-                        threshold,
-                    } => w.loot_method(method, master, threshold),
-                    ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
-                    ClientCommand::MinimapPing { x, y } => w.minimap_ping(x, y),
-                    ClientCommand::GroupChangeSubGroup { name, group } => {
-                        w.group_change_sub_group(&name, group)
-                    }
-                    ClientCommand::GroupSwapSubGroup { name, other } => {
-                        w.group_swap_sub_group(&name, &other)
-                    }
-                    ClientCommand::GroupAssistantLeader { guid, grant } => {
-                        w.group_assistant_leader(guid, grant)
-                    }
-                    ClientCommand::ReadyCheckStart => w.ready_check_start(),
-                    ClientCommand::ReadyCheckAnswer { ready } => w.ready_check_answer(ready),
-                    ClientCommand::RequestRaidInfo => w.request_raid_info(),
-                    ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
-                    ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
-                    ClientCommand::TogglePvp => w.toggle_pvp(),
-                    ClientCommand::ToggleHelm => w.toggle_helm(),
-                    ClientCommand::ToggleCloak => w.toggle_cloak(),
-                    ClientCommand::FriendListRequest => w.friend_list(),
-                    ClientCommand::AddFriend { name } => w.add_friend(&name),
-                    ClientCommand::DelFriend { guid } => w.del_friend(guid),
-                    ClientCommand::AddIgnore { name } => w.add_ignore(&name),
-                    ClientCommand::DelIgnore { guid } => w.del_ignore(guid),
-                    ClientCommand::Who { request } => w.who(&request),
-                    ClientCommand::ChatIgnored { guid } => w.chat_ignored(guid),
-                    ClientCommand::GuildQuery { guild_id } => w.guild_query(guild_id),
-                    ClientCommand::GuildCreate { name } => w.guild_create(&name),
-                    ClientCommand::GuildInvite { name } => w.guild_invite(&name),
-                    ClientCommand::GuildAccept => w.guild_accept(),
-                    ClientCommand::GuildDecline => w.guild_decline(),
-                    ClientCommand::GuildInfoRequest => w.guild_info(),
-                    ClientCommand::GuildRosterRequest => w.guild_roster(),
-                    ClientCommand::GuildPromote { name } => w.guild_promote(&name),
-                    ClientCommand::GuildDemote { name } => w.guild_demote(&name),
-                    ClientCommand::GuildLeave => w.guild_leave(),
-                    ClientCommand::GuildRemove { name } => w.guild_remove(&name),
-                    ClientCommand::GuildDisband => w.guild_disband(),
-                    ClientCommand::GuildLeader { name } => w.guild_leader(&name),
-                    ClientCommand::GuildMotd { motd } => w.guild_motd(&motd),
-                    ClientCommand::GuildRank {
-                        rank_id,
-                        rights,
-                        name,
-                    } => w.guild_rank(rank_id, rights, &name),
-                    ClientCommand::GuildAddRank { name } => w.guild_add_rank(&name),
-                    ClientCommand::GuildDelRank => w.guild_del_rank(),
-                    ClientCommand::GuildSetPublicNote { name, note } => {
-                        w.guild_set_public_note(&name, &note)
-                    }
-                    ClientCommand::GuildSetOfficerNote { name, note } => {
-                        w.guild_set_officer_note(&name, &note)
-                    }
-                    ClientCommand::GuildInfoText { text } => w.guild_info_text(&text),
-                    ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
-                    ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
-                    ClientCommand::ActivateTaxi {
-                        guid,
-                        source_node,
-                        dest_node,
-                    } => w.activate_taxi(guid, source_node, dest_node),
-                    ClientCommand::ActivateTaxiExpress {
-                        guid,
-                        total_cost,
-                        nodes,
-                    } => w.activate_taxi_express(guid, total_cost, &nodes),
-                };
+                let result = dispatch(w, cmd);
                 // **What actually reached the socket** (tag `wire`, decision 0621). The controller's
                 // `snd` line is written before the command is even queued, so it records a decision,
                 // not a transmission — a client whose session died goes on producing `snd` lines into
@@ -1059,5 +653,428 @@ fn writer_loop(
                 }
             },
         }
+    }
+}
+
+/// Send one [`ClientCommand`] down the wire — the whole outbound verb table, one arm per thing the
+/// player can do. Lifted out of [`writer_loop`] verbatim when the web build arrived (decision: the
+/// browser has no write thread, so its per-frame pump in [`crate::net`] needs the same body without
+/// the `select!` around it). The map is TOTAL: every command has exactly one send, and a new
+/// command that forgets one fails to compile here rather than going quietly missing.
+pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
+    match cmd {
+        ClientCommand::Move {
+            kind,
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        } => w.send_movement(
+            kind.opcode(),
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        ),
+        ClientCommand::MoveSplineDone {
+            flags,
+            pos,
+            orientation,
+            spline_id,
+        } => w.move_spline_done(flags, pos, orientation, spline_id),
+        ClientCommand::ForceSpeedAck {
+            kind,
+            guid,
+            counter,
+            speed,
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        } => w.force_speed_change_ack(
+            kind,
+            guid,
+            counter,
+            speed,
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        ),
+        ClientCommand::SetActiveMover { guid } => w.set_active_mover(guid),
+        ClientCommand::NotActiveMover {
+            guid,
+            flags,
+            pos,
+            orientation,
+            fall_time,
+        } => w.move_not_active_mover(guid, flags, pos, orientation, fall_time),
+        ClientCommand::FarSight { engage } => w.far_sight(engage),
+        ClientCommand::TeleportAck { guid, counter } => w.teleport_ack(guid, counter),
+        ClientCommand::WorldportAck => w.worldport_ack(),
+        ClientCommand::SetSelection { guid } => w.set_selection(guid),
+        ClientCommand::CancelAutoRepeat => w.cancel_auto_repeat(),
+        ClientCommand::CancelCast { spell_id } => w.cancel_cast(spell_id),
+        ClientCommand::CancelChannelling { spell_id } => w.cancel_channelling(spell_id),
+        ClientCommand::Chat { kind, target, text } => match kind {
+            ChatKind::Say => w.send_chat(&text),
+            ChatKind::Yell => w.send_yell(&text),
+            ChatKind::Emote => w.send_emote_chat(&text),
+            ChatKind::Whisper => w.send_whisper(target.as_deref().unwrap_or_default(), &text),
+            ChatKind::Party => w.send_party(&text),
+            ChatKind::Raid => w.send_raid(&text),
+            ChatKind::RaidLeader => w.send_raid_leader(&text),
+            ChatKind::RaidWarning => w.send_raid_warning(&text),
+            ChatKind::Guild => w.send_guild(&text),
+            ChatKind::Officer => w.send_officer(&text),
+            ChatKind::Battleground => w.send_battleground(&text),
+            ChatKind::BattlegroundLeader => w.send_battleground_leader(&text),
+            ChatKind::Afk => w.send_afk(&text),
+            ChatKind::Dnd => w.send_dnd(&text),
+            ChatKind::Channel => w.send_channel(target.as_deref().unwrap_or_default(), &text),
+        },
+        // The addon lane (decision 1235). The distribution arrived as an enum and the
+        // map is TOTAL — no "unknown, guess SAY" arm exists, which is what the enum
+        // seam is for — so the whole arm is one call.
+        ClientCommand::AddonMessage { distribution, text } => {
+            w.send_addon_message(super::addon_wire_chat_type(distribution), &text)
+        }
+        ClientCommand::JoinChannel { name, password } => w.join_channel(&name, &password),
+        ClientCommand::LeaveChannel { name } => w.leave_channel(&name),
+        ClientCommand::ChannelList { name } => w.channel_list(&name),
+        ClientCommand::RandomRoll { min, max } => w.random_roll(min, max),
+        ClientCommand::PlayedTime => w.played_time(),
+        ClientCommand::NameQuery { guid } => w.name_query(guid),
+        ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
+        ClientCommand::PetNameQuery { pet_number, guid } => w.pet_name_query(pet_number, guid),
+        ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
+        ClientCommand::UseItem {
+            bag_index,
+            slot,
+            spell_index,
+            target,
+        } => w.use_item(bag_index, slot, spell_index, target),
+        ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
+        ClientCommand::AutoEquipItem { bag_index, slot } => w.auto_equip_item(bag_index, slot),
+        ClientCommand::SetAmmo { entry } => w.set_ammo(entry),
+        ClientCommand::SwapInvItem { src_slot, dst_slot } => w.swap_inv_item(src_slot, dst_slot),
+        ClientCommand::SwapItem {
+            dst_bag,
+            dst_slot,
+            src_bag,
+            src_slot,
+        } => w.swap_item(dst_bag, dst_slot, src_bag, src_slot),
+        ClientCommand::SplitItem {
+            src_bag,
+            src_slot,
+            dst_bag,
+            dst_slot,
+            count,
+        } => w.split_item(src_bag, src_slot, dst_bag, dst_slot, count),
+        ClientCommand::DestroyItem {
+            bag_index,
+            slot,
+            count,
+        } => w.destroy_item(bag_index, slot, count),
+        ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
+        ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
+        ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
+        ClientCommand::SetActionButton { button, packed } => w.set_action_button(button, packed),
+        ClientCommand::SetActionBarToggles { toggles } => w.set_actionbar_toggles(toggles),
+        ClientCommand::PetAction {
+            pet_guid,
+            packed,
+            target_guid,
+        } => w.pet_action(pet_guid, packed, target_guid),
+        ClientCommand::PetSetAction { pet_guid, entries } => w.pet_set_action(pet_guid, &entries),
+        ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
+        ClientCommand::PetCancelAura { pet_guid, spell_id } => {
+            w.pet_cancel_aura(pet_guid, spell_id)
+        }
+        ClientCommand::PetSpellAutocast {
+            pet_guid,
+            spell_id,
+            enabled,
+        } => w.pet_spell_autocast(pet_guid, spell_id, enabled),
+        ClientCommand::PetAbandon { pet_guid } => w.pet_abandon(pet_guid),
+        ClientCommand::PetRename { pet_guid, name } => w.pet_rename(pet_guid, &name),
+        ClientCommand::AttackSwing { guid } => w.attack_swing(guid),
+        ClientCommand::AttackStop => w.attack_stop(),
+        ClientCommand::SetSheathed { state } => w.set_sheathed(state),
+        ClientCommand::StandStateChange { state } => w.stand_state_change(state),
+        ClientCommand::MountSpecial => w.mount_special(),
+        ClientCommand::TextEmote { text_id, target } => w.text_emote(text_id, target),
+        ClientCommand::GossipHello { guid } => w.gossip_hello(guid),
+        ClientCommand::GossipSelectOption { guid, option } => {
+            // v1 sends no code — coded options are greyed, never selected (decision 0081).
+            w.gossip_select_option(guid, option, None)
+        }
+        ClientCommand::NpcTextQuery { text_id, guid } => w.npc_text_query(text_id, guid),
+        ClientCommand::ListInventory { guid } => w.list_inventory(guid),
+        ClientCommand::BuyItem {
+            vendor,
+            entry,
+            count,
+        } => w.buy_item(vendor, entry, count),
+        ClientCommand::SellItem {
+            vendor,
+            item_guid,
+            count,
+        } => w.sell_item(vendor, item_guid, count),
+        ClientCommand::BuybackItem { vendor, slot } => w.buyback_item(vendor, slot),
+        ClientCommand::RepairItem { vendor, item_guid } => w.repair_item(vendor, item_guid),
+        ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
+        ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
+        ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
+        ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
+        ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
+        ClientCommand::AutoStoreBankItem { bag, slot } => w.autostore_bank_item(bag, slot),
+        ClientCommand::TrainerList { trainer } => w.trainer_list(trainer),
+        ClientCommand::TrainerBuySpell { trainer, spell_id } => {
+            w.trainer_buy_spell(trainer, spell_id)
+        }
+        ClientCommand::LearnTalent { talent_id, rank } => w.learn_talent(talent_id, rank),
+        ClientCommand::UnlearnSkill { skill_id } => w.unlearn_skill(skill_id),
+        ClientCommand::SetFactionAtWar {
+            rep_list_id,
+            at_war,
+        } => w.set_faction_at_war(rep_list_id, at_war),
+        ClientCommand::SetFactionInactive {
+            rep_list_id,
+            inactive,
+        } => w.set_faction_inactive(rep_list_id, inactive),
+        ClientCommand::SetWatchedFaction { rep_list_id } => w.set_watched_faction(rep_list_id),
+        ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
+        ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
+        ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),
+        ClientCommand::PageTextQuery { page_id, guid } => w.page_text_query(page_id, guid),
+        ClientCommand::CastSpellGameObject { spell_id, go_guid } => {
+            w.cast_spell_gameobject(spell_id, go_guid)
+        }
+        ClientCommand::CastSpellItem {
+            spell_id,
+            item_guid,
+        } => w.cast_spell_item(spell_id, item_guid),
+        ClientCommand::Loot { guid } => w.loot(guid),
+        ClientCommand::AutostoreLootItem { slot } => w.autostore_loot_item(slot),
+        ClientCommand::LootMoney => w.loot_money(),
+        ClientCommand::LootRelease { guid } => w.loot_release(guid),
+        ClientCommand::LootRoll {
+            looted_target,
+            item_slot,
+            roll_type,
+        } => w.loot_roll(looted_target, item_slot, roll_type),
+        ClientCommand::QuestgiverQuery { npc, quest } => w.questgiver_query_quest(npc, quest),
+        ClientCommand::QuestgiverAccept { npc, quest } => w.questgiver_accept_quest(npc, quest),
+        ClientCommand::QuestgiverComplete { npc, quest } => w.questgiver_complete_quest(npc, quest),
+        ClientCommand::QuestgiverRequestReward { npc, quest } => {
+            w.questgiver_request_reward(npc, quest)
+        }
+        ClientCommand::QuestgiverChooseReward { npc, quest, choice } => {
+            w.questgiver_choose_reward(npc, quest, choice)
+        }
+        ClientCommand::QuestQuery { quest } => w.quest_query(quest),
+        ClientCommand::QuestgiverStatusQuery { npc } => w.questgiver_status_query(npc),
+        ClientCommand::QuestlogRemove { slot } => w.questlog_remove_quest(slot),
+        ClientCommand::GetMailList { mailbox } => w.get_mail_list(mailbox),
+        ClientCommand::SendMail {
+            mailbox,
+            receiver,
+            subject,
+            body,
+            item_guid,
+            money,
+            cod,
+        } => w.send_mail(
+            mailbox, &receiver, &subject, &body,
+            // stationery/package: vmangos discards both — player mail is always
+            // stored MAIL_STATIONERY_DEFAULT (41, decision 0544) regardless of what
+            // rides the wire here.
+            41, 0, item_guid, money, cod,
+        ),
+        ClientCommand::MailTakeMoney { mailbox, mail_id } => w.mail_take_money(mailbox, mail_id),
+        ClientCommand::MailTakeItem { mailbox, mail_id } => w.mail_take_item(mailbox, mail_id),
+        ClientCommand::MailMarkAsRead { mailbox, mail_id } => w.mail_mark_as_read(mailbox, mail_id),
+        ClientCommand::MailReturnToSender { mailbox, mail_id } => {
+            w.mail_return_to_sender(mailbox, mail_id)
+        }
+        ClientCommand::MailDelete { mailbox, mail_id } => w.mail_delete(mailbox, mail_id),
+        ClientCommand::MailCreateTextItem { mailbox, mail_id } => {
+            w.mail_create_text_item(mailbox, mail_id)
+        }
+        ClientCommand::ItemTextQuery { text_id, mail_id } => w.item_text_query(text_id, mail_id),
+        ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
+        // The auction house arc (decision 1511 P0) — the CMSG verbs onto the
+        // P0 writers; the auctioneer guid rides on every one.
+        ClientCommand::AuctionHello { auctioneer } => w.auction_hello(auctioneer),
+        ClientCommand::AuctionListItems {
+            auctioneer,
+            list_from,
+            searched_name,
+            level_min,
+            level_max,
+            slot_id,
+            main_category,
+            sub_category,
+            quality,
+            usable,
+        } => w.auction_list_items(
+            auctioneer,
+            list_from,
+            &searched_name,
+            level_min,
+            level_max,
+            slot_id,
+            main_category,
+            sub_category,
+            quality,
+            usable,
+        ),
+        ClientCommand::AuctionListOwnerItems {
+            auctioneer,
+            list_from,
+        } => w.auction_list_owner_items(auctioneer, list_from),
+        ClientCommand::AuctionListBidderItems {
+            auctioneer,
+            list_from,
+            auction_ids,
+        } => w.auction_list_bidder_items(auctioneer, list_from, &auction_ids),
+        ClientCommand::AuctionSellItem {
+            auctioneer,
+            item_guid,
+            bid,
+            buyout,
+            etime_minutes,
+        } => w.auction_sell_item(auctioneer, item_guid, bid, buyout, etime_minutes),
+        ClientCommand::AuctionPlaceBid {
+            auctioneer,
+            auction_id,
+            price,
+        } => w.auction_place_bid(auctioneer, auction_id, price),
+        ClientCommand::AuctionRemoveItem {
+            auctioneer,
+            auction_id,
+        } => w.auction_remove_item(auctioneer, auction_id),
+        ClientCommand::QueryTime => w.query_time(),
+        // The inspect request (decision 0631) — no reply is awaited; see the writer.
+        ClientCommand::Inspect { target } => w.inspect(target),
+        // The inspect-honor query (decision 1512) — this one IS answered; the reply
+        // rides the same opcode back.
+        ClientCommand::InspectHonorStats { target } => w.inspect_honor_stats(target),
+        // The player-trade arc (decision 0592) — the CMSG verbs onto the P0 writers.
+        ClientCommand::InitiateTrade { target } => w.initiate_trade(target),
+        ClientCommand::BeginTrade => w.begin_trade(),
+        ClientCommand::AcceptTrade => w.accept_trade(),
+        ClientCommand::UnacceptTrade => w.unaccept_trade(),
+        ClientCommand::CancelTrade => w.cancel_trade(),
+        ClientCommand::SetTradeGold { copper } => w.set_trade_gold(copper),
+        ClientCommand::SetTradeItem {
+            trade_slot,
+            bag,
+            slot,
+        } => w.set_trade_item(trade_slot, bag, slot),
+        ClientCommand::ClearTradeItem { trade_slot } => w.clear_trade_item(trade_slot),
+        ClientCommand::Logout => w.logout_request(),
+        ClientCommand::LogoutCancel => w.logout_cancel(),
+        ClientCommand::CompleteCinematic => w.complete_cinematic(),
+        ClientCommand::MoveModeAck {
+            guid,
+            counter,
+            mode,
+            apply,
+            flags,
+            pos,
+            orientation,
+        } => w.move_mode_ack(guid, counter, mode, apply, flags, (pos, orientation)),
+        ClientCommand::RepopRequest => w.repop_request(),
+        ClientCommand::CorpseQuery => w.corpse_query(),
+        ClientCommand::ReclaimCorpse { corpse } => w.reclaim_corpse(corpse),
+        ClientCommand::SpiritHealerActivate { npc } => w.spirit_healer_activate(npc),
+        ClientCommand::ResurrectResponse { caster, accept } => w.resurrect_response(caster, accept),
+        ClientCommand::GroupInvite { name } => w.group_invite(&name),
+        ClientCommand::GroupAccept => w.group_accept(),
+        ClientCommand::GroupDecline => w.group_decline(),
+        ClientCommand::GroupUninvite { name } => w.group_uninvite(&name),
+        ClientCommand::GroupSetLeader { guid } => w.group_set_leader(guid),
+        ClientCommand::GroupLeave => w.group_disband(),
+        ClientCommand::GroupRaidConvert => w.group_raid_convert(),
+        ClientCommand::RequestPartyMemberStats { guid } => w.request_party_member_stats(guid),
+        ClientCommand::LootMethod {
+            method,
+            master,
+            threshold,
+        } => w.loot_method(method, master, threshold),
+        ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
+        ClientCommand::MinimapPing { x, y } => w.minimap_ping(x, y),
+        ClientCommand::GroupChangeSubGroup { name, group } => {
+            w.group_change_sub_group(&name, group)
+        }
+        ClientCommand::GroupSwapSubGroup { name, other } => w.group_swap_sub_group(&name, &other),
+        ClientCommand::GroupAssistantLeader { guid, grant } => {
+            w.group_assistant_leader(guid, grant)
+        }
+        ClientCommand::ReadyCheckStart => w.ready_check_start(),
+        ClientCommand::ReadyCheckAnswer { ready } => w.ready_check_answer(ready),
+        ClientCommand::RequestRaidInfo => w.request_raid_info(),
+        ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
+        ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
+        ClientCommand::TogglePvp => w.toggle_pvp(),
+        ClientCommand::ToggleHelm => w.toggle_helm(),
+        ClientCommand::ToggleCloak => w.toggle_cloak(),
+        ClientCommand::FriendListRequest => w.friend_list(),
+        ClientCommand::AddFriend { name } => w.add_friend(&name),
+        ClientCommand::DelFriend { guid } => w.del_friend(guid),
+        ClientCommand::AddIgnore { name } => w.add_ignore(&name),
+        ClientCommand::DelIgnore { guid } => w.del_ignore(guid),
+        ClientCommand::Who { request } => w.who(&request),
+        ClientCommand::ChatIgnored { guid } => w.chat_ignored(guid),
+        ClientCommand::GuildQuery { guild_id } => w.guild_query(guild_id),
+        ClientCommand::GuildCreate { name } => w.guild_create(&name),
+        ClientCommand::GuildInvite { name } => w.guild_invite(&name),
+        ClientCommand::GuildAccept => w.guild_accept(),
+        ClientCommand::GuildDecline => w.guild_decline(),
+        ClientCommand::GuildInfoRequest => w.guild_info(),
+        ClientCommand::GuildRosterRequest => w.guild_roster(),
+        ClientCommand::GuildPromote { name } => w.guild_promote(&name),
+        ClientCommand::GuildDemote { name } => w.guild_demote(&name),
+        ClientCommand::GuildLeave => w.guild_leave(),
+        ClientCommand::GuildRemove { name } => w.guild_remove(&name),
+        ClientCommand::GuildDisband => w.guild_disband(),
+        ClientCommand::GuildLeader { name } => w.guild_leader(&name),
+        ClientCommand::GuildMotd { motd } => w.guild_motd(&motd),
+        ClientCommand::GuildRank {
+            rank_id,
+            rights,
+            name,
+        } => w.guild_rank(rank_id, rights, &name),
+        ClientCommand::GuildAddRank { name } => w.guild_add_rank(&name),
+        ClientCommand::GuildDelRank => w.guild_del_rank(),
+        ClientCommand::GuildSetPublicNote { name, note } => w.guild_set_public_note(&name, &note),
+        ClientCommand::GuildSetOfficerNote { name, note } => w.guild_set_officer_note(&name, &note),
+        ClientCommand::GuildInfoText { text } => w.guild_info_text(&text),
+        ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
+        ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
+        ClientCommand::ActivateTaxi {
+            guid,
+            source_node,
+            dest_node,
+        } => w.activate_taxi(guid, source_node, dest_node),
+        ClientCommand::ActivateTaxiExpress {
+            guid,
+            total_cost,
+            nodes,
+        } => w.activate_taxi_express(guid, total_cost, &nodes),
     }
 }

@@ -14,13 +14,13 @@
 //!
 //! Headers are (de)crypted by [`benilla_srp::vanilla_header`]; bodies by [`crate::messages`].
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 
 use anyhow::{anyhow, Result};
 use benilla_srp::vanilla_header::{DecrypterHalf, EncrypterHalf};
 
 use crate::messages::{self, ServerPacket};
+use crate::transport::ReadExactAsync;
 
 mod movement;
 mod reader;
@@ -39,13 +39,17 @@ pub const WORLD_PORT: u16 = 8085;
 
 /// Read one server packet from `stream`: decrypt the 4-byte header, read the body, parse by opcode.
 /// `decrypter` is `None` for the (single) unencrypted `SMSG_AUTH_CHALLENGE`.
-pub(super) fn recv_packet(
-    stream: &mut TcpStream,
+///
+/// Awaited rather than blocking (see [`crate::transport`]): on the web the bytes arrive through the
+/// event loop, and natively the future is ready the instant it is polled.
+pub(super) async fn recv_packet(
+    stream: &mut impl ReadExactAsync,
     decrypter: Option<&mut DecrypterHalf>,
 ) -> Result<ServerPacket> {
     let mut header = [0u8; 4];
     stream
-        .read_exact(&mut header)
+        .read_exact_async(&mut header)
+        .await
         .map_err(|e| anyhow!("reading world header: {e}"))?;
     if let Some(d) = decrypter {
         d.decrypt(&mut header);
@@ -56,7 +60,8 @@ pub(super) fn recv_packet(
     let body_len = size.saturating_sub(2) as usize;
     let mut body = vec![0u8; body_len];
     stream
-        .read_exact(&mut body)
+        .read_exact_async(&mut body)
+        .await
         .map_err(|e| anyhow!("reading world body (opcode {opcode:#x}, {body_len} bytes): {e}"))?;
     messages::parse_server(opcode, &body).map_err(|e| anyhow!("parsing opcode {opcode:#x}: {e}"))
 }
@@ -64,7 +69,7 @@ pub(super) fn recv_packet(
 /// Write one client packet: an (optionally encrypted) 6-byte header + plaintext body. The header size
 /// field counts the 4-byte opcode plus the body, but not the size field itself.
 pub(super) fn send_packet(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     encrypter: Option<&mut EncrypterHalf>,
     opcode: u16,
     body: &[u8],

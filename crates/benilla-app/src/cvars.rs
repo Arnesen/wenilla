@@ -1590,7 +1590,7 @@ mod tests {
         };
 
         // ── Launch 1: the roster lands, and the player enters the world as the third row. ────
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded();
         let mut app = cvar_app();
         app.add_plugins(bevy::state::app::StatesPlugin);
         crate::char_select::add_test_systems(&mut app, tx);
@@ -1617,7 +1617,7 @@ mod tests {
         );
 
         // ── Launch 2: a fresh client over the same folder, and the roster arrives. ───────────
-        let (tx, _rx2) = crossbeam_channel::unbounded();
+        let (tx, _rx2) = async_channel::unbounded();
         let mut app = cvar_app();
         app.add_plugins(bevy::state::app::StatesPlugin);
         crate::char_select::add_test_systems(&mut app, tx);

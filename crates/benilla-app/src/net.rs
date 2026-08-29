@@ -75,6 +75,22 @@ impl Plugin for NetPlugin {
         if !self.connect {
             app.insert_resource(NetOffline);
         }
+        // The web's write half. It runs *before* the event drain so a command the app issued last
+        // frame is on the wire by the time this frame's inbound state lands on it.
+        #[cfg(target_arch = "wasm32")]
+        app.insert_resource(WebWriter {
+            writer: None,
+            writer_rx: handles.writer_rx,
+            cmd_rx: handles.commands_rx,
+            last_ping: 0.0,
+            warned: 0,
+        })
+        .add_systems(
+            Update,
+            web_writer_pump
+                .in_set(WorldStage::Net)
+                .before(apply_net_updates),
+        );
         // In the wire-drain stage, because that is what it is the product of. The lighting
         // resolve is ordered after that stage so it always reads THIS frame's clock rather than
         // whichever way the executor happened to break the tie.
@@ -154,6 +170,82 @@ impl Plugin for NetPlugin {
             // Not part of the movement chain above: one send on the world-enter message.
             .add_systems(Update, send_query_time.in_set(WorldStage::Net))
             .add_systems(Update, population_pulse.in_set(WorldStage::Net));
+    }
+}
+
+/// The web build's write half.
+///
+/// A page has no write thread — it has no threads at all — so what `io::writer_loop` owns natively
+/// lives here instead: the current [`WorldWriter`], the swap channel each new connection hands one
+/// over, and the command queue. [`web_writer_pump`] drains both once a frame through the same
+/// `io::dispatch` the native thread calls, so the two targets send byte-identical packets.
+///
+/// A `Resource` (not a non-`Send` one — Bevy 0.18 has none) because `WorldWriter` **is** `Send` on
+/// wasm: its `ConnWriter` wraps the page's WebSocket in a `SendWrapper`, whose contract — touch it
+/// only on the thread that made it — is exactly the truth of a single-threaded page.
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource)]
+pub(crate) struct WebWriter {
+    writer: Option<benilla_protocol::WorldWriter>,
+    writer_rx: Receiver<benilla_protocol::WorldWriter>,
+    cmd_rx: Receiver<ClientCommand>,
+    /// `Time`'s elapsed seconds at the last keepalive — the tick the write thread gets from
+    /// `crossbeam_channel::tick`, kept off the frame count so it holds at any frame rate.
+    last_ping: f64,
+    /// Consecutive dropped/failed sends warned about, capped per connection like the native path's
+    /// `SEND_WARN_CAP` so an outage cannot flood the browser console with a movement stream.
+    warned: u32,
+}
+
+/// Adopt a freshly-connected writer, drain the frame's commands through it, and keep the 30 s
+/// keepalive going — the web's `writer_loop`, once per frame instead of once per `select!`.
+#[cfg(target_arch = "wasm32")]
+fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingShared>) {
+    let web = &mut *web;
+    while let Ok(w) = web.writer_rx.try_recv() {
+        web.writer = Some(w);
+        web.warned = 0;
+        web.last_ping = time.elapsed_secs_f64();
+        // A fresh connection restarts the keepalive from scratch, like the real client: sequence 1
+        // is the new socket's first ping, and a stale pong from the old one can no longer match.
+        *ping.0.lock().expect("ping clock") = io::PingClock::default();
+    }
+    let Some(writer) = web.writer.as_mut() else {
+        // No live writer: the session is gone and these commands evaporate — the same answer the
+        // native write thread gives, and for the same reason (the reconnect handshake re-syncs us).
+        let mut dropped = 0u32;
+        while web.cmd_rx.try_recv().is_ok() {
+            dropped += 1;
+        }
+        if dropped > 0 && web.warned < io::SEND_WARN_CAP {
+            warn!("net: dropping {dropped} command(s) — not connected");
+            web.warned += 1;
+        }
+        return;
+    };
+    for cmd in web.cmd_rx.try_iter() {
+        if let Err(e) = io::dispatch(writer, cmd) {
+            if web.warned < io::SEND_WARN_CAP {
+                warn!("net: send failed: {e:#}");
+                web.warned += 1;
+            }
+        }
+    }
+    let now = time.elapsed_secs_f64();
+    if now - web.last_ping >= io::PING_INTERVAL.as_secs_f64() {
+        web.last_ping = now;
+        let (sequence, last_rtt) = {
+            let mut clock = ping.0.lock().expect("ping clock");
+            clock.sequence += 1;
+            clock.sent_at = Some(bevy::platform::time::Instant::now());
+            (clock.sequence, clock.last_rtt_ms.unwrap_or(0))
+        };
+        if let Err(e) = writer.ping(sequence, last_rtt) {
+            if web.warned < io::SEND_WARN_CAP {
+                warn!("net: ping send failed: {e:#}");
+                web.warned += 1;
+            }
+        }
     }
 }
 
@@ -285,7 +377,7 @@ pub(crate) struct NetCommands(pub(crate) Sender<ClientCommand>);
 /// until an `Enter` moves the session into the world (decision 0423). Sent by [`crate::char_select`]'s
 /// pick policy and the char-create screen; the parked IO read thread blocks on the other end.
 #[derive(Resource)]
-pub(crate) struct CharPick(pub(crate) Sender<CharRequest>);
+pub(crate) struct CharPick(pub(crate) async_channel::Sender<CharRequest>);
 
 /// One request to the parked IO thread over the [`CharPick`] channel (decision 0423). `Delete`'s
 /// wire + service path is live (proven by `WOW_PROBE_CHARCREATE`); its UI affordance is a later
@@ -306,7 +398,7 @@ pub(crate) enum CharRequest {
 /// Sent by [`crate::login`]'s policy (the screen's submit, the env fast path, the reconnect
 /// resubmit); the parked read thread blocks on the other end.
 #[derive(Resource)]
-pub(crate) struct LoginSubmit(pub(crate) Sender<io::LoginRequest>);
+pub(crate) struct LoginSubmit(pub(crate) async_channel::Sender<io::LoginRequest>);
 
 /// The login abandon generation (decision 0539): Cancel bumps it; each [`io::LoginRequest`] carries
 /// the value read at submit, and the IO thread discards an attempt whose value has been passed.

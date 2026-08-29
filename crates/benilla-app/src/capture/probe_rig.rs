@@ -338,7 +338,7 @@ fn drive_rig(
                 None => {
                     let (race, class, gender) = rig.spec.body.expect("name implies a body");
                     info!("rig: {want} does not exist — creating it");
-                    let _ = pick.0.send(CharRequest::Create(CharCreateReq {
+                    let _ = pick.0.try_send(CharRequest::Create(CharCreateReq {
                         name: want,
                         race,
                         class,
@@ -370,7 +370,7 @@ fn drive_rig(
                                  (guid {guid}). Only rig-named characters on this slot are ever \
                                  deleted; Probe<N> and hand-made characters are never touched."
                             );
-                            let _ = pick.0.send(CharRequest::Delete(guid));
+                            let _ = pick.0.try_send(CharRequest::Delete(guid));
                             rig.phase = RigPhase::Deleting;
                         }
                         None => {

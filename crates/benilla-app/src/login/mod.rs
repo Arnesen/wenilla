@@ -151,7 +151,7 @@ fn send_login(
     intent.in_flight = true;
     intent.announced = announced;
     intent.retry_at = None;
-    let _ = submit.0.send(LoginRequest {
+    let _ = submit.0.try_send(LoginRequest {
         user: user.to_string(),
         pass: pass.to_string(),
         generation: abandon.0.load(Ordering::SeqCst),
@@ -812,7 +812,7 @@ mod tests {
     /// under test is the disconnect arm and nothing else — and so an ambient `WOW_USER` in
     /// whatever shell runs the suite cannot seed credentials behind the assertions.
     fn policy_app() -> App {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         // Held for the App's life: a dropped receiver would turn every submit into an `Err` and
         // hide a policy that sent one.
         std::mem::forget(rx);

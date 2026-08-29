@@ -115,7 +115,7 @@ fn debug_auto_create(
     }
     sel.name.set_text(&name);
     sel.creating = true;
-    let _ = pick.0.send(CharRequest::Create(sel.request()));
+    let _ = pick.0.try_send(CharRequest::Create(sel.request()));
     *fired = true;
     info!("char create: auto-create fired for {:?}", sel.name.text);
 }
@@ -493,7 +493,7 @@ fn create_input(
     if do_create && !sel.creating {
         sel.creating = true;
         sounds.write(GlueSound("gsCharacterCreationCreateChar"));
-        let _ = pick.0.send(CharRequest::Create(sel.request()));
+        let _ = pick.0.try_send(CharRequest::Create(sel.request()));
     }
     if changed_look {
         preview.scene = Some(crate::portrait::GlueScene::Race(sel.race));
