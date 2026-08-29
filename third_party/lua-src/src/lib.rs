@@ -203,12 +203,12 @@ impl Build {
             // `wasi_snapshot_preview1` imports the page stubs out). `setjmp`/`longjmp` — Lua's
             // error path — is LLVM's Wasm SJLJ lowering on top of the wasm exception-handling
             // proposal, with the runtime half in wasi-libc's `libsetjmp.a`. `WASI_SDK` names
-            // the SDK root (default: `<repo>/../tools/wasi-sdk`, where `scripts/benilla-web.sh`
+            // the SDK root (default: `<repo>/tools/wasi-sdk`, where `scripts/web-setup.sh`
             // unpacks it).
             _ if target == "wasm32-unknown-unknown" => {
                 let sdk = env::var("WASI_SDK")
                     .map(PathBuf::from)
-                    .unwrap_or_else(|_| manifest_dir.join("../../../tools/wasi-sdk"));
+                    .unwrap_or_else(|_| manifest_dir.join("../../tools/wasi-sdk"));
                 let sysroot = sdk.join("share/wasi-sysroot");
                 let sys_lib = sysroot.join("lib/wasm32-wasip1");
                 if !sys_lib.join("libsetjmp.a").exists() {

@@ -3,7 +3,7 @@
 **/*.rs.bk
 # Cargo.lock IS committed (this workspace produces binaries).
 
-# The wasm-bindgen build output (`scripts/benilla-web.sh build`, wowclassic repo) — regenerated
+# The wasm-bindgen build output (`scripts/web-build.sh`) — regenerated
 # from `crates/benilla-web` + `web/index.html`/`web/wasi_stubs.js` on every build, and the .wasm
 # alone can run tens of MB.
 /web/dist/
@@ -24,3 +24,6 @@ trace-*.json
 .DS_Store
 *.swp
 /.idea/
+
+# The C sysroot for the wasm Lua build — fetched by scripts/web-setup.sh, ~300 MB
+/tools/wasi-sdk/
