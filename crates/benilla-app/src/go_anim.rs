@@ -72,7 +72,7 @@ use bevy::animation::RepeatAnimation;
 use bevy::prelude::*;
 use std::time::Duration;
 
-use crate::creature_anim::{advance_track, scan_events, AnimSoundEvent};
+use crate::creature_anim::{advance_track, scan_events, select, AnimSoundEvent};
 use crate::net::{GuidIndex, ObjectStore};
 use benilla_world::schedule::WorldStage;
 
@@ -131,7 +131,37 @@ pub(crate) struct GoAnim {
     /// 5 Destroy / 7 Rebuild) and the Custom0..3 block (8..11). [`retire_transient_anim`] models
     /// the advance for both; without it a bit-0-clear clip runs for ever — the bobber's splash
     /// looping ~1.3 s (1100's 2-3 audible splashes) and the crate lid never settling shut (1151).
-    transient: Option<u16>,
+    transient: Option<Transient>,
+    /// The **rest** pose's armed clip node, when that pose is on the re-arm cycle below. Distinct
+    /// from [`Self::transient`], which is the reference's ONE transient-substate slot
+    /// (`[handler+0x10]`) and drives the §2d *advance*: a rest pose never advances, it re-arms
+    /// **itself**. `None` while a transient owns the model, on the rate-0 frozen leg (which never
+    /// completes), and once the §2c already-playing check has refused the re-arm and the pose has
+    /// settled for good.
+    rest_window: Option<AnimationNodeIndex>,
+    /// The **requested** animation id currently armed — the reference's `[block0+0xf8]`, written by
+    /// op4 (`0x71252f`) and read back by `0x712090(model, -1)`. The §2c *remap* legs consult it
+    /// (`0x5f39fa: cmp esi,eax; je 0x5f3b32`) and refuse an arm that would request what is already
+    /// playing; the model-owns-it leg (`0x5f396c jne`) and the collapse-to-Stand leg
+    /// (`0x5f3a54 jmp 0x5f3a0b`, past the check) do not. That asymmetry is the whole difference
+    /// between a prop that **settles** and one that **cycles** — see [`drive_go_anim`].
+    armed_id: Option<u16>,
+}
+
+/// The **armed** transient clip — its `AnimationData.dbc` id *and* the graph node the arm actually
+/// landed on. The id alone was enough while every arm took a model's **head** variation; it stops
+/// being enough now that the GameObject arm rolls one (`variationIdx = -1`, see [`drive_go_anim`]),
+/// because two sequences sharing an id are two different nodes and only one of them is playing.
+/// [`retire_transient_anim`] must watch the node that was armed, or it retires against a sibling
+/// variation's (idle) player state and ends the substate on the wrong frame — immediately, for a
+/// variation that was never played.
+#[derive(Clone, Copy)]
+struct Transient {
+    /// The `AnimationData.dbc` id — the reference's `[handler+0x10]` substate identity, what the
+    /// inspector and the despawn pin compare against.
+    id: u16,
+    /// The graph node of the clip actually armed: this id's *rolled* variation, not its head.
+    node: AnimationNodeIndex,
 }
 
 /// The GameObject's **stored** state — the binary's `go+0x27c`, which is what every consumer reads
@@ -171,7 +201,7 @@ pub(crate) fn armed_anim(
         .min_by(|a, b| a.1.seek_time().total_cmp(&b.1.seek_time()))?;
     Some((
         clip.anim_id,
-        go.transient == Some(clip.anim_id),
+        go.transient.is_some_and(|t| t.id == clip.anim_id),
         active.repeat_mode(),
     ))
 }
@@ -524,7 +554,7 @@ fn release_despawn_pin(
     pinned: Query<(Entity, Option<&GoAnim>), With<PendingDestroy>>,
 ) {
     for (e, go) in &pinned {
-        if go.is_some_and(|g| g.transient == Some(ANIM_DESPAWN)) {
+        if go.is_some_and(|g| g.transient.is_some_and(|t| t.id == ANIM_DESPAWN)) {
             continue;
         }
         commands.entity(e).try_despawn();
@@ -570,7 +600,7 @@ fn close_go_lid(
 /// | 5 Destroy          | 6 Destroyed | |
 /// | 7 Rebuild          | 1 Closed    | |
 /// | 0 Spawn, 8..11 Custom0-3 | re-run at the current state (`0x5f4190`) | |
-/// | 1/3/6 (a rest pose) | nothing (`0x5f4167`) | a held pose never advances |
+/// | 1/3/6 (a rest pose) | **itself** (`0x5f4167`) | the held pose re-arms, with a fresh variation roll |
 ///
 /// **This — not the animation kernel — is what turns a transition clip into a resting state**, and
 /// it is why the kernel's loop bit is not the transition's duration: `G_Crate01`'s Close is
@@ -579,27 +609,50 @@ fn close_go_lid(
 /// landing one frame after the 1333 ms window — before the looping kernel's second `$GC0` crossing
 /// at 1533 ms. Net law: one splash per 0xB3, one swing per state change, then the state pose.
 ///
-/// Benilla arms every transient clip `Never`-repeat (one window, the same endpoint), so "the
+/// **The last row is not "nothing", and 1151 read it as such.** `0x5f4167` is byte-for-byte slot
+/// 34's own selection and calls `0x5f3930` **directly**, bypassing slot 34's change guard on an
+/// unchanged `[handler+0x10]` — so a resting substate re-issues its own op4, and with it a fresh
+/// `variationIdx = -1` roll, every `span × R` ms for ever (wow-re `gameobject-anim-arm.md` §6c/§6d,
+/// §5-arbitrated). The completion that drives it ignores the loop bit (`0x719503` tests it only
+/// after the notify block), so a bit-0-CLEAR pose completes too. That is why Onyxia's lava traps
+/// spurt *continuously* rather than once at stream-in, and it is the same law `loop-replay-fidget.md`
+/// §7 and `doodad-anim-host.md` §5 already carried for units and placed doodads — the GameObject
+/// note was the outlier.
+///
+/// Benilla therefore arms EVERY clip `Never`-repeat (one window, the same endpoint), so "the
 /// window ended" is the player's finished flag; the retire then clears `shown`, which makes the
 /// state arm of [`drive_go_anim`] re-resolve the current state as a fresh rest pose — our
 /// state-machine re-run, and (for a motion) exactly the table above, since `rest_anim(state)` is
 /// the destination row of whichever motion that state's change armed. Runs before
 /// [`drive_go_anim`] in the chain so the re-arm lands the same frame. Reads never deref-mut, so a
 /// quiet GO stays out of the Changed stream.
-fn retire_transient_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer, &ModelAnimations)>) {
-    for (mut go, player, anims) in &mut gos {
-        let Some(id) = go.transient else {
-            continue;
+fn retire_transient_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer)>) {
+    for (mut go, player) in &mut gos {
+        // The ARMED node, not `find(id)`'s head variation — see [`Transient::node`].
+        let done = |n| {
+            player
+                .animation(n)
+                .is_none_or(bevy::animation::ActiveAnimation::is_finished)
         };
-        let done = anims
-            .find(id)
-            .is_none_or(|clip| player.animation(clip.node).is_none_or(|a| a.is_finished()));
-        if done {
-            go.transient = None;
-            // The completion's state-machine re-run: forget the shown pose so the state arm
-            // re-resolves it (a silent rest snap — `resolve(None, state)`), exactly the
-            // reference's re-arm over the finished transient block.
-            go.shown = None;
+        if let Some(t) = go.transient {
+            if done(t.node) {
+                go.transient = None;
+                // The completion's state-machine re-run: forget the shown pose so the state arm
+                // re-resolves it (a silent rest snap — `resolve(None, state)`), exactly the
+                // reference's re-arm over the finished transient block.
+                go.shown = None;
+            }
+            continue;
+        }
+        // A REST pose completes too, and its completion re-arms *itself* — see [`drive_go_anim`]'s
+        // rest arm. Same device: forget the shown pose and the state arm re-resolves it, rolling a
+        // fresh variation. `rest_window` is cleared first so a refused re-arm settles instead of
+        // spinning.
+        if let Some(node) = go.rest_window {
+            if done(node) {
+                go.rest_window = None;
+                go.shown = None;
+            }
         }
     }
 }
@@ -617,6 +670,9 @@ fn drive_go_anim(
         ),
         Changed<GoAnim>,
     >,
+    // The client's single `_rand` stream (wow-re `rf36-rand-stub.md`), as `creature_anim` keeps
+    // one: op4's variation roll draws from it on every GameObject arm below.
+    mut rng: Local<u32>,
 ) {
     for (mut go, mut player, mut tr, anims) in &mut gos {
         // ── The §243 state arm ─────────────────────────────────────────────────────────────────
@@ -628,20 +684,47 @@ fn drive_go_anim(
                 // exactly ONE (`[handler+0x10]`), so an old motion's completion can never fire
                 // over the pose that superseded it.
                 go.transient = None;
+                go.rest_window = None;
                 if let Some(play) = resolve(prev, state) {
                     // Resolve the id to this model's clip (keyed by AnimationData.dbc id, as
                     // `creature_anim` does), through the §2c remap for a model that doesn't author
                     // it — that is what keeps a lidless model on a real pose instead of bind.
                     let (want, frozen) = remap_missing(anims, play.anim_id());
-                    if let Some(clip) = anims.find(want) {
+                    // **`variationIdx = -1` — the arm ROLLS a variation** (wow-re
+                    // `gameobject-anim-arm.md` §2c, `0x5f3aee: push -1`), unlike the §1 loader seed
+                    // beneath it, which passes an explicit `0` (`0x710189`). Where a model authors
+                    // one sequence per id the two are the same clip and nothing changes; where it
+                    // authors a chain they are not, and taking the head is a whole authored
+                    // behaviour that never plays. Onyxia's lava traps are the case that named it:
+                    // `ONYZIASLAIRLAVATRAP.M2` authors Stand twice — seq 0 (`freq` 29491, looping,
+                    // silent) and seq 1 (`freq` 3276, one-shot) — and it is seq **1** that carries
+                    // the 300/s `LAVALUMP2` burst, the lava spurting out of the floor. Every one of
+                    // the 208 trap GameObjects in the lair took the head, so the chamber's whole
+                    // ember field was missing.
+                    // **The §2c already-playing skip, and it decides settle-vs-cycle.** Three
+                    // edges reach the arm (`0x5f3a0b`): the model OWNS the table id
+                    // (`0x5f396c jne`), the model is not live, and the 147-absent collapse to
+                    // Stand (`0x5f3a52 xor esi,esi; 0x5f3a54 jmp 0x5f3a0b` — a backwards jump
+                    // PAST the check). Only the other remap legs fall through `0x5f39fa`'s
+                    // `cmp esi,eax; je 0x5f3b32`, and there a re-arm requesting what is already
+                    // armed is refused — so a prop the remap sent to a *non-zero* substitute
+                    // settles on it (the fishing bobber), while one that owns its id or collapsed
+                    // to Stand re-arms, and re-rolls, every window (the lava trap).
+                    let skip =
+                        want != 0 && !anims.owns(play.anim_id()) && go.armed_id == Some(want);
+                    if skip {
+                        continue;
+                    }
+                    if let Some(clip) = anims.pick_variation(want, select::msvc_rand(&mut rng)) {
+                        go.armed_id = Some(want);
                         // Snap a rest pose (blend 0 — a stream-in must not swing); ease a motion
                         // over its authored blend.
                         let blend = match play {
                             Play::Rest(_) => 0.0,
                             Play::Motion(_) => clip.blend_time.max(0.0),
                         };
-                        let active =
-                            tr.play(&mut player, clip.node, Duration::from_secs_f32(blend));
+                        let node = clip.node;
+                        let active = tr.play(&mut player, node, Duration::from_secs_f32(blend));
                         if frozen {
                             // A motion standing in for a missing rest pose: the reference arms it
                             // at playback rate 0, so it holds frame 0 forever — the pose that
@@ -655,25 +738,26 @@ fn drive_go_anim(
                             // clock but keeps `speed` — so re-arming a node a frozen leg previously
                             // parked at rate 0 (the same Open clip serves both) would stay stuck.
                             active.set_speed(1.0);
-                            // **The transition motion is ONE window, whatever the loop bit says**
-                            // (decision 1151): it is a transient substate, ended by the object
-                            // layer's §2d advance ([`retire_transient_anim`]), never by the
-                            // kernel — whose bit-0-clear branch wraps the band for ever and would
-                            // make the crate lid spring open and slam shut ~1.5×/s. A *rest* pose
-                            // is the opposite: nothing advances off it (slot 14's `0x5f4167`), so
-                            // it holds or loops exactly as the model authored it.
+                            // **ONE baked window, rest pose included** (decision 1151 for the
+                            // motions; wow-re
+                            // `gameobject-anim-arm.md` §6, correcting 1151's "nothing advances off
+                            // a held pose"). The completion notification `0x719370` fires at
+                            // `span × R` **without consulting the loop bit** (`0x719503` tests it
+                            // only afterwards), so a bit-0-CLEAR rest clip completes too — and
+                            // slot 14's row for a resting substate, `0x5f4167`, calls `0x5f3930`
+                            // *directly*, past slot 34's change guard, on an unchanged substate.
+                            // The arm is therefore re-issued every ~`span` ms with a fresh
+                            // `variationIdx = -1` roll, for ever. For a single-variation id that
+                            // is the loop it always was, restarted at its own band start; for a
+                            // chain it is the whole point — Onyxia's traps re-roll every 867 ms,
+                            // so ~10 % of ~200 of them light a 5 s lava plume at any moment
+                            // instead of one flurry at stream-in.
+                            active.set_repeat(RepeatAnimation::Never);
                             match play {
                                 Play::Motion(_) => {
-                                    active.set_repeat(RepeatAnimation::Never);
-                                    go.transient = Some(want);
+                                    go.transient = Some(Transient { id: want, node });
                                 }
-                                Play::Rest(_) => {
-                                    active.set_repeat(if clip.looping {
-                                        RepeatAnimation::Forever
-                                    } else {
-                                        RepeatAnimation::Never
-                                    });
-                                }
+                                Play::Rest(_) => go.rest_window = Some(node),
                             }
                         }
                     }
@@ -697,15 +781,21 @@ fn drive_go_anim(
         if go.one_shot.is_some() {
             let id = go.one_shot.take().expect("checked is_some");
             if anims.owns(id) {
-                if let Some(clip) = anims.find(id) {
+                // Slot 15 funnels through the same slot-34 → `0x5f3930` arm as the state channel
+                // (§2c), so it rolls a variation for the same reason — a Custom0 with two authored
+                // takes alternates them.
+                if let Some(clip) = anims.pick_variation(id, select::msvc_rand(&mut rng)) {
+                    go.armed_id = Some(id);
+                    go.rest_window = None;
+                    let node = clip.node;
                     let active = tr.play(
                         &mut player,
-                        clip.node,
+                        node,
                         Duration::from_secs_f32(clip.blend_time.max(0.0)),
                     );
                     active.set_speed(1.0);
                     active.set_repeat(RepeatAnimation::Never);
-                    go.transient = Some(id);
+                    go.transient = Some(Transient { id, node });
                 }
             }
         }
@@ -917,17 +1007,17 @@ mod tests {
     /// `benilla-formats/tests/m2_go_crate_lid.rs`): Open/Opened/Close/Closed, **all four `looping`**
     /// — `flags` bit 0 clear — with an empty replay range. Blend times are zeroed so the arm is a
     /// cut and the assertions read the armed clip, not a fade.
-    const CRATE_FAMILY: [(u16, f32); 4] = [
-        (0x94, 0.666), // 148 Open   — the lid sweeps 0° → 75°
-        (0x95, 0.100), // 149 Opened — holds 75°
-        (0x92, 0.667), // 146 Close  — sweeps 75° → 0°
-        (0x93, 0.167), // 147 Closed — holds 0°
+    const CRATE_FAMILY: [(u16, f32, u16); 4] = [
+        (0x94, 0.666, 0),     // 148 Open   — the lid sweeps 0° → 75°
+        (0x95, 0.100, 0),     // 149 Opened — holds 75°
+        (0x92, 0.667, 0),     // 146 Close  — sweeps 75° → 0°
+        (0x93, 0.167, 29491), // 147 Closed — holds 0° (the chain HEAD, weighted like the traps')
     ];
 
     /// An app running the two systems this file's law lives in, plus one GameObject wearing a
     /// crate's animation set: REAL `AnimationClip` assets and a real graph, so Bevy's own
     /// `advance_animations` ticks the completions [`retire_transient_anim`] watches.
-    fn crate_app(extra_ids: &[(u16, f32)]) -> (App, Entity) {
+    fn crate_app(extra_ids: &[(u16, f32, u16)]) -> (App, Entity) {
         use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
         use bevy::animation::AnimationClip;
 
@@ -950,10 +1040,11 @@ mod tests {
                 .chain(),
         );
 
-        let authored: Vec<(u16, f32)> = CRATE_FAMILY.iter().chain(extra_ids).copied().collect();
+        let authored: Vec<(u16, f32, u16)> =
+            CRATE_FAMILY.iter().chain(extra_ids).copied().collect();
         let handles: Vec<_> = authored
             .iter()
-            .map(|&(_, dur)| {
+            .map(|&(_, dur, _)| {
                 let mut c = AnimationClip::default();
                 c.set_duration(dur);
                 app.world_mut()
@@ -968,15 +1059,19 @@ mod tests {
             .add(graph);
 
         let mut lookup = vec![0xffffu16; 160];
-        for (slot, &(id, _)) in authored.iter().enumerate() {
-            lookup[id as usize] = slot as u16;
+        for (slot, &(id, _, _)) in authored.iter().enumerate() {
+            // A variation chain shares one id, and `animationLookup` holds its HEAD — so only the
+            // first slot claiming an id writes here, exactly as the exporter bakes it.
+            if lookup[id as usize] == 0xffff {
+                lookup[id as usize] = slot as u16;
+            }
         }
         let anims = ModelAnimations {
             graph: graph.clone(),
             clips: authored
                 .iter()
                 .zip(&nodes)
-                .map(|(&(id, dur), &node)| benilla_assets::AnimClip {
+                .map(|(&(id, dur, frequency), &node)| benilla_assets::AnimClip {
                     anim_id: id,
                     seq_index: 0,
                     node,
@@ -993,7 +1088,7 @@ mod tests {
                     events: Vec::new().into(),
                     arm_nodes: None,
                     upper_node: None,
-                    frequency: 0,
+                    frequency,
                     replay: (0, 0),
                     poses_bones: true,
                 })
@@ -1059,11 +1154,13 @@ mod tests {
                 .state = Some(s);
         };
 
-        // Streamed in closed: the rest pose, snapped, and it keeps the loop the model authored —
-        // nothing advances off a held pose (`0x5f4167`), so this leg must NOT be narrowed to one
-        // window along with the motions.
+        // Streamed in closed: the rest pose, snapped. It is ONE baked window like everything else
+        // — `0x5f4167` re-arms a resting substate through `0x5f3930` at its own completion, so the
+        // pose repeats by re-arming (and re-rolling its variation), not by the kernel's loop bit
+        // (wow-re `gameobject-anim-arm.md` §6; this corrects 1151's "nothing advances off a held
+        // pose"). What must hold across those windows is the armed ID, asserted below.
         app.update();
-        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Forever)));
+        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Never)));
 
         // The open-lock cast lands: the lid swings open, ONE window.
         state(&mut app, GO_STATE_ACTIVE);
@@ -1079,7 +1176,7 @@ mod tests {
         app.update();
         assert_eq!(
             armed(&app, go),
-            Some((0x95, RepeatAnimation::Forever)),
+            Some((0x95, RepeatAnimation::Never)),
             "the completion advance settles the swing onto the Opened rest pose"
         );
 
@@ -1088,23 +1185,141 @@ mod tests {
         app.update();
         assert_eq!(armed(&app, go), Some((0x92, RepeatAnimation::Never)));
 
-        // 4 Close → 1 Closed, and then it STAYS there. Pre-1151 the Close clip was armed
-        // `Forever`, so this is the assertion the director's report failed at.
+        // 4 Close → 1 Closed, and then it STAYS there — through many completion re-arms of the
+        // Closed pose itself. Pre-1151 the Close *motion* was armed `Forever`, so this is the
+        // assertion the director's crate report failed at, and the re-arm cycle must not
+        // resurrect it.
         advance(&mut app, 700);
         app.update();
         assert_eq!(
             armed(&app, go),
-            Some((0x93, RepeatAnimation::Forever)),
+            Some((0x93, RepeatAnimation::Never)),
             "the lid must settle on Closed"
         );
         for _ in 0..20 {
             advance(&mut app, 100);
             assert_eq!(
                 armed(&app, go),
-                Some((0x93, RepeatAnimation::Forever)),
+                Some((0x93, RepeatAnimation::Never)),
                 "two seconds on — three Close windows — the crate is still shut"
             );
         }
+    }
+
+    /// **The arm rolls a VARIATION** — `variationIdx = -1` (wow-re `gameobject-anim-arm.md` §2c,
+    /// `0x5f3aee: push -1`), not the id's head. The §1 loader seed under it takes an explicit
+    /// variation 0 (`0x710189`), so a model's second and later takes are reachable ONLY through
+    /// this arm; resolving the id with `find()` made them unreachable everywhere.
+    ///
+    /// The subject is Onyxia's lava traps in miniature: a Closed chain authored 29491 : 3276, where
+    /// the 10 %-weighted second take is the one that does something (there, a 300/s `LAVALUMP2`
+    /// burst — the lava spurting out of the lair floor; 208 trap GameObjects all played the silent
+    /// head). Spawning many objects makes the roll observable without a statistical test on one:
+    /// the count must be neither 0 (the bug) nor all (a broken walk), and near the authored tenth.
+    #[test]
+    fn the_arm_rolls_a_weighted_variation_not_the_head() {
+        const N: usize = 400;
+        let (mut app, go) = crate_app(&[(0x93, 0.866, 3276)]);
+        let (anims, player, tr, graph) = {
+            let e = app.world().entity(go);
+            (
+                e.get::<ModelAnimations>().unwrap().clone(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                e.get::<bevy::animation::graph::AnimationGraphHandle>()
+                    .unwrap()
+                    .clone(),
+            )
+        };
+        let second = anims
+            .clips
+            .iter()
+            .filter(|c| c.anim_id == 0x93)
+            .nth(1)
+            .expect("the chain's second take")
+            .node;
+        let mut gos = vec![go];
+        for _ in 1..N {
+            gos.push(
+                app.world_mut()
+                    .spawn((
+                        anims.clone(),
+                        player.clone(),
+                        tr.clone(),
+                        graph.clone(),
+                        GoAnim {
+                            state: Some(GO_STATE_READY),
+                            ..Default::default()
+                        },
+                    ))
+                    .id(),
+            );
+        }
+        app.update();
+        let rolled = gos
+            .iter()
+            .filter(|&&e| {
+                app.world()
+                    .entity(e)
+                    .get::<AnimationPlayer>()
+                    .unwrap()
+                    .animation(second)
+                    .is_some()
+            })
+            .count();
+        assert!(
+            rolled > 0,
+            "not one of {N} arms reached the second take — the arm is taking the head, which is \
+             the whole Onyxia lava-trap bug"
+        );
+        assert!(
+            (N / 40..N / 4).contains(&rolled),
+            "{rolled}/{N} on a 3276/32768 chain — the weighted walk is not weighting"
+        );
+    }
+
+    /// **A rest pose is ONE window, and its completion re-arms it — with a FRESH roll, for ever**
+    /// (wow-re `gameobject-anim-arm.md` §6c/§6d, correcting 1151's "nothing advances off a held
+    /// pose"). `0x719370` fires the completion at `span × R` without consulting the loop bit
+    /// (`0x719503` tests it only afterwards), and slot 14's resting row `0x5f4167` calls
+    /// `0x5f3930` directly — past slot 34's change guard — on an unchanged substate.
+    ///
+    /// This is the half that makes Onyxia's Lair a *continuous* ember field rather than one flurry
+    /// at stream-in: ~200 trap GameObjects each re-roll a 10 %-weighted Stand chain every 867 ms,
+    /// against a 5 s particle lifespan. One object, many windows, is the same law in the small.
+    #[test]
+    fn a_rest_pose_re_arms_every_window_and_re_rolls_its_variation() {
+        let (mut app, go) = crate_app(&[(0x93, 0.866, 3276)]);
+        let nodes: Vec<_> = {
+            let e = app.world().entity(go);
+            e.get::<ModelAnimations>()
+                .unwrap()
+                .clips
+                .iter()
+                .filter(|c| c.anim_id == 0x93)
+                .map(|c| c.node)
+                .collect()
+        };
+        assert_eq!(nodes.len(), 2, "the chain is two takes");
+        let mut seen = [0u32; 2];
+        app.update();
+        for _ in 0..300 {
+            let player = app.world().entity(go).get::<AnimationPlayer>().unwrap();
+            for (i, n) in nodes.iter().enumerate() {
+                if player.animation(*n).is_some() {
+                    seen[i] += 1;
+                }
+            }
+            // Longer than either take's band, so whichever is armed completes and re-arms.
+            advance(&mut app, 900);
+        }
+        assert!(
+            seen[0] > 0 && seen[1] > 0,
+            "over 300 windows the pose showed takes {seen:?} — a rest pose that never re-armed \
+             would show exactly one, and Onyxia's floor would spurt once and go quiet"
+        );
+        // The pose itself never wanders off Closed: re-arming is not the §2d substate advance.
+        assert!(matches!(armed(&app, go), Some((0x93, _))));
     }
 
     /// The Custom channel shares the ONE transient slot with the motions (the reference's
@@ -1113,9 +1328,9 @@ mod tests {
     /// the state's own pose.
     #[test]
     fn a_custom_block_still_runs_one_window_and_hands_back_to_the_state() {
-        let (mut app, go) = crate_app(&[(153, 0.667)]); // Custom0 — the crate authors one
+        let (mut app, go) = crate_app(&[(153, 0.667, 0)]); // Custom0 — the crate authors one
         app.update();
-        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Forever)));
+        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Never)));
 
         app.world_mut()
             .entity_mut(go)
@@ -1129,7 +1344,7 @@ mod tests {
         app.update();
         assert_eq!(
             armed(&app, go),
-            Some((0x93, RepeatAnimation::Forever)),
+            Some((0x93, RepeatAnimation::Never)),
             "one Custom window, then the state pose — never a churning loop"
         );
     }
@@ -1144,9 +1359,9 @@ mod tests {
     /// so 271 eggs blinked out with no animation at all.
     #[test]
     fn an_announced_despawn_plays_its_window_before_the_object_pops() {
-        let (mut app, go) = crate_app(&[(157, 2.667)]);
+        let (mut app, go) = crate_app(&[(157, 2.667, 0)]);
         app.update();
-        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Forever)));
+        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Never)));
 
         // The wire pair, in the order vmangos sends it and Commands apply it.
         app.world_mut()
@@ -1196,7 +1411,7 @@ mod tests {
     /// object with no destroy plays its window and returns to its state pose, still there.
     #[test]
     fn an_announcement_without_a_destroy_never_despawns_anything() {
-        let (mut app, go) = crate_app(&[(157, 2.667)]);
+        let (mut app, go) = crate_app(&[(157, 2.667, 0)]);
         app.update();
 
         app.world_mut().entity_mut(go).insert(DespawnAnimAnnounced);
@@ -1208,7 +1423,7 @@ mod tests {
         assert!(app.world().get_entity(go).is_ok(), "no destroy, no despawn");
         assert_eq!(
             armed(&app, go),
-            Some((0x93, RepeatAnimation::Forever)),
+            Some((0x93, RepeatAnimation::Never)),
             "and the window hands back to the state pose, like any other one-shot"
         );
     }

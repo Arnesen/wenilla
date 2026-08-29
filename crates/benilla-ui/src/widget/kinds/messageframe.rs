@@ -64,7 +64,9 @@ pub struct ScrollingMessageState {
     /// `fadingEnabled` (ctor 1). While false, lines never fade.
     pub fading_enabled: bool,
     /// The scrollback offset, counted up from the newest line: `0` = pinned to the bottom (AtBottom,
-    /// where fades tick); `n` = the view is `n` lines older. Clamped in [`Self::scroll_up`].
+    /// the only state in which fades tick — though every scroll entry re-arms the displayed lines
+    /// regardless, [`Self::reset_all_fade_times`]); `n` = the view is `n` lines older. Clamped in
+    /// [`Self::scroll_up`].
     pub scroll_offset: usize,
 }
 
@@ -155,24 +157,89 @@ impl ScrollingMessageState {
         self.scroll_offset = self.scroll_offset.min(self.max_scroll());
     }
 
-    /// `ScrollUp` (`0x788610`) — one line older (no-op at the top).
-    pub fn scroll_up(&mut self) {
+    /// **Re-arm the displayed lines' fade** — the engine's `0x788b80`, which every scroll entry
+    /// reaches (see the scroll methods below). Per displayed line it writes the quartet
+    /// `alpha = 0xFF` (`0x788baf`), the in-use flag (`0x788bb3`), and the frame's *current*
+    /// `timeVisible`/`fadeDuration` **defaults** back onto the record's `+0xc`/`+0x10` snapshots
+    /// (`0x788bc0`/`0x788bc9`) — full values, never partial, and the frame default rather than
+    /// whatever the line was inserted with.
+    ///
+    /// Two properties that are easy to get wrong and are both byte-verified:
+    ///
+    /// - **The displayed set only, never the whole ring.** `0x788b80` walks `[+0x34c]` entries of
+    ///   the display vector `[+0x3a4]`, reaching each record through `node.+0xc`. A line scrolled
+    ///   out of view keeps whatever fade state it had.
+    /// - **A fully-faded line is recoverable.** Expiry (`0x788525`–`0x788538`) only clears the
+    ///   in-use flag, blanks the display object and hides it; `0x788460` contains no allocator call
+    ///   at all, so the record, its text and its wrapped height all survive and come straight back.
+    ///
+    /// Not a Lua binding: it is in no vtable and no data dword, and 1.12's FrameXML has no
+    /// `ResetAllFadeTimes` caller. It is engine behavior, reached only through the scroll entries.
+    pub fn reset_all_fade_times(&mut self, viewport_rows: usize) {
+        let (time_visible, fade_duration) = (self.time_visible, self.fade_duration);
+        for line in self.lines.range_mut(self.displayed_range(viewport_rows)) {
+            line.time_left = time_visible;
+            line.fade_left = fade_duration;
+            line.alpha = 1.0;
+        }
+    }
+
+    /// The ring indices the view currently shows, oldest-first — the set
+    /// [`Self::reset_all_fade_times`] walks. The newest displayed line sits at the top end (it is
+    /// the bottom row on screen); the walk runs older from there for [`Self::displayed_count`]
+    /// messages.
+    pub fn displayed_range(&self, viewport_rows: usize) -> std::ops::Range<usize> {
+        let count = self.displayed_count(viewport_rows);
+        if count == 0 {
+            return 0..0;
+        }
+        let newest = self.lines.len().saturating_sub(1 + self.scroll_offset);
+        newest + 1 - count.min(newest + 1)..newest + 1
+    }
+
+    // ── The scroll entries ──────────────────────────────────────────────────────────────────
+    //
+    // **Every one of them re-arms the displayed lines' fade**, by one of two engine routes that
+    // between them leave no gap (wow-re `msgframe-fade-rearm-law.md`):
+    //
+    // - the cursor does NOT move (a scroll that is already at the boundary, or a no-op jump) — the
+    //   binding calls `0x788b80` directly: `ScrollUp` at AtTop (`0x788626`), `ScrollDown` at
+    //   AtBottom (`0x788666`), `ScrollToBottom` at AtBottom (`0x7886e5`);
+    // - the cursor DOES move — the relayout `0x788750` runs and its per-line helper `0x788af0`
+    //   (sole caller `0x7888be`) writes the same quartet under `arg3 != 0 || AtBottom == 0`, where
+    //   `arg3` is the relayout's own 0→1 AtBottom edge flag (`0x7887a3`). Land off the bottom and
+    //   the second term fires; land back ON the bottom and the edge flag does.
+    //
+    // So the re-arm is unconditional at this level and the two routes collapse into one call after
+    // the cursor has moved — which is also the right order, since the displayed set the engine
+    // walks is the one the new cursor selects. **Correction (2026-08-29):** benilla previously had
+    // scrolling merely *freeze* the countdown, on the strength of msgframe-runtime.md's "nothing
+    // un-fades" — that note described the tick's gate, not the scroll bindings, which had not been
+    // walked. Faded chat could never be brought back; the director reported it.
+
+    /// `ScrollUp` (`0x788610`) — one line older (no cursor move at the top), then re-arm.
+    pub fn scroll_up(&mut self, viewport_rows: usize) {
         self.scroll_offset = (self.scroll_offset + 1).min(self.max_scroll());
+        self.reset_all_fade_times(viewport_rows);
     }
 
-    /// `ScrollDown` (`0x788650`) — one line newer (no-op at the bottom).
-    pub fn scroll_down(&mut self) {
+    /// `ScrollDown` (`0x788650`) — one line newer (no cursor move at the bottom), then re-arm.
+    pub fn scroll_down(&mut self, viewport_rows: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.reset_all_fade_times(viewport_rows);
     }
 
-    /// `ScrollToBottom` (`0x7886d0`) — jump to the newest line (re-arms the fade).
-    pub fn scroll_to_bottom(&mut self) {
+    /// `ScrollToBottom` (`0x7886d0`) — jump to the newest line, then re-arm.
+    pub fn scroll_to_bottom(&mut self, viewport_rows: usize) {
         self.scroll_offset = 0;
+        self.reset_all_fade_times(viewport_rows);
     }
 
-    /// `ScrollToTop` (`0x788690`) — jump to the oldest line.
-    pub fn scroll_to_top(&mut self) {
+    /// `ScrollToTop` (`0x788690`) — jump to the oldest line, then re-arm. This one never reaches
+    /// `0x788b80`; it re-arms because it always relayouts with AtBottom = 0.
+    pub fn scroll_to_top(&mut self, viewport_rows: usize) {
         self.scroll_offset = self.max_scroll();
+        self.reset_all_fade_times(viewport_rows);
     }
 
     /// How many messages the view shows from the current anchor, given the viewport's row budget
@@ -202,25 +269,39 @@ impl ScrollingMessageState {
     pub fn page_up(&mut self, viewport_rows: usize) {
         let page = self.displayed_count(viewport_rows).saturating_sub(1).max(1);
         self.scroll_offset = (self.scroll_offset + page).min(self.max_scroll());
+        self.reset_all_fade_times(viewport_rows);
     }
 
-    /// `PageDown` — the same page size toward the newest line.
+    /// `PageDown` — the same page size toward the newest line. Pages inherit both re-arm routes
+    /// from the `ScrollUp`/`ScrollDown` steps they are built out of.
     pub fn page_down(&mut self, viewport_rows: usize) {
         let page = self.displayed_count(viewport_rows).saturating_sub(1).max(1);
         self.scroll_offset = self.scroll_offset.saturating_sub(page);
+        self.reset_all_fade_times(viewport_rows);
     }
 
     /// Advance the fade by `dt` (the OnUpdate tick, `0x788460`). The entry gate is **AtBottom** and
-    /// `fading_enabled` — scrolled up, every line holds its current alpha and nothing un-fades. Each
+    /// `fading_enabled` — scrolled up, every line holds its current alpha and *this* function never
+    /// un-fades one. Un-fading is the scroll entries' job, through
+    /// [`Self::reset_all_fade_times`] — do not read the freeze below as "nothing ever comes back",
+    /// which is the reading that cost us the bug. Each
     /// line runs phase 1 (`time_left` countdown at full alpha), then phase 2 (`fade_left` countdown,
     /// alpha = `trunc(fade_left/fade_duration*255)`); `fade_duration == 0` snaps straight to 0.
+    ///
+    /// **Both countdowns are `fst`-without-pop** (`0x7884d7` phase 1, `0x788544` phase 2): memory
+    /// takes the `f32` rounding of `remaining − dt` while the x87 stack keeps the un-rounded value,
+    /// and it is the *un-rounded* one that the `fdiv`/`fmul 255.0`/`__ftol` ramp then consumes. So
+    /// the arithmetic runs wide and only the stored countdown narrows to `f32`. Phase 1's negative
+    /// overshoot is discarded — it stores exactly `0`, and phase 2 starts on the next tick with the
+    /// full fade rather than the remainder.
     pub fn tick(&mut self, dt: f32) {
         if !self.fading_enabled || !self.at_bottom() {
             return;
         }
+        let dt = f64::from(dt);
         for line in &mut self.lines {
             if line.time_left > 0.0 {
-                line.time_left -= dt;
+                line.time_left = ((f64::from(line.time_left) - dt).max(0.0)) as f32;
                 continue;
             }
             if self.fade_duration <= 0.0 {
@@ -228,14 +309,16 @@ impl ScrollingMessageState {
                 line.alpha = 0.0;
                 continue;
             }
-            line.fade_left -= dt;
-            if line.fade_left <= 0.0 {
+            let remaining = f64::from(line.fade_left) - dt;
+            line.fade_left = remaining as f32;
+            if remaining <= 0.0 {
                 line.fade_left = 0.0;
                 line.alpha = 0.0;
             } else {
                 // Divisor is the LIVE frame fadeDuration (a mid-fade SetFadeDuration rescales the
-                // ramp), byte-quantized like the client.
-                let byte = quantize_fade(line.fade_left / self.fade_duration);
+                // ramp), byte-quantized like the client — off the wide `remaining`, not the stored
+                // f32, per the `fst`-no-pop shape above.
+                let byte = quantize_fade_wide(remaining / f64::from(self.fade_duration));
                 line.alpha = f32::from(byte) / 255.0;
             }
         }
@@ -244,6 +327,12 @@ impl ScrollingMessageState {
 
 /// Phase-2 alpha quantization: `trunc(x*255)` (no `+0.5` — the fade tick truncates, `0x788547`).
 fn quantize_fade(x: f32) -> u8 {
+    (x.clamp(0.0, 1.0) * 255.0).trunc() as u8
+}
+
+/// [`quantize_fade`] off the x87 stack's un-rounded ratio — see [`ScrollingMessageState::tick`] on
+/// the `fst`-without-pop shape that makes the ramp wider than the countdown it stores.
+fn quantize_fade_wide(x: f64) -> u8 {
     (x.clamp(0.0, 1.0) * 255.0).trunc() as u8
 }
 
@@ -358,6 +447,11 @@ impl MessageFrameState {
     /// `trunc(fade_left/fade_duration*255)` against the **live** frame `fade_duration`. A finished
     /// line is then **freed** rather than left in place — this class has no ring to hold a slot, so
     /// the survivors re-pack (`0x786570`, the retire helper that decrements the active count).
+    ///
+    /// Deliberately still narrow arithmetic: the `fst`-without-pop shape is byte-cited for the
+    /// *scrolling* class's tick (`0x7884d7`/`0x788544`), and `0x786200` has not been walked for it.
+    /// Copying the wide form across on the strength of "same formula" would be the scope error
+    /// decision 1692 is about, one class over.
     pub fn tick(&mut self, dt: f32) {
         if !self.fading_enabled {
             return;
