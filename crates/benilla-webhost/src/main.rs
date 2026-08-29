@@ -14,6 +14,11 @@ use anyhow::{Context, Result};
 use benilla_formats::Chain;
 use clap::Parser;
 
+/// The only two ports the `/ws/{port}` proxy will ever dial — mangos realmd (login) and worldd
+/// (world). Fixed here, not a CLI flag: this host can bind `0.0.0.0` on a Tailscale box, so the
+/// allowlist is a security boundary, not a convenience default.
+const ALLOWED_PORTS: [u16; 2] = [3724, 8085];
+
 #[derive(Parser)]
 #[command(about = "Serve the benilla browser build, its game data, and its net proxy")]
 struct Cli {
@@ -24,6 +29,10 @@ struct Cli {
     /// itself reads on the desktop.
     #[arg(long)]
     data: PathBuf,
+    /// Host the `/ws/{port}` proxy dials for the allowed ports — the mangos boxes this host
+    /// itself runs against, so it defaults to loopback.
+    #[arg(long, default_value = "127.0.0.1")]
+    upstream: String,
 }
 
 #[tokio::main]
@@ -38,11 +47,12 @@ async fn main() -> Result<()> {
     );
     tracing::info!(data = %cli.data.display(), "patch chain open");
 
-    let app = benilla_webhost::data::router(chain);
+    let app = benilla_webhost::data::router(chain)
+        .merge(benilla_webhost::ws::router(cli.upstream.clone(), ALLOWED_PORTS));
 
     let listener = tokio::net::TcpListener::bind(&cli.bind)
         .await
         .with_context(|| format!("binding {}", cli.bind))?;
-    tracing::info!(bind = %cli.bind, "benilla-webhost listening");
+    tracing::info!(bind = %cli.bind, upstream = %cli.upstream, "benilla-webhost listening");
     axum::serve(listener, app).await.context("serving")
 }
