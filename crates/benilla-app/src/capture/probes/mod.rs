@@ -36,6 +36,12 @@ pub(crate) use particle_census::ParticleCensusPlugin;
 mod ground_census;
 pub(crate) use ground_census::GroundCensusPlugin;
 
+/// The transport census — per type-11/15 GameObject, the arm stage, the visibility pair and the
+/// render-descendant count: the reader that separates a lift the server never sent from one that
+/// never armed and so never lifted its spawn-hide (B168).
+mod lift_census;
+pub(crate) use lift_census::LiftCensusPlugin;
+
 /// The unit-visual census — per-entity "what visual did this display actually get", which is what
 /// separates a debug cube (a gap of ours) from a model that legitimately draws nothing (B13,
 /// decision 1403).

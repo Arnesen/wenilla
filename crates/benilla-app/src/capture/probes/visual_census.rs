@@ -13,13 +13,20 @@
 //! One line per streamed entity says which, without an eye:
 //!
 //! ```text
-//! UVIS 0xF130003A7200013B Unit  display=13069 d=6.4  cube=1 meshes=0  Zandalarian Event Generator
+//! UVIS 0xF130003A7200013B Unit  display=13069 d=6.4  cube=1 meshes=0  held=[] Zandalarian Event Generator
 //! ```
 //!
 //! - **`cube`** is the [`FallbackCube`] marker — literally the arm that spawned it, not a guess
 //!   from the picture. The headline `cubes=` count is the number that names the bug.
-//! - **`meshes`** counts the entity's spawned render children. `cube=0 meshes=0` is the *correct*
-//!   reading for a trigger creature: attached, and drawing nothing.
+//! - **`meshes`** counts the entity's spawned render children — the BODY's own batches. `cube=0
+//!   meshes=0` is the *correct* reading for a trigger creature: attached, and drawing nothing.
+//! - **`held`** is the attach-slot list actually hanging off its skeleton
+//!   ([`HeldAttached::spawned_slots`], the dress census's own reader). It is here because
+//!   `meshes` counts *direct* children and an attached model is a grandchild, so a unit whose
+//!   whole visible self is a held weapon — the Naxxramas `Unholy Axe`, an `InvisibleStalker` body
+//!   with an axe in its hand — reads `meshes=0` whether the axe is there or not. That blind spot
+//!   is what let decision 1618's defect sit under a green census; `held=[main]` is the line that
+//!   says the weapon arrived.
 //! - **`pending`** marks an entity whose visual has not been built yet (a model still streaming) —
 //!   never to be confused with one that built nothing, which is the distinction the census exists
 //!   to keep.
@@ -41,7 +48,7 @@ use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use super::ProbeClock;
-use crate::entities::{FallbackCube, VisualAttached};
+use crate::entities::{FallbackCube, HeldAttached, VisualAttached, ATTACH_SLOT_NAMES};
 use crate::names::NameCache;
 use crate::net::{Guid, NetEntity, SelfPlayer};
 
@@ -90,6 +97,9 @@ type VisualQuery = (
     &'static Transform,
     Option<&'static Children>,
     Has<VisualAttached>,
+    // The attach slots standing under this unit — the visual truth for everything that rides a
+    // BONE rather than the entity, which `Children` above cannot see.
+    Option<&'static HeldAttached>,
 );
 
 /// One line per streamed entity within [`UnitVisuals::radius`] of the body — cubes first, then
@@ -123,7 +133,7 @@ fn fire_unit_visuals(
     let mut rows: Vec<(bool, i64, String)> = Vec::new();
     let (mut cube_n, mut blank_n, mut pending_n) = (0u32, 0u32, 0u32);
     let mut cube_displays: Vec<u32> = Vec::new();
-    for (guid, net, t, children, attached) in &entities {
+    for (guid, net, t, children, attached, held) in &entities {
         if matches!(net.kind, EntityKind::DynamicObject | EntityKind::Other)
             || t.translation.distance_squared(body.translation) > radius2
         {
@@ -149,15 +159,25 @@ fn fire_unit_visuals(
             blank_n += 1;
         }
         let dist = t.translation.distance(body.translation);
+        let held: Vec<&str> = held
+            .map(|h| {
+                h.spawned_slots()
+                    .iter()
+                    .zip(ATTACH_SLOT_NAMES)
+                    .filter_map(|(slot, name)| slot.map(|_| name))
+                    .collect()
+            })
+            .unwrap_or_default();
         rows.push((
             cube,
             (dist * 100.0) as i64,
             format!(
                 "UVIS {:#018x} {:<12} display={display:<6} d={dist:6.1} cube={} meshes={mesh_n:<3} \
-                 {:<8} {}",
+                 held=[{:<12}] {:<8} {}",
                 guid.0,
                 format!("{:?}", net.kind),
                 u8::from(cube),
+                held.join(","),
                 if attached { "attached" } else { "PENDING" },
                 names.peek(guid.0).unwrap_or("?"),
             ),

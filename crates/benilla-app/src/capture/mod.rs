@@ -121,10 +121,10 @@ pub(crate) use probe_rig::ProbeRigPlugin;
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, DressCensusPlugin, EntityCensusPlugin, GroundCensusPlugin,
-    JitterMeterPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
-    ProbeClock, ProbeDragPlugin, ProbeExitPlugin, ProbeFocusPlugin, ProbeHoverPlugin,
-    ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin, RevealAuditPlugin, SchedCensusPlugin,
-    UnitVisualsPlugin,
+    JitterMeterPlugin, LiftCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin,
+    ProbeChatPlugin, ProbeClock, ProbeDragPlugin, ProbeExitPlugin, ProbeFocusPlugin,
+    ProbeHoverPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin, RevealAuditPlugin,
+    SchedCensusPlugin, UnitVisualsPlugin,
 };
 use scenarios::GlueScreen;
 use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};

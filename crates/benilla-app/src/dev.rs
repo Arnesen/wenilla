@@ -201,6 +201,15 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_GROUND_CENSUS").is_ok() {
                 app.add_plugins(crate::capture::GroundCensusPlugin);
             }
+            // The transport census: `WOW_LIFT_CENSUS=<secs>[,<every>]` prints one line per
+            // type-11/15 transport GameObject on the map — its arm stage, its cycle, its
+            // visibility pair and its render-descendant count. The instrument B168 was missing: a
+            // lift that isn't on screen is either unsent, unarmed (and so still wearing its spawn
+            // hide), model-less, or simply elsewhere in its cycle, and only numbers tell those
+            // four apart (see `capture::LiftCensusPlugin`).
+            if std::env::var("WOW_LIFT_CENSUS").is_ok() {
+                app.add_plugins(crate::capture::LiftCensusPlugin);
+            }
             // The unit-visual census: `WOW_UNIT_VISUALS=<secs>[,<every>]` prints one line per
             // streamed entity near the body — whether it got a debug cube, real geometry, or
             // nothing at all. The instrument B13 was missing: a black slab in a screenshot cannot

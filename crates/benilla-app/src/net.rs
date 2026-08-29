@@ -37,9 +37,12 @@ use apply::{apply_net_updates, tag_self_player};
 // and are pulled in here for the plugin + the event bridge.
 pub(crate) use io::LoginRequest;
 use motion::{
-    drain_pending_moves, drive_display_facing, extrapolate_remote_units, ground_clamp_creatures,
-    mark_swimming_creatures, sample_splines,
+    drain_pending_moves, extrapolate_remote_units, ground_clamp_creatures, mark_swimming_creatures,
+    sample_splines,
 };
+// The client-local facing turn. `pub(crate)` because the shuffle latch it produces is read in
+// `creature_anim`, and the cross-seam test that pins the pair runs both systems in one app.
+pub(crate) use motion::drive_display_facing;
 pub(crate) use motion::{
     jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
 };

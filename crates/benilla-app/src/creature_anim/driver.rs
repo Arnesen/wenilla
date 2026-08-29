@@ -1106,28 +1106,45 @@ pub(super) fn drive_animations(
         // the callback-less map doodads, which loop one variation forever, are `doodad_anim`'s
         // separate concern). A combat/cast re-arm keeps the deterministic head, like any base
         // arm. The carried rate keeps the gait's scaling; the per-frame sync re-syncs it anyway.
+        //
+        // **In the GAIT slot the completion is a re-SELECTION, not a re-arm** (decision 1655).
+        // The client's callback is `RecomputeBaseAnim(−1)` — `0x5fc3f0`'s jump-table row
+        // `0x5fc844` is literally `push -1; call 0x5fd9e0`, which runs the whole `0x5fd8b0`
+        // selector chain. For Fly and /dance the chain hands back the id it was already playing,
+        // so a same-id re-arm and a re-selection are indistinguishable and this code read as
+        // right for two years. For the turn-shuffle they are the difference between stepping once
+        // and shuffling for ever: the shuffle's window is the ONLY thing that ends it (the
+        // per-frame tail refuses to — see [`select::SHUFFLE_LEFT`] and `mode`'s hold), so if the
+        // completion re-armed 11 the vendor would never stop. Clearing the target IS the
+        // re-selection — `mode::run` picks fresh a few lines below, rolling the variation exactly
+        // as this arm would have. Outside the gait slot (a Special loop) the id is not the
+        // chain's to choose, so the same-id re-arm stands.
         if let Some((node, budget)) = drv.loop_window {
             if tr.get_main_animation() == Some(node)
                 && player
                     .animation(node)
                     .is_some_and(|a| a.completions() >= budget)
             {
-                let head = anims
-                    .clips
-                    .iter()
-                    .find(|c| c.node == node)
-                    .and_then(|armed| find_resolved(anims, armed.anim_id, catalog));
-                if let Some(head) = head {
-                    let rate = player.animation(node).map_or(1.0, |a| a.speed());
-                    let (c, fresh) = roll_loop(anims, head, relaxed, &mut rng);
-                    play_clip(
-                        &mut tr,
-                        &mut player,
-                        c,
-                        bevy::animation::RepeatAnimation::Forever,
-                        rate,
-                    );
-                    drv.loop_window = Some((c.node, fresh));
+                if drv.mode == Mode::Gait {
+                    drv.gait = None;
+                } else {
+                    let head = anims
+                        .clips
+                        .iter()
+                        .find(|c| c.node == node)
+                        .and_then(|armed| find_resolved(anims, armed.anim_id, catalog));
+                    if let Some(head) = head {
+                        let rate = player.animation(node).map_or(1.0, |a| a.speed());
+                        let (c, fresh) = roll_loop(anims, head, relaxed, &mut rng);
+                        play_clip(
+                            &mut tr,
+                            &mut player,
+                            c,
+                            bevy::animation::RepeatAnimation::Forever,
+                            rate,
+                        );
+                        drv.loop_window = Some((c.node, fresh));
+                    }
                 }
             }
         }

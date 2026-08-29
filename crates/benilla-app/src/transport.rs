@@ -115,6 +115,13 @@ enum Drive {
     Lift(Lift),
 }
 
+/// **No map field, deliberately** (decision 1654). A lift's map is not a datum it owns: vmangos
+/// hands a player the whole map's transport set on entry (`Map::SendInitTransports`) and takes it
+/// back on the way out, so a type-11 is only ever resident for someone standing on its own map —
+/// the car is always on the map *you* are on. 0611 stamped `CurrentMap` here at arm time, which in
+/// the login frame is the startup seed (`arm_transports` runs a stage before `player::wire_in`
+/// writes the real map), and the off-map hide below then hid every lift on Kalimdor for the whole
+/// session — the director's Thunder Bluff report, and B168's Gnomeregan lift.
 struct Lift {
     frames: Arc<Vec<ElevatorKeyframe>>,
     period_ms: u32,
@@ -122,12 +129,19 @@ struct Lift {
     quat: [f32; 4],
     /// Constant rendered heading (wire orientation, WoW radians).
     yaw: f32,
-    /// The map the car lives on — a lift never leaves it (the worldport-spare predicate).
-    map: u32,
 }
 
 impl Transport {
-    fn period_ms(&self) -> u32 {
+    /// Which drive is underneath — for the instruments only (`WOW_LIFT_CENSUS`); no consumer
+    /// keys on it (decision 0438 §5: the drive is private by design).
+    pub(crate) fn drive_label(&self) -> &'static str {
+        match &self.drive {
+            Drive::Taxi(_) => "taxi",
+            Drive::Lift(_) => "lift",
+        }
+    }
+
+    pub(crate) fn period_ms(&self) -> u32 {
         match &self.drive {
             Drive::Taxi(t) => t.period_ms,
             Drive::Lift(l) => l.period_ms,
@@ -142,22 +156,29 @@ impl Transport {
     }
 
     /// Whether any leg of this transport's cycle lies on `map_id` — the cross-map worldport's
-    /// spare predicate (decision 0455). A lift lives (and dies) on its one map.
+    /// spare predicate (decision 0455). **A lift always answers no** (1654): the spare exists so a
+    /// *ridden boat* survives the seam mid-cycle, and a lift never spans one — the server re-sends
+    /// the destination map's whole transport set on arrival (`SendInitTransports`), so a lift
+    /// despawns and streams back like every other object.
     pub(crate) fn touches_map(&self, map_id: u32) -> bool {
         match &self.drive {
             Drive::Taxi(t) => t.touches_map(map_id),
-            Drive::Lift(l) => l.map == map_id,
+            Drive::Lift(_) => false,
         }
     }
 
-    /// The cycle sample — position/heading/map/motion at `cycle_ms`, both drives.
-    fn sample(&self, cycle_ms: u32) -> TransportSample {
+    /// The cycle sample — position/heading/map/motion at `cycle_ms`, both drives. `here` is the
+    /// map the viewer is on: a **taxi** ignores it (its timetable knows which continent each leg
+    /// lies on, which is the whole point of the off-map hide), and a **lift** reports it, because
+    /// a type-11 exists only for players standing on its own map. That is the honest answer to
+    /// "which map is this position expressed in", and it is what [`Lift`] refuses to store.
+    fn sample(&self, cycle_ms: u32, here: u32) -> TransportSample {
         match &self.drive {
             Drive::Taxi(t) => t.sample(cycle_ms),
             Drive::Lift(l) => {
                 let (pos, moving) = elevator_sample(&l.frames, l.base_pos, l.quat, cycle_ms);
                 TransportSample {
-                    map: l.map,
+                    map: here,
                     pos,
                     heading: l.yaw,
                     moving,
@@ -168,8 +189,8 @@ impl Transport {
 
     /// The live sample for an anchor — the same pose the tick writes this frame. For
     /// instruments (the crossing probe reads dock state + the deck drop point off it).
-    pub(crate) fn sample_at(&self, anchor: &TransportAnchor) -> TransportSample {
-        self.sample(self.cycle_ms(anchor))
+    pub(crate) fn sample_at(&self, anchor: &TransportAnchor, here: u32) -> TransportSample {
+        self.sample(self.cycle_ms(anchor), here)
     }
 }
 
@@ -215,12 +236,15 @@ fn setup_taxi_nodes(mut timetables: ResMut<Timetables>, world_assets: Option<Res
 /// The query is a handful of entities at most (the map's transports), so polling is free; the
 /// boat's ask-once template request was already made at create (`go_templates.request` in the
 /// apply arm).
+///
+/// **The lift arm reads no world state at all** (1654): at login every type-11 on the map arms in
+/// the same drain that carries `SMSG_LOGIN_VERIFY_WORLD`, one stage before `player::wire_in`
+/// writes `CurrentMap` — so anything captured from the world *here* is captured stale.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn arm_transports(
     mut commands: Commands,
     mut timetables: ResMut<Timetables>,
     templates: Res<GameObjectTemplates>,
-    current_map: Option<Res<CurrentMap>>,
     // `Or<…, With<ElevatorSeed>>`: a re-created lift is already armed (`Transport` present) but
     // carries a fresh seed from the new create block — it re-enters here so the seed is consumed
     // (a fresh, identical arm) instead of lingering. Boats never carry a seed, so for them the
@@ -265,9 +289,6 @@ fn arm_transports(
                     .vis_chain_only();
                 continue;
             };
-            let Some(current_map) = current_map.as_ref() else {
-                continue; // between worlds — next frame
-            };
             let frames = lifts
                 .entry(seed.entry)
                 .or_insert_with(|| Arc::new(frames.to_vec()))
@@ -291,7 +312,6 @@ fn arm_transports(
                         base_pos: seed.base_pos,
                         quat,
                         yaw: seed.yaw,
-                        map: current_map.0,
                     }),
                     was_moving: false,
                 },
@@ -353,6 +373,8 @@ fn arm_transports(
 /// rotation only — the renderer bakes model scale into the transform (`write_pose`'s law).
 /// Off-map samples (the boat is sailing the other continent's leg) hide the model; the server
 /// removes the GO around the same time, so this is belt-and-braces for the transition frames.
+/// **A lift can never trip it** (decision 1654): its sample is expressed in the map passed in, so
+/// the term is a boat's alone — which is what it always meant, and what 0611's stamped map broke.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn tick_transports(
     current_map: Option<Res<CurrentMap>>,
@@ -373,7 +395,7 @@ fn tick_transports(
         &mut transports
     {
         let cycle = transport.cycle_ms(anchor);
-        let sample = transport.sample(cycle);
+        let sample = transport.sample(cycle, current_map.0);
         if sample.moving != transport.was_moving {
             transport.was_moving = sample.moving;
             debug!(
@@ -388,6 +410,7 @@ fn tick_transports(
         // identical pose each frame, and the unconditional writes this replaces re-dirtied the
         // deck's whole subtree — transform propagation over every submesh plus a `Visibility`
         // re-propagation — for every docked elevator on the map, every frame.
+        // Boats only, by construction — see this system's doc.
         if sample.map != current_map.0 {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
@@ -474,6 +497,26 @@ mod tests {
     use super::*;
     use benilla_formats::ElevatorKeyframe;
 
+    /// A two-frame pause path at `base_pos` — the same lift both tests below drive.
+    fn parked_lift() -> Lift {
+        Lift {
+            frames: Arc::new(vec![
+                ElevatorKeyframe {
+                    time_ms: 0,
+                    pos: [0.0; 3],
+                },
+                ElevatorKeyframe {
+                    time_ms: 1000,
+                    pos: [0.0; 3],
+                },
+            ]),
+            period_ms: 1000,
+            base_pos: [10.0, 20.0, 30.0],
+            quat: [0.0, 0.0, 0.0, 1.0],
+            yaw: 0.5,
+        }
+    }
+
     /// A docked lift goes QUIET: `tick_transports` writes pose and visibility on change only
     /// (1473) — the unconditional writes it replaces re-dirtied every docked elevator's whole
     /// subtree (transform + `Visibility` propagation over all its submeshes), map-wide, every
@@ -501,23 +544,7 @@ mod tests {
         app.world_mut().spawn((
             Guid(0xF110_0000_0000_0001),
             Transport {
-                drive: Drive::Lift(Lift {
-                    frames: Arc::new(vec![
-                        ElevatorKeyframe {
-                            time_ms: 0,
-                            pos: [0.0; 3],
-                        },
-                        ElevatorKeyframe {
-                            time_ms: 1000,
-                            pos: [0.0; 3],
-                        },
-                    ]),
-                    period_ms: 1000,
-                    base_pos: [10.0, 20.0, 30.0],
-                    quat: [0.0, 0.0, 0.0, 1.0],
-                    yaw: 0.5,
-                    map: 0,
-                }),
+                drive: Drive::Lift(parked_lift()),
                 was_moving: false,
             },
             TransportAnchor {
@@ -536,6 +563,50 @@ mod tests {
             (dirty.transforms, dirty.visibilities),
             (0, 0),
             "a docked lift must stop dirtying its transform and visibility"
+        );
+    }
+
+    /// **A lift is never hidden by the off-map term, whatever `CurrentMap` says** (decision 1654).
+    /// The off-map hide is the boat's: a ferry mid-cycle on the other continent's leg. 0611 gave
+    /// the lift a `map` stamped from `CurrentMap` at arm time — and `arm_transports` runs a stage
+    /// *before* `player::wire_in` writes that resource, so at login every type-11 on the map armed
+    /// against the startup seed and the term hid all of them for the session (Thunder Bluff; B168).
+    /// Driving the tick on a map the arm never saw is exactly that shape, and the car must show.
+    #[test]
+    fn a_lift_is_visible_on_whatever_map_the_viewer_is_on() {
+        let mut app = App::new();
+        // Alterac Valley — a real 1.12 map that carries no type-11 GO at all, so it is a map no
+        // lift could ever have been stamped with. The point is that the value cannot matter.
+        app.insert_resource(CurrentMap(30))
+            .add_systems(Update, tick_transports);
+        let lift = app
+            .world_mut()
+            .spawn((
+                Guid(0xF110_0000_0000_0002),
+                Transport {
+                    drive: Drive::Lift(parked_lift()),
+                    was_moving: false,
+                },
+                TransportAnchor {
+                    progress_ms: 0,
+                    at: Instant::now(),
+                },
+                Transform::default(),
+                // As the net apply spawns an anchored transport: hidden until its first ticked
+                // pose. If the tick declines to unhide it, the car is solid and invisible.
+                Visibility::Hidden,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(lift),
+            Some(&Visibility::Inherited),
+            "the tick must unhide a lift on the viewer's map, not judge it against a stamped one"
+        );
+        // And the pose it wrote is the car's own — base + its (zero) local offset, in Bevy axes.
+        assert_eq!(
+            app.world().get::<Transform>(lift).map(|t| t.translation),
+            Some(benilla_assets::coords::wow_to_bevy([10.0, 20.0, 30.0])),
         );
     }
 }

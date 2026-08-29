@@ -211,6 +211,46 @@ fn wmo_group_census() {
                 .map(|(lo, hi)| format!("  LIQUID local z[{lo:.1},{hi:.1}]"))
                 .unwrap_or_default(),
         );
+        // The group's portal edges, each placed in WoW world space. The group lines above answer
+        // "which room is that"; without this the doorway between two of them is a local-space
+        // vertex span nobody can point at in game, so a `.go xyz` report can't name the portal it
+        // is standing in front of.
+        let start = g.ref_start as usize;
+        let end = (start + g.ref_count as usize).min(subject.model.portal_refs.len());
+        for r in &subject.model.portal_refs[start..end] {
+            let Some(info) = subject.model.portal_infos.get(r.portal as usize) else {
+                continue;
+            };
+            let vs = (info.start_vertex as usize)
+                ..(info.start_vertex as usize + info.count as usize)
+                    .min(subject.model.portal_vertices.len());
+            let verts = &subject.model.portal_vertices[vs];
+            if verts.is_empty() {
+                continue;
+            }
+            let mut c = [0.0f32; 3];
+            for v in verts {
+                for k in 0..3 {
+                    c[k] += v[k] / verts.len() as f32;
+                }
+            }
+            let w = bevy_to_wow(placed.world_from_local.transform_point3(wow_to_bevy(c)));
+            // Widest chord across the polygon (yd) — a doorway's opening, so "did that hop really
+            // have a 3-yd gap to see through" is answered without re-projecting by hand.
+            let span = verts
+                .iter()
+                .flat_map(|a| {
+                    verts.iter().map(move |b| {
+                        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2))
+                            .sqrt()
+                    })
+                })
+                .fold(0.0f32, f32::max);
+            println!(
+                "     p{:<3} ->g{:03}(side {:+}) world ({:.1},{:.1},{:.1}) span {:.1} yd",
+                r.portal, r.group, r.side, w[0], w[1], w[2], span,
+            );
+        }
     }
 }
 

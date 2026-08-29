@@ -80,9 +80,24 @@
 //! ## What is gated so far, and what is knowingly not
 //!
 //! **Gated:** ADT terrain (`0x683bf0`), ADT doodad placements (`0x683700`), the WDL far band
-//! (`0x683040`) and now the net **bodies** on `0x683340` ([`WorldUnit::bound`]) — the buckets that produce
-//! the reported symptoms, and the ones whose entities have no other `Visibility` writer, so this is
-//! their sole authority (decision 0025).
+//! (`0x683040`), the net **bodies** on `0x683340` ([`WorldUnit::bound`]), and open-world **liquid**
+//! (`0x683ab0`) — the buckets whose entities have no other `Visibility` writer, so this is their
+//! sole authority (decision 0025). World **WMO placements** (`0x6856c0`), their props and their
+//! MLIQ pools are gated too, but by the *model-visibility* authority, which folds [`ExteriorGate`]
+//! into its own AND rather than being written here (decision 0784).
+//!
+//! **Liquid was the last of them** (decision 1652). 0774 deferred it and 0784 deferred it again,
+//! both on the same stated ground — that it "already has a visibility authority… its own lane". It
+//! did not. An ADT surface is spawned as a world root with `Mesh3d`, and nothing ever wrote its
+//! `Visibility`; the only writer in the whole subsystem was the `$WOW_NO_LIQUID` kill-switch,
+//! env-gated and `Added`-filtered. So the fix was not the "real design step" both records
+//! predicted — it was the tag, and this system was already the right owner. The lesson is 0784's
+//! own, one turn later: *"it already has an authority" needs a check, not a memory.* 0774 made that
+//! claim about two buckets at once; it was true of WMO placements and false of liquid, and because
+//! the two travelled in one sentence, nobody separated them. 0784 checked the half it was closing,
+//! found the claim inverted there, and copied the other half forward untested. What that cost is
+//! the director's report — from inside a cavern, the lake overhead drawing straight through the
+//! ceiling.
 //!
 //! **The unit is the drawn object, and for terrain that is the 33.333 yd MCNK cell, not the 533 yd
 //! tile** (decision 0780). This is a property of the *spawner*, not of anything here — but the cull is
@@ -90,12 +105,8 @@
 //! window and is admitted whichever way the doorway faces. The cull was correct and looked broken.
 //! The far band keeps its whole-tile box, which is the reference's own far-tier granularity.
 //!
-//! **NOT yet gated, deliberately:** world **WMO placements** (`0x6856c0`) and open-world **liquid**
-//! (`0x683ab0`). Both already have a visibility authority — WMO group submeshes are written by the
-//! portal PVS apply, liquid by its own lane — and bolting a second writer onto the same entities is
-//! precisely the two-authorities bug 0025 forbids. Folding them in means teaching *those* authorities
-//! to consume [`ExteriorWindows`], which is a real design step and not a line to sneak in here. Until
-//! then a distant building or lake still shows through a wall where the reference would hide it.
+//! **NOT gated, knowingly:** the horizon-occlusion term (`0x686000`) — its own machinery, its
+//! own record. Nothing in the exterior *buckets* is left ungated.
 //!
 //! **Deviation to be honest about:** the reference tests one AABB per *object*; a doodad placement has
 //! no root entity in our graph, so we tag and test each **submesh**. Their union is the object, so the
@@ -156,6 +167,14 @@ pub struct ExteriorCullVerdict {
     /// couple of dozen. Summed together, a body leg that reaches nothing at all would be invisible.
     pub(crate) bodies: usize,
     pub(crate) bodies_hidden: usize,
+    /// Open-world liquid surfaces the cull reached, and how many the windows rejected — a
+    /// **subset** of `tested`/`hidden` above, reported separately for the reason the body leg is
+    /// (decision 1652). A tile carries a handful of MCNK liquid layers against ~250 terrain cells,
+    /// so a liquid leg that reached *nothing* would move `tested` by less than its own noise. This
+    /// is the number that says "the lake is being decided", and before 1652 it was structurally
+    /// zero.
+    pub(crate) liquid: usize,
+    pub(crate) liquid_hidden: usize,
 }
 
 pub(crate) struct ExteriorCullPlugin;
@@ -285,6 +304,9 @@ type UnownedScene = (
     &'static GlobalTransform,
     Option<&'static Aabb>,
     &'static mut Visibility,
+    // Instrument only — never a term in the verdict. Liquid takes exactly the same test as a
+    // terrain cell; this only lets the counters say so (see [`ExteriorCullVerdict::liquid`]).
+    Has<crate::liquid::LiquidSurface>,
 );
 
 /// …and the objects it is allowed to write: exterior scene that nothing else owns. `ModelPart` and
@@ -416,11 +438,14 @@ fn apply_exterior_cull(
             .is_none_or(|f| f.intersects_obb(bound, &gt.affine(), true, true))
     };
     let (mut tested, mut hidden, mut unbounded) = (0usize, 0usize, 0usize);
-    for (gt, aabb, mut vis) in &mut scene {
+    let (mut liquid, mut liquid_hidden) = (0usize, 0usize);
+    for (gt, aabb, mut vis, is_liquid) in &mut scene {
         tested += 1;
         unbounded += usize::from(aabb.is_none());
         let admitted = gate.admits(gt, aabb);
         hidden += usize::from(!admitted);
+        liquid += usize::from(is_liquid);
+        liquid_hidden += usize::from(is_liquid && !admitted);
         set(
             &mut vis,
             if admitted {
@@ -501,6 +526,8 @@ fn apply_exterior_cull(
         unbounded,
         bodies: body_n,
         bodies_hidden: body_hidden,
+        liquid,
+        liquid_hidden,
     };
 }
 
@@ -900,5 +927,172 @@ mod tests {
             "the window is on the right"
         );
         assert_eq!((verdict.bodies, verdict.bodies_hidden), (2, 1));
+    }
+
+    /// One `apply_exterior_cull` run over a scene of **liquid surfaces** — the ADT spawn's own
+    /// shape: a world root at `IDENTITY` (MCLQ positions are absolute) carrying a world-space
+    /// `Aabb`, the `LiquidSurface` marker and the `ExteriorScene` tag.
+    fn run_liquid(
+        windows: ExteriorWindows,
+        surfaces: &[Aabb],
+    ) -> (Vec<Visibility>, ExteriorCullVerdict) {
+        let mut app = App::new();
+        app.init_resource::<ExteriorCullVerdict>()
+            .insert_resource(Assets::<benilla_assets::WmoModel>::default())
+            .insert_resource(windows)
+            .add_systems(Update, apply_exterior_cull);
+        app.world_mut().spawn((
+            WorldCamera,
+            GlobalTransform::IDENTITY,
+            Projection::Perspective(PerspectiveProjection {
+                fov: std::f32::consts::FRAC_PI_2,
+                aspect_ratio: 1.0,
+                near: 0.1,
+                far: 1000.0,
+                ..default()
+            }),
+        ));
+        let ids: Vec<Entity> = surfaces
+            .iter()
+            .map(|bound| {
+                app.world_mut()
+                    .spawn((
+                        GlobalTransform::IDENTITY,
+                        *bound,
+                        ExteriorScene,
+                        crate::liquid::LiquidSurface,
+                        Visibility::Inherited,
+                    ))
+                    .id()
+            })
+            .collect();
+        app.update();
+        let vis = ids
+            .iter()
+            .map(|e| *app.world().entity(*e).get::<Visibility>().unwrap())
+            .collect();
+        (vis, *app.world().resource::<ExteriorCullVerdict>())
+    }
+
+    /// One MCNK liquid layer's world box, centred at `at` — a flat 33.333 yd sheet, which is the
+    /// granularity `spawn_liquids` actually produces (one entity per `LiquidMesh`, and an ADT chunk
+    /// carries its liquid per chunk). Flat on purpose: a lake is a sheet, and the whole question is
+    /// whether a sheet *overhead* reaches the doorway's part of the view.
+    fn lake(at: Vec3) -> Aabb {
+        const CELL: f32 = 33.333 / 2.0;
+        Aabb::from_min_max(
+            at - Vec3::new(CELL, 0.05, CELL),
+            at + Vec3::new(CELL, 0.05, CELL),
+        )
+    }
+
+    /// **The director's report, as a test** (decision 1652): from inside a cavern you could see the
+    /// lake above through the ceiling. Sealed room ⇒ no windows ⇒ the reference's per-window
+    /// exterior populate never runs, and its ADT liquid producer `0x683ab0` is reachable from
+    /// nowhere else — so the lake is not submitted at all.
+    ///
+    /// Before 1652 this asserted nothing, because an ADT surface carried no `ExteriorScene` and the
+    /// cull never reached it. That is what `liquid`/`liquid_hidden` exist to make visible: the
+    /// counters are the difference between "the cull admitted the lake" and "the cull never saw
+    /// it", which from a screenshot are the same picture.
+    #[test]
+    fn a_sealed_room_hides_the_lake_overhead() {
+        let overhead = Vec3::new(0.0, 30.0, -60.0);
+        let (vis, verdict) = run_liquid(ExteriorWindows::Windows(Vec::new()), &[lake(overhead)]);
+        assert_eq!(
+            vis,
+            vec![Visibility::Hidden],
+            "a sealed cavern draws no exterior liquid — the ceiling is not a depth test"
+        );
+        assert_eq!(
+            (verdict.liquid, verdict.liquid_hidden),
+            (1, 1),
+            "and the cull must have REACHED it — (0, 0) here is the pre-1652 defect, which \
+             leaves the surface `Inherited` and looks identical on screen to being admitted"
+        );
+    }
+
+    /// The control that must not change: **outdoors nothing about liquid moves.** The driver's
+    /// outside leg is one full-screen window (`0x6811ca`), so the gate is `Open` and every surface
+    /// goes back to whatever else owns it — which, for liquid, is nothing. If this ever fails, the
+    /// lake has started disappearing in the open world, which is a far worse bug than the one 1652
+    /// fixed.
+    #[test]
+    fn outdoors_every_lake_is_admitted() {
+        let (vis, verdict) = run_liquid(
+            ExteriorWindows::Unrestricted,
+            &[
+                lake(Vec3::new(0.0, 30.0, -60.0)),
+                lake(Vec3::new(0.0, -2.0, 400.0)), // behind the eye: still not this system's call
+            ],
+        );
+        assert_eq!(vis, vec![Visibility::Inherited; 2]);
+        assert_eq!((verdict.liquid, verdict.liquid_hidden), (2, 0));
+    }
+
+    /// A doorway shows the water on its own side of the view and no other — the same law the
+    /// terrain and body legs take, on the bucket that was missing it. Both sheets sit at the same
+    /// height and depth; the only difference is which way the doorway faces.
+    #[test]
+    fn a_doorway_admits_only_the_water_on_its_own_side() {
+        let (vis, verdict) = run_liquid(
+            ExteriorWindows::Windows(vec![[0.1, -1.0, 1.0, 1.0]]),
+            &[
+                lake(Vec3::new(60.0, 10.0, -60.0)),
+                lake(Vec3::new(-60.0, 10.0, -60.0)),
+            ],
+        );
+        assert_eq!(
+            vis,
+            vec![Visibility::Inherited, Visibility::Hidden],
+            "the window is on the right"
+        );
+        assert_eq!((verdict.liquid, verdict.liquid_hidden), (2, 1));
+    }
+
+    /// **The failure mode this change could have had, pinned:** the cavern's OWN pool must not be
+    /// blanked by the sealed room it sits in. A WMO pool carries `WmoGroupVis` (0689), so it is
+    /// owned by the model-visibility authority — which exempts the camera's own placement and folds
+    /// the window term in itself (0784) — and this system's `Without<WmoGroupVis>` filter must keep
+    /// its hands off it entirely, tag or no tag.
+    ///
+    /// Asserting on `liquid` is the point: the counter proves the surface was not merely *admitted*
+    /// but never walked, which is the difference between the two authorities agreeing and one of
+    /// them silently overwriting the other.
+    #[test]
+    fn a_wmo_pool_is_never_written_by_this_system() {
+        let mut app = App::new();
+        app.init_resource::<ExteriorCullVerdict>()
+            .insert_resource(Assets::<benilla_assets::WmoModel>::default())
+            // The sealed room — the one case that would blank it.
+            .insert_resource(ExteriorWindows::Windows(Vec::new()))
+            .add_systems(Update, apply_exterior_cull);
+        let instance = app.world_mut().spawn(()).id();
+        let pool = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::IDENTITY,
+                lake(Vec3::new(0.0, 0.0, -10.0)),
+                ExteriorScene,
+                crate::liquid::LiquidSurface,
+                crate::wmo_portal::WmoGroupVis {
+                    instance,
+                    groups: std::sync::Arc::from([0u16].as_slice()),
+                },
+                Visibility::Inherited,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            *app.world().entity(pool).get::<Visibility>().unwrap(),
+            Visibility::Inherited,
+            "the pool in the room you are standing in belongs to the model-visibility authority"
+        );
+        let verdict = *app.world().resource::<ExteriorCullVerdict>();
+        assert_eq!(
+            (verdict.tested, verdict.liquid),
+            (0, 0),
+            "`Without<WmoGroupVis>` must exclude it from the walk, not just from the verdict"
+        );
     }
 }

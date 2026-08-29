@@ -27,12 +27,20 @@ use bevy::prelude::*;
 use super::super::{ActiveMover, GuidIndex, NetEntity, ObjectStore, SelfPlayer};
 use super::{yaw_of, RemoteMotion, Spline};
 
-/// The remaining yaw error (radians) under which a facing ease counts as **settled** — the
-/// [`FacingStep`] latch drops and the anim layer's turn-shuffle releases back to Stand. The
-/// client's own small/large-delta thresholds (`0x80c5c4`/`0x80c5c8`, decision 0123) aren't
-/// transcribed; this is an eyeballable stand-in (~3°). Shared with the remote facing interp
+/// The turn-shuffle latch's **sign dead-band** — the client's `[0x80c5c8]` = +1e-5 /
+/// `[0x80c5c4]` = −1e-5 (`0x60843b`–`0x608473`), tested on the yaw **this pump actually applied**.
+/// Above it the frame latches `+0xd58` bit `0x800` (→ ShuffleLeft 11), below its negative bit
+/// `0x1000` (→ ShuffleRight 12), and between the two nothing latches: it is a *did the body move
+/// at all* test, not a "close enough" one. Shared with the remote facing interp
 /// ([`super::remote`]) — the same latch drives a standing remote's mouse-turn shuffle.
-pub(super) const FACING_SETTLED: f32 = 0.05;
+///
+/// **This replaces `FACING_SETTLED = 0.05` (~3°), which was wrong twice over** (decision 1655).
+/// 0123 recorded `0x80c5c4`/`0x80c5c8` as "the client's small/large-delta thresholds" and left an
+/// "eyeballable stand-in" in their place; re-read at the bytes they are ±1e-5, a symmetric pair
+/// about zero, and the two bits they gate are *left/right*, not small/large. Sixty times too wide,
+/// and applied to the wrong quantity, the stand-in dropped the latch about half-way through every
+/// turn — which is most of why a vendor turned to face you with frozen feet.
+pub(super) const TURN_LATCH_BAND: f32 = 1.0e-5;
 
 /// The filter's **dead-band** (`[0x8029d0]` = 0.01 rad ≈ 0.57°), tested on the *unfolded* goal−current
 /// delta and **inclusive** (`fcomp` + `jp` at `600eb5`–`600ec0`). Inside it the goal is taken
@@ -70,12 +78,16 @@ pub(crate) struct DisplayFacing {
     hist: [f32; 4],
 }
 
-/// A stationary unit's display facing is still **stepping** this frame: the signed remaining delta
-/// (WoW yaw, positive = counterclockwise = turning left). The anim layer folds it into the unit's
-/// turn view — the client's facing-delta shuffle latch (`0x607ed0` bits `0x800`/`0x1000`, wow-re
+/// A stationary unit's display facing **moved this frame**: the signed yaw the pump applied (WoW
+/// yaw, positive = counterclockwise = turning left). The anim layer folds it into the unit's turn
+/// view — the client's facing-delta shuffle latch (`0x607ed0` bits `0x800`/`0x1000`, wow-re
 /// `loop-replay-fidget.md` §5b; decision 0123) — so a squaring-up creature foot-shuffles instead of
-/// pivoting frozen, and each shuffle's return to Stand re-rolls the idle variation. Removed the
-/// frame the ease settles.
+/// pivoting frozen, and each shuffle's return to Stand re-rolls the idle variation.
+///
+/// **The applied step, not the remaining gap** (decision 1655): the client's latch reads
+/// `0x607ed0`'s accumulator — the increment it writes to `+0xc94` at `608239` — against
+/// [`TURN_LATCH_BAND`]. The two differ at the tail of a per-frame-halving ease, which is exactly
+/// where a shuffle is still meant to be playing. Removed the frame the body stops moving.
 #[derive(Component)]
 pub(crate) struct FacingStep(pub(crate) f32);
 
@@ -211,8 +223,12 @@ fn filter_step(cur: f32, goal: f32, hist: &mut [f32; 4]) -> f32 {
 /// **No range, line-of-sight, faction or is-alive test appears anywhere on this path** — the
 /// `CanInteract` family is ruled out at the client's call graph. The only leash is the window's own
 /// range close, which [`crate::ui_session::close_npc_session_out_of_range`] already owns.
+///
+/// `pub(crate)` rather than `pub(in crate::net)` for one reason: the shuffle latch's *consumer*
+/// lives in `creature_anim`, and the only test that can catch the latch being produced but never
+/// read has to run both systems in one app (`creature_anim::driver::tests`).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
-pub(in crate::net) fn drive_display_facing(
+pub(crate) fn drive_display_facing(
     mut commands: Commands,
     index: Res<GuidIndex>,
     // `Option<Res<_>>` throughout: a headless test mounts this system without the UI plugins.
@@ -315,11 +331,13 @@ pub(in crate::net) fn drive_display_facing(
         if tf.rotation != rot {
             tf.rotation = rot;
         }
-        // The turn-shuffle latch (decision 0123): while the ease still has meaningful yaw to
-        // cover, the anim layer sees a signed turning step; settled drops it below.
-        let remaining = crate::creature_anim::wrap_pi(goal - new);
-        if remaining.abs() > FACING_SETTLED {
-            commands.entity(e).insert(FacingStep(remaining));
+        // The turn-shuffle latch (decision 0123, corrected by 1650): the client tests the yaw
+        // this pump APPLIED (`0x607ed0`'s `param_2`, the increment written to `+0xc94`) against
+        // the symmetric ±[`TURN_LATCH_BAND`] sign band — not the gap still to cover, and not a
+        // "close enough" threshold. Folded because a pump may cross the wrap.
+        let step = crate::creature_anim::wrap_pi(new - cur);
+        if step.abs() > TURN_LATCH_BAND {
+            commands.entity(e).insert(FacingStep(step));
             stepping.insert(e);
         }
         trace_face(e, source, goal, cur, new);
@@ -522,6 +540,93 @@ mod tests {
         assert!(
             crate::creature_anim::wrap_pi(back - 0.0).abs() <= DEAD_BAND,
             "the vendor swings back to its authored heading, got {back}"
+        );
+    }
+
+    /// The turn-shuffle latch's own law (decision 1655): [`FacingStep`] carries **the yaw this
+    /// pump applied** — the client's `0x607ed0` accumulator, the increment it writes to `+0xc94` —
+    /// tested against the symmetric ±[`TURN_LATCH_BAND`] sign band (`[0x80c5c8]`/`[0x80c5c4]`).
+    ///
+    /// The regression this fences is the pair of substitutions 0123 made: the *remaining* gap in
+    /// place of the applied step, and an eyeballed ~3° in place of ±1e-5. Because the ease halves
+    /// its error every pump, "3° still to go" arrives while the body is still visibly moving, so
+    /// the latch released about half-way through every turn and the foot-shuffle never blended in.
+    /// The middle assertion is that exact frame: the latch is still held while the gap left is
+    /// under the old threshold.
+    #[test]
+    fn the_latch_carries_the_step_applied_not_the_gap_remaining() {
+        let mut app = App::new();
+        app.init_resource::<GuidIndex>()
+            .init_resource::<crate::ui_session::InteractNpc>()
+            .add_systems(Update, drive_display_facing);
+        // Us off the vendor's axis: the bearing is +2.601 rad, reached counterclockwise, so every
+        // step is positive — the left turn, and ShuffleLeft (11) downstream.
+        app.world_mut().spawn((
+            SelfPlayer,
+            ActiveMover,
+            Transform::from_translation(wow_to_bevy([0.0, 3.0, 0.0])),
+        ));
+        let npc = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                ObjectStore::default(),
+                Transform {
+                    translation: wow_to_bevy([5.0, 0.0, 0.0]),
+                    rotation: Quat::from_rotation_y(0.0),
+                    ..default()
+                },
+            ))
+            .id();
+        let yaw = |app: &App| yaw_of(app.world().entity(npc).get::<Transform>().unwrap().rotation);
+        let step = |app: &App| app.world().entity(npc).get::<FacingStep>().map(|f| f.0);
+
+        app.update(); // the seeding frame
+        app.world_mut()
+            .resource_mut::<crate::ui_session::InteractNpc>()
+            .0 = Some(npc);
+
+        let goal = 3.0f32.atan2(-5.0);
+        let (mut latched_inside_the_old_band, mut pumps) = (false, 0);
+        for _ in 0..24 {
+            let before = yaw(&app);
+            app.update();
+            let after = yaw(&app);
+            let applied = crate::creature_anim::wrap_pi(after - before);
+            match step(&app) {
+                Some(s) => {
+                    pumps += 1;
+                    assert!(
+                        (s - applied).abs() < 1.0e-6,
+                        "the latch carries the applied step: {s} vs {applied}"
+                    );
+                    assert!(s > 0.0, "a counterclockwise turn latches LEFT: {s}");
+                    if crate::creature_anim::wrap_pi(goal - after).abs() < 0.05 {
+                        latched_inside_the_old_band = true;
+                    }
+                }
+                // Nothing moved this frame, so nothing may be latched.
+                None => assert!(
+                    applied.abs() <= TURN_LATCH_BAND,
+                    "unlatched, but the body moved {applied}"
+                ),
+            }
+        }
+        assert!(
+            (9..=11).contains(&pumps),
+            "this bearing closes in ten pumps, got {pumps}"
+        );
+        assert!(
+            latched_inside_the_old_band,
+            "the latch outlives the old ~3° stand-in — that gap IS the missing half of the shuffle"
+        );
+        assert!(
+            !app.world().entity(npc).contains::<FacingStep>(),
+            "and drops once the body stops moving"
         );
     }
 

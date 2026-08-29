@@ -185,11 +185,27 @@ pub(crate) struct LiquidSurface;
 /// wall, and both look like a hard straight seam across the scene. One A/B now separates them; the
 /// alternative was a screenshot argument. Same shape as `$WOW_NO_PARTICLES` / `$WOW_NO_FFX`.
 ///
-/// Runs on `Added` so it costs one filtered query per frame and catches streamed-in surfaces too
-/// (both spawn paths insert [`LiquidSurface`], MCLQ and WMO alike).
-pub(super) fn hide_liquid_surfaces(mut surfaces: Query<&mut Visibility, Added<LiquidSurface>>) {
+/// **An ordered override, not a second authority** — the shape `apply_self_model_fade` already
+/// uses against the model-`Visibility` authority (`model_render::ModelVisSet`). Every liquid
+/// surface now has a real per-frame `Visibility` owner: an ADT surface is `ExteriorScene`, written
+/// by `exterior_cull::apply_exterior_cull`; a WMO pool carries `WmoGroupVis`, written by
+/// `model_render::visibility::apply_model_visibility`'s `group_only` query. So this runs in
+/// `PostUpdate` **after** both (decision 1652) and wins the frame.
+///
+/// It used to run in `Update` on `Added`, writing `Hidden` exactly once when a surface streamed in.
+/// That was already broken for WMO pools before this change — 0689 gave them `WmoGroupVis` in
+/// `Update`, so the authority re-wrote `Inherited` over the kill-switch on the very next frame and
+/// `$WOW_NO_LIQUID` silently stopped hiding Stormwind's canals and every dungeon pool. Nobody
+/// noticed because the switch's usual subject is a lake. Tagging ADT liquid would have taken the
+/// remaining half the same way; making it an override fixes both at once.
+///
+/// Change-gated, so the steady state is one compare per surface and no change-detection churn —
+/// and the system is `run_if`'d off the env var, so an ordinary run never schedules it at all.
+pub(super) fn hide_liquid_surfaces(mut surfaces: Query<&mut Visibility, With<LiquidSurface>>) {
     for mut vis in &mut surfaces {
-        *vis = Visibility::Hidden;
+        if *vis != Visibility::Hidden {
+            *vis = Visibility::Hidden;
+        }
     }
 }
 
@@ -247,6 +263,22 @@ pub(crate) fn spawn_liquids<'a>(
                     MeshMaterial3d(material),
                     Transform::IDENTITY,
                     LiquidSurface,
+                    // **Open-world liquid is exterior scene** — the reference's ADT liquid
+                    // producer `0x683ab0` is called only from the per-window populate
+                    // `0x682fa0`, exactly like ADT terrain (`0x683bf0`) and doodads
+                    // (`0x683700`), so from inside a cavern the lake overhead draws only where a
+                    // doorway window admits it, and not at all from a sealed room (decision
+                    // 1652). This was 0774's last knowingly-ungated bucket, deferred again by
+                    // 0784 on the belief that liquid "has its own lane" — it does not: nothing
+                    // wrote an ADT surface's `Visibility` at all, so `apply_exterior_cull` is its
+                    // sole authority and the tag is the whole change.
+                    //
+                    // Granularity is already the reference's: one entity per MCNK liquid layer
+                    // (33.333 yd), never the 533 yd tile — the half of the cull that decision
+                    // 0780 is about. The `IDENTITY` transform is not incidental either: MCLQ
+                    // positions are absolute, so the mesh `Aabb` Bevy derives is already the
+                    // world-space box the window test wants.
+                    crate::exterior_cull::ExteriorScene,
                     info,
                     LiquidSoundSource {
                         nibble: lq.sound_nibble,
@@ -632,6 +664,100 @@ mod tests {
                 "{kind:?}: scroll lane and the nibbles that can ask for one must agree"
             );
         }
+    }
+
+    /// One 2×2-vertex MCLQ sheet at `at` — the smallest thing `spawn_liquids` will actually build.
+    fn one_sheet(at: [f32; 3]) -> LiquidMesh {
+        let [x, y, z] = at;
+        LiquidMesh {
+            grid: [2, 2],
+            wet: vec![true],
+            shared: vec![false],
+            positions: vec![
+                [x, y, z],
+                [x + 8.0, y, z],
+                [x, y + 8.0, z],
+                [x + 8.0, y + 8.0, z],
+            ],
+            uvs: vec![[0.0, 0.0]; 4],
+            depths: vec![1.0; 4],
+            indices: vec![0, 1, 2, 1, 3, 2],
+            sound_nibble: 0,
+            material_id: None,
+            kind: LiquidKind::Still,
+        }
+    }
+
+    /// A [`LiquidAssets`] whose only entry is the one the ADT arm asks for — `spawn_liquids`
+    /// `continue`s past a kind whose frames failed to load, so without this the spawn is a no-op
+    /// and the test below would pass on an empty world.
+    fn adt_assets() -> LiquidAssets {
+        LiquidAssets {
+            materials: HashMap::from([(
+                LiquidKey {
+                    kind: LiquidKind::Still,
+                    path: LiquidPath::Adt,
+                    scroll: false,
+                },
+                LiquidEntry {
+                    material: Handle::default(),
+                },
+            )]),
+        }
+    }
+
+    /// **The spawner's half of the indoor water cull** (decision 1652) — and the half no test in
+    /// `exterior_cull` can cover, because that module's harness spawns its own entities and tags
+    /// them itself. `apply_exterior_cull` decides nothing about a surface it never queries, and
+    /// what puts a surface in its query is this tag, applied here. 0780 left exactly this note on
+    /// the terrain cull ("nothing in `apply_exterior_cull` can fix that — it is decided by what the
+    /// spawner tags") and terrain still has no test for it; liquid gets one.
+    ///
+    /// The three companion assertions are the filter `UnownedSceneFilter` actually applies: a
+    /// surface that picked up `ModelPart`, `WmoGroupVis` or `WorldUnit` would be silently dropped
+    /// from the walk and go back to drawing through the ceiling with this test still green.
+    #[test]
+    fn an_adt_liquid_surface_is_tagged_exterior_scene() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.add_plugins(bevy::asset::AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<LiquidMaterial>();
+        let sheets = [one_sheet([100.0, 100.0, 5.0])];
+        let assets = adt_assets();
+        let mut spawned = Vec::new();
+        app.world_mut()
+            .run_system_once(
+                move |mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>| {
+                    let mut ents = Vec::new();
+                    spawn_liquids(
+                        &mut commands,
+                        sheets.iter(),
+                        Some(&assets),
+                        &mut meshes,
+                        &mut ents,
+                    );
+                    ents
+                },
+            )
+            .map(|ents| spawned = ents)
+            .expect("the spawn system ran");
+        assert_eq!(spawned.len(), 1, "one sheet in, one surface out");
+        let e = app.world().entity(spawned[0]);
+        assert!(
+            e.contains::<crate::exterior_cull::ExteriorScene>(),
+            "an open-world liquid surface is exterior scene — untagged, the window cull never \
+             queries it and the lake draws through a sealed ceiling (the director's report)"
+        );
+        assert!(
+            e.contains::<LiquidSurface>(),
+            "…and is still a liquid surface"
+        );
+        // The three exclusions in `UnownedSceneFilter`. An ADT surface must satisfy all of them or
+        // the tag buys nothing.
+        assert!(!e.contains::<crate::model_render::ModelPart>());
+        assert!(!e.contains::<crate::wmo_portal::WmoGroupVis>());
+        assert!(!e.contains::<crate::world_unit::WorldUnit>());
     }
 }
 

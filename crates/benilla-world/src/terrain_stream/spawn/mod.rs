@@ -509,20 +509,48 @@ pub(super) fn spawn_loaded_placements(
                             &m.material_diff_color,
                             &mut ents,
                         );
+                        // Another building's canal is exterior scene like its walls (`0x6856c0`,
+                        // the same per-window populate). **Unconditional, like the walls at the
+                        // `ExteriorScene` site above** — decision 1652's second half, and a
+                        // structural fix with **no shipped symptom**, which is the honest framing.
+                        //
+                        // It used to be tagged only *inside* the `portal_instance` arm below,
+                        // because `WmoGroupVis` carries the instance the camera's-own-building
+                        // exemption is keyed on. That left a pool with NEITHER component — and so
+                        // no `Visibility` authority at all — whenever a placement got no instance
+                        // (`has_portals || m.wmo_id != 0`, ~line 334), while the same placement's
+                        // walls, tagged unconditionally, were window-culled normally.
+                        //
+                        // **That branch is dead on shipped 1.12.1 content** (`cargo run -p
+                        // benilla-formats --example wmo_ownerless_pools`): of 815 roots, 448 have
+                        // no portal graph and exactly ONE has `wmoID == 0` — and that one
+                        // (`pvp_alterac_ent01.wmo`) *does* carry portals. The two conditions never
+                        // coincide, so zero placements reach the hole and none of them carries
+                        // liquid. Kept anyway because it costs nothing and the asymmetry with the
+                        // walls two blocks up was a real defect in the code even where the data
+                        // never exercised it — but it must never be credited with a sighting.
+                        //
+                        // An instance-less placement can never BE the camera's claimed room (the
+                        // interior down-ray resolves through an instance), so there is no
+                        // exemption to lose: the tag alone is right for it, and
+                        // `apply_exterior_cull` is its sole authority exactly as for ADT liquid.
+                        for &e in &ents[first..] {
+                            commands
+                                .entity(e)
+                                .insert(crate::exterior_cull::ExteriorScene);
+                        }
                         if let Some(instance) = p.portal_instance {
                             let groups: Arc<[u16]> = Arc::from([gi as u16].as_slice());
                             for &e in &ents[first..] {
-                                commands.entity(e).insert((
-                                    WmoGroupVis {
-                                        instance,
-                                        groups: groups.clone(),
-                                    },
-                                    // Another building's canal is exterior scene like its walls; the
-                                    // one you are standing in is exempted by instance (0784). Only
-                                    // tagged alongside `WmoGroupVis`, because that component is what
-                                    // carries the instance the exemption is keyed on.
-                                    crate::exterior_cull::ExteriorScene,
-                                ));
+                                // …and where there IS an instance, the pool rides its group with
+                                // the room (0689) and takes the exemption (0784) — which moves it
+                                // out of `apply_exterior_cull`'s query (`Without<WmoGroupVis>`)
+                                // and into the model-visibility authority, the one that can see
+                                // both terms.
+                                commands.entity(e).insert(WmoGroupVis {
+                                    instance,
+                                    groups: groups.clone(),
+                                });
                             }
                         }
                     }

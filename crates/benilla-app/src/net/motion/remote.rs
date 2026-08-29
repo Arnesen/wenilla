@@ -607,22 +607,26 @@ pub(in crate::net) fn extrapolate_remote_units(
         // `0x800/0x1000` → `0x712090`, anims 11/12 — not the movement interp, whose integrator
         // doesn't run flag-less; our display-facing layer models the chase with this latch, the
         // same confirmed outcome. A keyboard turner needs none of it — its TURN flags pick the
-        // shuffle already.) Dropped the frame the yaw settles (the apply snaps the remainder).
-        let step = rm.pending.front().map_or(0.0, |ev| {
-            let grounded_still = rm.flags
-                & (move_flags::ANY_MOVE
-                    | move_flags::TURN_LEFT
-                    | move_flags::TURN_RIGHT
-                    | move_flags::FALLING
-                    | move_flags::SWIMMING)
-                == 0;
-            if grounded_still {
-                wrap_pi(ev.mv.orientation - orientation)
-            } else {
-                0.0
-            }
-        });
-        if step.abs() > super::facing::FACING_SETTLED {
+        // shuffle already.) Dropped the frame the body stops moving.
+        //
+        // **The yaw this frame APPLIED, against the ±1e-5 sign band** — the client's own latch
+        // input and its own band (`0x607ed0` `60843b`–`608473`; decision 1655), not the gap still
+        // to cover measured against an eyeballed ~3°. `facing_lerp` above is what moved it; with
+        // nothing queued it does not move at all, so the `pending` test the old form needed is
+        // carried by the quantity itself.
+        let grounded_still = rm.flags
+            & (move_flags::ANY_MOVE
+                | move_flags::TURN_LEFT
+                | move_flags::TURN_RIGHT
+                | move_flags::FALLING
+                | move_flags::SWIMMING)
+            == 0;
+        let step = if grounded_still {
+            wrap_pi(orientation - rm.orientation)
+        } else {
+            0.0
+        };
+        if step.abs() > super::facing::TURN_LATCH_BAND {
             commands.entity(e).insert(super::FacingStep(step));
         } else if latched {
             commands.entity(e).remove::<super::FacingStep>();
