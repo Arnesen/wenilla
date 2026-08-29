@@ -291,7 +291,10 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     var shadow_lit = 1.0;
     let si = in.uv_b.y;
     if (si >= 0.0) {
-        let mcsh = textureSample(shadow_array, splat_samp, auv, i32(round(si))).r;
+        // `textureSampleLevel`, not `textureSample`: this sits in a per-fragment branch, and WGSL's
+        // uniformity rule (enforced by the browser's compiler, not by naga) forbids the implicit
+        // derivative there. The shadow grid has one mip anyway, so level 0 is the same sample.
+        let mcsh = textureSampleLevel(shadow_array, splat_samp, auv, i32(round(si)), 0.0).r;
         shadow_lit = 1.0 - mcsh;
     }
 

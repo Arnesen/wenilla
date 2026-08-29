@@ -227,11 +227,19 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Sample: the item's array layer through the sampler matching its wrap flags. Both-repeat
     // and both-clamp ride real samplers (exact parity); the rare MIXED batch keeps the repeat
     // sampler plus the half-texel inset clamp on its clamped axis (0763's silhouette clamp,
-    // per axis). Both samples are taken unconditionally — `textureSample` needs uniform
-    // control flow for its derivatives — and the select is per fragment.
+    // per axis). The derivatives are taken unconditionally (see below) and the select
+    // is per fragment.
     var base = vec4<f32>(1.0);
     let wrap_x = (in.word & WORD_WRAP_X) != 0u;
     let wrap_y = (in.word & WORD_WRAP_Y) != 0u;
+    // The samples below sit inside a per-fragment branch (`WORD_TEXTURED` is per vertex), where
+    // WGSL's uniformity rule forbids implicit derivatives — naga lets it through, the browser's
+    // compiler does not. So the derivatives are taken HERE, in uniform flow, and the samples use
+    // `textureSampleGrad`; `mip_bias` folds in as a scale of 2^bias on the footprint, which is
+    // exactly what the bias form does to the LOD.
+    let grad_scale = exp2(view.mip_bias);
+    let uv_dx = dpdx(in.uv) * grad_scale;
+    let uv_dy = dpdy(in.uv) * grad_scale;
     if ((in.word & WORD_TEXTURED) != 0u) {
         let layer = i32(recs[in.word & 0xffffu].x);
         let dims = vec2<f32>(textureDimensions(tex_array).xy);
@@ -248,9 +256,9 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // through its own sampler rather than through `pbr_input_from_standard_material`, which
         // applies the bias for free; a lane that skipped it would blur out of step with the
         // entity path drawing the identical art.
-        let c_repeat = textureSampleBias(tex_array, samp_repeat, in.uv, layer, view.mip_bias);
-        let c_clamp = textureSampleBias(tex_array, samp_clamp, in.uv, layer, view.mip_bias);
-        let c_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias);
+        let c_repeat = textureSampleGrad(tex_array, samp_repeat, in.uv, layer, uv_dx, uv_dy);
+        let c_clamp = textureSampleGrad(tex_array, samp_clamp, in.uv, layer, uv_dx, uv_dy);
+        let c_mixed = textureSampleGrad(tex_array, samp_repeat, uv_mixed, layer, uv_dx, uv_dy);
         if (wrap_x && wrap_y) {
             base = c_repeat;
         } else if (!wrap_x && !wrap_y) {

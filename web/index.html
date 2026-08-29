@@ -6,6 +6,26 @@
   #benilla { display: block; width: 100vw; height: 100vh; }
 </style>
 <script type="importmap">{"imports":{"wasi_snapshot_preview1":"./wasi_stubs.js"}}</script>
+<script>
+  // WGSL compile errors are otherwise invisible: wgpu's browser backend never asks the module for
+  // its compilation info, so Chrome only prints the "[Invalid ShaderModule] … previous error"
+  // cascade. Ask on its behalf and print the real diagnostics — cheap, and only speaks on errors.
+  if (navigator.gpu && window.GPUDevice) {
+    const orig = GPUDevice.prototype.createShaderModule;
+    GPUDevice.prototype.createShaderModule = function (desc) {
+      const m = orig.call(this, desc);
+      m.getCompilationInfo().then((info) => {
+        const errs = info.messages.filter((x) => x.type === 'error');
+        if (!errs.length) return;
+        const lines = (desc.code || '').split('\n');
+        for (const e of errs) {
+          console.error(`WGSL error in ${desc.label || '(unlabeled)'} @${e.lineNum}:${e.linePos}: ${e.message}\n    ${lines[e.lineNum - 1] || ''}`);
+        }
+      });
+      return m;
+    };
+  }
+</script>
 <canvas id="benilla"></canvas>
 <script type="module">
   import init from './benilla_web.js';
