@@ -32,6 +32,9 @@ use benilla_assets::WorldAssets;
 use super::{ClientState, DialogKind, Field, LoginForm};
 
 const SCREEN_Z: i32 = 1100;
+/// `GlueFontDisableSmall`'s color (GlueFonts.xml) — the grey the reference's own
+/// `AccountLoginRealmName` readout draws in.
+const DISABLED_GREY: Color = Color::srgb(0.5, 0.5, 0.5);
 /// `DEFAULT_TOOLTIP_COLOR` (AccountLogin.lua): the edit boxes' backdrop tint (border rgb, bg rgb).
 const BOX_BORDER: Color = Color::srgb(0.8, 0.8, 0.8);
 const BOX_FILL: Color = Color::srgb(0.09, 0.09, 0.09);
@@ -44,8 +47,15 @@ pub(crate) enum LoginAction {
     Login,
     Quit,
     ToggleSave,
-    /// The dialog's one button (Cancel / Okay — [`super::drive_dialog`]'s).
+    /// Open the realmlist editor (decision 1667) — on the button and on the address readout under
+    /// it, so clicking the address you want to change does what it looks like it does.
+    Realmlist,
+    /// The dialog's first button — Cancel on the status dialog, Okay on the other two
+    /// ([`super::drive_dialog`]'s; the ref's `GlueDialogButton1`).
     Dialog,
+    /// The dialog's second button, on the kinds that declare one (`GlueDialogButton2` — Cancel on
+    /// the realmlist editor).
+    Dialog2,
 }
 
 /// Root of the login screen (despawned whole on exit); `with_art` mirrors the select screen's
@@ -73,6 +83,14 @@ pub(super) struct CheckHilight;
 /// The dialog's message text (updated in place on stage changes).
 #[derive(Component)]
 pub(super) struct DialogText;
+/// The dialog's edit box row items — the ref's `GlueDialogEditBox`, painted from
+/// [`super::LoginDialog::edit`] by [`refresh_dialog_box`].
+#[derive(Component, Clone)]
+pub(super) struct DialogEditText;
+/// The realmlist readout under the button — the ref's own `AccountLoginRealmName` slot, rewritten
+/// in place by [`refresh_realmlist`] when the address changes.
+#[derive(Component)]
+pub(super) struct RealmlistReadout;
 
 /// Spawn the screen tree once its prerequisites exist (the select screen's boot-order pattern:
 /// the INITIAL state's `OnEnter` fires before the MPQ chain / booth slots do) — and upgrade an
@@ -89,6 +107,7 @@ pub(super) fn materialize_screen(
     mut add_mats: ResMut<Assets<crate::glue::add_material::AddUiMaterial>>,
     strings: Option<Res<GlueStrings>>,
     form: Res<LoginForm>,
+    realmlist: Res<crate::realmlist::Realmlist>,
     window: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
 ) {
@@ -110,6 +129,7 @@ pub(super) fn materialize_screen(
                     &art,
                     strings.as_deref(),
                     &form,
+                    &realmlist,
                     &window,
                 );
             }
@@ -123,6 +143,7 @@ pub(super) fn materialize_screen(
                     &art,
                     strings.as_deref(),
                     &form,
+                    &realmlist,
                     &window,
                 );
             }
@@ -138,6 +159,7 @@ fn spawn_screen(
     art: &GlueArt,
     strings: Option<&GlueStrings>,
     form: &LoginForm,
+    realmlist: &crate::realmlist::Realmlist,
     window: &Query<&Window, With<PrimaryWindow>>,
 ) {
     let font = wow_font(assets);
@@ -397,6 +419,76 @@ fn spawn_screen(
                 );
             });
 
+        // **The realmlist control** (decision 1667) — benilla's, in the reference's coordinates.
+        //
+        // The bottom-right column of `AccountLogin.xml` is a stack anchored off the Quit button:
+        // TOS sits BOTTOM ← `AccountLoginExitButton`'s TOP at (0, 80), with Credits and Cinematics
+        // above it. Decision 0539 cut all three, so the slot is empty — and the reference hangs
+        // `AccountLoginRealmName` off exactly that button (a 256-wide right-justified
+        // `GlueFontDisableSmall` at TOPRIGHT ← its BOTTOMRIGHT, (−8, −10)), filled in
+        // `AccountLogin_OnShow` from `GetServerName()`. So the authored layout already reserves a
+        // button here with a server readout beneath it; we put ours in that slot rather than
+        // inventing a spot.
+        //
+        // Resolved: Quit is BOTTOMRIGHT (−5, 29) at 150×38, so its top edge is bottom 67 and the
+        // button lands at bottom 67 + 80 = 147, sharing Quit's right offset of 5. The readout's
+        // top is 10 below the button's bottom (bottom 137 → top 768 − 137 = 631) and its right
+        // edge is 8 further in (5 + 8 = 13).
+        //
+        // The caption is a bare literal, deliberately: the reference has no string for this,
+        // because it has no such control. `CHANGE_REALM` was the near miss and is the wrong
+        // word — it is the *character select* screen's button for picking another realm out of a
+        // list already fetched, which is a different act from repointing the client at a different
+        // logon server. "Realmlist" is what the file, the CVar and every private server's setup
+        // page call it, in every locale.
+        ui.spawn((Node {
+            position_type: PositionType::Absolute,
+            right: px(5.0),
+            bottom: px(147.0),
+            ..default()
+        },))
+            .with_children(|c| {
+                let btn = glue_button(
+                    c,
+                    art,
+                    &font,
+                    LoginAction::Realmlist,
+                    "Realmlist",
+                    150.0,
+                    38.0,
+                    GlueBtnKind::Small,
+                    s,
+                );
+                // `$WOW_HOST` owns the session, so the button reads disabled — the ref's own
+                // `Enable()`/`Disable()` split, rendered by `glue_button_visuals`. Clicking it
+                // still explains itself ([`super::login_input`]) rather than doing nothing.
+                if realmlist.pinned_by_env() {
+                    c.commands()
+                        .entity(btn)
+                        .insert(crate::glue::widgets::GlueDisabled(true));
+                }
+            });
+        // `AccountLoginRealmName`'s seat, right-justified by being anchored on its right edge.
+        outlined_text(
+            ui,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(13.0),
+                top: px(631.0),
+                ..default()
+            },
+            (LoginAction::Realmlist, Button),
+            RealmlistReadout,
+            GlueText {
+                text: realmlist.address(),
+                size: 12.0, // GlueFontDisableSmall = GlueFontNormalSmall's 12, in grey
+                color: DISABLED_GREY,
+                wrap: false,
+            },
+            &font,
+            s,
+        );
+
         // The Remember Account Name checkbox (20×20 at the resolved absolute (17, top 653) —
         // the ref anchors it under the Community button we cut; the spot is the same) + its
         // 10 px shadowed gold label at LEFT+24.
@@ -515,6 +607,42 @@ pub(super) fn refresh_boxes(
     );
 }
 
+/// The realmlist readout, rewritten in place when the address changes (the ref's own
+/// `AccountLoginRealmName:SetText`). `sync_outlines` carries the write into the eight outline
+/// copies, so the whole nine-string stack follows.
+///
+/// An unconditional compare rather than a `Res::is_changed` gate: it is one string comparison
+/// against one entity, and the gate would silently depend on the screen tree never being spawned
+/// **after** the last change to the resource — which is exactly what a rebuild on a window resize
+/// does. Cheap beats subtly order-dependent.
+pub(super) fn refresh_realmlist(
+    realmlist: Res<crate::realmlist::Realmlist>,
+    mut texts: Query<&mut Text, With<RealmlistReadout>>,
+) {
+    for mut t in &mut texts {
+        if t.0 != realmlist.address() {
+            t.0 = realmlist.address().to_string();
+        }
+    }
+}
+
+/// Paint the dialog's edit box from [`super::LoginDialog::edit`], through the same
+/// [`paint_glue_field`] the two screen boxes use (decision 0704) — so the realmlist box gets the
+/// identical caret, selection highlight and scrolling.
+///
+/// Runs **after** [`super::drive_dialog`], which is what spawns the box: on the frame a dialog
+/// opens the entities do not exist until that system has run, and painting before it would show
+/// one frame of empty box.
+#[allow(clippy::type_complexity)]
+pub(super) fn refresh_dialog_box(
+    dialog: Res<super::LoginDialog>,
+    mut boxes: Query<(&GlueFieldPart, Option<&mut Text>, &mut Visibility), With<DialogEditText>>,
+) {
+    if dialog.kind.is_some_and(DialogKind::has_edit_box) {
+        paint_glue_field(&dialog.edit, true, boxes.iter_mut());
+    }
+}
+
 /// The checkbox's visuals: the checked overlay tracks the form's save flag; the ADD hover ring
 /// tracks the button's interaction (the checkbox isn't a `GlueBtn`, so the shared pass skips it).
 #[allow(clippy::type_complexity)]
@@ -551,9 +679,21 @@ pub(super) fn refresh_checkbox(
 }
 
 /// Build the dialog tree (the ref's shared `GlueDialog`): the 512-wide `UI-DialogBox` backdrop
-/// centered on the screen, the message (`GlueFontNormalLarge`, wrapping at 440), and the one
-/// `GlueDialogButtonTemplate` 200×40 button — Cancel for the connecting status, Okay for an
-/// error. Content-sized vertically (the ref's own `GlueDialog_OnShow` resize, by layout).
+/// centered on the screen, the message (`GlueFontNormalLarge`, wrapping at 440), an optional edit
+/// box, and one or two `GlueDialogButtonTemplate` 200×40 buttons — Cancel for the connecting
+/// status, Okay for an error, Okay + Cancel over the box for the realmlist editor.
+/// Content-sized vertically (the ref's own `GlueDialog_OnShow` resize, by layout).
+///
+/// The edit box and the second button are both the reference's own (`GlueDialog.lua`'s
+/// `hasEditBox` and `button2`); benilla simply had no dialog that used either until 1667. The two
+/// authored geometries they bring with them: the button pair is Button1 BOTTOMRIGHT ← the
+/// backdrop's BOTTOM at (−6, 16) with Button2 LEFT ← Button1's RIGHT at (13, 0) — a centred pair
+/// with a 13 gap — and the box re-heights the backdrop to
+/// `16 + text + 8 + editbox + 8 + button + 16`, which the column below is already shaped as.
+///
+/// **One stated divergence:** the ref's `GlueDialogEditBox` is 130×32, sized for the short values
+/// its own dialogs ask for. A realmlist is a hostname, so ours is 300 wide inside the same 512
+/// backdrop; the height, insets and border treatment are the login screen's boxes unchanged.
 pub(super) fn spawn_dialog(
     commands: &mut Commands,
     art: &GlueArt,
@@ -565,10 +705,8 @@ pub(super) fn spawn_dialog(
 ) -> Entity {
     let px = |v: f32| Val::Px(v * s);
     let font = wow_font(assets);
-    let caption = match kind {
-        DialogKind::Status => strings.text("CANCEL", "Cancel"),
-        DialogKind::Error => strings.text("OKAY", "Okay"),
-    };
+    let edit_font: Handle<Font> = assets.load("mpq://Fonts/ARIALN.ttf");
+    let (caption, caption2) = kind.buttons(strings);
     commands
         .spawn((
             GlobalZIndex(1200), // over the screen's 1100
@@ -629,18 +767,53 @@ pub(super) fn spawn_dialog(
                     &font,
                     s,
                 );
-                // The one button (GlueDialogButtonTemplate 200×40).
-                glue_button(
-                    b,
-                    art,
-                    &font,
-                    LoginAction::Dialog,
-                    caption,
-                    200.0,
-                    40.0,
-                    GlueBtnKind::Dialog,
-                    s,
-                );
+                // The edit box, on the kinds that declare one (`hasEditBox`).
+                if kind.has_edit_box() {
+                    glue_edit_box(
+                        b,
+                        art,
+                        &edit_font,
+                        (),
+                        DialogEditText,
+                        (300.0, 32.0),
+                        (BOX_BORDER, BOX_FILL),
+                        (15.0, 0.0, 0.0, 5.0), // the login boxes' TextInsets
+                        s,
+                    );
+                }
+                // The buttons (GlueDialogButtonTemplate 200×40) — one centred, or the authored
+                // pair with its 13 gap.
+                b.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: px(13.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    glue_button(
+                        row,
+                        art,
+                        &font,
+                        LoginAction::Dialog,
+                        caption,
+                        200.0,
+                        40.0,
+                        GlueBtnKind::Dialog,
+                        s,
+                    );
+                    if let Some(caption2) = caption2 {
+                        glue_button(
+                            row,
+                            art,
+                            &font,
+                            LoginAction::Dialog2,
+                            caption2,
+                            200.0,
+                            40.0,
+                            GlueBtnKind::Dialog,
+                            s,
+                        );
+                    }
+                });
             });
         })
         .id()

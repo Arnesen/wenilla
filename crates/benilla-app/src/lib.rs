@@ -90,6 +90,7 @@ mod preflight;
 mod probe_shield;
 mod quest_markers;
 mod raid_marks;
+mod realmlist;
 mod run_mode;
 mod screenshot;
 mod shaders;
@@ -576,6 +577,9 @@ pub fn run(build: BuildId) -> AppExit {
     // The video knobs the CVar host writes into (today: `gxVSync`). Before CvarPlugin so the
     // resource exists when `load_config` applies the saved value at Startup.
     .add_plugins(video::VideoPlugin)
+    // The realmlist (decision 1667) — the logon address the login screen edits. Same reason as
+    // VideoPlugin above: it is a CVar knob, so its resource has to exist before `load_config`.
+    .add_plugins(realmlist::RealmlistPlugin)
     // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After
     // UiScriptPlugin only for reading order — its systems gate on the VM existing anyway.
     .add_plugins(cvars::CvarPlugin)

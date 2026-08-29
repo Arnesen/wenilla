@@ -76,6 +76,9 @@ impl Plugin for LoginPlugin {
                         screen::refresh_boxes,
                         screen::refresh_checkbox,
                         drive_dialog,
+                        // Both after `drive_dialog`: it is what spawns the dialog's edit box, and
+                        // what a realmlist Okay changes the address in.
+                        (screen::refresh_dialog_box, screen::refresh_realmlist),
                         crate::glue::art_swaps,
                         crate::glue::glue_button_visuals,
                         crate::glue::sync_outlines,
@@ -138,24 +141,41 @@ impl LoginIntent {
     }
 }
 
-/// Send one login attempt to the parked IO thread, stamped with the current abandon generation.
-fn send_login(
-    intent: &mut LoginIntent,
-    submit: &LoginSubmit,
-    abandon: &LoginAbandon,
-    user: &str,
-    pass: &str,
-    announced: bool,
-) {
-    intent.creds = Some((user.to_string(), pass.to_string()));
-    intent.in_flight = true;
-    intent.announced = announced;
-    intent.retry_at = None;
-    let _ = submit.0.send(LoginRequest {
-        user: user.to_string(),
-        pass: pass.to_string(),
-        generation: abandon.0.load(Ordering::SeqCst),
-    });
+/// **Everything one login attempt is made of**, as a single [`SystemParam`]: the policy's memory,
+/// the channel to the parked IO thread, the abandon generation a Cancel bumps, and — since
+/// decision 1667 — the realmlist it dials.
+///
+/// A bundle rather than four parameters, for `cvars::KnobParams`' reason: adding the realmlist put
+/// [`login_input`] at **seventeen** parameters, one past Bevy's ceiling, and the three systems
+/// that submit were already re-typing the same four names. Now a submit is one call on one param,
+/// and the next thing an attempt needs is one field here instead of a fourth signature to widen.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct Attempt<'w> {
+    pub(super) intent: ResMut<'w, LoginIntent>,
+    submit: Res<'w, LoginSubmit>,
+    abandon: Res<'w, LoginAbandon>,
+    realmlist: Res<'w, crate::realmlist::Realmlist>,
+}
+
+impl Attempt<'_> {
+    /// Send one login attempt to the parked IO thread, stamped with the current abandon
+    /// generation.
+    ///
+    /// The realmlist is read **at submit time** (decision 1667) rather than by the IO thread, so a
+    /// resubmit fired after the player repointed the client dials the new server while an attempt
+    /// already on the wire keeps the one it started with.
+    fn send(&mut self, user: &str, pass: &str, announced: bool) {
+        self.intent.creds = Some((user.to_string(), pass.to_string()));
+        self.intent.in_flight = true;
+        self.intent.announced = announced;
+        self.intent.retry_at = None;
+        let _ = self.submit.0.send(LoginRequest {
+            user: user.to_string(),
+            pass: pass.to_string(),
+            host: self.realmlist.address().to_string(),
+            generation: self.abandon.0.load(Ordering::SeqCst),
+        });
+    }
 }
 
 /// The `LOGIN_STATE_*` glue string for a stage (the connecting dialog's text).
@@ -199,10 +219,8 @@ fn fail_text(strings: &GlueStrings, code: Option<u8>) -> &str {
 /// [`send_login`] with `announced = true`.
 #[allow(clippy::too_many_arguments)]
 fn drive_policy(
-    mut intent: ResMut<LoginIntent>,
+    mut attempt: Attempt,
     mut dialog: ResMut<LoginDialog>,
-    submit: Res<LoginSubmit>,
-    abandon: Res<LoginAbandon>,
     strings: Option<Res<GlueStrings>>,
     time: Res<Time>,
     mut stages: MessageReader<LoginStageMessage>,
@@ -223,8 +241,8 @@ fn drive_policy(
     // The env fast path, once (decision 0539 §3): any of WOW_USER/WOW_PASS/WOW_CHAR explicitly
     // set → auto-submit env-with-defaults, so every probe/smoke/harness invocation keeps working.
     // The login smoke drives its own credentials instead.
-    if !intent.env_read {
-        intent.env_read = true;
+    if !attempt.intent.env_read {
+        attempt.intent.env_read = true;
         // The same fact a lost session asks about (decision 1262) — read from the one place that
         // owns it, so "the harness logs in for us" and "the harness logs back in for us" can never
         // be two different answers.
@@ -238,13 +256,13 @@ fn drive_policy(
             match crate::run_mode::account_guard(&user) {
                 Ok(()) => {
                     info!("login: env fast path — auto-submitting as {user}");
-                    intent.creds = Some((user, pass));
-                    intent.retry_at = Some(now);
+                    attempt.intent.creds = Some((user, pass));
+                    attempt.intent.retry_at = Some(now);
                 }
                 Err(why) if std::env::var_os("WOW_ALLOW_ACCOUNT").is_some() => {
                     warn!("login: {why} — WOW_ALLOW_ACCOUNT is set, going ahead anyway");
-                    intent.creds = Some((user, pass));
-                    intent.retry_at = Some(now);
+                    attempt.intent.creds = Some((user, pass));
+                    attempt.intent.retry_at = Some(now);
                 }
                 Err(why) => {
                     error!("login: REFUSING the env fast path — {why} Set WOW_ALLOW_ACCOUNT=1 if the cross-account login is deliberate.");
@@ -264,13 +282,13 @@ fn drive_policy(
         }
     }
     for msg in failures.read() {
-        intent.in_flight = false;
-        intent.park = IoPark::AtLogin;
+        attempt.intent.in_flight = false;
+        attempt.intent.park = IoPark::AtLogin;
         // A terminal failure names something no resubmit can change (the server requires Warden,
         // say) — show the server's own words and drop the credentials so nothing retries.
         if msg.terminal {
             warn!("login: {}", msg.reason);
-            intent.clear();
+            attempt.intent.clear();
             dialog.open_error(&msg.reason);
             if harness {
                 error!("login: FATAL — terminal login failure with nobody at the keyboard ({}); exiting", msg.reason);
@@ -283,30 +301,30 @@ fn drive_policy(
                 // A refusal: surface it (even on the silent path — the credentials went stale)
                 // and never auto-retry against it.
                 warn!("login: refused (code {code:#04x}) — {}", msg.reason);
-                intent.clear();
+                attempt.intent.clear();
                 dialog.open_error(fail_text(strings, Some(code)));
                 if harness {
                     error!("login: FATAL — refused (code {code:#04x}) and no resubmit can change it; exiting");
                     exit.write(AppExit::error());
                 }
             }
-            None if intent.announced => {
+            None if attempt.intent.announced => {
                 warn!("login: {}", msg.reason);
                 dialog.open_error(fail_text(strings, None));
             }
             None => {
                 // Silent transport failure with pending intent: schedule the paced resubmit.
                 debug!("login: transport failure ({}) — retrying", msg.reason);
-                if intent.creds.is_some() {
-                    intent.retry_at = Some(now + RETRY_DELAY_SECS);
+                if attempt.intent.creds.is_some() {
+                    attempt.intent.retry_at = Some(now + RETRY_DELAY_SECS);
                 }
             }
         }
     }
     for msg in disconnects.read() {
         // The IO thread is heading back to its pre-logon park.
-        intent.park = IoPark::AtLogin;
-        intent.in_flight = false;
+        attempt.intent.park = IoPark::AtLogin;
+        attempt.intent.in_flight = false;
         if msg.session_over {
             // The reference's `DISCONNECTED_FROM_SERVER` (decision 1262): `GlueParent.lua` answers
             // it with `SetGlueScreen("login")` + `GlueDialog_Show("DISCONNECTED")` — the account
@@ -317,32 +335,32 @@ fn drive_policy(
                 "login: {} — session over, back to the login screen",
                 msg.reason
             );
-            intent.clear();
+            attempt.intent.clear();
             dialog.open_error(strings.text("DISCONNECTED", "Disconnected from server"));
             continue;
         }
         // Otherwise the session continues through the park and the re-auth is silent: immediate
         // after a clean logout (the roster IS the select screen the app now shows), paced after a
         // stream death an unattended run must recover from on its own (0065, paced app-side).
-        if intent.creds.is_some() {
+        if attempt.intent.creds.is_some() {
             let delay = if msg.end == benilla_protocol::SessionEnd::LoggedOut {
                 0.0
             } else {
                 RETRY_DELAY_SECS
             };
-            intent.retry_at = Some(now + delay);
+            attempt.intent.retry_at = Some(now + delay);
         }
     }
 
     // The silent (re)submit tick.
-    if intent.park == IoPark::AtLogin
-        && !intent.in_flight
-        && intent.retry_at.is_some_and(|t| now >= t)
+    if attempt.intent.park == IoPark::AtLogin
+        && !attempt.intent.in_flight
+        && attempt.intent.retry_at.is_some_and(|t| now >= t)
     {
-        if let Some((user, pass)) = intent.creds.clone() {
-            send_login(&mut intent, &submit, &abandon, &user, &pass, false);
+        if let Some((user, pass)) = attempt.intent.creds.clone() {
+            attempt.send(&user, &pass, false);
         } else {
-            intent.retry_at = None;
+            attempt.intent.retry_at = None;
         }
     }
 }
@@ -452,10 +470,8 @@ fn login_input(
     mut clipboard: NonSendMut<HostClipboard>,
     raw_handle: Query<&bevy::window::RawHandleWrapper, With<bevy::window::PrimaryWindow>>,
     mut form: ResMut<LoginForm>,
-    mut intent: ResMut<LoginIntent>,
+    mut attempt: Attempt,
     mut dialog: ResMut<LoginDialog>,
-    submit: Res<LoginSubmit>,
-    abandon: Res<LoginAbandon>,
     strings: Option<Res<GlueStrings>>,
     mut sounds: MessageWriter<GlueSound>,
     mut quit: Local<bool>,
@@ -508,6 +524,27 @@ fn login_input(
             LoginAction::FocusAccount | LoginAction::FocusPassword => {} // focused on the press
             LoginAction::Login => do_login = true,
             LoginAction::Quit => do_quit = true,
+            // The realmlist control (1667) — the button and the address readout under it are
+            // the same action, so clicking either opens the editor.
+            LoginAction::Realmlist => {
+                sounds.write(GlueSound("gsClick"));
+                if attempt.realmlist.pinned_by_env() {
+                    // A harness/dev run owns the address for the session (`cvars`' env-override
+                    // law). Say so rather than opening an editor whose Okay would be a silent
+                    // no-op — the trap that shape would set.
+                    dialog.open_error(&format!(
+                        "$WOW_HOST is set for this session, so the realmlist is fixed at {}.",
+                        attempt.realmlist.address(),
+                    ));
+                } else {
+                    dialog.open_realmlist(
+                        // The reference's own registered help text for `realmList`, byte-verified
+                        // in `WoW.exe` beside the CVar's name and default.
+                        "Address of realm list server",
+                        attempt.realmlist.address(),
+                    );
+                }
+            }
             LoginAction::ToggleSave => {
                 form.save = !form.save;
                 // Verbatim ref quirk (`AccountLoginSaveAccountName` OnClick): checked plays the
@@ -521,14 +558,29 @@ fn login_input(
                     save_account("");
                 }
             }
-            LoginAction::Dialog => {} // the dialog driver's
+            // The dialog's own buttons are [`drive_dialog`]'s, and this loop is skipped
+            // entirely while one is open.
+            LoginAction::Dialog | LoginAction::Dialog2 => {}
         }
     }
 
     let mods = textinput::mods_now(&keys);
     let wl = textinput::wayland_display(raw_handle.iter().next());
     for ev in keyboard.read() {
+        // A dialog with an edit box owns the keyboard while it is up — the ref's `GlueDialog` is
+        // `toplevel` with `enableKeyboard="true"`, so the boxes behind it hear nothing. ENTER and
+        // ESCAPE still come back unclaimed; [`drive_dialog`] reads them as its two buttons.
         if dialog_open {
+            if dialog.kind.is_some_and(DialogKind::has_edit_box) {
+                textinput::feed_key(
+                    &mut dialog.edit,
+                    ev,
+                    mods,
+                    &mut clipboard,
+                    wl,
+                    textinput::CharFilter::Any,
+                );
+            }
             continue;
         }
         // The shared law first (editing, caret, selection, the clipboard trio); only what it
@@ -566,7 +618,7 @@ fn login_input(
         do_quit = true;
     }
 
-    if do_login && !intent.in_flight {
+    if do_login && !attempt.intent.in_flight {
         // The ref's own guards: empty account / empty password get their dialog, no wire.
         if form.account.text.is_empty() {
             dialog.open_error(strings.text("LOGIN_ENTER_NAME", "Please enter your account name."));
@@ -584,7 +636,7 @@ fn login_input(
             let (user, pass) = (form.account.text.clone(), form.password.text.clone());
             form.password.set_text("");
             dialog.open_status(strings.text("LOGIN_STATE_CONNECTING", "Connecting"));
-            send_login(&mut intent, &submit, &abandon, &user, &pass, true);
+            attempt.send(&user, &pass, true);
         }
     }
     if do_quit && !*quit {
@@ -604,9 +656,17 @@ fn login_input(
 /// going missing again. It went missing once already, and nothing but an eye noticed: the box's
 /// `caret_shown` simply never left its `true` default, so the login caret was the one glue caret
 /// that sat solid.
-fn tick_login_caret(mut form: ResMut<LoginForm>, time: Res<Time>) {
+///
+/// **A dialog with an edit box takes the focus with the keys** (1667): its box blinks and the
+/// form's stops, so the screen never shows two live carets at once. Every other dialog leaves the
+/// form's caret running — a dialog eats the keys, not the clock.
+fn tick_login_caret(mut form: ResMut<LoginForm>, mut dialog: ResMut<LoginDialog>, time: Res<Time>) {
     let dt = time.delta_secs();
-    textinput::tick_caret(form.focused(), true, dt);
+    let in_dialog = dialog.kind.is_some_and(DialogKind::has_edit_box);
+    textinput::tick_caret(form.focused(), !in_dialog, dt);
+    if in_dialog {
+        textinput::tick_caret(&mut dialog.edit, true, dt);
+    }
 }
 
 /// Editing the account box away from the saved name clears the save + unchecks (the ref's
@@ -632,13 +692,45 @@ fn drive_quit(arm: Option<Res<QuitArm>>, time: Res<Time>, mut exit: MessageWrite
 
 // ── The GlueDialog (connecting / error) ──────────────────────────────────────────────────────────
 
-/// Which dialog is up: the connecting status (Cancel button, text driven by the stages) or an
-/// error (Okay button).
+/// Which dialog is up: the connecting status (Cancel button, text driven by the stages), an
+/// error (Okay button), or the realmlist editor (Okay + Cancel over an edit box).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DialogKind {
     Status,
     Error,
+    /// The realmlist editor (decision 1667) — the reference's `GlueDialog` `hasEditBox` shape,
+    /// which is how the shipped dialog asks for a typed value (`GlueDialog.lua`: it shows
+    /// `GlueDialogEditBox` and re-heights the box to
+    /// `16 + text + 8 + editbox + 8 + button + 16`). The reference never opens this particular
+    /// dialog — it has no realmlist UI at all — but the widget is its own.
+    Realmlist,
 }
+
+impl DialogKind {
+    /// Whether this dialog carries the ref's `GlueDialogEditBox` (its `hasEditBox` flag).
+    pub(super) fn has_edit_box(self) -> bool {
+        matches!(self, DialogKind::Realmlist)
+    }
+
+    /// `(button1, button2)` captions — `GlueDialogTypes`' own two fields. A `None` second button
+    /// is the ref's centred single-button layout; `Some` is its BOTTOMRIGHT/LEFT pair.
+    pub(super) fn buttons(self, strings: &GlueStrings) -> (&str, Option<&str>) {
+        match self {
+            DialogKind::Status => (strings.text("CANCEL", "Cancel"), None),
+            DialogKind::Error => (strings.text("OKAY", "Okay"), None),
+            DialogKind::Realmlist => (
+                strings.text("OKAY", "Okay"),
+                Some(strings.text("CANCEL", "Cancel")),
+            ),
+        }
+    }
+}
+
+/// What the realmlist dialog says when the box holds something that is not an address. It replaces
+/// the prompt in place and **leaves the typed text alone**, so the fix is an edit rather than a
+/// retype — the reason a bad value does not close the dialog or become an error dialog of its own.
+const REALMLIST_BAD: &str =
+    "That is not a server address.\nTry  logon.example.org  or  127.0.0.1:3724";
 
 /// The login screen's one dialog (the ref's shared `GlueDialog`): kind + text; the driver spawns/
 /// despawns the tree (respawning on a kind change — the button caption differs) and updates the
@@ -649,6 +741,11 @@ pub(crate) struct LoginDialog {
     pub(super) text: String,
     pub(super) dirty: bool,
     pub(super) root: Option<Entity>,
+    /// The ref's `GlueDialogEditBox` — a real [`EditBoxState`] like the two on the screen behind
+    /// it, so the realmlist box gets the same caret, selection, Ctrl+A and clipboard law
+    /// (decision 0704). Only meaningful while a [`DialogKind::has_edit_box`] dialog is up; it is
+    /// rebuilt from the current value on every open, so a cancelled edit leaves nothing behind.
+    pub(super) edit: EditBoxState,
     /// The kind the spawned tree was built for.
     spawned: Option<DialogKind>,
     /// The glue scale the spawned tree was built at — a resize rebuilds it.
@@ -663,6 +760,18 @@ impl LoginDialog {
     fn open_error(&mut self, text: &str) {
         self.kind = Some(DialogKind::Error);
         self.set_text(text);
+    }
+    /// Open the realmlist editor over `current`, with the caret at the end of it and the whole
+    /// value selected — the reference's `hasEditBox` dialogs open ready to be typed over, and a
+    /// player changing servers is replacing the address far more often than editing it.
+    fn open_realmlist(&mut self, prompt: &str, current: &str) {
+        self.kind = Some(DialogKind::Realmlist);
+        self.edit = textinput::field(crate::realmlist::MAX_LETTERS, false);
+        self.edit.set_text(current);
+        // `HighlightText(0, -1)` — the client's own select-all (`0x77cca0`), which resets the
+        // blink on its way so the box opens on a solid caret.
+        self.edit.highlight_text(0, -1);
+        self.set_text(prompt);
     }
     fn set_text(&mut self, text: &str) {
         if self.text != text {
@@ -686,6 +795,8 @@ fn drive_dialog(
     mut commands: Commands,
     mut dialog: ResMut<LoginDialog>,
     mut intent: ResMut<LoginIntent>,
+    mut realmlist: ResMut<crate::realmlist::Realmlist>,
+    mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     abandon: Res<LoginAbandon>,
     art: Res<crate::glue::art::GlueArt>,
     assets: Res<AssetServer>,
@@ -723,6 +834,7 @@ fn drive_dialog(
             &dialog.text,
             s,
         ));
+        dialog.edit.reset_blink();
         dialog.spawned = Some(kind);
         dialog.spawned_s = s;
         dialog.dirty = false;
@@ -735,19 +847,36 @@ fn drive_dialog(
         dialog.dirty = false;
     }
 
-    // The one button (or its keys).
-    let mut pressed = buttons
-        .iter()
-        .any(|(e, a)| matches!(a, LoginAction::Dialog) && clicks.hit(e));
-    if keys.just_pressed(KeyCode::Escape) {
-        pressed = true;
+    // The buttons (or their keys). Button 1 is the affirmative one on every kind — Cancel on
+    // the status dialog, Okay on the other two — and button 2 exists only where the kind declares
+    // it. ENTER confirms, ESCAPE dismisses; on a one-button dialog they are the same button.
+    let hit = |want: LoginAction| buttons.iter().any(|(e, a)| *a == want && clicks.hit(e));
+    let enter = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
+    let escape = keys.just_pressed(KeyCode::Escape);
+    let button1 = hit(LoginAction::Dialog)
+        || match kind {
+            // The status dialog's one button IS Cancel, so ESCAPE is it.
+            DialogKind::Status => escape,
+            DialogKind::Error => escape || enter,
+            DialogKind::Realmlist => enter,
+        };
+    let button2 = hit(LoginAction::Dialog2) || (kind == DialogKind::Realmlist && escape);
+
+    if kind == DialogKind::Realmlist && button1 {
+        // Okay: take the typed address, or say why it cannot be taken and stay open with the text
+        // as typed — the fix is then an edit, not a retype.
+        let typed = dialog.edit.text.clone();
+        if accept_realmlist(&typed, &mut realmlist, script.as_deref_mut()) {
+            dialog.close();
+            if let Some(root) = dialog.root.take() {
+                commands.entity(root).despawn();
+            }
+        } else {
+            dialog.set_text(REALMLIST_BAD);
+        }
+        return;
     }
-    if kind == DialogKind::Error
-        && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
-    {
-        pressed = true;
-    }
-    if pressed {
+    if button1 || button2 {
         if kind == DialogKind::Status {
             // Cancel: the next stage boundary discards the attempt; a canceled manual attempt
             // must not silently resubmit later.
@@ -760,6 +889,45 @@ fn drive_dialog(
             commands.entity(root).despawn();
         }
     }
+}
+
+/// Take the realmlist dialog's Okay: normalize what was typed, point the session at it, and mirror
+/// it into the `realmList` CVar so it is still there next launch. `false` = the box holds nothing
+/// usable and the caller should keep the dialog open.
+///
+/// The persistence leg is `char_select`'s `lastCharacterIndex` pattern exactly (1131/1293): an
+/// **engine-side** write rides the change queue like a Lua `SetCVar`, so `cvars::sync_cvars` folds
+/// it into the knob and marks the file dirty, and `save_config` writes `config.toml`. A write to a
+/// name the VM has not registered yet is a deliberate silent no-op there, so this reports that
+/// case rather than claiming a save that did not happen — the **session** value stands either way,
+/// which is the half that matters for the login about to be attempted.
+fn accept_realmlist(
+    typed: &str,
+    realmlist: &mut crate::realmlist::Realmlist,
+    script: Option<&mut benilla_ui::script::UiScript>,
+) -> bool {
+    let Some(address) = crate::realmlist::normalize(typed) else {
+        return false;
+    };
+    realmlist.set(&address);
+    let name = crate::realmlist::CVAR_REALMLIST;
+    match script {
+        Some(script) => {
+            script.set_cvar_engine(name, &address);
+            if script.cvar(name).is_some() {
+                info!("login: realmlist -> {address}");
+            } else {
+                warn!(
+                    "login: realmlist -> {address} for this session, but the VM has not registered \
+                     {name} yet, so it was not saved"
+                );
+            }
+        }
+        None => {
+            warn!("login: realmlist -> {address} for this session only — no UI VM to persist it")
+        }
+    }
+    true
 }
 
 // ── The saved account name (decision 0539 §4) ────────────────────────────────────────────────────
@@ -811,15 +979,18 @@ mod tests {
     /// Stand `drive_policy` up on its own with the env fast path already spent, so the policy
     /// under test is the disconnect arm and nothing else — and so an ambient `WOW_USER` in
     /// whatever shell runs the suite cannot seed credentials behind the assertions.
-    fn policy_app() -> App {
+    fn policy_app() -> (App, crossbeam_channel::Receiver<LoginRequest>) {
         let (tx, rx) = crossbeam_channel::unbounded();
-        // Held for the App's life: a dropped receiver would turn every submit into an `Err` and
-        // hide a policy that sent one.
-        std::mem::forget(rx);
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<LoginIntent>()
             .init_resource::<LoginDialog>()
+            // Literal, not Default: `Realmlist::default()` reads `$WOW_HOST`, and every probe
+            // recipe in this repo exports it — a suite run from such a shell would otherwise
+            // assert against whatever that shell happened to be pointing at.
+            .insert_resource(crate::realmlist::Realmlist::unpinned(
+                crate::realmlist::DEFAULT_REALMLIST,
+            ))
             .insert_resource(LoginSubmit(tx))
             .insert_resource(LoginAbandon(std::sync::Arc::new(
                 std::sync::atomic::AtomicU64::new(0),
@@ -829,7 +1000,10 @@ mod tests {
             .add_message::<DisconnectedMessage>()
             .add_systems(Update, drive_policy);
         app.world_mut().resource_mut::<LoginIntent>().env_read = true;
-        app
+        // The receiver is RETURNED rather than leaked: a dropped one turns every submit into an
+        // `Err` and hides a policy that sent one, and holding it is also what lets a test read
+        // back the request that went out.
+        (app, rx)
     }
 
     /// **A lost session does not log itself back in** (decision 1262).
@@ -842,7 +1016,7 @@ mod tests {
     /// one-button dialog, and retries nothing.
     #[test]
     fn a_lost_session_clears_the_credentials_and_shows_the_dialog() {
-        let mut app = policy_app();
+        let (mut app, _requests) = policy_app();
         app.world_mut().resource_mut::<LoginIntent>().creds = Some(("one".into(), "pone".into()));
         app.world_mut().write_message(DisconnectedMessage {
             reason: "disconnected: world stream closed: failed to fill whole buffer".into(),
@@ -870,7 +1044,7 @@ mod tests {
     /// select the player asked for. Breaking this would strand `/logout` on the login screen.
     #[test]
     fn a_logout_teardown_still_relists_at_once() {
-        let mut app = policy_app();
+        let (mut app, _requests) = policy_app();
         app.world_mut().resource_mut::<LoginIntent>().creds = Some(("one".into(), "pone".into()));
         app.world_mut().write_message(DisconnectedMessage {
             reason: "logged out".into(),
@@ -899,7 +1073,7 @@ mod tests {
     /// the message, so the policy honours it without re-reading the environment.
     #[test]
     fn an_unattended_run_still_reconnects_on_its_own() {
-        let mut app = policy_app();
+        let (mut app, _requests) = policy_app();
         app.world_mut().resource_mut::<LoginIntent>().creds =
             Some(("probe1".into(), "pprobe1".into()));
         app.world_mut().write_message(DisconnectedMessage {
@@ -917,6 +1091,111 @@ mod tests {
             "paced by the flat 3 s off a zeroed clock, not fired on the spot",
         );
         assert!(app.world().resource::<LoginDialog>().kind.is_none());
+    }
+
+    /// **The submitted attempt dials the configured realmlist** (decision 1667) — the whole
+    /// point of the setting. Before this, the address was latched out of `$WOW_HOST` once at
+    /// process start and the request had no say in it; now the request carries it, so a change
+    /// made between attempts is the one the next attempt uses.
+    #[test]
+    fn a_submitted_attempt_carries_the_configured_realmlist() {
+        let (mut app, requests) = policy_app();
+        app.world_mut()
+            .insert_resource(crate::realmlist::Realmlist::unpinned(
+                "logon.example.org:3725",
+            ));
+        // Credentials pending with the retry due: the policy's silent submit tick.
+        {
+            let mut intent = app.world_mut().resource_mut::<LoginIntent>();
+            intent.creds = Some(("one".into(), "pone".into()));
+            intent.retry_at = Some(0.0);
+        }
+        app.update();
+
+        let sent = requests.try_recv().expect("the policy submitted");
+        assert_eq!(sent.user, "one");
+        assert_eq!(
+            sent.host, "logon.example.org:3725",
+            "the attempt dials what the realmlist says, not a value latched at spawn",
+        );
+
+        // And a change between attempts is picked up by the next one, with no relaunch.
+        app.world_mut()
+            .insert_resource(crate::realmlist::Realmlist::unpinned(
+                "elsewhere.example.org",
+            ));
+        {
+            let mut intent = app.world_mut().resource_mut::<LoginIntent>();
+            intent.in_flight = false;
+            intent.retry_at = Some(0.0);
+        }
+        app.update();
+        assert_eq!(
+            requests.try_recv().expect("resubmitted").host,
+            "elsewhere.example.org",
+        );
+    }
+
+    /// The dialog's Okay: what the box holds becomes the session's address, including the
+    /// `realmlist.wtf` line a player pastes off a server's setup page. No VM here, so the
+    /// persistence leg is the `None` arm — the session value is what this asserts, and it is the
+    /// half the next login attempt reads.
+    #[test]
+    fn the_realmlist_dialog_takes_what_was_typed() {
+        let mut realmlist = crate::realmlist::Realmlist::unpinned("localhost");
+        assert!(accept_realmlist(
+            r#"  SET realmlist "logon.example.org"  "#,
+            &mut realmlist,
+            None,
+        ));
+        assert_eq!(realmlist.address(), "logon.example.org");
+    }
+
+    /// …and a box holding something that is not an address changes nothing and reports it, so the
+    /// caller keeps the dialog open over the text as typed rather than closing on a silent no-op.
+    #[test]
+    fn a_bad_address_leaves_the_realmlist_alone() {
+        let mut realmlist = crate::realmlist::Realmlist::unpinned("localhost");
+        for typed in ["", "   ", "logon.example.org and more", "host:notaport"] {
+            assert!(
+                !accept_realmlist(typed, &mut realmlist, None),
+                "{typed:?} is not an address",
+            );
+            assert_eq!(realmlist.address(), "localhost");
+        }
+    }
+
+    /// The dialog kinds' own shape: only the realmlist editor carries the ref's `hasEditBox`, and
+    /// only it declares a second button. The caret clock and the keyboard routing both branch on
+    /// the first of those, and `spawn_dialog` lays out from the second.
+    #[test]
+    fn only_the_realmlist_dialog_has_a_box_and_two_buttons() {
+        let strings = GlueStrings::default();
+        assert!(!DialogKind::Status.has_edit_box());
+        assert!(!DialogKind::Error.has_edit_box());
+        assert!(DialogKind::Realmlist.has_edit_box());
+        assert_eq!(DialogKind::Status.buttons(&strings), ("Cancel", None));
+        assert_eq!(DialogKind::Error.buttons(&strings), ("Okay", None));
+        assert_eq!(
+            DialogKind::Realmlist.buttons(&strings),
+            ("Okay", Some("Cancel")),
+        );
+    }
+
+    /// Opening the editor seats the current address in the box, selected whole — so typing a new
+    /// server replaces the old one instead of appending to it.
+    #[test]
+    fn opening_the_editor_preselects_the_current_address() {
+        let mut dialog = LoginDialog::default();
+        dialog.open_realmlist("Address of realm list server", "logon.example.org");
+        assert_eq!(dialog.kind, Some(DialogKind::Realmlist));
+        assert_eq!(dialog.edit.text, "logon.example.org");
+        assert_eq!(
+            dialog.edit.selected_text().as_deref(),
+            Some("logon.example.org")
+        );
+        assert_eq!(dialog.edit.max_letters, crate::realmlist::MAX_LETTERS);
+        assert!(!dialog.edit.password, "an address is not a secret");
     }
 
     /// The code→string map quotes the client's own strings for the vmangos-verified rows.
@@ -962,6 +1241,10 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<LoginForm>()
+            // The clock now asks which box owns the focus (1667): a dialog with an edit box takes
+            // it. No dialog is open here, so the form's box keeps it — which is the case this
+            // asserts.
+            .init_resource::<LoginDialog>()
             .add_systems(Update, tick_login_caret);
 
         let past_the_period = |app: &mut App| {

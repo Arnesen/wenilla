@@ -719,6 +719,10 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
 /// A glue-panel button (Accept/Back/Enter World/…): the real `Glue-Panel-Button` art with its
 /// additive hover sheen and a caption that whitens on hover (the ref's `HighlightFont`);
 /// plain-fill fallback. Art states + caption color are driven by [`super::glue_button_visuals`].
+///
+/// Returns the button's entity, so a screen can reach back into what it just built — the login
+/// screen marks its realmlist button [`GlueDisabled`] when `$WOW_HOST` owns the session (1667).
+/// Ignoring the return is the norm; nothing is `#[must_use]`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn glue_button<A: Component>(
     parent: &mut ChildSpawnerCommands,
@@ -730,7 +734,7 @@ pub(crate) fn glue_button<A: Component>(
     h: f32,
     kind: GlueBtnKind,
     s: f32,
-) {
+) -> Entity {
     let px = |v: f32| Val::Px(v * s);
     let mut b = parent.spawn((
         action,
@@ -797,6 +801,7 @@ pub(crate) fn glue_button<A: Component>(
             s,
         );
     });
+    b.id()
 }
 
 #[cfg(test)]

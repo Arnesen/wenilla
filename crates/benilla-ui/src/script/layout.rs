@@ -195,11 +195,11 @@ fn region_node_hash(data: &RegionData) -> u64 {
 /// leaves the axis at zero — which is the client's answer too when a texture has no `CGxTex*`
 /// at all.
 ///
-/// **This is the texture half of 1349 §4 only.** A `CSimpleFontString`'s span is likewise derived
-/// (its measured extent, floored at one unit — `0x772930`), and our floor is still the zero-span
-/// collapse the sweep applies below; that half, and deleting the owner-edge fallback the derived
-/// spans make redundant, stay 1349's own arc.
-fn content_span(
+/// This is the TEXTURE half. A `CSimpleFontString`'s span is derived the same way and lives in
+/// the sweep itself, because it needs the measure the sweep already folds in
+/// ([`FONTSTRING_MIN_SPAN`]). Between them they are what let the owner-edge fallback go
+/// (decision 1664): a region's span comes from its content, never from the frame it hangs on.
+pub(super) fn content_span(
     data: &RegionData,
     probe: Option<&crate::script::TextureSizeProbe>,
 ) -> Option<(f32, f32)> {
@@ -223,6 +223,14 @@ pub(super) fn texel_span(
 /// The edge of the surface `CSimpleTexture::SetTexture(const CImVector*)` generates for the colour
 /// form — 64 texels, `0x44a900` stamping `[tex+0x144] = [tex+0x148] = 8` (decision 1349 §1).
 const SOLID_TEXTURE_TEXELS: f32 = 8.0;
+
+/// The floor under a **FontString's** derived span, in FrameXML units —
+/// `CSimpleFontString::GetWidth 0x772930` / `GetHeight 0x772a60` end
+/// `fld 1-unit; fcomp candidate; test ah,0x5; jp` and return the floor when the candidate is
+/// smaller (wow-re `region-size-fallback.md` §3, `tooltip-blank-line-height.md` §3). One unit,
+/// not one line: the reference's own blank tooltip spacer is `" \n"` — a real one-line string —
+/// and this floor is what a *genuinely* empty string reads back as, never `0.0`.
+pub(super) const FONTSTRING_MIN_SPAN: f32 = 1.0;
 
 /// [`LayoutScope::node_of`] holds one roster index per id, and the two rosters are separate
 /// (`plan` for frames, `regions` for regions) — this bit says which one. Node counts run in the
@@ -1126,28 +1134,9 @@ impl UiScript {
                 if prof {
                     n_regions_swept += 1;
                 }
-                // An owner with NO resolved rect does not disqualify its regions. `owner_rect`
-                // is only the fallback for the axes this region's own anchors do not pin (see the
-                // two `axis(..)` calls below) — a region anchored fully to some OTHER frame needs
-                // nothing from its owner, and the reference resolves it.
-                //
-                // Skipping here made a whole shape silently invisible: a bare container frame
-                // (`CreateFrame("Frame", n, UIParent)` with no size and no SetPoint) holding a
-                // region anchored elsewhere. That is ordinary addon code — MapCoords builds three
-                // of them, and its world-map coordinate readout computed the right string every
-                // frame and was never positioned, with no error anywhere.
-                //
-                // It is only the FALLBACK, though, and an owner with no rect cannot supply one: an
-                // unpinned axis on an unpositioned owner has nothing to fall back TO, and the
-                // region is unresolvable exactly as its owner is. Standing a zero rect in there
-                // instead put the region at the SCREEN ORIGIN, where a template's sibling-chained
-                // textures resolve off it into real on-screen geometry — the stray dropdown capsule
-                // at the bottom of the screen when the social pane opened (B264:
-                // `BenillaFriendsDropDown` carries no anchors, exactly as the reference's
-                // `FriendsDropDown` does, and the reference draws nothing). `None` keeps the
-                // MapCoords fix — a region its own anchors fully pin never consults this — without
-                // inventing a position for a frame that has none.
-                let owner_rect = resolved.get(&owner).copied();
+                // The owner supplies the region's SCALE and nothing else. It used to supply
+                // fallback edges too; it does not any more (decision 1664) — see the `axis`
+                // closure below for why, and what the two shapes that leaned on it get instead.
                 let scale = arena.frame(owner).map(|f| f.effective_scale).unwrap_or(1.0);
                 // A FontString with no explicit height takes its host-measured wrapped size
                 // (the measure round-trip — the client's layout↔font-engine seam).
@@ -1181,6 +1170,18 @@ impl UiScript {
                     if width == 0.0 {
                         width = m.w;
                     }
+                }
+                // …and then the FLOOR. `CSimpleFontString::GetWidth 0x772930` takes the
+                // authored value when it is not exactly `0.0` and the measured extent otherwise,
+                // then returns `max(candidate, ONE FrameXML unit)` — the floor sits past the
+                // `jp 0x772957` that skips the measure, so it applies to BOTH legs. `0x772a60` is
+                // the identical body for height. **A FontString's span is therefore never `0.0`**
+                // (wow-re `region-size-fallback.md` §3), which is what makes a single-anchored
+                // FontString always resolve — and what retires the zero-span collapse this sweep
+                // used to apply in the `axis` closure below.
+                if is_fontstring {
+                    width = width.max(FONTSTRING_MIN_SPAN);
+                    height = height.max(FONTSTRING_MIN_SPAN);
                 }
                 // A TEXTURE's unset axis is the client's *other* content-derived span: the art's
                 // own texel extent ([`content_span`]). It is the same shape as the FontString
@@ -1220,43 +1221,38 @@ impl UiScript {
                     // on a performance fix.
                     (id != SCREEN).then(|| solver.rect(id)).flatten()
                 });
-                // Unpinned edges: textures inherit the owner's edge (the v1 region model,
-                // decision 0068). A FONTSTRING's implicit extent is its measured TEXT, and
-                // empty/unmeasured text measures zero — so an unpinned edge COLLAPSES onto its
-                // pinned opposite (a zero span), never onto the owner's edge. The owner
-                // fallback there stretched an empty tooltip line to the plate's bottom, and
-                // the line chain (each line anchors to the previous line's resolved bottom)
-                // marched every later line out of the plate. An axis with NO pinned edge keeps
-                // the owner fallback (nothing to collapse onto).
+                // **An axis resolves, or the region does not** — there is no owner-edge
+                // fallback and no zero-span collapse (decision 1664, from wow-re's byte-verified
+                // `region-size-fallback.md` §7). A complete memory-operand enumeration of the real
+                // resolver core `[0x7671a0, 0x76761f)` finds no parent or owner pointer in it at
+                // all: the only fallbacks are the object's own nine anchor slots and
+                // `combineEdge`/`combineCenter` over its own opposite edge/centre ± its own size.
+                // `assemble 0x767a20` returns 0 the moment any edge is still UNSET, and
+                // `0x768d20` latches the region unresolvable.
                 //
-                // `None` = this axis needs the owner and the owner has no rect (above): the region
-                // is unresolvable, like its owner.
+                // The two shapes that leaned on the fallback both have their own answer now, which
+                // is why deleting it is a fidelity fix and not a hole:
                 //
-                // **The owner fallback is OURS, not the client's** (decision 1349, from wow-re's
-                // byte-verified `region-size-fallback.md`): a complete operand enumeration of the
-                // real resolver `[0x7671a0, 0x76761f)` finds no parent pointer in it at all. The
-                // client reaches the same answer for the case that matters — a region with a parent
-                // and NO anchors — at *attach* time instead, via an implicit `SetAllPoints(parent)`
-                // (`0x7701c0` / `0x771480`), and reaches a DIFFERENT answer for every other shape,
-                // because its size getters are virtual and content-derived (see `layout::size_span`).
-                // That is why an authored-zero-width texture with one anchor resolves to its OWNER's
-                // width here and to 8 points there. 1349 §4 carries the replacement and its scope.
-                let axis = |lo: Option<f32>,
-                            hi: Option<f32>,
-                            owner: Option<(f32, f32)>|
-                 -> Option<(f32, f32)> {
-                    match (is_fontstring, lo, hi) {
-                        (true, Some(l), None) => Some((l, l)),
-                        (true, None, Some(h)) => Some((h, h)),
-                        (_, Some(l), Some(h)) => Some((l, h)),
-                        _ => {
-                            let (olo, ohi) = owner?;
-                            Some((lo.unwrap_or(olo), hi.unwrap_or(ohi)))
-                        }
+                // * **No anchors at all.** The client anchors those at CREATION, per region type —
+                //   a texture gets `SetAllPoints(parent)`, a FontString one justify-selected
+                //   `SetPoint` — so by the time the resolver sees them they are pinned like
+                //   anything else ([`super::region::implicit_creation_anchor`], decision 1310).
+                //   The ones that reach here still unanchored are the shapes the reference leaves
+                //   rect-less too: a templateless `CreateTexture`, a title region, a plain frame.
+                // * **A pinned edge with a zero span.** The span is content-derived on both region
+                //   classes — the texture's texel extent above, the FontString's measured extent
+                //   floored at one unit — so `combineEdge`'s zero-span leg is nearly unreachable
+                //   for a region at all (`region-size-fallback.md` §4). What is left is a texture
+                //   with no art whatever, which the reference resolves to nothing and draws as a
+                //   degenerate all-zero quad.
+                let axis = |lo: Option<f32>, hi: Option<f32>| -> Option<(f32, f32)> {
+                    match (lo, hi) {
+                        (Some(l), Some(h)) => Some((l, h)),
+                        _ => None,
                     }
                 };
-                let vertical = axis(edges[0], edges[2], owner_rect.map(|o| (o.bottom, o.top)));
-                let horizontal = axis(edges[1], edges[3], owner_rect.map(|o| (o.left, o.right)));
+                let vertical = axis(edges[0], edges[2]);
+                let horizontal = axis(edges[1], edges[3]);
                 let (Some((bottom, top)), Some((left, right))) = (vertical, horizontal) else {
                     // Unresolvable: drop any rect it used to have, the way the frame pass does —
                     // a region that stops resolving must stop drawing, not keep a stale position.

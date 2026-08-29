@@ -2,7 +2,8 @@
 //!
 //! [`spawn_net`] starts a read thread with **two park points** (decisions 0193 + 0539): it first
 //! parks **pre-logon** on the credentials channel — the login screen's pause — then, once a
-//! [`LoginRequest`] walks logon → realm → world handshake (emitting [`SessionEvent::LoginStage`]s,
+//! [`LoginRequest`] (credentials *and* the realmlist to dial) walks logon → realm → world
+//! handshake (emitting [`SessionEvent::LoginStage`]s,
 //! and [`SessionEvent::LoginFailed`] + re-park on any pre-roster failure), it **parks at character
 //! select**: it emits the roster as a [`SessionEvent::CharacterList`] and blocks until the app
 //! answers with a guid over the pick channel. The pick sends `CMSG_PLAYER_LOGIN`, and the thread
@@ -78,6 +79,12 @@ pub(crate) fn inbound_census() -> (u64, Option<u64>) {
 pub(crate) struct LoginRequest {
     pub(crate) user: String,
     pub(crate) pass: String,
+    /// The realmlist to dial, `host[:port]` (decision 1667). **Per-attempt, exactly like the
+    /// credentials beside it** — the login screen can now repoint the client between attempts, and
+    /// an address travelling with its attempt means an edit made mid-dial cannot silently retarget
+    /// the connection already in flight. It is also the only shape under which the abandon
+    /// generation stays meaningful: what a cancel abandons is *this* attempt, at *that* server.
+    pub(crate) host: String,
     pub(crate) generation: u64,
 }
 
@@ -105,11 +112,14 @@ pub(crate) struct PingClock {
 /// during an outage can't flood the log. Reset when a fresh writer arrives.
 const SEND_WARN_CAP: u32 = 8;
 
-/// Connection parameters, from env (`WOW_HOST` as `host[:port]`, `WOW_CHAR`). Credentials are NOT here anymore
-/// (decision 0539): they arrive per-attempt over the login channel — the app's policy owns the
-/// env fast path and its `one`/`pone` defaults.
+/// What is left of the per-process connection parameters: `WOW_CHAR`, and nothing else.
+///
+/// Neither the credentials nor the **address** live here any more. 0539 moved the credentials onto
+/// each [`LoginRequest`]; decision 1667 moved the host the same way and for the same reason — it
+/// is now a setting the player edits on the login screen (`crate::realmlist`), so a value latched
+/// out of the environment once at spawn could only ever be stale. `$WOW_HOST` is still honoured;
+/// it is read where every other env-overridable setting is read, by `Realmlist::default()`.
 pub(super) struct NetConfig {
-    host: String,
     /// `WOW_CHAR`, when explicitly set. Here it only names the create-if-empty character on a fresh
     /// account; as a *pick* it is app-side policy (`crate::char_select` auto-answers the roster with
     /// it — the dev fast path past the select screen).
@@ -119,7 +129,6 @@ pub(super) struct NetConfig {
 impl NetConfig {
     pub(super) fn from_env() -> Self {
         NetConfig {
-            host: std::env::var("WOW_HOST").unwrap_or_else(|_| "localhost".into()),
             character: std::env::var("WOW_CHAR").ok(),
         }
     }
@@ -275,7 +284,7 @@ fn run(
 
     // Logon (the dial + SRP6 exchange — one blocking sequence against realmd).
     stage(LoginStage::Connecting);
-    let logon = match benilla_protocol::logon(&cfg.host, &req.user, &req.pass) {
+    let logon = match benilla_protocol::logon(&req.host, &req.user, &req.pass) {
         Ok(l) => l,
         Err(e) => {
             if canceled() {
@@ -296,8 +305,8 @@ fn run(
     let world_addr = realm
         .as_ref()
         .map(|r| r.address.clone())
-        // Strip any explicit auth `:port` off `WOW_HOST` — the fallback world port is its own.
-        .unwrap_or_else(|| format!("{}:{}", host_port(&cfg.host, WORLD_PORT).0, WORLD_PORT));
+        // Strip any explicit auth `:port` off the realmlist — the fallback world port is its own.
+        .unwrap_or_else(|| format!("{}:{}", host_port(&req.host, WORLD_PORT).0, WORLD_PORT));
 
     stage(LoginStage::Handshaking);
     let mut session = match WorldSession::connect(&world_addr, &req.user, logon.session_key) {

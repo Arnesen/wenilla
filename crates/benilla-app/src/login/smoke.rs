@@ -3,9 +3,9 @@
 
 use bevy::prelude::*;
 
-use super::{send_login, LoginIntent};
+use super::Attempt;
 use crate::char_select::ClientState;
-use crate::net::{LoginAbandon, LoginFailedMessage, LoginSubmit};
+use crate::net::LoginFailedMessage;
 
 /// Split `WOW_LOGIN_SMOKE=user:pass[:Character]` into its three fields. **Three-way, once**: a
 /// `split_once(':')` here would hand the character name to the password, which is exactly what it
@@ -40,9 +40,7 @@ pub(crate) fn smoke_character(spec: &str) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn debug_login_smoke(
     state: Res<State<ClientState>>,
-    mut intent: ResMut<LoginIntent>,
-    submit: Res<LoginSubmit>,
-    abandon: Res<LoginAbandon>,
+    mut attempt: Attempt,
     mut failures: MessageReader<LoginFailedMessage>,
     time: Res<Time>,
     mut exit: MessageWriter<AppExit>,
@@ -56,7 +54,7 @@ pub(super) fn debug_login_smoke(
             let (user, pass, _) = smoke_spec(&spec);
             info!("login-smoke: submitting as {user}");
             let (user, pass) = (user.to_string(), pass.to_string());
-            send_login(&mut intent, &submit, &abandon, &user, &pass, true);
+            attempt.send(&user, &pass, true);
             *phase = 1;
         }
         1 => {

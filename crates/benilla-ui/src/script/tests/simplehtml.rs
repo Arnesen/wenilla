@@ -642,11 +642,14 @@ fn an_unsized_image_reserves_its_arts_texel_height_unless_it_is_floated() {
     );
 }
 
-/// A VM with no host oracle has no art to measure, so a zero-size image stays exactly where it
-/// always was. The engine-less truth, stated so the fix cannot be read as "the engine now knows
-/// texel sizes".
+/// A VM with no host oracle has no art to measure, so a zero-size image has **no span on either
+/// axis** — and with one corner pinned and nothing to add to it, it does not resolve at all. That
+/// is the reference's own answer for a texture with no `CGxTex*`: `combineEdge`'s legs both fail
+/// their `span != 0.0` test, `assemble 0x767a20` returns 0, and the texture emits a degenerate
+/// all-zero quad (wow-re `region-size-fallback.md` §5's counterfactual and §7). Stated so the
+/// engine-less path cannot quietly go back to borrowing the page's width.
 #[test]
-fn without_a_size_oracle_an_unsized_image_is_unchanged() {
+fn without_a_size_oracle_an_unsized_image_does_not_resolve() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     page(&s);
@@ -658,11 +661,9 @@ fn without_a_size_oracle_an_unsized_image_is_unchanged() {
         .iter()
         .position(|x| x.texture.is_some())
         .expect("an IMG block");
-    let rect = resolved_rect(&s, "Page", img);
-    assert_eq!(
-        rect.right - rect.left,
-        270.0,
-        "the owner-edge fallback, unchanged"
+    assert!(
+        maybe_resolved_rect(&s, "Page", img).is_none(),
+        "no art, no span, no rect"
     );
 }
 
@@ -947,6 +948,15 @@ fn resolved_tops(s: &UiScript, name: &str) -> Vec<(f32, f32)> {
             (r.top, r.bottom)
         })
         .collect()
+}
+
+/// One block's resolved rect if it HAS one — the shape a region with no span reaches.
+fn maybe_resolved_rect(s: &UiScript, name: &str, block: usize) -> Option<crate::layout::Rect> {
+    let lua = s.lua();
+    let model = lua.app_data_ref::<Model>().expect("model");
+    let fh = model.arena.lookup(name).expect("frame");
+    let st = model.simple_html.get(&fh).expect("state");
+    model.region_resolved.get(&st.blocks[block]).copied()
 }
 
 /// One block's resolved rect, by index in the block list.

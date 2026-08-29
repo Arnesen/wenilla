@@ -643,8 +643,8 @@ pub(super) fn hide_tooltip(lua: &Lua, h: FrameHandle) {
 }
 
 /// One line cell's layout input: `Some((w, h))` once the cell is shown with text AND the measure
-/// round-trip has answered; `Some((0, 0))` for a shown but EMPTY cell (the corpus' `AddLine("")`
-/// — a real zero-height row that still charges its slot gap, the ref's empty-line shape); `None`
+/// round-trip has answered; one floored unit each way for a shown but EMPTY cell (the reference's
+/// `AddLine("")` adds no line at all, and its virtual `GetHeight` never reads back `0.0`); `None`
 /// for hidden/cleared cells and for PENDING measures. A pending cell contributes nothing — no
 /// width, no height, and (in the caller) no gaps — so a fresh tooltip holds its declared default
 /// size until real extents land, instead of collapsing to a gaps-only rect (the guard the first
@@ -659,7 +659,17 @@ fn cell(model: &Model, rh: crate::widget::RegionHandle) -> Cell {
         return None;
     }
     if text.is_empty() {
-        return Some((0.0, 0.0));
+        // The same floor the sweep applies to the line's own rect
+        // (`layout::FONTSTRING_MIN_SPAN`): the reference's `GetHeight` is virtual and ends in a
+        // one-unit clamp, so `0.0` is not a height any caller — plate arithmetic included — can
+        // read back off a FontString (wow-re `region-size-fallback.md` §3,
+        // `tooltip-blank-line-height.md` §3). Reporting zero here while the chain below the row
+        // resolved one unit is the B309 shape at 1/14th the size, and the point of one constant
+        // is that the two cannot drift apart.
+        return Some((
+            super::layout::FONTSTRING_MIN_SPAN,
+            super::layout::FONTSTRING_MIN_SPAN,
+        ));
     }
     d.measured.map(|m| (m.w, m.h))
 }
