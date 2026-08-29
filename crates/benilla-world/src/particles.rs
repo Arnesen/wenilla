@@ -146,6 +146,15 @@ pub struct ParticleEmitter {
     /// Model→world (Bevy space): `world = placement · wow_to_bevy(local)`. Carries the placement scale.
     /// Static for terrain doodads; refreshed each frame from [`Self::owner`] when set.
     placement: Transform,
+    /// **The frame this cloud's WORLD-mode particles are stored in** — world on the ground, the
+    /// transport's deck while the owning model rides one ([`crate::ride_frame`], decision 1591).
+    ///
+    /// The `0x10` CLEAR store bakes a birth into absolute coordinates and never re-applies a live
+    /// matrix, which is what makes a trail. On a transport that leaves a rider's cloud behind the
+    /// vehicle, so the reference divides the ride matrix out at birth (`rt+0x1fc = srcMx · A⁻¹`)
+    /// and folds it back at draw (`0xcf5b68 = A · T · S`). MODEL-mode (`0x10` SET) emitters take
+    /// the verbatim-copy arm and never see `A` at all — they already ride their host rigidly.
+    pub(crate) ride: crate::ride_frame::StoredFrame,
     /// The entity this emitter belongs to, if it follows one (a streamed creature/GameObject). Each
     /// frame the emitter copies the owner's world transform into [`Self::placement`] (so it tracks a
     /// moving prop) and **drains** once the owner is gone. `None` for terrain doodads, which carry
@@ -393,7 +402,7 @@ impl ParticleEmitter {
             .iter()
             .map(|p| {
                 if anchored {
-                    p.pos
+                    self.ride.to_world(p.pos)
                 } else {
                     self.placement
                         .transform_point(benilla_assets::coords::wow_to_bevy([
@@ -635,6 +644,7 @@ pub fn spawn_emitter(
                 ParticleEmitter {
                     def,
                     placement,
+                    ride: crate::ride_frame::StoredFrame::default(),
                     owner,
                     on_owner_loss: frames.on_owner_loss,
                     draining: false,

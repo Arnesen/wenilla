@@ -41,6 +41,8 @@ pub(crate) use ground_census::GroundCensusPlugin;
 /// never armed and so never lifted its spawn-hide (B168).
 mod lift_census;
 pub(crate) use lift_census::LiftCensusPlugin;
+mod trail_census;
+pub(crate) use trail_census::TrailCensusPlugin;
 
 /// The unit-visual census — per-entity "what visual did this display actually get", which is what
 /// separates a debug cube (a gap of ours) from a model that legitimately draws nothing (B13,
@@ -75,6 +77,12 @@ pub(crate) use world_census::{EntityCensusPlugin, NodeProbePlugin};
 /// worlds: the structural inventory under the 1435 orchestration rows (decision 1437).
 mod sched_census;
 pub(crate) use sched_census::SchedCensusPlugin;
+
+/// The frame-stall injector — blocks the main loop on a schedule, reproducing on demand the one
+/// thing a probe window can never do to itself: go to the background and come back with one
+/// enormous frame delta. Doubles as the plain frame-delta/occlusion monitor at `WOW_STALL=0`.
+mod stall;
+pub(crate) use stall::StallPlugin;
 
 /// The clock **every probe schedule reads** — real time, never the virtual clock (decision 0789).
 ///
@@ -126,6 +134,13 @@ mod tests {
                 "drive_capture",
                 "the fixture AGE runs on the clock the effect animates on, and the capture freezes \
                  that same clock at save time — an age, not a schedule",
+            ),
+            (
+                "capture/probes/stall.rs",
+                "drive_stall",
+                "the clamp IS the subject: this probe reports `Time<Virtual>`'s delta beside \
+                 `Time<Real>`'s so a stalled frame's divergence is a printed number rather than a \
+                 remembered constant. Its own schedule is [`ProbeClock`], bound on the line above",
             ),
             (
                 "capture/waterfx.rs",

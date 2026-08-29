@@ -210,6 +210,24 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_LIFT_CENSUS").is_ok() {
                 app.add_plugins(crate::capture::LiftCensusPlugin);
             }
+            // The frame-stall injector: `WOW_STALL="<ms>[,<every_s>[,<after_s>]]"` blocks the
+            // main loop on a schedule — the reproduction for "I tabbed away and came back to X",
+            // which no probe can otherwise stage (every scripted probe asserts `AlwaysOnTop`
+            // precisely so the OS cannot throttle it). `WOW_STALL=0` injects nothing and leaves
+            // the frame-delta/occlusion monitor, which is how the premise gets checked rather
+            // than assumed (see `capture::StallPlugin`).
+            if std::env::var("WOW_STALL").is_ok() {
+                app.add_plugins(crate::capture::StallPlugin);
+            }
+            // The ribbon-trail census: `WOW_TRAIL_CENSUS=<secs>[,<every>]` prints one line per live
+            // weapon/spell streak — its committed extent in WORLD space, which is the observable:
+            // a rider standing still on a moving deck must draw a SHORT streak, because its edges
+            // are stored on the deck and re-projected through the deck's live pose. A long one is
+            // a streak drawn against the world while its owner stands still (see
+            // `capture::TrailCensusPlugin`).
+            if std::env::var("WOW_TRAIL_CENSUS").is_ok() {
+                app.add_plugins(crate::capture::TrailCensusPlugin);
+            }
             // The unit-visual census: `WOW_UNIT_VISUALS=<secs>[,<every>]` prints one line per
             // streamed entity near the body — whether it got a debug cube, real geometry, or
             // nothing at all. The instrument B13 was missing: a black slab in a screenshot cannot

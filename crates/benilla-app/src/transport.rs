@@ -26,7 +26,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use avian3d::prelude::{Position, RigidBody, Rotation};
+// avian's own public AABB/tree republish system, registered by name below. Aliased because the
+// chain's concern is *when* it runs, not whose it is — and because the upstream name says what it
+// does to colliders, not why this app needs it a second time each frame.
+use avian3d::collider_tree::update_moved_collider_aabbs as republish_moved_collider_aabbs;
+use avian3d::prelude::{Collider, Position, RigidBody, Rotation};
 use benilla_formats::{
     elevator_period_ms, elevator_sample, load_elevator_paths, load_taxi_path_nodes,
     ElevatorKeyframe, ElevatorPaths, TaxiPathNodes, TransportSample, TransportTimetable,
@@ -36,6 +40,7 @@ use bevy::prelude::*;
 use crate::go_templates::GameObjectTemplates;
 use crate::net::Guid;
 use benilla_assets::{LockRecover, WorldAssets};
+use benilla_world::ride_frame::RideFrame;
 use benilla_world::vis_chain::VisChainOnly;
 use benilla_world::world_map::CurrentMap;
 
@@ -56,10 +61,51 @@ impl Plugin for TransportPlugin {
                 // After the net drain (fresh anchors/re-anchors applied), before the player's
                 // input stage — the boat must be at its this-frame pose before the mover reads
                 // the world (phase 2's platform carry rides exactly this edge).
-                (arm_transports, tick_transports, compose_riders)
+                //
+                // **[`republish_moved_collider_aabbs`] is the third link, and it is here because
+                // of a general engine truth, not a lift one** (decision 1663): *a collider moved
+                // in `Update` is invisible to `Update`'s own spatial queries until the next
+                // physics step, by up to one frame of its own travel.* avian refreshes
+                // `ColliderAabb`, `EnlargedAabb` and the `ColliderTrees` proxies in
+                // `ColliderTreeSystems::UpdateAabbs`, which sits in `PhysicsSchedule` — i.e. in
+                // `FixedPostUpdate`, **before** `Update` — while [`tick_transports`] writes the
+                // deck's pose *in* `Update`. Every `Update`-side spatial query
+                // (`SpatialQuery::aabb_intersections_with_aabb`, which is how the mover's
+                // ground/step/slide casts enumerate candidates — `benilla_world::collision`) is
+                // therefore pruned against the deck's **previous-frame** box.
+                //
+                // At 60 Hz that is centimetres and harmless. On one long frame — a backgrounded
+                // window is at least one ~1 s frame (decisions 0713/0906) — a Thunder Bluff lift
+                // descends 7.3 yd while its box stays put, the box ends up *above* the rider it
+                // is carrying, the down-probe enumerates no deck at all, and the rider is
+                // declared airborne on the very platform they are standing on. Two such frames in
+                // a row and `Time<Virtual>`'s clamped 250 ms lands a full gravity step on the
+                // second one: the body drops 1.2 yd through the deck and never re-earns it,
+                // because the deck is now above the probe. That is the reported fall-through, and
+                // 1663 records the measured chain.
+                //
+                // The system is avian's own, public, and read-only on `LastPhysicsTick` — it
+                // writes no tick resource, so running it a second time in the frame is
+                // idempotent, and the next physics step simply recomputes what has not moved
+                // since. It sweeps *every* collider, not just transports; 1663 records the
+                // measured per-frame cost of that sweep in a streamed outdoor scene.
+                (
+                    arm_transports,
+                    tick_transports,
+                    republish_moved_collider_aabbs::<Collider>,
+                    compose_riders,
+                )
                     .chain()
                     .after(benilla_world::schedule::WorldStage::Net)
                     .before(benilla_world::schedule::WorldStage::Input),
+            )
+            // …and the ride frame LAST, after the mover has decided what we are standing on this
+            // frame ([`crate::player::Player::ride`] is written inside `PlayerControlSet`). Its
+            // consumers — the particle and ribbon sims — run in `PostUpdate`, so the deferred
+            // insert has landed by the time anything reads it.
+            .add_systems(
+                Update,
+                stamp_ride_frames.after(crate::player::PlayerControlSet),
             );
     }
 }
@@ -489,6 +535,58 @@ fn compose_riders(
             rm.wow_pos = benilla_assets::coords::bevy_to_wow(world);
             rm.orientation = yaw;
         }
+    }
+}
+
+/// Publish the **ride frame** onto every model standing on a transport — the reference's
+/// `SetMoveBase` install (`0x617170`/`0x618970` → `0x718910` → `[CM2Model+0x17c]`), which is the
+/// frame a rider's world-space effects are *stored* in ([`benilla_world::ride_frame`]).
+///
+/// Two riders, one component. The **body we steer** takes the mover's own platform attach
+/// ([`crate::player::Player::ride_entity`] — the deck collider that grounded us), and every
+/// **observed** rider takes the wire's transport tail ([`TransportRider`]). Everything hung off
+/// either — a held weapon, its enchant streamer, a spell kit — inherits it through the
+/// `ParentModel` chain rather than being stamped itself, which is exactly how the reference
+/// propagates `[model+0x17c]` to a model's children every frame (`0x7142c1` in `m2_animate`).
+///
+/// Why this is a component and not a field on `Transport`: the fact is *per rider*, it changes on
+/// a step, and `benilla-world` — which owns the emitters that consume it — cannot see either
+/// `Player` or `TransportRider`. Decision 1591 named this seam and left it unbuilt; the director's
+/// weapon-trail report on the Thunder Bluff lift is what it costs.
+fn stamp_ride_frames(
+    mut commands: Commands,
+    player: Res<crate::player::Player>,
+    guid_index: Res<crate::net::GuidIndex>,
+    body: Query<Entity, With<crate::net::Embodied>>,
+    riders: Query<(Entity, &TransportRider)>,
+    stamped: Query<(Entity, &RideFrame)>,
+) {
+    let mut want: HashMap<Entity, Entity> = HashMap::new();
+    if let (Ok(me), Some(deck)) = (body.single(), player.ride_entity()) {
+        want.insert(me, deck);
+    }
+    for (rider, on) in &riders {
+        // A rider whose transport isn't streamed in keeps no frame: there is no pose to store
+        // against, and the server despawns the pair together anyway (`compose_riders`' note).
+        if let Some(&deck) = guid_index.0.get(&on.transport_guid) {
+            want.insert(rider, deck);
+        }
+    }
+    // Reconcile rather than re-stamp: an unchanged rider must not touch its component at all, so
+    // change detection stays quiet on a deck full of passengers.
+    for (model, current) in &stamped {
+        match want.remove(&model) {
+            Some(deck) if deck == current.0 => {}
+            Some(deck) => {
+                commands.entity(model).insert(RideFrame(deck));
+            }
+            None => {
+                commands.entity(model).remove::<RideFrame>();
+            }
+        }
+    }
+    for (model, deck) in want {
+        commands.entity(model).insert(RideFrame(deck));
     }
 }
 

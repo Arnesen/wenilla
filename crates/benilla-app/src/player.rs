@@ -502,8 +502,18 @@ fn control(
     // transport that owns it — solid cargo, 0470).
     world_q: (
         benilla_world::world_point::WorldPoint,
+        // `ColliderAabb` rides along for the **ride trace only**, and it is the column that
+        // separates "the deck moved" from "the deck's collider moved": avian refreshes it in
+        // `PhysicsSchedule` (i.e. `FixedPostUpdate`, *before* `Update`), while `tick_transports`
+        // writes the deck's pose *in* `Update` — so the box the broad phase prunes against is
+        // always one frame behind the deck it belongs to, and the down-probe's candidate set is
+        // whatever that stale box still overlaps.
         Query<
-            (&Transform, &crate::net::Guid),
+            (
+                &Transform,
+                &crate::net::Guid,
+                Option<&avian3d::prelude::ColliderAabb>,
+            ),
             (
                 With<crate::transport::Transport>,
                 Without<Embodied>,
@@ -785,7 +795,7 @@ fn control(
     // player rig the same way.
     if let Some(ride) = player.ride.as_ref() {
         match transports.get(ride.entity) {
-            Ok((boat, _)) => {
+            Ok((boat, _, _)) => {
                 let world = boat.translation + boat.rotation * ride.local_pos;
                 let yaw_now = boat.rotation.to_euler(EulerRot::YXZ).0;
                 let mut dyaw = yaw_now - ride.boat_yaw;
@@ -1511,7 +1521,7 @@ fn control(
         // recomposes from.
         let owning_transport = |mut e: Entity| {
             for _ in 0..4 {
-                if let Ok((t, g)) = transports.get(e) {
+                if let Ok((t, g, _)) = transports.get(e) {
                     return Some((e, t, g));
                 }
                 e = child_of.get(e).ok()?.parent();
@@ -1555,15 +1565,39 @@ fn control(
                 .ride
                 .as_ref()
                 .and_then(|r| transports.get(r.entity).ok())
-                .map(|(t, _)| (t.translation, t.rotation.to_euler(EulerRot::YXZ).0));
-            if let (Some(ride), Some((bpos, byaw))) = (player.ride.as_ref(), boat_pose) {
+                .map(|(t, _, aabb)| {
+                    (
+                        t.translation,
+                        t.rotation.to_euler(EulerRot::YXZ).0,
+                        aabb.copied(),
+                    )
+                });
+            if let (Some(ride), Some((bpos, byaw, baabb))) = (player.ride.as_ref(), boat_pose) {
                 let local = Quat::from_euler(EulerRot::YXZ, byaw, 0.0, 0.0)
                     .inverse()
                     .mul_vec3(feet - bpos);
+                // The deck's **broad-phase box**, and the gap from its underside to the feet. The
+                // candidate enumeration every mover probe rides
+                // (`SpatialQuery::aabb_intersections_with_aabb`) tests exactly this component —
+                // and avian refreshes it in `PhysicsSchedule` (`FixedPostUpdate`, *before*
+                // `Update`), while `tick_transports` writes the deck's pose *in* `Update`. So the
+                // box is always one frame of deck travel behind the deck, and on a long frame it
+                // is left behind entirely: a positive `gap` means the down-probe cannot even see
+                // the deck the feet are standing on, which is the difference between
+                // `support=deck` and `support=NONE` while `local` still reads (0, 0.05, 0).
+                let aabb_col = match baabb {
+                    Some(a) => format!(
+                        " | aabbY[{:8.2},{:8.2}] gap{:+7.2}",
+                        a.min.y,
+                        a.max.y,
+                        a.min.y - feet.y,
+                    ),
+                    None => " | aabbY[  absent]".to_string(),
+                };
                 benilla_assets::trace::line(
                     "ride",
                     &format!(
-                        "on {:#x} deck({:8.2},{:7.2},{:8.2}) yaw{:+.3} | feet({:8.2},{:7.2},{:8.2})                          local({:7.2},{:6.2},{:7.2}) | grounded={} support={} vy={:+6.2}",
+                        "on {:#x} deck({:8.2},{:7.2},{:8.2}) yaw{:+.3} | feet({:8.2},{:7.2},{:8.2})                          local({:7.2},{:6.2},{:7.2}) | grounded={} support={} vy={:+6.2}{}",
                         ride.guid,
                         bpos.x,
                         bpos.y,
@@ -1582,6 +1616,7 @@ fn control(
                             None => "NONE",
                         },
                         player.vel_y,
+                        aabb_col,
                     ),
                 );
             } else if !swimming {
@@ -1599,7 +1634,7 @@ fn control(
             }
         }
         if let Some(ride) = player.ride.as_mut() {
-            if let Ok((boat, _)) = transports.get(ride.entity) {
+            if let Ok((boat, _, _)) = transports.get(ride.entity) {
                 ride.local_pos = boat.compute_affine().inverse().transform_point3(feet);
                 ride.boat_yaw = boat.rotation.to_euler(EulerRot::YXZ).0;
             }
