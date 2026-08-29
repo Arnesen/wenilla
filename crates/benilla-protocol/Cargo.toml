@@ -24,6 +24,7 @@ rand = "0.8.6"
 # that bounds a read, and the `SendWrapper` that lets the write half live in a Bevy resource.
 # wasm-bindgen is pinned exact: a newer crate against the installed 0.2.122 CLI emits broken glue.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
 js-sys = "0.3.99"
 send_wrapper = "0.6"
 wasm-bindgen = "=0.2.122"

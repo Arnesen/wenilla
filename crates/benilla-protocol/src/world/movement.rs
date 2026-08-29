@@ -15,7 +15,13 @@ pub(super) const MOVEMENT_FLAG_FORWARD: u32 = 0x1;
 /// which folded backwards every ~24.85 days — a delta glitch the clean `u32` wrap avoids.)
 pub(super) fn client_uptime_ms() -> u32 {
     use std::sync::OnceLock;
+    // `web_time::Instant`, not `std::time::Instant`: the browser has no clock behind the std one
+    // (it panics on first use), and this stamp is on every movement packet. A plain re-export of
+    // std's on native.
+    #[cfg(not(target_arch = "wasm32"))]
     use std::time::Instant;
+    #[cfg(target_arch = "wasm32")]
+    use web_time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
     (START.get_or_init(Instant::now).elapsed().as_millis() as u32).max(1)
 }
