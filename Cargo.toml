@@ -38,6 +38,8 @@ sha1 = "0.10.6"
 # authority. `third_party/lua-src/BENILLA.md` has the current state and the verifying command.
 [patch.crates-io]
 lua-src = { path = "third_party/lua-src" }
+# The browser build keeps `lua_Integer = i64` on wasm32 — one-line fork, see third_party/mlua-sys/BENILLA.md.
+mlua-sys = { path = "third_party/mlua-sys" }
 
 # Optimize *dependencies* even in dev builds. avian/parry collision math (and wgpu/bevy render) is
 # unusably slow at opt-level 0 — a plain `cargo run` crawls to <1 fps once physics is doing real work.

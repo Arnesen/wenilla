@@ -142,7 +142,12 @@
 ** CHANGE that if ptrdiff_t is not adequate on your machine. (On most
 ** machines, ptrdiff_t gives a good choice between int or long.)
 */
+/* benilla: 64-bit integers on wasm32 too — must match `lua_Integer` in third_party/mlua-sys. */
+#if defined(__wasm32__)
+#define LUA_INTEGER	long long
+#else
 #define LUA_INTEGER	ptrdiff_t
+#endif
 
 
 /*
