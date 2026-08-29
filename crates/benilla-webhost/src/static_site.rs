@@ -11,16 +11,20 @@
 use std::path::Path;
 
 use axum::http::HeaderValue;
-use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 pub fn router(www: &Path) -> axum::Router {
     let no_cache = HeaderValue::from_static("no-cache");
-    let serve = ServeDir::new(www).append_index_html_on_directories(true);
+    // Precompressed, not compressed on the fly: the wasm is ~90 MB, and brotli-ing that per
+    // request is seconds of CPU for every page load. `scripts/benilla-web.sh build` writes the
+    // `.br`/`.gz` siblings once; a browser that accepts neither gets the plain file.
+    let serve = ServeDir::new(www)
+        .append_index_html_on_directories(true)
+        .precompressed_br()
+        .precompressed_gzip();
     axum::Router::new().fallback_service(
         tower::ServiceBuilder::new()
-            .layer(CompressionLayer::new())
             .layer(SetResponseHeaderLayer::overriding(
                 axum::http::header::CACHE_CONTROL,
                 no_cache,
