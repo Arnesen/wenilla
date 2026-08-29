@@ -15,7 +15,7 @@
 //! they stay a handful while `frames=`/`anchored=` grow without bound. A solve whose scope tracks
 //! the graph again is precisely the regression this file exists to catch.
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use benilla_ui::script::UiScript;
 

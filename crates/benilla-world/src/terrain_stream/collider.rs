@@ -8,7 +8,8 @@
 //! mass-property hook), and the async pool finishes a streamed burst together — so a tile boundary
 //! used to attach the whole burst in a single frame. Decision 0610 measured that path and caps it.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 use avian3d::prelude::{Collider, CollisionLayers, RigidBody};
 use benilla_assets::coords::wow_to_bevy;

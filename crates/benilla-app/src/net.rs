@@ -15,7 +15,8 @@
 //! covers in one frame. Coordinates cross from raw WoW into Bevy space here (`wow_to_bevy`).
 
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 use benilla_protocol::{
     messages::WhoRequest, EntityKind, JumpInfo, MoveMode, MoveSpeeds, ObjectFields, SessionEvent,

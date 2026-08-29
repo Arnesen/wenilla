@@ -59,7 +59,8 @@
 //! prints the scenario names. `scripts/visual.sh` wraps all of this.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot, ScreenshotCaptured};

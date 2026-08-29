@@ -9,10 +9,10 @@
 
 use std::time::Duration;
 
-// `bevy::platform::time::Instant`, not `std::time::Instant`: every `Instant` this pending-cast/
+// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: every `Instant` this pending-cast/
 // channel store trades with its callers eventually meets `crate::ui_script::UiClock::anchor`
 // (see that field's doc) — on wasm32 (the default `web` Bevy feature) they are genuinely
-// different types, a plain alias for `std::time::Instant` everywhere else.
+// different types, a plain alias for `bevy::platform::time::Instant` everywhere else.
 use bevy::platform::time::Instant;
 
 use bevy::prelude::*;

@@ -101,7 +101,7 @@ pub(super) fn object_create(
         .flatten()
         .map(|progress_ms| crate::transport::TransportAnchor {
             progress_ms,
-            at: std::time::Instant::now(),
+            at: bevy::platform::time::Instant::now(),
         });
     // The spawn's `GAMEOBJECT_ROTATION` quaternion — read once, wanted twice: it is this object's
     // placement (below) and, on a type-11 lift, the basis its keyframe offsets rotate through.

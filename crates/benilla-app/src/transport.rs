@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use benilla_formats::{

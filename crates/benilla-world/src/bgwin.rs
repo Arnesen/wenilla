@@ -81,10 +81,21 @@ pub fn background_run() -> bool {
         Ok(_) => return true,
         Err(_) => {}
     }
-    std::env::vars_os().any(|(name, _)| {
-        name.to_str()
-            .is_some_and(|name| BG_ENV_PREFIXES.iter().any(|p| name.starts_with(p)))
-    })
+    env_names().any(|name| BG_ENV_PREFIXES.iter().any(|p| name.starts_with(p)))
+}
+
+/// Every environment variable name — or none in a browser, where `std::env::vars_os` does not
+/// return an empty list but *panics* ("not supported on this platform"), and a page has no
+/// instrumented-run env to detect anyway.
+fn env_names() -> impl Iterator<Item = String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::iter::empty()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::vars_os().filter_map(|(name, _)| name.to_str().map(str::to_owned))
+    }
 }
 
 /// Background-run envs whose run produces **no image** — nothing reads the framebuffer, so the
@@ -131,8 +142,7 @@ pub fn no_pixel_run() -> bool {
         return false;
     }
     let mut saw_one = false;
-    for (name, _) in std::env::vars_os() {
-        let Some(name) = name.to_str() else { continue };
+    for name in env_names() {
         if !BG_ENV_PREFIXES.iter().any(|p| name.starts_with(p)) {
             continue;
         }

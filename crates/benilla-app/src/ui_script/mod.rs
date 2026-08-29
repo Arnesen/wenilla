@@ -223,9 +223,9 @@ pub(crate) struct UiInput;
 #[derive(Resource)]
 pub(crate) struct UiClock {
     /// The `Instant` leg: `Time<Real>::last_update()` at the tick that produced [`Self::ui_now`].
-    /// `bevy::platform::time::Instant`, not `std::time::Instant`: it's what `Time<Real>` itself
+    /// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: it's what `Time<Real>` itself
     /// hands back, and on wasm32 (the default `web` Bevy feature) the two are genuinely different
-    /// types — `web_time::Instant` there, a plain alias for `std::time::Instant` everywhere else —
+    /// types — `web_time::Instant` there, a plain alias for `bevy::platform::time::Instant` everywhere else —
     /// so this is the one spelling that's correct on both. [`crate::cooldowns`] takes the same
     /// type for exactly this reason: every `Instant` this clock's value ever meets must agree.
     pub(crate) anchor: bevy::platform::time::Instant,

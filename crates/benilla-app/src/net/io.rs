@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-// Not `std::time::Instant`: a browser has no monotonic clock behind that name (it panics), and this
+// Not `bevy::platform::time::Instant`: a browser has no monotonic clock behind that name (it panics), and this
 // one is the ping clock's stopwatch. `bevy::platform` is std's `Instant` natively and `performance
 // .now()` in a page.
 use bevy::platform::time::Instant;

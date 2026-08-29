@@ -216,7 +216,7 @@ pub fn finalize_rig_worlds(
     }
     // The `WOW_RIG_COST` compose meter (decision 0736): how many rigs refresh and what the
     // whole finalize pass costs, beside the palette's copy/write and upload lines.
-    let cost_t0 = crate::rig_palette::rig_cost_enabled().then(std::time::Instant::now);
+    let cost_t0 = crate::rig_palette::rig_cost_enabled().then(bevy::platform::time::Instant::now);
     let mut globals = worlds_params.p1();
     // The rigid-child re-walk's do-not-enter set, exactly the entity pass's: a nested rig with
     // its own billboard output owns its interior (and its root keeps the propagated frame).

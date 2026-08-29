@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-// `bevy::platform::time::Instant`, not `std::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `std::time::Instant` — a plain alias for it everywhere else.
+// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
 use bevy::platform::time::Instant;
 
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
@@ -338,7 +338,7 @@ pub(super) fn spell_start(
                 // `Instant` this file otherwise imports — spelled out fully so it stays that type
                 // regardless.
                 until: Some(
-                    std::time::Instant::now() + Duration::from_millis(u64::from(cast_time_ms)),
+                    bevy::platform::time::Instant::now() + Duration::from_millis(u64::from(cast_time_ms)),
                 ),
             });
         }

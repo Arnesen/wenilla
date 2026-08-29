@@ -2,7 +2,8 @@
 //! the jump ballistics, and the facing turn (each child module's math, exercised together here
 //! like [`super`]'s original single-file block).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 use benilla_protocol::{JumpInfo, MonsterMoveFacing, MoveSpeeds};
 use bevy::prelude::Quat;

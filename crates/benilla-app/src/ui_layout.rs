@@ -90,7 +90,7 @@ pub(crate) struct LayoutFile {
     /// doc: a `bool` that outlived its VM could compose the file from a tree with nothing placed
     /// in it.
     dirty: VmMemo<bool>,
-    last_change: Option<std::time::Instant>,
+    last_change: Option<bevy::platform::time::Instant>,
 }
 
 /// Render the cache exactly as [`parse`] reads it, frames in the order the engine hands them
@@ -236,7 +236,7 @@ fn watch_layout(script: Option<NonSendMut<UiScript>>, mut file: ResMut<LayoutFil
         return;
     }
     *file.dirty.get(&script) = true;
-    file.last_change = Some(std::time::Instant::now());
+    file.last_change = Some(bevy::platform::time::Instant::now());
 }
 
 /// Dirty + one quiet second (or the app exiting) → rewrite the file atomically.

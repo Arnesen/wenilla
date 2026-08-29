@@ -153,7 +153,7 @@ pub(super) fn feed_ui_input(
         static HIT_COST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let metering =
             *HIT_COST.get_or_init(|| std::env::var("WOW_HIT_COST").as_deref() == Ok("1"));
-        let t0 = metering.then(std::time::Instant::now);
+        let t0 = metering.then(bevy::platform::time::Instant::now);
         hover.0 = script.mouse_move(x, y);
         if let Some(t0) = t0 {
             use std::sync::atomic::{AtomicU64, Ordering};

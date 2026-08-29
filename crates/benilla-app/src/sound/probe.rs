@@ -129,7 +129,7 @@ pub(crate) struct Probe {
     tx: crossbeam_channel::Sender<String>,
     /// The pre-tap's frame clock — the shared time axis (see the module docs).
     audio_pos: Option<Arc<AtomicU64>>,
-    started: std::time::Instant,
+    started: bevy::platform::time::Instant,
     marks: u32,
     since_tick: std::time::Duration,
     since_speak: std::time::Duration,
@@ -186,7 +186,7 @@ impl Probe {
             rate,
             tx,
             audio_pos,
-            started: std::time::Instant::now(),
+            started: bevy::platform::time::Instant::now(),
             marks: 0,
             since_tick: std::time::Duration::ZERO,
             since_speak: std::time::Duration::ZERO,

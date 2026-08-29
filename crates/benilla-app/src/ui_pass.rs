@@ -1029,14 +1029,14 @@ fn rebuild_ui_mesh(
     // rebuild pays one bool test, not six clock reads.
     let cost_on = cost_wanted.0 || crate::ui_script::extract::ui_cost_enabled();
     **mesh_cost = UiMeshCost::default();
-    let t_rebuild = cost_on.then(std::time::Instant::now);
+    let t_rebuild = cost_on.then(bevy::platform::time::Instant::now);
     let mut t_mark = t_rebuild;
     let mut lap = move || -> u128 {
         if !cost_on {
             return 0;
         }
         t_mark
-            .replace(std::time::Instant::now())
+            .replace(bevy::platform::time::Instant::now())
             .map_or(0, |t| t.elapsed().as_micros())
     };
     let (meshes, materials) = (&mut stores.0, &mut stores.1);
@@ -1333,9 +1333,9 @@ fn rebuild_ui_mesh(
             use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
             static SHOWN: AtomicU32 = AtomicU32::new(0);
             static LAST_SEC: AtomicU64 = AtomicU64::new(0);
-            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            static START: std::sync::OnceLock<bevy::platform::time::Instant> = std::sync::OnceLock::new();
             let sec = START
-                .get_or_init(std::time::Instant::now)
+                .get_or_init(bevy::platform::time::Instant::now)
                 .elapsed()
                 .as_secs();
             if LAST_SEC.swap(sec, Ordering::Relaxed) != sec {

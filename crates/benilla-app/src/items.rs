@@ -319,7 +319,7 @@ pub(crate) struct Items {
     /// feed is `SMSG_ITEM_ENCHANT_TIME_UPDATE`. NOT derived from `ITEM_FIELD_ENCHANTMENT`'s
     /// duration field, which the reference's tooltip never reads. Session state, so it clears with
     /// the objects (decision 0920).
-    enchant_deadlines: HashMap<(u64, u32), std::time::Instant>,
+    enchant_deadlines: HashMap<(u64, u32), bevy::platform::time::Instant>,
 }
 
 impl Items {
@@ -371,7 +371,7 @@ impl Items {
                 }
             }
             n => {
-                let at = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(n));
+                let at = bevy::platform::time::Instant::now() + std::time::Duration::from_secs(u64::from(n));
                 self.enchant_deadlines.insert((guid, slot), at);
                 self.object_epoch = self.object_epoch.wrapping_add(1);
                 debug!("enchant timer: item {guid:#x} slot {slot} → {n}s");
@@ -384,7 +384,7 @@ impl Items {
     /// `!= 0` gate then prints the plain name).
     pub(crate) fn enchant_remaining_ms(&self, guid: u64, slot: u32) -> Option<u64> {
         let at = self.enchant_deadlines.get(&(guid, slot))?;
-        let left = at.saturating_duration_since(std::time::Instant::now());
+        let left = at.saturating_duration_since(bevy::platform::time::Instant::now());
         (!left.is_zero()).then_some(left.as_millis() as u64)
     }
 
@@ -410,7 +410,7 @@ impl Items {
     /// Landings and removals move [`Self::object_epoch`] on their own. Empty — the overwhelmingly
     /// common case — costs an empty iteration.
     pub(crate) fn enchant_display_epoch(&self) -> u64 {
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         self.enchant_deadlines
             .values()
             .map(|&at| {
@@ -437,7 +437,7 @@ impl Items {
     pub(crate) fn enchant_deadline_ms(&self, guid: u64, slot: u32) -> Option<u64> {
         let at = self.enchant_deadlines.get(&(guid, slot))?;
         Some(
-            at.saturating_duration_since(std::time::Instant::now())
+            at.saturating_duration_since(bevy::platform::time::Instant::now())
                 .as_millis() as u64,
         )
     }

@@ -538,8 +538,8 @@ fn resolve_slot(
     cooldowns: &crate::cooldowns::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
     names: &mut crate::names::NameCache,
-    // `bevy::platform::time::Instant`, not `std::time::Instant`: this is `clock.anchor`
-    // (`crate::ui_script::UiClock`), which on wasm32 is a different type from `std::time::Instant`
+    // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this is `clock.anchor`
+    // (`crate::ui_script::UiClock`), which on wasm32 is a different type from `bevy::platform::time::Instant`
     // (that field's own doc has the full reason).
     now: bevy::platform::time::Instant,
     ui_now: f64,
@@ -815,7 +815,7 @@ pub(crate) fn feed_containers(
     // a parked gated run prints (almost) nothing where the ungated binary printed once a second.
     let cost_t0 = std::env::var_os("WOW_FEED_COST")
         .is_some()
-        .then(std::time::Instant::now);
+        .then(bevy::platform::time::Instant::now);
     // The frame's atomic clock pair (`crate::ui_script::UiClock`): the slot resolves read the
     // cooldown store and convert triples through ONE coherent instant, so a running cooldown's
     // pushed start is frame-stable (the resource's own doc).

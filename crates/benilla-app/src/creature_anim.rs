@@ -33,7 +33,7 @@
 //! the unit's `UNIT_FIELD_BYTES_1` byte for streamed units, and from the controller (echo + in-flight
 //! request) for our own avatar (decision 0080c).
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use benilla_assets::{AnimClip, ModelAnimations};
 use benilla_formats::AnimDataCatalog;

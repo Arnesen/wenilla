@@ -639,7 +639,7 @@ pub(super) fn drive_script(
     // nothing after startup, and cost one wrong theory before the CSV contradicted it.
     ui_cost.measured = 0;
     ui_cost.measured_texts.clear();
-    let mut t_mark = cost_on.then(std::time::Instant::now);
+    let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
     // Marks phase boundaries under the meter: returns μs since the previous mark and re-arms.
     // With the meter off it does nothing (a run carries six no-op calls, not six clock reads).
     let mut lap = move || -> u128 {
@@ -647,7 +647,7 @@ pub(super) fn drive_script(
             return 0;
         }
         t_mark
-            .replace(std::time::Instant::now())
+            .replace(bevy::platform::time::Instant::now())
             .map_or(0, |t| t.elapsed().as_micros())
     };
     {
@@ -674,7 +674,7 @@ pub(super) fn drive_script(
     *ui_clock = super::UiClock {
         // `Time<Real>::last_update()` returns `bevy_platform::time::Instant`, which on wasm32 is
         // `web_time::Instant` (the `web` Bevy feature default_platform pulls in) — a distinct
-        // type from `std::time::Instant` there, unlike on native where they're the same type by
+        // type from `bevy::platform::time::Instant` there, unlike on native where they're the same type by
         // alias. Fall back with Bevy's own `Instant::now` so this compiles on both.
         anchor: time
             .last_update()

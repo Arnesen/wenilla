@@ -262,7 +262,7 @@ pub(crate) static GX_PERF: [std::sync::atomic::AtomicU64; 5] = [
 
 /// Scope guard timing one armed site into [`GX_PERF`] slot `i` — one line at the top of
 /// each measured fn; a no-op branch when the meter is off.
-pub(crate) struct GxPerfGuard(Option<(usize, std::time::Instant)>);
+pub(crate) struct GxPerfGuard(Option<(usize, bevy::platform::time::Instant)>);
 impl Drop for GxPerfGuard {
     fn drop(&mut self) {
         if let Some((i, t0)) = self.0 {
@@ -274,7 +274,7 @@ impl Drop for GxPerfGuard {
     }
 }
 pub(crate) fn gx_perf_guard(i: usize) -> GxPerfGuard {
-    GxPerfGuard(gx_perf_enabled().then(|| (i, std::time::Instant::now())))
+    GxPerfGuard(gx_perf_enabled().then(|| (i, bevy::platform::time::Instant::now())))
 }
 
 /// One diverted batch, held until its cell bakes (and retained after, so an owner-tile unload

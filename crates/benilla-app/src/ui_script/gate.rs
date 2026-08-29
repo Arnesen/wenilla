@@ -64,7 +64,7 @@ pub(crate) fn auditing() -> bool {
 /// from outside the body — 1439's own wiring anomaly was run to ground with exactly this.
 pub(crate) fn trace(feed: &'static str, inputs: &[(&str, bool)]) {
     use std::sync::Mutex;
-    use std::time::Instant;
+    use bevy::platform::time::Instant;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("WOW_FEED_GATE_TRACE").is_some_and(|v| v != "0")) {
         return;

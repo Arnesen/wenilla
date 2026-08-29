@@ -3,7 +3,8 @@
 //! (decisions 0052/0059/0097).
 
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{CreateSpline, EntityKind};
@@ -532,7 +533,7 @@ pub(in crate::net) fn ground_clamp_creatures(
 ) {
     let cost = clamp_cost_enabled();
     let legacy = clamp_seat_disabled();
-    let t0 = cost.then(std::time::Instant::now);
+    let t0 = cost.then(bevy::platform::time::Instant::now);
     let (mut visited, mut skipped, mut held, mut cast, mut hit_n, mut moved) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
     // What re-armed each cast (1384): the unit's own seat moved, or the world's colliders changed

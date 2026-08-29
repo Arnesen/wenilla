@@ -431,7 +431,7 @@ pub fn classify_entity_interior(
         Has<PendingAppearFade>,
     )>,
 ) {
-    let _t0 = std::time::Instant::now();
+    let _t0 = bevy::platform::time::Instant::now();
     let (mut n_anchors, mut n_resolved, mut n_written) = (0usize, 0usize, 0usize);
     // Anchors that wanted a resolve but had every part fade-excluded — the appear-fade lockout.
     let mut n_fade_blocked = 0usize;
@@ -478,7 +478,7 @@ pub fn classify_entity_interior(
         };
         let seated = seats.get(anchor).ok().map(|s| s.0);
         n_resolved += 1;
-        let _r = std::time::Instant::now();
+        let _r = bevy::platform::time::Instant::now();
         let (attach, attach_at) = attach_anchor(containment, bake_center, anchor_t);
         let law = resolve_anchor_law(
             &mut commands,

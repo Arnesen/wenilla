@@ -13,7 +13,7 @@
 //! screen exists to absorb exactly that burst, and the residency the settle release reads counts
 //! *furnished* tiles, so the cover never lifts onto bare ground.
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use benilla_assets::{chunk_to_mesh, AdtTile};
 use bevy::camera::primitives::MeshAabb;

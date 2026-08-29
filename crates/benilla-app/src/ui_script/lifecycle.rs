@@ -189,7 +189,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         }
     }
     world.remove_resource::<PendingEntryUiLoad>();
-    let start = std::time::Instant::now();
+    let start = bevy::platform::time::Instant::now();
     load_ingame_ui_on_world_entry(world);
     // The standing instrument for this burst: the one number that says whether the cover is
     // still hiding it, on every entry, in every log.

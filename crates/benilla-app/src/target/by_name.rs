@@ -583,7 +583,7 @@ pub(super) fn follow_requests(
                 *guid,
                 followee,
                 // `PendingCast::in_flight` wants the cooldown-clock `Instant`
-                // (`bevy::platform::time::Instant`, not `std::time::Instant` — see
+                // (`bevy::platform::time::Instant`, not `bevy::platform::time::Instant` — see
                 // `crate::ui_script::UiClock::anchor`'s doc for why they differ on wasm32).
                 cast.in_flight(bevy::platform::time::Instant::now()),
             ) {

@@ -97,7 +97,7 @@ pub(super) struct ChatWindowFile {
     /// stock row — the "refusing to compose the file from nothing" hazard `crate::cvars` guards
     /// against, one store over. A fresh VM starts undirty and cannot write until Lua writes.
     dirty: VmMemo<bool>,
-    last_change: Option<std::time::Instant>,
+    last_change: Option<bevy::platform::time::Instant>,
 }
 
 /// Render the table exactly as the loader reads it: one `WINDOW` line per window, in window order.
@@ -230,7 +230,7 @@ fn watch_chat_looks(script: Option<NonSendMut<UiScript>>, mut file: ResMut<ChatW
         return;
     }
     *file.dirty.get(&script) = true;
-    file.last_change = Some(std::time::Instant::now());
+    file.last_change = Some(bevy::platform::time::Instant::now());
 }
 
 /// Dirty + one quiet second (or the app exiting) → rewrite the file atomically.

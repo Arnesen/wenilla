@@ -24,7 +24,7 @@
 //! whatever it already said for those keys.
 
 use std::collections::{BTreeMap, HashSet};
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
