@@ -198,7 +198,7 @@ fn load_chat_looks(
     let Some(path) = file.path.clone() else {
         return; // hermetic capture, or no state folder — session-only, the stock row stands
     };
-    let text = match std::fs::read_to_string(&path) {
+    let text = match crate::local_state::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {

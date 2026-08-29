@@ -149,7 +149,7 @@ fn load_macros(
 
     let read = |path: &Option<std::path::PathBuf>| -> Vec<benilla_ui::script::MacroView> {
         let Some(path) = path else { return Vec::new() };
-        match std::fs::read_to_string(path) {
+        match crate::local_state::read_to_string(path) {
             Ok(text) => store::parse(&text),
             // Absent is the normal first-run case, not a failure; anything else is worth a line.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),

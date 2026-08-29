@@ -542,7 +542,7 @@ pub(crate) fn installed(identity: Option<&(String, String)>) -> Vec<InstalledAdd
 /// The lowercased names this character has turned off.
 fn disabled_set(identity: Option<&(String, String)>) -> HashSet<String> {
     enable_state_path(identity)
-        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|p| crate::local_state::read(&p).ok())
         .map(|b| {
             parse_enable_state(&benilla_ui::source::decode(&b))
                 .into_iter()
@@ -562,7 +562,7 @@ pub(crate) fn write_enable_state(identity: Option<&(String, String)>, states: &[
     let Some(path) = enable_state_path(identity) else {
         return; // no character picked, or no state folder — nothing to write to
     };
-    let mut merged: Vec<(String, bool)> = std::fs::read(&path)
+    let mut merged: Vec<(String, bool)> = crate::local_state::read(&path)
         .ok()
         .map(|b| parse_enable_state(&benilla_ui::source::decode(&b)))
         .unwrap_or_default();
@@ -663,7 +663,7 @@ pub(super) fn load_third_party(
     // rather than answer whatever a previous session left, and an addon that asks before any
     // exist is asking a real question.
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
-    if let Some(text) = enable_state_path(identity).and_then(|p| std::fs::read_to_string(p).ok()) {
+    if let Some(text) = enable_state_path(identity).and_then(|p| crate::local_state::read_to_string(&p).ok()) {
         for (name, enabled) in parse_enable_state(&text) {
             if let Some(i) = infos
                 .iter_mut()

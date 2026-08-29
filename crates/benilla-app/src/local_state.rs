@@ -56,11 +56,12 @@ const STATE_DIR: &str = "benilla-config";
 // actually applies to, so a real unreachable branch on native would still warn.
 #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
 pub(crate) fn home() -> Option<PathBuf> {
-    // No persistence on web yet (no filesystem, no `BENILLA_HOME`/exe-relative folder to speak
-    // of) — every caller already treats `None` as "defaults, don't write", which is exactly what
-    // a browser tab should do until an OPFS-backed `home()` lands.
+    // On the page the folder is virtual: every resident is a small text file, and they live in
+    // the browser's `localStorage` under keys named by these same paths (see [`web_store`]). The
+    // callers' contract is unchanged — a path in, `read_to_string`/`write_atomic` on it — which
+    // is what makes this the one place the web needs to know about.
     #[cfg(target_arch = "wasm32")]
-    return None;
+    return Some(PathBuf::from("/benilla-config"));
     if std::env::var_os("WOW_CAPTURE").is_some() {
         return None; // hermetic: captures neither read nor write player state
     }
@@ -317,6 +318,14 @@ fn file_token(s: &str) -> String {
 /// a crash mid-write leaves the old file intact, never a truncated one. The one write path for
 /// every resident of the folder.
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::set(path, contents);
+    #[cfg(not(target_arch = "wasm32"))]
+    write_atomic_fs(path, contents)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_atomic_fs(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -327,6 +336,76 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
+}
+
+/// Read a state file — the read twin of [`write_atomic`], and the only way a resident of the
+/// folder is read, so that the page's store answers too. Absent is `ErrorKind::NotFound` on both
+/// targets (every caller treats that as the first-run default).
+pub(crate) fn read_to_string(path: &Path) -> std::io::Result<String> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::get(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::read_to_string(path)
+}
+
+/// [`read_to_string`] for the residents read as bytes (the addon enable state decodes its own
+/// encoding); on the page the store holds text, so the bytes are its UTF-8.
+pub(crate) fn read(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::get(path).map(String::into_bytes);
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::read(path)
+}
+
+/// Remove a state file (a cleared saved account name). Absent is not an error.
+pub(crate) fn remove_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::remove(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+/// The page's state folder: `window.localStorage`, one entry per file, keyed by the file's own
+/// path (`/benilla-config/config.toml`, `/benilla-config/macros/account.txt`, …). Everything
+/// [`write_atomic`] writes is text, and the whole folder is a few tens of KB, far under the
+/// ~5 MB an origin gets — so the simplest store there is also the right one. Per browser and
+/// per origin, like a `benilla-config/` beside each install; nothing crosses to the server.
+#[cfg(target_arch = "wasm32")]
+mod web_store {
+    use std::io::{Error, ErrorKind, Result};
+    use std::path::Path;
+
+    fn key(path: &Path) -> String {
+        format!("benilla:{}", path.display())
+    }
+
+    fn storage() -> Result<web_sys::Storage> {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .ok_or_else(|| Error::new(ErrorKind::Unsupported, "localStorage unavailable"))
+    }
+
+    pub(super) fn get(path: &Path) -> Result<String> {
+        storage()?
+            .get_item(&key(path))
+            .map_err(|_| Error::new(ErrorKind::Other, "localStorage read failed"))?
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("{} not stored", path.display())))
+    }
+
+    pub(super) fn set(path: &Path, contents: &str) -> Result<()> {
+        storage()?
+            .set_item(&key(path), contents)
+            .map_err(|_| Error::new(ErrorKind::Other, "localStorage write failed (quota?)"))
+    }
+
+    pub(super) fn remove(path: &Path) -> Result<()> {
+        storage()?
+            .remove_item(&key(path))
+            .map_err(|_| Error::new(ErrorKind::Other, "localStorage remove failed"))
+    }
 }
 
 /// Shared test plumbing for anything that toggles the persistence env vars: `std::env::set_var`

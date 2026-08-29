@@ -767,7 +767,7 @@ fn drive_dialog(
 /// Read the saved account name from `base` (missing file/dir = empty). Takes the *file* rather
 /// than resolving one, so the round-trip is testable from a tempdir.
 fn load_saved_account_from(path: &std::path::Path) -> String {
-    std::fs::read_to_string(path)
+    crate::local_state::read_to_string(path)
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
@@ -775,15 +775,12 @@ fn load_saved_account_from(path: &std::path::Path) -> String {
 /// Write (or, for an empty name, remove) the saved account name at `path`.
 fn save_account_to(path: &std::path::Path, name: &str) {
     if name.is_empty() {
-        let _ = std::fs::remove_file(path);
+        let _ = crate::local_state::remove_file(path);
         return;
     }
-    if let Some(dir) = path.parent() {
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
-    }
-    if let Err(e) = std::fs::write(path, name) {
+    // Through `write_atomic` like every other resident of the folder — that is what makes the
+    // page's store (decision: localStorage) hold this file too.
+    if let Err(e) = crate::local_state::write_atomic(path, name) {
         warn!("login: saving account name failed: {e}");
     }
 }

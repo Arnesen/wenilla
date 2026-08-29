@@ -50,7 +50,7 @@ impl Plugin for UiSavedPlugin {
 pub(crate) fn load_saved_variables(script: &mut UiScript) {
     // `None` = hermetic capture, or no install — session-only state, and the event below still fires.
     if let Some(path) = crate::local_state::saved_variables_path() {
-        match std::fs::read_to_string(&path) {
+        match crate::local_state::read_to_string(&path) {
             Ok(text) => {
                 if let Err(e) = script.run(&text) {
                     warn!(

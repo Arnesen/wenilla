@@ -825,7 +825,7 @@ fn stored_config() -> StoredConfig {
     let Some(path) = crate::local_state::config_path() else {
         return StoredConfig::Absent; // hermetic capture, or no install — session-only state
     };
-    let text = match std::fs::read_to_string(&path) {
+    let text = match crate::local_state::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StoredConfig::Absent,
         Err(e) => return StoredConfig::Bad(format!("config: cannot read {}: {e}", path.display())),

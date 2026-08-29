@@ -46,9 +46,11 @@ own accounts (a second login on one account kicks the first, as in the real clie
 
 - **Sound** starts on the first click or key in the page — browsers suspend every AudioContext
   until a user gesture; `index.html` resumes it then.
-- **No persistence yet** — `config.toml`, macros and bindings do not survive a reload
-  (`local_state::home()` is `None` on the page). OPFS/localStorage behind that one seam is the
-  next step.
+- **Persistence** — the state folder (`config.toml`, macros, key bindings, layouts, chat
+  settings, saved variables, the remembered account name) lives in the browser's `localStorage`,
+  one entry per file keyed by its path (`benilla:/benilla-config/config.toml`, …). Per browser
+  and per origin, like a `benilla-config/` beside each native install; the server never sees it.
+  Clearing site data resets it.
 - **Debugging a crash**: the panic hook prints to the console; `WEB_DEBUG=1 scripts/web-build.sh`
   keeps the wasm name section so the stack trace has symbols. `index.html` also prints the real
   WGSL compile diagnostics (wgpu's browser backend does not ask for them).
