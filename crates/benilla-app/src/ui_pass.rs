@@ -591,6 +591,7 @@ fn demo_enabled() -> bool {
 fn spawn_ui_camera(mut commands: Commands) {
     commands.spawn((
         PlayerUiCamera,
+        Name::new("player-UI camera"),
         Camera2d,
         // **No MSAA — named, because silence here means 4×.** `bevy_render`'s `CameraPlugin`
         // registers `Camera` → `Msaa` as a required component (`bevy_render/src/camera.rs:56`) and

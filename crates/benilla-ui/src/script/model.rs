@@ -18,6 +18,9 @@ use super::{
 /// The host's texture-path resolvability oracle — see [`Model::texture_probe`].
 pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
 
+/// The host's texture **texel-size** oracle — see [`Model::texture_size_probe`].
+pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
+
 /// The Rust-side model behind the Lua VM — the arena, the layout inputs + resolved rects, the
 /// id↔handle bijection, region visuals, and the event/script registrations. Held in `lua.app_data`
 /// (interior-mutable) so callbacks reach it; contains **no** mlua handles (the MAXCSTACK discipline).
@@ -38,6 +41,20 @@ pub(crate) struct Model {
     /// engine-less VM (tests, the addon harness), where the path form keeps answering nil: no
     /// backend, nothing loads — which is also exactly what those tests always saw.
     pub(crate) texture_probe: Option<TextureProbe>,
+    /// The host's texture **texel-size** oracle ([`super::UiScript::set_texture_size_probe`]): how
+    /// many texels wide and tall is the art at this path?
+    ///
+    /// What lets a region whose authored size on an axis is exactly `0` take its span from its
+    /// CONTENT, the way the real client's size getters do — `CSimpleTexture::GetWidth 0x770720` /
+    /// `GetHeight 0x770790` return the authored value only when it is not `0.0`, and otherwise read
+    /// the loaded texture's `[tex+0x144]`/`[tex+0x148]` through the same converter `<AbsDimension>`
+    /// uses, so **one texel is one FrameXML unit** (wow-re `region-size-fallback.md` §2, decision
+    /// 1349). The host answers off the same candidate walk the renderer decodes with and memoises,
+    /// so the size layout resolves with is the size the screen shows.
+    ///
+    /// `None` in an engine-less VM (tests, the addon harness), where a zero-size texture keeps the
+    /// rect it always had — there is no art to measure without a backend.
+    pub(crate) texture_size_probe: Option<TextureSizeProbe>,
     /// Where per-addon saved variables live: the account-scoped folder, then this character's.
     /// Both are directories holding one `<Addon>.lua` per declaring addon.
     pub(crate) addons_saved_account: Option<std::path::PathBuf>,
@@ -1360,6 +1377,7 @@ impl Model {
             addons_root: None,
             measurer: None,
             texture_probe: None,
+            texture_size_probe: None,
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),

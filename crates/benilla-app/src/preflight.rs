@@ -32,6 +32,12 @@
 //!    it: that one waits on [`EnteredWorldMessage`], which needs a server. So this notice fires at
 //!    **startup**, before anything can be concluded from the run.
 //!
+//! 5. **Two `Camera2d`s on one target disagree about MSAA** ([`camera_2d_msaa_agrees`], decision
+//!    1659). Not an avatar state, but the same shape as the four above: it is invisible until it
+//!    kills the frame, and when it does, wgpu's `Attachments have differing sample counts` names
+//!    two numbers and no camera. One scan on the frame the cameras spawn turns that into a line
+//!    that names them.
+//!
 //! The banner is **not env-gated**: a warning nobody knows to switch on is not a warning. It costs
 //! one line per world entry when everything is fine, and it re-fires on every re-entry (a relog, a
 //! `.character race` forced logout, a reconnect) because the state can have changed.
@@ -47,7 +53,12 @@
 //! [`crate::run_mode`] now, not here: it is consulted by the login policy, and 1174's seam does not
 //! let gameplay call an instrument. Its reasoning went with it.
 
+use std::collections::HashMap;
+
+use bevy::camera::{NormalizedRenderTarget, RenderTarget};
 use bevy::prelude::*;
+use bevy::render::view::Msaa;
+use bevy::window::PrimaryWindow;
 
 use crate::area::AreaTableRes;
 use crate::names::NameCache;
@@ -111,6 +122,7 @@ impl Plugin for PreflightPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Preflight>()
             .add_systems(Startup, offline_notice)
+            .add_systems(Update, camera_2d_msaa_agrees)
             .add_systems(
                 Update,
                 report_session.after(benilla_world::schedule::WorldStage::Net),
@@ -135,6 +147,71 @@ fn offline_notice(net: Option<Res<crate::net::NetOffline>>) {
          visual capture; NOT evidence for a change to any of it. method.md's gate is a clean run \
          of the AFFECTED path — for wire work that means a live server run."
     );
+}
+
+/// **Every `Camera2d` sharing a render target must carry the same `Msaa`** — checked out loud on
+/// the frame they spawn, because the failure is fatal, immediate, and names nobody (decision 1659).
+///
+/// Bevy's two prepare passes disagree about whether the sample count is part of a texture's
+/// identity. `view::prepare_view_targets` keys the **colour** target on `(target, usage, hdr,
+/// msaa)`, so every camera gets an attachment at its own count. `core_2d::
+/// prepare_core_2d_depth_textures` keys the **depth** texture on `camera.target` *alone* and stamps
+/// it with whichever camera the hash map reaches first — `core_3d`'s equivalent keys on `(target,
+/// msaa)`, so the asymmetry is 2D-only and there is nothing here for `Camera3d`. Two `Camera2d`s on
+/// one window at different counts therefore share one depth texture, and the one that did not
+/// create it opens its pass with mismatched attachments: `Attachments have differing sample
+/// counts: the depth attachment's texture view has count N but ... count M`. Two numbers, no
+/// camera, no system, no frame — a panic in `render_system` on a thread called `Compute Task Pool`.
+///
+/// It costs a session an afternoon of source archaeology, and it is one query to catch. The trap
+/// that produces it is silence: `Camera` requires `Msaa` and `Msaa::default()` is `Sample4`, so a
+/// camera that never mentions multisampling does not get none, it gets four (1628 found that
+/// costing a full-window 4× texture on the player-UI camera; 1659 found the same silence on the
+/// egui overlay camera crashing the debug panel outright, one commit after 1628 broke the tie that
+/// had been hiding it). So the error below says *which* camera and *what* count, and names the
+/// likely cause.
+///
+/// Gated on `Added<Camera2d>` rather than run once at `PostStartup`: our three 2D cameras all spawn
+/// in `Startup` today, but a fourth added later must be checked too, and the guard makes the
+/// steady-state cost one empty query.
+fn camera_2d_msaa_agrees(
+    added: Query<(), (With<Camera2d>, Added<Camera2d>)>,
+    cams: Query<(Entity, &RenderTarget, &Msaa, Option<&Name>), With<Camera2d>>,
+    primary: Query<Entity, With<PrimaryWindow>>,
+) {
+    if added.is_empty() {
+        return;
+    }
+    let primary = primary.single().ok();
+    let mut first: HashMap<NormalizedRenderTarget, (Entity, Option<String>, u32)> = HashMap::new();
+    for (entity, target, msaa, name) in &cams {
+        // A target that will not normalize has no swapchain yet and no depth texture either.
+        let Some(key) = target.normalize(primary) else {
+            continue;
+        };
+        let label = name.map(|n| n.as_str().to_owned());
+        let samples = msaa.samples();
+        let Some((other, other_label, other_samples)) = first.get(&key) else {
+            first.insert(key, (entity, label, samples));
+            continue;
+        };
+        if *other_samples == samples {
+            continue;
+        }
+        error!(
+            "preflight: {} ({other}) renders {}x MSAA and {} ({entity}) renders {}x, both to the \
+             SAME target ({key:?}) — one of them will die with `Attachments have differing sample \
+             counts` the frame it goes active. Bevy keys the Core2d DEPTH texture on the target \
+             alone (core_2d::prepare_core_2d_depth_textures) but the COLOUR target on the sample \
+             count too, so they share one depth attachment and cannot share a colour one. Usually \
+             the cause is a camera that never named an Msaa: silence is Sample4, not off \
+             (decisions 1628, 1659).",
+            other_label.as_deref().unwrap_or("an unnamed Camera2d"),
+            other_samples,
+            label.as_deref().unwrap_or("an unnamed Camera2d"),
+            samples,
+        );
+    }
 }
 
 /// The banner's once-per-entry latch: armed by [`EnteredWorldMessage`], disarmed when the report

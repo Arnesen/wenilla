@@ -57,7 +57,7 @@ pub(crate) mod click;
 pub(crate) mod cursor_mode;
 mod flash;
 mod highlight;
-mod hover;
+pub(crate) mod hover;
 pub(crate) mod lock;
 mod relations;
 mod reticle;

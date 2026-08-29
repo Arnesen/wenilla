@@ -165,6 +165,23 @@ pub fn sprite_candidates(path: &str) -> [String; 2] {
     }
 }
 
+/// The **texel dimensions** of a UI sprite reference, or `None` when nothing resolves — the number
+/// the client's `CSimpleTexture` size getters read out of `[tex+0x144]`/`[tex+0x148]` when a region
+/// authored no size on an axis (wow-re `region-size-fallback.md` §2, decision 1349: one texel is one
+/// FrameXML unit).
+///
+/// It goes through [`decode_sprite`] rather than sniffing a header, so the size layout uses is the
+/// size the screen shows: the same candidate order, the same BLP-vs-TGA content sniff, and the same
+/// verdict on a candidate that reads but will not decode. The caller memoises — this is asked once
+/// per distinct path, for the handful of regions whose rect is derived from their art.
+pub fn sprite_dimensions(
+    chain: &Mutex<Chain>,
+    loose_root: Option<&Path>,
+    path: &str,
+) -> Option<(u32, u32)> {
+    decode_sprite(chain, loose_root, path).map(|(w, h, _)| (w, h))
+}
+
 /// Decode a UI sprite key to RGBA8, **warning once per key that fails to resolve**.
 ///
 /// Every sprite cache below stores misses as well as hits, and each calls this on the miss path

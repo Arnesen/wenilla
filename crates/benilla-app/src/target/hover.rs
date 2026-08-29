@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::creature_anim::AnimDriver;
+use crate::entities::HeldAttached;
 use crate::net::{Guid, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::CameraControl;
 use crate::ui_script::PointerOverUi;
@@ -68,6 +69,30 @@ pub(super) fn update_pick_occlusion(
     }
 }
 
+/// Every model instance whose parts are `unit`'s pick geometry: **the body, everything it wears,
+/// and its mount** (decision 1658; the mount leg is 0441's).
+///
+/// This is the reference's chained-model set. `0x480d90` registers a pick candidate by walking the
+/// object's CM2 **attachment tree** — `[model+0x1dc]` list head → `[+0x1e4]` sibling, the same two
+/// fields the dress and paperdoll lanes walk — and calling the registrar `0x713cb0` on *each* model
+/// it finds, all under one candidate node. So the ray tests the held axe's own triangles and the
+/// hit comes back as the unit holding it (wow-re `object-layer/scratch/selection-circle.md` §3 +
+/// `ui/scratch/paperdoll-liveness-law.md`).
+///
+/// Takes the worn roots as a plain slice rather than the `HeldAttached` that supplies them, so the
+/// rule is testable without building one. `pub(crate)` for the **census**
+/// ([`crate::capture::probes`]'s `pick=` column), which must count what the picker will actually
+/// test and not a second opinion about it.
+pub(crate) fn pick_model_roots(
+    unit: Entity,
+    worn: &[Option<Entity>],
+    mount: Option<Entity>,
+) -> impl Iterator<Item = Entity> + use<'_> {
+    std::iter::once(unit)
+        .chain(worn.iter().flatten().copied())
+        .chain(mount)
+}
+
 /// Recompute the unit under the cursor each frame — the real client's two-phase pick (wow-re
 /// pick-volume RE `bd630be` + `31562f1d`): **broad** = the cursor ray vs the *current animation's*
 /// bounds sphere (world-placed + world-scaled, no pad); **pass 1** = the ray vs the unit's **posed
@@ -79,6 +104,11 @@ pub(super) fn update_pick_occlusion(
 /// alive unit beats a dead one even when farther, ties by distance. A unit with no skinned parts
 /// (cube fallback) keeps the interim render-mesh AABB test, competing at pass-1 level. Inert while
 /// mouse-looking (cursor hidden) or over the dev UI.
+///
+/// **A unit's pick geometry includes what it wears** (decision 1658): every model chained to the
+/// body — held weapons, the helm, the shoulders, a mount — is its own pass-1/pass-2 candidate
+/// resolving to the same unit, because the reference registers the whole CM2 attachment tree into
+/// the pick scene under one candidate node (`0x480d90` walking `[model+0x1dc]`/`[+0x1e4]`).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn update_hover(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
@@ -117,6 +147,10 @@ pub(super) fn update_hover(
             Option<&Children>,
             Option<&crate::entities::mount::MountChild>,
             Option<&InheritedVisibility>,
+            // What this unit WEARS — the spawned root per attach slot. Each is a chained model
+            // and therefore pick geometry of its wearer (see the system doc); read here rather
+            // than by a query of its own because this system sits at Bevy's 16-param ceiling.
+            Option<&HeldAttached>,
         ),
         (With<Guid>, Without<SelfPlayer>),
     >,
@@ -178,7 +212,7 @@ pub(super) fn update_hover(
     // Units the faithful path *owns* (they have skinned parts): excluded from the AABB fallback
     // even when the broad phase rejects them — the reference wouldn't click them there either.
     let mut faithful: HashSet<Entity> = HashSet::new();
-    for (entity, gt, net, anims, drv, store, children, mount_child, drawn) in &roots {
+    for (entity, gt, net, anims, drv, store, children, mount_child, drawn, held) in &roots {
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
         }
@@ -190,12 +224,23 @@ pub(super) fn update_hover(
             continue;
         }
         let Some(children) = children else { continue };
+        // The models this unit WEARS, each its own pick candidate below. The reference registers
+        // every model **chained** to the object, not just its body: `0x480d90` walks the CM2
+        // attachment tree (`[model+0x1dc]` list head → `[+0x1e4]` sibling — the same two fields
+        // the dress and paperdoll lanes walk) and registers each child model into the pick scene
+        // under the SAME candidate node, so a ray that strikes the axe resolves to the unit
+        // holding it (wow-re `object-layer/scratch/selection-circle.md` §3 +
+        // `ui/scratch/paperdoll-liveness-law.md`; decision 1658). Ours tested the body alone,
+        // which is why a Naxxramas weapon mob — an `InvisibleStalker` body that draws nothing,
+        // whose entire visible self is the weapon in its hand — could only be targeted through
+        // its name plate.
+        let worn = held.map_or(&[][..], |h| h.spawned_slots().as_slice());
         // Ownership probe only — no collect yet. The `skinned` Vec used to be built HERE, for
         // every drawn unit in the scene, ahead of the few-FLOP broad phase that rejects nearly
         // all of them (1473 §3's hover row); the survivors alone pay it now, below. Membership
         // in `faithful` must still be decided pre-reject — a broad-phase-rejected skinned unit
         // stays excluded from the AABB fallback by RULE, not by accident.
-        if !children.iter().any(|c| parts.contains(c)) {
+        if !children.iter().any(|c| parts.contains(c)) && worn.iter().all(Option::is_none) {
             continue; // static/cube unit → the AABB fallback below
         }
         faithful.insert(entity);
@@ -220,7 +265,6 @@ pub(super) fn update_hover(
                 continue;
             }
         }
-        let skinned: Vec<_> = children.iter().filter_map(|c| parts.get(c).ok()).collect();
         // The posed joint palette (parts of one skeleton share the rig): the same
         // world-from-bind-pose matrices GPU skinning applies, read from the owned palette rows
         // (decision 0720 — last frame's propagated pose, exactly what the previous
@@ -232,29 +276,31 @@ pub(super) fn update_hover(
                     palettes.world_palette(rig.slot, rig.bones() as usize)
                 })
             };
-        let Some(palette) = palette_of(&skinned) else {
-            continue;
-        };
-        let mesh_ids = skinned.iter().map(|(m, _)| m.id()).collect();
         let priority = if store.is_some_and(|s| s.0.unit_is_dead()) {
             2
         } else {
             3
         };
-        candidates.push((entity, priority, mesh_ids, palette));
-        // The mount child's parts join as a second candidate resolving to the SAME unit
-        // (decision 0441): its own skeleton, its own palette, one hoverable whole.
-        if let Some(mc) = mount_child {
-            if let Ok(mc_children) = child_sets.get(mc.0) {
-                let mount_skinned: Vec<_> = mc_children
-                    .iter()
-                    .filter_map(|c| parts.get(c).ok())
-                    .collect();
-                if let Some(mount_palette) = palette_of(&mount_skinned) {
-                    let mount_mesh_ids = mount_skinned.iter().map(|(m, _)| m.id()).collect();
-                    candidates.push((entity, priority, mount_mesh_ids, mount_palette));
-                }
-            }
+        // **One candidate per model instance, every one of them resolving to this unit** — the
+        // reference's own shape (one candidate node; every chained model registered under it).
+        // The body contributes nothing when it has no parts, which is not a reason to stop: a
+        // trigger creature's whole visible self is what it wears. An attached item rides a rigid
+        // one-frame palette of its own (`RigRider`, 1609), so it reads here exactly like a body —
+        // its parts, its rig, its pose — and so does a mount child (decision 0441).
+        for root in pick_model_roots(entity, worn, mount_child.map(|mc| mc.0)) {
+            let Ok(kids) = child_sets.get(root) else {
+                continue;
+            };
+            let sk: Vec<_> = kids.iter().filter_map(|c| parts.get(c).ok()).collect();
+            let Some(palette) = palette_of(&sk) else {
+                continue;
+            };
+            candidates.push((
+                entity,
+                priority,
+                sk.iter().map(|(m, _)| m.id()).collect(),
+                palette,
+            ));
         }
     }
 
@@ -685,5 +731,50 @@ mod tests {
             "a card whose owner is gone resolves to nothing that carries a guid"
         );
         assert_eq!(resolved[4], net, "the net entity resolves to itself");
+    }
+
+    /// **A unit's pick geometry is every model chained to it** — decision 1658, the Naxxramas
+    /// weapon mobs (`.go xyz 2729.28 -3159.80 267.54 533`).
+    ///
+    /// "Unholy Axe" is an `InvisibleStalker` body — 80 bones, 135 animations, zero vertices —
+    /// holding a real axe on its right-hand attachment. Enumerating only the body left the unit
+    /// with no pick candidate at all, so the model could not be hovered or clicked and the name
+    /// plate was the only way to select it. The reference registers each chained model under the
+    /// same candidate node, which is what makes the axe itself the clickable surface.
+    #[test]
+    fn a_units_pick_geometry_is_every_model_chained_to_it() {
+        let unit = Entity::from_raw_u32(1).unwrap();
+        let main_hand = Entity::from_raw_u32(2).unwrap();
+        let helm = Entity::from_raw_u32(3).unwrap();
+        let mount = Entity::from_raw_u32(4).unwrap();
+
+        let bare: Vec<_> = pick_model_roots(unit, &[], None).collect();
+        assert_eq!(bare, vec![unit], "a unit wearing nothing is just its body");
+
+        // The empty slots between the filled ones are the real `HeldAttached` shape (main/off/
+        // ranged/helm/shL/shR/ammo/quiver), and must not become candidates.
+        let worn = [
+            Some(main_hand),
+            None,
+            None,
+            Some(helm),
+            None,
+            None,
+            None,
+            None,
+        ];
+        let dressed: Vec<_> = pick_model_roots(unit, &worn, Some(mount)).collect();
+        assert_eq!(
+            dressed,
+            vec![unit, main_hand, helm, mount],
+            "body, then every worn model, then the mount — all one unit's geometry"
+        );
+
+        // The case that was broken: the body draws nothing, so the axe is the whole hit surface.
+        let trigger: Vec<_> = pick_model_roots(unit, &worn[..1], None).collect();
+        assert!(
+            trigger.contains(&main_hand),
+            "a body with no geometry of its own still offers what it holds"
+        );
     }
 }

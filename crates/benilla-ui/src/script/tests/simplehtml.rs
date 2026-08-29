@@ -542,6 +542,130 @@ fn an_unfloated_image_reserves_height_without_becoming_the_anchor() {
     );
 }
 
+/// **B342, at the engine.** Goudy, 2026-08-27 (`#bugs` `1542371921486811236`): *"html images in
+/// books are not scaled correctly"* — the Alliance crest on *A Treatise on Military Ranks* drawn
+/// several times the reference's size, with the page's text over the top of it.
+///
+/// The body is `page_text` 2654 and its `<IMG>` carries **no `width=` and no `height=`**, so the
+/// block is sized `0 × 0`. In the reference that is not "no size": the resolver's size call is
+/// VIRTUAL, and `CSimpleTexture::GetWidth 0x770720` / `GetHeight 0x770790` answer an authored `0.0`
+/// with the loaded texture's own texel extent, through bit-for-bit the converter `<AbsDimension>`
+/// uses — **one texel is one FrameXML unit** (wow-re `region-size-fallback.md` §2, decision 1349).
+/// `PvPRankAlliance.blp` is 128×128, so the crest is a 128-unit square.
+///
+/// The falsification is the reported shape itself, asserted below: a zero span leaves the opposite
+/// edge unresolved (`combine_edge`'s `span != 0.0` leg), and the region sweep's owner-edge fallback
+/// then hands the image the rest of the **270-wide** page.
+#[test]
+fn the_books_unsized_crest_is_its_arts_texel_square_not_the_whole_page() {
+    const CREST: &str = "Interface\\PvPRankBadges\\PvPRankAlliance";
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_texture_size_probe(Box::new(|path| (path == CREST).then_some((128, 128))));
+    page(&s);
+    s.run(&format!(
+        "Page:SetText({})",
+        lua_str(
+            "<HTML><BODY>\n\
+             <H1 align=\"center\">A TREATISE ON MILITARY RANKS</H1>\n\
+             <BR/>\n<BR/>\n\
+             <IMG src=\"Interface\\PvPRankBadges\\PvPRankAlliance\" align=\"left\"/>\n\
+             <BR/>\n\
+             <P align=\"right\">What follows are</P>\n\
+             </BODY></HTML>"
+        )
+    ))
+    .unwrap();
+    measure_at_16px(&mut s);
+
+    let b = blocks(&s, "Page");
+    let img = b
+        .iter()
+        .position(|x| x.texture.is_some())
+        .expect("an IMG block");
+    assert_eq!(b[img].texture.as_deref(), Some(CREST));
+    assert_eq!(
+        b[img].size,
+        Some((0.0, 0.0)),
+        "the block still stores what the markup authored — the span is DERIVED at resolve, as the \
+         reference's virtual getter derives it"
+    );
+
+    let rect = resolved_rect(&s, "Page", img);
+    assert_eq!(
+        (rect.right - rect.left, rect.top - rect.bottom),
+        (128.0, 128.0),
+        "a texel is a FrameXML unit: the 128x128 crest is a 128-unit square, not the page"
+    );
+    // The reported symptom, stated as the thing that must not come back: the page is 270 wide and
+    // 304 tall, and the crest used to take all of the first and everything left of the second.
+    assert!(
+        rect.right - rect.left < 270.0,
+        "the crest is stretched across the page width again"
+    );
+}
+
+/// The flow half of the same law (`simplehtml-markup-engine.md` §7 step 6): an **unfloated** image
+/// reserves `texture.GetHeight()` — `CSimpleTexture`'s override — so one with no `height=` reserves
+/// its art's texel height, and the next text block hangs that far lower. A floated one (the book's
+/// `align="left"`) still reserves nothing, which is why its text overlaps it in both clients.
+#[test]
+fn an_unsized_image_reserves_its_arts_texel_height_unless_it_is_floated() {
+    let mut s = script();
+    s.set_texture_size_probe(Box::new(|_| Some((64, 48))));
+    page(&s);
+    s.run(
+        r#"Page:SetText("<HTML><BODY><P>a</P>" ..
+            "<IMG src=\"Interface\\Pic\"/>" ..
+            "<P>b</P></BODY></HTML>")"#,
+    )
+    .unwrap();
+    assert_eq!(
+        blocks(&s, "Page")[2].anchor.unwrap(),
+        (Point::TopLeft, Point::BottomLeft, 0.0, -48.0, Rel::Block(0)),
+        "no height= reserves the ART's height, not nothing"
+    );
+
+    let mut s = script();
+    s.set_texture_size_probe(Box::new(|_| Some((64, 48))));
+    page(&s);
+    s.run(
+        r#"Page:SetText("<HTML><BODY><P>a</P>" ..
+            "<IMG src=\"Interface\\Pic\" align=\"left\"/>" ..
+            "<P>b</P></BODY></HTML>")"#,
+    )
+    .unwrap();
+    assert_eq!(
+        blocks(&s, "Page")[2].anchor.unwrap(),
+        (Point::TopLeft, Point::BottomLeft, 0.0, 0.0, Rel::Block(0)),
+        "a FLOATED image reserves nothing — the text runs over it, in both clients"
+    );
+}
+
+/// A VM with no host oracle has no art to measure, so a zero-size image stays exactly where it
+/// always was. The engine-less truth, stated so the fix cannot be read as "the engine now knows
+/// texel sizes".
+#[test]
+fn without_a_size_oracle_an_unsized_image_is_unchanged() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    page(&s);
+    s.run(r#"Page:SetText("<HTML><BODY><P>a</P><IMG src=\"Interface\\Pic\"/></BODY></HTML>")"#)
+        .unwrap();
+    measure_at_16px(&mut s);
+    let b = blocks(&s, "Page");
+    let img = b
+        .iter()
+        .position(|x| x.texture.is_some())
+        .expect("an IMG block");
+    let rect = resolved_rect(&s, "Page", img);
+    assert_eq!(
+        rect.right - rect.left,
+        270.0,
+        "the owner-edge fallback, unchanged"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The Lua table
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -823,6 +947,18 @@ fn resolved_tops(s: &UiScript, name: &str) -> Vec<(f32, f32)> {
             (r.top, r.bottom)
         })
         .collect()
+}
+
+/// One block's resolved rect, by index in the block list.
+fn resolved_rect(s: &UiScript, name: &str, block: usize) -> crate::layout::Rect {
+    let lua = s.lua();
+    let model = lua.app_data_ref::<Model>().expect("model");
+    let fh = model.arena.lookup(name).expect("frame");
+    let st = model.simple_html.get(&fh).expect("state");
+    *model
+        .region_resolved
+        .get(&st.blocks[block])
+        .expect("block rect")
 }
 
 /// The text of every quad the extract emits for the page — what is actually on screen.

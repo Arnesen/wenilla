@@ -83,8 +83,11 @@ pub(super) struct RingAssets {
 /// The reference's ground selection-circle texture (`Textures\UnitSelectTexture.blp`, wow-re
 /// selection-circle RE) — a white ring, sampled top-down, tinted + additively blended below.
 const RING_TEXTURE: &str = "mpq://textures/unitselecttexture.blp";
-/// Model-local ring radius for a unit with no model (a cube fallback), since it has no M2 footprint.
-const RING_FALLBACK_RADIUS: f32 = 0.7;
+/// Model-local ring radius for a unit with **no model at all** (a cube fallback), since it has no M2
+/// footprint to measure. The reference's own degenerate-box constant (decision 1658) rather than a
+/// number of ours: a body whose box measures zero and a body with no box are the same question, and
+/// `0x60aee0` answers it with 1.2.
+const RING_FALLBACK_RADIUS: f32 = benilla_formats::DEGENERATE_RING_FOOTPRINT;
 /// The ring's own palette — **trace + byte verified end-to-end** (wow-re selection-circle §5, the
 /// `CGUnit::GetSelectionCircleColor` selector `0x605960`, per-object vtable `+0x2c`; the dword is
 /// written verbatim as every decal vertex's diffuse, alpha 255 — no tint global, no tex-env
@@ -241,7 +244,8 @@ pub(super) fn load_factions(mut commands: Commands, world_assets: Option<Res<Wor
 
 /// Position, size, colour + show the ring under the current target each frame; hide it when nothing is
 /// selected. Radius = the unit's model ring footprint ([`SelectionRadius`], the Stand-box
-/// `sqrt(0.5·sqrt(dx²+dy²))`) × its transform scale (`OBJECT_FIELD_SCALE_X`). Colour = the target's
+/// `sqrt(0.5·sqrt(dx²+dy²))`, or 1.2 for a degenerate box) × its transform scale
+/// (`OBJECT_FIELD_SCALE_X`). Colour = the target's
 /// reaction rank ([`ring_reaction`]), re-resolved each frame (faction can change live — the store
 /// merges `Values` deltas), the handle swapped only on change. No pulse — the reference's unit ring
 /// is steady. If the target's entity is gone (destroyed / streamed out) the selection clears and the
@@ -303,8 +307,12 @@ pub(super) fn update_ring(
         }
         Some(target) => match targets.0.get(target) {
             Ok((unit, sel_radius, store, net, mount_child)) => {
-                // A real model uses its own footprint (even if small); only a model-less unit falls back.
-                // The 0.05 floor just avoids a degenerate (zero-bounds) model rendering an invisible ring.
+                // A real model uses its own footprint, whatever it measures; only a model-less unit
+                // falls back. **No floor** — the reference has none, and the one we used to keep
+                // (0.05) is what a zero-bounds model landed on: `ring_footprint` now carries the
+                // writer's own degenerate-box answer (1.2) instead of a 0 for the picker to clamp,
+                // so the Naxxramas weapon mobs ring at 1.2 × 2.25 ≈ 2.7 yd like the reference and
+                // not at a coin's width (decision 1658).
                 // Mounted, the footprint and the extra scale column come from the mount child
                 // (the `mount_parts` doc above); a still-loading mount rides the fallback the
                 // way any model-less unit does until its bounds land.
@@ -313,7 +321,6 @@ pub(super) fn update_ring(
                     Some((mnet, msel)) => (msel.map_or(RING_FALLBACK_RADIUS, |r| r.0), mnet.scale),
                     None => (sel_radius.map_or(RING_FALLBACK_RADIUS, |r| r.0), 1.0),
                 };
-                let local = local.max(0.05);
                 let radius = local * (unit.scale.x * mount_scale).max(0.01);
                 *fade_angle = ring_fade_angle(&camera).unwrap_or(*fade_angle);
                 // The rebuild gate (0733 §5): a still target under a still camera keeps the

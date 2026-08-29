@@ -43,9 +43,6 @@
 //!   `SimpleHTML:SetSpacing` *does* honour here is the half SimpleHTML itself owns and computes:
 //!   the inter-block step. That is a real, drawn effect rather than a stored-and-ignored number,
 //!   which is why this pair ships where the FontString/Font ones do not.
-//! - **An `<IMG>` with no declared height reserves nothing in the flow.** The reference
-//!   substitutes the texture's natural pixel height (`0x770790`), which needs the BLP loaded —
-//!   knowledge the engine core does not have at `SetText` time.
 //! - **A block's wrap width of 0** (a SimpleHTML sized only by anchors) lets the measure
 //!   round-trip supply the natural text width, where the reference leaves the block at width 0.
 //!   That is this engine's standing law for every height-less/width-less FontString, and inverting
@@ -375,8 +372,23 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                 // `prevBlock` is **never** written by the image path (three reads of `+0x348` in
                 // the whole function, zero writes) — the next block still hangs off the last TEXT
                 // block, only lower.
+                //
+                // The height it reserves is `texture.GetHeight()`, which is `CSimpleTexture`'s
+                // **override**: a `<IMG>` with no `height=` reserves its art's own texel height,
+                // not nothing (decision 1349 — one texel is one FrameXML unit). Asked of the same
+                // host oracle the resolve derives the region's rect from, so the space the flow
+                // leaves and the space the image fills are one number.
                 if !*floated {
-                    next_y -= *h;
+                    let reserved = if *h == 0.0 {
+                        src.as_deref()
+                            .and_then(|p| {
+                                super::layout::texel_span(model.texture_size_probe.as_ref(), p)
+                            })
+                            .map_or(0.0, |(_, th)| th)
+                    } else {
+                        *h
+                    };
+                    next_y -= reserved;
                 }
                 made.push(rh);
             }

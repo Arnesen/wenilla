@@ -160,8 +160,69 @@ fn region_node_hash(data: &RegionData) -> u64 {
         }
         None => node.feed(u64::MAX),
     }
+    // **The ART, on a region whose rect is derived from it** (decision 1349): an axis authored `0`
+    // takes its span from the content ([`content_span`]), so swapping the texture on such a region
+    // MOVES it and the node must re-hash. Fed only on that shape — a sized region's art cannot
+    // change its rect, and hashing every icon path would put a string walk in the derive's hot loop
+    // for a fact with no reader.
+    if !data.anchors.is_empty() && data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0) {
+        node.feed(data.fill.is_some() as u64);
+        match &data.texture {
+            Some(path) => {
+                node.feed(path.len() as u64);
+                for b in path.as_bytes() {
+                    node.feed(u64::from(*b));
+                }
+            }
+            None => node.feed(u64::MAX),
+        }
+    }
     node.finish()
 }
+
+/// A region's **content-derived span**, in FrameXML units — the client's virtual size getters,
+/// which the resolver calls instead of reading a stored width/height (wow-re
+/// `region-size-fallback.md` §1/§2, decision 1349).
+///
+/// `CSimpleTexture::GetWidth 0x770720` returns the authored value only when it is **not exactly
+/// `0.0`**; on `0.0` with a texture loaded it returns the texture's own texel extent, through
+/// bit-for-bit the same converter the `<AbsDimension>` attribute uses — so **one texel is one
+/// FrameXML unit, at every aspect ratio**. `0x770790` is the identical body for height. The
+/// colour form generates an **8×8** surface (`0x770360` → `0x44a900` stamps
+/// `[tex+0x144] = [tex+0x148] = 8`), so a `<Color>`-only texture spans 8 units.
+///
+/// `None` = nothing to measure (no art, or no host oracle to measure it with), and the caller
+/// leaves the axis at zero — which is the client's answer too when a texture has no `CGxTex*`
+/// at all.
+///
+/// **This is the texture half of 1349 §4 only.** A `CSimpleFontString`'s span is likewise derived
+/// (its measured extent, floored at one unit — `0x772930`), and our floor is still the zero-span
+/// collapse the sweep applies below; that half, and deleting the owner-edge fallback the derived
+/// spans make redundant, stay 1349's own arc.
+fn content_span(
+    data: &RegionData,
+    probe: Option<&crate::script::TextureSizeProbe>,
+) -> Option<(f32, f32)> {
+    if data.fill.is_some() {
+        return Some((SOLID_TEXTURE_TEXELS, SOLID_TEXTURE_TEXELS));
+    }
+    texel_span(probe, data.texture.as_deref()?)
+}
+
+/// [`content_span`]'s texture arm, for a caller holding a path rather than a region — the
+/// SimpleHTML flow reservation, which asks the reference's `GetHeight` override the same way
+/// (`simplehtml-markup-engine.md` §7 step 6).
+pub(super) fn texel_span(
+    probe: Option<&crate::script::TextureSizeProbe>,
+    path: &str,
+) -> Option<(f32, f32)> {
+    let (w, h) = probe?(path)?;
+    Some((w as f32, h as f32))
+}
+
+/// The edge of the surface `CSimpleTexture::SetTexture(const CImVector*)` generates for the colour
+/// form — 64 texels, `0x44a900` stamping `[tex+0x144] = [tex+0x148] = 8` (decision 1349 §1).
+const SOLID_TEXTURE_TEXELS: f32 = 8.0;
 
 /// [`LayoutScope::node_of`] holds one roster index per id, and the two rosters are separate
 /// (`plan` for frames, `regions` for regions) — this bit says which one. Node counts run in the
@@ -768,6 +829,7 @@ impl UiScript {
             layout_last_scope,
             layout_rounds,
             pending_size_changed,
+            texture_size_probe,
             ..
         } = model;
         // ── The incremental seed (decision 1388) ─────────────────────────────────────────────
@@ -1118,6 +1180,29 @@ impl UiScript {
                     }
                     if width == 0.0 {
                         width = m.w;
+                    }
+                }
+                // A TEXTURE's unset axis is the client's *other* content-derived span: the art's
+                // own texel extent ([`content_span`]). It is the same shape as the FontString
+                // measure above — the reference's size getter is virtual, and both region classes
+                // override it — and it has to be applied HERE, before the resolve, because
+                // `combine_edge` reads a zero span as "no size at all" and leaves the opposite edge
+                // unresolved.
+                //
+                // That vacuum is what B342 fell into. `page_text` 2654 (*A Treatise on Military
+                // Ranks*) carries `<IMG src="…\PvPRankAlliance" align="left"/>` — **no width=, no
+                // height=** — so SimpleHTML sized the block `0 × 0`, one TOPLEFT anchor pinned the
+                // corner, and the owner-edge fallback below stretched a 128×128 crest across the
+                // rest of the 270×304 page with the text over it. The reference draws it at 128×128
+                // units, because a texel is a FrameXML unit.
+                if !is_fontstring && (width == 0.0 || height == 0.0) {
+                    if let Some((cw, ch)) = content_span(data, texture_size_probe.as_ref()) {
+                        if width == 0.0 {
+                            width = cw;
+                        }
+                        if height == 0.0 {
+                            height = ch;
+                        }
                     }
                 }
                 scratch.anchors.clear();

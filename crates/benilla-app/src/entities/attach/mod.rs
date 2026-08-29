@@ -61,7 +61,7 @@ pub(super) use redress::redress_player_looks;
 /// `skins` is whether anything will actually **skin through this slot** — the same law the item
 /// lane's rider states (`equipment::spawn`: "a slot only earns its keep if something will
 /// actually SKIN through it"). A body that drew no batch at all (the invisible trigger creature
-/// holding a visible weapon — decision 1618) still needs the *pose*, because its attachment
+/// holding a visible weapon — decision 1656) still needs the *pose*, because its attachment
 /// points carry what IS drawn, but it has nothing of its own to skin: it takes the slot-less rig
 /// [`benilla_world::rig_anim::finalize_rig_worlds`] has supported since 1365, and no `RigStarved`
 /// marker either (there is no starvation to heal).
@@ -327,7 +327,7 @@ pub(super) fn attach_entity_visuals(
         // rather than flash a cube we'd swap out.
         //
         // **The gate is "did the display name a model", not "did it build a batch"** (decision
-        // 1618). A model that named a file and built ZERO batches is a *loaded model instance that
+        // 1656). A model that named a file and built ZERO batches is a *loaded model instance that
         // draws nothing* — the reference builds its `CM2Model` like any other and the per-batch
         // loop simply has no trip to make — and everything an entity takes from its model but its
         // pixels comes from that instance: the skeleton, the attachment points a held weapon rides,
@@ -465,7 +465,7 @@ pub(super) fn attach_entity_visuals(
                     .is_ok_and(|s| crate::go_anim::go_animates(s.0.gameobject_type_id()));
             // Will anything actually SKIN through this instance's palette slot? Every M2 part
             // carries a skinned twin, so for an ordinary body this is simply "it drew something";
-            // a body that drew NOTHING (decision 1618's invisible weapon-holder) gets the rig
+            // a body that drew NOTHING (decision 1656's invisible weapon-holder) gets the rig
             // without the slot — see [`setup_skinned_instance`].
             let skins = parts.iter().any(|p| p.skinned_mesh.is_some());
             let mut skin: Option<RigBuild> = match (net.kind, dm) {
