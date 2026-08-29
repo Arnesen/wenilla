@@ -222,7 +222,15 @@ impl Build {
                     .target("wasm32-wasip1")
                     .flag(format!("--sysroot={}", sysroot.display()))
                     .flag("-mllvm").flag("-wasm-enable-sjlj")
-                    .flag("-fno-exceptions");
+                    .flag("-fno-exceptions")
+                    // C's float→int conversion is UB out of range; on wasm the plain opcode TRAPS
+                    // (x86 wraps). Lua does that cast on every `%d`/`tointeger`, and a 1.12 addon
+                    // formatting a big float must not take the whole VM down — use the saturating
+                    // opcodes instead.
+                    .flag("-mnontrapping-fptoint")
+                    // `%d` formats through `long long`, matching the 64-bit `lua_Integer` that
+                    // `luaconf.h` defines for wasm32 (see third_party/mlua-sys/BENILLA.md).
+                    .define("LUA_USELONGLONG", None);
                 // The link needs libsetjmp + libc + compiler-rt from the sysroot; `Artifacts`
                 // carries one search dir, so they are copied beside liblua.
                 fs::create_dir_all(&lib_dir)?;
