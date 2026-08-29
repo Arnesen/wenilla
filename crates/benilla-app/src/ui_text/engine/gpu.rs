@@ -196,8 +196,8 @@ fn report_cache(atlas: &UiFontAtlas) {
     if std::env::var_os("WOW_GLYPH_CACHE").is_none_or(|v| v == "0") {
         return;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     if LAST.swap(now, Ordering::Relaxed) == now {
         return;

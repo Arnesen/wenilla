@@ -162,8 +162,8 @@ pub(super) fn feed_ui_input(
             static LAST: AtomicU64 = AtomicU64::new(0);
             ACC_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
             let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
-            let now_s = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let now_s = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             if LAST.swap(now_s, Ordering::Relaxed) != now_s && calls > 1 {

@@ -38,6 +38,9 @@ webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
 webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
 
 [dependencies]
+# Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
+# `Date.now()` in a browser, where std's panics on first use.
+web-time = "1"
 anyhow.workspace = true
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true

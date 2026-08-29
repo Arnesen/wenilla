@@ -6,6 +6,9 @@ license.workspace = true
 description = "Engine-free WoW UI engine core: TOC/FrameXML parsing, templates, anchors, z-order — decision 0068"
 
 [dependencies]
+# Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
+# `Date.now()` in a browser, where std's panics on first use.
+web-time = "1"
 roxmltree = "0.20"
 # The embedded Lua runtime for the script host (decision 0068). `lua51` = Classic Era's Lua
 # version; `vendored` builds PUC-Rio Lua from source (no system dependency). 0.11 matches the

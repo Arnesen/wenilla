@@ -63,8 +63,8 @@ fn note_inbound() {
 /// Wall-clock unix milliseconds — the one clock two processes share (the trace header's `t0` is in
 /// the same units, so a mover's file and an observer's file line up).
 fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
 }
 

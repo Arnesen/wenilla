@@ -706,6 +706,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "wgpu",
 ]
 
@@ -819,6 +820,7 @@ version = "0.1.0"
 dependencies = [
  "mlua",
  "roxmltree",
+ "web-time",
 ]
 
 [[package]]

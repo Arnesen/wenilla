@@ -369,8 +369,8 @@ pub(super) fn time_speed(
 /// what a "the countdown is wrong by a constant" report would be about, and it costs one line.
 pub(super) fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
     if clock.0.is_none() {
-        let local = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let local = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         info!(

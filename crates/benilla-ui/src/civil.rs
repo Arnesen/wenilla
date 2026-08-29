@@ -83,8 +83,8 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// Wall-clock seconds since the Unix epoch. Before the epoch is not a state a game client is in; a
 /// clock that somehow reports it clamps to 0 rather than raising inside an addon's file scope.
 pub fn unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
