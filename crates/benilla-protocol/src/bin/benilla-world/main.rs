@@ -7,28 +7,45 @@
 //! `CMSG_PLAYER_LOGIN` has something to log in. The realmd host is a positional arg; the world server
 //! address defaults to whatever the realm list advertises (override with `--world`).
 
+// These CLIs are native tools — a browser has no argv, no realmd to dial by hand, and none of the
+// blocking `WorldSession` twins the probe harness is written against. The bin target still needs a
+// `main` for the web build to link, so it gets an empty one and everything else is gated off.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 mod probes;
+#[cfg(not(target_arch = "wasm32"))]
 mod world;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::{bail, Context, Result};
+#[cfg(not(target_arch = "wasm32"))]
 use benilla_protocol::messages::{
     CharCreateReq, CHAR_CREATE_NAME_IN_USE, CHAR_CREATE_SUCCESS, CLASS_WARRIOR, GENDER_MALE,
     RACE_HUMAN,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use benilla_protocol::{decode, EntityKind, WorldSession, WORLD_PORT};
+#[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
 
+#[cfg(not(target_arch = "wasm32"))]
 use probes::{
     Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, MountTele,
     OpenItem, Probe, QueryNames, Quest, QuestItem, QuestLog, QuestTimer, Speed, Spells, Spirit,
     SwapPackSlots, UsePackSlot, Vendor, WorldState,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use world::{DeathArc, Tracked, World};
 
 /// Connect to a WoW 1.12.1 world server, log in a character, and stream object updates.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser)]
 #[command(name = "benilla-world", version, about)]
 struct Cli {
@@ -260,6 +277,7 @@ struct Cli {
 
 /// Parse a `--loot-guid` value: decimal, or `0x`-prefixed hex (as `benilla-world`'s own `guid
 /// {:#x}` printouts read out).
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_guid(s: &str) -> Result<u64, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).map_err(|e| e.to_string())
@@ -269,6 +287,7 @@ fn parse_guid(s: &str) -> Result<u64, String> {
 }
 
 /// Parse a `--swap-pack-slots` value: two 1-based backpack slots as `A:B` (or `A,B`).
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_slot_pair(s: &str) -> Result<(u8, u8), String> {
     let (a, b) = s
         .split_once([':', ','])
@@ -281,6 +300,7 @@ fn parse_slot_pair(s: &str) -> Result<(u8, u8), String> {
     Ok((a, b))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -590,6 +610,7 @@ fn main() -> Result<()> {
 /// Walk the active player `yards` forward along `orientation`, sending a realistic
 /// start→heartbeat→stop sequence at run speed, and return the destination. WoW orientation 0 faces
 /// +X; forward is `(cos o, sin o, 0)`. Coordinates are raw WoW yards.
+#[cfg(not(target_arch = "wasm32"))]
 fn walk_forward(
     session: &mut WorldSession,
     start: [f32; 3],

@@ -2,10 +2,19 @@
 //!
 //! Example: `cargo run --bin benilla-auth -- one pone localhost`
 
+// These CLIs are native tools — a browser has no argv, no realmd to dial by hand, and none of the
+// blocking `WorldSession` twins the probe harness is written against. The bin target still needs a
+// `main` for the web build to link, so it gets an empty one and everything else is gated off.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Result;
+#[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
 
 /// Log in to a WoW 1.12.1 auth server and print its realm list.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser)]
 #[command(name = "benilla-auth", version, about)]
 struct Cli {
@@ -18,6 +27,7 @@ struct Cli {
     host: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let cli = Cli::parse();
 

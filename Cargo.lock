@@ -697,9 +697,14 @@ dependencies = [
  "clap",
  "flate2",
  "futures-lite",
+ "js-sys",
  "num-bigint",
  "rand 0.8.6",
+ "send_wrapper",
  "sha1",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
