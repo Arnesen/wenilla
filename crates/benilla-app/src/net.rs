@@ -1736,9 +1736,16 @@ impl DisconnectedMessage {
 /// client — e.g. it requires Warden): show `reason` and stop, never resubmit.
 #[derive(Message, Clone)]
 pub(crate) struct LoginFailedMessage {
-    pub(crate) code: Option<u8>,
+    /// Which server refused us and with which byte — see [`benilla_protocol::LoginRefusal`] for
+    /// why this is not a bare `Option<u8>`.
+    pub(crate) refusal: Option<benilla_protocol::LoginRefusal>,
     pub(crate) reason: String,
     pub(crate) terminal: bool,
+    /// The dial that never opened a socket, when that is what failed — see
+    /// [`benilla_protocol::DialFailure`]. What lets the screen say *which* of "that name does not
+    /// exist" and "nothing is answering there" happened, instead of one "Unable to connect" that
+    /// sends a player off editing a correct address.
+    pub(crate) dial: Option<benilla_protocol::DialFailure>,
 }
 
 /// A same-map teleport for our player: snap to the pose, then echo the ack. Written by

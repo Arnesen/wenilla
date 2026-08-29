@@ -264,20 +264,34 @@ fn run(
     let stage = |s: LoginStage| {
         let _ = events_tx.send(SessionEvent::LoginStage { stage: s });
     };
-    let fail = |code: Option<u8>, reason: String| {
+    let fail = |refusal: Option<benilla_protocol::LoginRefusal>, reason: String| {
         let _ = events_tx.send(SessionEvent::LoginFailed {
-            code,
+            refusal,
             reason,
             terminal: false,
+            dial: None,
+        });
+        Ok(Cycle::Repark)
+    };
+    // The dial that never opened a socket — the only failure whose cause the *screen* can act on,
+    // now that the address is something a player types (1667). Kept separate from `fail` so the
+    // classification happens once, at the one place holding the error object.
+    let fail_dial = |dial: benilla_protocol::DialFailure, reason: String| {
+        let _ = events_tx.send(SessionEvent::LoginFailed {
+            refusal: None,
+            reason,
+            terminal: false,
+            dial: Some(dial),
         });
         Ok(Cycle::Repark)
     };
     // A failure resubmitting cannot fix — the app shows it and stops (no paced retry).
     let fail_terminal = |reason: String| {
         let _ = events_tx.send(SessionEvent::LoginFailed {
-            code: None,
+            refusal: None,
             reason,
             terminal: true,
+            dial: None,
         });
         Ok(Cycle::Repark)
     };
@@ -291,9 +305,15 @@ fn run(
                 return Ok(Cycle::Repark);
             }
             // A server refusal carries its auth result byte (the app maps it to the client's
-            // own AUTH_* string); a transport failure carries None.
-            let code = e.downcast_ref::<AuthReject>().map(|r| r.code);
-            return fail(code, format!("{e:#}"));
+            // own AUTH_* string); a transport failure carries None. A failure to get a socket at
+            // all carries the dial verdict, which is the one the screen can turn into advice.
+            if let Some(dial) = e.downcast_ref::<benilla_protocol::DialFailure>() {
+                return fail_dial(dial.clone(), format!("{e:#}"));
+            }
+            let refusal = e
+                .downcast_ref::<AuthReject>()
+                .map(|r| benilla_protocol::LoginRefusal::Logon(r.code));
+            return fail(refusal, format!("{e:#}"));
         }
     };
     if canceled() {
@@ -319,6 +339,14 @@ fn run(
             // rather than wrapping it in handshake noise.
             if let Some(w) = e.downcast_ref::<WardenRequired>() {
                 return fail_terminal(w.to_string());
+            }
+            // The world server's own refusal, in its own enum — the screen owes the player the
+            // authored `AUTH_*` string for it, which it cannot recover from a formatted message.
+            if let Some(r) = e.downcast_ref::<benilla_protocol::WorldAuthReject>() {
+                return fail(
+                    Some(benilla_protocol::LoginRefusal::World(r.code)),
+                    format!("{e:#}"),
+                );
             }
             return fail(None, format!("world handshake with {world_addr}: {e:#}"));
         }

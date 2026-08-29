@@ -59,7 +59,10 @@ pub(super) fn debug_login_smoke(
         }
         1 => {
             if let Some(f) = failures.read().last() {
-                error!("login-smoke: FAILED code={:?} reason={}", f.code, f.reason);
+                error!(
+                    "login-smoke: FAILED refusal={:?} reason={}",
+                    f.refusal, f.reason
+                );
                 // `WOW_LOGIN_SMOKE_HOLD=1`: keep running on a refusal instead of exiting — the
                 // error dialog stays up, so a shot instrument can photograph it (the dialog is
                 // otherwise unreachable headlessly; pair with `WOW_PROBE_EXIT_AT`).

@@ -37,15 +37,17 @@ pub(super) fn login_stage(
 /// A login attempt failed before the roster (decision 0539): the IO thread is back at its pre-logon
 /// park, and [`crate::login`]'s policy decides what happens next.
 pub(super) fn login_failed(
-    code: Option<u8>,
+    refusal: Option<benilla_protocol::LoginRefusal>,
     reason: String,
     terminal: bool,
+    dial: Option<benilla_protocol::DialFailure>,
     out: &mut MessageWriter<LoginFailedMessage>,
 ) {
     out.write(LoginFailedMessage {
-        code,
+        refusal,
         reason,
         terminal,
+        dial,
     });
 }
 

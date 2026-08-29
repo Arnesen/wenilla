@@ -32,7 +32,7 @@ use crate::textinput::{self, HostClipboard};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
-use benilla_protocol::LoginStage;
+use benilla_protocol::{DialFailure, LoginRefusal, LoginStage};
 
 use crate::char_select::ClientState;
 use crate::glue_strings::GlueStrings;
@@ -190,7 +190,72 @@ fn stage_text(strings: &GlueStrings, stage: LoginStage) -> &str {
 /// The authored failure string for an auth result byte (the vmangos-verified map, decision 0539
 /// §6): each row is the client's own `GlueStrings` text; a transport failure (`None`) reads
 /// `LOGIN_FAILED` ("Unable to connect").
-fn fail_text(strings: &GlueStrings, code: Option<u8>) -> &str {
+///
+/// **A dial that never opened a socket answers ahead of all of them**, because it is the only
+/// failure the player can act on and — since 1667 made the address editable — the only one they can
+/// misread. "Unable to connect" cannot distinguish *that name does not exist* from *the address is
+/// fine and nothing is listening*, so a player whose server is simply down edits a correct address
+/// until they give up. That is what the editor's first live use produced. Both replacement strings
+/// are the reference's own (`AUTH_LOGIN_SERVER_NOT_FOUND` / `LOGIN_SERVER_DOWN`, so they localize);
+/// the address line under them is ours, because the reference never had an address to get wrong.
+fn fail_text(
+    strings: &GlueStrings,
+    refusal: Option<LoginRefusal>,
+    dial: Option<&DialFailure>,
+) -> String {
+    if let Some(dial) = dial {
+        let headline = if dial.unresolved {
+            strings.text("AUTH_LOGIN_SERVER_NOT_FOUND", "Invalid Login Server")
+        } else {
+            strings.text("LOGIN_SERVER_DOWN", "Login Server Down")
+        };
+        return format!("{headline}\n{}", dial.address);
+    }
+    match refusal {
+        Some(LoginRefusal::World(code)) => world_refusal_text(strings, code).to_string(),
+        Some(LoginRefusal::Logon(code)) => logon_refusal_text(strings, Some(code)).to_string(),
+        None => logon_refusal_text(strings, None).to_string(),
+    }
+}
+
+/// **The world server's** `SMSG_AUTH_RESPONSE` refusal, in the client's own words.
+///
+/// A straight transcription of the client's own dispatch over this enum, decompiled in wow-re
+/// `system/net/scratch/w2b-pack.c` — each case loads exactly the `GlueStrings` key named below,
+/// and the numbering is `AuthResponseCodes` in cmangos `SharedDefines.h:1721+`. Nothing here is a
+/// judgement call; where the client picks a string, so do we.
+///
+/// Every one of these used to arrive as a generic "Unable to connect", because the world result
+/// was formatted into an error string in `WorldSession::connect` and the byte thrown away.
+fn world_refusal_text(strings: &GlueStrings, code: u8) -> &str {
+    use benilla_protocol::messages as m;
+    let (key, fallback): (&str, &str) = match code {
+        m::AUTH_FAILED => ("AUTH_FAILED", "Authentication failed"),
+        m::AUTH_REJECT => ("AUTH_REJECT", "Login unavailable"),
+        m::AUTH_BAD_SERVER_PROOF => ("AUTH_BAD_SERVER_PROOF", "Server is not valid"),
+        m::AUTH_UNAVAILABLE => (
+            "AUTH_UNAVAILABLE",
+            "System unavailable - Please try again later",
+        ),
+        m::AUTH_SYSTEM_ERROR => ("AUTH_SYSTEM_ERROR", "System Error"),
+        m::AUTH_BILLING_ERROR => ("AUTH_BILLING_ERROR", "Billing system error"),
+        m::AUTH_BILLING_EXPIRED => ("AUTH_BILLING_EXPIRED", "Account billing has expired"),
+        m::AUTH_VERSION_MISMATCH => ("AUTH_VERSION_MISMATCH", "Wrong client version"),
+        m::AUTH_UNKNOWN_ACCOUNT => ("AUTH_UNKNOWN_ACCOUNT", "Unknown account"),
+        m::AUTH_INCORRECT_PASSWORD => ("AUTH_INCORRECT_PASSWORD", "Incorrect Password"),
+        m::AUTH_SESSION_EXPIRED => ("AUTH_SESSION_EXPIRED", "Session Expired"),
+        m::AUTH_SERVER_SHUTTING_DOWN => ("AUTH_SERVER_SHUTTING_DOWN", "Server Shutting Down"),
+        m::AUTH_ALREADY_LOGGING_IN => ("AUTH_ALREADY_LOGGING_IN", "Already Logging In"),
+        m::AUTH_LOGIN_SERVER_NOT_FOUND => ("AUTH_LOGIN_SERVER_NOT_FOUND", "Invalid Login Server"),
+        // `AUTH_OK` never reaches here (it is the success path) and `AUTH_WAIT_QUEUE` is not a
+        // refusal at all; anything else is a code this client does not know.
+        _ => ("AUTH_FAILED", "Authentication failed"),
+    };
+    strings.text(key, fallback)
+}
+
+/// The **realmd** logon-proof refusal, borrowed straight out of the table.
+fn logon_refusal_text(strings: &GlueStrings, code: Option<u8>) -> &str {
     let (key, fallback): (&str, &str) = match code {
         None => ("LOGIN_FAILED", "Unable to connect"),
         Some(0x03) => ("AUTH_BANNED", "This account has been banned"),
@@ -229,11 +294,21 @@ fn drive_policy(
     mut exit: MessageWriter<AppExit>,
 ) {
     let now = time.elapsed_secs();
-    // A harness run (env creds, and not the smoke — the smoke owns its own verdict) has nobody at
-    // the keyboard: a login failure no resubmit can change leaves it parked on a dialog for its
-    // whole wall-clock, and every retry a runner grants it is spent the same way. Those failures
-    // exit non-zero instead, on one greppable marker — "login: FATAL" — that leg.sh keys on.
-    let harness =
+    // A harness run (env creds, and not the smoke — the smoke owns its own verdict) may have
+    // nobody at the keyboard: a login failure no resubmit can change would leave it parked on a
+    // dialog for its whole wall-clock, and every retry a runner grants it is spent the same way.
+    // Those failures exit non-zero instead, on one greppable marker — "login: FATAL" — that
+    // leg.sh keys on (decision 1371).
+    //
+    // **"May" is the whole correction.** This flag is derived from the environment
+    // ([`crate::run_mode::unattended_login`] — any of `$WOW_USER`/`$WOW_PASS`/`$WOW_CHAR`), and
+    // the environment cannot see who is in the room. The director keeps `$WOW_CHAR` set to skip
+    // character select, which made every one of their sessions "a harness" — so a **typed**
+    // password with a typo killed the process instead of showing the dialog the reference shows.
+    // The env fact is the right answer to "should the client log in without waiting for someone
+    // to type?" and the wrong answer to "is there anybody here?"; it was answering both. Whether
+    // an *attempt* was typed is not an inference at all — see `announced` at the use sites.
+    let harness_env =
         crate::run_mode::unattended_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none();
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
@@ -286,31 +361,40 @@ fn drive_policy(
         attempt.intent.park = IoPark::AtLogin;
         // A terminal failure names something no resubmit can change (the server requires Warden,
         // say) — show the server's own words and drop the credentials so nothing retries.
+        // **Did a person submit the attempt that just failed?** `announced` is set by the login
+        // screen's own submit and by nothing else — the env fast path and every paced resubmit
+        // leave it false — so it is direct evidence rather than an inference about the room, and
+        // `LoginIntent::clear` below deliberately does not reset it. A typed attempt is attended
+        // by definition, and an attended failure gets the reference's answer: the dialog, and
+        // another go. Only an attempt nobody typed may kill the process.
+        let typed = attempt.intent.announced;
+        let fatal = harness_env && !typed;
         if msg.terminal {
             warn!("login: {}", msg.reason);
             attempt.intent.clear();
             dialog.open_error(&msg.reason);
-            if harness {
+            if fatal {
                 error!("login: FATAL — terminal login failure with nobody at the keyboard ({}); exiting", msg.reason);
                 exit.write(AppExit::error());
             }
             continue;
         }
-        match msg.code {
-            Some(code) => {
-                // A refusal: surface it (even on the silent path — the credentials went stale)
-                // and never auto-retry against it.
-                warn!("login: refused (code {code:#04x}) — {}", msg.reason);
+        match msg.refusal {
+            Some(refusal) => {
+                // A refusal — from EITHER server: surface it (even on the silent path, since the
+                // credentials went stale) and never auto-retry against it.
+                let byte = refusal.byte();
+                warn!("login: refused ({refusal:?}, {byte:#04x}) — {}", msg.reason);
                 attempt.intent.clear();
-                dialog.open_error(fail_text(strings, Some(code)));
-                if harness {
-                    error!("login: FATAL — refused (code {code:#04x}) and no resubmit can change it; exiting");
+                dialog.open_error(&fail_text(strings, Some(refusal), None));
+                if fatal {
+                    error!("login: FATAL — refused ({refusal:?}, {byte:#04x}) and no resubmit can change it; exiting");
                     exit.write(AppExit::error());
                 }
             }
             None if attempt.intent.announced => {
                 warn!("login: {}", msg.reason);
-                dialog.open_error(fail_text(strings, None));
+                dialog.open_error(&fail_text(strings, None, msg.dial.as_ref()));
             }
             None => {
                 // Silent transport failure with pending intent: schedule the paced resubmit.
@@ -1198,15 +1282,132 @@ mod tests {
         assert!(!dialog.edit.password, "an address is not a secret");
     }
 
+    /// Did this update ask the app to quit?
+    fn exited(app: &mut App, cursor: &mut bevy::ecs::message::MessageCursor<AppExit>) -> bool {
+        let msgs = app.world().resource::<Messages<AppExit>>();
+        cursor.read(msgs).next().is_some()
+    }
+
+    /// Drive one refusal through the policy and report whether it killed the process.
+    fn refusal_exits(typed: bool) -> bool {
+        let (mut app, _requests) = policy_app();
+        let mut cursor = bevy::ecs::message::MessageCursor::<AppExit>::default();
+        // Drain whatever the first update writes before the message under test.
+        app.update();
+        let _ = exited(&mut app, &mut cursor);
+        app.world_mut().resource_mut::<LoginIntent>().announced = typed;
+        app.world_mut().write_message(LoginFailedMessage {
+            refusal: Some(LoginRefusal::Logon(0x05)),
+            reason: "server rejected logon: result 0x05".into(),
+            terminal: false,
+            dial: None,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<LoginDialog>().kind,
+            Some(DialogKind::Error),
+            "every refusal shows the dialog, exit or not",
+        );
+        exited(&mut app, &mut cursor)
+    }
+
+    /// **A typo must not kill the client.**
+    ///
+    /// The reported crash: `login: FATAL — refused (code 0x04) … exiting`, on a password typed at
+    /// the screen. `$WOW_CHAR` was set — the director keeps it to skip character select — which
+    /// makes [`crate::run_mode::unattended_login`] true and therefore made *every* session "a
+    /// harness", so a refusal took `AppExit::error()` instead of the reference's dialog. The
+    /// environment cannot see who is in the room; `announced` can, because only the screen's own
+    /// submit sets it.
+    #[test]
+    fn a_typed_password_refusal_never_exits() {
+        let _lock = crate::local_state::test_env::ENV_LOCK.lock();
+        // The harness environment the director actually runs with.
+        let _char = crate::local_state::test_env::EnvGuard::set("WOW_CHAR", "Somebody");
+        let _smoke = crate::local_state::test_env::EnvGuard::unset("WOW_LOGIN_SMOKE");
+        assert!(
+            crate::run_mode::unattended_login(),
+            "the fixture must reproduce the env that made this fatal",
+        );
+        assert!(
+            !refusal_exits(true),
+            "a password typed at the screen is attended by definition — dialog, then another go",
+        );
+        assert!(
+            refusal_exits(false),
+            "an attempt nobody typed still exits non-zero: decision 1371's leg guarantee",
+        );
+    }
+
     /// The code→string map quotes the client's own strings for the vmangos-verified rows.
     #[test]
     fn fail_text_maps_the_verified_codes() {
         let strings = GlueStrings::default(); // empty table → the fallback literals
-        assert_eq!(fail_text(&strings, Some(0x04)), "Unknown account");
-        assert_eq!(fail_text(&strings, Some(0x05)), "Incorrect Password");
-        assert_eq!(fail_text(&strings, None), "Unable to connect");
-        assert_eq!(fail_text(&strings, Some(0x09)), "Wrong client version");
-        assert_eq!(fail_text(&strings, Some(0xEE)), "Authentication failed");
+        let logon = |b| fail_text(&strings, Some(LoginRefusal::Logon(b)), None);
+        assert_eq!(logon(0x04), "Unknown account");
+        assert_eq!(logon(0x05), "Incorrect Password");
+        assert_eq!(fail_text(&strings, None, None), "Unable to connect");
+        assert_eq!(logon(0x09), "Wrong client version");
+        assert_eq!(logon(0xEE), "Authentication failed");
+    }
+
+    /// **The two result enums are different enums**, and the same byte must not mean the same
+    /// thing in both. 0x0C is `AUTH_LOGON_FAILED_SUSPENDED` to realmd and `AUTH_OK` to the world
+    /// server; 0x05 is a bad password to realmd and nothing at all to the world server. A single
+    /// `Option<u8>` could not tell them apart, which is why `LoginRefusal` exists.
+    #[test]
+    fn the_two_auth_enums_do_not_share_a_byte() {
+        use benilla_protocol::messages as m;
+        let strings = GlueStrings::default();
+        let logon = |b| fail_text(&strings, Some(LoginRefusal::Logon(b)), None);
+        let world = |b| fail_text(&strings, Some(LoginRefusal::World(b)), None);
+
+        assert_eq!(logon(0x0C), "This account has been temporarily suspended");
+        assert_eq!(world(m::AUTH_BILLING_ERROR), "Billing system error");
+        assert_ne!(logon(0x0C), world(0x0C));
+
+        // Every world row is the client's own dispatch (`w2b-pack.c`), transcribed.
+        assert_eq!(world(m::AUTH_INCORRECT_PASSWORD), "Incorrect Password");
+        assert_eq!(world(m::AUTH_SESSION_EXPIRED), "Session Expired");
+        assert_eq!(world(m::AUTH_SERVER_SHUTTING_DOWN), "Server Shutting Down");
+        assert_eq!(world(m::AUTH_ALREADY_LOGGING_IN), "Already Logging In");
+        assert_eq!(
+            world(m::AUTH_UNAVAILABLE),
+            "System unavailable - Please try again later"
+        );
+        // A code this client does not know still lands on the authored catch-all.
+        assert_eq!(world(0xEE), "Authentication failed");
+    }
+
+    /// **The report that prompted this** — a dead local server read as a bad address, twice, because
+    /// "Unable to connect" cannot tell the two apart. Each dial verdict now gets the reference's own
+    /// string for that exact condition, with the address under it so there is nothing left to guess.
+    #[test]
+    fn a_dial_failure_says_which_failure_it_was() {
+        let strings = GlueStrings::default();
+        let down = DialFailure {
+            address: "127.0.0.1:3724".into(),
+            unresolved: false,
+        };
+        assert_eq!(
+            fail_text(&strings, None, Some(&down)),
+            "Login Server Down\n127.0.0.1:3724",
+            "the address resolved and nothing answered — editing the address will not help",
+        );
+        let missing = DialFailure {
+            address: "logon.nonesuch.example:3724".into(),
+            unresolved: true,
+        };
+        assert_eq!(
+            fail_text(&strings, None, Some(&missing)),
+            "Invalid Login Server\nlogon.nonesuch.example:3724",
+            "the name resolved to nothing — this one IS the address",
+        );
+        // A refusal still wins its own authored string; the dial verdict only speaks for the dial.
+        assert_eq!(
+            fail_text(&strings, Some(LoginRefusal::Logon(0x05)), None),
+            "Incorrect Password",
+        );
     }
 
     /// Save → load → clear round-trips through the dot-file (the ref's Get/SetSavedAccountName).

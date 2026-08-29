@@ -109,6 +109,33 @@ pub enum SessionEnd {
     Lost,
 }
 
+/// **Who refused the login, and with which byte.**
+///
+/// A login crosses two servers and each has its own result enum. They overlap numerically and mean
+/// unrelated things — 0x0C is `AUTH_LOGON_FAILED_SUSPENDED` to realmd and `AUTH_OK` to the world
+/// server — so a bare `Option<u8>` could not say what it held, and the screen could not look up the
+/// right authored string from it. It used to be exactly that bare byte: the realmd code rode it and
+/// the world code was formatted into the reason string and lost, which is why every world-side
+/// refusal reached the player as a generic "Unable to connect".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginRefusal {
+    /// realmd's logon-proof `AuthLogonResult` (`crate::AuthReject`) — bad password, banned, …
+    Logon(u8),
+    /// The world server's `SMSG_AUTH_RESPONSE` code (`crate::WorldAuthReject`, the
+    /// `messages::AUTH_*` block) — session expired, server shutting down, …
+    World(u8),
+}
+
+impl LoginRefusal {
+    /// The raw byte, for logging. Deliberately not a `From`/`Into`: the whole point of the type is
+    /// that the byte alone is ambiguous, so getting it back should look like a narrowing.
+    pub fn byte(self) -> u8 {
+        match self {
+            LoginRefusal::Logon(b) | LoginRefusal::World(b) => b,
+        }
+    }
+}
+
 /// One decoded event from the world stream. Carries only primitives + the coarse [`EntityKind`]
 /// classification — no wire types leak to the app, and no running state lives here.
 #[derive(Debug, Clone)]
@@ -124,9 +151,14 @@ pub enum SessionEvent {
     /// the server is simply unusable by this client (e.g. [`crate::WardenRequired`]). The app must
     /// surface `reason` and stop, never fold it into the paced-resubmit path.
     LoginFailed {
-        code: Option<u8>,
+        refusal: Option<LoginRefusal>,
         reason: String,
         terminal: bool,
+        /// Set when the failure was the **dial itself** — the socket never opened — carrying which
+        /// of the two reasons it was and the address it was aimed at (decision 1667's follow-up).
+        /// `None` for every other transport failure (a handshake that got a socket and then broke)
+        /// and for every server refusal, which have a `code` instead.
+        dial: Option<crate::DialFailure>,
     },
     /// The account's character roster (`SMSG_CHAR_ENUM`): the world socket is authenticated and
     /// parked at character select. The IO thread emits this each connection cycle, then waits for

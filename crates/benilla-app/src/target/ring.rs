@@ -691,14 +691,7 @@ pub(crate) fn reaction_from_player(
         let catalog = &factions?.0;
         let target_tpl = catalog.template(target_store?.0.unit_faction_template()?)?;
         // Leg 3: a faction that owns a reputation slot is answered by the AT-WAR bit alone.
-        // `faction_flags::AT_WAR` is the same wire byte the reputation pane's war checkbox reads,
-        // which is what makes declaring war on Booty Bay turn its goblins' plates red *and* move
-        // them into the enemy category — one bit, both consequences, as the reference has it.
-        if let Some(info) = catalog.reputation_faction(target_tpl.faction) {
-            let at_war = usize::try_from(info.rep_index)
-                .ok()
-                .and_then(|i| reputations.0.get(i))
-                .is_some_and(|&(flags, _)| flags & benilla_formats::faction_flags::AT_WAR != 0);
+        if let Some(at_war) = at_war_with(catalog, reputations, target_tpl.faction) {
             return Some(if at_war {
                 Reaction::Hostile as u8
             } else {
@@ -710,6 +703,76 @@ pub(crate) fn reaction_from_player(
         Some(self_tpl.reaction_toward(target_tpl) as u8)
     })();
     resolved.unwrap_or(Reaction::Neutral as u8)
+}
+
+/// **Leg 3's whole content**: is the local player at war with the `Faction.dbc` id a unit's
+/// faction template names? `None` when that faction owns no reputation slot — the one case leg 3
+/// does not answer, and the reaction falls through to the template comparator.
+///
+/// `faction_flags::AT_WAR` is the same wire byte the reputation pane's war checkbox writes, which
+/// is what makes declaring war on Booty Bay turn its goblins' plates red, move them into the enemy
+/// category, and put the sword on the cursor — one bit, three consequences, as the reference has
+/// it. Shared with `/reaction`, which prints it: the bit is the cause of every "why is this
+/// friendly NPC attackable" question and it is visible nowhere else in the client.
+pub(crate) fn at_war_with(
+    catalog: &benilla_formats::FactionCatalog,
+    reputations: &Reputations,
+    faction_id: u32,
+) -> Option<bool> {
+    let info = catalog.reputation_faction(faction_id)?;
+    Some(
+        usize::try_from(info.rep_index)
+            .ok()
+            .and_then(|i| reputations.0.get(i))
+            .is_some_and(|&(flags, _)| flags & benilla_formats::faction_flags::AT_WAR != 0),
+    )
+}
+
+/// `CGUnit::CanInteract(this = the local player → arg = unit)` — `0x6067f0`, byte-verified
+/// complete (disassembly read at `0x6067f0`–`0x606871`; wow-re `ui/scratch/cursor-system.md` §3 +
+/// `cursor-decomp`, and the register set-up confirmed at every call: `0x4822f2 push esi(unit); mov
+/// ecx,edi(player); call 0x606880`, then `0x60691d push esi(unit); mov ecx,edi(player); call
+/// 0x6067f0`).
+///
+/// **This is the world cursor's service gate — not a reaction threshold** (`0x482310`, `test al,al;
+/// je 0x4824e6`): TRUE sends the hover into the `UNIT_NPC_FLAGS` service ladder, FALSE into the
+/// loot/skin/attack block. Three terms, in the binary's order:
+///
+/// 1. the unit's `UNIT_FIELD_FLAGS` **bit 25** clear (`0x606835 shr ecx,0x19`),
+/// 2. its `UNIT_NPC_FLAGS` **non-zero** (`0x60683d`) — a unit carrying no service bit at all is
+///    never interactable, whatever its reaction,
+/// 3. **both** reaction directions `>= 3` (neutral), and they are genuinely different functions:
+///    `0x606847 push esi; mov ecx,edi; call 0x6061e0` is [`ring_reaction`] (unit → player, the
+///    standing), `0x606854 push edi; mov ecx,esi; call 0x6061e0` is [`reaction_from_player`]
+///    (player → unit, the **at-war bit**). Each is `cmp eax,3; jl → 0`.
+///
+/// Term 3's second half is what makes declaring war on a faction drop its vendors out of the
+/// service ladder and into the sword — one bit, both consequences, exactly as it moves the plate
+/// category (1530).
+///
+/// **Deferred, and each can only ever make a unit *less* interactable than we say** — so none of
+/// them can manufacture a service cursor we would not already show: the `CanInteractNow 0x606880`
+/// wrapper's own gates (player `UNIT_FIELD_FLAGS` bit 20 clear @ `0x606893`, both sides'
+/// `UNIT_FIELD_CHARMEDBY` zero, player alive, the shapeshift-form clause `0x60e9f0` +
+/// `SpellShapeshiftForm` flag `0x8`, and the two unnamed unit predicates `0x613230` / `0x60ecd0`),
+/// and `0x6067f0`'s own ghost leg `0x605f70(unit)` — which term 2 already subsumes, since a ghost
+/// is a player and a player has no `UNIT_NPC_FLAGS`.
+pub(crate) fn can_interact_from_player(
+    factions: Option<&Factions>,
+    reputations: &Reputations,
+    target_store: Option<&ObjectStore>,
+    self_store: Option<&ObjectStore>,
+) -> bool {
+    let Some(target) = target_store else {
+        return false; // fields not streamed yet — nothing to take a service from
+    };
+    const UNIT_FLAG_NOT_SELECTABLE: u32 = 1 << 25;
+    if target.0.unit_flags() & UNIT_FLAG_NOT_SELECTABLE != 0 || target.0.unit_npc_flags() == 0 {
+        return false;
+    }
+    const NEUTRAL: u8 = Reaction::Neutral as u8;
+    ring_reaction(factions, reputations, target_store, self_store) >= NEUTRAL
+        && reaction_from_player(factions, reputations, target_store, self_store) >= NEUTRAL
 }
 
 /// `CGUnit::CanAttack(this = the local player → arg = unit)` — `0x606980`, byte-verified complete
@@ -1051,6 +1114,102 @@ mod tests {
         // that agreed all along, kept so the fix cannot be read as having moved it.
         assert!(category(&unit(12), &quiet));
         assert_eq!(rank(&unit(12), &quiet), 4);
+    }
+
+    /// **The reported bug, on the real build-5875 DBC, naming the faction** (1674): hovering a
+    /// **Cenarion Circle** NPC with no gossip drew the ATTACK sword at neutral standing, with the
+    /// faction not set to war.
+    ///
+    /// Cenarion Circle is faction 609, reputation slot 36 — one of the 36 templates wow-re's §7
+    /// measured as decided entirely by the at-war bit, and one 1530 named while correcting the
+    /// plate category alone. The cursor and `relations::can_attack` kept the reaction *threshold*,
+    /// which reads the OTHER direction (the standing, 0 → neutral → "≤ 3 is attackable"), so the
+    /// sword came back for every one of those factions.
+    ///
+    /// The pin asserts the divergence the threshold cannot express: **the rank stays 3 — the ring
+    /// and the bar are untouched — while both branch predicates say Point.** A "simplification"
+    /// back to a threshold has to break this, on real data, naming the creature.
+    #[test]
+    fn a_not_at_war_cenarion_circle_npc_takes_no_cursor_at_neutral() {
+        use crate::net::{ObjectStore, Reputations};
+        use benilla_protocol::ObjectFields;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let factions = Factions(benilla_formats::load_faction_catalog(&mut chain).expect("dbc"));
+        // 35 = UNIT_FIELD_FACTIONTEMPLATE, 46 = UNIT_FIELD_FLAGS, 147 = UNIT_NPC_FLAGS.
+        let npc = |tpl: u32, npc_flags: u32| {
+            ObjectStore(ObjectFields::from_pairs(&[(35, tpl), (147, npc_flags)]))
+        };
+        let me = ObjectStore(ObjectFields::from_pairs(&[
+            (35, 1), // Human
+            (46, UNIT_FLAG_PVP_ATTACKABLE),
+        ]));
+        let quiet = Reputations::default(); // nothing at war — the out-of-box state
+        let mut slots = vec![(0u8, 0i32); 64];
+        slots[36] = (benilla_formats::faction_flags::AT_WAR, 0); // Cenarion Circle = slot 36
+        let at_war = Reputations(slots);
+
+        let attackable = |u: &ObjectStore, r: &Reputations| {
+            can_attack_from_player(Some(&factions), r, Some(u), Some(&me), false)
+        };
+        let interactable = |u: &ObjectStore, r: &Reputations| {
+            crate::target::ring::can_interact_from_player(Some(&factions), r, Some(u), Some(&me))
+        };
+
+        // FactionTemplate 996 → faction 609 "Cenarion Circle" (also 635/994/1254/1608). The
+        // reported subject: no service bit at all, so the ladder was never in play — the unit fell
+        // straight to the attack leg.
+        let silent = npc(996, 0);
+        assert_eq!(
+            ring_reaction(Some(&factions), &quiet, Some(&silent), Some(&me)),
+            3,
+            "neutral standing — the ring and the bar are RIGHT and must not move"
+        );
+        assert!(
+            !attackable(&silent, &quiet),
+            "not at war → CanAttack says no: the sword was the bug"
+        );
+        assert!(
+            !interactable(&silent, &quiet),
+            "and with no service bit it is not interactable either → the cursor CLEARS to Point"
+        );
+
+        // A Cenarion Circle NPC that DOES gossip keeps its speech bubble — the control that must
+        // not move, and the half of the report that was already right.
+        let gossip = npc(996, crate::target::cursor_mode::npc_flags::GOSSIP);
+        assert!(interactable(&gossip, &quiet), "gossip NPC still talks");
+        assert!(!attackable(&gossip, &quiet));
+
+        // Declaring war moves BOTH, off one bit: leg 3 answers hostile, so the gossiper drops out
+        // of the service ladder and the silent one takes the sword. This is the behaviour the
+        // director named as the discriminator — "even if you don't have the faction set to at war".
+        assert!(
+            attackable(&silent, &at_war),
+            "at war → the sword is correct"
+        );
+        assert!(attackable(&gossip, &at_war));
+        assert!(
+            !interactable(&gossip, &at_war),
+            "at war → no more gossip cursor; the reference leaves the ladder entirely"
+        );
+        // …and only that faction's own slot moves.
+        assert_eq!(
+            ring_reaction(Some(&factions), &at_war, Some(&silent), Some(&me)),
+            3,
+            "the STANDING is still neutral — at-war does not touch the bar"
+        );
+
+        // **The control that must not change**: an ordinary neutral creature whose faction owns no
+        // reputation slot (Chicken, FT 31 → faction 28 "Prey") is answered by the template
+        // comparator, reads neutral, and is still attackable. Neutral mobs keep the sword — the fix
+        // is about the at-war bit, not about neutrality.
+        let chicken = npc(31, 0);
+        assert!(
+            attackable(&chicken, &quiet),
+            "a neutral critter still takes the sword — the comparator, not at-war"
+        );
+        assert!(!interactable(&chicken, &quiet));
     }
 
     /// **The PLAYER subject** — the arm 1530 landed and left unpinned, on the real DBC.

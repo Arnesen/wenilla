@@ -222,8 +222,35 @@ pub use vendor::{
 };
 pub use world_state::InitWorldStates;
 
-/// `SMSG_AUTH_RESPONSE` AuthOk result.
+/// The **world server's** `SMSG_AUTH_RESPONSE` result codes — a **different enum** from the
+/// realmd logon-proof's `AuthLogonResult` (`crate::AuthReject`, 0x00..=0x12), which is the trap
+/// this block exists to close: both are "the auth result byte", they overlap numerically, and they
+/// mean unrelated things. 0x0C is `AUTH_OK` here and `AUTH_LOGON_FAILED_SUSPENDED` there.
+///
+/// VERIFIED two ways. The client's own dispatch over exactly this enum is decompiled in wow-re
+/// `system/net/scratch/w2b-pack.c` — case 0x0c → `AUTH_OK`, 0x0d → `AUTH_FAILED`, 0x0e →
+/// `AUTH_REJECT`, … 0x15 → `AUTH_UNKNOWN_ACCOUNT`, 0x16 → `AUTH_INCORRECT_PASSWORD`, 0x1b →
+/// `AUTH_WAIT_QUEUE`, 0x22..=0x26 → the `REALM_LIST_*` strings — and the same numbering is
+/// `AuthResponseCodes` in cmangos `src/game/Globals/SharedDefines.h:1721+`. Each constant's name
+/// is the `GlueStrings` key the client shows for it, which is what makes the mapping in
+/// `crate::login`'s `world_refusal_text` a transcription rather than a judgement call.
 pub const AUTH_OK: u8 = 0x0C;
+pub const AUTH_FAILED: u8 = 0x0D;
+pub const AUTH_REJECT: u8 = 0x0E;
+pub const AUTH_BAD_SERVER_PROOF: u8 = 0x0F;
+pub const AUTH_UNAVAILABLE: u8 = 0x10;
+pub const AUTH_SYSTEM_ERROR: u8 = 0x11;
+pub const AUTH_BILLING_ERROR: u8 = 0x12;
+pub const AUTH_BILLING_EXPIRED: u8 = 0x13;
+pub const AUTH_VERSION_MISMATCH: u8 = 0x14;
+pub const AUTH_UNKNOWN_ACCOUNT: u8 = 0x15;
+pub const AUTH_INCORRECT_PASSWORD: u8 = 0x16;
+pub const AUTH_SESSION_EXPIRED: u8 = 0x17;
+pub const AUTH_SERVER_SHUTTING_DOWN: u8 = 0x18;
+pub const AUTH_ALREADY_LOGGING_IN: u8 = 0x19;
+pub const AUTH_LOGIN_SERVER_NOT_FOUND: u8 = 0x1A;
+/// The realm is full and we are **queued**, not refused — the one code here that is not an ending.
+pub const AUTH_WAIT_QUEUE: u8 = 0x1B;
 /// `LogoutResult::Success` (`SMSG_LOGOUT_RESPONSE`).
 pub const LOGOUT_SUCCESS: u32 = 0x0;
 /// Chat `Language` wire ids (VERIFIED vmangos `SharedDefines.h:256-261`): the faction tongues.

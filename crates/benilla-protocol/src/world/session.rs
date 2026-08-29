@@ -28,6 +28,35 @@ const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WardenRequired;
 
+/// The **world server** refused the session (`SMSG_AUTH_RESPONSE` with anything but
+/// [`messages::AUTH_OK`]).
+///
+/// Typed, and carrying its raw code, for the same reason [`crate::AuthReject`] is: the screen owes
+/// the player the client's own authored words for what happened, and it cannot look them up from a
+/// formatted string. Before this the code was interpolated into a `bail!` and thrown away, so every
+/// world-side refusal — expired session, server shutting down, already logging in — arrived at the
+/// login screen as the same generic "Unable to connect".
+///
+/// **Its codes are `messages`' `AUTH_*` block, NOT [`crate::AuthReject`]'s.** See that block for
+/// why the distinction is load-bearing: the two enums overlap numerically and mean unrelated
+/// things.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldAuthReject {
+    pub code: u8,
+}
+
+impl std::fmt::Display for WorldAuthReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "world server refused the session: result {:#04x}",
+            self.code
+        )
+    }
+}
+
+impl std::error::Error for WorldAuthReject {}
+
 impl std::fmt::Display for WardenRequired {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -131,7 +160,7 @@ impl WorldSession {
             match session.recv()? {
                 ServerPacket::AuthResponse { result } if result == messages::AUTH_OK => break,
                 ServerPacket::AuthResponse { result } => {
-                    bail!("world auth rejected: result {result:#x}")
+                    return Err(WorldAuthReject { code: result }.into())
                 }
                 ServerPacket::Other {
                     opcode: opcode::SMSG_WARDEN_DATA,

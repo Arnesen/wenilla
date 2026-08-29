@@ -456,10 +456,11 @@ pub(super) fn apply_net_updates(
         match ev {
             SessionEvent::LoginStage { stage } => session::login_stage(stage, &mut login_stages),
             SessionEvent::LoginFailed {
-                code,
+                refusal,
                 reason,
                 terminal,
-            } => session::login_failed(code, reason, terminal, &mut login_failures),
+                dial,
+            } => session::login_failed(refusal, reason, terminal, dial, &mut login_failures),
             SessionEvent::CharacterList { characters, realm } => {
                 session::character_list(characters, realm, &mut status, &mut char_lists)
             }
