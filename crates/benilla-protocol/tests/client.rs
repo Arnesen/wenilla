@@ -604,18 +604,22 @@ fn name_and_creature_query_roundtrip() {
     // (type_flags, TYPE — the TAB critter filter's input — FAMILY, RANK, unk, pet_spell_id,
     // display_id), 2 u8 tail. Family and rank are given DIFFERENT non-zero values on purpose:
     // they are adjacent dwords, so a one-column slip between them reads as plausible data and
-    // shows up only as a pet whose level line names the wrong beast (decision 1062).
+    // shows up only as a pet whose level line names the wrong beast (decision 1062). `display_id`
+    // is non-zero for the same reason (decision 1676): it sits behind two alignment-only dwords
+    // that were zeros here, so a slip into either read 0 — indistinguishable from "no model" —
+    // and the stable window would have drawn an empty booth for every pet.
     let body = hx(concat!(
         "45000000",
-        "596f756e6720576f6c6600",   // "Young Wolf"
-        "000000",                   // name2..4 empty
-        "5465737400",               // subname "Test"
-        "10000000",                 // type_flags = 0x10 (hide-faction-tooltip)
-        "01000000",                 // type = 1 (Beast)
-        "01000000",                 // pet_family = 1 (Wolf)
-        "02000000",                 // rank = 2 (rare elite)
-        "000000000000000000000000", // unk, pet_spell_list_id, display_id
-        "0101"                      // civilian, racial_leader
+        "596f756e6720576f6c6600", // "Young Wolf"
+        "000000",                 // name2..4 empty
+        "5465737400",             // subname "Test"
+        "10000000",               // type_flags = 0x10 (hide-faction-tooltip)
+        "01000000",               // type = 1 (Beast)
+        "01000000",               // pet_family = 1 (Wolf)
+        "02000000",               // rank = 2 (rare elite)
+        "0000000000000000",       // unk, pet_spell_list_id
+        "15020000",               // display_id = 533 — the model a stabled pet is drawn from
+        "0101"                    // civilian, racial_leader
     ));
     match messages::parse_server(messages::opcode::SMSG_CREATURE_QUERY_RESPONSE, &body).unwrap() {
         ServerPacket::CreatureQueryResponse { entry, info } => {
@@ -631,6 +635,7 @@ fn name_and_creature_query_roundtrip() {
                     type_flags: 0x10,
                     civilian: true,
                     racial_leader: true,
+                    display_id: 533,
                 })
             );
         }

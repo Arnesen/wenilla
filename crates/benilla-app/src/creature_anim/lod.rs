@@ -499,6 +499,7 @@ mod tests {
                     type_flags: 0x20,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
         app.update();

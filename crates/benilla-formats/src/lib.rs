@@ -83,6 +83,8 @@ mod exhaustion;
 pub use exhaustion::{load_exhaustion, ExhaustionRow};
 mod bank_bag_slot_prices;
 pub use bank_bag_slot_prices::{load_bank_bag_slot_prices, BankBagSlotPrices};
+mod stable_slot_prices;
+pub use stable_slot_prices::{load_stable_slot_prices, StableSlotPrices};
 mod page_text_material;
 pub use page_text_material::{load_page_text_material_catalog, PageTextMaterialCatalog};
 mod stationery;

@@ -34,7 +34,10 @@ use bevy::prelude::*;
 use crate::ui_script::UiInput;
 
 mod feed;
-pub(crate) use feed::{raid_row_guid, synthetic_raid, synthetic_roster, PARTY_TOKENS, RAID_TOKENS};
+pub(crate) use feed::{
+    raid_row_guid, synthetic_raid, synthetic_roster, GROUPTYPE_RAID, GROUP_MEMBER_SUBGROUP,
+    PARTY_TOKENS, RAID_TOKENS,
+};
 
 pub(crate) struct UiPartyPlugin;
 

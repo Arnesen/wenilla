@@ -7,8 +7,8 @@ use super::{
     auction, backdrop, bank, char_stats, chat_window, colorselect, container, craft, cursor, death,
     duel, follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant,
     party, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider, social,
-    spellbook, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject,
-    ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState,
+    FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -863,6 +863,11 @@ pub(crate) struct Model {
     pub(crate) repair_all: bool,
     pub(crate) repair_mode: bool,
 
+    /// The stable window's whole state — the pushed snapshot, the selection, the frame-local
+    /// drag, and the queued verbs (the stable seam, [`stable`], decision 1676). One sub-struct
+    /// rather than five loose fields because the close path resets several of them together.
+    pub(crate) stable: stable::StableModel,
+
     /// The open bank's purchase-row snapshot the app pushes (`None` = no bank open), the
     /// `PurchaseSlot` intent, and whether `CloseBankFrame` was called — the bank seam ([`bank`],
     /// decision 0604; the bank's *contents* ride the container seam as bags −1/5..=10).
@@ -960,6 +965,11 @@ pub(crate) struct Model {
     pub(crate) loot: Option<loot::LootState>,
     pub(crate) loot_picks: Vec<u32>,
     pub(crate) loot_close: bool,
+    /// The `GiveMasterLoot(slot, candidateIndex)` assignments the app drains — both 1-based and
+    /// both display-side: the row as the window numbers it, and the candidate's position in
+    /// [`loot::LootState::master_candidates`]. The app owns the translation to the wire slot and
+    /// the recipient's guid (decision 1675).
+    pub(crate) loot_master_gives: Vec<(u32, u32)>,
 
     /// The open group-loot rolls the app pushes (empty = none open) and the `RollOnLoot`
     /// `(roll_id, roll_type)` votes it drains — the roll seam ([`loot_roll`], decision 0591).
@@ -1544,6 +1554,7 @@ impl Model {
             merchant_buybacks: Vec::new(),
             repair_all: false,
             repair_mode: false,
+            stable: Default::default(),
             bank: None,
             bank_purchase: false,
             bank_close: false,
@@ -1574,6 +1585,7 @@ impl Model {
             loot: None,
             loot_picks: Vec::new(),
             loot_close: false,
+            loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),
             loot_roll_votes: Vec::new(),
             loot_roll_confirms: Vec::new(),

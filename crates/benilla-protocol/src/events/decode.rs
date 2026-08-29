@@ -364,6 +364,16 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             services,
             greeting: title,
         }],
+        ServerPacket::ListStabledPets {
+            npc,
+            num_stable_slots,
+            pets,
+        } => vec![SessionEvent::ListStabledPets {
+            npc,
+            num_stable_slots,
+            pets,
+        }],
+        ServerPacket::StableResult { result } => vec![SessionEvent::StableResult { result }],
         ServerPacket::TrainerBuySucceeded { trainer, spell_id } => {
             vec![SessionEvent::TrainerBuySucceeded { trainer, spell_id }]
         }
@@ -433,6 +443,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::LootRoll(p) => vec![SessionEvent::LootRoll(p)],
         ServerPacket::LootRollWon(p) => vec![SessionEvent::LootRollWon(p)],
         ServerPacket::LootAllPassed(p) => vec![SessionEvent::LootAllPassed(p)],
+        ServerPacket::LootMasterList { candidates } => {
+            vec![SessionEvent::LootMasterList { candidates }]
+        }
         ServerPacket::ItemPushResult(p) => vec![SessionEvent::ItemPushResult(p)],
         ServerPacket::CorpseQuery(loc) => vec![SessionEvent::CorpseQuery {
             found: loc.found,
@@ -700,6 +713,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 pet_family,
                 rank,
                 type_flags,
+                display_id,
                 civilian,
                 racial_leader,
             ) = match info {
@@ -718,10 +732,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                     i.pet_family,
                     i.rank,
                     i.type_flags,
+                    i.display_id,
                     i.civilian,
                     i.racial_leader,
                 ),
-                None => (None, None, None, 0, 0, 0, false, false),
+                None => (None, None, None, 0, 0, 0, 0, false, false),
             };
             vec![SessionEvent::CreatureName {
                 entry,
@@ -731,6 +746,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 pet_family,
                 rank,
                 type_flags,
+                display_id,
                 civilian,
                 racial_leader,
             }]

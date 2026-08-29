@@ -54,6 +54,7 @@ mod skills;
 mod social;
 mod spellbook;
 mod spells;
+mod stable;
 mod taxi;
 mod trade;
 mod trainer;
@@ -139,9 +140,9 @@ pub use items::{
     ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{
-    autostore_loot_item, loot, loot_error, loot_money, loot_release, loot_roll, loot_type,
-    roll_vote, slot_type, ItemPushResult, LootAllPassed, LootItem, LootResponseBody, LootRoll,
-    LootRollWon, LootStartRoll,
+    autostore_loot_item, loot, loot_error, loot_master_give, loot_money, loot_release, loot_roll,
+    loot_type, roll_vote, slot_type, ItemPushResult, LootAllPassed, LootItem, LootResponseBody,
+    LootRoll, LootRollWon, LootStartRoll,
 };
 pub use mail::{
     get_mail_list, item_text_query, mail_action, mail_create_text_item, mail_delete, mail_error,
@@ -199,6 +200,10 @@ pub use spellbook::SpellCooldown;
 pub use spells::{
     cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_gameobject, cast_spell_item,
     CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
+};
+pub use stable::{
+    buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
+    StabledPet,
 };
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,

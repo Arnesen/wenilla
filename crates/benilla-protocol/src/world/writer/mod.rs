@@ -33,6 +33,7 @@
 //! | [`vendor`] | buy, sell, buy back, repair |
 //! | [`bank`] | open, buy a slot, deposit, withdraw |
 //! | [`trainer`] | the service list refresh + the purchase |
+//! | [`stable`] | the hunter stable: the list refresh, stable/unstable/swap, buy a slot |
 //! | [`taxi`] | the flight master: status, map, the two flight verbs |
 //! | [`quest`] | the questgiver dialog walk + the two quest-log verbs |
 //! | [`gameobject`] | the one USE verb + the template ask |
@@ -84,6 +85,7 @@ mod self_movement;
 mod skills;
 mod social;
 mod spells;
+mod stable;
 mod taxi;
 mod trade;
 mod trainer;

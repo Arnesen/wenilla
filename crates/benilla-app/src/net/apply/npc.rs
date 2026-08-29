@@ -3,13 +3,16 @@
 //! 0237), and the taxi-map session (decision 0484 phase 1). Each `pub(super)` fn here is exactly
 //! one arm's body; the match at the call site stays the dispatcher, one call per arm.
 
-use benilla_protocol::messages::{GossipOption, NpcTextBlock, TaxiMask, TrainerSpell, VendorItem};
+use benilla_protocol::messages::{
+    GossipOption, NpcTextBlock, StabledPet, TaxiMask, TrainerSpell, VendorItem,
+};
 use bevy::prelude::*;
 
 use crate::ui_bank::{BankErrors, BankOpen};
 use crate::ui_gossip::GossipState;
 use crate::ui_merchant::{MerchantErrors, MerchantOpen, MerchantRefusal};
 use crate::ui_quest::QuestGiver;
+use crate::ui_stable::StableOpen;
 use crate::ui_taxi::TaxiState;
 use crate::ui_trainer::{TrainerErrors, TrainerOpen};
 
@@ -189,6 +192,49 @@ pub(super) fn trainer_buy_succeeded(
     if trainer_open.trainer == Some(trainer) {
         trainer_open.refresh_pending = true;
         let _ = net_commands.0.send(ClientCommand::TrainerList { trainer });
+    }
+}
+
+/// A stable master's pet list (`MSG_LIST_STABLED_PETS`): fill the [`StableOpen`] the stable feed
+/// (`crate::ui_stable`) reads. Arrives unprompted off the gossip stable option — that is how the
+/// window opens — and again in answer to our own refresh send.
+pub(super) fn list_stabled_pets(
+    npc: u64,
+    num_stable_slots: u8,
+    pets: Vec<StabledPet>,
+    stable_open: &mut StableOpen,
+) {
+    debug!(
+        "net: stable master {npc:#x} listed {} pets ({num_stable_slots} slots bought)",
+        pets.len()
+    );
+    stable_open.open(npc, num_stable_slots, pets);
+}
+
+/// The answer to a stable verb (`SMSG_STABLE_RESULT`) — one byte, and the *whole* answer: no
+/// success carries an updated list (VERIFIED vmangos, every `HandleStable*` path ends in
+/// `SendStableResult` and nothing else). So a success **must** be followed by a re-request or the
+/// window would go on showing the pre-action arrangement — a pet that is now stabled still standing
+/// in slot 0. That re-request is forced by the server's behaviour, not a choice.
+///
+/// The refusal half is where the client's own behaviour is still open (decision 1676): benilla
+/// surfaces `ERR_MONEY` on the error line and swallows the generic `ERR_STABLE`, which carries no
+/// reason at all — dead player, out of range, no free bought slot, untameable, and "you already
+/// have a pet" are one indistinguishable code. What the reference does with each is a wow-re carve
+/// item; showing a wrong-but-confident sentence for a code that means five things would be worse
+/// than the silence.
+pub(super) fn stable_result(result: u8, stable_open: &mut StableOpen, net_commands: &NetCommands) {
+    use benilla_protocol::messages::stable_result as code;
+    let Some(npc) = stable_open.npc else {
+        debug!("net: stable result {result} with no open stable — ignored");
+        return;
+    };
+    match result {
+        code::SUCCESS_STABLE | code::SUCCESS_UNSTABLE | code::SUCCESS_BUY_SLOT => {
+            debug!("net: stable action succeeded (code {result}) — re-listing");
+            let _ = net_commands.0.send(ClientCommand::ListStabledPets { npc });
+        }
+        _ => debug!("net: stable action refused (code {result})"),
     }
 }
 

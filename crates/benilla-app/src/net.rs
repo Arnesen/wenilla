@@ -1126,6 +1126,22 @@ pub(crate) enum ClientCommand {
     /// answers `SMSG_TRAINER_BUY_SUCCEEDED` and delivers the spell via `SMSG_LEARNED_SPELL`; refusal
     /// answers `SMSG_TRAINER_BUY_FAILED` (a `TrainerBuyFailed` event → the window's error line).
     TrainerBuySpell { trainer: u64, spell_id: u32 },
+    /// Ask (or re-ask) a stable master's pet list (`MSG_LIST_STABLED_PETS`, decision 1676): one
+    /// NPC guid. The window first opens off the gossip stable option's own inbound send of the
+    /// same opcode; this is the *refresh* verb, re-requested after every successful mutation
+    /// because none of them is answered with a fresh list.
+    ListStabledPets { npc: u64 },
+    /// Put the current pet away (`CMSG_STABLE_PET`, decision 1676). **No destination slot** — the
+    /// server takes the first free bought one, so there is none to carry.
+    StablePet { npc: u64 },
+    /// Summon a stabled pet (`CMSG_UNSTABLE_PET`, decision 1676): the NPC guid + the pet's own
+    /// number. Valid only with no current pet; with one out the verb is [`Self::StableSwapPet`].
+    UnstablePet { npc: u64, pet_number: u32 },
+    /// Trade the current pet for a stabled one in one step (`CMSG_STABLE_SWAP_PET`, decision 1676).
+    StableSwapPet { npc: u64, pet_number: u32 },
+    /// Buy the next stable slot (`CMSG_BUY_STABLE_SLOT`, decision 1676). The *which* is implicit,
+    /// as with the bank's bag slots; a refusal answers `SMSG_STABLE_RESULT`'s `ERR_MONEY`.
+    BuyStableSlot { npc: u64 },
     /// Spend talent points (`CMSG_LEARN_TALENT`, decision 0304): a `Talent.dbc` row id + the
     /// requested rank (0-based, learn-up-to — the click sends the current rank count). Sent by
     /// the talent window's click-to-learn. No dedicated reply: success arrives as the rank
@@ -1204,6 +1220,11 @@ pub(crate) enum ClientCommand {
         item_slot: u32,
         roll_type: u8,
     },
+    /// Hand a loot row to a group member (`CMSG_LOOT_MASTER_GIVE`, decision 1675): the master
+    /// looter's dropdown pick. `guid` is the open loot source, `slot` the row's **wire** slot, and
+    /// `target` the recipient's guid. Success arrives as an ordinary `SMSG_LOOT_REMOVED` (the item
+    /// traffic goes to the recipient, not to us); a refusal as a `MASTER_*` loot error.
+    LootMasterGive { guid: u64, slot: u8, target: u64 },
     /// Look at an available quest (`CMSG_QUESTGIVER_QUERY_QUEST`, decision 0088): a greeting/gossip
     /// quest row click. Answered by `SMSG_QUESTGIVER_QUEST_DETAILS` (a `QuestDetail` event → the
     /// accept panel).

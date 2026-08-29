@@ -19,8 +19,8 @@ use crate::messages::{
     MirrorTimerStart, MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog,
     PetMode, PetSpells, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
     QuestRequestItems, QuestTemplate, SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss,
-    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
-    WhoResults, XpGain,
+    StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
+    VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -436,6 +436,10 @@ pub enum SessionEvent {
         rank: u32,
         /// The template type flags — bit `0x10` hides the tooltip's faction-name line. `0` on a miss.
         type_flags: u32,
+        /// The template's model (`CreatureDisplayInfo.dbc` id) — the only way to draw a creature
+        /// with no world object to read `UNIT_FIELD_DISPLAYID` off, which is exactly a stabled pet
+        /// (decision 1676). `0` when the template ships none, and `0` on a miss.
+        display_id: u32,
         /// The civilian flag (the tooltip's green CIVILIAN line). `false` on a miss.
         civilian: bool,
         /// The racial-leader flag (the tooltip's white LEADER line). `false` on a miss.
@@ -829,6 +833,22 @@ pub enum SessionEvent {
         services: Vec<TrainerSpell>,
         greeting: String,
     },
+    /// A stable master's pet list (`MSG_LIST_STABLED_PETS`, decision 1676) — the current pet and
+    /// the stabled ones, each already carrying its rebased client slot (`0` = current), plus how
+    /// many stable slots the player has **bought**. Arrives unprompted when the gossip stable
+    /// option is chosen (that is how the window opens) and again in answer to our own refresh send.
+    ///
+    /// Read the rows **by slot, never by position**: the current-pet row is absent for a petless
+    /// hunter, so `pets[0]` is not necessarily slot 0.
+    ListStabledPets {
+        npc: u64,
+        num_stable_slots: u8,
+        pets: Vec<StabledPet>,
+    },
+    /// The answer to every stable verb (`SMSG_STABLE_RESULT`, decision 1676) — one
+    /// [`crate::messages::stable_result`] code and nothing else. No success carries an updated
+    /// list, so repainting the window takes a fresh `MSG_LIST_STABLED_PETS` send.
+    StableResult { result: u8 },
     /// A trainer taught a service (`SMSG_TRAINER_BUY_SUCCEEDED`, answering `CMSG_TRAINER_BUY_SPELL`):
     /// confirmation only — the spell itself arrives via `SMSG_LEARNED_SPELL` (already in the book).
     /// The app re-requests `CMSG_TRAINER_LIST` on this to repaint the bought row green→gray (decision
@@ -876,7 +896,8 @@ pub enum SessionEvent {
     /// A loot window opened (`SMSG_LOOT_RESPONSE`'s normal shape), answering our `CMSG_LOOT`:
     /// `loot_type` is a `loot::loot_type` code, `items` the row list (quest rows ride the same
     /// list, `slot = items.len() + i`). A row still under a group roll arrives with
-    /// `slot_type == ROLL_ONGOING` (decision 0591); master loot stays out of scope.
+    /// `slot_type == ROLL_ONGOING` (decision 0591); under master loot every row vmangos shows a
+    /// group member arrives `slot_type == MASTER` (decision 1675).
     LootResponse {
         guid: u64,
         loot_type: u8,
@@ -906,6 +927,10 @@ pub enum SessionEvent {
     /// Everyone passed (`SMSG_LOOT_ALL_PASSED`) — closes that roll's frame; the item returns to
     /// the corpse for ordinary looting.
     LootAllPassed(LootAllPassed),
+    /// The group members eligible to receive an item from the loot window that is opening
+    /// (`SMSG_LOOT_MASTER_LIST`) — it arrives *before* the `LootResponse` it belongs to, because
+    /// the server sends it from inside `SendLoot` (decision 1675).
+    LootMasterList { candidates: Vec<u64> },
     /// An item landed in our bags — looted or received from an NPC (`SMSG_ITEM_PUSH_RESULT`);
     /// drives the "You receive loot: …" chat line.
     ItemPushResult(ItemPushResult),

@@ -26,9 +26,9 @@
     <Script><![CDATA[
         -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only
         -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard, Petition,
-        -- GuildRegistrar, PetStable, Battlefield, Help, Cinematic, WorldStateScore, Minigame — and
-        -- the doublewide AuctionFrame) join as their windows land (audited row-by-row against the
-        -- bytes, decision 1507).
+        -- GuildRegistrar, Battlefield, Help, Cinematic, WorldStateScore, Minigame) join as their
+        -- windows land (audited row-by-row against the bytes, decision 1507). Two have since left
+        -- that list: the doublewide AuctionFrame with decision 1511, PetStableFrame with 1676.
         UIPanelWindows = {}
         UIPanelWindows["GossipFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["MerchantFrame"] = { area = "left", pushable = 0 }
@@ -75,6 +75,13 @@
         -- registration line (`UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }`),
         -- quoted verbatim — same left-slot competition as Gossip/Merchant/Trainer above.
         UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }
+        -- The stable-master window (decision 1676, PetStable.xml): the ref's own UIParent.lua l.39
+        -- registration line (`UIPanelWindows["PetStableFrame"] = { area = "left", pushable = 0 }`),
+        -- quoted verbatim — the same left-slot competition as Gossip/Merchant/Trainer/Taxi above,
+        -- which is what makes the stable master's gossip window give way to the stable it opens.
+        -- The reference lists it between MailFrame (l.37) and DressUpFrame (l.41), which is where
+        -- it sits here too, inside the NPC-session cluster those rows are grouped into.
+        UIPanelWindows["PetStableFrame"] = { area = "left", pushable = 0 }
         -- The auction house (decision 1511, AuctionFrame.xml): the reference's own registration,
         -- quoted verbatim from `Blizzard_AuctionUI.lua` l.13 rather than UIParent.lua — the window
         -- ships as a loadable addon there, so it registers its own row. **The one and only

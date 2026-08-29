@@ -23,6 +23,15 @@
 //! wire loot slot the item lives at (`CMSG_AUTOSTORE_LOOT_ITEM` addresses the **wire** slot, which is
 //! *not* the 1-based display position once a coin row is prepended or a row is removed) — the Lua side
 //! never sees the wire slot, exactly as the merchant's Lua side never sees the item entry.
+//!
+//! ## Master loot (decision 1675)
+//!
+//! Two more globals ride the same seam when the group's loot method is master loot:
+//! `GetMasterLootCandidate(index)` reads [`LootState::master_candidates`] (names, 1-based, dense)
+//! and `GiveMasterLoot(slot, candidateIndex)` queues an assignment the app resolves to a wire slot
+//! and a recipient guid. The *decision* to open the dropdown is not Lua's: the app fires
+//! `OPEN_MASTER_LOOT_LIST` when a picked row's wire `slot_type` is `MASTER`, which is where the
+//! real client puts it too — its take dispatcher branches on the same byte before any Lua runs.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -85,6 +94,22 @@ pub struct LootState {
     /// `loot_type == 3`, decision 1086). `LootFrame_OnShow` keys the "FISHING REEL IN" sound and
     /// the FishingLoot portrait overlay on it (`LootFrame.lua:137-140`).
     pub fishing: bool,
+    /// The master-loot candidate slots — what `GetMasterLootCandidate(i)` answers for a 1-based
+    /// `i` (decision 1675). Empty unless the group's loot method is master loot and the server
+    /// sent `SMSG_LOOT_MASTER_LIST` for this window.
+    ///
+    /// **A `None` is a real slot that answers nil**, not padding, and the list is deliberately
+    /// not packed: in a raid the client files each candidate into its own subgroup's five-slot
+    /// block, so index `i` carries which raid group the candidate is in. That is what lets
+    /// `GroupLootDropDown_Initialize` walk `1..40` in blocks of five and label each block
+    /// "Group N" (`LootFrame.lua:186-212`). A `None` also covers a candidate whose name has not
+    /// resolved yet — the binding pushes nil for that too, and `UPDATE_MASTER_LOOT_LIST` exists
+    /// to repaint the menu when it lands.
+    ///
+    /// Names, not guids: the seam's standing division is that Lua speaks names and 1-based
+    /// indices while the app owns guids and wire slots, and `GroupLootDropDown_Initialize` puts
+    /// this string straight into `info.text` (`LootFrame.lua:181`/`:229`).
+    pub master_candidates: Vec<Option<String>>,
 }
 
 impl super::UiScript {
@@ -103,6 +128,13 @@ impl super::UiScript {
     /// `CMSG_LOOT_RELEASE` when a loot is open.
     pub fn take_loot_close(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().loot_close)
+    }
+
+    /// Drain the `GiveMasterLoot(slot, candidateIndex)` assignments queued since the last call —
+    /// both 1-based display numbers. The app resolves the row to its wire slot and the candidate
+    /// to a guid, then sends `CMSG_LOOT_MASTER_GIVE` (decision 1675).
+    pub fn take_loot_master_gives(&mut self) -> Vec<(u32, u32)> {
+        std::mem::take(&mut self.model_mut().loot_master_gives)
     }
 }
 
@@ -245,6 +277,42 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetMasterLootCandidate(index) → the 1-based candidate's NAME, or nil past the end.
+    //
+    // `GroupLootDropDown_Initialize` probes this sparsely and relies entirely on the nil:
+    // the party arm walks `1..MAX_PARTY_MEMBERS+1` and the raid arm walks `1..40` in blocks of
+    // five, keeping a "Group N" submenu only where the block's first probe answered non-nil
+    // (`LootFrame.lua:169-232`). So an out-of-range index must answer nil rather than raise, and
+    // the list must be DENSE — a hole would silently drop a candidate from the menu.
+    g.set(
+        "GetMasterLootCandidate",
+        lua.create_function(|lua, index: u32| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let name = index.checked_sub(1).and_then(|i| {
+                model
+                    .loot
+                    .as_ref()?
+                    .master_candidates
+                    .get(i as usize)?
+                    .clone()
+            });
+            Ok(name)
+        })?,
+    )?;
+
+    // GiveMasterLoot(slot, candidateIndex) — queue the assignment; the app owns the wire slot and
+    // the recipient guid. Called from the dropdown's own handler for a below-threshold item and
+    // from the CONFIRM_LOOT_DISTRIBUTION popup's OnAccept above it (`LootFrame.lua:236-244`,
+    // `StaticPopup.lua:85-94`).
+    g.set(
+        "GiveMasterLoot",
+        lua.create_function(|lua, (slot, candidate): (u32, u32)| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.loot_master_gives.push((slot, candidate));
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }
 
@@ -255,6 +323,7 @@ mod tests {
 
     fn loot() -> LootState {
         LootState {
+            master_candidates: Vec::new(),
             rows: vec![
                 // The coin pile, always first. No link: there is no item to link (decision 1059).
                 Some(LootRow {
@@ -368,6 +437,105 @@ mod tests {
         assert!(s.eval::<bool>("return not LootSlotIsCoin(1)").unwrap());
         // …and the rows below keep their own slots.
         assert!(s.eval::<bool>("return LootSlotIsItem(2)").unwrap());
+    }
+
+    /// The master-loot half of the seam (decision 1675). `GetMasterLootCandidate` must answer nil
+    /// past the end rather than raise — `GroupLootDropDown_Initialize` probes it sparsely (the
+    /// raid arm walks 1..40 in blocks of five) and reads the nil as "nobody here".
+    #[test]
+    fn master_loot_candidates_read_1_based_and_nil_past_the_end() {
+        let mut s = UiScript::new().unwrap();
+
+        // No loot open at all: nil, not an error.
+        assert!(s
+            .eval::<bool>("return GetMasterLootCandidate(1) == nil")
+            .unwrap());
+
+        // A window with no candidate list (any loot method but master): still nil everywhere.
+        s.set_loot(Some(loot()));
+        assert!(s
+            .eval::<bool>("return GetMasterLootCandidate(1) == nil")
+            .unwrap());
+
+        let mut ml = loot();
+        ml.master_candidates = vec![Some("Thrall".into()), Some("Cairne".into())];
+        s.set_loot(Some(ml));
+        assert_eq!(
+            s.eval::<String>("return GetMasterLootCandidate(1)")
+                .unwrap(),
+            "Thrall"
+        );
+        assert_eq!(
+            s.eval::<String>("return GetMasterLootCandidate(2)")
+                .unwrap(),
+            "Cairne"
+        );
+        assert!(
+            s.eval::<bool>("return GetMasterLootCandidate(3) == nil")
+                .unwrap(),
+            "past the end is nil"
+        );
+        assert!(
+            s.eval::<bool>("return GetMasterLootCandidate(0) == nil")
+                .unwrap(),
+            "0 is not a Lua index"
+        );
+        // The raid arm's real sweep shape: 40 probes must all answer without raising.
+        assert_eq!(
+            s.eval::<i64>(
+                "local n = 0
+                 for i = 1, 40 do if GetMasterLootCandidate(i) then n = n + 1 end end
+                 return n",
+            )
+            .unwrap(),
+            2
+        );
+
+        // A HOLE in the middle answers nil without ending the list — the raid layout, where a
+        // candidate's index carries which subgroup they are in, so slot 6 can be occupied while
+        // slots 2-5 are empty. A list that stopped at the first nil would lose them.
+        let mut raid = loot();
+        raid.master_candidates = vec![
+            Some("Thrall".into()),
+            None,
+            None,
+            None,
+            None,
+            Some("Cairne".into()),
+        ];
+        s.set_loot(Some(raid));
+        assert_eq!(
+            s.eval::<String>("return GetMasterLootCandidate(1)")
+                .unwrap(),
+            "Thrall"
+        );
+        for hole in 2..=5 {
+            assert!(
+                s.eval::<bool>(&format!("return GetMasterLootCandidate({hole}) == nil"))
+                    .unwrap(),
+                "slot {hole} is a hole"
+            );
+        }
+        assert_eq!(
+            s.eval::<String>("return GetMasterLootCandidate(6)")
+                .unwrap(),
+            "Cairne",
+            "an occupant past the holes is still reachable"
+        );
+    }
+
+    #[test]
+    fn give_master_loot_queues_the_assignment() {
+        let mut s = UiScript::new().unwrap();
+        let mut ml = loot();
+        ml.master_candidates = vec![Some("Thrall".into())];
+        s.set_loot(Some(ml));
+        assert!(s.take_loot_master_gives().is_empty());
+        s.run("GiveMasterLoot(2, 1)").unwrap();
+        assert_eq!(s.take_loot_master_gives(), vec![(2, 1)]);
+        assert!(s.take_loot_master_gives().is_empty(), "drained");
+        // It is NOT a loot pick — the two intents must not cross wires.
+        assert!(s.take_loot_picks().is_empty());
     }
 
     #[test]

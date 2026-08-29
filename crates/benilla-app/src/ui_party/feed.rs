@@ -85,12 +85,12 @@ pub(crate) const RAID_TOKENS: [&str; 40] = [
 ];
 
 /// `GROUPTYPE_RAID` — `SMSG_GROUP_LIST`'s first byte (`0` party, `1` raid; vmangos `Group.h:116`).
-const GROUPTYPE_RAID: u8 = 1;
+pub(crate) const GROUPTYPE_RAID: u8 = 1;
 
 /// The subgroup index in a member's flags byte — bits 0-2 (`GroupMemberEntry::flags`'s own doc;
 /// the assistant bit `0x80` is its neighbour, and the `0x7f` mask `party_slots` uses is a
 /// different question, "same subgroup AND same assistant state").
-const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
+pub(crate) const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
 
 /// Push the roster snapshot + the `party1..party4` unit snapshots into the VM and fire the party
 /// events on their edges. The per-member unit state is the 0434 §2 **merged view**: a streamed
@@ -207,16 +207,29 @@ pub(super) fn feed_party(
                 4 => "needbeforegreed",
                 _ => "group",
             };
-            let master = (loot.method == 2 && loot.master != 0).then(|| {
-                if Some(loot.master) == self_guid {
-                    0
-                } else {
-                    slots
-                        .iter()
-                        .position(|m| m.guid == loot.master)
-                        .map_or(0, |i| i as u32 + 1)
-                }
-            });
+            // `GetLootMethod`'s second return, and it is deliberately narrow: the binding
+            // (`0x4e91b0`) pushes 0 when the stored looter guid is our own, else searches ONLY
+            // the four party slots (`0x4e81a0`, bounded to 4 even in a raid) and pushes index+1
+            // on a hit — and pushes **nil** on a miss, the same value it pushes when there is no
+            // master looter at all. So a master looter sitting in another raid subgroup is not
+            // expressible here; that is a real, verified asymmetry with `SetLootMethod`, which
+            // does accept raid members.
+            //
+            // The miss arm is what this used to get wrong: it folded an unfound master to 0, and
+            // 0 means "the player" — so a raid master looter in another subgroup lit the master
+            // crown on OUR portrait (`PlayerFrame_UpdatePartyLeader` shows it on `lootMaster == 0`).
+            let master = (loot.method == 2 && loot.master != 0)
+                .then(|| {
+                    if Some(loot.master) == self_guid {
+                        Some(0)
+                    } else {
+                        slots
+                            .iter()
+                            .position(|m| m.guid == loot.master)
+                            .map(|i| i as u32 + 1)
+                    }
+                })
+                .flatten();
             (method.to_string(), master, u32::from(loot.threshold))
         }
         None => ("group".to_string(), None, 0),
@@ -846,6 +859,7 @@ pub(super) fn drain_party(
             PartyRequest::LootMethod {
                 method,
                 master_name,
+                threshold: asked,
             } => {
                 let Some(method_id) = loot_method_id(&method) else {
                     continue;
@@ -865,11 +879,22 @@ pub(super) fn drain_party(
                 } else {
                     0
                 };
-                let threshold = group
-                    .loot
-                    .map(|l| u32::from(l.threshold))
-                    .filter(|t| *t >= 2)
-                    .unwrap_or(2);
+                // The caller's own threshold wins when it passed one. Absent, we keep the
+                // group's current floor.
+                //
+                // **Stated divergence** (decision 1675): the real binding defaults the absent
+                // argument to a literal 2, so on the reference client changing the loot method
+                // with no third argument silently RESETS the threshold to Uncommon. Ours is
+                // sticky. The reference behaviour is one line (`.unwrap_or(2)` on `asked` alone);
+                // it is left to the director's call because it is quietly destructive and nothing
+                // in this arc needs it.
+                let threshold = asked.unwrap_or_else(|| {
+                    group
+                        .loot
+                        .map(|l| u32::from(l.threshold))
+                        .filter(|t| *t >= 2)
+                        .unwrap_or(2)
+                });
                 let _ = commands.0.send(ClientCommand::LootMethod {
                     method: method_id,
                     master,
@@ -1024,6 +1049,7 @@ fn test_apply_local(
         PartyRequest::LootMethod {
             method,
             master_name,
+            threshold,
         } => {
             if let Some(method_id) = loot_method_id(method) {
                 let master = if method_id == 2 {
@@ -1041,7 +1067,10 @@ fn test_apply_local(
                 } else {
                     0
                 };
-                let threshold = group.loot.map_or(2, |l| l.threshold.max(2));
+                // Same rule as the live drain: the caller's threshold wins when it passed one,
+                // else the group keeps its current floor.
+                let threshold = threshold
+                    .map_or_else(|| group.loot.map_or(2, |l| l.threshold.max(2)), |t| t as u8);
                 group.loot = Some(GroupLootInfo {
                     method: method_id as u8,
                     master,
@@ -1601,6 +1630,7 @@ mod tests {
             &PartyRequest::LootMethod {
                 method: "needbeforegreed".into(),
                 master_name: None,
+                threshold: None,
             },
             me,
             None,

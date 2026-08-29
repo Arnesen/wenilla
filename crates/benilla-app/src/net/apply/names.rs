@@ -38,6 +38,7 @@ pub(super) fn creature_name(
     type_flags: u32,
     civilian: bool,
     racial_leader: bool,
+    display_id: u32,
     names: &mut NameCache,
 ) {
     names.insert_creature(
@@ -51,6 +52,7 @@ pub(super) fn creature_name(
             type_flags,
             civilian,
             racial_leader,
+            display_id,
         }),
     );
 }

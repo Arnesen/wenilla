@@ -13,9 +13,9 @@ use crate::wire::{
 use super::{
     action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
     duel, gameobject, gossip, group, guild, items, loot, mail, mirror_timer, monster_move,
-    movement, opcode, page_text, pet, progression, pvp, quest, social, spellbook, spells, taxi,
-    trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo, MoveMode,
-    ServerPacket, SpeedKind,
+    movement, opcode, page_text, pet, progression, pvp, quest, social, spellbook, spells, stable,
+    taxi, trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo,
+    MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -679,6 +679,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 error,
             }
         }
+        opcode::MSG_LIST_STABLED_PETS => {
+            let (npc, num_stable_slots, pets) = stable::read_list_stabled_pets(&mut r)?;
+            ServerPacket::ListStabledPets {
+                npc,
+                num_stable_slots,
+                pets,
+            }
+        }
+        opcode::SMSG_STABLE_RESULT => {
+            let result = stable::read_stable_result(&mut r)?;
+            ServerPacket::StableResult { result }
+        }
         opcode::SMSG_LOOT_RESPONSE => {
             let (guid, body) = loot::read_loot_response(&mut r)?;
             match body {
@@ -714,6 +726,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_LOOT_ALL_PASSED => {
             ServerPacket::LootAllPassed(loot::read_loot_all_passed(&mut r)?)
         }
+        opcode::SMSG_LOOT_MASTER_LIST => ServerPacket::LootMasterList {
+            candidates: loot::read_loot_master_list(&mut r)?,
+        },
         opcode::SMSG_ITEM_PUSH_RESULT => {
             ServerPacket::ItemPushResult(loot::read_item_push_result(&mut r)?)
         }
@@ -817,16 +832,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 // (the `CreatureType.dbc` id — the TAB-target filter's input), `pet_family` (the
                 // `CreatureFamily.dbc` id behind `UnitCreatureFamily` and the diet tooltip,
                 // decision 1062), `rank` (the unit tooltip's Elite/Boss word, decision 0276's
-                // level-line law), `type_flags` (bit 0x10 hides its faction line), and the
-                // `civilian`/`racial_leader` pair (its green CIVILIAN / white LEADER lines); the
-                // rest stays alignment-only.
+                // level-line law), `type_flags` (bit 0x10 hides its faction line), the
+                // `civilian`/`racial_leader` pair (its green CIVILIAN / white LEADER lines), and
+                // `display_id` — the template's model, which is the ONLY way to draw a creature
+                // that has no world object to read `UNIT_FIELD_DISPLAYID` off: a stabled pet
+                // (decision 1676). The `unk`/`pet_spell_list_id` pair stays alignment-only.
                 let type_flags = read_u32_le(&mut r)?;
                 let creature_type = read_u32_le(&mut r)?;
                 let pet_family = read_u32_le(&mut r)?;
                 let rank = read_u32_le(&mut r)?;
                 let _unk = read_u32_le(&mut r)?;
                 let _pet_spell_list = read_u32_le(&mut r)?;
-                let _display_id = read_u32_le(&mut r)?;
+                let display_id = read_u32_le(&mut r)?;
                 let civilian = read_u8(&mut r)? != 0;
                 let racial_leader = read_u8(&mut r)? != 0;
                 ServerPacket::CreatureQueryResponse {
@@ -838,6 +855,7 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                         pet_family,
                         rank,
                         type_flags,
+                        display_id,
                         civilian,
                         racial_leader,
                     }),

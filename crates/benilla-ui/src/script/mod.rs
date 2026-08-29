@@ -117,6 +117,7 @@ mod slider;
 mod social;
 mod sound;
 mod spellbook;
+mod stable;
 mod statusbar;
 mod stdlib;
 mod talent;
@@ -203,6 +204,7 @@ pub use sound::SoundRequest;
 pub use spellbook::{
     resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
 };
+pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_spell::SpellTooltipView;
@@ -566,6 +568,7 @@ impl UiScript {
         gossip::install(&lua)?;
         merchant::install(&lua)?;
         bank::install(&lua)?;
+        stable::install(&lua)?;
         item_text::install(&lua)?;
         mail::install(&lua)?;
         auction::install(&lua)?;

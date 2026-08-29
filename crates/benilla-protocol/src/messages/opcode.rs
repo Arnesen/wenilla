@@ -739,6 +739,20 @@ pub const SMSG_BUY_BANK_SLOT_RESULT: u16 = 0x01BA; // 442
 pub const CMSG_AUTOSTORE_BANK_ITEM: u16 = 0x0282; // 642
 pub const CMSG_AUTOBANK_ITEM: u16 = 0x0283; // 643
 
+// The pet-stable set (VERIFIED vmangos `Opcodes_1_12_1.h`: 623-629). `MSG_LIST_STABLED_PETS` is one
+// opcode in BOTH directions: the gossip stable option makes the server send the list unprompted
+// (that is how the window opens), and the client sends the same number back — one guid — to
+// refresh. The four mutations are all answered by a single `SMSG_STABLE_RESULT` byte and nothing
+// else, so a successful one is a cue to re-ask the list. Bodies in [`super::stable`]
+// (decision 1676). `CMSG_STABLE_REVIVE_PET` (0x0274, 628) is deliberately absent: vmangos's handler
+// is an empty no-op and whether the 5875 client ever sends it is an open RE question.
+pub const MSG_LIST_STABLED_PETS: u16 = 0x026F; // 623
+pub const CMSG_STABLE_PET: u16 = 0x0270; // 624
+pub const CMSG_UNSTABLE_PET: u16 = 0x0271; // 625
+pub const CMSG_BUY_STABLE_SLOT: u16 = 0x0272; // 626
+pub const SMSG_STABLE_RESULT: u16 = 0x0273; // 627
+pub const CMSG_STABLE_SWAP_PET: u16 = 0x0275; // 629
+
 /// Spend talent points (VERIFIED vmangos `Opcodes_1_12_1.h`: 593) — body in
 /// [`super::progression::learn_talent`]; the server answers with the rank spell's learn effects
 /// (`SMSG_LEARNED_SPELL` etc.) and the refreshed `PLAYER_CHARACTER_POINTS1`. Decision 0304.
@@ -804,13 +818,18 @@ pub const SMSG_ITEM_PUSH_RESULT: u16 = 0x0166; // 358
 
 // The group-loot roll family (VERIFIED vmangos `Opcodes_1_12_1.h:671-675`) — the Need/Greed/Pass
 // flow the `GroupLootFrame`s drive when the group's loot method is group/need-before-greed and a
-// drop is at or above the quality threshold (decision 0591). Bodies in [`super::loot`]. Master
-// loot (`CMSG_LOOT_MASTER_GIVE` 675 / `SMSG_LOOT_MASTER_LIST` 676) stays out of scope.
+// drop is at or above the quality threshold (decision 0591). Bodies in [`super::loot`].
 pub const SMSG_LOOT_ALL_PASSED: u16 = 0x029E; // 670
 pub const SMSG_LOOT_ROLL_WON: u16 = 0x029F; // 671
 pub const CMSG_LOOT_ROLL: u16 = 0x02A0; // 672
 pub const SMSG_LOOT_START_ROLL: u16 = 0x02A1; // 673
 pub const SMSG_LOOT_ROLL: u16 = 0x02A2; // 674
+
+// Master loot (VERIFIED vmangos `Opcodes_1_12_1.h:676-677`) — the other answer to an
+// above-threshold drop: no roll, the master looter is handed the eligible-member list at
+// window-open and assigns each row from a dropdown (decision 1675). Bodies in [`super::loot`].
+pub const CMSG_LOOT_MASTER_GIVE: u16 = 0x02A3; // 675
+pub const SMSG_LOOT_MASTER_LIST: u16 = 0x02A4; // 676
 
 // The death arc (decision 0308) — release/repop, corpse query, reclaim, spirit healer, resurrect
 // requests (all VERIFIED vmangos `Opcodes_1_12_1.h`: 346-348, 466, 534, 540, 546, 617). Bodies in

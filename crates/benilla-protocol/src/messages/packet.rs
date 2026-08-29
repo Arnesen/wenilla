@@ -15,8 +15,9 @@ use super::{
     MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, PvpCredit,
     QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems,
     QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown,
-    SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask,
-    TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, StabledPet,
+    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
+    WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -61,6 +62,14 @@ pub struct CreatureQueryInfo {
     pub civilian: bool,
     /// The racial-leader flag (the tooltip's white LEADER line; `0x6125c0` on the record's `+0x31`).
     pub racial_leader: bool,
+    /// `CreatureDisplayInfo.dbc` id (`creature_template.display_id[0]`, vmangos
+    /// `QueryHandler.cpp:179`); `0` when the template has none. The one field that lets the client
+    /// draw a creature it has **never seen in the world** — a stabled pet, whose wire record names
+    /// only a `creature_template` entry and has no world object to read a display id from
+    /// (decision 1676). vmangos randomizes among a template's four display ids when it *spawns* a
+    /// creature, so this is the template's first entry, not necessarily what a given live unit
+    /// shows: for anything actually on screen, the unit's own `UNIT_FIELD_DISPLAYID` still wins.
+    pub display_id: u32,
 }
 
 /// A decoded server packet (only the opcodes benilla handles; everything else is [`Self::Other`]).
@@ -796,6 +805,28 @@ pub enum ServerPacket {
         spell_id: u32,
         error: u32,
     },
+    /// `MSG_LIST_STABLED_PETS` — the stable master's pet list (layout in
+    /// [`super::stable::read_list_stabled_pets`], decision 1676). Arrives **unprompted** when the
+    /// gossip stable option is chosen — that is how the window opens — and again in answer to our
+    /// own send of the same opcode, which is the only refresh there is (a successful mutation
+    /// answers with nothing but a [`Self::StableResult`] byte).
+    ///
+    /// `num_stable_slots` is how many stable slots the player has *bought* (0..=2), not how many
+    /// are occupied. `pets` carries the current pet **and** the stabled ones, each keyed by its own
+    /// already-rebased [`StabledPet::slot`] (`0` = current) — the current-pet row is absent for a
+    /// petless hunter or a warlock, so the list must be read by slot, never by position.
+    ListStabledPets {
+        npc: u64,
+        num_stable_slots: u8,
+        pets: Vec<StabledPet>,
+    },
+    /// `SMSG_STABLE_RESULT` — the whole answer to a stable/unstable/swap/buy-slot ask (vmangos
+    /// `StableResult::AppendBodyTo`). `result` is a [`super::stable::stable_result`] code; success
+    /// codes carry no updated list, so repainting the window takes a fresh
+    /// `MSG_LIST_STABLED_PETS` send.
+    StableResult {
+        result: u8,
+    },
     /// `SMSG_LOOT_RESPONSE`, normal shape — a loot window opened, answering `CMSG_LOOT` (layout in
     /// [`super::loot::read_loot_response`]). `loot_type` is a [`super::loot::loot_type`] code; `items` includes
     /// any quest-item rows riding the same list.
@@ -838,6 +869,12 @@ pub enum ServerPacket {
     /// `SMSG_LOOT_ALL_PASSED` — everyone passed; the roll closes and the item returns to the
     /// corpse for ordinary looting (layout in [`LootAllPassed`]).
     LootAllPassed(LootAllPassed),
+    /// `SMSG_LOOT_MASTER_LIST` — the group members eligible to be handed an item from the loot
+    /// window that is opening (layout in [`super::loot::read_loot_master_list`]). It precedes the
+    /// `SMSG_LOOT_RESPONSE` it belongs to.
+    LootMasterList {
+        candidates: Vec<u64>,
+    },
     /// `SMSG_ITEM_PUSH_RESULT` — an item landed in our bags (looted or received from an NPC);
     /// drives the "You receive loot: …" chat line (layout in [`ItemPushResult`]).
     ItemPushResult(ItemPushResult),
@@ -1374,6 +1411,8 @@ impl ServerPacket {
             ServerPacket::TrainerList { .. } => "SMSG_TRAINER_LIST".into(),
             ServerPacket::TrainerBuySucceeded { .. } => "SMSG_TRAINER_BUY_SUCCEEDED".into(),
             ServerPacket::TrainerBuyFailed { .. } => "SMSG_TRAINER_BUY_FAILED".into(),
+            ServerPacket::ListStabledPets { .. } => "MSG_LIST_STABLED_PETS".into(),
+            ServerPacket::StableResult { .. } => "SMSG_STABLE_RESULT".into(),
             ServerPacket::LootResponse { .. } => "SMSG_LOOT_RESPONSE".into(),
             ServerPacket::LootError { .. } => "SMSG_LOOT_RESPONSE (error)".into(),
             ServerPacket::LootReleaseResponse { .. } => "SMSG_LOOT_RELEASE_RESPONSE".into(),
@@ -1384,6 +1423,7 @@ impl ServerPacket {
             ServerPacket::LootRoll(_) => "SMSG_LOOT_ROLL".into(),
             ServerPacket::LootRollWon(_) => "SMSG_LOOT_ROLL_WON".into(),
             ServerPacket::LootAllPassed(_) => "SMSG_LOOT_ALL_PASSED".into(),
+            ServerPacket::LootMasterList { .. } => "SMSG_LOOT_MASTER_LIST".into(),
             ServerPacket::ItemPushResult(_) => "SMSG_ITEM_PUSH_RESULT".into(),
             ServerPacket::CorpseQuery(_) => "MSG_CORPSE_QUERY".into(),
             ServerPacket::CorpseReclaimDelay { .. } => "SMSG_CORPSE_RECLAIM_DELAY".into(),

@@ -41,8 +41,8 @@ mod world;
 // body; the match stays the dispatcher, one call per arm — see the child modules).
 use loot::{
     inventory_failure, item_push_result, item_template, loot_all_passed, loot_clear_money,
-    loot_error, loot_money_notify, loot_release_response, loot_removed, loot_response, loot_roll,
-    loot_roll_won, loot_start_roll,
+    loot_error, loot_master_list, loot_money_notify, loot_release_response, loot_removed,
+    loot_response, loot_roll, loot_roll_won, loot_start_roll,
 };
 use quests::{
     quest_complete, quest_detail, quest_failed, quest_giver_failed, quest_giver_invalid,
@@ -140,7 +140,12 @@ pub(super) fn apply_net_updates(
         ResMut<crate::items::Items>,
         ResMut<crate::ui_gossip::GossipState>,
         ResMut<crate::ui_merchant::MerchantOpen>,
-        ResMut<crate::ui_trainer::TrainerOpen>,
+        // Nested pair: the two gossip-reached NPC service sessions the net drain fills whose
+        // state is a whole open window (the tuple is at the 16-param ceiling).
+        (
+            ResMut<crate::ui_trainer::TrainerOpen>,
+            ResMut<crate::ui_stable::StableOpen>,
+        ),
         // Nested triple (the tuple is at the 16-param ceiling): the loot window state, the
         // client-local loot-target latch (the kneel's self trigger, decision 0515), and the open
         // group-loot rolls (decision 0591).
@@ -368,7 +373,7 @@ pub(super) fn apply_net_updates(
         mut items,
         mut gossip,
         mut merchant,
-        mut trainer_open,
+        (mut trainer_open, mut stable_open),
         (mut loot, mut loot_latch, mut loot_rolls),
         mut chat_log,
         mut quest,
@@ -789,6 +794,7 @@ pub(super) fn apply_net_updates(
                 pet_family,
                 rank,
                 type_flags,
+                display_id,
                 civilian,
                 racial_leader,
             } => names::creature_name(
@@ -801,6 +807,7 @@ pub(super) fn apply_net_updates(
                 type_flags,
                 civilian,
                 racial_leader,
+                display_id,
                 &mut names,
             ),
             SessionEvent::GameObjectInfo {
@@ -1109,6 +1116,8 @@ pub(super) fn apply_net_updates(
             SessionEvent::LootRoll(p) => loot_roll(p, &mut loot_rolls),
             SessionEvent::LootRollWon(p) => loot_roll_won(p, &mut loot_rolls),
             SessionEvent::LootAllPassed(p) => loot_all_passed(p, &mut loot_rolls),
+            // ── Master loot (decision 1675) — the candidate list, ahead of its LootResponse ───
+            SessionEvent::LootMasterList { candidates } => loot_master_list(candidates, &mut loot),
             // ── The death arc (decision 0308) — arm bodies in `death` ─────────────────────────
             SessionEvent::CorpseQuery {
                 found,
@@ -1527,6 +1536,14 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::TrainerBuyFailed { error, .. } => {
                 npc::trainer_buy_failed(error, &mut ui_actions.8)
+            }
+            SessionEvent::ListStabledPets {
+                npc,
+                num_stable_slots,
+                pets,
+            } => npc::list_stabled_pets(npc, num_stable_slots, pets, &mut stable_open),
+            SessionEvent::StableResult { result } => {
+                npc::stable_result(result, &mut stable_open, &net_commands)
             }
             SessionEvent::TaxiNodesShown {
                 flightmaster,

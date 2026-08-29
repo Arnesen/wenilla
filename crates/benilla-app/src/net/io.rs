@@ -815,6 +815,15 @@ fn writer_loop(
                     ClientCommand::TrainerBuySpell { trainer, spell_id } => {
                         w.trainer_buy_spell(trainer, spell_id)
                     }
+                    ClientCommand::ListStabledPets { npc } => w.list_stabled_pets(npc),
+                    ClientCommand::StablePet { npc } => w.stable_pet(npc),
+                    ClientCommand::UnstablePet { npc, pet_number } => {
+                        w.unstable_pet(npc, pet_number)
+                    }
+                    ClientCommand::StableSwapPet { npc, pet_number } => {
+                        w.stable_swap_pet(npc, pet_number)
+                    }
+                    ClientCommand::BuyStableSlot { npc } => w.buy_stable_slot(npc),
                     ClientCommand::LearnTalent { talent_id, rank } => {
                         w.learn_talent(talent_id, rank)
                     }
@@ -843,6 +852,9 @@ fn writer_loop(
                         spell_id,
                         item_guid,
                     } => w.cast_spell_item(spell_id, item_guid),
+                    ClientCommand::LootMasterGive { guid, slot, target } => {
+                        w.loot_master_give(guid, slot, target)
+                    }
                     ClientCommand::Loot { guid } => w.loot(guid),
                     ClientCommand::AutostoreLootItem { slot } => w.autostore_loot_item(slot),
                     ClientCommand::LootMoney => w.loot_money(),

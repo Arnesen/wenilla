@@ -1808,6 +1808,7 @@ mod tests {
                 type_flags: 0,
                 civilian: false,
                 racial_leader: false,
+                display_id: 0,
             }),
         );
 

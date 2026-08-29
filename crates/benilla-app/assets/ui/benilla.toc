@@ -357,6 +357,17 @@ BankFrame.xml
 # Loaded right after TrainerFrame per the same "NPC session windows grouped" posture — it
 # needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney), both already loaded above.
 TaxiFrame.xml
+# The stable-master window (decision 1676): the hunter's three-slot pet stable over the stable
+# API (`benilla-ui/src/script/stable.rs`) + the app's feed/drain. Kept in the "NPC session
+# windows grouped" cluster beside Trainer/Bank/Taxi. Two of its dependencies are resolved at
+# LOAD and so must sit above it: MoneyFrame (its purse and cost displays inherit
+# SmallMoneyFrameTemplate) and UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton).
+# A third is resolved at load too, and is the reason this cannot sit up with the other NPC
+# windows' dependencies: the model pane's own <OnLoad> calls CharacterFrame.xml's shared
+# `BenillaPaperDollModel_OnLoad`, so that file must already have run. The rest
+# (ItemButtonTemplate's SetItemButtonTexture, GameTooltip, UiPanels' ShowUIPanel/HideUIPanel,
+# UIParent's BuildListString) are resolved when the window repaints, so their order is free.
+PetStable.xml
 # The auction house (decision 1511): the three-tab doublewide window over the auction API
 # (`benilla-ui/src/script/auction.rs`) + the app's feed/drain. Kept in the "NPC session
 # windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight

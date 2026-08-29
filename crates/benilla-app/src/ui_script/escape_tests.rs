@@ -62,6 +62,10 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set, used by the bag's Update
+                                       // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
+                                       // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
+    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
+    load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "BagFrame.xml");
@@ -72,6 +76,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     s.run("BenillaBagToggle_OnClick()").unwrap();
     s.set_loot(Some(LootState {
         fishing: false,
+        master_candidates: Vec::new(),
         rows: vec![Some(LootRow {
             item_id: 0,
             name: Some("Wool Cloth".into()),
