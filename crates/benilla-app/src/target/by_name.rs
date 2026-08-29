@@ -582,7 +582,10 @@ pub(super) fn follow_requests(
             if let Some(key) = scan_params.follow_refusal(
                 *guid,
                 followee,
-                cast.in_flight(std::time::Instant::now()),
+                // `PendingCast::in_flight` wants the cooldown-clock `Instant`
+                // (`bevy::platform::time::Instant`, not `std::time::Instant` — see
+                // `crate::ui_script::UiClock::anchor`'s doc for why they differ on wasm32).
+                cast.in_flight(bevy::platform::time::Instant::now()),
             ) {
                 info!("follow: refused — {key}");
                 errors.0.push(crate::ui_action::UiError::key(key));

@@ -125,8 +125,8 @@ pub(super) struct NetConfig {
 impl NetConfig {
     pub(super) fn from_env() -> Self {
         NetConfig {
-            host: std::env::var("WOW_HOST").unwrap_or_else(|_| "localhost".into()),
-            character: std::env::var("WOW_CHAR").ok(),
+            host: crate::webenv::var("WOW_HOST").unwrap_or_else(crate::webenv::default_wow_host),
+            character: crate::webenv::var("WOW_CHAR"),
         }
     }
 }

@@ -164,16 +164,22 @@ impl Probe {
     /// Begin recording. `audio_pos` is the pre-tap's frame clock; `None` (no pre-tap) still
     /// produces a usable timeline, just one keyed on the game clock alone.
     pub(super) fn start(dir: PathBuf, rate: u32, audio_pos: Option<Arc<AtomicU64>>) -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded::<String>();
-        let path = dir.join("timeline.jsonl");
-        match std::fs::File::create(&path) {
-            Ok(file) => {
-                std::thread::Builder::new()
-                    .name("sound-probe".into())
-                    .spawn(move || writer(file, rx))
-                    .expect("spawn sound-probe writer");
+        let (tx, _rx) = crossbeam_channel::unbounded::<String>();
+        // No writer thread on wasm32 (single-threaded there without COOP/COEP + SharedArrayBuffer)
+        // — `_rx` is simply never drained, so `send`'s ordinary `$WOW_SOUND_PROBE`-off case (a
+        // full queue nobody reads) is exactly what a web run looks like too. Native only, below.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = dir.join("timeline.jsonl");
+            match std::fs::File::create(&path) {
+                Ok(file) => {
+                    std::thread::Builder::new()
+                        .name("sound-probe".into())
+                        .spawn(move || writer(file, _rx))
+                        .expect("spawn sound-probe writer");
+                }
+                Err(e) => warn!("sound probe: cannot create {}: {e}", path.display()),
             }
-            Err(e) => warn!("sound probe: cannot create {}: {e}", path.display()),
         }
         let probe = Self {
             dir,

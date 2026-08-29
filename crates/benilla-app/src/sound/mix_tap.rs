@@ -65,6 +65,20 @@ pub(super) fn install(
 ///
 /// Returns `None` if the file cannot be created — a probe that cannot record says so and the run
 /// continues, rather than taking the client down over an instrument.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn install_at(
+    _builder: &mut kira::track::MainTrackBuilder,
+    _path: &std::path::Path,
+    _sample_rate: u32,
+) -> Option<Arc<AtomicU64>> {
+    // No background writer thread on wasm32 (single-threaded there without COOP/COEP +
+    // SharedArrayBuffer, and `web_sys`'s File System Access API isn't `std::fs::File` anyway) —
+    // this is a native-only diagnostic; `$WOW_MIX_TAP` simply does nothing on web (`install`'s
+    // caller already treats `None` as "not recording", same as a native path it couldn't create).
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn install_at(
     builder: &mut kira::track::MainTrackBuilder,
     path: &std::path::Path,

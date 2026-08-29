@@ -3,7 +3,10 @@
 //! resolve pipeline). Each `pub(super)` fn here is exactly one arm's body; the match at the call
 //! site stays the dispatcher, one call per arm.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// `bevy::platform::time::Instant`, not `std::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `std::time::Instant` — a plain alias for it everywhere else.
+use bevy::platform::time::Instant;
 
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
@@ -330,7 +333,13 @@ pub(super) fn spell_start(
         if cast_time_ms > 0 {
             commands.entity(e).insert(Casting {
                 spell_id,
-                until: Some(Instant::now() + Duration::from_millis(u64::from(cast_time_ms))),
+                // `Casting::until` is its own self-contained animation deadline
+                // (`creature_anim::Casting`'s doc), never compared against the cooldown-clock
+                // `Instant` this file otherwise imports — spelled out fully so it stays that type
+                // regardless.
+                until: Some(
+                    std::time::Instant::now() + Duration::from_millis(u64::from(cast_time_ms)),
+                ),
             });
         }
         // The anim layer's precast edge (decision 0107) — instants included: their

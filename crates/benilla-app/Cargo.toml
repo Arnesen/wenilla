@@ -35,11 +35,6 @@ trace_chrome = ["bevy/trace_chrome"]
 
 [dependencies]
 anyhow.workspace = true
-# OS clipboard access for the UI EditBox copy/cut/paste chords (chat input). Already in the tree via
-# bevy_egui; pinned to the same 3.x so there's one copy. Read on the main thread (the UI key feed is
-# a NonSend system) — required for the macOS NSPasteboard path. Covers macOS, Windows, and Linux/BSD
-# under X11; the Wayland backend is `smithay-clipboard` below (decision 0702).
-arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
 wgpu.workspace = true
@@ -124,6 +119,14 @@ mint = "0.5"
 # source. Pinned to 0.8: the version `benilla-srp` already depends on, so this adds no crate.
 rand = "0.8"
 
+# OS clipboard access for the UI EditBox copy/cut/paste chords (chat input). Already in the tree via
+# bevy_egui; pinned to the same 3.x so there's one copy. Read on the main thread (the UI key feed is
+# a NonSend system) — required for the macOS NSPasteboard path. Covers macOS, Windows, and Linux/BSD
+# under X11; the Wayland backend is `smithay-clipboard` below (decision 0702). Native-only: arboard
+# has no wasm32 backend at all (`textinput/clipboard.rs` falls back to no pasteboard there).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = "3"
+
 [dev-dependencies]
 # The WMO portal-cull audit's raw-face instruments (`WOW_PIN_COL`): the pin probe compares the
 # filtered walking-collision set against the group file's FULL face list with per-face MOPY flags,
@@ -162,6 +165,18 @@ objc2-app-kit = { version = "0.2", features = [
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeometry"] }
 
 # The web build has no threads: the net sequencer is one `spawn_local` task on the browser's event
-# loop, and the write half is pumped by a Bevy system instead of a sibling thread.
+# loop, and the write half is pumped by a Bevy system instead of a sibling thread. `crate::webenv`
+# (the wasm32 half — reading the page's own query string) and `boot.rs`'s canvas binding use the
+# `web-sys` window/location. wasm-bindgen is pinned exact per the plan: a newer wasm-bindgen crate
+# + the 0.2.122 CLI emits broken glue — verified, so this must track the CLI
+# `scripts/benilla-web.sh` invokes to the digit.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+# WebGL2 is bevy's wasm32 render backend (there is no WebGPU fallback path here); the plain
+# `bevy.workspace = true` above already carries it in transitively (`2d`/`3d`'s `default_platform`
+# bundles it for every target), but naming it explicitly on the wasm32 target table is what the
+# plan's feature-unification note asks for — belt and braces against a future default change.
+bevy = { workspace = true, features = ["webgl2"] }

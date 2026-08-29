@@ -538,7 +538,10 @@ fn resolve_slot(
     cooldowns: &crate::cooldowns::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
     names: &mut crate::names::NameCache,
-    now: std::time::Instant,
+    // `bevy::platform::time::Instant`, not `std::time::Instant`: this is `clock.anchor`
+    // (`crate::ui_script::UiClock`), which on wasm32 is a different type from `std::time::Instant`
+    // (that field's own doc has the full reason).
+    now: bevy::platform::time::Instant,
     ui_now: f64,
 ) -> Option<ContainerSlot> {
     if guid == 0 {
