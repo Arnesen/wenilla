@@ -285,7 +285,7 @@ pub(crate) struct NetCommands(pub(crate) Sender<ClientCommand>);
 /// until an `Enter` moves the session into the world (decision 0423). Sent by [`crate::char_select`]'s
 /// pick policy and the char-create screen; the parked IO read thread blocks on the other end.
 #[derive(Resource)]
-pub(crate) struct CharPick(pub(crate) Sender<CharRequest>);
+pub(crate) struct CharPick(pub(crate) async_channel::Sender<CharRequest>);
 
 /// One request to the parked IO thread over the [`CharPick`] channel (decision 0423). `Delete`'s
 /// wire + service path is live (proven by `WOW_PROBE_CHARCREATE`); its UI affordance is a later
@@ -306,7 +306,7 @@ pub(crate) enum CharRequest {
 /// Sent by [`crate::login`]'s policy (the screen's submit, the env fast path, the reconnect
 /// resubmit); the parked read thread blocks on the other end.
 #[derive(Resource)]
-pub(crate) struct LoginSubmit(pub(crate) Sender<io::LoginRequest>);
+pub(crate) struct LoginSubmit(pub(crate) async_channel::Sender<io::LoginRequest>);
 
 /// The login abandon generation (decision 0539): Cancel bumps it; each [`io::LoginRequest`] carries
 /// the value read at submit, and the IO thread discards an attempt whose value has been passed.

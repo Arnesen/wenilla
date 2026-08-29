@@ -588,6 +588,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "async-channel",
  "avian3d",
  "benilla-assets",
  "benilla-formats",
@@ -602,6 +603,7 @@ dependencies = [
  "cpal 0.17.1",
  "crossbeam-channel",
  "fontdb",
+ "futures-lite",
  "half",
  "image",
  "include_dir",

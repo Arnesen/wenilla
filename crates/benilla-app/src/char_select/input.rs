@@ -116,7 +116,7 @@ pub(super) fn select_input(
         sounds.write(GlueSound("gsCharacterSelectionExit"));
         roster.pending_pick = None;
         intent.clear();
-        let _ = pick.0.send(crate::net::CharRequest::Abandon);
+        let _ = pick.0.try_send(crate::net::CharRequest::Abandon);
         next.set(ClientState::Login);
     }
     let n = roster.chars.len();

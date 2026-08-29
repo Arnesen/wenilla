@@ -391,7 +391,7 @@ fn persist_last_character(
 /// re-answers with the rigged body rather than showing the roster.
 pub(crate) fn send_pick(roster: &mut Roster, pick: &CharPick, guid: u64) {
     roster.pending_pick = Some(guid);
-    let _ = pick.0.send(CharRequest::Enter(guid));
+    let _ = pick.0.try_send(CharRequest::Enter(guid));
 }
 
 /// Drain each [`CharListMessage`] into the roster, then decide what answers it: the pending pick
@@ -934,7 +934,7 @@ pub(crate) fn test_character(guid: u64, name: &str) -> Character {
 /// module's own tests stub it. `CharSelectPlugin` itself is not usable there — it wants the whole
 /// glue screen, its art and its sounds.
 #[cfg(test)]
-pub(crate) fn add_test_systems(app: &mut App, pick: crossbeam_channel::Sender<CharRequest>) {
+pub(crate) fn add_test_systems(app: &mut App, pick: async_channel::Sender<CharRequest>) {
     app.insert_state(ClientState::CharSelect)
         .init_resource::<Roster>()
         .insert_resource(CharPick(pick))
@@ -1078,7 +1078,7 @@ mod tests {
         names: &[&str],
         preselected: Option<usize>,
     ) -> Option<usize> {
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
@@ -1175,7 +1175,7 @@ mod tests {
     /// `UpdateCharacterList`'s deferred `selectLast` flag overwrites it (B119 stays fixed).
     #[test]
     fn a_created_character_outranks_the_remembered_one() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
@@ -1232,7 +1232,7 @@ mod tests {
     /// and never touch it. So "last logged in", exactly as reported.
     #[test]
     fn only_entering_the_world_writes_the_cvar() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded();
         let mut script = benilla_ui::script::UiScript::new().unwrap();
         script.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
 
@@ -1279,7 +1279,7 @@ mod tests {
     /// happens to carry the key across (`cvars::sync_cvars`'s saved-base seed does, today).
     #[test]
     fn a_replaced_vm_is_told_the_remembered_row_again() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded();
         let fresh = || {
             let mut s = benilla_ui::script::UiScript::new().unwrap();
             s.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
@@ -1319,7 +1319,7 @@ mod tests {
     /// swallow the session's FIRST entry — the one launch-to-launch memory exists for.
     #[test]
     fn an_entry_made_before_the_cvar_table_exists_is_not_lost() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()

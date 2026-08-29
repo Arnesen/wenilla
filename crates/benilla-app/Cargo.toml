@@ -72,6 +72,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # (std's mpsc Sender is `!Sync`, so it can't be a Bevy resource without a mutex — the very thing this
 # bridge deletes). The canonical Bevy background-thread→channel→system idiom. See decision 0006.
 crossbeam-channel = "0.5"
+# The two channels the sequencer *waits* at (credentials, character pick). crossbeam's `recv` parks
+# the calling thread, which the browser build has none of — `async_channel`'s awaits instead, and the
+# ECS side keeps `try_send`ing into an unbounded queue exactly as before. `futures-lite` drives the
+# sequencer future to completion on the native net thread, so that thread's behaviour is unchanged.
+async-channel = "2.5"
+futures-lite = "2.6.1"
 benilla-assets = { path = "../benilla-assets", default-features = false }
 benilla-formats = { path = "../benilla-formats", default-features = false }
 benilla-protocol = { path = "../benilla-protocol" }
