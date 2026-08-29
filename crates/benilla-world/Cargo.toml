@@ -19,6 +19,12 @@ default = ["dev"]
 # depends on it and the player build simply says less. Enabled here rather than in `benilla-app`
 # so `benilla-worldview` — the enforcer, whose entire output is these names — carries it too.
 dev = ["benilla-formats/dev", "benilla-assets/dev", "bevy/debug"]
+# The browser render backend, chosen by the launcher (`benilla-web`): WebGL2 runs everywhere but has
+# no storage buffers (the shared light blob and the skin palettes are storage — decision 0278), so
+# the world needs WebGPU; WebGL2 stays selectable for the glue screens and as the census baseline.
+# Mutually exclusive — bevy asserts if both are on.
+webgl2 = ["bevy/webgl2"]
+webgpu = ["bevy/webgpu"]
 
 [dependencies]
 avian3d = "0.6"
@@ -59,5 +65,3 @@ objc2 = "0.5"
 # already carries it transitively (`default_platform` bundles it for every target), but named
 # explicitly on the wasm32 target table per the plan's feature-unification note — this crate and
 # `benilla-app` must resolve `bevy` to the SAME feature set or cargo builds two copies.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-bevy = { workspace = true, features = ["webgl2"] }

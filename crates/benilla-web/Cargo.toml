@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 description = "The browser entry point: a wasm-bindgen `#[start]` that boots benilla-app inside the canvas `web/index.html` gives it — benilla's third launcher shim, after `benilla` and `benilla-worldview` (decision 1160), and like them just carries the build-id stamp so a commit dirties this ~20-line crate instead of the app"
 
+[features]
+# Which browser GPU API the page renders through. `scripts/benilla-web.sh build` picks: WebGL2 by
+# default (every browser, no secure context needed — but no storage buffers, so the glue screens
+# only), `WEB_GPU=1` for WebGPU (Chrome/Edge/Safari; Chrome on Linux behind
+# chrome://flags/#enable-unsafe-webgpu; needs https or localhost). Exactly one must be on.
+webgl2 = ["benilla-app/webgl2"]
+webgpu = ["benilla-app/webgpu"]
+
 [lib]
 crate-type = ["cdylib"]
 

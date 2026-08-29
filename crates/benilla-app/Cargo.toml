@@ -32,6 +32,10 @@ tracy = ["bevy/trace_tracy"]
 # live capture, so a per-system cost question is answerable from a terminal (and from a run someone
 # else recorded). Aggregate it with `scripts/tracesum.py`.
 trace_chrome = ["bevy/trace_chrome"]
+# Browser render backend, forwarded from `benilla-web` (see benilla-world's note on why the world
+# needs WebGPU).
+webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
+webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
 
 [dependencies]
 anyhow.workspace = true
@@ -175,8 +179,3 @@ wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Location"] }
-# WebGL2 is bevy's wasm32 render backend (there is no WebGPU fallback path here); the plain
-# `bevy.workspace = true` above already carries it in transitively (`2d`/`3d`'s `default_platform`
-# bundles it for every target), but naming it explicitly on the wasm32 target table is what the
-# plan's feature-unification note asks for — belt and braces against a future default change.
-bevy = { workspace = true, features = ["webgl2"] }
