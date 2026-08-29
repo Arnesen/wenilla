@@ -1,0 +1,22 @@
+[package]
+name = "benilla-webhost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native web host for the browser build: serves the wasm bundle, answers /data/* from the real MPQ chain, and proxies /ws/{port} to the world/login TCP sockets"
+
+# Never built for wasm32 — it's a native bin nobody depends on (Lane H note). `benilla-formats`
+# is taken with `default-features = false` for the same reason `benilla` takes it that way: the
+# `dev` feature bakes this source tree's absolute path into `install::candidates`' probe, and a
+# server binary that runs on the box (not a player's machine) has no business carrying it either.
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+benilla-formats = { path = "../benilla-formats", default-features = false }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tower-http = { version = "0.7", features = ["fs", "compression-br", "compression-gzip", "set-header", "trace"] }
+percent-encoding = "2.3"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
