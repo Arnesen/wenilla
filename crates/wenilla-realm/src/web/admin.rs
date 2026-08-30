@@ -70,6 +70,7 @@ async fn dashboard(
         nav: "dashboard",
         s,
         client_data_error: state.client_data_error.clone(),
+        mem: crate::sysinfo::read(),
         csrf: session.csrf_token.clone(),
         me: session.user,
         status,

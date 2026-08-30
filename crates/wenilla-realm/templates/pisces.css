@@ -153,3 +153,5 @@ form.inline { display:inline; margin:0; }
 .t form.inline .input-shell { display:inline-grid; vertical-align:middle; }
 .wrap { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 @media (max-width: 900px) { .body { grid-template-columns: 1fr; } .side { flex-direction:row; flex-wrap:wrap; border-right:0; border-bottom:1px solid var(--line-gold); } .side-foot { margin-top:0; } .grid-3, .grid-2 { grid-template-columns:1fr; } .main { padding:20px 16px; } .top { grid-template-columns:1fr auto; } .top-title { display:none; } }
+.gauge { height:6px; border-radius:999px; background:var(--midnight-4); box-shadow:inset 0 0 0 1px var(--line); overflow:hidden; }
+.gauge i { display:block; height:100%; background:var(--accent); box-shadow:0 0 10px var(--accent-ring); }

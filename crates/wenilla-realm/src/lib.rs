@@ -17,6 +17,7 @@ pub mod realmdb;
 pub mod secrets;
 pub mod session;
 pub mod soap;
+pub mod sysinfo;
 pub mod templates;
 pub mod web;
 
