@@ -80,6 +80,7 @@ fn pet_unit() -> UnitState {
 /// for a Boar (id 5, food mask 63) resolved through `ItemPetFood.dbc` (decision 1062).
 fn hunter_pet_stats() -> PetStats {
     PetStats {
+        icon: None,
         hunter_pet: true,
         happiness: Some(3),
         damage_percentage: 125.0,

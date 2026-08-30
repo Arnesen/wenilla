@@ -179,6 +179,19 @@ impl Probe for Loot {
                             }
                             response = Some((loot_type, gold, items));
                         }
+                        // The master-loot candidate list rides the window OPEN, ahead of the
+                        // response it belongs to, and it is the one part of the master-loot arc
+                        // that cannot be staged from a single probe account (decision 1675). It
+                        // is printed unconditionally — it carries no loot guid to match on.
+                        SessionEvent::LootMasterList { candidates } => {
+                            println!(
+                                "SMSG_LOOT_MASTER_LIST: {} eligible looter(s)",
+                                candidates.len()
+                            );
+                            for (i, guid) in candidates.iter().enumerate() {
+                                println!("  candidate {:>2}  guid {guid:#x}", i + 1);
+                            }
+                        }
                         SessionEvent::LootError { guid: g, error } if g == target => {
                             println!("SMSG_LOOT_RESPONSE (error): guid {g:#x} error {error}");
                             loot_refusal = Some(error);

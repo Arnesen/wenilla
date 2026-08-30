@@ -66,7 +66,7 @@ pub(crate) struct CooldownEvents;
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use errors::{
     attack_actor_refusal, reagent_totem_refusal, ui_error_text, CastErrors, CastFail, MountErrors,
-    MsgSurface, UiError, UiErrorKeys,
+    MsgSurface, UiError, UiErrorKeys, UiErrorTexts,
 };
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
 // spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).
@@ -290,6 +290,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<CastErrors>()
             .init_resource::<MountErrors>()
             .init_resource::<UiErrorKeys>()
+            .init_resource::<UiErrorTexts>()
             .init_resource::<crate::cooldowns::Cooldowns>()
             .init_resource::<AutoRepeatActive>()
             .init_resource::<ChainCasts>()

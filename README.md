@@ -59,16 +59,26 @@ and no bundled game assets.
 - **UI:** a from-scratch FrameXML + Lua engine driving the built-in interface, from the login and
   character screens through the full HUD, the classic windows (guild, macros and key bindings
   included), chat, nameplates, floating combat text and tooltips; third-party addons load from
-  a `benilla-config/AddOns/` folder beside the executable (partial — see below).
+  a `benilla-config/AddOns/` folder beside the executable (partial: AtlasLoot and Bagnon run,
+  see below).
 - **Combat:** melee on the faithful swing law, ranged and Auto Shot, casting with GCD and
   cooldowns, combo points, crowd control that really holds you, and the spell visual pipeline.
 - **Audio:** music, ambience and SFX under the client's own selection and crossfade rules, with
   interior and underwater transitions and zone reverb.
 
-## Not built yet
+## Where it's going
 
-Battlegrounds. Third-party addons are partial: AtlasLoot and Bagnon run, and the addon API
-fills in as other addons are tried.
+benilla is done when a 1.12.1 player can do everything here that they could in the original
+client, it looks and feels the same, and it runs from a download on Windows, Linux and macOS.
+No dates; the order is what is likely, not a promise.
+
+- The rest of the basics: battlegrounds, guild charters, the stable master, meeting stones,
+  GM tickets, master loot, cinematics and whatever else turns up.
+- Addons, options and performance, ongoing.
+- The no-brainer fixes from VanillaFixes, SuperWoW and the like.
+- Playable downloads for Windows, Linux and macOS. Linux first.
+
+Not planned: other expansions or client versions, Warden (anticheat).
 
 ## Running it
 

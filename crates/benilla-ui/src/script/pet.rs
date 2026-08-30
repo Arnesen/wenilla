@@ -131,6 +131,20 @@ pub struct PetStats {
     /// bounds check. The page guards its whole level-line `SetText` on this
     /// (ref `PetPaperDollFrame.lua:68-70`), so nil renders no line rather than a half one.
     pub family: Option<String>,
+    /// `GetPetIcon()` — the pet's icon path, from the family row's own `CreatureFamily.dbc` icon
+    /// column (`Interface\\Icons\\Ability_Hunter_Pet_<Family>` for all 22 shipped families). A pet
+    /// has no item behind it, so this column is the only icon there is. `None` = nil, on the same
+    /// four lookup-miss paths as [`Self::family`], which is why it sits beside it.
+    ///
+    /// **Outside the hunter gate, like [`Self::family`] and unlike [`Self::food_types`] — and that
+    /// placement is INFERRED, not carved** (decision 1676). `GetPetIcon 0x4beb10` is registered
+    /// adjacent to both in the same table (wow-re §11b's neighbour list) and has not been read.
+    /// It is grouped with the family word because it is a pure family-row lookup like that one,
+    /// where the diet's gate is shared with the four *stat* bindings. The choice is unobservable
+    /// in the reference's own call sites — every one of them (`PetStable.lua:51`, `161-162`) sits
+    /// downstream of the window's own warlock early-return — so a warlock can never reach it there
+    /// either way; only an addon could tell the difference.
+    pub icon: Option<String>,
     /// `GetPetFoodTypes()` — the localized diet names the family's pet-food mask selects, in
     /// **record order** (`0x4bea10`: bit `1 << (recordID - 1)` against `CreatureFamily` column 7,
     /// the name from `ItemPetFood` column `1 + locale`). Varargs; the client returns the count and
@@ -512,6 +526,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetPetIcon() → the pet's icon path, or NIL. One return. The stable window reads it both as a
+    // predicate ("is there a current pet?", `PetStable.lua:51`) and as the texture itself (`161`),
+    // so the nil must be a real nil rather than an empty string — `SetItemButtonTexture` would
+    // happily take "" and a path resolving to nothing draws WHITE (decision 1046).
+    g.set(
+        "GetPetIcon",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match model.pet_bar.stats.icon.as_deref() {
+                Some(path) => Value::String(lua.create_string(path)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+
     // GetPetFoodTypes() → the diet names as VARARGS, one Lua return per food type, in record
     // order — the shape `BuildListString(GetPetFoodTypes())` needs (ref
     // `PetPaperDollFrame.xml:269`). `0x4bea10` returns the pushed COUNT and never a nil, so the
@@ -866,9 +895,32 @@ mod tests {
             .unwrap());
     }
 
+    /// `GetPetIcon` — one return, a real nil when there is no pet. The stable window reads it BOTH
+    /// as a predicate and as the texture it passes to `SetItemButtonTexture`, so an empty string
+    /// standing in for the nil would draw a white square rather than the empty-slot art
+    /// (decision 1046's law, decision 1676's consumer).
+    #[test]
+    fn the_pet_icon_answers_a_path_or_a_real_nil() {
+        let mut s = UiScript::new().unwrap();
+        assert!(s.eval::<bool>("return GetPetIcon() == nil").unwrap());
+
+        s.set_pet_stats(true, hunter_stats());
+        assert_eq!(
+            s.eval::<String>("return GetPetIcon()").unwrap(),
+            "Interface\\Icons\\Ability_Hunter_Pet_Boar"
+        );
+
+        // Exactly one return — the reference assigns it straight into a single local.
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetPetIcon())").unwrap(),
+            1
+        );
+    }
+
     fn hunter_stats() -> PetStats {
         PetStats {
             hunter_pet: true,
+            icon: Some("Interface\\Icons\\Ability_Hunter_Pet_Boar".into()),
             happiness: Some(3),
             damage_percentage: 125.0,
             loyalty_rate: 20.0,

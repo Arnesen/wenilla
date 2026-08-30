@@ -86,7 +86,7 @@ fn crossing_probe(
                 if !(transport.touches_map(0) && transport.touches_map(1)) {
                     continue;
                 }
-                let sample = transport.sample_at(anchor);
+                let sample = transport.sample_at(anchor, map);
                 if sample.map != map || sample.moving {
                     continue;
                 }
@@ -144,7 +144,7 @@ fn crossing_probe(
             } else if let Some((_, transport, anchor)) =
                 transports.iter().find(|(g, ..)| g.0 == boat)
             {
-                let sample = transport.sample_at(anchor);
+                let sample = transport.sample_at(anchor, map);
                 if sample.map == to_map && !sample.moving {
                     info!(
                         "PROBE crossing: SUCCESS — docked on map {to_map} still aboard {boat:#x}"

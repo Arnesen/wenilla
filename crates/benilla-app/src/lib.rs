@@ -48,6 +48,7 @@ mod capture;
 mod char_create;
 mod char_select;
 mod chat_bubble;
+mod cinematic;
 mod combat_text;
 mod cooldowns;
 mod creature_anim;
@@ -90,10 +91,12 @@ mod preflight;
 mod probe_shield;
 mod quest_markers;
 mod raid_marks;
+mod realmlist;
 mod run_mode;
 mod screenshot;
 mod shaders;
 
+mod name_persist;
 /// Where "the client is going down" may be observed, and why that is `Last` and not `Update`
 /// (decision 1528). Every system that persists state on the way out registers through it.
 mod shutdown;
@@ -115,6 +118,7 @@ mod ui_dressup;
 mod ui_duel;
 mod ui_follow;
 mod ui_gamma;
+mod ui_gm_ticket;
 mod ui_gossip;
 mod ui_guild;
 mod ui_hide;
@@ -137,6 +141,7 @@ mod ui_pet;
 mod ui_pet_book;
 mod ui_pet_doll;
 mod ui_pet_stats;
+mod ui_petition;
 mod ui_quest;
 mod ui_quest_log;
 mod ui_reputation;
@@ -146,6 +151,7 @@ mod ui_session;
 mod ui_shapeshift;
 mod ui_social;
 mod ui_spellbook;
+mod ui_stable;
 mod ui_talent;
 mod ui_talent_wipe;
 mod ui_taxi;
@@ -171,12 +177,14 @@ use bevy::prelude::*;
 use blob_shadow::BlobShadowPlugin;
 use bowstring::BowstringPlugin;
 use camera_shake::CameraShakePlugin;
+use cinematic::CinematicPlugin;
 use creature_anim::CreatureAnimPlugin;
 use cursor::CursorPlugin;
 use entities::EntitiesPlugin;
 use fishing_line::FishingLinePlugin;
 use footprints::FootprintsPlugin;
 use loading_screen::LoadingScreenPlugin;
+use name_persist::NamePersistPlugin;
 use net::NetPlugin;
 use player::PlayerPlugin;
 use portrait::PortraitPlugin;
@@ -196,6 +204,7 @@ use ui_chat::UiChatPlugin;
 use ui_craft::UiCraftPlugin;
 use ui_duel::UiDuelPlugin;
 use ui_follow::UiFollowPlugin;
+use ui_gm_ticket::UiGmTicketPlugin;
 use ui_gossip::UiGossipPlugin;
 use ui_guild::UiGuildPlugin;
 use ui_item_text::UiItemTextPlugin;
@@ -214,6 +223,7 @@ use ui_pet::UiPetPlugin;
 use ui_pet_book::UiPetBookPlugin;
 use ui_pet_doll::UiPetDollPlugin;
 use ui_pet_stats::UiPetStatsPlugin;
+use ui_petition::UiPetitionPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
 use ui_saved::UiSavedPlugin;
@@ -221,6 +231,7 @@ use ui_script::UiScriptPlugin;
 use ui_shapeshift::UiShapeshiftPlugin;
 use ui_social::UiSocialPlugin;
 use ui_spellbook::UiSpellbookPlugin;
+use ui_stable::UiStablePlugin;
 use ui_talent::UiTalentPlugin;
 use ui_talent_wipe::UiTalentWipePlugin;
 use ui_taxi::UiTaxiPlugin;
@@ -511,6 +522,10 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(go_anim::plugin)
     // Avatar + camera + input.
     .add_plugins(PlayerPlugin)
+    // Cinematic fly-bys (`SMSG_TRIGGER_CINEMATIC`): the race intro a first login plays, and the
+    // GameObject cameras. Takes the world camera for the duration — hence after PlayerPlugin,
+    // whose `control` it overrides within the same stage (decision 0196's deferred arc).
+    .add_plugins(CinematicPlugin)
     // The real client's hardware mouse cursor (native NSCursor on macOS).
     .add_plugins(CursorPlugin)
     // Net↔ECS bridge: spawns the world thread, exposes the snapshot + writer resources. In capture
@@ -581,6 +596,9 @@ pub fn run(build: BuildId) -> AppExit {
     // The video knobs the CVar host writes into (today: `gxVSync`). Before CvarPlugin so the
     // resource exists when `load_config` applies the saved value at Startup.
     .add_plugins(video::VideoPlugin)
+    // The realmlist (decision 1667) — the logon address the login screen edits. Same reason as
+    // VideoPlugin above: it is a CVar knob, so its resource has to exist before `load_config`.
+    .add_plugins(realmlist::RealmlistPlugin)
     // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After
     // UiScriptPlugin only for reading order — its systems gate on the VM existing anyway.
     .add_plugins(cvars::CvarPlugin)
@@ -598,6 +616,11 @@ pub fn run(build: BuildId) -> AppExit {
     // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
     // packet in the flow that actually binds anything.
     .add_plugins(UiBinderPlugin)
+    // The GM trouble-ticket flow (decision 1673): the Help window's five sends, the UPDATE_TICKET
+    // answer ticket behind its 10-minute poll, and the GMTicketCategory.dbc list its "page a GM"
+    // rows are built from. Beside the binder because it is the same feed/drain shape, and after it
+    // because both want UiInput ordering and this reads better grouped.
+    .add_plugins(UiGmTicketPlugin)
     // Auto-follow's UI seam: the popup's Follow row + `FollowUnit`/`FollowByName` inbound, and
     // the AUTOFOLLOW_BEGIN/END pair that drives the centre-screen status line outbound.
     .add_plugins(UiFollowPlugin)
@@ -609,6 +632,10 @@ pub fn run(build: BuildId) -> AppExit {
     // membership verbs, and the `ERR_GUILD_*` lines. Right after the social session, whose
     // FriendsFrame it shares a window with and whose ignore list its sign-on lines consult.
     .add_plugins(UiGuildPlugin)
+    // Founding a guild (decision 1672): the guild registrar and the charter window — the slice
+    // 1257 §2 left out. Right after the guild session, whose error channel its refusals ride and
+    // whose roster its success produces.
+    .add_plugins(UiPetitionPlugin)
     .add_plugins(UiTooltipPlugin)
     // The character-window feed (decision 0208): the combat-stats/inventory snapshots + events
     // the paper doll reads, and the paper-doll booth's yaw mirror.
@@ -720,6 +747,8 @@ pub fn run(build: BuildId) -> AppExit {
     // copies) read in the reference reader window over the shared ask-once item-text cache.
     .add_plugins(UiItemTextPlugin)
     .add_plugins(UiSavedPlugin)
+    .add_plugins(NamePersistPlugin)
+    .add_plugins(UiStablePlugin)
     .add_plugins(UiTrainerPlugin)
     // The taxi map (decision 0484 phases 1-2): the SMSG_SHOWTAXINODES-fed TaxiState resource, the
     // NPC-session range guard, and the TaxiFrame.xml window feed/drain (catalogs, node

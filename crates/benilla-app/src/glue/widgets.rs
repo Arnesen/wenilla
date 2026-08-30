@@ -131,6 +131,43 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
         &markup_spans(spec.text, spec.color, spec.wrap),
         spec.size,
         spec.wrap,
+        Justify::Left,
+        font,
+        s,
+    )
+}
+
+/// [`outlined_text`], **centred** — for a wrapped paragraph the reference centres.
+///
+/// A separate door rather than a field on [`GlueText`] because centring is the exception here, and
+/// naming it at the one call site that wants it is cheaper and clearer than a fifth field on
+/// thirty-three literals. The justification has to reach all nine strings (the eight outline copies
+/// share the layout), so it cannot be inserted onto the real text afterwards.
+///
+/// **Which way round is faithful is not obvious**, so: a `FontString` with no `justifyH` defaults
+/// to **CENTER**, and `GlueDialogText` (`GlueDialog.xml:56`) omits it — so the dialog is centred.
+/// Every *other* wrapped glue string in the shipped XML sets `justifyH="LEFT"` explicitly
+/// (`CharacterCreate.xml`'s race/class/faction bodies, `AddonList.xml`'s title/notes/deps), which
+/// is why [`outlined_text`] stays left and this is the exception rather than the default.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn outlined_text_centered<W: Bundle, T: Bundle>(
+    parent: &mut ChildSpawnerCommands,
+    node: Node,
+    wrapper_extra: W,
+    text_extra: T,
+    spec: GlueText,
+    font: &Handle<Font>,
+    s: f32,
+) -> Entity {
+    outlined_spans(
+        parent,
+        node,
+        wrapper_extra,
+        text_extra,
+        &markup_spans(spec.text, spec.color, spec.wrap),
+        spec.size,
+        spec.wrap,
+        Justify::Center,
         font,
         s,
     )
@@ -216,16 +253,20 @@ fn outlined_spans<W: Bundle, T: Bundle>(
     spans: &[(String, Color)],
     size: f32,
     wrap: bool,
+    justify: Justify,
     font: &Handle<Font>,
     s: f32,
 ) -> Entity {
+    // Both fields set, so no `..default()` — `TextLayout` has exactly these two, and clippy's
+    // `needless_update` is right that spelling a rest-pattern here only hides the next field
+    // Bevy adds.
     let layout = TextLayout {
         linebreak: if wrap {
             LineBreak::WordBoundary
         } else {
             LineBreak::NoWrap
         },
-        ..default()
+        justify,
     };
     let tf = TextFont {
         font: font.clone(),
@@ -517,22 +558,54 @@ const CARET_W: f32 = 4.0;
 /// line so it lands at the cursor without anyone measuring text. The ONE caret; every edit box —
 /// [`glue_edit_box`]'s chrome and the delete dialog's ChatInputBorder box — spawns it here, so the
 /// mechanism can never fork back into per-screen `"|"`/`"_"` glyphs.
+///
+/// **The caret is an OVERLAY: it takes no width in the row.** The flex item is zero-wide — a bare
+/// *seam* the row's layout collapses to nothing — and the drawn bar is an absolutely-positioned
+/// child hanging off it, left edge on the seam, so the typed line is one continuous run whatever
+/// the cursor or the selection is doing. It used to be the bar itself, [`CARET_W`] units wide and
+/// in flow, which pushed the text apart at the cursor and — because a select-all moves the whole
+/// string from the `Before` slot to the `Selected` slot, across one caret seam — **shifted the
+/// text bodily to the right the moment a box was focused** (the director's report, 2026-08-29).
+///
+/// This is also what the client does, and the two facts are the same fact: the caret is a
+/// `CSimpleTexture` quad at `drawLayer 3`, anchored LEFT-to-LEFT on the FontString with
+/// `x = W(lineStart → cursor)` — the measured advance of the text before the cursor (wow-re
+/// `rf85-editbox-caret.md` §1, §8, both §5-VERIFIED). A quad anchored *over* the line cannot
+/// displace it, and its left edge sits exactly on the seam flex puts us on. `drawLayer 3` is above
+/// the FontString's `2`, which is the [`ZIndex`] here.
 pub(crate) fn caret_bar<C: Bundle>(
     parent: &mut ChildSpawnerCommands,
     caret: C,
     font_size: f32,
     s: f32,
 ) {
-    parent.spawn((
-        caret,
-        Visibility::Hidden,
-        Node {
-            width: Val::Px(CARET_W * s),
-            height: Val::Px(font_size * EDIT_LINE_HEIGHT * s),
-            ..default()
-        },
-        BackgroundColor(EDIT_TEXT_COLOR),
-    ));
+    parent
+        .spawn((
+            caret,
+            Visibility::Hidden,
+            // The seam: zero-wide, one line tall (the row centres it), and above its siblings.
+            ZIndex(1),
+            Node {
+                width: Val::Px(0.0),
+                height: Val::Px(font_size * EDIT_LINE_HEIGHT * s),
+                ..default()
+            },
+        ))
+        .with_children(|c| {
+            // The drawn bar, out of flow so it costs the row nothing. `Visibility::Inherited` by
+            // default, so blinking the seam blinks the bar.
+            c.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Px(CARET_W * s),
+                    height: Val::Px(font_size * EDIT_LINE_HEIGHT * s),
+                    ..default()
+                },
+                BackgroundColor(EDIT_TEXT_COLOR),
+            ));
+        });
 }
 
 /// Which flex item of a glue edit box's text row an entity is.
@@ -543,6 +616,9 @@ pub(crate) fn caret_bar<C: Bundle>(
 /// highlight background permanently; with nothing selected its text is empty, so it has zero width
 /// and paints nothing. Which of the two caret slots is visible follows the cursor, which the box
 /// law keeps at one end of the selection or the other.
+///
+/// **Both caret slots are zero-width seams** ([`caret_bar`]), present or not, so the three text
+/// slots concatenate to one unbroken line: which slot a run of text sits in never moves it.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum GlueFieldPart {
     /// `display[..sel_start]`
@@ -571,6 +647,15 @@ pub(crate) fn paint_glue_field<'a>(
         ),
     >,
 ) {
+    // **The highlight is deliberately NOT gated on `focused`** — `focused` drives the caret alone.
+    // That asymmetry looks like an oversight and is the reference's own: the caret's flush
+    // (`0x77da80`) explicitly hides when `E != [0xcf4dc8]`, while the selection flush (`0x77d950`)
+    // and its geometry worker (`0x77de70`) contain no read of the focus global anywhere, and the
+    // per-frame update calls the flush BEFORE its own focus test. The quads show iff
+    // `start < end` — focus never enters it (wow-re `editbox-selection-focus-law.md` §1-§3,
+    // §5-VERIFIED, asked because this asymmetry looked wrong). An unfocused box that still holds a
+    // selection paints it, and that is correct; the login screen simply never leaves one behind
+    // (`LoginForm::focus` collapses the box it leaves).
     let display = field.display();
     let lo = field.sel_start.min(field.sel_end);
     let hi = field.sel_start.max(field.sel_end);
@@ -719,6 +804,10 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
 /// A glue-panel button (Accept/Back/Enter World/…): the real `Glue-Panel-Button` art with its
 /// additive hover sheen and a caption that whitens on hover (the ref's `HighlightFont`);
 /// plain-fill fallback. Art states + caption color are driven by [`super::glue_button_visuals`].
+///
+/// Returns the button's entity, so a screen can reach back into what it just built — the login
+/// screen marks its realmlist button [`GlueDisabled`] when `$WOW_HOST` owns the session (1667).
+/// Ignoring the return is the norm; nothing is `#[must_use]`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn glue_button<A: Component>(
     parent: &mut ChildSpawnerCommands,
@@ -730,7 +819,7 @@ pub(crate) fn glue_button<A: Component>(
     h: f32,
     kind: GlueBtnKind,
     s: f32,
-) {
+) -> Entity {
     let px = |v: f32| Val::Px(v * s);
     let mut b = parent.spawn((
         action,
@@ -797,6 +886,7 @@ pub(crate) fn glue_button<A: Component>(
             s,
         );
     });
+    b.id()
 }
 
 #[cfg(test)]

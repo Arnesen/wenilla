@@ -29,6 +29,7 @@ mod combat_log;
 mod death;
 mod duel;
 mod gameobject;
+mod gm_ticket;
 mod gossip;
 mod group;
 mod guild;
@@ -44,6 +45,7 @@ mod packet;
 mod page_text;
 mod parse;
 mod pet;
+mod petition;
 mod pose;
 mod progression;
 mod pvp;
@@ -54,6 +56,7 @@ mod skills;
 mod social;
 mod spellbook;
 mod spells;
+mod stable;
 mod taxi;
 mod trade;
 mod trainer;
@@ -109,6 +112,10 @@ pub use duel::{
     read_duel_winner, DuelRequested, DuelWinner,
 };
 pub use gameobject::{gameobj_use, gameobject_query, GameObjectQueryInfo};
+pub use gm_ticket::{
+    gm_ticket_create, gm_ticket_updatetext, GmTicket, GMTICKET_QUEUE_ENABLED,
+    GMTICKET_STATUS_DEFAULT, GMTICKET_STATUS_HASTEXT, RESERVED_FOR_FUTURE_USE,
+};
 pub use gossip::{
     gossip_hello, gossip_select_option, npc_text_query, select_greeting, GossipOption, GossipPoi,
     NpcTextBlock, QuestOption, NPC_TEXT_BLOCKS,
@@ -139,9 +146,9 @@ pub use items::{
     ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{
-    autostore_loot_item, loot, loot_error, loot_money, loot_release, loot_roll, loot_type,
-    roll_vote, slot_type, ItemPushResult, LootAllPassed, LootItem, LootResponseBody, LootRoll,
-    LootRollWon, LootStartRoll,
+    autostore_loot_item, loot, loot_error, loot_master_give, loot_money, loot_release, loot_roll,
+    loot_type, roll_vote, slot_type, ItemPushResult, LootAllPassed, LootItem, LootResponseBody,
+    LootRoll, LootRollWon, LootStartRoll,
 };
 pub use mail::{
     get_mail_list, item_text_query, mail_action, mail_create_text_item, mail_delete, mail_error,
@@ -165,6 +172,13 @@ pub use pet::{
     PET_COMMAND_FOLLOW, PET_COMMAND_STAY, PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE,
     PET_REACT_DEFENSIVE, PET_REACT_PASSIVE, PET_STATE_BAR_DISABLED, PET_TYPE_SPELL_FIRST,
     PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
+};
+pub use petition::{
+    offer_petition, petition_buy, petition_decline, petition_query, petition_rename,
+    petition_result, petition_show_list, petition_show_signatures, petition_sign, turn_in_petition,
+    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowListEntry,
+    PetitionShowSignatures, PetitionSignResults, PetitionSignature, CHARTER_DISPLAY_ID,
+    CHARTER_ITEM_ENTRY, CHARTER_NAME_MAX_LENGTH, ITEM_FLAG_CHARTER, MAX_PETITION_SIGNATURES,
 };
 pub use pose::{set_sheathed, stand_state_change};
 pub use progression::{
@@ -200,6 +214,10 @@ pub use spells::{
     cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_gameobject, cast_spell_item,
     CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
 };
+pub use stable::{
+    buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
+    StabledPet,
+};
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,
     taxi_reply, TaxiMask,
@@ -222,8 +240,44 @@ pub use vendor::{
 };
 pub use world_state::InitWorldStates;
 
-/// `SMSG_AUTH_RESPONSE` AuthOk result.
+/// The **world server's** `SMSG_AUTH_RESPONSE` result codes — a **different enum** from the
+/// realmd logon-proof's `AuthLogonResult` (`crate::AuthReject`, 0x00..=0x12), which is the trap
+/// this block exists to close: both are "the auth result byte", they overlap numerically, and they
+/// mean unrelated things. 0x0C is `AUTH_OK` here and `AUTH_LOGON_FAILED_SUSPENDED` there.
+///
+/// VERIFIED two ways. The client's own dispatch over exactly this enum is decompiled in wow-re
+/// `system/net/scratch/w2b-pack.c` — case 0x0c → `AUTH_OK`, 0x0d → `AUTH_FAILED`, 0x0e →
+/// `AUTH_REJECT`, … 0x15 → `AUTH_UNKNOWN_ACCOUNT`, 0x16 → `AUTH_INCORRECT_PASSWORD`, 0x1b →
+/// `AUTH_WAIT_QUEUE`, 0x22..=0x26 → the `REALM_LIST_*` strings — and the same numbering is
+/// `AuthResponseCodes` in cmangos `src/game/Globals/SharedDefines.h:1721+`. Each constant's name
+/// is the `GlueStrings` key the client shows for it, which is what makes the mapping in
+/// `crate::login`'s `world_refusal_text` a transcription rather than a judgement call.
 pub const AUTH_OK: u8 = 0x0C;
+pub const AUTH_FAILED: u8 = 0x0D;
+pub const AUTH_REJECT: u8 = 0x0E;
+pub const AUTH_BAD_SERVER_PROOF: u8 = 0x0F;
+pub const AUTH_UNAVAILABLE: u8 = 0x10;
+pub const AUTH_SYSTEM_ERROR: u8 = 0x11;
+pub const AUTH_BILLING_ERROR: u8 = 0x12;
+pub const AUTH_BILLING_EXPIRED: u8 = 0x13;
+pub const AUTH_VERSION_MISMATCH: u8 = 0x14;
+pub const AUTH_UNKNOWN_ACCOUNT: u8 = 0x15;
+pub const AUTH_INCORRECT_PASSWORD: u8 = 0x16;
+pub const AUTH_SESSION_EXPIRED: u8 = 0x17;
+pub const AUTH_SERVER_SHUTTING_DOWN: u8 = 0x18;
+pub const AUTH_ALREADY_LOGGING_IN: u8 = 0x19;
+pub const AUTH_LOGIN_SERVER_NOT_FOUND: u8 = 0x1A;
+/// The realm is full and we are **queued**, not refused — the one code here that is not an ending.
+pub const AUTH_WAIT_QUEUE: u8 = 0x1B;
+// The tail past the queue. These five are exactly the codes the client's `OKAY_WITH_URL` table
+// (`0x803740`, 5 records, stride 0x24) keys on — banned/no-time/db-busy/suspended/parental — which
+// is why the URL dialog is reachable ONLY from this enum and never from realmd.
+pub const AUTH_BANNED: u8 = 0x1C;
+pub const AUTH_ALREADY_ONLINE: u8 = 0x1D;
+pub const AUTH_NO_TIME: u8 = 0x1E;
+pub const AUTH_DB_BUSY: u8 = 0x1F;
+pub const AUTH_SUSPENDED: u8 = 0x20;
+pub const AUTH_PARENTAL_CONTROL: u8 = 0x21;
 /// `LogoutResult::Success` (`SMSG_LOGOUT_RESPONSE`).
 pub const LOGOUT_SUCCESS: u32 = 0x0;
 /// Chat `Language` wire ids (VERIFIED vmangos `SharedDefines.h:256-261`): the faction tongues.

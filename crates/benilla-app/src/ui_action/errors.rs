@@ -11,7 +11,12 @@
 //!   ("Requires Herbalism", decision 0545) — the latter carry [`UiError`]'s `%s`/`%d`
 //!   argText fills, resolved by [`ui_error_text`].
 //!
-//! All three drain in `super::feed_actions`, firing `UI_ERROR_MESSAGE` per resolved line;
+//! - [`UiErrorTexts`] — the same route for lines that arrive already resolved (the server's own
+//!   `SMSG_NOTIFICATION` / `SMSG_AREA_TRIGGER_MESSAGE` text, the death durability notice), so
+//!   there is no key to look up — only the arm to pick.
+//!
+//! All four drain in `super::feed_actions`, firing `UI_ERROR_MESSAGE` (or, for the info arm,
+//! `UI_INFO_MESSAGE`) per resolved line;
 //! every string comes from the VM's own loaded `GlobalStrings.lua`, never hardcoded, so an
 //! absent key shows nothing (the reference's data-suppression face) and localization rides
 //! for free.
@@ -133,6 +138,31 @@ impl UiError {
 /// decision 0545 are the formatted ones). The [`MountErrors`] shape without the code table.
 #[derive(Resource, Default)]
 pub(crate) struct UiErrorKeys(pub Vec<UiError>);
+
+/// [`UiErrorKeys`]' twin for lines that arrive **already resolved** — text with no GlobalStrings
+/// key to look up, because the server (or a fixed literal) already wrote it. Same frame, same two
+/// events, same drain.
+///
+/// The wire tenants are the reference's own: `SMSG_NOTIFICATION` (`0x1cb`, handler `0x401800` —
+/// `mov edx,1; call 0x4945b0` → `UI_ERROR_MESSAGE`) and `SMSG_AREA_TRIGGER_MESSAGE` (`0x2b8`, the
+/// shared handler `0x48f690`'s arm at `0x48f8ff` — `xor edx,edx; call 0x4945b0` →
+/// `UI_INFO_MESSAGE`). `0x4945b0(text, flag)` is the whole sink: null/empty guard, then
+/// `neg edx; sbb edx,edx; add edx,0xe1` = event `0xe1` when the flag is 0 and `0xe0` when it is 1
+/// (wow-re `system/ui/ui.md` l.2459). So the flag IS [`UiError::info`] under another name.
+#[derive(Resource, Default)]
+pub(crate) struct UiErrorTexts(pub Vec<(String, bool)>);
+
+impl UiErrorTexts {
+    /// The red `UI_ERROR_MESSAGE` arm (`0x4945b0(text, 1)`).
+    pub(crate) fn error(&mut self, text: String) {
+        self.0.push((text, false));
+    }
+
+    /// The yellow `UI_INFO_MESSAGE` arm (`0x4945b0(text, 0)`).
+    pub(crate) fn info(&mut self, text: String) {
+        self.0.push((text, true));
+    }
+}
 
 /// Resolve one [`UiError`] to its displayed text — `GetText(key)` + the `%s`/`%d` argText
 /// substitution ("Requires %s" + "Herbalism" → "Requires Herbalism", cursor-system.md §8.8).

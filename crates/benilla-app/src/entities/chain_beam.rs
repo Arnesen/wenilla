@@ -39,10 +39,19 @@
 //!   the `+2` is a floor, so even a one-yard hop bends.
 //! - each interior point takes an independent 3-vector in `[−1, 1]³` scaled by `len × noiseScale`,
 //!   **re-rolled every frame**, and the live polyline advects toward it `0.75` old / `0.25` new.
-//! - the ribbon's cross-section is the **world-horizontal** perpendicular `(−d.y, d.x, 0)` in WoW
-//!   axes — [`Vec3::Y.cross`] here, the same vector — normalized only when it is longer than
-//!   `0.001`, so a hop pointing straight up (or straight at a camera looking down it) collapses to
-//!   nothing. That is the reference's own regime, not an artefact.
+//! - the ribbon's cross-section is `(−d.y, d.x, 0)` taken **in EYE space**, not world space: the
+//!   strip is built from points already run through the world→eye transform (`0x7bca80` against
+//!   `0xcf5800 = T(−cameraPos)·VIEW`, assembled at `0x7affb1`–`0x7b00c4`; `VIEW` is the device's
+//!   slot-10 matrix, whose producer `0x50ab70` is `LookAt(eye = origin, …)` — **pure rotation, zero
+//!   translation row**, which is why the pre-translate is not a double translate). Eye axes are X
+//!   right, Y up, **+Z into the screen**, so the formula is the *screen*-plane 90° rotation and the
+//!   ribbon is **view-plane aligned**. In world axes it is `normalize(d × camForward)` — the same
+//!   vector, and the same magnitude, so the reference's `0.001` guard transfers unchanged. The
+//!   transform is an isometry with no projection (`0x7bca80` is row-vector affine, no w-divide) and
+//!   both the WORLD and VIEW slots are identity at the submit, so the strip is drawn in eye space
+//!   and the width stays **`2 × field2` world yards at any distance**. Decision 1653 corrects 0964,
+//!   which read the formula as world-space and drew every beam as a horizontal slab — a hairline
+//!   from any camera near the beam's own plane.
 //! - an interior vertex sits at `p ± 0.5·(perp₍ᵢ₋₁₎ + perpᵢ)·halfWidth`; **both ends collapse to a
 //!   point** with `v = 0.5` — the beam is a spindle, tapered at caster and target.
 //! - `u` runs `0 → 1` caster→target, translated by `−(phase / period)` where
@@ -90,8 +99,16 @@ const CHAIN_ATTACH_FALLBACK: u16 = 34;
 /// The subdivision floor's constant (`fadd [0x801628] = 2.0f` @ `0x7af716`): `n = trunc(len/avg + 2)`.
 const SUBDIVISION_FLOOR: f32 = 2.0;
 
-/// The normalisation guard on the cross-section vector (`fcom [0x801360]` @ `0x7b01bd`): a
-/// perpendicular shorter than this is left **un-normalized**, collapsing that segment's width.
+/// The normalisation guard on the cross-section vector (`fcom [0x801360]` @ `0x7b01bd`, strictly
+/// `>`): a perpendicular shorter than this is left **un-normalized**, collapsing that segment's
+/// width. The length it measures is the segment's *screen*-plane projection, so what it guards is a
+/// hop aimed at the camera — not one aimed at the sky, which is what 0964 believed.
+///
+/// It is a **numerical guard, not a visible behaviour**: because everything above it is normalized
+/// to full width, the pinch cone is `arcsin(0.001 / |d|)` — about `0.023°` for the ~2.5 yd
+/// sub-segments a 30 yd link subdivides into, and `noiseScale`'s per-frame re-roll walks the
+/// segment out of it. A beam does **not** thin as you turn to look down its length; it holds its
+/// width and then, at an angle no player can hold, degenerates instead of producing a NaN.
 const PERP_EPSILON: f32 = 0.001;
 
 /// The per-frame advection weight on the live polyline (`0x7afc10`/`0x7afc38`):
@@ -373,20 +390,36 @@ fn subdivide(a: Vec3, b: Vec3, effect: &ChainEffect, rng: &mut u32, out: &mut Ve
 /// One strand's polyline, written into the shared stream as a triangle strip expressed in quads
 /// (the ribbon lane's conversion: strip triangles `(t₀,b₀,t₁),(b₀,b₁,t₁)` = quad `[b₀,b₁,t₁,t₀]`).
 ///
-/// Cross-section, ends and texcoords are the reference's (`0x7b0196`–`0x7b0541`): the world-
-/// horizontal perpendicular, un-normalized below [`PERP_EPSILON`]; an interior vertex at
+/// Cross-section, ends and texcoords are the reference's (`0x7b0196`–`0x7b0541`): the **view-plane
+/// aligned** perpendicular, un-normalized below [`PERP_EPSILON`]; an interior vertex at
 /// `p ± 0.5·(perp₍ᵢ₋₁₎ + perpᵢ)·halfWidth`; both ends collapsed to a point at `v = 0.5`; `u`
 /// running 0→1 caster→target plus the scroll translate. The colour is the beam's constant
 /// `0xFFFFFFFF` — emissive white, never tinted.
-fn push_strand(verts: &mut Vec<EffectVertex>, pts: &[Vec3], half_width: f32, u_scroll: f32) {
+///
+/// `cam_forward` is the world camera's unit forward axis (into the screen) — **one axis for the
+/// whole strand**, not a per-point eye ray: the reference's only use of the camera position is the
+/// single pre-translate that builds the world→eye matrix (`0x7affb1`), after which every point
+/// shares one linear map. So the ribbon lies in the view plane and keeps its authored world width
+/// from every angle.
+fn push_strand(
+    verts: &mut Vec<EffectVertex>,
+    pts: &[Vec3],
+    half_width: f32,
+    u_scroll: f32,
+    cam_forward: Vec3,
+) {
     let count = pts.len();
     if count < 2 {
         return;
     }
     let seg_perp = |i: usize| -> Vec3 {
-        // `(−d.y, d.x, 0)` in WoW axes IS `Y × d` in ours — same vector, same magnitude, so the
-        // reference's 0.001 guard on the raw length transfers unchanged.
-        let raw = Vec3::Y.cross(pts[i + 1] - pts[i]);
+        // `(−d.y, d.x, 0)` on the EYE-space delta is `d × camForward` in world axes: same vector,
+        // same magnitude — `|d|` projected onto the screen plane — so the reference's 0.001 guard
+        // on the raw length transfers unchanged. The order is `d × F`, not `F × d`: the two differ
+        // by a sign, which mirrors `v` across the beam's centreline, and this is the one that puts
+        // the `v = 0` rail on the same side the reference does (eye axes X right / Y up / +Z into
+        // the screen — a beam running rightwards across the screen carries `v = 0` on top).
+        let raw = (pts[i + 1] - pts[i]).cross(cam_forward);
         if raw.length() > PERP_EPSILON {
             raw.normalize()
         } else {
@@ -436,16 +469,20 @@ pub(crate) fn simulate_chain_beams(
     mut commands: Commands,
     mut draw: benilla_world::particles::buffer::WorldEffectDraw,
     images: Res<Assets<Image>>,
-    world_cam: Query<Entity, With<WorldCamera>>,
+    world_cam: Query<(Entity, &GlobalTransform), With<WorldCamera>>,
     units: super::missile::AttachPosQuery,
     joints: Query<&GlobalTransform>,
     heights: Query<&OverheadFallback>,
     mut beams: Query<(Entity, &mut ChainBeam)>,
     mut scratch: Local<Vec<Vec3>>,
 ) {
-    let Ok(cam) = world_cam.single() else {
+    let Ok((cam, cam_xf)) = world_cam.single() else {
         return;
     };
+    // The reference's world→eye map is rebuilt from the live camera every `CLightning::Render`
+    // (`0x7aff82`–`0x7b00c4`), so the cross-section follows the camera frame by frame; one axis
+    // serves the whole beam.
+    let cam_forward = *cam_xf.forward();
     let dt = time.delta_secs().min(0.1);
     let now = time.elapsed_secs();
     for (entity, mut beam) in &mut beams {
@@ -517,7 +554,7 @@ pub(crate) fn simulate_chain_beams(
                     pts.clear();
                     pts.extend_from_slice(&scratch);
                 }
-                push_strand(batch.verts_mut(), pts, half_width, u_scroll);
+                push_strand(batch.verts_mut(), pts, half_width, u_scroll, cam_forward);
             }
         }
         if anchor_n == 0.0 {
@@ -535,7 +572,7 @@ pub(crate) fn simulate_chain_beams(
 }
 
 /// The beam's arithmetic, against the numbers wow-re read out of the binary — the subdivision floor,
-/// the spindle taper, the world-horizontal cross-section and its degenerate regime, and the signed
+/// the spindle taper, the view-plane cross-section and its degenerate regime, and the signed
 /// scroll. Each of these is a value that would go straight into pixels, and two of the four columns
 /// they read were mis-named in the community schemas until the §5 (decision 0955).
 #[cfg(test)]
@@ -688,8 +725,9 @@ mod tests {
         assert_eq!(moved, out.len() - 2, "every interior point takes a draw");
     }
 
-    /// The ribbon spans `2 × halfWidth` on its **world-horizontal** cross-section, and **both ends
-    /// collapse to a point** — the beam is a spindle, not a slab (`0x7b04b9`–`0x7b0541`).
+    /// The ribbon spans `2 × halfWidth` across its cross-section, that cross-section is square to
+    /// the **camera** (perpendicular to the view axis, not to world up), and **both ends collapse
+    /// to a point** — the beam is a spindle, not a slab (`0x7b0196`–`0x7b0541`).
     #[test]
     fn the_ribbon_is_a_spindle_two_half_widths_across() {
         let pts = [
@@ -697,8 +735,10 @@ mod tests {
             Vec3::new(0.0, 0.0, -5.0),
             Vec3::new(0.0, 0.0, -10.0),
         ];
+        // A camera off to the side, looking along −X at a hop that runs along −Z.
+        let cam_forward = -Vec3::X;
         let mut verts = Vec::new();
-        push_strand(&mut verts, &pts, 0.5, 0.0);
+        push_strand(&mut verts, &pts, 0.5, 0.0, cam_forward);
         // 2 segments × one quad each.
         assert_eq!(verts.len(), 8);
         // Quad corner order is [b₀, b₁, t₁, t₀]: the first quad's b₀/t₀ are the collapsed caster
@@ -707,36 +747,98 @@ mod tests {
         assert_eq!(verts[3].pos, pts[0].to_array());
         assert_eq!(verts[5].pos, pts[2].to_array());
         assert_eq!(verts[6].pos, pts[2].to_array());
-        // The middle point carries the full width, across the horizontal — the hop runs along −Z,
-        // so its cross-section is ±X.
+        // The middle point carries the full width…
         let (mid_bottom, mid_top) = (Vec3::from(verts[1].pos), Vec3::from(verts[2].pos));
         assert!(
             (mid_top.distance(mid_bottom) - 1.0).abs() < 1e-5,
             "2 × 0.5 yd"
         );
-        assert!(
-            mid_top.y.abs() < 1e-6 && mid_bottom.y.abs() < 1e-6,
-            "horizontal"
-        );
+        // …spread square to the view axis, which for this camera means straight up/down.
+        let across = (mid_top - mid_bottom).normalize();
+        assert!(across.dot(cam_forward).abs() < 1e-6, "square to the camera");
+        assert!(across.x.abs() < 1e-6 && across.z.abs() < 1e-6, "±Y here");
         // …and the collapsed ends stamp v = 0.5 on both rails.
         assert_eq!(verts[0].uv[1], 0.5);
         assert_eq!(verts[3].uv[1], 0.5);
     }
 
-    /// A hop pointing straight up has **no** horizontal perpendicular: the reference skips the
-    /// normalisation below `0.001` (`0x7b01bd`) and the segment collapses toward zero width. That
-    /// regime — a beam vanishing when seen end-on — is the reference's, not a bug of ours.
+    /// **The defect decision 1653 fixes.** A long, level hop watched from a camera in its own
+    /// plane — the Razorgore-room beam, and Chain Lightning's mob-to-mob jumps — kept its full
+    /// authored width in the reference and collapsed to a hairline for us, because 0964 spread the
+    /// ribbon across *world* horizontal instead of the *screen* plane. Any camera axis must give
+    /// the same `2 × halfWidth` span, and it must never lie along the view direction.
     #[test]
-    fn a_vertical_hop_collapses_instead_of_exploding() {
+    fn a_level_hop_keeps_its_width_from_a_level_camera() {
+        let pts = [Vec3::ZERO, Vec3::X * 15.0, Vec3::X * 30.0];
+        for cam_forward in [
+            Vec3::NEG_Z,                  // level, square on
+            Vec3::new(0.0, -0.2, -1.0),   // the player's slightly-above-eye camera
+            Vec3::new(-0.3, -0.05, -1.0), // level and off to one side
+            Vec3::NEG_Y,                  // straight down
+        ] {
+            let cam_forward = cam_forward.normalize();
+            let mut verts = Vec::new();
+            push_strand(&mut verts, &pts, 0.5, 0.0, cam_forward);
+            let (mid_bottom, mid_top) = (Vec3::from(verts[1].pos), Vec3::from(verts[2].pos));
+            let across = mid_top - mid_bottom;
+            assert!(
+                (across.length() - 1.0).abs() < 1e-5,
+                "{cam_forward}: spans 2 × 0.5 yd, not {}",
+                across.length()
+            );
+            assert!(
+                across.normalize().dot(cam_forward).abs() < 1e-5,
+                "{cam_forward}: the width never runs into the screen"
+            );
+        }
+    }
+
+    /// The `v = 0` rail sits where the reference puts it. Eye axes are X right, Y up, `+Z` into
+    /// the screen, and the perp is `(−d.y, d.x, 0)`, so a beam running **rightwards** across the
+    /// screen carries `v = 0` along its **top** edge. In world axes that is `d × camForward`; the
+    /// opposite order is the same line mirrored, which would flip the texture across the beam's
+    /// centreline.
+    #[test]
+    fn the_v_zero_rail_is_the_top_edge_of_a_rightward_beam() {
+        // Camera at the origin looking along −Z with +Y up: a hop along +X runs left→right.
+        let pts = [Vec3::ZERO, Vec3::X * 5.0, Vec3::X * 10.0];
+        let mut verts = Vec::new();
+        push_strand(&mut verts, &pts, 0.5, 0.0, Vec3::NEG_Z);
+        // Quad corner order is [b₀, b₁, t₁, t₀]; index 2 is the mid point's `t` rail.
+        let (mid_bottom, mid_top) = (Vec3::from(verts[1].pos), Vec3::from(verts[2].pos));
+        assert_eq!(verts[2].uv[1], 0.0, "the t rail is v = 0");
+        assert!(
+            mid_top.y > mid_bottom.y,
+            "…and it is the upper edge on screen"
+        );
+    }
+
+    /// A hop pointing **at the camera** has no screen-plane extent, and the reference skips the
+    /// normalisation below `0.001` (`0x7b01bd`), so the segment degenerates instead of producing a
+    /// NaN. This is a **numerical guard, not a behaviour you can see**: the cone is
+    /// `arcsin(0.001/|d|)` ≈ `0.023°` on a real sub-segment, and every angle outside it is
+    /// normalized to full width. A hop pointing straight *up* is not in the regime at all — that
+    /// was 0964's world-space misreading, and it drew a vertical beam as nothing.
+    #[test]
+    fn a_hop_aimed_at_the_camera_collapses_instead_of_exploding() {
         let pts = [Vec3::ZERO, Vec3::Y * 5.0, Vec3::Y * 10.0];
         let mut verts = Vec::new();
-        push_strand(&mut verts, &pts, 0.5, 0.0);
+        push_strand(&mut verts, &pts, 0.5, 0.0, Vec3::NEG_Y);
         let (mid_bottom, mid_top) = (Vec3::from(verts[1].pos), Vec3::from(verts[2].pos));
         assert!(
             mid_top.distance(mid_bottom) < 1e-6,
-            "a vertical hop has no width, and certainly no NaN"
+            "a hop seen end-on has no width, and certainly no NaN"
         );
         assert!(verts.iter().all(|v| v.pos.iter().all(|c| c.is_finite())));
+
+        // …and the same hop, from a camera beside it, is at full width.
+        verts.clear();
+        push_strand(&mut verts, &pts, 0.5, 0.0, Vec3::NEG_Z);
+        let (mid_bottom, mid_top) = (Vec3::from(verts[1].pos), Vec3::from(verts[2].pos));
+        assert!(
+            (mid_top.distance(mid_bottom) - 1.0).abs() < 1e-5,
+            "2 × 0.5 yd"
+        );
     }
 
     /// `u` runs 0 → 1 caster→target (`0x7afb20`), translated by the scroll (`0x7b057e`).
@@ -744,11 +846,11 @@ mod tests {
     fn u_runs_caster_to_target_and_the_scroll_translates_it() {
         let pts = [Vec3::ZERO, Vec3::X * 5.0, Vec3::X * 10.0];
         let mut verts = Vec::new();
-        push_strand(&mut verts, &pts, 0.5, 0.0);
+        push_strand(&mut verts, &pts, 0.5, 0.0, Vec3::NEG_Z);
         assert_eq!(verts[0].uv[0], 0.0, "caster end");
         assert_eq!(verts[5].uv[0], 1.0, "target end");
         verts.clear();
-        push_strand(&mut verts, &pts, 0.5, -0.25);
+        push_strand(&mut verts, &pts, 0.5, -0.25, Vec3::NEG_Z);
         assert_eq!(
             verts[0].uv[0], -0.25,
             "the whole run slides with the scroll"

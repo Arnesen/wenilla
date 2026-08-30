@@ -120,7 +120,10 @@ pub(super) fn apply_server_moves(
     self_moves: &mut MessageReader<SelfMoveMessage>,
     control_msgs: &mut MessageReader<ClientControlMessage>,
     self_guid: Option<u64>,
-    transports: &Query<(&Transform, &Guid), (With<Transport>, Without<Embodied>, Without<FlyCam>)>,
+    transports: &Query<
+        (&Transform, &Guid, Option<&avian3d::prelude::ColliderAabb>),
+        (With<Transport>, Without<Embodied>, Without<FlyCam>),
+    >,
     self_pose: Option<(Vec3, f32)>,
 ) -> Vec<SpeedChangeMessage> {
     // The control handoff (B211). Two questions, and they are NOT the same one: "is this about my
@@ -225,7 +228,7 @@ pub(super) fn apply_server_moves(
             // server reads as a deboard mid-ocean.
             let ride = player.ride.as_mut().expect("riding checked above");
             ride.local_pos = wow_to_bevy(w.position);
-            if let Ok((boat, _)) = transports.get(ride.entity) {
+            if let Ok((boat, _, _)) = transports.get(ride.entity) {
                 let boat_yaw = boat.rotation.to_euler(EulerRot::YXZ).0;
                 ride.boat_yaw = boat_yaw;
                 player.pos = boat.translation + boat.rotation * ride.local_pos;
@@ -536,7 +539,10 @@ fn apply_self_move(
     player: &mut Player,
     cam: &mut FlyCam,
     time: &Time,
-    transports: &Query<(&Transform, &Guid), (With<Transport>, Without<Embodied>, Without<FlyCam>)>,
+    transports: &Query<
+        (&Transform, &Guid, Option<&avian3d::prelude::ColliderAabb>),
+        (With<Transport>, Without<Embodied>, Without<FlyCam>),
+    >,
 ) {
     let was_falling = player.move_flags & move_flags::FALLING != 0;
     player.move_flags = merge_server_flags(player.move_flags, m.flags);
@@ -571,7 +577,7 @@ fn apply_self_move(
     // it moved us **within** the platform frame. Re-anchor the local pose from the boat's live
     // transform, or next frame's carry recomposes the stale one and undoes the snap.
     if let Some(ride) = player.ride.as_mut() {
-        if let Ok((boat, _)) = transports.get(ride.entity) {
+        if let Ok((boat, _, _)) = transports.get(ride.entity) {
             ride.local_pos = boat.rotation.inverse() * (player.pos - boat.translation);
             ride.boat_yaw = boat.rotation.to_euler(EulerRot::YXZ).0;
         }

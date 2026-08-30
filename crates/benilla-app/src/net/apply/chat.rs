@@ -1,11 +1,16 @@
 //! Chat-window arm bodies for [`super::apply_net_updates`]'s dispatch match — the spoken line
 //! itself, plus the server notices and query answers that render as chat lines (the channel
-//! roster, whisper refusals, `SMSG_NOTIFICATION`, `/played`). Each `pub(super)` fn here is exactly
-//! one arm's body; the match at the call site stays the dispatcher, one call per arm.
+//! roster, whisper refusals, `/played`). Each `pub(super)` fn here is exactly one arm's body; the
+//! match at the call site stays the dispatcher, one call per arm.
+//!
+//! Two arms here do NOT render as chat: `SMSG_NOTIFICATION` and `SMSG_AREA_TRIGGER_MESSAGE` are
+//! the reference's UIErrorsFrame toasts, and queue onto [`UiErrorTexts`]. They live in this file
+//! because they are text-carrying server notices, not because they share a sink.
 
 use benilla_protocol::messages::{ChatMessage, CHAT_MSG_WHISPER};
 use bevy::prelude::*;
 
+use crate::ui_action::UiErrorTexts;
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_social::SocialState;
 
@@ -172,24 +177,39 @@ pub(super) fn chat_wrong_faction(chat_log: &mut ChatLog) {
     ));
 }
 
-/// A server notice (`SMSG_NOTIFICATION`). The ref flashes it in the red UIErrorsFrame
-/// (center-screen); benilla has no error frame yet, so the chat feed carries it — an honest
-/// divergence, chosen over silence (a dropped notice hid the language-gate bug for weeks:
-/// a rejected send looked like nothing at all).
-pub(super) fn notification(text: String, chat_log: &mut ChatLog) {
-    chat_log.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+/// A server notice (`SMSG_NOTIFICATION`) — the **red UIErrorsFrame line**, never a chat line.
+///
+/// Byte-verified in the reference: opcode `0x1cb`'s handler is `0x401800` (registered at
+/// `0x40172f`, torn down at `0x401f09`), whose whole body is "read the cstring, then
+/// `mov edx,1; lea ecx,[buf]; call 0x4945b0`" plus a console log (`0x63cd00(…, 3, buf)` — our
+/// `info!` below). `0x4945b0(text, 1)` fires FrameScript event `0xe0` = `UI_ERROR_MESSAGE`
+/// (wow-re `system/ui/ui.md` l.2459). Nothing on this path touches the chat composer.
+///
+/// **This used to push into the chat feed**, as a stand-in from before benilla had an errors
+/// frame. It has had a real one for a long time (`assets/ui/ErrorsFrame.xml`, the ref
+/// `UIErrorsFrame` as a genuine `MessageFrame`), and the stand-in outlived its reason: vmangos
+/// `Player::SetGameMaster` answers `.gm on|off` with **both** `SendSysMessage` and
+/// `SendNotification` (`Objects/Player.cpp:2676-2677`/`2701-2702`), so a client that sinks the
+/// notification into chat prints "GM mode is ON" **twice** where the reference prints it once.
+pub(super) fn notification(text: String, errors: &mut UiErrorTexts) {
+    // The handler's own console leg, and the same reason 0651 logs the dot-command answers: a
+    // toast that flashed for five seconds and one that never arrived look identical afterwards.
+    info!("net: notification — {text}");
+    errors.error(text);
 }
 
 /// An area trigger's refusal (`SMSG_AREA_TRIGGER_MESSAGE`) — "You must be at least level 58 to
-/// enter…", "You cannot enter … while in ghost form." The reference sends it to the **same** sink
-/// as [`notification`] (its `0x2b8` arm and the system-message table's kinds 1/2 both end at
-/// `0x4945b0`), so it goes wherever that one goes. Without it, a refused portal is silent, which
-/// reads exactly like a portal that is still broken.
-pub(super) fn area_trigger_message(text: String, chat_log: &mut ChatLog) {
+/// enter…", "You cannot enter … while in ghost form." The same frame as [`notification`], the
+/// **yellow** arm: `0x2b8` shares the multi-opcode handler `0x48f690`, whose arm at `0x48f8ff`
+/// ends `xor edx,edx; call 0x4945b0` — flag 0, so event `0xe1` = `UI_INFO_MESSAGE`. (The older
+/// comment here called it the same sink as the notification and left it at that; the sink is the
+/// same, the arm is not.) Without it, a refused portal is silent, which reads exactly like a
+/// portal that is still broken.
+pub(super) fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
     // Logged for the same reason 0651 logs the server's dot-command answers: a trigger that
     // refused and a trigger the client never noticed look identical from outside.
     info!("net: area-trigger message — {text}");
-    chat_log.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+    errors.info(text);
 }
 
 /// The `/played` answer (`SMSG_PLAYED_TIME`) — TIME_PLAYED_TOTAL/LEVEL over
@@ -215,7 +235,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
-    use benilla_protocol::messages::{CHAT_MSG_PARTY, LANGUAGE_ADDON};
+    use benilla_protocol::messages::{CHAT_MSG_PARTY, CHAT_MSG_SYSTEM, LANGUAGE_ADDON};
 
     fn a_party_line(language: u32, text: &str) -> ChatMessage {
         ChatMessage {
@@ -232,6 +252,11 @@ mod tests {
 
     /// Run one inbound line through the real arm body and report whether it reached the chat log.
     fn reaches_the_chat_window(m: ChatMessage) -> bool {
+        chat_lines(m) > 0
+    }
+
+    /// How many lines one inbound message put in the chat window.
+    fn chat_lines(m: ChatMessage) -> usize {
         let mut world = World::new();
         world.init_resource::<Messages<ServerSaidMessage>>();
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -254,7 +279,7 @@ mod tests {
                 },
             )
             .unwrap();
-        world.resource::<ChatLog>().pending_len() > 0
+        world.resource::<ChatLog>().pending_len()
     }
 
     /// B215 / decision 1029: an addon broadcast never reaches the chat window. It arrives as an
@@ -329,5 +354,56 @@ mod tests {
                 "language {language} is a tongue — the line must render"
             );
         }
+    }
+
+    /// **The GM-mode double line** — the director's report, pinned end to end.
+    ///
+    /// vmangos answers `.gm on|off` with **two** packets, not one: `Player::SetGameMaster` calls
+    /// `SendSysMessage(LANG_GM_ON)` *and* `GetSession()->SendNotification(LANG_GM_ON)`
+    /// (`src/game/Objects/Player.cpp:2676-2677` and `2701-2702`). They carry the same words down
+    /// different roads, and only the first is a chat line: the reference's `SMSG_NOTIFICATION`
+    /// handler `0x401800` is "read the cstring, `mov edx,1`, `call 0x4945b0`" — event `0xe0`
+    /// `UI_ERROR_MESSAGE`, the UIErrorsFrame toast — plus a console log, and it never reaches the
+    /// chat composer. Benilla used to park the notice in the chat feed for want of an errors
+    /// frame; it has had one since `assets/ui/ErrorsFrame.xml`, and the stand-in was what printed
+    /// "GM mode is ON" twice.
+    ///
+    /// The pair is the test: BOTH halves of one toggle, one chat line, one toast.
+    #[test]
+    fn toggling_gm_mode_prints_one_chat_line_and_one_toast() {
+        let sys_line = ChatMessage {
+            chat_type: CHAT_MSG_SYSTEM,
+            ..a_party_line(0, "GM mode is ON")
+        };
+        assert_eq!(
+            chat_lines(sys_line),
+            1,
+            "the SendSysMessage half is the chat line, and it stays"
+        );
+
+        let mut errors = UiErrorTexts::default();
+        notification("GM mode is ON".to_string(), &mut errors);
+        assert_eq!(
+            errors.0,
+            [("GM mode is ON".to_string(), false)],
+            "the SendNotification half is the RED toast (0x4945b0's flag 1), never a second line"
+        );
+    }
+
+    /// The notification's sibling arm shares the frame and **not** the colour: `0x2b8`
+    /// `SMSG_AREA_TRIGGER_MESSAGE` runs the multi-opcode handler `0x48f690`, whose arm at
+    /// `0x48f8ff` ends `xor edx,edx; call 0x4945b0` — flag 0, so event `0xe1` `UI_INFO_MESSAGE`,
+    /// the yellow line. This is the half the old "same sink as the notification" comment missed.
+    #[test]
+    fn an_area_trigger_refusal_takes_the_yellow_arm() {
+        let mut errors = UiErrorTexts::default();
+        area_trigger_message(
+            "You must be at least level 58 to enter.".to_string(),
+            &mut errors,
+        );
+        assert_eq!(
+            errors.0,
+            [("You must be at least level 58 to enter.".to_string(), true)]
+        );
     }
 }

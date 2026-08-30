@@ -430,6 +430,150 @@ fn required_level_one_is_hidden() {
 /// wow-re `right-click-open.md` §1 re-derived the `p6` leg selector that had it suppressed).
 /// A **running cooldown** takes SetBagItem's other leg and suppresses the line — the two are
 /// structurally exclusive on this binding (decision 0896).
+/// **Line 3 — the charter's guild name and master**, between the NAME and the green
+/// `ITEM_SIGNABLE` (wow-re `tooltip-content-law.md`'s emission order: 2 NAME, 3 the petition
+/// triple, 4 SIGNABLE).
+///
+/// The director's report was that our charter tooltip showed the name and the green line with
+/// nothing between them, where the real client prints "Guild Name: BTC" / "Guild Master:
+/// Twowarrior". The ORDER is the half a text-only assertion would miss: these lines sit above the
+/// green one, not below it.
+///
+/// Also pinned: the two key families (a plain petition reads "Petition:" / "Created by"), and that
+/// an unresolved owner withholds only its own line — the creator line's rule, and the reason a
+/// first hover of an unopened charter is not blank but partial.
+#[test]
+fn charter_lines_sit_between_the_name_and_the_signable_line() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_item_template(
+        5863,
+        ItemTemplateView {
+            name: "Guild Charter".into(),
+            quality: 1,
+            flags: 0x2000, // ITEM_FLAG_CHARTER — the green line's own gate
+            max_count: 1,
+            bonding: 1,
+            ..Default::default()
+        },
+    );
+    let charter = |p: Option<PetitionSlotView>| ContainerSlot {
+        item_id: 5863,
+        count: 1,
+        quality: Some(1),
+        already_bound: true,
+        petition: p,
+        ..Default::default()
+    };
+    let mut slots = HashMap::new();
+    slots.insert(
+        1,
+        charter(Some(PetitionSlotView {
+            is_charter: true,
+            title: "BTC".into(),
+            owner: Some("Twowarrior".into()),
+        })),
+    );
+    // The owner's name still in flight — the title line stands, its own does not.
+    slots.insert(
+        2,
+        charter(Some(PetitionSlotView {
+            is_charter: true,
+            title: "BTC".into(),
+            owner: None,
+        })),
+    );
+    // No record yet at all: the plate is the name and the green line, as it was before this.
+    slots.insert(3, charter(None));
+    // A non-charter petition takes the OTHER key family.
+    slots.insert(
+        4,
+        charter(Some(PetitionSlotView {
+            is_charter: false,
+            title: "Something".into(),
+            owner: Some("Someone".into()),
+        })),
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 4,
+            slots,
+        }),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "SlotC"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetBagItem(0, 1)
+    "#,
+    )
+    .unwrap();
+    let lines = lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "Guild Charter",
+            "Guild Name: BTC",
+            "Guild Master: Twowarrior",
+            "<Right Click for Details>",
+            "Soulbound",
+            "Unique",
+        ],
+        "the two guild lines sit ABOVE the green line, not below it"
+    );
+    assert_eq!(lines[1].1, [1.0, 1.0, 1.0, 1.0], "the title line is white");
+    assert_eq!(lines[2].1, [1.0, 1.0, 1.0, 1.0], "the master line is white");
+    assert_eq!(lines[3].1, [0.0, 1.0, 0.0, 1.0], "SIGNABLE is still green");
+
+    let hover = |s: &mut UiScript, slot: u32| {
+        s.run(&format!(
+            r#"TT:SetOwner(getglobal("SlotC"), "ANCHOR_RIGHT"); TT:SetBagItem(0, {slot})"#
+        ))
+        .unwrap();
+        lines_of(s)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        hover(&mut s, 2),
+        vec![
+            "Guild Charter",
+            "Guild Name: BTC",
+            "<Right Click for Details>",
+            "Soulbound",
+            "Unique"
+        ],
+        "an unresolved owner withholds ITS line only — the repaint fills it"
+    );
+    assert_eq!(
+        hover(&mut s, 3),
+        vec![
+            "Guild Charter",
+            "<Right Click for Details>",
+            "Soulbound",
+            "Unique"
+        ],
+        "no record yet: exactly the plate we shipped before, not a blank one"
+    );
+    assert_eq!(
+        hover(&mut s, 4),
+        vec![
+            "Guild Charter",
+            "Petition: Something",
+            "Created by Someone",
+            "<Right Click for Details>",
+            "Soulbound",
+            "Unique"
+        ],
+        "the record's charter bit picks the key family"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
 #[test]
 fn instance_tail_creator_and_readable() {
     let mut s = script();

@@ -123,6 +123,7 @@ pub(super) fn setup_composite(
 
     let camera = commands
         .spawn((
+            Name::new("minimap composite camera"),
             Camera2d,
             // **No MSAA** — the client's target is a plain RGBA8 surface with none, and here it is
             // load-bearing rather than cosmetic: multisampling an alpha-TESTED edge hands back

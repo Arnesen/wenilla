@@ -16,6 +16,7 @@ mod events;
 mod font_object;
 mod frame_api;
 mod generic_for;
+mod gm_ticket;
 mod handler_prof;
 mod input;
 mod keyboard;

@@ -85,3 +85,14 @@ codegen-units = 1
 [profile.play]
 inherits = "release"
 incremental = true
+# ThinLTO OFF, and it is not a performance choice -- it is the fix for rustc #86049. `release`
+# implies thin-LOCAL LTO (ThinLTO across a crate's own codegen units), which promotes each CGU's
+# internal anonymous constants to external symbols named `anon.<hash>.N.llvm.<moduleid>`. Under
+# `incremental` some CGUs come back from the cache carrying names minted in an earlier compile,
+# so a promoted reference finds no definition and `cc` fails with "symbol(s) not found for
+# architecture arm64" -- an intermittent link failure with no source-level cause, cleared only by
+# a full rebuild. Measured on the 2026-08-29 occurrence: 7 poisoned CGUs in `benilla-formats`, 48
+# unresolved symbols. `lto = "off"` disables the promotion step entirely (verified: the play rlib
+# goes from 381 undefined `anon.*.llvm.*` symbols to 0). `release` and `ship` are UNTOUCHED -- they
+# are non-incremental, cannot hit this, and stay the graded profiles (0736). Decision 1698.
+lto = "off"

@@ -159,6 +159,7 @@ pub mod model_render;
 pub mod modkeys;
 pub mod particles;
 pub mod ribbons;
+pub mod ride_frame;
 pub mod rig_anim;
 pub mod rig_palette;
 pub mod rig_rider;

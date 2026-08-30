@@ -189,6 +189,14 @@ pub(super) fn loot_all_passed(p: LootAllPassed, rolls: &mut LootRolls) {
     rolls.all_passed(p);
 }
 
+/// The master-loot candidate list (`SMSG_LOOT_MASTER_LIST`, decision 1675) — who the master looter
+/// may hand a row to. It arrives from inside the server's `SendLoot`, so it lands just AHEAD of the
+/// `SMSG_LOOT_RESPONSE` it belongs to; `LootState` stages it and the open claims it.
+pub(super) fn loot_master_list(candidates: Vec<u64>, loot: &mut LootState) {
+    debug!("net: master-loot candidates: {} eligible", candidates.len());
+    loot.set_master_candidates(candidates);
+}
+
 /// Is this push **ours**? The outermost gate in `CGGameUI::OnItemPush` (1.12.1 `WoW.exe` 5875,
 /// `0x491a60`): `0x491b56`/`0x491b61` compare the packet guid against the active player's and fork,
 /// and the self arm is the only one that prints "You receive …" *or* animates a bag button. A group

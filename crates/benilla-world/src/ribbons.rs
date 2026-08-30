@@ -50,8 +50,9 @@ pub struct RibbonVerdict {
     pub drawn: usize,
 }
 
-/// One committed trail edge: the vertex pair across the node, world (Bevy) space, and its birth
-/// time on the shared clock.
+/// One committed trail edge: the vertex pair across the node, in the trail's **stored** frame
+/// ([`RibbonTrail::ride`] — world on the ground, the deck on a transport), and its birth time on
+/// the shared clock.
 struct Edge {
     top: Vec3,
     bottom: Vec3,
@@ -129,8 +130,20 @@ pub struct RibbonTrail {
     /// [`crate::particles::EmitterFade`] itself takes, and with the same far-clip backstop applied
     /// in [`simulate_ribbons`] for the one lane server visibility does not bound (transports).
     fade: Option<crate::particles::EmitterFade>,
-    /// Committed edges, newest at the back. The live head (the current node) is appended at
-    /// render time only, so the trail always connects to the emitter between commits.
+    /// **The frame the committed edges are expressed in** — world on the ground, the transport's
+    /// deck while the owning model rides one ([`crate::ride_frame`], decision 1591).
+    ///
+    /// A ribbon's whole point is that a committed edge never moves again, which is what draws a
+    /// streak behind a swinging weapon. On a transport that same rule streams the streak off the
+    /// back of the vehicle, so the reference stores the edges in the ride frame instead and
+    /// re-projects them through its live pose at draw — the ribbon twins of the particle folds
+    /// (birth `0x718dd8` → `0x7b76c0`, draw `0x70d87d` → `0x7b80c0`), and note the negative: the
+    /// ribbon birth has **no `0x100` gate**, so a trail is ride-framed unconditionally where a
+    /// particle cloud is only in world mode.
+    ride: crate::ride_frame::StoredFrame,
+    /// Committed edges, newest at the back, in [`Self::ride`]'s frame. The live head (the current
+    /// node) is appended at render time only, so the trail always connects to the emitter between
+    /// commits.
     edges: VecDeque<Edge>,
     accumulator: f32,
     /// Seconds since spawn — the clip clock the keyed look tracks (colour/alpha/heights) sample
@@ -154,6 +167,27 @@ impl RibbonTrail {
     /// the one `emdump`/`m2anim` print, so an instrument line and an asset line name the same trail.
     pub fn bone(&self) -> u16 {
         self.def.bone
+    }
+
+    /// The committed strip in **world** space — the points the draw rasterizes, folded out of the
+    /// store's ride frame ([`Self::ride`]). For instruments: the trail census measures this
+    /// strip's spread inside the DECK's frame, which is exactly the observable the ride law is
+    /// about ("does the streak hang still relative to the floor you're standing on?").
+    pub fn strip_world(&self) -> impl Iterator<Item = Vec3> + '_ {
+        self.edges
+            .iter()
+            .flat_map(move |e| [self.ride.to_world(e.top), self.ride.to_world(e.bottom)])
+    }
+
+    /// The transport this trail's edges are stored against — `None` on the ground.
+    pub fn deck(&self) -> Option<Entity> {
+        self.ride.source()
+    }
+
+    /// The authored edge lifetime (seconds) — the trail's own length in time, which is what a
+    /// streak's world extent divides by to give the host speed that drew it.
+    pub fn edge_lifetime(&self) -> f32 {
+        self.def.edge_lifetime
     }
 
     /// The authored blend, and how many edges are committed right now (0 = nothing drawn yet).
@@ -234,6 +268,7 @@ pub fn spawn_ribbon(
                     seq,
                     alpha_src,
                     fade,
+                    ride: crate::ride_frame::StoredFrame::default(),
                     edges: VecDeque::new(),
                     accumulator: 0.0,
                     age: 0.0,
@@ -276,6 +311,8 @@ pub(crate) fn simulate_ribbons(
     // bundle `simulate_particles` reads, so the two emitter families cannot answer differently
     // ([`RibbonTrail::fade`]).
     gates: crate::particles::sim::SceneGates,
+    // Which transport (if any) each trail's MODEL is riding — the frame its edges are stored in.
+    rides: crate::ride_frame::RideFrames,
     mut verdict: ResMut<RibbonVerdict>,
     mut trails: Query<
         (
@@ -308,6 +345,7 @@ pub(crate) fn simulate_ribbons(
             seq,
             alpha_src,
             fade,
+            ride,
             edges,
             accumulator,
             age,
@@ -339,6 +377,35 @@ pub(crate) fn simulate_ribbons(
             continue;
         }
         verdict.trails += 1;
+
+        // **The ride frame, this frame** — the transport the owning MODEL is on, inherited down
+        // the `ParentModel` chain (an enchant streamer's model is the weapon; the weapon's parent
+        // is its wearer). A transport that has streamed out reads as no frame, which is the leave
+        // leg: the edges are handed back to the world where they stood.
+        let deck = alpha_src
+            .or(*owner)
+            .and_then(|model| rides.source(model))
+            .and_then(|t| {
+                transforms
+                    .get(t)
+                    .ok()
+                    .map(|gt| (t, crate::ride_frame::ride_matrix(gt)))
+            });
+        // Boarding and leaving RE-EXPRESS the committed edges rather than snapping them (the
+        // reference's `0x7187f0` → `0x7b7bc0` on the NULL↔non-NULL edge). Riding a *moving* deck
+        // folds nothing at all — the draw's live `A` is what carries the strip, and touching the
+        // store as well would ride it twice.
+        if let Some(fold) = ride.retarget(deck) {
+            for e in edges.iter_mut() {
+                e.top = fold.transform_point3(e.top);
+                e.bottom = fold.transform_point3(e.bottom);
+            }
+        }
+        let (to_deck, to_world) = match ride.matrix() {
+            // One inverse per trail per frame, not one per edge.
+            Some(a) => (Some(a.inverse()), Some(a)),
+            None => (None, None),
+        };
 
         // The **draw-set** gate: is this trail's MODEL in the frame's scene at all? A trail is one
         // of its model's emitters, and the reference ticks a model's emitters inside that model's
@@ -472,6 +539,10 @@ pub(crate) fn simulate_ribbons(
         // cannot explain at all. Our old `pos.y -= 2·g·dt` was wrong twice over: constant velocity
         // instead of `g·t²`, and falling instead of rising. On the Frost Trap that turned a
         // 0.6–1.3 yd tuft rising off the crown into a 2–3 yd column smeared to the ground.
+        // The gravity axis is world up in EITHER store: `A` is `translate·Rz` (yaw only), and a
+        // yaw leaves `+Y` alone — so a trail sags/rises the same way on a deck as on the ground,
+        // with no fold. That invariance is why [`crate::ride_frame::ride_matrix`] drops
+        // pitch/roll rather than carrying the transport's full rotation.
         for e in edges.iter_mut() {
             let term = gravity_step(def.gravity, e.age, dt);
             e.top.y += term;
@@ -484,6 +555,13 @@ pub(crate) fn simulate_ribbons(
         // silently thins every trail below `eps` frames per second — the whole trail, at 30 fps
         // with the Frost Trap's `eps` 30, is half the edges it should hold.
         if let Some((node, axis)) = head {
+            // BIRTH fold: the node and its cross-section axis are live WORLD values (the owner's
+            // bone matrix); an edge is committed in the store's frame. Off a transport this is the
+            // identity, which is the whole world.
+            let (node, axis) = match to_deck {
+                Some(inv) => (inv.transform_point3(node), inv.transform_vector3(axis)),
+                None => (node, axis),
+            };
             *accumulator += def.edges_per_second * dt;
             let n = accumulator.floor().max(0.0);
             *accumulator -= n;
@@ -545,9 +623,12 @@ pub(crate) fn simulate_ribbons(
         // The trail's SORT anchor — the live head node (the point the material path's entity
         // translation used to carry; same sort-tie flashing fix as the particle clouds).
         // Draining trails anchor on their newest surviving edge.
+        // DRAW fold: stored → world (`0xcf5b68 = A · T · S`). The live head is already world —
+        // it was never committed.
+        let out = |p: Vec3| to_world.map_or(p, |a| a.transform_point3(p));
         let anchor = head.map(|(node, _)| node).unwrap_or_else(|| {
             let e = edges.back().expect("n >= 2 ⇒ edges exist while draining");
-            (e.top + e.bottom) * 0.5
+            out((e.top + e.bottom) * 0.5)
         });
         entity_tf.translation = anchor;
         // Post-propagation frame: publish directly (see the particle sim's matching note; trail
@@ -562,8 +643,8 @@ pub(crate) fn simulate_ribbons(
         }
         for e in edges.iter().rev() {
             pairs.push((
-                e.top,
-                e.bottom,
+                out(e.top),
+                out(e.bottom),
                 ((now - e.born) / def.edge_lifetime).clamp(0.0, 1.0),
             ));
         }

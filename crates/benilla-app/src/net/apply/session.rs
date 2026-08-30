@@ -20,10 +20,10 @@ use crate::ui_taxi::TaxiState;
 use crate::ui_trainer::TrainerOpen;
 
 use super::super::{
-    CharActionResultMessage, CharListMessage, ClientCommand, DisconnectedMessage, DroppedOpcodes,
-    EnteredWorldMessage, GameTime, GuidIndex, LoggedOutMessage, LoginFailedMessage,
-    LoginStageMessage, NetCommands, NetStatus, PendingTransfer, PingShared, Reputations, SelfGuid,
-    ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
+    CharActionResultMessage, CharListMessage, CinematicTriggeredMessage, DisconnectedMessage,
+    DroppedOpcodes, EnteredWorldMessage, GameTime, GuidIndex, LoggedOutMessage, LoginFailedMessage,
+    LoginStageMessage, NetStatus, PendingTransfer, PingShared, Reputations, SelfGuid, ServerTime,
+    ServerWallClock, TeleportMessage, WorldportMessage,
 };
 
 /// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
@@ -37,15 +37,17 @@ pub(super) fn login_stage(
 /// A login attempt failed before the roster (decision 0539): the IO thread is back at its pre-logon
 /// park, and [`crate::login`]'s policy decides what happens next.
 pub(super) fn login_failed(
-    code: Option<u8>,
+    refusal: Option<benilla_protocol::LoginRefusal>,
     reason: String,
     terminal: bool,
+    dial: Option<benilla_protocol::DialFailure>,
     out: &mut MessageWriter<LoginFailedMessage>,
 ) {
     out.write(LoginFailedMessage {
-        code,
+        refusal,
         reason,
         terminal,
+        dial,
     });
 }
 
@@ -79,15 +81,21 @@ pub(super) fn character_list(
     char_lists.write(CharListMessage { characters, realm });
 }
 
-/// A cinematic sequence was triggered (`SMSG_TRIGGER_CINEMATIC`).
-pub(super) fn cinematic_triggered(cinematic_id: u32, net_commands: &NetCommands) {
-    // benilla doesn't play cinematics yet — ack immediately (a real player's ESC
-    // skip). Load-bearing, not cosmetic: while a cinematic runs unacked, vmangos
-    // re-anchors object visibility to the flying camera (`Player::UpdateCinematic`)
-    // and every NPC around the body despawns until relog. A first login's race intro
-    // is the common trigger. The future cinematic arc hooks this event for playback.
-    info!("net: cinematic {cinematic_id} triggered — skipping (unimplemented)");
-    let _ = net_commands.0.send(ClientCommand::CompleteCinematic);
+/// A cinematic sequence was triggered (`SMSG_TRIGGER_CINEMATIC`) — hand it to
+/// [`crate::cinematic`], which plays it and owns the ack.
+///
+/// **The ack no longer goes out from here, and that is the load-bearing part.** While a cinematic
+/// runs unacked, vmangos re-anchors object visibility to the flying camera
+/// (`Player::UpdateCinematic`) and everything around the body despawns until relog (decision 0196)
+/// — so the ack must still happen, at the *end* of playback rather than instantly. The cinematic
+/// plugin sends it on a natural end, on an ESC skip, and immediately for a trigger it cannot
+/// resolve to a shot, so no path drops it.
+pub(super) fn cinematic_triggered(
+    cinematic_id: u32,
+    triggered: &mut MessageWriter<CinematicTriggeredMessage>,
+) {
+    info!("net: cinematic {cinematic_id} triggered");
+    triggered.write(CinematicTriggeredMessage { cinematic_id });
 }
 
 /// We are in the world (the IO thread's first in-world event): record our guid, flip the status,
@@ -162,6 +170,7 @@ pub(super) fn disconnected(
     duel: &mut crate::ui_duel::DuelState,
     social: &mut crate::ui_social::SocialState,
     guild: &mut crate::ui_guild::GuildState,
+    gm_ticket: &mut crate::ui_gm_ticket::GmTicketState,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
 ) {
@@ -245,6 +254,11 @@ pub(super) fn disconnected(
     // lazily, and keeping a cache alive across a socket only to save one query is not worth the
     // one wrong name a renamed guild would show.
     *guild = crate::ui_guild::GuildState::default();
+    // The GM ticket is login-scoped too (decision 1673), and for a sharper reason than most: the
+    // ticket belongs to the CHARACTER, and the next login may be a different one. Its answer
+    // counters go with it, so the first `SMSG_GMTICKET_GETTICKET` of the new session re-fires
+    // `UPDATE_TICKET` rather than being diffed away against the old character's answer count.
+    gm_ticket.clear_session();
     // The death stores are session-scoped too: a reclaim expiry, resurrect offer, or corpse
     // marker must not survive the socket (the reconnect re-sends the reclaim delay when dead).
     *death_net = crate::death::DeathNet::default();

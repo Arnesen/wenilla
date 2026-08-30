@@ -805,14 +805,22 @@
                 TargetFrame_CheckClassification()
             end
 
-            -- DEAD text (target only): shown at zero health (ref TargetFrame_CheckDead). Blanked
-            -- via SetText when alive — a site that predates region Show/Hide (region.rs has the
-            -- real pair now, the level slot above uses it); equivalent either way.
+            -- DEAD text (target only), ref TargetFrame_CheckDead (l.220-228) whole: Show/Hide a
+            -- region whose word the XML already carries. This site used to SetText("DEAD") a
+            -- LITERAL and blank it when alive, which put the KEY on screen in caps — `DEAD` is a
+            -- GlobalStrings key (l.898 = "Dead"), not the string, and typing a key as display text
+            -- is the "CREATE_MACROS" failure of 0983/0991 again. Nothing here names the word now:
+            -- it comes from the FontString's `text="DEAD"` attribute, which the loader resolves
+            -- through the global (loader/mod.rs resolve_text), locale and all.
+            --
+            -- `UnitIsConnected` is the reference's own second term and is what tells dead from
+            -- LINK-dead: a disconnected player reads 0 health here and is not dead. The ToT twin
+            -- (TargetofTarget_CheckDead) has carried it since it was written; this leg had not.
             if frame.deadText then
-                if UnitHealth(unit) <= 0 then
-                    frame.deadText:SetText("DEAD")
+                if UnitHealth(unit) <= 0 and UnitIsConnected(unit) then
+                    frame.deadText:Show()
                 else
-                    frame.deadText:SetText("")
+                    frame.deadText:Hide()
                 end
             end
 
@@ -1599,8 +1607,13 @@
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="63" y="-16"/></Offset></Anchor>
                             </Anchors>
                         </Texture>
-                        <!-- DEAD, CENTER (-50,3), shown at zero health (ref l.173-181). Blank while alive. -->
-                        <FontString name="$parentDeadText" inherits="GameFontNormalSmall">
+                        <!-- DEAD, CENTER (-50,3), shown at zero health (ref l.173-181), spelled
+                             the reference's own way: `text="DEAD"` is a GLOBAL-STRING LOOKUP, so
+                             the word rendered is GlobalStrings.lua l.898's `DEAD = "Dead"` — the
+                             key never reaches the screen. `hidden` like the ToT twin below, a
+                             deliberate divergence: the reference leaves the region shown and
+                             relies on CheckDead landing before the frame does. -->
+                        <FontString name="$parentDeadText" inherits="GameFontNormalSmall" text="DEAD" hidden="true">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="3"/></Offset></Anchor>
                             </Anchors>

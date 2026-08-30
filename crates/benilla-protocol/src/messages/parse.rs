@@ -12,10 +12,10 @@ use crate::wire::{
 
 use super::{
     action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
-    duel, gameobject, gossip, group, guild, items, loot, mail, mirror_timer, monster_move,
-    movement, opcode, page_text, pet, progression, pvp, quest, social, spellbook, spells, taxi,
-    trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo, MoveMode,
-    ServerPacket, SpeedKind,
+    duel, gameobject, gm_ticket, gossip, group, guild, items, loot, mail, mirror_timer,
+    monster_move, movement, opcode, page_text, pet, petition, progression, pvp, quest, social,
+    spellbook, spells, stable, taxi, trade, trainer, update_object, vendor, world_state, Character,
+    CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -159,9 +159,42 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_AUTH_CHALLENGE => ServerPacket::AuthChallenge {
             server_seed: read_u32_le(&mut r)?,
         },
-        opcode::SMSG_AUTH_RESPONSE => ServerPacket::AuthResponse {
-            result: read_u8(&mut r)?,
-        },
+        opcode::SMSG_AUTH_RESPONSE => {
+            // **The client's own grammar** (VERIFIED, handler `0x5b41b0`; wow-re
+            // `system/glue/scratch/login-failure-dialogs.md`):
+            //
+            //   u8 code
+            //   if (code == AUTH_OK || code == AUTH_WAIT_QUEUE) && remaining >= 5:
+            //       u32 billingTimeRemaining, u8 billingPlanFlags, u32 billingTimeRested
+            //   if code == AUTH_WAIT_QUEUE:
+            //       u32 position
+            //
+            // The client **branches on the remaining length**, which is what makes both shapes the
+            // mangos family sends parse correctly: the short `{u8, u32}` leaves 4 bytes (`4 < 5`,
+            // billing skipped, position at body offset 1) and the long
+            // `{u8, u32, u8, u32, u32}` leaves 13 (billing read, position at offset 10).
+            //
+            // The threshold is **5 guarding a 9-byte group** — not a size check, just "is there
+            // more here than a bare position?". Copied rather than tidied: a body of 6..=9 bytes
+            // hits it and mis-parses, and matching the client's mistakes is the point of a
+            // faithful parser.
+            //
+            // ONE DELIBERATE DIVERGENCE: where a truncated body leaves the client's position
+            // *unwritten* — silently redisplaying the previous queue position from an
+            // uninitialised process-lifetime global — ours reports `None`. Rendering a stale
+            // position as current is a bug we decline to reproduce.
+            let result = read_u8(&mut r)?;
+            let queued = result == super::AUTH_WAIT_QUEUE;
+            if (result == super::AUTH_OK || queued) && r.len() >= 5 {
+                let _billing_time_remaining = read_u32_le(&mut r)?;
+                let _billing_plan_flags = read_u8(&mut r)?;
+                let _billing_time_rested = read_u32_le(&mut r)?;
+            }
+            ServerPacket::AuthResponse {
+                result,
+                queue_position: queued.then(|| read_u32_le(&mut r).ok()).flatten(),
+            }
+        }
         opcode::SMSG_CHAR_ENUM => {
             let count = read_u8(&mut r)?;
             let mut characters = Vec::with_capacity(count as usize);
@@ -287,6 +320,26 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 area,
             }
         }
+        // The GM trouble-ticket answers (decision 1673). The three response opcodes share one
+        // 4-byte body and therefore one reader; only the opcode says which verb was answered.
+        opcode::SMSG_GMTICKET_GETTICKET => ServerPacket::GmTicketAnswer {
+            ticket: gm_ticket::read_gm_ticket(&mut r)?.map(Box::new),
+        },
+        opcode::SMSG_GMTICKET_CREATE => ServerPacket::GmTicketCreated {
+            response: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
+        opcode::SMSG_GMTICKET_UPDATETEXT => ServerPacket::GmTicketUpdated {
+            response: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
+        opcode::SMSG_GMTICKET_DELETETICKET => ServerPacket::GmTicketDeleted {
+            response: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
+        opcode::SMSG_GMTICKET_SYSTEMSTATUS => ServerPacket::GmTicketSystemStatus {
+            status: gm_ticket::read_gm_ticket_system_status(&mut r)?,
+        },
+        opcode::SMSG_GM_TICKET_STATUS_UPDATE => ServerPacket::GmTicketStatusUpdate {
+            status: gm_ticket::read_gm_ticket_response(&mut r)?,
+        },
         opcode::SMSG_BINDER_CONFIRM => ServerPacket::BinderConfirm {
             binder: binder::read_binder_confirm(&mut r)?,
         },
@@ -679,6 +732,21 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 error,
             }
         }
+        opcode::MSG_LIST_STABLED_PETS => {
+            let (npc, num_stable_slots, pets) = stable::read_list_stabled_pets(&mut r)?;
+            ServerPacket::ListStabledPets {
+                npc,
+                num_stable_slots,
+                pets,
+            }
+        }
+        opcode::SMSG_INVALIDATE_PLAYER => ServerPacket::InvalidatePlayer {
+            guid: read_u64_le(&mut r)?,
+        },
+        opcode::SMSG_STABLE_RESULT => {
+            let result = stable::read_stable_result(&mut r)?;
+            ServerPacket::StableResult { result }
+        }
         opcode::SMSG_LOOT_RESPONSE => {
             let (guid, body) = loot::read_loot_response(&mut r)?;
             match body {
@@ -714,6 +782,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_LOOT_ALL_PASSED => {
             ServerPacket::LootAllPassed(loot::read_loot_all_passed(&mut r)?)
         }
+        opcode::SMSG_LOOT_MASTER_LIST => ServerPacket::LootMasterList {
+            candidates: loot::read_loot_master_list(&mut r)?,
+        },
         opcode::SMSG_ITEM_PUSH_RESULT => {
             ServerPacket::ItemPushResult(loot::read_item_push_result(&mut r)?)
         }
@@ -817,16 +888,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 // (the `CreatureType.dbc` id — the TAB-target filter's input), `pet_family` (the
                 // `CreatureFamily.dbc` id behind `UnitCreatureFamily` and the diet tooltip,
                 // decision 1062), `rank` (the unit tooltip's Elite/Boss word, decision 0276's
-                // level-line law), `type_flags` (bit 0x10 hides its faction line), and the
-                // `civilian`/`racial_leader` pair (its green CIVILIAN / white LEADER lines); the
-                // rest stays alignment-only.
+                // level-line law), `type_flags` (bit 0x10 hides its faction line), the
+                // `civilian`/`racial_leader` pair (its green CIVILIAN / white LEADER lines), and
+                // `display_id` — the template's model, which is the ONLY way to draw a creature
+                // that has no world object to read `UNIT_FIELD_DISPLAYID` off: a stabled pet
+                // (decision 1676). The `unk`/`pet_spell_list_id` pair stays alignment-only.
                 let type_flags = read_u32_le(&mut r)?;
                 let creature_type = read_u32_le(&mut r)?;
                 let pet_family = read_u32_le(&mut r)?;
                 let rank = read_u32_le(&mut r)?;
                 let _unk = read_u32_le(&mut r)?;
                 let _pet_spell_list = read_u32_le(&mut r)?;
-                let _display_id = read_u32_le(&mut r)?;
+                let display_id = read_u32_le(&mut r)?;
                 let civilian = read_u8(&mut r)? != 0;
                 let racial_leader = read_u8(&mut r)? != 0;
                 ServerPacket::CreatureQueryResponse {
@@ -838,6 +911,7 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                         pet_family,
                         rank,
                         type_flags,
+                        display_id,
                         civilian,
                         racial_leader,
                     }),
@@ -1033,6 +1107,31 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             name: guild::read_guild_decline(&mut r)?,
         },
         opcode::SMSG_GUILD_INFO => ServerPacket::GuildInfo(guild::read_guild_info(&mut r)?),
+        // The petition family (bodies in `petition`) — founding a guild, which at 1.12 is an
+        // entirely different wire from the guild family above. Note `SMSG_PETITION_SHOW_SIGNATURES`
+        // answers two different asks, and the two `MSG_` opcodes read a *different* body from the
+        // one they write (see `petition`'s own docs).
+        opcode::SMSG_PETITION_SHOWLIST => {
+            ServerPacket::PetitionShowList(petition::read_petition_show_list(&mut r)?)
+        }
+        opcode::SMSG_PETITION_SHOW_SIGNATURES => {
+            ServerPacket::PetitionShowSignatures(petition::read_petition_show_signatures(&mut r)?)
+        }
+        opcode::SMSG_PETITION_SIGN_RESULTS => {
+            ServerPacket::PetitionSignResults(petition::read_petition_sign_results(&mut r)?)
+        }
+        opcode::SMSG_PETITION_QUERY_RESPONSE => {
+            ServerPacket::PetitionQueryResponse(petition::read_petition_query_response(&mut r)?)
+        }
+        opcode::SMSG_TURN_IN_PETITION_RESULTS => ServerPacket::TurnInPetitionResults {
+            result: petition::read_turn_in_petition_results(&mut r)?,
+        },
+        opcode::MSG_PETITION_DECLINE => ServerPacket::PetitionDeclined {
+            player: petition::read_petition_decline(&mut r)?,
+        },
+        opcode::MSG_PETITION_RENAME => {
+            ServerPacket::PetitionRenamed(petition::read_petition_rename(&mut r)?)
+        }
         // The observer speed legs (decision 0441): a unit we don't control changed speed — a
         // creature or mid-spline player (SPLINE family), or a freely-moving player (MOVE_SET
         // family, which carries a fresh pose too). No ack on either.

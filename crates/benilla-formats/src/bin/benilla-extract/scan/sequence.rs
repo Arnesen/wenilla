@@ -132,6 +132,14 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
     // advance, and a consumer that arms it by the loop bit instead flaps. And `replay` decides
     // whether that window is one band or several.
     let (mut looping_motion, mut looping_motion_sensitive, mut multi_replay) = (0u32, 0u32, 0u32);
+    // The VARIATION half (wow-re `gameobject-anim-arm.md` §2c, `0x5f3aee: push -1`): the GameObject
+    // arm rolls a `_rand`-weighted variation, while the §1 loader seed underneath it takes an
+    // explicit variation 0. So a model that authors a CHAIN on a reachable substate's id plays
+    // something the seed never reaches — and a consumer resolving the id to its head variation
+    // renders the whole rest of the chain unreachable. Onyxia's lava traps are the case
+    // (`ONYZIASLAIRLAVATRAP`: Stand ×2, and only the 10 %-weighted second one spurts lava).
+    let mut chained = 0u32;
+    let mut chained_paths: Vec<String> = Vec::new();
     for (path, displays) in &models {
         let Ok(bytes) = chain.read_file(path) else {
             continue;
@@ -150,6 +158,7 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
         let mut lines = Vec::new();
         let (mut differs, mut remapped, mut froze) = (false, false, false);
         let (mut flaps, mut replays) = (false, false);
+        let mut has_chain = false;
         for (sub, label) in REACHABLE {
             let lut = SUBSTATE_ANIM[sub];
             let (req, r0) = go_remap(m, lut);
@@ -166,6 +175,10 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
             let motion = MOTION_SUBSTATES.contains(&sub);
             flaps |= motion && !r0 && played.is_some_and(|s| s.looping);
             replays |= played.is_some_and(|s| (s.min_replay, s.max_replay) != (0, 0));
+            // A variation chain on THIS substate's armed id: >1 sequence sharing it.
+            let variations =
+                armed.map_or(0, |(id, _)| seqs.iter().filter(|s| s.anim_id == id).count());
+            has_chain |= variations > 1;
             lines.push(format!(
                 "   {label} sub{sub}  lut {lut}{}  ->  {}{}",
                 if req == lut {
@@ -197,6 +210,10 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
                     ),
                 },
             ));
+        }
+        if has_chain {
+            chained += 1;
+            chained_paths.push(path.clone());
         }
         flaps.then(|| looping_motion += 1);
         (flaps && differs).then(|| looping_motion_sensitive += 1);
@@ -237,6 +254,13 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
          models a GO type that skips the arm renders in the wrong pose"
     );
     println!("  needing the §2c remap on some substate: {needs_remap}");
+    println!(
+        "  authoring a VARIATION CHAIN on a reachable substate: {chained}  — the models the arm's \
+         `variationIdx = -1` roll can reach and the loader seed's explicit variation 0 cannot"
+    );
+    for p in &chained_paths {
+        println!("      {p}");
+    }
     println!(
         "  arming a LOOPING band on a transition (motion) substate: {looping_motion} \
          ({looping_motion_sensitive} of them state-SENSITIVE, i.e. the transition is a clip the \

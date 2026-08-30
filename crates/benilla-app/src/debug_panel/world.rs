@@ -122,8 +122,9 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
     //   * `windows N` with N large, or a window covering most of the screen — we are indoors and the
     //     doorway rects are too generous.
     //   * `windows 0` — sealed, nothing exterior may draw; terrain visible anyway means something
-    //     is reaching the screen that is not tagged `ExteriorScene` (world WMO placements and
-    //     open-world liquid are knowingly not gated yet).
+    //     is reaching the screen that is not tagged `ExteriorScene`. Every exterior bucket is
+    //     tagged now — WMO placements since 0784, open-world liquid since 1652 — so at `windows 0`
+    //     the honest reading of anything still drawn is a bug, not a known gap.
     // Two numbers is the whole diagnosis, and neither was readable from the chair before.
     let room_line = match world.room.0 {
         Some(claim) => format!("room g{:02}", claim.room.group),

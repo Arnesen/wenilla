@@ -29,9 +29,10 @@ mod spline;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use facing::drive_display_facing;
+pub(in crate::net) use facing::resolve_facing;
 pub(in crate::net) use facing::DisplayFacing;
 pub(crate) use facing::FacingStep;
-pub(super) use facing::{drive_display_facing, resolve_facing};
 pub(crate) use relay::{PendingMove, RelayMove};
 pub(crate) use remote::jump_seed;
 pub(crate) use remote::RemoteMotion;

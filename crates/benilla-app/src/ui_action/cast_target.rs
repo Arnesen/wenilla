@@ -547,11 +547,19 @@ mod tests {
     /// The three wire shapes without any world state: mask 0 self-commits (never the selection —
     /// the Battle Shout/Ice Armor bug), unit masks refuse without a candidate, and the no-target
     /// vs wrong-target refusals use the client's two error strings.
+    ///
+    /// Both stores are present but empty, because `CanAttack` refuses outright when either side is
+    /// missing (1674) and this test is about the wire shapes, not about that posture.
     #[test]
     fn resolution_wire_shapes() {
+        use benilla_protocol::ObjectFields;
+        // `UNIT_FIELD_FLAGS` bit 3 (player-controlled) on us alone selects `CanAttack`'s mixed
+        // arm; with no catalog the reaction resolves neutral, so the enemy bit clears.
+        let me = crate::net::ObjectStore(ObjectFields::from_pairs(&[(46, 1 << 3)]));
+        let it = crate::net::ObjectStore(ObjectFields::from_pairs(&[(35, 0)]));
         let rel = TargetRelations {
-            target_store: None,
-            self_store: None,
+            target_store: Some(&it),
+            self_store: Some(&me),
             factions: None,
             reputations: &Reputations(Vec::new()),
         };
@@ -566,7 +574,8 @@ mod tests {
             resolve_cast_target(Some(&fireball), &cands(None, Some(1)), true, &rel),
             CastWireTarget::Refused(ERR_NO_TARGET)
         );
-        // Reaction defaults to neutral (3) with no stores: attackable (≤3), not assistable.
+        // With no catalog the reaction resolves neutral (3): the mixed arm's `< 4` is attackable,
+        // and `CanAssist`'s `>= 4` is not.
         assert_eq!(
             resolve_cast_target(Some(&fireball), &cands(Some(42), Some(1)), true, &rel),
             CastWireTarget::Unit(42)

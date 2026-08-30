@@ -22,15 +22,19 @@
 //! → coin ? [`ClientCommand::LootMoney`] : [`ClientCommand::AutostoreLootItem`] (the clicked 1-based
 //! row mapped to the item's **wire** loot slot); `CloseLoot` → [`ClientCommand::LootRelease`].
 
-use benilla_protocol::messages::{ItemPushResult, LootItem, BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST};
+use benilla_protocol::messages::{
+    slot_type, ItemPushResult, LootItem, BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST,
+};
 use bevy::prelude::*;
 
 use benilla_ui::script::{LootRow, LootState as LootSnapshot, ScriptValue, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::{Items, RollCatalogs};
+use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_items::KEYRING_CONTAINER;
+use crate::ui_party::{GroupState, GROUPTYPE_RAID, GROUP_MEMBER_SUBGROUP};
 use crate::ui_script::UiInput;
 
 /// The coin-pile row icons (direct `Interface\Icons` paths — `SetTexture` takes them as-is, no DBC),
@@ -171,13 +175,36 @@ pub(crate) struct LootState {
     /// snapshot as `IsFishingLoot()`, which `LootFrame_OnShow` keys the "FISHING REEL IN" sound
     /// and the FishingLoot portrait overlay on (decision 1086).
     fishing: bool,
+    /// The master-loot candidates for the OPEN window (`SMSG_LOOT_MASTER_LIST`), in wire order —
+    /// the guids `GiveMasterLoot`'s 1-based candidate index resolves against (decision 1675).
+    /// Empty under every other loot method.
+    master_candidates: Vec<u64>,
+    /// The candidate list that arrived but has no window yet. `SMSG_LOOT_MASTER_LIST` is sent from
+    /// *inside* `Player::SendLoot` (`Player.cpp:8077-8081`), so it lands **before** the
+    /// `SMSG_LOOT_RESPONSE` it belongs to; [`LootState::open`] takes it from here. Staging it
+    /// rather than writing `master_candidates` directly is what keeps one window's list from
+    /// leaking into the next window opened under a different loot method.
+    pending_master_candidates: Vec<u64>,
 }
 
+/// The master-loot candidate array's fixed width — 40 slots of 8 bytes at `0xc4dc38`, zeroed at
+/// every `SMSG_LOOT_MASTER_LIST` and bound-checked by the getter `0x61c660` (`cmp ecx,0x28`).
+const MASTER_LOOT_CANDIDATE_SLOTS: usize = 40;
+/// The raid subgroup's stride within that array (`n*5 .. n*5+5`, `0x61c609`) — 8 groups of 5.
+const MEMBERS_PER_RAID_GROUP: usize = 5;
+
 /// A resolved loot-row pick: the coin pile, or an item at a concrete **wire** loot slot (carrying
-/// its display id, so the pick can play the item's pickup sound without a second lookup).
+/// its display id, so the pick can play the item's pickup sound without a second lookup, and the
+/// wire's `slot_type`, which decides whether the row is takeable at all).
 enum LootAction {
     Money,
-    Item { wire_slot: u8, display_id: u32 },
+    Item {
+        wire_slot: u8,
+        display_id: u32,
+        /// The wire's per-row [`slot_type`]. `MASTER` diverts the click to the master-loot
+        /// dropdown instead of a take (decision 1675).
+        slot_type: u8,
+    },
 }
 
 impl LootState {
@@ -192,6 +219,21 @@ impl LootState {
         self.taken.clear();
         self.auto_release = false; // empty-at-open stays open — only a removal auto-closes
         self.fishing = loot_type == benilla_protocol::messages::loot_type::FISHING;
+        // The master-loot candidate list arrives just AHEAD of this response (the server sends it
+        // from inside `SendLoot`), so the window claims whatever was staged and leaves the staging
+        // empty — a later window under a non-master method then correctly has no candidates.
+        self.master_candidates = std::mem::take(&mut self.pending_master_candidates);
+    }
+
+    /// A master-loot candidate list arrived (`SMSG_LOOT_MASTER_LIST`). Normally this precedes the
+    /// `SMSG_LOOT_RESPONSE` it belongs to and is staged for [`LootState::open`]; if a window is
+    /// already up it is also applied in place, which is the case the reference's
+    /// `UPDATE_MASTER_LOOT_LIST` event exists for.
+    pub(crate) fn set_master_candidates(&mut self, candidates: Vec<u64>) {
+        if self.source.is_some() {
+            self.master_candidates.clone_from(&candidates);
+        }
+        self.pending_master_candidates = candidates;
     }
 
     /// A row was taken by anyone (`SMSG_LOOT_REMOVED`, keyed by the **wire** slot): its position
@@ -258,6 +300,8 @@ impl LootState {
         self.taken.clear();
         self.auto_release = false;
         self.fishing = false;
+        self.master_candidates.clear();
+        self.pending_master_candidates.clear();
     }
 
     /// Disconnect: drop the open window **and** any pending receive lines (mirrors the merchant/gossip
@@ -304,7 +348,61 @@ impl LootState {
         (!self.taken.contains(&it.slot)).then_some(LootAction::Item {
             wire_slot: it.slot,
             display_id: it.display_info_id,
+            slot_type: it.slot_type,
         })
+    }
+
+    /// The candidate slots as the client lays them out — **not** simply the wire order (VERIFIED
+    /// in the 5875 binary, `SMSG_LOOT_MASTER_LIST`'s handler `0x61c550`). The array is 40 fixed
+    /// 8-byte slots at `0xc4dc38`, zeroed per packet, and filled by one of two paths chosen once
+    /// from the live raid-member count `[0xb713e0]`:
+    ///
+    /// - **Not in a raid** (`0x61c5b9`): the wire's own loop counter is the slot. Dense, and with
+    ///   no bound check at all — a party can only ever fill 0..4.
+    /// - **In a raid** (`0x61c5c9`-`0x61c637`): each guid is looked up in the raid roster, its
+    ///   subgroup `n` read, and it is written to the **first free slot of `[n*5, n*5+5)`**, bound
+    ///   checked against 40. So the array is BUCKETED BY SUBGROUP, with holes.
+    ///
+    /// The holes are the point: `GroupLootDropDown_Initialize` walks `1..40` in blocks of five and
+    /// keeps a "Group N" submenu only where the block has an occupant (`LootFrame.lua:190-201`).
+    /// Packing the list densely would have labelled every candidate with the wrong raid group.
+    ///
+    /// One placement function serves both readers — the feed (which turns slots into names) and
+    /// the drain (which turns a clicked index back into a guid) — so the index the Lua hands back
+    /// can never mean something different from the index it was shown.
+    fn placed_candidates(&self, group: &GroupState) -> Vec<Option<u64>> {
+        if group.group_type != GROUPTYPE_RAID {
+            return self.master_candidates.iter().copied().map(Some).collect();
+        }
+        let mut slots: Vec<Option<u64>> = vec![None; MASTER_LOOT_CANDIDATE_SLOTS];
+        for &guid in &self.master_candidates {
+            // Everyone else's subgroup rides their roster entry; ours rides `own_flags`, and the
+            // fallback IS us — `SMSG_GROUP_LIST`'s member array is the *other* members, so the one
+            // candidate guid that can never be found in it is our own (the server puts us in the
+            // candidate list: `Group::MasterLoot` walks the whole group).
+            let flags = group
+                .members
+                .iter()
+                .find(|m| m.guid == guid)
+                .map_or(group.own_flags, |m| m.flags);
+            let base = usize::from(flags & GROUP_MEMBER_SUBGROUP) * MEMBERS_PER_RAID_GROUP;
+            let end = (base + MEMBERS_PER_RAID_GROUP).min(MASTER_LOOT_CANDIDATE_SLOTS);
+            if let Some(free) = (base..end).find(|&i| slots[i].is_none()) {
+                slots[free] = Some(guid);
+            }
+        }
+        while slots.last().is_some_and(Option::is_none) {
+            slots.pop(); // trailing empties read as nil either way; keep the snapshot small
+        }
+        slots
+    }
+
+    /// The candidate at a 1-based menu index, through [`LootState::placed_candidates`].
+    fn master_candidate(&self, index_1based: u32, group: &GroupState) -> Option<u64> {
+        self.placed_candidates(group)
+            .get(index_1based.checked_sub(1)? as usize)
+            .copied()
+            .flatten()
     }
 }
 
@@ -492,6 +590,14 @@ fn loot_error_text(reason: u8) -> String {
         e::STUNNED => "You can't do that while stunned.".into(),
         e::PLAYER_NOT_FOUND => "You can't loot that right now.".into(),
         e::ALREADY_PICKPOCKETED => "Those pockets are already empty.".into(),
+        // The master looter's three refusals (decision 1675). These reach only the master looter,
+        // in answer to a `CMSG_LOOT_MASTER_GIVE` the server would not honour
+        // (`LootHandler.cpp:718-729`), and unlike the lines above they are QUOTED from 1.12's own
+        // GlobalStrings (l.1679-1681) rather than composed — the reference has real strings for
+        // exactly this trio.
+        e::MASTER_INV_FULL => "That player's inventory is full".into(),
+        e::MASTER_UNIQUE_ITEM => "Player has too many of that item already".into(),
+        e::MASTER_OTHER => "Can't assign item to that player".into(),
         other => format!("You can't loot that ({other})."),
     }
 }
@@ -600,6 +706,7 @@ fn snapshot(
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     rolls: RollCatalogs,
+    who: Candidates,
 ) -> Option<LootSnapshot> {
     loot.source?;
     let mut rows = Vec::with_capacity(loot.items.len() + 1);
@@ -626,7 +733,51 @@ fn snapshot(
     Some(LootSnapshot {
         rows,
         fishing: loot.fishing,
+        master_candidates: who.names_for(loot),
     })
+}
+
+/// The two name sources a master-loot candidate guid can resolve through (decision 1675). The
+/// roster is the primary one — `SMSG_GROUP_LIST` carries every other member's name outright, so no
+/// query is needed — and the name cache covers the one guid the roster never lists: **our own**,
+/// which vmangos includes in the candidate list (`Group::MasterLoot` walks the whole group,
+/// `Group.cpp:919-937`) but excludes from the member array it sends us.
+#[derive(Clone, Copy)]
+struct Candidates<'a> {
+    group: &'a GroupState,
+    names: &'a NameCache,
+}
+
+impl Candidates<'_> {
+    /// The open window's candidate slots as NAMES, with two kinds of hole preserved: an empty
+    /// slot, and an occupied slot whose name has not resolved yet.
+    ///
+    /// Both read as `nil` from `GetMasterLootCandidate`, which is what the real binding does —
+    /// `0x4c2f10` takes its name from the guid→name cache `0x55f080` and pushes **nil** on a miss
+    /// (`0x4c2f91`), the same value it pushes for an empty slot. The miss is transient: the cache
+    /// queues a lookup with `0x4c2fb0` as its completion callback, and that callback fires event
+    /// `0x1f8` — `UPDATE_MASTER_LOOT_LIST`, whose whole job is to repaint the menu once a name
+    /// lands. Answering an empty string instead would put a blank row in the dropdown and make
+    /// that event pointless.
+    fn names_for(&self, loot: &LootState) -> Vec<Option<String>> {
+        loot.placed_candidates(self.group)
+            .into_iter()
+            .map(|slot| slot.and_then(|guid| self.name(guid)))
+            .collect()
+    }
+
+    /// A candidate's display name, or `None` while it is unresolved. The roster is the primary
+    /// source — `SMSG_GROUP_LIST` carries every other member's name outright — and the name cache
+    /// covers our own guid, which that array never lists.
+    fn name(&self, guid: u64) -> Option<String> {
+        self.group
+            .members
+            .iter()
+            .find(|m| m.guid == guid)
+            .map(|m| m.name.clone())
+            .or_else(|| self.names.peek(guid).map(str::to_string))
+            .filter(|n| !n.is_empty())
+    }
 }
 
 /// Compose one `CHAT_MSG_LOOT` receive line — the whole of `CGGameUI::OnItemPush`'s self branch,
@@ -754,6 +905,9 @@ fn feed_loot(
     // only source either can come from.
     props: Option<Res<crate::items::RandomProperties>>,
     enchants: Option<Res<crate::items::Enchants>>,
+    // The two master-loot candidate name sources (decision 1675) — see [`Candidates`].
+    group: Res<GroupState>,
+    names: Res<NameCache>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -782,7 +936,11 @@ fn feed_loot(
         rolls,
     );
 
-    let fresh = snapshot(&loot, &mut items, icons.as_deref(), &commands, rolls);
+    let who = Candidates {
+        group: &group,
+        names: &names,
+    };
+    let fresh = snapshot(&loot, &mut items, icons.as_deref(), &commands, rolls, who);
     if fresh == *last {
         return;
     }
@@ -802,16 +960,23 @@ fn feed_loot(
                         Some(LootAction::Money) => {
                             let _ = commands.0.send(ClientCommand::LootMoney);
                         }
+                        // Only an ALLOW_LOOT row: the reference's auto-loot sweep processes a
+                        // record exactly when the wire's slot-type getter answers 0
+                        // (`0x4c2180`/`0x4c2196 test eax,eax; jne` — wow-re
+                        // `ui/scratch/loot-slot-record.md` §2). So a master-loot row is not
+                        // swept into a dropdown, and a roll-in-progress row is not sent as a
+                        // take the server would refuse.
                         Some(LootAction::Item {
                             wire_slot,
                             display_id,
-                        }) => {
+                            slot_type,
+                        }) if slot_type == slot_type::ALLOW_LOOT => {
                             let _ = commands
                                 .0
                                 .send(ClientCommand::AutostoreLootItem { slot: wire_slot });
                             pickup.write(crate::sound::LootPickupSound { display_id });
                         }
-                        None => {}
+                        Some(LootAction::Item { .. }) | None => {}
                     }
                 }
             }
@@ -820,7 +985,16 @@ fn feed_loot(
         // keeping the current page (LOOT_UPDATE, the merchant's MERCHANT_UPDATE twin — this replaces
         // Blizzard's per-button LOOT_SLOT_CLEARED optimization with a full re-snapshot, exactly as
         // the merchant seam replaced per-row stock updates).
-        (Some(_), Some(_)) => script.fire_event("LOOT_UPDATE", vec![]),
+        (Some(before), Some(after)) => {
+            script.fire_event("LOOT_UPDATE", vec![]);
+            // The reference keeps the two apart: `LOOT_UPDATE` repaints the rows, while a changed
+            // candidate list refreshes the open dropdown in place without re-toggling it
+            // (`LootFrame_OnEvent`'s `UIDropDownMenu_Refresh(GroupLootDropDown)`,
+            // `LootFrame.lua:63`). Firing it only on a real change keeps a closed menu untouched.
+            if before.master_candidates != after.master_candidates {
+                script.fire_event("UPDATE_MASTER_LOOT_LIST", vec![]);
+            }
+        }
         (Some(_), None) => script.fire_event("LOOT_CLOSED", vec![]),
         (None, None) => {}
     }
@@ -839,6 +1013,8 @@ fn drain_loot(
     mut latch: ResMut<LootLatch>,
     commands: Res<NetCommands>,
     mut pickup: MessageWriter<crate::sound::LootPickupSound>,
+    // The candidate placement is raid-shaped, so resolving a clicked menu index needs the roster.
+    group: Res<GroupState>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -851,9 +1027,22 @@ fn drain_loot(
                 debug!("ui_loot: loot coin (row {index})");
                 let _ = commands.0.send(ClientCommand::LootMoney);
             }
+            // A master-loot row is not takeable by anyone — it is ASSIGNED. The click opens the
+            // candidate dropdown instead of sending a take, and the decision is made here, on the
+            // wire's slot-type byte, rather than in Lua: the real client branches on the same byte
+            // inside its take dispatcher before any Lua runs (`0x4c2790`, which already reads the
+            // getter at `0x4c28a9` — wow-re `ui/scratch/loot-slot-record.md` §2), and the
+            // reference `LootFrame.lua` never consults `GetLootMethod` at all. The row's
+            // `LootFrame.selected*` bookkeeping is already stashed by the Lua `OnClick` that ran
+            // before this drain, so the event's `ToggleDropDownMenu` has its anchor button.
+            Some(LootAction::Item { slot_type, .. }) if slot_type == slot_type::MASTER => {
+                debug!("ui_loot: row {index} is master-loot — opening the candidate list");
+                script.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
+            }
             Some(LootAction::Item {
                 wire_slot,
                 display_id,
+                ..
             }) => {
                 debug!("ui_loot: autostore row {index} (wire slot {wire_slot})");
                 let _ = commands
@@ -865,6 +1054,44 @@ fn drain_loot(
             }
             None => debug!("ui_loot: LootSlot({index}) out of range — ignored"),
         }
+    }
+    // The master looter's assignments (`GiveMasterLoot(slot, candidateIndex)`): the Lua hands two
+    // 1-based display numbers, the app turns them into the wire slot and the recipient guid. Both
+    // must resolve — a stale row or a candidate index past the end of the list is dropped here
+    // rather than sent, since the app could not address either.
+    for (index, candidate) in script.take_loot_master_gives() {
+        let Some(guid) = loot.source else {
+            continue;
+        };
+        let (
+            Some(LootAction::Item {
+                wire_slot,
+                slot_type,
+                ..
+            }),
+            Some(target),
+        ) = (
+            loot.action_at(index),
+            loot.master_candidate(candidate, &group),
+        )
+        else {
+            debug!("ui_loot: GiveMasterLoot({index}, {candidate}) unresolvable — ignored");
+            continue;
+        };
+        // The row must still BE a master row. The real sender checks exactly this before it
+        // builds anything — `0x4c2940` re-reads the slot type through `0x5ebce0(record+0x18)`
+        // and bails unless it is 2 — so a give aimed at an ordinary row sends nothing at all
+        // rather than a packet the server would refuse.
+        if slot_type != slot_type::MASTER {
+            debug!("ui_loot: GiveMasterLoot({index}) is not a master row — ignored");
+            continue;
+        }
+        debug!("ui_loot: master-give row {index} (wire slot {wire_slot}) to {target:#x}");
+        let _ = commands.0.send(ClientCommand::LootMasterGive {
+            guid,
+            slot: wire_slot,
+            target,
+        });
     }
     if script.take_loot_close() {
         if let Some(guid) = loot.source {
@@ -893,8 +1120,16 @@ fn drain_loot(
 mod tests {
     use super::*;
     use benilla_protocol::messages::loot_type;
+    use benilla_protocol::messages::GroupMemberEntry;
     use benilla_protocol::messages::ObjectFields;
     use benilla_protocol::EntityKind;
+
+    /// An empty group + name cache — what every loot test that is not about master loot wants:
+    /// no candidates resolve, and a snapshot's `master_candidates` comes out empty. Master-loot
+    /// tests build their own roster.
+    fn nobody() -> (GroupState, NameCache) {
+        (GroupState::default(), NameCache::default())
+    }
 
     /// Descriptor field indices the predicate-B table reads.
     const F_GO_TYPE_ID: u16 = 21;
@@ -983,6 +1218,150 @@ mod tests {
         }
     }
 
+    /// The same row, stamped MASTER — what vmangos sends every group member for every row once
+    /// the group's loot method is master loot.
+    fn master_item(slot: u8, entry: u32, count: u32) -> LootItem {
+        LootItem {
+            slot_type: slot_type::MASTER,
+            ..item(slot, entry, count)
+        }
+    }
+
+    /// The candidate list rides AHEAD of the response it belongs to (the server sends it from
+    /// inside `SendLoot`), so the window has to claim what was staged before it opened — and a
+    /// later window opened with no list of its own must not inherit the previous one's.
+    #[test]
+    fn the_candidate_list_arrives_before_its_window_and_does_not_outlive_it() {
+        let mut loot = LootState::default();
+        // A default GroupState is a plain party (`group_type` 0) — the flat placement path.
+        let party = GroupState::default();
+
+        // Staged with no window open: nothing to read yet.
+        loot.set_master_candidates(vec![0xA, 0xB, 0xC]);
+        assert_eq!(
+            loot.master_candidate(1, &party),
+            None,
+            "no window, no candidates"
+        );
+
+        // The response lands: the window claims the staged list, 1-based.
+        loot.open(0x42, loot_type::CORPSE, 0, vec![master_item(0, 117, 1)]);
+        assert_eq!(loot.master_candidate(1, &party), Some(0xA));
+        assert_eq!(loot.master_candidate(3, &party), Some(0xC));
+        assert_eq!(loot.master_candidate(4, &party), None, "past the end");
+        assert_eq!(
+            loot.master_candidate(0, &party),
+            None,
+            "0 is not a Lua index"
+        );
+
+        // A refresh while the window is up applies in place (the ref's UPDATE_MASTER_LOOT_LIST).
+        loot.set_master_candidates(vec![0xA, 0xB]);
+        assert_eq!(loot.master_candidate(2, &party), Some(0xB));
+        assert_eq!(loot.master_candidate(3, &party), None, "the list shrank");
+
+        // Close, then a plain corpse under a different loot method: no candidates leak across.
+        loot.clear();
+        loot.open(0x43, loot_type::CORPSE, 0, vec![item(0, 117, 1)]);
+        assert_eq!(
+            loot.master_candidate(1, &party),
+            None,
+            "a fresh window starts empty"
+        );
+    }
+
+    /// **The raid placement — the finding that corrected this code** (VERIFIED, the 5875
+    /// binary's `SMSG_LOOT_MASTER_LIST` handler `0x61c550`). In a raid the candidate array is not
+    /// the wire order: each guid is filed into the first free slot of its own subgroup's block of
+    /// five. It was built dense first, which would have labelled every candidate with the wrong
+    /// raid group in the dropdown's "Group N" submenus.
+    #[test]
+    fn raid_candidates_file_into_their_own_subgroup_block() {
+        let member = |guid: u64, name: &str, subgroup: u8| GroupMemberEntry {
+            name: name.into(),
+            guid,
+            status: 0,
+            flags: subgroup,
+        };
+        let mut raid = GroupState {
+            group_type: GROUPTYPE_RAID,
+            own_flags: 0, // we are in subgroup 0
+            ..GroupState::default()
+        };
+        raid.members = vec![
+            member(0xB, "Cairne", 0),
+            member(0xC, "Vol", 2),
+            member(0xD, "Sylvanas", 2),
+        ];
+
+        let mut loot = LootState::default();
+        // Wire order deliberately interleaves the subgroups — placement must ignore it.
+        loot.set_master_candidates(vec![0xC, 0xA, 0xD, 0xB]);
+        loot.open(0x42, loot_type::CORPSE, 0, vec![master_item(0, 117, 1)]);
+
+        // Subgroup 0 fills slots 1-2 (us at 0xA, then Cairne); subgroup 2 fills 11-12, in the
+        // order the wire listed them.
+        assert_eq!(loot.master_candidate(1, &raid), Some(0xA), "us, group 1");
+        assert_eq!(
+            loot.master_candidate(2, &raid),
+            Some(0xB),
+            "Cairne, group 1"
+        );
+        for empty in [3, 4, 5, 6, 7, 8, 9, 10] {
+            assert_eq!(
+                loot.master_candidate(empty, &raid),
+                None,
+                "slot {empty} belongs to an empty group"
+            );
+        }
+        assert_eq!(loot.master_candidate(11, &raid), Some(0xC), "Vol, group 3");
+        assert_eq!(
+            loot.master_candidate(12, &raid),
+            Some(0xD),
+            "Sylvanas, group 3"
+        );
+        assert_eq!(loot.master_candidate(13, &raid), None);
+
+        // The same list in a plain PARTY is flat — the binary picks the path once, off the raid
+        // member count, and the party path just uses the wire's own loop counter.
+        let party = GroupState {
+            members: raid.members.clone(),
+            ..GroupState::default()
+        };
+        assert_eq!(loot.master_candidate(1, &party), Some(0xC));
+        assert_eq!(loot.master_candidate(4, &party), Some(0xB));
+        assert_eq!(loot.master_candidate(5, &party), None);
+    }
+
+    /// A master-loot row is not takeable — the click has to divert. The state layer's half of
+    /// that is carrying the wire's `slot_type` out to the drain alongside the wire slot.
+    #[test]
+    fn a_master_row_reports_its_slot_type() {
+        let mut loot = LootState::default();
+        loot.open(
+            0x42,
+            loot_type::CORPSE,
+            0,
+            vec![master_item(0, 117, 1), item(1, 2589, 5)],
+        );
+        assert!(matches!(
+            loot.action_at(1),
+            Some(LootAction::Item {
+                wire_slot: 0,
+                slot_type: slot_type::MASTER,
+                ..
+            })
+        ));
+        assert!(matches!(
+            loot.action_at(2),
+            Some(LootAction::Item {
+                wire_slot: 1,
+                slot_type: slot_type::ALLOW_LOOT,
+                ..
+            })
+        ));
+    }
+
     /// One `SMSG_ITEM_PUSH_RESULT` as the loot path sees it (self, shown in chat, no random
     /// property) — the net bridge's guid/`showInChat` gates are tested at their own seam.
     fn push(entry: u32, count: u32, from_npc: bool, created: bool) -> ItemPushResult {
@@ -1025,14 +1404,16 @@ mod tests {
             loot.action_at(2),
             Some(LootAction::Item {
                 wire_slot: 0,
-                display_id: 1117
+                display_id: 1117,
+                ..
             })
         ));
         assert!(matches!(
             loot.action_at(3),
             Some(LootAction::Item {
                 wire_slot: 1,
-                display_id: 3589
+                display_id: 3589,
+                ..
             })
         ));
         assert!(loot.action_at(4).is_none());
@@ -1343,10 +1724,22 @@ mod tests {
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
+        let (grp, nm) = nobody();
         let mut loot = LootState::default();
         // A pure-copper drop: name reads "4 Copper", icon is the copper coin pile (_05).
         loot.open(0x42, loot_type::CORPSE, 4, vec![]);
-        let snap = snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("open");
+        let snap = snapshot(
+            &loot,
+            &mut items,
+            None,
+            &commands,
+            RollCatalogs::NONE,
+            Candidates {
+                group: &grp,
+                names: &nm,
+            },
+        )
+        .expect("open");
         assert_eq!(snap.rows.len(), 1, "coin row only");
         let coin = snap.rows[0].as_ref().expect("coin row present");
         assert!(coin.is_coin);
@@ -1359,11 +1752,34 @@ mod tests {
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
+        let (grp, nm) = nobody();
         let mut loot = LootState::default();
         // Closed → no snapshot.
-        assert!(snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).is_none());
+        assert!(snapshot(
+            &loot,
+            &mut items,
+            None,
+            &commands,
+            RollCatalogs::NONE,
+            Candidates {
+                group: &grp,
+                names: &nm,
+            },
+        )
+        .is_none());
         loot.open(0x42, loot_type::CORPSE, 12_345, vec![item(0, 117, 3)]);
-        let snap = snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("open");
+        let snap = snapshot(
+            &loot,
+            &mut items,
+            None,
+            &commands,
+            RollCatalogs::NONE,
+            Candidates {
+                group: &grp,
+                names: &nm,
+            },
+        )
+        .expect("open");
         assert_eq!(snap.rows.len(), 2, "coin + one item");
         let coin = snap.rows[0].as_ref().expect("coin row present");
         assert!(coin.is_coin);
@@ -1378,16 +1794,36 @@ mod tests {
         // Looting the coin turns row 1 into a gap — the item KEEPS its position (the reference's
         // fixed slot array; the director's report was exactly this row sliding up).
         loot.clear_money();
-        let snap =
-            snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("still open");
+        let snap = snapshot(
+            &loot,
+            &mut items,
+            None,
+            &commands,
+            RollCatalogs::NONE,
+            Candidates {
+                group: &grp,
+                names: &nm,
+            },
+        )
+        .expect("still open");
         assert_eq!(snap.rows.len(), 2, "the layout keeps both slots");
         assert!(snap.rows[0].is_none(), "the looted coin slot is a gap");
         assert!(snap.rows[1].is_some(), "the item stays at position 2");
 
         // Looting the item empties the layout entirely (both gaps) — and arms the auto-close.
         loot.remove_slot(0);
-        let snap =
-            snapshot(&loot, &mut items, None, &commands, RollCatalogs::NONE).expect("still open");
+        let snap = snapshot(
+            &loot,
+            &mut items,
+            None,
+            &commands,
+            RollCatalogs::NONE,
+            Candidates {
+                group: &grp,
+                names: &nm,
+            },
+        )
+        .expect("still open");
         assert_eq!(snap.rows, vec![None, None]);
         assert!(loot.take_auto_release(), "nothing lootable left");
     }

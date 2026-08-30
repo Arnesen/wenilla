@@ -4,7 +4,9 @@
 
 use std::ffi::CString;
 
-use crate::track::{M2QuatTrack, M2ScalarTrack, M2Vec3Track};
+use crate::track::{
+    M2QuatTrack, M2ScalarSplineTrack, M2ScalarTrack, M2Vec3SplineTrack, M2Vec3Track,
+};
 
 /// A 3-float vector (position / normal / pivot).
 #[derive(Clone, Copy)]
@@ -220,6 +222,44 @@ pub struct M2TextureTransform {
     pub scaling: M2Vec3Track,
 }
 
+/// One M2 **camera** record (header `cameras` @`0x124`, file stride `0x7c`) — the authored
+/// eye/target path a `Cameras\*.m2` cinematic fly-by *is*, and the same record the portrait bake
+/// and the `<Model>` panes frame themselves with.
+///
+/// Field map VERIFIED at the reference's M2 load `0x70ebd0` + the publish pass `0x718960` (wow-re
+/// `ui.md` §"The `Model` / `PlayerModel` pane camera", `models.md` §182):
+/// `type@+0x00 · fov@+0x04 · farClip@+0x08 · nearClip@+0x0c · positions@+0x10 ·
+/// position_base@+0x2c · target@+0x38 · target_position_base@+0x54 · roll@+0x60`. The load copies
+/// only fov/far/near into the runtime `CCamera`; the tracks are evaluated by the animate kernel and
+/// **published against the bases** — `eye = position_base + positions(t)`,
+/// `target = target_position_base + target(t)`, `roll = roll(t)` — so a keyless track leaves the
+/// base as the value. Character and creature models author a single `(0,0,0)` key on all three
+/// (their pane camera is a frozen constant); the fly-bys are the case the tracks exist for.
+#[derive(Clone)]
+pub struct M2Camera {
+    /// The record's `type` word. `0` = portrait, `1` = "characterinfo" (the `<PlayerModel>` pane's
+    /// raw index 1); every shipped `Cameras\*.m2` fly-by authors `-1`.
+    pub camera_type: i32,
+    /// **Diagonal** field of view, radians — the reference's `camera_view_lookat` `0x7ac640` takes
+    /// the half-angle as `θ = (fov/2)/√(aspect²+1)`, *not* `fov/2` (wow-re
+    /// `ui/scratch/portrait-projection-aspect.md`). All ten fly-bys author `0.7854` (45°).
+    pub fov: f32,
+    /// Far clip as authored (`+0x08`). Every fly-by carries `27.777779` (= 1000/36).
+    pub far_clip: f32,
+    /// Near clip as authored (`+0x0c`). Every fly-by carries `0.22222222` (= 8/36).
+    pub near_clip: f32,
+    /// The eye path, relative to [`Self::position_base`].
+    pub positions: M2Vec3SplineTrack,
+    /// The eye's base position, model space (`+0x2c`).
+    pub position_base: [f32; 3],
+    /// The look-at path, relative to [`Self::target_base`].
+    pub target: M2Vec3SplineTrack,
+    /// The look-at base position, model space (`+0x54`).
+    pub target_base: [f32; 3],
+    /// Roll about the view axis, radians (`+0x60`).
+    pub roll: M2ScalarSplineTrack,
+}
+
 /// The parsed model (render subset).
 pub struct M2Model {
     pub vertices: Vec<M2Vertex>,
@@ -262,6 +302,15 @@ pub struct M2Model {
     /// `gseq`-tagged tracks wrap on.
     pub global_sequences: Vec<u32>,
     pub bones: Vec<M2Bone>,
+    /// The authored camera records (header `0x124`) — see [`M2Camera`]. Empty for the overwhelming
+    /// majority of models; a `Cameras\*.m2` fly-by carries exactly one.
+    pub cameras: Vec<M2Camera>,
+    /// The **CameraLookup** table (header `0x12c`, u16): a camera *purpose* index → the slot in
+    /// [`Self::cameras`] that serves it. The portrait bake selects through it (`cameraLookup[0]`,
+    /// `0x525266`); the `<Model>` pane indexes [`Self::cameras`] raw instead (wow-re
+    /// `ui/scratch/modelframe-camera-law.md`). Carried so a selection can be written the way the
+    /// reference writes it rather than assumed 1:1.
+    pub camera_lookup: Vec<u16>,
     pub raw_data: M2RawData,
     pub header: M2Header,
     /// Model-space **Z** of attachment id 17 — the reference's follow-camera pivot height (wow-re

@@ -364,6 +364,17 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             services,
             greeting: title,
         }],
+        ServerPacket::InvalidatePlayer { guid } => vec![SessionEvent::InvalidatePlayer { guid }],
+        ServerPacket::ListStabledPets {
+            npc,
+            num_stable_slots,
+            pets,
+        } => vec![SessionEvent::ListStabledPets {
+            npc,
+            num_stable_slots,
+            pets,
+        }],
+        ServerPacket::StableResult { result } => vec![SessionEvent::StableResult { result }],
         ServerPacket::TrainerBuySucceeded { trainer, spell_id } => {
             vec![SessionEvent::TrainerBuySucceeded { trainer, spell_id }]
         }
@@ -433,6 +444,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::LootRoll(p) => vec![SessionEvent::LootRoll(p)],
         ServerPacket::LootRollWon(p) => vec![SessionEvent::LootRollWon(p)],
         ServerPacket::LootAllPassed(p) => vec![SessionEvent::LootAllPassed(p)],
+        ServerPacket::LootMasterList { candidates } => {
+            vec![SessionEvent::LootMasterList { candidates }]
+        }
         ServerPacket::ItemPushResult(p) => vec![SessionEvent::ItemPushResult(p)],
         ServerPacket::CorpseQuery(loc) => vec![SessionEvent::CorpseQuery {
             found: loc.found,
@@ -554,6 +568,23 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }
         ServerPacket::GuildDecline { name } => vec![SessionEvent::GuildDecline { name }],
         ServerPacket::GuildInfo(info) => vec![SessionEvent::GuildInfo(info)],
+        ServerPacket::PetitionShowList(list) => vec![SessionEvent::PetitionShowList(list)],
+        ServerPacket::PetitionShowSignatures(sigs) => {
+            vec![SessionEvent::PetitionShowSignatures(sigs)]
+        }
+        ServerPacket::PetitionSignResults(results) => {
+            vec![SessionEvent::PetitionSignResults(results)]
+        }
+        ServerPacket::PetitionQueryResponse(response) => {
+            vec![SessionEvent::PetitionQueryResponse(response)]
+        }
+        ServerPacket::TurnInPetitionResults { result } => {
+            vec![SessionEvent::TurnInPetitionResults { result }]
+        }
+        ServerPacket::PetitionDeclined { player } => {
+            vec![SessionEvent::PetitionDeclined { player }]
+        }
+        ServerPacket::PetitionRenamed(rename) => vec![SessionEvent::PetitionRenamed(rename)],
         ServerPacket::DestroyObject { guid } => vec![SessionEvent::ObjectDestroyed(guid)],
         ServerPacket::TriggerCinematic { cinematic_id } => {
             vec![SessionEvent::CinematicTriggered { cinematic_id }]
@@ -653,6 +684,22 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::ServerUnixTime { unix_time }]
         }
         ServerPacket::BindPoint { area, .. } => vec![SessionEvent::BindPoint { area }],
+        ServerPacket::GmTicketAnswer { ticket } => vec![SessionEvent::GmTicket { ticket }],
+        ServerPacket::GmTicketCreated { response } => {
+            vec![SessionEvent::GmTicketCreated { response }]
+        }
+        ServerPacket::GmTicketUpdated { response } => {
+            vec![SessionEvent::GmTicketUpdated { response }]
+        }
+        ServerPacket::GmTicketDeleted { response } => {
+            vec![SessionEvent::GmTicketDeleted { response }]
+        }
+        ServerPacket::GmTicketSystemStatus { status } => {
+            vec![SessionEvent::GmTicketSystemStatus { status }]
+        }
+        ServerPacket::GmTicketStatusUpdate { status } => {
+            vec![SessionEvent::GmTicketStatusUpdate { status }]
+        }
         ServerPacket::BinderConfirm { binder } => vec![SessionEvent::BinderConfirm { binder }],
         ServerPacket::TalentWipeConfirm { trainer, cost } => {
             vec![SessionEvent::TalentWipeConfirm { trainer, cost }]
@@ -700,6 +747,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 pet_family,
                 rank,
                 type_flags,
+                display_id,
                 civilian,
                 racial_leader,
             ) = match info {
@@ -718,10 +766,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                     i.pet_family,
                     i.rank,
                     i.type_flags,
+                    i.display_id,
                     i.civilian,
                     i.racial_leader,
                 ),
-                None => (None, None, None, 0, 0, 0, false, false),
+                None => (None, None, None, 0, 0, 0, 0, false, false),
             };
             vec![SessionEvent::CreatureName {
                 entry,
@@ -731,6 +780,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 pet_family,
                 rank,
                 type_flags,
+                display_id,
                 civilian,
                 racial_leader,
             }]

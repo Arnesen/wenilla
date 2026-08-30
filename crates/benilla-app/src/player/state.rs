@@ -956,6 +956,13 @@ impl Player {
         self.ride.as_ref().map(|r| r.guid)
     }
 
+    /// The transport we're standing on, as its ECS entity — what the **ride frame** is read from
+    /// (`benilla_world::ride_frame`, decision 1591): a rider's world-space effects are stored in
+    /// the deck's frame, and the deck's live pose is the transport entity's transform.
+    pub(crate) fn ride_entity(&self) -> Option<Entity> {
+        self.ride.as_ref().map(|r| r.entity)
+    }
+
     /// A server-authored spline currently owns the avatar (Charge/knockback/taxi — the
     /// [`super::server_ride`] state). For instruments (the taxi probe watches the flight run) and
     /// the UI's `UnitOnTaxi` feed.

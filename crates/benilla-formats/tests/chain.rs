@@ -127,6 +127,50 @@ fn trigger_creature_models_carry_no_render_geometry() {
 }
 
 #[test]
+fn the_trigger_creature_still_carries_the_attachments_its_visible_self_rides() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+
+    // Decision 1656: a trigger creature draws nothing *and is not therefore empty*. The
+    // Naxxramas weapon mobs (`Unholy Axe`/`Swords`/`Staff`, creature_template 16194/16215/16216,
+    // all display 15294) ARE an `InvisibleStalker` body — the model above, `nVertices == 0` —
+    // whose entire visible self hangs off its attachment points: the weapon on HandRight, the
+    // name plate on PlayerName. If either of these ever stops resolving, the mobs go back to
+    // being a bare name on the floor, and nothing in the render lane would say so.
+    let bytes = chain
+        .read_file("Creature\\InvisibleStalker\\InvisibleStalker.m2")
+        .expect("read InvisibleStalker.m2");
+    let attach = benilla_formats::parse_m2_attachments(&bytes).expect("parse attachments");
+    let at = |id: u16| attach.iter().find(|a| a.id == id).copied();
+
+    let hand = at(1).expect("HandRight (1) — the drawn mainhand, where the axe hangs");
+    assert!(
+        hand.position[2] > 0.5,
+        "the hand attachment sits on the body, not at the origin: {:?}",
+        hand.position
+    );
+    let name = at(18).expect("PlayerName (18) — `0x608640`'s overhead anchor");
+    assert!(
+        name.position[2] > 2.0,
+        "the name anchor is overhead, not at the feet: {:?}",
+        name.position
+    );
+
+    // And the bounds really are degenerate, which is why the plate CANNOT come from the fallback
+    // (`feet + scale × bbox_z × 1.25` = feet) and must come from the attachment above.
+    let bounds = benilla_formats::load_m2_bounds(
+        &mut chain,
+        "Creature\\InvisibleStalker\\InvisibleStalker.mdx",
+    )
+    .expect("bounds");
+    assert_eq!(
+        bounds.bbox_max[2] - bounds.bbox_min[2],
+        0.0,
+        "a vertex-less model has no vertex box — the overhead fallback is feet-height here"
+    );
+}
+
+#[test]
 fn suppresses_white1_invisible_trap_placeholder() {
     let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");

@@ -340,6 +340,9 @@ pub(super) fn drain_action_uses(
                             spell_index,
                             use_spell: template.use_spell.map(|u| u.spell_id),
                             on_object: None,
+                            is_charter: template.flags
+                                & benilla_protocol::messages::ITEM_FLAG_CHARTER
+                                != 0,
                         },
                         &targeting.context(),
                         &mut ladder,

@@ -354,6 +354,51 @@ impl Creatures {
         })
     }
 
+    /// A built display's **mirror lists** — the same `(PortraitPart, PortraitBillboard)` pair a
+    /// dressed unit's attach-spawned descendants carry, assembled straight from the display cache
+    /// for a creature that has **no world entity at all**: the stable window's stabled pet
+    /// ([`crate::portrait::PortraitStandIn`]).
+    ///
+    /// The split is [`crate::entities::attach::preview`]'s `assemble_pet` law verbatim — every
+    /// batch of the model, camera-facing ones separated out — because it is the same question:
+    /// only the character compositor selects among geosets, and a creature is not a character
+    /// model, so the world's creature path draws every batch of a beast the same way. The
+    /// billboards seat at [`crate::portrait::PortraitSeat::Body`] (the model's own rigged batch:
+    /// its bone's booth joint already bakes the pivot, the 0130 rig identity) with `attach: None`,
+    /// which is exactly what a host model's own batch is.
+    ///
+    /// `None` while the display's model is still loading — the same gate [`Self::display_rig`] and
+    /// [`Self::display_anchors`] apply, so all three become available together.
+    pub(crate) fn display_mirror(
+        &self,
+        display_id: u32,
+    ) -> Option<(
+        Vec<crate::portrait::PortraitPart>,
+        Vec<crate::portrait::PortraitBillboard>,
+    )> {
+        let parts = self.models.get(&display_id)?.parts.as_deref()?;
+        let mut meshes = Vec::new();
+        let mut cards = Vec::new();
+        for part in parts {
+            match &part.billboard {
+                Some(info) => cards.push(crate::portrait::PortraitBillboard {
+                    mesh: part.mesh.clone(),
+                    material: part.material.clone(),
+                    bone: info.bone,
+                    seat: crate::portrait::PortraitSeat::Body,
+                    kind: info.kind,
+                    attach: None,
+                }),
+                None => meshes.push(crate::portrait::PortraitPart {
+                    static_mesh: part.mesh.clone(),
+                    skinned_mesh: part.skinned_mesh.clone(),
+                    material: part.material.clone(),
+                }),
+            }
+        }
+        Some((meshes, cards))
+    }
+
     /// A built display's **booth rig** — what the portrait booth needs to pose a fresh instance at
     /// Stand like the ref bake (wow-re portrait-render §4 D2: a throwaway instance armed to
     /// Stand/seq-0, not the unit's live world pose): the rest skeleton, the shared inverse bind
@@ -991,6 +1036,10 @@ fn setup_entities(
         Ok(prices) => commands.insert_resource(crate::ui_bank::BankPrices(prices)),
         Err(e) => warn!("bank bag slot prices unavailable, the purchase row shows 0: {e:#}"),
     }
+    match benilla_formats::load_stable_slot_prices(&mut chain) {
+        Ok(prices) => commands.insert_resource(crate::ui_stable::StableSlotPrices(prices)),
+        Err(e) => warn!("stable slot prices unavailable, the purchase row shows 0: {e:#}"),
+    }
     match benilla_formats::load_stationery_catalog(&mut chain) {
         Ok(catalog) => commands.insert_resource(crate::ui_mail::Stationery(catalog)),
         Err(e) => warn!("stationery catalog unavailable, mail uses the default backdrop: {e:#}"),
@@ -1020,6 +1069,10 @@ fn update_display_models(
     // its model builds with no wire entity (the screens run pre-world, where no NetEntity carries it).
     glue_preview: Option<Res<crate::portrait::GluePreview>>,
     char_create: Option<Res<CharCreate>>,
+    // The stable pane's want (wow-re `stable-master-window.md` §7.1): a stabled pet is a row in the
+    // server's character-pet cache and a `CreatureDisplayInfo` id — there is no wire entity to
+    // carry it, so the booth's own selection is the want.
+    stable_booth: Option<Res<crate::portrait::StableBooth>>,
 ) {
     if !mats.ready() {
         return; // no lighting yet → no materials to build
@@ -1048,6 +1101,15 @@ fn update_display_models(
         if let Some(pet) = preview.look.and_then(|l| l.pet()) {
             actives.push((EntityKind::Unit, pet.display_id));
         }
+    }
+
+    // The stable window's selected pet — the same wantless want, and the same `Unit` kind: the
+    // creature query answers with a `CreatureDisplayInfo` id, so it resolves down the plain
+    // creature chain, skins and all. Asked for whenever the pane names one, live pet or not; a
+    // summoned pet's display is already in the scan above, and a repeat is free (the cache is
+    // keyed by display).
+    if let Some(display) = stable_booth.as_deref().and_then(|b| b.display_id) {
+        actives.push((EntityKind::Unit, display));
     }
 
     for (kind, disp) in actives {
@@ -1313,5 +1375,98 @@ mod world_unit_tests {
                 .is_none(),
             "the marker is reconciled off, not left behind"
         );
+    }
+}
+
+#[cfg(test)]
+mod display_mirror_tests {
+    use super::*;
+    use crate::portrait::PortraitSeat;
+
+    /// One synthetic batch — plain, or a camera-facing one on `bone`.
+    fn part(billboard: Option<u16>) -> crate::entities::display::EntityPart {
+        crate::entities::display::EntityPart {
+            mesh: Handle::default(),
+            geometry: std::sync::Arc::new(benilla_formats::RenderSubmesh::default()),
+            aabb: None,
+            skinned_mesh: Some(Handle::default()),
+            welded_billboard: false,
+            material: Handle::default(),
+            material_interior: None,
+            material_interior_bake: None,
+            material_interior_bake_blend: None,
+            fade_blend: None,
+            zfill: None,
+            blend: benilla_formats::ModelBlend::Opaque,
+            additive: false,
+            two_sided: false,
+            geoset_id: 0,
+            char_slot: None,
+            billboard: billboard.map(|bone| benilla_assets::BillboardInfo {
+                pivot: Vec3::ZERO,
+                bone,
+                kind: benilla_formats::BillboardKind::Spherical,
+                scale_anim: None,
+                seq_translations: Vec::new(),
+            }),
+            alpha_anim: None,
+            rgb_anim: None,
+            ground_quad: None,
+        }
+    }
+
+    fn creatures(display_id: u32, dm: crate::entities::display::DisplayModel) -> Creatures {
+        let mut c = Creatures {
+            catalog: Default::default(),
+            models: HashMap::new(),
+        };
+        c.models.insert(display_id, dm);
+        c
+    }
+
+    /// **Every batch the display authored reaches the mirror, split by lane.** This is the same
+    /// failure mode decision 1539's imp filed against the select pet: a display-only assembly that
+    /// reads one field and drops another renders a creature that is *nearly* right, silently. The
+    /// assertion is "everything the cache holds arrives, in the right lane", not a count pinned to
+    /// one model.
+    #[test]
+    fn a_display_mirror_carries_every_batch_and_splits_the_camera_facing_ones() {
+        let mut dm = crate::entities::display::empty_shell();
+        dm.parts = Some(vec![part(None), part(Some(17)), part(None)]);
+        let c = creatures(4449, dm);
+
+        let (parts, cards) = c.display_mirror(4449).expect("the model is built");
+        assert_eq!(parts.len(), 2, "the two plain batches are ordinary parts");
+        assert_eq!(
+            cards.len(),
+            1,
+            "the camera-facing batch is a card, not a part"
+        );
+        assert_eq!(cards[0].bone, 17, "the card keeps its own billboard bone");
+        assert_eq!(
+            cards[0].seat,
+            PortraitSeat::Body,
+            "a creature's own batch is the host model's — its bone's booth joint already bakes the \
+             pivot, so it takes no rider offset"
+        );
+        assert!(
+            cards[0].attach.is_none(),
+            "a batch of the host model itself sits in no M2 attachment node"
+        );
+        assert!(
+            parts.iter().all(|p| p.skinned_mesh.is_some()),
+            "the skinned twin travels — the booth poses it at Stand on its own skeleton"
+        );
+    }
+
+    /// The gate that keeps a half-loaded display out of the booth: `display_mirror` answers `None`
+    /// until the parts are built, the same instant [`Creatures::display_rig`] and
+    /// [`Creatures::display_anchors`] start answering — so the stand-in never spawns a subject the
+    /// booth could frame from fabricated bounds.
+    #[test]
+    fn a_display_still_loading_mirrors_nothing() {
+        let c = creatures(4449, crate::entities::display::empty_shell());
+        assert!(c.display_mirror(4449).is_none(), "parts not built yet");
+        assert!(c.display_mirror(1).is_none(), "unknown display");
     }
 }

@@ -57,6 +57,16 @@ impl Element {
             .is_some_and(|v| v.eq_ignore_ascii_case("true"))
     }
 
+    /// The same, but **presence-aware** — `None` when the attribute is absent.
+    ///
+    /// [`attr_bool`](Self::attr_bool) folds "absent" and `="false"` together, which is fine for a
+    /// flag whose default is off and *silently wrong* for one whose default is on: it turns an
+    /// explicit opt-out into a no-op. `<EditBox autoFocus="false">` is exactly that flag, and the
+    /// shipped UI writes it ten times.
+    pub fn attr_bool_opt(&self, name: &str) -> Option<bool> {
+        self.attr(name).map(|v| v.eq_ignore_ascii_case("true"))
+    }
+
     /// The `name` attribute, if any.
     pub fn name(&self) -> Option<&str> {
         self.attr("name")

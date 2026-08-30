@@ -131,6 +131,7 @@ fn drain_logout(
     commands: Res<NetCommands>,
     mut exit: MessageWriter<AppExit>,
     mut reload: ResMut<crate::ui_script::ReloadUiPending>,
+    mut cinematic: ResMut<crate::cinematic::Cinematic>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -174,6 +175,12 @@ fn drain_logout(
             // Not this module's business beyond routing: the rebuild itself is
             // [`crate::ui_script::run_pending_reload`]'s, at the top of the next frame.
             SessionRequest::ReloadUi => reload.0 = true,
+            // ESC out of a cinematic. It rides this queue rather than the binding table because
+            // that is where the reference puts it: `StopCinematic` has no native callers and no
+            // `Bindings.xml` row — `CinematicFrame`'s own `OnKeyDown` is the whole skip path.
+            SessionRequest::StopCinematic => {
+                crate::cinematic::stop(&mut cinematic, Some(&commands));
+            }
         }
     }
 }

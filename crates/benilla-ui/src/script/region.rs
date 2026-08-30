@@ -772,28 +772,123 @@ pub(super) fn region_set_point(
     Ok(())
 }
 
-/// The measured extent a FontString reports, falling back to an explicit `SetSize`.
+/// `Region:GetWidth()`/`GetHeight()` — **the virtual size getters**, per region class.
 ///
-/// Hoisted out of the text cluster when this file split (0716): `GetStringWidth`/`GetStringHeight`
-/// live in `region::text` and `GetWidth`/`GetHeight` in `region::layout`, and both read it.
+/// The Lua bindings are not field reads. `GetWidth 0x7a1e00` ends `ff 52 1c` and
+/// `GetHeight 0x7a2030` ends `ff 52 20` (wow-re `minimap-ping-law.md`): both dispatch through the
+/// receiver's own **geometry vtable** — slots `+0x1c`/`+0x20` — which is the identical call the
+/// rect resolver makes (`0x767579`). So a region's Lua-visible size and the size its rect is built
+/// from are one number BY CONSTRUCTION on the reference, and this function is how they are one
+/// number here (decision 1670; the resolver half is `layout::content_span` +
+/// `layout::FONTSTRING_MIN_SPAN`, and both are read from here).
+///
+/// | class | law |
+/// |---|---|
+/// | plain frame / title region | the flat authored field, `0x768420` / `0x768410`. No content. |
+/// | `CSimpleTexture` | `0x770720` / `0x770790`: authored when **not exactly `0.0`**, else the art's own texel extent, else `0.0`. |
+/// | `CSimpleFontString` | `0x772930` / `0x772a60`: authored when not `0.0`, else the cached measure — and then **floored at one FrameXML unit**. |
+///
+/// Two details of the FontString row are worth spelling out, because both were wrong here before
+/// and neither is guessable from the name:
+///
+/// * **The authored value WINS.** The old code preferred the measure and fell back to `SetSize`;
+///   the reference's `jp` at `0x77294a` skips the measure entirely when the authored value is
+///   non-zero. Per axis, not per region — `<Size x="290" y="0"/>` takes 290 from the author and
+///   the height from the text.
+/// * **The width is the NATURAL, unwrapped extent** — `0x772890`'s `[fs+0xfc]`, measured with no
+///   wrap constraint, the very cell `GetStringWidth 0x79e510` returns. The *height* is the other
+///   cell, `0x7729b0`'s `[fs+0x100]`, which IS the wrapped line count × line height. So a wrapped
+///   string reports a width wider than its own box and a height taller than one line, and that
+///   asymmetry is the client's (wow-re `fontstring-overflow.md` "The measurement echo").
 pub(super) fn measured_wh(lua: &Lua, this: &Table) -> mlua::Result<(f32, f32)> {
     let rh = region_handle_of(lua, this)?;
     // Same-tick measure when a host font engine is installed — see `region::text`'s `natural_w`.
     // A no-op for a Texture (not a FontString) and for an already-current measure.
     super::measure::ensure_measured(lua, rh);
     let model = lua.app_data_ref::<Model>().expect("model");
-    let d = model.region_data.get(&rh);
-    // The key carries the owner's effective_scale ([`RegionData::measure_key`]) — the same
-    // recipe the request loop stamps, or every read under a SetScale'd owner reports stale.
-    let scale = model
-        .arena
-        .region(rh)
-        .and_then(|r| model.arena.frame(r.owner))
-        .map(|f| f.effective_scale)
-        .unwrap_or(1.0);
-    let m = d.and_then(|d| d.measured.filter(|m| m.key == d.measure_key(scale)));
-    let size = d.and_then(|d| d.size);
-    let w = m.map(|m| m.w).or(size.map(|s| s.0)).unwrap_or(0.0);
-    let h = m.map(|m| m.h).or(size.map(|s| s.1)).unwrap_or(0.0);
-    Ok((w, h))
+    Ok(virtual_span(&model, rh))
+}
+
+/// [`measured_wh`]'s body, on a borrowed model — the form the engine's own callers want.
+pub(super) fn virtual_span(model: &Model, rh: RegionHandle) -> (f32, f32) {
+    let Some(d) = model.region_data.get(&rh) else {
+        return (0.0, 0.0);
+    };
+    let (aw, ah) = d.size.unwrap_or((0.0, 0.0));
+    match model.arena.region(rh).map(|r| r.kind) {
+        Some(RegionKind::FontString) => {
+            // The key carries the owner's effective_scale ([`RegionData::measure_key`]) — the same
+            // recipe the request loop stamps, or every read under a SetScale'd owner reports
+            // stale. Unlike the layout sweep, the getter DOES key-check: the sweep holds a
+            // last-known box so a line whose text just changed does not flicker for the frame the
+            // re-measure is in flight, and a getter that did the same would hand a caller the
+            // previous string's metric (the whisper header's latched inset).
+            let scale = model
+                .arena
+                .region(rh)
+                .and_then(|r| model.arena.frame(r.owner))
+                .map(|f| f.effective_scale)
+                .unwrap_or(1.0);
+            let m = d.measured.filter(|m| m.key == d.measure_key(scale));
+            // **The floor applies to a KNOWN extent, and a pending measure is not one.** On the
+            // reference every extent is known — the getter measures inline — so `0.0` never comes
+            // back and the question never arises. Ours can be *waiting*, which is not a size but
+            // the absence of an answer, and several of our own convergence drivers read exactly
+            // that: `BenillaGossipRow_Resize`, the tab fit and the quest panel all guard
+            // `if h <= 0 then return end` and re-run from `OnUpdate` until the round-trip lands.
+            // Flooring a pending measure to one unit hands them a number, so they stop waiting and
+            // seat every row at 3px (`shipped_gossip_frame_drives_end_to_end` catches it).
+            //
+            // A genuinely EMPTY string is a different thing: its extent is known and it is zero, so
+            // it floors — which is the case the reference's floor exists for. The layout sweep
+            // floors unconditionally because a rect has to exist on every frame and nothing reads
+            // it as a sentinel (decision 1664); the difference between the two is exactly this
+            // pending state, which the reference does not have.
+            //
+            // "Known" is the same test the layout sweep applies: **empty text needs no
+            // round-trip** — nothing ever measures an empty string, and its extent is known
+            // without asking. So `""` is a known zero (⇒ one unit) while a pending measure on real
+            // text is no answer at all (⇒ `0.0`), and the two are only indistinguishable if you
+            // look at `measured` alone.
+            let floor = super::layout::FONTSTRING_MIN_SPAN;
+            let known = |from_measure: fn(&crate::script::types::MeasuredText) -> f32| {
+                if d.text.as_deref().is_none_or(str::is_empty) {
+                    Some(0.0)
+                } else {
+                    m.as_ref().map(from_measure)
+                }
+            };
+            let w = if aw != 0.0 {
+                aw.max(floor)
+            } else {
+                known(|m| m.natural_w).map_or(0.0, |v| v.max(floor))
+            };
+            let h = if ah != 0.0 {
+                ah.max(floor)
+            } else {
+                known(|m| m.h).map_or(0.0, |v| v.max(floor))
+            };
+            (w, h)
+        }
+        Some(RegionKind::Texture) => {
+            let texel = (aw == 0.0 || ah == 0.0)
+                .then(|| super::layout::content_span(d, model.texture_size_probe.as_ref()))
+                .flatten();
+            (
+                if aw != 0.0 {
+                    aw
+                } else {
+                    texel.map_or(0.0, |t| t.0)
+                },
+                if ah != 0.0 {
+                    ah
+                } else {
+                    texel.map_or(0.0, |t| t.1)
+                },
+            )
+        }
+        // A title region is a bare `CScriptRegion` — geometry vtable `0x81c9c8`, whose `+0x1c`
+        // is the unoverridden `0x768420`. The flat field, like a frame.
+        _ => (aw, ah),
+    }
 }

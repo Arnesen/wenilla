@@ -15,7 +15,8 @@ pub mod wire;
 pub mod world;
 pub use auth::AuthReject;
 pub use events::{
-    decode, CharAction, EntityKind, LoginStage, MoveSpeeds, Poll, SessionEnd, SessionEvent,
+    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, SessionEnd,
+    SessionEvent,
 };
 pub use messages::{
     CharCreateReq, CharEnumItem, Character, CreateSpline, ItemInfo, JumpInfo, MonsterMoveFacing,
@@ -23,7 +24,9 @@ pub use messages::{
     CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM,
     CHARACTER_FLAG_RENAME,
 };
-pub use world::{WardenRequired, WorldReader, WorldSession, WorldWriter, WORLD_PORT};
+pub use world::{
+    WardenRequired, WorldAuthReject, WorldReader, WorldSession, WorldWriter, WORLD_PORT,
+};
 
 use anyhow::{anyhow, Context, Result};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_LENGTH};
@@ -51,6 +54,78 @@ pub fn host_port(host: &str, default: u16) -> (&str, u16) {
         },
         _ => (host, default),
     }
+}
+
+/// The dial never got a socket — **and which of the two reasons it was**.
+///
+/// This distinction only started mattering when the realmlist became something a player types
+/// (decision 1667). Before that the address was a constant and "Unable to connect" could only mean
+/// one thing; afterwards it means either *you typed a name that does not exist* or *the address is
+/// fine and nothing is answering on it*, and a player with no way to tell them apart edits a
+/// correct address over and over. That is exactly what the first live use of the editor produced.
+///
+/// The split is drawn where it is honest — resolution and connection are two separate operations,
+/// so we do them separately rather than reading tea leaves out of one `io::Error` (a DNS failure
+/// surfaces as `ErrorKind::Uncategorized` on macOS, so the kind cannot carry this).
+#[derive(Debug, Clone)]
+pub struct DialFailure {
+    /// What we tried to reach, as the player would recognise it (`host:port`).
+    pub address: String,
+    /// `true` = the host name resolved to nothing; `false` = it resolved and the connection failed.
+    pub unresolved: bool,
+}
+
+impl std::fmt::Display for DialFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.unresolved {
+            write!(f, "cannot find a server called {}", self.address)
+        } else {
+            write!(f, "nothing answered at {}", self.address)
+        }
+    }
+}
+
+impl std::error::Error for DialFailure {}
+
+/// Resolve `host:port` and open a socket to it, reporting the two failures apart ([`DialFailure`]).
+///
+/// `to_socket_addrs` is the resolution step on its own; an empty result is a name that resolved to
+/// no addresses, which is as much a "cannot find it" as an outright lookup error. Connecting to the
+/// resolved list (rather than to `(host, port)` again) also means the OS does not repeat the
+/// lookup, and that every address the name carries is tried — the `localhost` → `::1` then
+/// `127.0.0.1` case on a machine whose server binds only IPv4.
+async fn dial(host: &str, port: u16) -> Result<Conn> {
+    let address = format!("{host}:{port}");
+    // Resolution is a separate step natively so the two failures stay apart. On the web the
+    // page never resolves anything — the host proxies the dial — so a failure there can only be
+    // "nothing answered".
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::net::ToSocketAddrs;
+        match (host, port).to_socket_addrs().map(|mut a| a.next().is_some()) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(anyhow::Error::new(DialFailure {
+                    address,
+                    unresolved: true,
+                }))
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(DialFailure {
+                    address,
+                    unresolved: true,
+                })
+                .context(format!("resolving {host}: {e}")))
+            }
+        }
+    }
+    Conn::connect(host, port).await.map_err(|e| {
+        anyhow::Error::new(DialFailure {
+            address,
+            unresolved: false,
+        })
+        .context(format!("connecting: {e}"))
+    })
 }
 
 /// A realm as advertised by the auth server's realm list.
@@ -104,9 +179,7 @@ pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<L
     let (mut stream, reply, server_public_key) = {
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
-            let mut stream = Conn::connect(host, port)
-                .await
-                .with_context(|| format!("connecting to {host}:{port}"))?;
+            let mut stream = dial(host, port).await?;
             auth::write_logon_challenge(&mut stream, &username.to_uppercase(), CLIENT_BUILD)
                 .context("sending logon challenge")?;
             let reply = auth::read_challenge_reply(&mut stream)

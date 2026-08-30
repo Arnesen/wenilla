@@ -109,6 +109,17 @@ const MAX_FOOD_BITS: u32 = 8;
 pub struct CreatureFamily {
     /// The localized family word — "Wolf", "Imp", "Wind Serpent". What `UnitCreatureFamily` pushes.
     pub name: String,
+    /// The family's icon path — `Interface\\Icons\\Ability_Hunter_Pet_<Family>` for every one of
+    /// the 22 real families (verified by dumping the shipped table this session; the column is
+    /// field 17, `0x44`). This is a pet's icon everywhere one is shown without an item behind it:
+    /// the stable window's slot buttons and `GetPetIcon` (decision 1676). The schema already
+    /// declared the column so the parser aligned past it; only the read into this struct is new.
+    ///
+    /// Empty for a row that ships no icon — the same "render the empty-slot art" case as a pet
+    /// whose creature query has not landed, which is why consumers treat it as absent rather than
+    /// passing an empty path to a texture setter (decision 1046: a path resolving to nothing draws
+    /// WHITE).
+    pub icon: String,
     /// The pet-food bitfield (field 7). **`0` for every warlock minion** — Imp, Voidwalker,
     /// Succubus, Felhunter, Doomguard all ship a zero mask, and so does row 28 ("Remote Control") —
     /// which is why a diet list can be legitimately empty without anything having gone wrong.
@@ -170,6 +181,15 @@ impl CreatureFamilies {
     }
 
     /// The localized family word for an id — [`Self::get`]'s name half.
+    /// The family's icon path, or `None` for an unknown family or a row that ships none —
+    /// the stable window's slot art and `GetPetIcon`'s answer (decision 1676).
+    pub fn icon(&self, id: u32) -> Option<&str> {
+        self.0
+            .get(&id)
+            .map(|f| f.icon.as_str())
+            .filter(|i| !i.is_empty())
+    }
+
     pub fn name(&self, id: u32) -> Option<&str> {
         self.get(id).map(|f| f.name.as_str())
     }
@@ -273,6 +293,7 @@ pub fn load_creature_families(chain: &mut Chain) -> Result<CreatureFamilies> {
             id,
             CreatureFamily {
                 name,
+                icon: str_at(&rs, r, FAMILY_ICON_FIELD).unwrap_or_default(),
                 pet_food_mask: u32_at(r, FAMILY_FOOD_MASK_FIELD).unwrap_or(0),
                 min_scale: f32_at(r, FAMILY_MIN_SCALE_FIELD).unwrap_or(1.0),
                 min_scale_level: u32_at(r, FAMILY_MIN_SCALE_LEVEL_FIELD).unwrap_or(0),
@@ -316,6 +337,37 @@ mod tests {
     /// The load-bearing shape is that **all 22 real families ramp 1 → 60**, warlock minions
     /// included — they are flat only because `min == max`, not because their level columns are
     /// zero. Row 28 ("Remote Control") is the sole 0/0/0/0 row, and the sole `None`.
+    /// The icon column, off the shipped file (decision 1676). It is the stable window's slot art
+    /// and `GetPetIcon`'s answer, and it sits at field 17 behind a locale block the schema types as
+    /// dwords — so a misread there returns an empty string, and an empty texture path draws WHITE
+    /// (decision 1046). Asserting real paths is what catches that.
+    #[test]
+    fn every_shipped_family_carries_a_pet_icon() {
+        let Some(mut chain) = chain() else { return };
+        let fams = load_creature_families(&mut chain).expect("families");
+
+        assert_eq!(
+            fams.icon(1),
+            Some("Interface\\Icons\\Ability_Hunter_Pet_Wolf")
+        );
+        // A warlock minion has one too — the stable never shows them, but `GetPetIcon` does.
+        assert!(fams
+            .icon(15)
+            .is_some_and(|i| i.starts_with("Interface\\Icons\\")));
+
+        // No real family is missing one, and none is a bare empty string masquerading as a path.
+        for id in 1..=27 {
+            let Some(f) = fams.get(id) else { continue };
+            assert!(
+                fams.icon(id).is_some(),
+                "family {id} ({}) has no icon",
+                f.name
+            );
+        }
+        // An unknown family is absent, not empty.
+        assert_eq!(fams.icon(9999), None);
+    }
+
     #[test]
     fn the_family_size_ramp_reads_off_the_shipped_file() {
         let Some(mut chain) = chain() else { return };

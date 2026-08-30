@@ -147,6 +147,10 @@ pub struct CullTerms {
     /// a two-dozen audience into a tens-of-thousands one erases it.
     pub bodies: usize,
     pub bodies_hidden: usize,
+    /// The liquid subset of `tested`/`hidden` — see the verdict's own note for why a few dozen
+    /// surfaces summed into tens of thousands of terrain cells is an invisible leg (1652).
+    pub liquid: usize,
+    pub liquid_hidden: usize,
 }
 
 impl WorldCensus<'_, '_> {
@@ -284,6 +288,8 @@ impl WorldCensus<'_, '_> {
                 unbounded: v.unbounded,
                 bodies: v.bodies,
                 bodies_hidden: v.bodies_hidden,
+                liquid: v.liquid,
+                liquid_hidden: v.liquid_hidden,
             }),
             mats: self.mats.len(),
             meshes: self.meshes.len(),

@@ -2,7 +2,9 @@
 //!
 //! The smeared-merchant root cause: region `<Size>`/`<Anchors>` used to be dropped — a region either
 //! filled its owner or (with a size) drew centered, and its anchors were ignored. Regions now resolve
-//! through the same leaf math as frames, owner-relative, inheriting any edge their anchors don't pin.
+//! through the same leaf math as frames, off their own anchors and their own span; an edge nothing
+//! pins does NOT fall back to the owner's (decision 1664 retired that — the owner supplies scale and
+//! nothing else), because the span is content-derived and a pinned edge plus a span is a rect.
 
 use super::common::script;
 use crate::layout::Rect;
@@ -54,14 +56,13 @@ fn region_texture_anchored_topleft_resolves_exact_rect() {
     );
 }
 
-/// A FontString's implicit extent is its measured TEXT — an unpinned edge COLLAPSES onto its
-/// pinned opposite while the measure is pending (empty text never measures at all), never onto
-/// the owner's edge; only an axis with NO pinned edge keeps the v1 owner fallback. (The old
-/// owner-edge inheritance stretched an empty tooltip line to the plate's bottom and marched the
-/// line chain out of the plate — the live NPC-tooltip spill.) Textures keep the owner fallback:
-/// [`region_texture_anchored_topleft_resolves_exact_rect`]'s sized leg is unaffected either way.
+/// A FontString's implicit extent is its measured TEXT, **floored at one FrameXML unit**
+/// (`CSimpleFontString::GetWidth 0x772930` / `GetHeight 0x772a60` — decision 1664). So a
+/// single-anchored FontString whose measure has not landed is a 1×1 box seated on its anchor,
+/// not a collapse onto the pinned edge and not the owner's rect: the floor is what makes such a
+/// FontString **always resolve**, and it is why the resolver needs no owner-edge fallback at all.
 #[test]
-fn region_fontstring_unpinned_edge_collapses_until_measured() {
+fn region_fontstring_span_floors_at_one_unit_until_measured() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -77,9 +78,12 @@ fn region_fontstring_unpinned_edge_collapses_until_measured() {
     )
     .unwrap();
     s.resolve();
-    // Pending measure: x collapses onto the pinned left (5); the y-axis has no pinned EDGE
-    // (a LEFT point pins the y-CENTER only), so it keeps the owner fallback.
-    assert_eq!(region_text_rect(&s, "Name"), Rect::new(0.0, 5.0, 50.0, 5.0));
+    // Pending measure: both spans floor at one unit. x runs right from the pinned left (5→6);
+    // a LEFT point pins the y-CENTER only (25), so y is the centre ± half a unit.
+    assert_eq!(
+        region_text_rect(&s, "Name"),
+        Rect::new(24.5, 5.0, 25.5, 6.0)
+    );
     // Measured, the rect is the text extent seated on the anchor: 40×12 around y-center 25.
     let answers: Vec<(u32, f32, f32, u64)> = s
         .fontstrings_needing_measure()
@@ -92,6 +96,48 @@ fn region_fontstring_unpinned_edge_collapses_until_measured() {
         region_text_rect(&s, "Name"),
         Rect::new(19.0, 5.0, 31.0, 45.0)
     );
+}
+
+/// `ExhaustionLevelFillBar`'s exact shape, both ways (wow-re `region-size-fallback.md` §5, and
+/// the counterfactual it states): authored width **0**, one TOPLEFT anchor, and a `<Color>`.
+///
+/// The colour form installs a real 8×8 texture before any resolve (`0x7700a9` → `0x770360` →
+/// `0x44a900`), so `CSimpleTexture::GetWidth 0x770720` answers **8** for the authored zero and
+/// `combineEdge`'s first leg fires: RIGHT = LEFT + 8, and `assemble 0x767a20` returns 1. Strip the
+/// colour and there is no `CGxTex*` at all — the getter answers `0.0`, both `combineEdge` legs
+/// fail their `span != 0.0` test, and the rect never resolves. Our owner-edge fallback used to
+/// turn that second case into the owner's **full width** (1348's 1024-point white band); it is
+/// gone, so the two cases now differ by 8 points and a rect, exactly as they do on the reference.
+#[test]
+fn a_zero_width_solid_spans_eight_units_and_its_artless_twin_gets_no_rect() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Owner")
+        f:SetPoint("BOTTOMLEFT", 0, 0)   -- owner [0, 0, 50, 100]
+        f:SetSize(100, 50)
+        Fill = f:CreateTexture("Fill", "BORDER")
+        Fill:SetTexture(1, 1, 1, 1)      -- the <Color> form: an 8x8 solid
+        Fill:SetWidth(0); Fill:SetHeight(13)
+        Fill:SetPoint("TOPLEFT", 0, 0)
+        Bare = f:CreateTexture("Bare", "BORDER")
+        Bare:SetWidth(0); Bare:SetHeight(13)
+        Bare:SetPoint("TOPLEFT", 0, 0)   -- same shape, no art at all
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.run(
+        r#"
+        assert(Fill:GetLeft() == 0 and Fill:GetRight() == 8,
+               "the solid spans its 8 texels, got " .. tostring(Fill:GetRight()))
+        assert(Fill:GetTop() == 50 and Fill:GetBottom() == 37, "and its authored 13 of height")
+        assert(Bare:GetLeft() == nil, "no art, no span, no rect — not the owner's width")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
 }
 
 #[test]
@@ -944,4 +990,109 @@ fn set_portrait_to_texture_is_a_global_taking_a_name() {
     s.run(r#"SetPortraitToTexture("NoSuchPortrait", "Interface\\X")"#)
         .unwrap();
     assert!(s.errors().is_empty());
+}
+
+/// **`Region:GetWidth`/`GetHeight` are the VIRTUAL getters** — the same content-derived law the
+/// rect resolver calls, because the Lua bindings dispatch through the same geometry-vtable slots
+/// (`GetWidth 0x7a1e00` ends `ff 52 1c`, `GetHeight 0x7a2030` ends `ff 52 20`; decision 1670).
+///
+/// Both halves of the FontString row, each of which we had backwards:
+///
+/// * the **authored** value wins per axis — `0x772930`'s `jp 0x77294a` skips the measure entirely
+///   when the authored width is not `0.0`, so `<Size x="300" y="0"/>` reports 300 from the author
+///   and the height from the text (`CharacterNameText` is exactly that, in the reference's own
+///   file), where we used to report the 37-point measure;
+/// * on an axis authored `0` the **width** is the NATURAL, unwrapped extent — the very cell
+///   `GetStringWidth` returns (`0x772890`'s `[fs+0xfc]`) — while the **height** is the *wrapped*
+///   one (`0x7729b0`'s `[fs+0x100]`). We used to report the laid-out width for both.
+#[test]
+fn the_size_getters_take_the_author_first_then_the_natural_width_and_wrapped_height() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Owner")
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetSize(100, 50)
+        Sized = f:CreateFontString("Sized", "ARTWORK")
+        Sized:SetPoint("TOPLEFT"); Sized:SetWidth(300); Sized:SetText("Name")
+        Auto = f:CreateFontString("Auto", "ARTWORK")
+        Auto:SetPoint("TOPLEFT"); Auto:SetText("Name")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    // A wrapped measure: 40 wide as laid out, 24 tall over two lines, 90 unwrapped.
+    let answers: Vec<(u32, f32, f32, f32, u64)> = s
+        .fontstrings_needing_measure()
+        .iter()
+        .map(|r| (r.id, 40.0, 24.0, 90.0, r.key))
+        .collect();
+    s.set_measured_text(&answers);
+    s.run(
+        r#"
+        assert(Sized:GetWidth() == 300, "the AUTHORED width wins, got " .. tostring(Sized:GetWidth()))
+        assert(Sized:GetHeight() == 24, "and the un-authored height is the measure, got " .. tostring(Sized:GetHeight()))
+        assert(Auto:GetWidth() == 90, "no author ⇒ the NATURAL width, got " .. tostring(Auto:GetWidth()))
+        assert(Auto:GetWidth() == Auto:GetStringWidth(), "which is GetStringWidth's own cell")
+        assert(Auto:GetHeight() == 24, "and the WRAPPED height, got " .. tostring(Auto:GetHeight()))
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// The floor, and the state the reference does not have. `0x772930`/`0x772a60` end in a one-unit
+/// clamp, so a genuinely empty string reads back **1**, never `0.0`. But a measure that has not
+/// LANDED is not an extent at all — it is our async round-trip, which the reference has no
+/// equivalent of — and our own convergence drivers (`BenillaGossipRow_Resize` and the tab fit,
+/// which guard `if h <= 0 then return end` and re-run from `OnUpdate`) read that zero as
+/// "not yet". Flooring it would tell them to stop waiting. So: floor a known extent, not the
+/// absence of one.
+#[test]
+fn an_empty_string_reads_back_one_unit_and_a_pending_measure_reads_back_zero() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Owner")
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetSize(100, 50)
+        Pending = f:CreateFontString("Pending", "ARTWORK")
+        Pending:SetPoint("TOPLEFT"); Pending:SetText("Name")
+        Empty = f:CreateFontString("Empty", "ARTWORK")
+        Empty:SetPoint("TOPLEFT"); Empty:SetText("")
+        assert(Pending:GetHeight() == 0, "a pending measure is not a size, got " .. tostring(Pending:GetHeight()))
+        assert(Empty:GetHeight() == 1, "an EMPTY string is one unit, got " .. tostring(Empty:GetHeight()))
+        assert(Empty:GetWidth() == 1, "both axes")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// A TEXTURE's getters are the same virtual law with the other override behind them
+/// (`0x770720`/`0x770790`): the authored value when it is not exactly `0.0`, else the art's own
+/// texel extent, else `0.0` — and **no floor**, which only the FontString override carries. This
+/// is the getter half of 1662; before it, Lua saw `0` for a size the screen was already drawing.
+#[test]
+fn a_textures_getters_report_its_texel_span_on_an_unsized_axis() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_texture_size_probe(Box::new(|p| (p == "Interface\\Crest").then_some((128, 96))));
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Owner")
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetSize(100, 50)
+        Art = f:CreateTexture("Art", "ARTWORK")
+        Art:SetTexture("Interface\\Crest"); Art:SetPoint("TOPLEFT")
+        Half = f:CreateTexture("Half", "ARTWORK")
+        Half:SetTexture("Interface\\Crest"); Half:SetPoint("TOPLEFT"); Half:SetHeight(13)
+        Bare = f:CreateTexture("Bare", "ARTWORK")
+        Bare:SetPoint("TOPLEFT")
+        assert(Art:GetWidth() == 128 and Art:GetHeight() == 96, "the art's own texels")
+        assert(Half:GetWidth() == 128 and Half:GetHeight() == 13, "per AXIS: authored 13 wins, width still derived")
+        assert(Bare:GetWidth() == 0, "no art, no span — and no floor on a texture")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
 }

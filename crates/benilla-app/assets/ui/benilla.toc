@@ -357,6 +357,17 @@ BankFrame.xml
 # Loaded right after TrainerFrame per the same "NPC session windows grouped" posture — it
 # needs only Fonts/UiPanels/GameTooltip (SetTooltipMoney), both already loaded above.
 TaxiFrame.xml
+# The stable-master window (decision 1676): the hunter's three-slot pet stable over the stable
+# API (`benilla-ui/src/script/stable.rs`) + the app's feed/drain. Kept in the "NPC session
+# windows grouped" cluster beside Trainer/Bank/Taxi. Two of its dependencies are resolved at
+# LOAD and so must sit above it: MoneyFrame (its purse and cost displays inherit
+# SmallMoneyFrameTemplate) and UIPanelTemplates (UIPanelButtonTemplate / UIPanelCloseButton).
+# A third is resolved at load too, and is the reason this cannot sit up with the other NPC
+# windows' dependencies: the model pane's own <OnLoad> calls CharacterFrame.xml's shared
+# `BenillaPaperDollModel_OnLoad`, so that file must already have run. The rest
+# (ItemButtonTemplate's SetItemButtonTexture, GameTooltip, UiPanels' ShowUIPanel/HideUIPanel,
+# UIParent's BuildListString) are resolved when the window repaints, so their order is free.
+PetStable.xml
 # The auction house (decision 1511): the three-tab doublewide window over the auction API
 # (`benilla-ui/src/script/auction.rs`) + the app's feed/drain. Kept in the "NPC session
 # windows grouped" cluster beside Trainer/Bank/Taxi, and loaded AFTER MoneyFrame (its eight
@@ -391,6 +402,16 @@ GroupLootFrame.xml
 # MerchantFrame (the BenillaMoney coin helpers live there) and GossipFrame (shared parchment
 # art conventions); its title/panel-button labels use the auto-centred ButtonText slot.
 QuestFrame.xml
+# The two guild-charter windows (decision 1672): the guild registrar — the window the "How do I
+# form a guild?" gossip row opens — and the charter itself, the sheet nine people sign. Loaded
+# here, right after QuestFrame, because both wear the QuestGreeting parchment and its QuestFont /
+# QuestTitleFont objects and read as that family; they need UiPanels (the panel manager seats both,
+# and PetitionFrame registers its RENAME_GUILD dialog on the shared popup engine), MoneyFrame (the
+# registrar's price rides MoneyFrameTemplate, resolved at LOAD — decision 1580's ordering rule) and
+# UIPanelTemplates (the close/action buttons), all far above. The registrar must come first: no
+# load-order dependency links them, but the flow does, and the pair reads in the order it is used.
+GuildRegistrarFrame.xml
+PetitionFrame.xml
 # The quest log window (decision 0088 arc, the quest-log slice): durable player state, not an
 # NPC session — loaded after MerchantFrame (the BenillaMoney coin helpers it reuses) and
 # alongside QuestFrame (same arc); the 'L' binding (ui_script/input.rs) calls its
@@ -418,6 +439,27 @@ MacroFrame.xml
 # UiPanels (ShowUIPanel/HideUIPanel + the UIPanelWindows row that seats it and gets it closed
 # by ESC). Before GameMenuFrame, which is deliberately last.
 ScriptLogFrame.xml
+# The GM help window + the ticket-status toast (the HelpFrame.xml transcription): the third
+# **center**-area UIPanelWindows row, so it opens like the game menu and the options window and
+# shuts every other panel on the way in. It heads the SHELL TAIL for that reason — Help, then the
+# options pair, then the game menu last — and it goes ahead of KeyBindingsPage.xml rather than
+# between it and OptionsFrame.xml, because those two are a hard must-load-before pair and nothing
+# should be wedged into it. Every dependency is far above: UiPanels (ShowUIPanel/HideUIPanel, the
+# UIPanelWindows row, and the StaticPopup engine its three ticket dialogs register into),
+# UIPanelTemplates (UIPanelCloseButton, UIPanelButtonTemplate2, GameMenuButtonTemplate and the
+# real UIPanelScrollFrameTemplate the ticket editor is built on), ScrollTemplates (the faux kit
+# behind the GM category list, its shared trough, and the ScrollingEdit pair), GameTooltip (the
+# toast wears the tooltip backdrop colours at OnLoad) and MicroMenu (whose Help button calls this
+# file's ToggleHelpFrame, and whose UpdateMicroButtons this file calls back on show/hide — both
+# resolved at call time, so that pair could sit either way round). The one seat that is a REAL
+# requirement rather than legibility is **after BuffFrame.xml**: the toast re-anchors
+# TemporaryEnchantFrame out of its own way, and that frame is declared there.
+HelpFrame.xml
+# The cinematic letterbox (the race-intro fly-by's two black bars, and the ESC that skips it).
+# Needs UiPanels.xml far above for ShowUIPanel/HideUIPanel and its own UIPanelWindows row; needs
+# nothing else, and nothing needs it — the engine reaches it purely by firing CINEMATIC_START.
+# Seated late because it is an outermost, screen-owning layer, like the two windows below it.
+CinematicFrame.xml
 # The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
 # the templates + script of the Options window's Keybindings category, over the
 # engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12

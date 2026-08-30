@@ -376,8 +376,17 @@ fn drive_live_fps(
             let culled = match seen.cull.as_ref() {
                 Some(v) => format!(
                     " cull_windows={} cull_frusta={} cull_tested={} cull_hidden={} \
-                     cull_unbounded={} cull_bodies={} cull_bodies_hidden={}",
-                    v.windows, v.frusta, v.tested, v.hidden, v.unbounded, v.bodies, v.bodies_hidden
+                     cull_unbounded={} cull_bodies={} cull_bodies_hidden={} \
+                     cull_liquid={} cull_liquid_hidden={}",
+                    v.windows,
+                    v.frusta,
+                    v.tested,
+                    v.hidden,
+                    v.unbounded,
+                    v.bodies,
+                    v.bodies_hidden,
+                    v.liquid,
+                    v.liquid_hidden
                 ),
                 None => String::new(),
             };

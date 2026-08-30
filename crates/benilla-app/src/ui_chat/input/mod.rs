@@ -460,6 +460,65 @@ pub(super) fn drain_chat_input(
                         own_store
                     )
                 ));
+                // **The at-war bit, named** (decision 1674). It is the entire content of the
+                // player→unit reaction's leg 3, it is what the world cursor, the plate category and
+                // `UnitCanAttack` all turn on for a reputation-slot faction, and it is printed
+                // nowhere else — so "why does this friendly NPC take the sword?" is unanswerable
+                // from any other line here.
+                let war = (|| {
+                    let catalog = factions.as_deref()?.catalog();
+                    let tpl = catalog.template(target_store?.0.unit_faction_template()?)?;
+                    let at_war =
+                        crate::target::ring::at_war_with(catalog, reputations, tpl.faction);
+                    Some(match at_war {
+                        Some(at_war) => format!(
+                            "faction {} {:?} owns reputation slot {} → leg 3 answers with AT WAR \
+                             = {at_war} (reaction {}); the standing is never read",
+                            tpl.faction,
+                            catalog.faction_name(tpl.faction).unwrap_or("<unnamed>"),
+                            catalog
+                                .reputation_faction(tpl.faction)
+                                .map_or(-1, |i| i.rep_index),
+                            if at_war { "hostile" } else { "friendly" },
+                        ),
+                        None => format!(
+                            "faction {} {:?} has NO reputation slot → the template comparator \
+                             answers; at-war does not apply",
+                            tpl.faction,
+                            catalog.faction_name(tpl.faction).unwrap_or("<unnamed>"),
+                        ),
+                    })
+                })()
+                .unwrap_or_else(|| "at-war not evaluated (no catalog, store or template)".into());
+                lines.push(format!("reaction: {war}"));
+                // The world cursor's two branch predicates, in the order `0x482200` runs them —
+                // `CanInteract` picks the service ladder or the loot/skin/attack block, then
+                // `CanAttack` decides the sword. Neither is a reaction threshold, so neither can
+                // be read off RANK above.
+                let interactable = crate::target::can_interact(
+                    target_store,
+                    factions.as_deref(),
+                    reputations,
+                    own_store,
+                );
+                let attackable = crate::target::can_attack(
+                    target_store,
+                    factions.as_deref(),
+                    reputations,
+                    own_store,
+                );
+                lines.push(format!(
+                    "reaction: CURSOR npc_flags 0x{:04x} · can_interact {interactable} · \
+                     can_attack {attackable} → {}",
+                    target_store.map_or(0, |s| s.0.unit_npc_flags()),
+                    if interactable {
+                        "the NPC service ladder (a bit it consults → its cursor; none → Point)"
+                    } else if attackable {
+                        "the ATTACK sword (grayed past 10.45 yd)"
+                    } else {
+                        "nothing matched → Point"
+                    },
+                ));
                 // The V-plate CATEGORY, which is a **different predicate** from the rank above
                 // (`CanAttack` player→unit, plus `CanCooperate` for a player subject — decision
                 // 1530) and so cannot be read off it. Both legs are printed, with the faction-group
@@ -479,8 +538,10 @@ pub(super) fn drain_chat_input(
                     is_player,
                 );
                 lines.push(format!(
-                    "reaction: plate is_player {is_player} · faction-group mask self {} \
+                    "reaction: plate is_player {is_player} (OBJECT_FIELD_TYPE says {:?}; the two \
+                     must agree — the predicates read the field, 1674) · faction-group mask self {} \
                      target {} · can_cooperate {} · can_attack(player→unit) {}",
+                    target_store.and_then(|s| s.0.object_type()),
                     mask(own_store),
                     mask(target_store),
                     crate::target::ring::can_cooperate_with_player(

@@ -201,8 +201,9 @@ fn drive_child(
 /// the portal query joins this bundle rather than becoming a seventeenth.
 /// The **owner reads** — one bundle for the two questions this sim asks of an emitter's owner
 /// (a joint, a unit root, a placement submesh; never an emitter or child-draw entity, so both
-/// members are provably disjoint from the `&mut GlobalTransform` writes below): *where is it* and
-/// *is its model being drawn*. A `SystemParam` rather than two parameters because
+/// members are provably disjoint from the `&mut GlobalTransform` writes below): *where is it*,
+/// *is its model being drawn*, and *what is it standing on*. A `SystemParam` rather than three
+/// parameters because
 /// [`simulate_particles`] sits at Bevy's 16-param ceiling, and because the pair is one concept —
 /// the owner's frame — that no caller should be able to half-answer.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -210,6 +211,10 @@ pub(crate) struct Owners<'w, 's> {
     transforms:
         Query<'w, 's, &'static GlobalTransform, (Without<ParticleEmitter>, Without<ChildDraw>)>,
     visibility: Query<'w, 's, &'static InheritedVisibility>,
+    /// Which transport (if any) the owner's MODEL is riding — the frame world-mode particles are
+    /// stored in ([`crate::ride_frame`], decision 1591). Joined the bundle for the same reason the
+    /// portal query did: [`simulate_particles`] is at the ceiling.
+    rides: crate::ride_frame::RideFrames<'w, 's>,
 }
 
 impl Owners<'_, '_> {
@@ -671,6 +676,7 @@ pub(super) fn simulate_particles(
         }
         let ParticleEmitter {
             def,
+            ride,
             placement,
             owner,
             on_owner_loss,
@@ -791,6 +797,66 @@ pub(super) fn simulate_particles(
         // `anchor` is shadowed by the draw anchor further down.
         let dump_owner = (*host).or(*anchor);
 
+        // 0a. THE RIDE FRAME (`[CM2Model+0x17c]`, decision 1591) — which transport, if any, this
+        //     cloud's MODEL is standing on. Inherited down the `ParentModel` chain, so a held
+        //     weapon's sparkle takes its wearer's deck without either spawn site knowing.
+        //     A transport that has streamed out reads as no frame: that is the leave leg, and it
+        //     hands the cloud back to the world where it stood.
+        let deck = anchor
+            .or(*owner)
+            .and_then(|model| owners.rides.source(model))
+            .and_then(|t| {
+                owners
+                    .transforms
+                    .get(t)
+                    .ok()
+                    .map(|gt| (t, crate::ride_frame::ride_matrix(gt)))
+            })
+            // MODEL mode takes the reference's verbatim-copy arm at birth and ignores `[ebp+8]`
+            // at draw (`0x7b518e`/`0x7b3ef9`): it already rides its host rigidly, so `A` would
+            // ride it a second time.
+            .filter(|_| anchored);
+        // Boarding and leaving RE-EXPRESS every already-live particle — position and velocity
+        // (`0x7187f0` → `0x7b5e60`) — rather than snapping the cloud. Riding a *moving* deck folds
+        // nothing: the draw's live `A` is what carries it.
+        if let Some(fold) = ride.retarget(deck) {
+            let rot = Quat::from_mat3a(&fold.matrix3);
+            for p in particles
+                .iter_mut()
+                .chain(children.iter_mut().flat_map(|c| &mut c.particles))
+            {
+                p.pos = fold.transform_point3(p.pos);
+                p.vel = rot * p.vel;
+            }
+            // The emitter-motion state is stored-frame too, and it must cross the seam with the
+            // cloud: the Δ that keys the follow and inherit terms is a DIFFERENCE against last
+            // frame's origin, so leaving a stale one behind would read the frame change itself as
+            // ~1300 yd of emitter motion — one frame of `fraction` pinned at 1.0, which teleports
+            // the whole cloud on the step onto the lift. (The reference's `0x7b5e60` re-expresses
+            // "already-committed state" under the new parent; whether its `rt+0x248` is inside
+            // that is not settled at the bytes, and reproducing a one-frame pop would be building
+            // past the evidence either way.)
+            *emitter_prev = emitter_prev.map(|prev| fold.transform_point3(prev));
+            *inherit_vel = rot * *inherit_vel;
+        }
+        // The emitter matrix every birth is baked through: `rt+0x1fc = srcMx · A⁻¹` (`0x7b51b0`).
+        // Dividing the ride frame out HERE is what makes the whole rest of this system correct
+        // without a single further change — births, the child fold, the emitter-motion Δ, the
+        // inherit velocity and the kill-outbound origin all compose off this one transform, and
+        // all of them want the deck's frame while riding. `placement` itself stays WORLD: the
+        // emission LOD, the water-plane side and the model-mode draw are all world questions.
+        let emit_place = match ride.matrix() {
+            Some(a) => {
+                let inv = a.inverse();
+                Transform {
+                    translation: inv.transform_point3(placement.translation),
+                    rotation: Quat::from_mat3a(&inv.matrix3) * placement.rotation,
+                    scale: placement.scale,
+                }
+            }
+            None => *placement,
+        };
+
         // 0b. The EMITTER-MOTION terms (wow-re `part-emitter-motion.md`, byte-verified): both
         //     feed off the emitter origin's one-frame live world Δ. prevPos refreshes EVERY
         //     frame (the reference's rt+0x248 @`0x7b5265`), so even a multi-frame inherit
@@ -799,7 +865,10 @@ pub(super) fn simulate_particles(
         //     anchored mode; for model mode the reference adds the raw world vector to LOCAL
         //     coords (a frame quirk) — we fold it into the local frame instead, since our
         //     world axes are Bevy's, not WoW's (translation-dominant content is equivalent).
-        let emitter_world = placement.transform_point(wow_to_bevy(def.position));
+        // In the STORED frame, deliberately: the reference's `rt+0x22c` is the translation row of
+        // `rt+0x1fc`, which already has `A⁻¹` folded in — so on a deck a rider standing still has
+        // no emitter motion at all, and the follow/inherit terms key off deck-relative speed.
+        let emitter_world = emit_place.transform_point(wow_to_bevy(def.position));
         let emitter_delta = emitter_prev.map_or(Vec3::ZERO, |prev| emitter_world - prev);
         *emitter_prev = Some(emitter_world);
         // NOTE on the R(+Z,90°) emitter-frame law (`emit_local`'s tail): we apply R at EMISSION,
@@ -826,7 +895,7 @@ pub(super) fn simulate_particles(
         let follow = if fraction == 0.0 || emitter_delta == Vec3::ZERO {
             Vec3::ZERO
         } else {
-            to_stored(fraction * emitter_delta, placement)
+            to_stored(fraction * emitter_delta, &emit_place)
         };
         // VELOCITY INHERIT (file 0x40): the ~30 Hz trigger holds the inherit velocity births
         // read; the live gate (rt+0x64) zeroes it while nothing is live.
@@ -954,8 +1023,9 @@ pub(super) fn simulate_particles(
             // re-applies the live matrix instead (`0x7b8aa5`/`0x7b3efb`).
             let (mut pos, vel) = if anchored {
                 (
-                    placement.transform_point(wow_to_bevy(base.to_array())),
-                    placement.rotation * (placement.scale * wow_to_bevy((dir * speed).to_array())),
+                    emit_place.transform_point(wow_to_bevy(base.to_array())),
+                    emit_place.rotation
+                        * (emit_place.scale * wow_to_bevy((dir * speed).to_array())),
                 )
             } else {
                 (base, dir * speed)
@@ -967,8 +1037,14 @@ pub(super) fn simulate_particles(
             // SIZE. A miss leaves the spawn position untouched. `pos` is already world here, so
             // the probe reads and writes it directly.
             if anchored && def.ground_snap() {
-                if let Some(hit) = spatial.cast_ray(pos, Dir3::NEG_Y, 20.0, true, &snap_filter) {
-                    pos.y = pos.y - hit.distance + def.over_life.sample(0.0).size;
+                // The probe is a WORLD query against world geometry, so it runs on the world
+                // point and the answer comes back into the store (1591 — the identity off a
+                // transport). The drop is along world down, which a yaw-only `A` leaves alone.
+                let world = ride.to_world(pos);
+                if let Some(hit) = spatial.cast_ray(world, Dir3::NEG_Y, 20.0, true, &snap_filter) {
+                    pos = ride.to_stored(
+                        world.with_y(world.y - hit.distance + def.over_life.sample(0.0).size),
+                    );
                 }
             }
             // VELOCITY INHERIT consumption (the shape kernels' closing block, gated on the
@@ -976,7 +1052,7 @@ pub(super) fn simulate_particles(
             // stored frame (the block runs after the reference's space fold).
             let vel = if def.inherits_emitter_motion() && *inherit_vel != Vec3::ZERO {
                 vel + (1.0 + now.speed_variation * rand_s11(rng))
-                    * to_stored(*inherit_vel, placement)
+                    * to_stored(*inherit_vel, &emit_place)
             } else {
                 vel
             };
@@ -1007,7 +1083,7 @@ pub(super) fn simulate_particles(
                 // yaw appended to the frame rotation in both modes.
                 let r90 = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
                 let quat = if anchored {
-                    placement.rotation * r90
+                    emit_place.rotation * r90
                 } else {
                     r90
                 };
@@ -1048,7 +1124,7 @@ pub(super) fn simulate_particles(
                 density * dist_lod,
                 dt,
                 anchored,
-                placement,
+                &emit_place,
             );
             let c_env = StepEnv {
                 dt,
@@ -1084,6 +1160,7 @@ pub(super) fn simulate_particles(
         let frame = DrawFrame {
             anchored,
             alpha: *alpha,
+            ride: *ride,
         };
         let cam = CamBasis {
             right: e_right,
@@ -1154,7 +1231,9 @@ pub(super) fn simulate_particles(
                     particles,
                     &frame,
                     placement,
-                    emitter_world,
+                    // The instrument's frame is the world's, so hand it the world point (the
+                    // sim's own `emitter_world` is the STORE's origin — 1591).
+                    ride.to_world(emitter_world),
                     &cam,
                     cam_tf,
                     camera,
@@ -1397,6 +1476,7 @@ mod tests {
         let frame = DrawFrame {
             anchored: true, // 0x10 CLEAR — the world store
             alpha: 1.0,
+            ride: crate::ride_frame::StoredFrame::default(), // on the ground: no fold
         };
         // Every host pose we can think of, including ones no bone reaches.
         for placement in [
@@ -1415,6 +1495,48 @@ mod tests {
         }
     }
 
+    /// …with exactly one exception, and it is the reason the ride frame exists (decision 1591):
+    /// a world-mode particle follows the **transport** its host is standing on, because its store
+    /// is the deck's frame and the draw re-projects through the deck's live pose (`A · T · S`,
+    /// `0x7b3f4f`). This is the director's Thunder Bluff report: without it a weapon's sparkle
+    /// stays at the height it was born and the rising lift streams it out below your feet.
+    #[test]
+    fn a_world_mode_particle_rides_the_transport_under_it() {
+        use crate::particles::quads::{particle_center, DrawFrame};
+        use bevy::math::Affine3A;
+        let mut ride = crate::ride_frame::StoredFrame::default();
+        let deck = bevy::prelude::Entity::from_raw_u32(7).expect("a valid test entity id");
+        let lift_low = Affine3A::from_translation(Vec3::new(-1280.0, 60.0, 185.0));
+        // Board at the bottom of the shaft, then ride 30 yd up.
+        let fold = ride
+            .retarget(Some((deck, lift_low)))
+            .expect("boarding folds");
+        let born_at = Vec3::new(-1279.0, 61.5, 186.0);
+        let p = particle(fold.transform_point3(born_at), Vec3::ZERO);
+        let placement = Transform::IDENTITY; // model mode's input; world mode must ignore it
+        let mut frame = DrawFrame {
+            anchored: true,
+            alpha: 1.0,
+            ride,
+        };
+        assert_eq!(
+            particle_center(&frame, &placement, &p),
+            born_at,
+            "boarding moved a particle that was standing still"
+        );
+        let lift_high = Affine3A::from_translation(Vec3::new(-1280.0, 90.0, 185.0));
+        assert!(
+            ride.retarget(Some((deck, lift_high))).is_none(),
+            "the deck MOVING must not re-express the store — only boarding and leaving do"
+        );
+        frame.ride = ride;
+        assert_eq!(
+            particle_center(&frame, &placement, &p),
+            born_at + Vec3::new(0.0, 30.0, 0.0),
+            "the particle did not ride the lift up"
+        );
+    }
+
     /// The other half of the same law: model mode (`0x10` SET) rides its host rigidly, rotation
     /// included — the carried torch. Storage space is the whole discriminator, so these two tests
     /// together are the ride/trail law at the draw.
@@ -1425,6 +1547,7 @@ mod tests {
         let frame = DrawFrame {
             anchored: false, // 0x10 SET — the emitter-local store
             alpha: 1.0,
+            ride: crate::ride_frame::StoredFrame::default(),
         };
         let moved = Transform::from_translation(Vec3::new(10.0, 0.0, 0.0));
         assert_eq!(

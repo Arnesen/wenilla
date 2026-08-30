@@ -12,15 +12,16 @@
 use crate::messages::{
     ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
     AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline, DamageShield,
-    EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
+    EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GmTicket, GossipOption,
     GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
     GuildQueryResponse, GuildRoster, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
     LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
     MirrorTimerStart, MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog,
-    PetMode, PetSpells, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
-    QuestRequestItems, QuestTemplate, SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss,
-    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
-    WhoResults, XpGain,
+    PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
+    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestDetails,
+    QuestGiverList, QuestOfferReward, QuestRequestItems, QuestTemplate, SpellDamageLog,
+    SpellEnergizeLog, SpellHealLog, SpellLogMiss, StabledPet, TaxiMask, TradeStatus,
+    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -109,6 +110,33 @@ pub enum SessionEnd {
     Lost,
 }
 
+/// **Who refused the login, and with which byte.**
+///
+/// A login crosses two servers and each has its own result enum. They overlap numerically and mean
+/// unrelated things — 0x0C is `AUTH_LOGON_FAILED_SUSPENDED` to realmd and `AUTH_OK` to the world
+/// server — so a bare `Option<u8>` could not say what it held, and the screen could not look up the
+/// right authored string from it. It used to be exactly that bare byte: the realmd code rode it and
+/// the world code was formatted into the reason string and lost, which is why every world-side
+/// refusal reached the player as a generic "Unable to connect".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginRefusal {
+    /// realmd's logon-proof `AuthLogonResult` (`crate::AuthReject`) — bad password, banned, …
+    Logon(u8),
+    /// The world server's `SMSG_AUTH_RESPONSE` code (`crate::WorldAuthReject`, the
+    /// `messages::AUTH_*` block) — session expired, server shutting down, …
+    World(u8),
+}
+
+impl LoginRefusal {
+    /// The raw byte, for logging. Deliberately not a `From`/`Into`: the whole point of the type is
+    /// that the byte alone is ambiguous, so getting it back should look like a narrowing.
+    pub fn byte(self) -> u8 {
+        match self {
+            LoginRefusal::Logon(b) | LoginRefusal::World(b) => b,
+        }
+    }
+}
+
 /// One decoded event from the world stream. Carries only primitives + the coarse [`EntityKind`]
 /// classification — no wire types leak to the app, and no running state lives here.
 #[derive(Debug, Clone)]
@@ -116,6 +144,15 @@ pub enum SessionEvent {
     /// A login attempt progressed to `stage` (decision 0539) — IO-thread-emitted, like
     /// [`Self::CharacterList`], never wire-decoded.
     LoginStage { stage: LoginStage },
+    /// **We are queued for a full realm** (`SMSG_AUTH_RESPONSE(AUTH_WAIT_QUEUE)`) — a wait, not
+    /// an outcome. Emitted once per queue packet while the world handshake is parked; the attempt
+    /// is still live and ends normally with a roster (admitted) or a failure. `position` is `None`
+    /// when the packet carried no readable one. `realm` is the realm we are queued for, so the
+    /// screen can name it without waiting for the roster that is on the far side of the queue.
+    LoginQueued {
+        position: Option<u32>,
+        realm: Option<String>,
+    },
     /// A login attempt failed before the roster (decision 0539): `code` is the server's auth
     /// result byte ([`crate::auth::AuthReject`]) when the server *refused* us, `None` for a
     /// transport failure (dial/handshake error). The IO thread is re-parked pre-logon; the app
@@ -124,9 +161,14 @@ pub enum SessionEvent {
     /// the server is simply unusable by this client (e.g. [`crate::WardenRequired`]). The app must
     /// surface `reason` and stop, never fold it into the paced-resubmit path.
     LoginFailed {
-        code: Option<u8>,
+        refusal: Option<LoginRefusal>,
         reason: String,
         terminal: bool,
+        /// Set when the failure was the **dial itself** — the socket never opened — carrying which
+        /// of the two reasons it was and the address it was aimed at (decision 1667's follow-up).
+        /// `None` for every other transport failure (a handshake that got a socket and then broke)
+        /// and for every server refusal, which have a `code` instead.
+        dial: Option<crate::DialFailure>,
     },
     /// The account's character roster (`SMSG_CHAR_ENUM`): the world socket is authenticated and
     /// parked at character select. The IO thread emits this each connection cycle, then waits for
@@ -340,6 +382,25 @@ pub enum SessionEvent {
     /// The player's hearthstone bind point (`SMSG_BINDPOINTUPDATE`): the AreaTable id the
     /// `$z` token names ("Returns you to <area>.").
     BindPoint { area: u32 },
+    /// The player's open GM ticket, or `None` for the ordinary "you have no ticket" answer
+    /// (`SMSG_GMTICKET_GETTICKET`; decision 1673). **Every one of these is an answer, including a
+    /// `None`** — the Help window re-polls every 10 minutes and must re-fire `UPDATE_TICKET` each
+    /// time even when nothing changed, so the consumer counts these rather than diffing them.
+    GmTicket { ticket: Option<Box<GmTicket>> },
+    /// The answer to filing a ticket (`SMSG_GMTICKET_CREATE`): 2 = created, 3 = refused,
+    /// 1 = one already exists (vmangos never sends 1 and sometimes sends nothing at all).
+    GmTicketCreated { response: u32 },
+    /// The answer to editing a ticket (`SMSG_GMTICKET_UPDATETEXT`): 4 = saved, 5 = refused.
+    GmTicketUpdated { response: u32 },
+    /// The answer to abandoning a ticket (`SMSG_GMTICKET_DELETETICKET`): 9 = deleted. Also arrives
+    /// unsolicited when a GM runs `.ticket delete`.
+    GmTicketDeleted { response: u32 },
+    /// Whether the petition queue is taking tickets (`SMSG_GMTICKETSYSTEMSTATUS`): 1 = yes.
+    /// Drives `UPDATE_GM_STATUS`, and through it the Help window's "page a GM" gate.
+    GmTicketSystemStatus { status: i32 },
+    /// A GM touched the ticket (`SMSG_GM_TICKET_STATUS_UPDATE`): 1 = updated, 2 = closed,
+    /// 3 = a survey is offered. vmangos never sends it; cmangos makes it the notification model.
+    GmTicketStatusUpdate { status: u32 },
     /// An innkeeper is asking whether to make this your home (`SMSG_BINDER_CONFIRM`) — the
     /// question the `CONFIRM_BINDER` dialog puts on screen. `binder` is the innkeeper's guid, and
     /// it must be echoed in `CMSG_BINDER_ACTIVATE` for the bind to happen at all (decision 1331).
@@ -404,6 +465,10 @@ pub enum SessionEvent {
         rank: u32,
         /// The template type flags — bit `0x10` hides the tooltip's faction-name line. `0` on a miss.
         type_flags: u32,
+        /// The template's model (`CreatureDisplayInfo.dbc` id) — the only way to draw a creature
+        /// with no world object to read `UNIT_FIELD_DISPLAYID` off, which is exactly a stabled pet
+        /// (decision 1676). `0` when the template ships none, and `0` on a miss.
+        display_id: u32,
         /// The civilian flag (the tooltip's green CIVILIAN line). `false` on a miss.
         civilian: bool,
         /// The racial-leader flag (the tooltip's white LEADER line). `false` on a miss.
@@ -797,6 +862,25 @@ pub enum SessionEvent {
         services: Vec<TrainerSpell>,
         greeting: String,
     },
+    /// Forget a player's cached name (`SMSG_INVALIDATE_PLAYER`, decision 1689) — the name cache's
+    /// only explicit eviction for a player, and the safety valve a *persisted* cache needs.
+    InvalidatePlayer { guid: u64 },
+    /// A stable master's pet list (`MSG_LIST_STABLED_PETS`, decision 1676) — the current pet and
+    /// the stabled ones, each already carrying its rebased client slot (`0` = current), plus how
+    /// many stable slots the player has **bought**. Arrives unprompted when the gossip stable
+    /// option is chosen (that is how the window opens) and again in answer to our own refresh send.
+    ///
+    /// Read the rows **by slot, never by position**: the current-pet row is absent for a petless
+    /// hunter, so `pets[0]` is not necessarily slot 0.
+    ListStabledPets {
+        npc: u64,
+        num_stable_slots: u8,
+        pets: Vec<StabledPet>,
+    },
+    /// The answer to every stable verb (`SMSG_STABLE_RESULT`, decision 1676) — one
+    /// [`crate::messages::stable_result`] code and nothing else. No success carries an updated
+    /// list, so repainting the window takes a fresh `MSG_LIST_STABLED_PETS` send.
+    StableResult { result: u8 },
     /// A trainer taught a service (`SMSG_TRAINER_BUY_SUCCEEDED`, answering `CMSG_TRAINER_BUY_SPELL`):
     /// confirmation only — the spell itself arrives via `SMSG_LEARNED_SPELL` (already in the book).
     /// The app re-requests `CMSG_TRAINER_LIST` on this to repaint the bought row green→gray (decision
@@ -844,7 +928,8 @@ pub enum SessionEvent {
     /// A loot window opened (`SMSG_LOOT_RESPONSE`'s normal shape), answering our `CMSG_LOOT`:
     /// `loot_type` is a `loot::loot_type` code, `items` the row list (quest rows ride the same
     /// list, `slot = items.len() + i`). A row still under a group roll arrives with
-    /// `slot_type == ROLL_ONGOING` (decision 0591); master loot stays out of scope.
+    /// `slot_type == ROLL_ONGOING` (decision 0591); under master loot every row vmangos shows a
+    /// group member arrives `slot_type == MASTER` (decision 1675).
     LootResponse {
         guid: u64,
         loot_type: u8,
@@ -874,6 +959,10 @@ pub enum SessionEvent {
     /// Everyone passed (`SMSG_LOOT_ALL_PASSED`) — closes that roll's frame; the item returns to
     /// the corpse for ordinary looting.
     LootAllPassed(LootAllPassed),
+    /// The group members eligible to receive an item from the loot window that is opening
+    /// (`SMSG_LOOT_MASTER_LIST`) — it arrives *before* the `LootResponse` it belongs to, because
+    /// the server sends it from inside `SendLoot` (decision 1675).
+    LootMasterList { candidates: Vec<u64> },
     /// An item landed in our bags — looted or received from an NPC (`SMSG_ITEM_PUSH_RESULT`);
     /// drives the "You receive loot: …" chat line.
     ItemPushResult(ItemPushResult),
@@ -1104,6 +1193,34 @@ pub enum SessionEvent {
     /// The guild's "founded on / N members / N accounts" summary (`SMSG_GUILD_INFO`) — a separate
     /// ask from the roster, sharing no fields with it.
     GuildInfo(GuildInfo),
+    /// A guild registrar's charter list (`SMSG_PETITION_SHOWLIST`) — what opens the registrar
+    /// window. Always one row at 1.12; `npc` is the registrar every later verb names.
+    PetitionShowList(PetitionShowList),
+    /// Who has signed a charter (`SMSG_PETITION_SHOW_SIGNATURES`). **Two meanings in one packet**:
+    /// the answer to our own ask, or somebody offering us theirs — a consumer tells them apart by
+    /// whether `owner` is us, and nothing else does.
+    ///
+    /// It carries neither the proposed guild's name nor the signature requirement. Those live only
+    /// on [`Self::PetitionQueryResponse`], keyed by `petition_id` — the same two-caches shape the
+    /// guild roster has with [`Self::GuildQueryResponse`].
+    PetitionShowSignatures(PetitionShowSignatures),
+    /// The verdict on one signature (`SMSG_PETITION_SIGN_RESULTS`). Sent to **both** the signer and
+    /// the charter's owner on success, and both copies name the *signer*, so a consumer cannot tell
+    /// which copy it holds from the packet alone.
+    PetitionSignResults(PetitionSignResults),
+    /// A petition's record (`SMSG_PETITION_QUERY_RESPONSE`) — the proposed guild name and the
+    /// signature requirement. The lazy cache fill behind the charter window's title.
+    PetitionQueryResponse(PetitionQueryResponse),
+    /// The verdict on a turn-in (`SMSG_TURN_IN_PETITION_RESULTS`) — a bare code, with no charter
+    /// named. **Silence is a real outcome**: a name collision answers with an
+    /// [`Self::GuildCommandResult`] and no results packet at all.
+    TurnInPetitionResults { result: u32 },
+    /// Somebody declined our charter (`MSG_PETITION_DECLINE`) — their guid, delivered to the
+    /// charter's owner only.
+    PetitionDeclined { player: u64 },
+    /// A charter rename that took (`MSG_PETITION_RENAME`) — the server's echo, sent only on
+    /// success. A rejected name arrives as a [`Self::GuildCommandResult`] instead.
+    PetitionRenamed(PetitionRename),
     /// The taxi map (`SMSG_SHOWTAXINODES`, decision 0484): `flightmaster` is the NPC the menu
     /// opened on, `nearest_node` the node it sits at, `known_mask` the full known-node bitmask
     /// ([`TaxiMask::is_known`]). The wire's window-framing constant carries no state and is

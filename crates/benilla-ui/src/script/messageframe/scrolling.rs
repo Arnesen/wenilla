@@ -4,7 +4,9 @@
 //! Grounded in wow-re's byte-verified runtime model (msgframe-runtime.md, §5 pair): a **true ring**
 //! of `maxLines` (drop-oldest, `SetMaxLines` destructive), `AddMessage(text[,r,g,b[,id]])` with the
 //! `trunc(x*255+0.5)` color quantization + forced-opaque alpha, per-line fade snapshots ticked only
-//! while **AtBottom** (scrolled up freezes every alpha), and 1-slot scrollback. The heavy lifting
+//! while **AtBottom** (scrolled up freezes every alpha), 1-slot scrollback, and — the other half of
+//! that fade, `msgframe-fade-rearm-law.md` — **every scroll entry re-arming the displayed lines**,
+//! which is what brings a faded-out chat back. The heavy lifting
 //! (the ring, the fade phases, the scroll clamps) lives on [`ScrollingMessageState`]
 //! (`crate::widget`), unit-tested there; this module is the thin Lua binding over it, plus the
 //! host-facing [`UiScript::add_chat_message`]/fade advance the app drives.
@@ -56,11 +58,17 @@ fn num_f32(v: &Value) -> f32 {
     }
 }
 
-/// `PageUp`/`PageDown`: page by the currently-displayed message count minus one (one message of
-/// overlap — msgframe-runtime.md's page law). The viewport's row budget comes from the frame's last
-/// resolved rect at the ring font's pitch (the font-height line-step law, the emit pass's basis);
-/// an unresolved frame pages by one message.
-fn page(lua: &Lua, this: &Table, up: bool) -> mlua::Result<()> {
+/// Run a scroll entry over a frame's state with the viewport's row budget in hand.
+///
+/// Every scroll method needs it, not just the pages: each one re-arms the **displayed** lines'
+/// fade ([`ScrollingMessageState::reset_all_fade_times`]), and which lines those are depends on the
+/// row budget. It comes from the frame's last resolved rect at the ring font's pitch (the
+/// font-height line-step law, the emit pass's basis); an unresolved frame reads as one row.
+fn scroll(
+    lua: &Lua,
+    this: &Table,
+    op: impl FnOnce(&mut ScrollingMessageState, usize),
+) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let viewport_rows = UiScript::message_viewport_rows(&model, h);
@@ -70,11 +78,7 @@ fn page(lua: &Lua, this: &Table, up: bool) -> mlua::Result<()> {
         .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
     match &mut frame.kind_state {
         KindState::ScrollingMessage(smf) => {
-            if up {
-                smf.page_up(viewport_rows);
-            } else {
-                smf.page_down(viewport_rows);
-            }
+            op(smf, viewport_rows);
             Ok(())
         }
         _ => Err(mlua::Error::runtime("not a ScrollingMessageFrame")),
@@ -112,34 +116,36 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "ScrollUp",
         lua.create_function(|lua, this: Table| {
-            with_smf(lua, &this, ScrollingMessageState::scroll_up)
+            scroll(lua, &this, ScrollingMessageState::scroll_up)
         })?,
     )?;
     m.set(
         "ScrollDown",
         lua.create_function(|lua, this: Table| {
-            with_smf(lua, &this, ScrollingMessageState::scroll_down)
+            scroll(lua, &this, ScrollingMessageState::scroll_down)
         })?,
     )?;
     m.set(
         "ScrollToTop",
         lua.create_function(|lua, this: Table| {
-            with_smf(lua, &this, ScrollingMessageState::scroll_to_top)
+            scroll(lua, &this, ScrollingMessageState::scroll_to_top)
         })?,
     )?;
     m.set(
         "ScrollToBottom",
         lua.create_function(|lua, this: Table| {
-            with_smf(lua, &this, ScrollingMessageState::scroll_to_bottom)
+            scroll(lua, &this, ScrollingMessageState::scroll_to_bottom)
         })?,
     )?;
     m.set(
         "PageUp",
-        lua.create_function(|lua, this: Table| page(lua, &this, true))?,
+        lua.create_function(|lua, this: Table| scroll(lua, &this, ScrollingMessageState::page_up))?,
     )?;
     m.set(
         "PageDown",
-        lua.create_function(|lua, this: Table| page(lua, &this, false))?,
+        lua.create_function(|lua, this: Table| {
+            scroll(lua, &this, ScrollingMessageState::page_down)
+        })?,
     )?;
     m.set(
         "AtTop",
@@ -334,6 +340,9 @@ mod tests {
         assert_eq!(s.lines[0].alpha, 0.0);
     }
 
+    /// The tick's AtBottom gate, isolated from the scroll re-arm that now sits next to it: with a
+    /// one-row viewport only the newest displayed line is re-armed, so the two lines either side of
+    /// it are the ones that show the freeze.
     #[test]
     fn scrolled_up_freezes_the_fade() {
         let mut s = ScrollingMessageState {
@@ -342,18 +351,92 @@ mod tests {
             fade_duration: 4.0,
             ..Default::default()
         };
-        s.add("a".into(), 1.0, 1.0, 1.0);
-        s.add("b".into(), 1.0, 1.0, 1.0);
-        // Scroll up one line — no longer AtBottom, so ticks must not advance any alpha.
-        s.scroll_up();
+        for n in 0..3 {
+            s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+        }
+        s.tick(2.0); // half-way down the ramp: trunc(2.0/4.0*255) = 127
+        let half = 127.0 / 255.0;
+        assert_eq!(s.lines[0].alpha, half);
+        // Scroll up one line — no longer AtBottom, so ticks must not advance any alpha. The line
+        // that lands in the one-row viewport (l1) is re-armed by the scroll; l0 and l2 are not.
+        s.scroll_up(1);
         assert!(!s.at_bottom());
+        assert_eq!(s.lines[1].alpha, 1.0, "the displayed line was re-armed");
         s.tick(2.0);
-        assert_eq!(s.lines[0].alpha, 1.0, "frozen while scrolled up");
+        assert_eq!(s.lines[0].alpha, half, "frozen while scrolled up");
+        assert_eq!(s.lines[2].alpha, half);
         assert_eq!(s.lines[1].alpha, 1.0);
-        // Back to bottom → the fade resumes.
-        s.scroll_to_bottom();
+        // Back to bottom → the fade resumes (from the re-arm this scroll performs).
+        s.scroll_to_bottom(1);
         s.tick(2.0);
-        assert!(s.lines[1].alpha < 1.0);
+        assert!(s.lines[2].alpha < 1.0);
+    }
+
+    /// **The director's bug (2026-08-29): a fully-faded chat could never be brought back.** Every
+    /// scroll entry re-arms the displayed lines — including the ones that move no cursor at all,
+    /// which is what clicking the arrows on an already-at-bottom chat does.
+    #[test]
+    fn any_scroll_brings_faded_lines_back() {
+        let armed = |op: fn(&mut ScrollingMessageState, usize)| {
+            let mut s = ScrollingMessageState {
+                max_lines: 8,
+                time_visible: 1.0,
+                fade_duration: 1.0,
+                ..Default::default()
+            };
+            for n in 0..3 {
+                s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+            }
+            s.tick(1.5); // spend phase 1
+            s.tick(1.5); // spend phase 2 — everything is gone
+            assert!(s.lines.iter().all(|l| l.alpha == 0.0), "faded out first");
+            op(&mut s, 8);
+            s
+        };
+        for (name, op) in [
+            (
+                "ScrollUp",
+                ScrollingMessageState::scroll_up as fn(&mut _, usize),
+            ),
+            ("ScrollDown", ScrollingMessageState::scroll_down),
+            ("ScrollToTop", ScrollingMessageState::scroll_to_top),
+            ("ScrollToBottom", ScrollingMessageState::scroll_to_bottom),
+            ("PageUp", ScrollingMessageState::page_up),
+            ("PageDown", ScrollingMessageState::page_down),
+        ] {
+            let s = armed(op);
+            // Whatever the op left in view is what the engine re-arms — `ScrollUp` carries the
+            // newest line off the bottom of the viewport, so the set is the op's, not the ring.
+            let shown = s.displayed_range(8);
+            assert!(!shown.is_empty(), "{name} displayed nothing");
+            for i in shown {
+                let line = &s.lines[i];
+                assert_eq!(line.alpha, 1.0, "{name} left line {i} invisible");
+                assert_eq!(line.time_left, 1.0, "{name} left line {i} un-armed");
+                assert_eq!(line.fade_left, 1.0, "{name} left line {i} un-armed");
+            }
+        }
+    }
+
+    /// `0x788b80` walks the display vector, not the ring: a line scrolled out of view keeps
+    /// whatever fade state it had.
+    #[test]
+    fn the_re_arm_reaches_only_the_displayed_lines() {
+        let mut s = ScrollingMessageState {
+            max_lines: 8,
+            time_visible: 1.0,
+            fade_duration: 1.0,
+            ..Default::default()
+        };
+        for n in 0..3 {
+            s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+        }
+        s.tick(1.5);
+        s.tick(1.5);
+        s.scroll_down(1); // a no-op scroll at the bottom, one row of viewport
+        assert_eq!(s.lines[2].alpha, 1.0, "the one displayed line came back");
+        assert_eq!(s.lines[1].alpha, 0.0, "off-screen lines are untouched");
+        assert_eq!(s.lines[0].alpha, 0.0);
     }
 
     #[test]
@@ -366,15 +449,15 @@ mod tests {
             s.add(format!("l{n}"), 1.0, 1.0, 1.0);
         }
         assert!(s.at_bottom());
-        s.scroll_down(); // already at bottom — no-op
+        s.scroll_down(8); // already at bottom — no cursor move
         assert!(s.at_bottom());
         // 3 lines → max_scroll = 2; scroll past it clamps.
         for _ in 0..10 {
-            s.scroll_up();
+            s.scroll_up(8);
         }
         assert!(s.at_top());
         assert_eq!(s.scroll_offset, 2);
-        s.scroll_to_bottom();
+        s.scroll_to_bottom(8);
         assert!(s.at_bottom());
     }
 
@@ -387,7 +470,7 @@ mod tests {
         for n in 0..4 {
             s.add(format!("l{n}"), 1.0, 1.0, 1.0);
         }
-        s.scroll_up(); // viewing one line back (bottom row = l2)
+        s.scroll_up(8); // viewing one line back (bottom row = l2)
         let off = s.scroll_offset;
         s.add("l4".into(), 1.0, 1.0, 1.0); // a new line arrives at the bottom
         assert_eq!(

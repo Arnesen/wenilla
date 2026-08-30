@@ -38,10 +38,15 @@ pub use characters::{
     StartOutfitItem,
 };
 mod camera_shakes;
+mod cinematics;
 mod creatures;
 mod dbc;
 mod unit_blood;
 pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog};
+pub use cinematics::{
+    camera_model_path, load_cinematics, CinematicCameraRow, CinematicCatalog, CinematicPath,
+    CinematicSequence, CinematicView, SEQUENCE_CAMERAS,
+};
 pub use creatures::{
     load_creature_catalog, CreatureCatalog, CreatureModel, FootprintParams, NpcAppearance,
 };
@@ -50,6 +55,10 @@ mod macro_icons;
 pub use unit_blood::{load_blood_catalog, BloodCatalog};
 mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
+mod gm_ticket_category;
+pub use gm_ticket_category::{
+    load_gm_ticket_categories, GmTicketCategory, GmTicketCategoryCatalog,
+};
 mod itembagfamily;
 pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
 mod itemclass;
@@ -87,6 +96,8 @@ mod exhaustion;
 pub use exhaustion::{load_exhaustion, ExhaustionRow};
 mod bank_bag_slot_prices;
 pub use bank_bag_slot_prices::{load_bank_bag_slot_prices, BankBagSlotPrices};
+mod stable_slot_prices;
+pub use stable_slot_prices::{load_stable_slot_prices, StableSlotPrices};
 mod page_text_material;
 pub use page_text_material::{load_page_text_material_catalog, PageTextMaterialCatalog};
 mod stationery;
@@ -235,7 +246,8 @@ pub use models::{
     ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton,
     SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
     WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot,
-    ALPHA_KEY_REF, GLUE_AUTHORED_ASPECT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
+    ALPHA_KEY_REF, DEGENERATE_RING_FOOTPRINT, GLUE_AUTHORED_ASPECT, NO_GROUP_LIQUID,
+    OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{

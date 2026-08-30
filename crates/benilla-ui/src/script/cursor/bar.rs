@@ -123,6 +123,9 @@ pub(crate) fn place_action(model: &mut Model, id: u32) -> bool {
         // no `CMSG_SET_ACTION_BUTTON` encoding at all, so there is nothing to pack: the payload
         // goes straight back on the cursor, where the pet bar can still take it.
         CursorPayload::PetAction(_) => None,
+        // Mode 10 (decision 1677) — a stabled pet has no `CMSG_SET_ACTION_BUTTON` encoding either,
+        // so the action bar refuses it and it goes back on the cursor.
+        CursorPayload::StablePet(_) => None,
     };
     let Some((kind, action, texture)) = placeable else {
         model.cursor = Some(held);
