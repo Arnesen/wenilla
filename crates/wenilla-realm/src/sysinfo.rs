@@ -79,6 +79,15 @@ pub fn read() -> Memory {
                 }
             }
         }
+        // One row per program (threads and short-lived duplicates fold into it).
+        let mut by_name: Vec<(String, u64)> = Vec::new();
+        for (n, r) in std::mem::take(&mut m.processes) {
+            match by_name.iter_mut().find(|(k, _)| *k == n) {
+                Some(e) => e.1 = e.1.max(r),
+                None => by_name.push((n, r)),
+            }
+        }
+        m.processes = by_name;
         m.processes.sort_by(|a, b| b.1.cmp(&a.1));
     }
     m
