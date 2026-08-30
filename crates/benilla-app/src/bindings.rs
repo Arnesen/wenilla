@@ -253,8 +253,14 @@ fn seed_bindings(
 /// Read + parse one diff file; `None` when absent/unreadable (defaults).
 fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<String>)>> {
     let path = path.as_ref()?;
-    match std::fs::read_to_string(path) {
-        Ok(text) => Some(store::from_diff(&text)),
+    // Through `local_state` (not `std::fs`): on the web the state folder is `localStorage`, and
+    // a direct read there is a silent "not found" — bindings were saved and never read back.
+    match crate::local_state::read_to_string(path) {
+        Ok(text) => {
+            let diff = store::from_diff(&text);
+            info!("bindings: {} overrides read from {}", diff.len(), path.display());
+            Some(diff)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             warn!("bindings: reading {}: {e}", path.display());
@@ -314,7 +320,7 @@ fn save_bindings(script: Option<NonSendMut<UiScript>>, files: Res<BindingFiles>)
         }
         if which == 1 {
             if let Some(chr) = &files.character {
-                match std::fs::remove_file(chr) {
+                match crate::local_state::remove_file(chr) {
                     Ok(()) => info!("bindings: character-specific set deleted"),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => warn!("bindings: deleting {}: {e}", chr.display()),
