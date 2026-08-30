@@ -1,8 +1,9 @@
 //! Memory pressure for the dashboard, read from `/proc`. Inside the container `/proc/meminfo`
 //! is the machine's (Docker does not virtualise it), so total/available are what the operator
-//! sizes the VM by. Per-process RSS is visible only for processes in the same PID namespace —
-//! the packaging runs the realm container with `pid: "service:mangosd"` so the world server
-//! shows up; natively (a dev box) every process does.
+//! sizes the VM by. Per-process RSS is visible only for processes in the same PID namespace:
+//! natively (a dev box) that includes mangosd; in the container deployment only the service
+//! itself (sharing mangosd's namespace was tried and dropped — it stops the panel from
+//! starting while mangosd restarts).
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Memory {
