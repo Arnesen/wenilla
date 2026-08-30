@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}About {{ realm_name }}{% endblock %}
+{% block brand %}{{ realm_name }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>About</h1>
+  <p>{{ realm_name }} is a private, invite-only realm run for a group of friends. It is played entirely in the browser: there is nothing to install and no other way to connect.</p>
+  <p>The realm is non-commercial. It runs on open-source software (<a href="https://github.com/cmangos/mangos-classic">CMaNGOS</a>, <a href="https://github.com/samwhosung/benilla">benilla</a>, <a href="https://github.com/Arnesen/wenilla-realm">wenilla-realm</a>) and uses game data the operator supplied from their own client. It is not affiliated with or endorsed by Blizzard Entertainment.</p>
+  <p><a href="/login">Sign in</a></p>
+</div>
+{% endblock %}

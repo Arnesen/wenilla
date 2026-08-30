@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block brand %}Admin{% endblock %}
+{% block nav %}<nav><a href="/admin">Dashboard</a><a href="/admin/users">Users</a><a href="/admin/config">Settings</a><a href="/admin/audit">Audit</a><a href="/">Play</a><form class="inline" method="post" action="/logout"><button class="secondary small">Sign out</button></form></nav>{% endblock %}
+{% block content %}
+{% if let Some(n) = notice %}<div class="flash notice">{{ n }}</div>{% endif %}
+{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+{% if restart_pending %}<div class="flash error">A settings change needs a world-server restart to take effect.</div>{% endif %}
+<div class="row">
+  <div class="card">
+    <h2>World server</h2>
+    {% if status.reachable %}<p class="ok">reachable</p>{% else %}<p class="bad">unreachable — {{ status.raw }}</p>{% endif %}
+    <p>{{ players_online }} player{% if players_online != 1 %}s{% endif %} online, {{ bots_online }} bots</p>
+    {% if status.reachable %}<details><summary>server info</summary><pre>{{ status.raw }}</pre></details>{% endif %}
+  </div>
+  <div class="card">
+    <h2>Say something</h2>
+    <form method="post" action="/admin/server/announce"><input type="hidden" name="_csrf" value="{{ csrf }}"><label>Chat announcement (everyone online)</label><input name="text" type="text" maxlength="200" required> <button class="small">Announce</button></form>
+    <form method="post" action="/admin/server/notify"><input type="hidden" name="_csrf" value="{{ csrf }}"><label>On-screen notice</label><input name="text" type="text" maxlength="200" required> <button class="small">Notify</button></form>
+  </div>
+  <div class="card">
+    <h2>Restart</h2>
+    <p class="muted">Counts down in chat, saves everyone, restarts. Back in a minute or two.</p>
+    <form method="post" action="/admin/server/restart"><input type="hidden" name="_csrf" value="{{ csrf }}"><label>Delay (seconds)</label><input name="delay" type="number" min="0" max="3600" value="60"> <button class="danger small">Restart world server</button></form>
+    <form method="post" action="/admin/server/cancel-restart"><input type="hidden" name="_csrf" value="{{ csrf }}"><p><button class="secondary small">Cancel a pending restart</button></p></form>
+    <form method="post" action="/admin/server/reload"><input type="hidden" name="_csrf" value="{{ csrf }}"><p><button class="secondary small">Reload config</button></p></form>
+  </div>
+</div>
+<div class="card">
+  <h2>Online now</h2>
+  {% if online.is_empty() %}<p class="muted">Nobody.</p>{% else %}
+  <table><tr><th>Character</th><th>Level</th><th>Race / class</th><th>Zone</th><th>Account</th></tr>
+  {% for c in online %}<tr><td>{{ c.name }}</td><td>{{ c.level }}</td><td>{{ self::race(c.race) }} {{ self::class(c.class) }}</td><td>{{ c.zone }}</td><td class="muted">{{ c.account }}</td></tr>{% endfor %}
+  </table>{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Realm setup{% endblock %}
+{% block content %}
+<div class="card" style="max-width:40rem;margin:1rem auto">
+  <h1>Set up your realm</h1>
+  <p class="muted">One-time. The setup token was printed by the service when it started (<code>realmctl up</code> shows it).</p>
+  {% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+  <form method="post" action="/setup">
+    <label>Setup token</label><input name="token" type="text" value="{{ token }}" required>
+    <h2 style="margin-top:1.2rem">Admin account</h2>
+    <label>Username</label><input name="admin_username" type="text" autocomplete="username" required>
+    <div class="row">
+      <div><label>Password (10+ characters)</label><input name="admin_password" type="password" autocomplete="new-password" required></div>
+      <div><label>Password again</label><input name="admin_password2" type="password" autocomplete="new-password" required></div>
+    </div>
+    <h2 style="margin-top:1.2rem">Realm</h2>
+    <label>Realm name (shown in the game's realm list)</label><input name="realm_name" type="text" maxlength="32" placeholder="Our Realm" value="Our Realm">
+    <label>Public address</label><input type="url" value="{{ public_url }}" disabled><p class="muted">From <code>REALM_PUBLIC_URL</code>; change it in <code>.env</code>.</p>
+    <div class="row">
+      <div><label>Experience rate</label><select name="xp_rate"><option value="1">1× (as shipped)</option><option value="2">2×</option><option value="3">3×</option><option value="5">5×</option></select></div>
+      <div><label>Loot drop rate</label><select name="loot_rate"><option value="1">1×</option><option value="2">2×</option><option value="3">3×</option></select></div>
+      <div><label>Money drop rate</label><select name="money_rate"><option value="1">1×</option><option value="2">2×</option><option value="3">3×</option></select></div>
+    </div>
+    <div class="row">
+      <div><label>Random bots populating the world (0 = none, max {{ bot_account_count }} without a restart)</label><input name="bots" type="number" min="0" max="2000" value="0"></div>
+      <div><label>Auction-house bot</label><label style="color:var(--fg)"><input name="ahbot" type="checkbox" value="1"> stock the auction house</label></div>
+    </div>
+    <label>Message of the day</label><input name="motd" type="text" maxlength="250" placeholder="Welcome!">
+    <p><button type="submit">Create realm</button></p>
+  </form>
+</div>
+{% endblock %}

@@ -16,7 +16,10 @@ use tokio::net::TcpStream;
 async fn raw_request(addr: std::net::SocketAddr, method: &str, path: &str) -> (u16, Vec<u8>) {
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     stream
-        .write_all(format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .await
         .expect("write request");
     let mut raw = Vec::new();

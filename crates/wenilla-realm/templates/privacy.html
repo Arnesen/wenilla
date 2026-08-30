@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Privacy — {{ realm_name }}{% endblock %}
+{% block brand %}{{ realm_name }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Privacy</h1>
+  <p>This realm stores as little about you as it can:</p>
+  <ul>
+    <li><b>Your login</b>: the username and display name the admin gave you, a salted hash of your password, and your sign-in sessions.</li>
+    <li><b>Your web address</b>: the IP you signed in from, kept for 90 days for abuse handling, then removed.</li>
+    <li><b>Your characters</b>: everything the game itself keeps (characters, items, chat is not logged). The game server never sees your IP — it only sees this website.</li>
+    <li><b>The audit log</b>: what admins did (bans, resets) and when you signed in.</li>
+  </ul>
+  <p>Nothing is shared with anyone else, and nothing is sold. To have your account and characters deleted, ask the admin — deletion is immediate and complete.</p>
+</div>
+{% endblock %}

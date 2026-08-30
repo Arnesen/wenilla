@@ -65,10 +65,7 @@ async fn file(method: Method, uri: Uri, State(state): State<DataState>) -> Respo
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, "application/octet-stream"),
-                    (
-                        header::CACHE_CONTROL,
-                        "public, max-age=31536000, immutable",
-                    ),
+                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
                 ],
                 body,
             )

@@ -1,0 +1,39 @@
+[package]
+name = "wenilla-realm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The realm service: a login-gated web front for the browser client plus an admin panel that runs the game server over SOAP, the config files, and read-only DB access"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+wenilla-host = { path = "../wenilla-host" }
+benilla-formats = { path = "../benilla-formats", default-features = false }
+axum = { version = "0.8", features = ["ws", "macros", "form", "json"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["fs", "set-header", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "mysql", "migrate", "macros"] }
+askama = "0.14"
+argon2 = { version = "0.5", features = ["std"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+regex = "1"
+async-trait = "0.1"
+url = "2"
+subtle = "2"
+hex = "0.4"
+time = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+http-body-util = "0.1"

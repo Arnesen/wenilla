@@ -58,6 +58,12 @@
   }
 </script>
 <canvas id="benilla"></canvas>
+<script>
+  // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
+  // credentials itself sets `window.__wenilla_env = {user, pass, host}` here instead, and the
+  // client then never reads credentials from the URL (`benilla_app::webenv`).
+  window.__wenilla_env = { dev_query_creds: '1' };
+</script>
 <script type="module">
   import init from './wenilla.js';
   import { bind } from './wasi_stubs.js';

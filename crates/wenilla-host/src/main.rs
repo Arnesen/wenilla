@@ -11,11 +11,6 @@ use anyhow::{Context, Result};
 use benilla_formats::Chain;
 use clap::Parser;
 
-/// The only two ports the `/ws/{port}` proxy will ever dial — mangos realmd (login) and worldd
-/// (world). Fixed here, not a CLI flag: this host can bind `0.0.0.0` on a Tailscale box, so the
-/// allowlist is a security boundary, not a convenience default.
-const ALLOWED_PORTS: [u16; 2] = [3724, 8085];
-
 #[derive(Parser)]
 #[command(about = "Serve the benilla browser build, its game data, and its net proxy")]
 struct Cli {
@@ -49,7 +44,10 @@ async fn main() -> Result<()> {
     tracing::info!(data = %cli.data.display(), "patch chain open");
 
     let app = wenilla_host::data::router(chain)
-        .merge(wenilla_host::ws::router(cli.upstream.clone(), ALLOWED_PORTS))
+        .merge(wenilla_host::ws::router(
+            cli.upstream.clone(),
+            wenilla_host::ALLOWED_PORTS,
+        ))
         .merge(wenilla_host::static_site::router(&cli.www));
 
     let listener = tokio::net::TcpListener::bind(&cli.bind)

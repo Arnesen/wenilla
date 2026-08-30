@@ -5,7 +5,7 @@
 //! host runs on a Tailscale-reachable bind address, so an unchecked proxy would be an open relay
 //! onto whatever else is listening on the box.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -20,20 +20,29 @@ use tokio::net::TcpStream;
 
 #[derive(Clone)]
 struct WsState {
-    /// Host the proxy dials for an allowed port — plain hostname/IP, not a URL (mangos runs on
-    /// this same box in the normal deployment, so this defaults to loopback in `main.rs`).
-    upstream: Arc<str>,
-    allowed: Arc<HashSet<u16>>,
+    /// Port → host the proxy dials for it — plain hostname/IP, not a URL. The key set *is* the
+    /// allowlist: a port with no entry is refused. One host for every port is the single-box
+    /// deployment (`main.rs` defaults to loopback); a host per port is the containerised one,
+    /// where realmd (3724) and mangosd (8085) are different services.
+    upstreams: Arc<HashMap<u16, Arc<str>>>,
 }
 
-/// Build the `/ws/{port}` router. `allowed` is the exact port set the proxy will dial — production
-/// passes `{3724, 8085}` (the plan's shared scheme: "only 3724 and 8085 are allowed"); tests pass
-/// their own echo-server port so the allowlist check doesn't have to be bypassed to exercise it.
+/// Build the `/ws/{port}` router with one upstream host for every allowed port. `allowed` is the
+/// exact port set the proxy will dial — production passes `{3724, 8085}` (the plan's shared
+/// scheme: "only 3724 and 8085 are allowed"); tests pass their own echo-server port so the
+/// allowlist check doesn't have to be bypassed to exercise it.
 pub fn router(upstream: impl Into<Arc<str>>, allowed: impl IntoIterator<Item = u16>) -> Router {
-    Router::new().route("/ws/{port}", get(upgrade)).with_state(WsState {
-        upstream: upstream.into(),
-        allowed: Arc::new(allowed.into_iter().collect()),
-    })
+    let upstream: Arc<str> = upstream.into();
+    router_map(allowed.into_iter().map(|p| (p, Arc::clone(&upstream))))
+}
+
+/// Build the `/ws/{port}` router from an explicit port → host map; the keys are the allowlist.
+pub fn router_map(upstreams: impl IntoIterator<Item = (u16, Arc<str>)>) -> Router {
+    Router::new()
+        .route("/ws/{port}", get(upgrade))
+        .with_state(WsState {
+            upstreams: Arc::new(upstreams.into_iter().collect()),
+        })
 }
 
 /// `host` arrives as `?host=` — logging only (the shared scheme's own words); the proxy always
@@ -45,10 +54,9 @@ async fn upgrade(
     Query(params): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !state.allowed.contains(&port) {
+    let Some(upstream) = state.upstreams.get(&port).cloned() else {
         return StatusCode::FORBIDDEN.into_response();
-    }
-    let upstream = Arc::clone(&state.upstream);
+    };
     let host_label = params.get("host").cloned().unwrap_or_default();
     ws.on_upgrade(move |socket| async move {
         if let Err(e) = relay(socket, &upstream, port).await {
@@ -97,7 +105,11 @@ async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<()> {
                     break;
                 }
                 Ok(n) => {
-                    if ws_tx.send(Message::binary(buf[..n].to_vec())).await.is_err() {
+                    if ws_tx
+                        .send(Message::binary(buf[..n].to_vec()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }

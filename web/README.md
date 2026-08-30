@@ -9,7 +9,7 @@ behind a seam the native build already had:
 | raw TCP to realmd/mangosd | a WebSocket to `wenilla-host`, which proxies it to the server (`benilla-protocol::transport::Conn`) |
 | the MPQ patch chain on disk | single files fetched from `GET /data/<name>`, answered from the real `Data/` by the host (`benilla-formats::Chain` on wasm) — the MPQs never leave the server |
 | Lua 5.1 in C, `longjmp` for errors | the same C, compiled against the wasi-sdk sysroot with LLVM's wasm SJLJ; 64-bit `lua_Integer` kept (`third_party/mlua-sys`) |
-| `WOW_USER`/`WOW_PASS`/`WOW_CHAR`/`WOW_HOST` env | the page's query string: `?user=…&pass=…&char=…&host=…` |
+| `WOW_USER`/`WOW_PASS`/`WOW_CHAR`/`WOW_HOST` env | a `window.__wenilla_env = {user, pass, host, …}` object the page sets before `init()`, else the query string `?user=…&pass=…&char=…&host=…` — but the three credential keys are read from the query only when the env object carries `dev_query_creds: "1"` (the dev `index.html` sets it; a login-gated host such as `wenilla-realm` fetches the credentials itself and never puts them in a URL) |
 | the window | `<canvas id="benilla">` in `web/index.html` |
 
 ## Requirements
@@ -44,6 +44,11 @@ own accounts (a second login on one account kicks the first, as in the real clie
 
 ## Things to know
 
+- **Hosting behind a login** — `crates/wenilla-realm` wraps this host's routers behind a session
+  cookie (the wasm, `/data/*` and `/ws/*` all need it; same-origin requests carry the cookie by
+  themselves), renders its own play page that fetches the player's hidden game credentials over
+  the session and hands them to the client through `window.__wenilla_env`, and adds an admin
+  panel for the server. The packaged one-VM deployment is github.com/Arnesen/wenilla-realm.
 - **Sound** starts on the first click or key in the page — browsers suspend every AudioContext
   until a user gesture; `index.html` resumes it then.
 - **Persistence** — the state folder (`config.toml`, macros, key bindings, layouts, chat

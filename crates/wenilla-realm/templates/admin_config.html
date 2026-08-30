@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block brand %}Admin{% endblock %}
+{% block nav %}<nav><a href="/admin">Dashboard</a><a href="/admin/users">Users</a><a href="/admin/config">Settings</a><a href="/admin/audit">Audit</a><a href="/">Play</a><form class="inline" method="post" action="/logout"><button class="secondary small">Sign out</button></form></nav>{% endblock %}
+{% block content %}
+{% if let Some(n) = notice %}<div class="flash notice">{{ n }}</div>{% endif %}
+{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+{% if restart_pending %}<div class="flash error">A change needs a world-server restart — Dashboard → Restart.</div>{% endif %}
+<div class="card">
+  <h2>Realm settings</h2>
+  <p class="muted">Rates, MOTD, limits and the save interval apply live. Max level and turning bots on/off need a restart.</p>
+  <form method="post" action="/admin/config">
+    <input type="hidden" name="_csrf" value="{{ csrf }}">
+    <div class="row">
+      <div><label>Experience rate (0.1–20)</label><input name="xp_rate" type="number" step="0.1" min="0.1" max="20" value="{{ s.xp_rate }}"></div>
+      <div><label>Loot drop rate</label><input name="loot_rate" type="number" step="0.1" min="0.1" max="20" value="{{ s.loot_rate }}"></div>
+      <div><label>Money drop rate</label><input name="money_rate" type="number" step="0.1" min="0.1" max="20" value="{{ s.money_rate }}"></div>
+    </div>
+    <div class="row">
+      <div><label>Player limit</label><input name="player_limit" type="number" min="1" max="5000" value="{{ s.player_limit }}"></div>
+      <div><label>Character save interval (seconds)</label><input name="save_interval_secs" type="number" min="30" max="3600" value="{{ s.save_interval_secs }}"></div>
+      <div><label>Max player level (restart)</label><input name="max_player_level" type="number" min="1" max="60" value="{{ s.max_player_level }}"></div>
+    </div>
+    <div class="row">
+      <div><label>Random bots (0 = off; above {{ s.bot_account_count }} needs a restart)</label><input name="bots" type="number" min="0" max="2000" value="{{ s.bots }}"></div>
+      <div><label>Auction-house bot</label><label style="color:var(--fg)"><input name="ahbot" type="checkbox" value="1"{% if s.ahbot %} checked{% endif %}> stock the auction house</label></div>
+    </div>
+    <label>Message of the day</label><input name="motd" type="text" maxlength="250" value="{{ s.motd }}">
+    <p><button>Save</button></p>
+  </form>
+</div>
+{% endblock %}

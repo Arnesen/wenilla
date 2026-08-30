@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block brand %}Admin{% endblock %}
+{% block nav %}<nav><a href="/admin">Dashboard</a><a href="/admin/users">Users</a><a href="/admin/config">Settings</a><a href="/admin/audit">Audit</a><a href="/">Play</a><form class="inline" method="post" action="/logout"><button class="secondary small">Sign out</button></form></nav>{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Audit log</h2>
+  <table><tr><th>When (UTC)</th><th>Who</th><th>IP</th><th>Action</th><th>Target</th><th>Detail</th></tr>
+  {% for e in entries %}<tr><td class="muted">{{ self::when(e.at) }}</td><td>{{ e.actor.as_deref().unwrap_or("-") }}</td><td class="muted">{{ e.ip.as_deref().unwrap_or("") }}</td><td>{{ e.action }}</td><td>{{ e.target.as_deref().unwrap_or("") }}</td><td class="muted">{{ e.detail.as_deref().unwrap_or("") }}</td></tr>{% endfor %}
+  </table>
+  {% if let Some(b) = next_before %}<p><a href="/admin/audit?before={{ b }}">Older →</a></p>{% endif %}
+</div>
+{% endblock %}
