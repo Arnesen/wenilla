@@ -80,6 +80,7 @@ pub struct AdminDashboard {
     pub me: User,
     pub status: crate::control::Status,
     pub s: crate::mangos_conf::Settings,
+    pub client_data_error: Option<String>,
     pub online: Vec<crate::realmdb::OnlineRow>,
     pub players_online: i64,
     pub bots_online: i64,

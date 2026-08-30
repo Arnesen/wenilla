@@ -43,6 +43,11 @@ pub struct AppState {
     pub secrets: secrets::Keyring,
     pub providers: Vec<Arc<dyn auth::provider::IdentityProvider>>,
     pub limiter: ratelimit::Limiter,
+    /// Why the client data could not be opened at start — `None` when it could. The service
+    /// still runs (setup and the panel work) so an operator sees the problem instead of a
+    /// crash loop; `/data` answers 503 and `/healthz` reports it until a restart with a valid
+    /// `CLIENT_DATA`.
+    pub client_data_error: Option<String>,
 }
 
 impl AppState {
@@ -157,7 +162,15 @@ pub fn app(state: Arc<AppState>, chain: Option<Arc<Chain>>, www: &Path) -> Route
         .route_layer(session_layer.clone());
     let data = match chain {
         Some(chain) => wenilla_host::data::router(chain),
-        None => Router::new(),
+        None => Router::new().route(
+            "/data/{*name}",
+            axum::routing::get(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "client data is not available on this server — check CLIENT_DATA",
+                )
+            }),
+        ),
     };
     let game = data
         .merge(wenilla_host::ws::router_map([

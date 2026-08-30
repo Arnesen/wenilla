@@ -81,6 +81,7 @@ async fn harness() -> Harness {
         secrets: secrets::Keyring::load_or_create(&state_dir).unwrap(),
         providers: Vec::new(),
         limiter: ratelimit::Limiter::default(),
+        client_data_error: Some("test: no client data".into()),
         db: sqlite,
         cfg: cfg.clone(),
     });

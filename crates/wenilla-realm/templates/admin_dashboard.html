@@ -7,6 +7,7 @@
 {% if let Some(e) = error %}<div class="flash error">{% call ic::icon("alert") %}<span>{{ e }}</span></div>{% endif %}
 {% endblock %}
 {% block content %}
+{% if let Some(e) = client_data_error %}<div class="flash error">{% call ic::icon("alert") %}<span><b>No game data.</b> {{ e }}. Players cannot load the world until <code>CLIENT_DATA</code> points at a 1.12.1 client's <code>Data/</code> folder and the realm service is restarted.</span></div>{% endif %}
 {% if restart_pending %}<div class="flash warn">{% call ic::icon("alert") %}<span>A settings change needs a world-server restart to take effect.</span></div>{% endif %}
 <div class="head"><span class="eyebrow">Realm</span><h1 class="headline" style="text-transform: none; letter-spacing: 0.02em;">{{ realm_name }}</h1></div>
 <div class="grid-3">

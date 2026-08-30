@@ -60,7 +60,22 @@ async fn main() -> Result<()> {
         Cmd::Serve => {}
     }
 
+    let (chain, client_data_error) = match Chain::open(&cfg.client_data) {
+        Ok(c) => {
+            tracing::info!(data = %cfg.client_data.display(), "patch chain open");
+            (Some(Arc::new(c)), None)
+        }
+        Err(e) => {
+            let msg = format!(
+                "cannot open client data at {}: {e:#}",
+                cfg.client_data.display()
+            );
+            tracing::error!("{msg} — the panel and setup still work; the game will not until CLIENT_DATA points at a 1.12.1 client's Data folder and the service is restarted");
+            (None, Some(msg))
+        }
+    };
     let state = Arc::new(AppState {
+        client_data_error,
         realmdb: realmdb::connect(&cfg.mariadb_url).await?,
         soap: soap::Client::new(
             &cfg.soap_url,
@@ -82,12 +97,6 @@ async fn main() -> Result<()> {
         eprintln!("SETUP TOKEN: {token}");
     }
 
-    let chain = Arc::new(
-        Chain::open(&cfg.client_data)
-            .with_context(|| format!("opening client data at {}", cfg.client_data.display()))?,
-    );
-    tracing::info!(data = %cfg.client_data.display(), "patch chain open");
-
     // Housekeeping: prune old IPs / expired sessions daily.
     {
         let db = state.db.clone();
@@ -101,7 +110,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let app = wenilla_realm::app(Arc::clone(&state), Some(chain), &cfg.www);
+    let app = wenilla_realm::app(Arc::clone(&state), chain, &cfg.www);
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
         .with_context(|| format!("binding {}", cfg.bind))?;

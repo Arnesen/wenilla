@@ -69,6 +69,7 @@ async fn dashboard(
         realm_name: state.realm_name().await,
         nav: "dashboard",
         s,
+        client_data_error: state.client_data_error.clone(),
         csrf: session.csrf_token.clone(),
         me: session.user,
         status,
