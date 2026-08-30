@@ -147,6 +147,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             // Eight rows across both columns: long names to exercise the wrap, mixed prices to
@@ -211,6 +212,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             gossip.npc = Some(NPC_GUID);
@@ -276,6 +278,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: true,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             // Vault items (bank wire slots 0, 1, 2, 7 → fields 564+2i) + the held bank bag in bag
@@ -369,6 +372,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             // A QUEST_DETAILS-shaped view (the accept panel): a description + objectives, one choice
@@ -413,6 +417,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             // The multi-quest greeting: two AVAILABLE quests (not in the log → bullet rows under the
@@ -459,6 +464,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             // The item objective's target + the reward rows (log icons resolve through the item
@@ -922,6 +928,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             let wolf = commands
@@ -1310,6 +1317,7 @@ pub(super) fn seed_ui_fixture(
                     type_flags: 0,
                     civilian: false,
                     racial_leader: false,
+                    display_id: 0,
                 }),
             );
             commands.spawn((
@@ -1407,6 +1415,7 @@ fn seed_bag_window(
     };
     let slot = |disp: u32, count: u32, id: u32, name: &str, quality: u32| {
         benilla_ui::script::ContainerSlot {
+            petition: None,
             durability: None,
             bar_placeable: true,
             texture: icon(disp),
@@ -1497,6 +1506,7 @@ fn seed_equipped_bags(
     };
     let slot =
         |disp: u32, count: u32, name: &str, quality: u32| benilla_ui::script::ContainerSlot {
+            petition: None,
             durability: None,
             bar_placeable: true,
             texture: icon(disp),

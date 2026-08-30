@@ -622,6 +622,114 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
     assert!(keys >= 23, "only {keys} key-shaped text= values swept");
 }
 
+/// **No shipped script hands a GlobalStrings KEY to a text sink as if it were the string.**
+///
+/// The defect this pins, twice now: `TargetFrame_CheckDead` did `deadText:SetText("DEAD")`, and
+/// `DEAD` is not the word — it is `GlobalStrings.lua` l.898's key for `"Dead"`. So the target
+/// frame wore **DEAD** in caps over every corpse, in every locale, until the director looked at
+/// an Onyxia and said so. The same class shipped once before with `"CREATE_MACROS"` written
+/// across the macro window's title bar (0983 → 0991).
+///
+/// The XML half of this class is already guarded twice: `loader::resolve_text` warns at load
+/// whenever a **key-shaped** `text=` attribute resolves to nothing, and the sweep directly above
+/// answers every one of them against the real `GlobalStrings.lua`. The **Lua** half had no guard
+/// at all — `SetText` takes a string and cannot tell a key from a word — and that is the
+/// half both escapes came through. This is that missing guard, as a shape test: a literal that is
+/// all `[A-Z0-9_]` with an uppercase in it is `is_global_string_key`'s own predicate, and nothing
+/// we would ever want a player to read.
+///
+/// Swept over the whole directory rather than the file that broke, because the next one will be a
+/// different window. If a genuinely uppercase word ever needs to reach a sink, it goes through the
+/// house's `gs(key, fallback)` helper (AuctionFrame/HelpFrame/MailFrame) or the XML `text=`
+/// attribute — both resolve the global first, and both are what "faithful" means here.
+#[test]
+fn no_shipped_script_sets_a_global_string_key_as_display_text() {
+    /// `loader::is_global_string_key`'s predicate, restated here because it is private: at least
+    /// two characters, uppercase/digit/underscore only, and at least one uppercase.
+    fn key_shaped(s: &str) -> bool {
+        s.len() >= 2
+            && s.chars().any(|c| c.is_ascii_uppercase())
+            && s.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    // The literal after a text sink's open paren, if the call opens on this line at all. Prose is
+    // the noise here — the house documents its own history in comments, this very record included
+    // — so XML comment blocks are tracked across lines and Lua `--` lines are dropped.
+    fn sink_literals(line: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        for sink in [":SetText(", ":SetFormattedText(", ":SetButtonText("] {
+            let mut rest = line;
+            while let Some(at) = rest.find(sink) {
+                rest = &rest[at + sink.len()..];
+                let arg = rest.trim_start();
+                if let Some(body) = arg.strip_prefix('"') {
+                    if let Some(end) = body.find('"') {
+                        out.push(&body[..end]);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut swept = 0;
+    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "xml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        let mut in_comment = false;
+        for (n, raw) in text.lines().enumerate() {
+            // Strip whatever of this line sits inside an XML comment, carrying the state over.
+            let mut code = String::new();
+            let mut cur = raw;
+            loop {
+                if in_comment {
+                    match cur.find("-->") {
+                        Some(at) => {
+                            in_comment = false;
+                            cur = &cur[at + 3..];
+                        }
+                        None => break,
+                    }
+                } else {
+                    match cur.find("<!--") {
+                        Some(at) => {
+                            code.push_str(&cur[..at]);
+                            in_comment = true;
+                            cur = &cur[at + 4..];
+                        }
+                        None => {
+                            code.push_str(cur);
+                            break;
+                        }
+                    }
+                }
+            }
+            if code.trim_start().starts_with("--") {
+                continue; // a Lua comment line
+            }
+            for lit in sink_literals(&code) {
+                if key_shaped(lit) {
+                    offenders.push(format!(
+                        "{}:{}: SetText(\"{lit}\") — a GlobalStrings KEY, not the word",
+                        path.file_name().unwrap().to_string_lossy(),
+                        n + 1
+                    ));
+                }
+            }
+        }
+        swept += 1;
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+    // The sweep must never pass by finding nothing to sweep.
+    assert!(swept >= 40, "only {swept} xml files swept — sweep broke");
+}
+
 /// **The `$parentTextureFrame` idiom's contract, over the whole shipped UI**: a frame whose art is
 /// meant to cap a unit frame must sit at a strictly HIGHER frame level than that frame's status
 /// bars — because frame level is the only key term above the draw layer, and the layer would

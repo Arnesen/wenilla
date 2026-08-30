@@ -62,6 +62,11 @@ pub(super) struct CamBasis {
 /// coordinates reach the world (the anchored/model split of [`super::Particle`]'s doc).
 pub(super) struct DrawFrame {
     pub(crate) anchored: bool,
+    /// The WORLD-mode store's **ride frame** `A` ([`crate::ride_frame`], decision 1591) — the
+    /// reference's `[ebp+8]` at `0x7b3d20`, folded forward on the `0x7b3f4f` leg. `None` off a
+    /// transport, which is every cloud on the ground, and then every fold below is the identity.
+    /// Model mode never reads it: `0x7b3efb` leaves `[ebp+8]` untouched.
+    pub(crate) ride: crate::ride_frame::StoredFrame,
     /// The owning MODEL's render alpha, folded into every particle's alpha channel — the
     /// reference's `emitter+0x1a8` (decision 0827). 1.0 for a model that isn't fading.
     pub(crate) alpha: f32,
@@ -72,9 +77,11 @@ pub(super) struct DrawFrame {
 /// re-derivation that can drift.
 pub(super) fn particle_center(frame: &DrawFrame, placement: &Transform, p: &Particle) -> Vec3 {
     if frame.anchored {
-        // WORLD mode (`0x10` CLEAR): the store IS world and the draw folds nothing — the
-        // reference's `0x7b3f48`, which omits `rt+0x1fc` (decision 1585, wow-re §2c-B).
-        p.pos
+        // WORLD mode (`0x10` CLEAR): the store is absolute in its OWN frame and the draw never
+        // folds `rt+0x1fc` back — the reference's `0x7b3f48` (decision 1585, wow-re §2c-B). The
+        // one matrix that does fold is the ride frame, on the `0x7b3f4f` leg: `A · T · S`. Off a
+        // transport `A` is NULL and the store is world, which is the `0x7b3f95` leg.
+        frame.ride.to_world(p.pos)
     } else {
         // MODEL mode (`0x10` SET): the live emitter matrix, re-applied every frame — `0x7b3efb`.
         placement.transform_point(wow_to_bevy([p.pos.x, p.pos.y, p.pos.z]))
@@ -249,7 +256,9 @@ pub(super) fn expand_quads(
         if def.head_tail >= 1 {
             let ((u0, u1), (v0, v1)) = cell_uv(ol.tail_cell);
             let vel_world = if anchored {
-                p.vel
+                // The tail streak points back along the world velocity, so the stored direction
+                // takes the ride frame's rotation (never its translation — this is a vector).
+                frame.ride.dir_to_world(p.vel)
             } else {
                 placement.rotation * (placement.scale * wow_to_bevy(p.vel.to_array()))
             };
@@ -338,6 +347,7 @@ mod tests {
         let shoot = |alpha| {
             let frame = DrawFrame {
                 anchored: true,
+                ride: crate::ride_frame::StoredFrame::default(),
                 alpha,
             };
             let mut out = Vec::new();

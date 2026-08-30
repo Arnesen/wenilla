@@ -44,9 +44,9 @@ pub const EQUIPMENT_BAG: i64 = -100;
 
 /// What the cursor carries — the client's payload-mode global [0xb4d900] as a typed enum
 /// (wow-re cursor-dragdrop-payload.md §1: 1 = live item, 3 = spell, **4 = pet action**, **8 =
-/// macro**; our Action arm is the client's bar-slot pickup; the money/preview arms stay unbuilt).
-/// One transition seam for every surface, so sounds, CURSOR_UPDATE, and lock display can't drift
-/// apart per window (decision 0216).
+/// macro**, **10 = stabled pet**; our Action arm is the client's bar-slot pickup; the
+/// money/preview arms stay unbuilt). One transition seam for every surface, so sounds,
+/// CURSOR_UPDATE, and lock display can't drift apart per window (decision 0216).
 #[derive(Clone, Debug, PartialEq)]
 pub enum CursorPayload {
     Item(CursorItem),
@@ -54,6 +54,34 @@ pub enum CursorPayload {
     Action(CursorAction),
     Macro(CursorMacro),
     PetAction(CursorPetAction),
+    /// A pet picked up from the stable window — **mode 10** (see [`CursorStablePet`]).
+    ///
+    /// Mode 10 was recorded as "class/talent ability (DBC)" until wow-re's stable-master carve
+    /// corrected it (`system/ui/scratch/stable-master-window.md` §9; decision 1677): `0x495020` is
+    /// the stabled-pet grab, `[0xb4d900] = 10` is written at exactly one site image-wide, and it is
+    /// inside it. benilla built the stable's drag frame-locally on the strength of the old note —
+    /// this variant is what puts it back on the shared cursor, so a stable pet dropped on the world
+    /// or another window clears through the same path as every other payload.
+    StablePet(CursorStablePet),
+}
+
+/// A pet held on the cursor from the stable window — payload **mode 10** (`0x495020`, the grab
+/// `0x495010`).
+///
+/// Mode 10 was recorded as "class/talent ability (DBC)" until wow-re's stable-master carve
+/// corrected it (`system/ui/scratch/stable-master-window.md` §9; decision 1677): `[0xb4d900] = 10`
+/// is written at exactly one site image-wide and it is inside the stabled-pet grab, whose id global
+/// `[0xb4e300]` holds a **stable index**, not a spell. benilla first built the stable's drag
+/// frame-locally on the strength of the old note; this puts it on the shared cursor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CursorStablePet {
+    /// The slot the grab came from, in the Lua index space `PickupStablePet` takes (`0` = the
+    /// summoned pet, `1..=2` a stable slot) — the client's `[0xb4e300]`.
+    pub slot: u8,
+    /// The family icon drawn at the mouse. Not merely decoration: a **non-empty icon path is the
+    /// grab's own gate** (`0x495010` refuses without one), so a payload of this shape always has
+    /// one.
+    pub texture: String,
 }
 
 /// The item currently held on the cursor (`PickupContainerItem`/`SplitContainerItem`/
@@ -269,7 +297,8 @@ pub(crate) fn clear_cursor(model: &mut Model) {
             CursorPayload::Spell(_)
             | CursorPayload::Action(_)
             | CursorPayload::Macro(_)
-            | CursorPayload::PetAction(_),
+            | CursorPayload::PetAction(_)
+            | CursorPayload::StablePet(_),
         ) => {
             queue_cursor_update(model);
         }
@@ -559,6 +588,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     Value::Nil,
                     Value::Nil,
                 )),
+                // Mode 10 — the stabled-pet grab (decision 1677). Reported as nothing: the
+                // reference's `GetCursorInfo` arms are not carved for it, the stable window never
+                // asks, and inventing a type string would put a guess where an addon could read it.
+                Some(CursorPayload::StablePet(_)) => {
+                    Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil))
+                }
                 None => Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil)),
             }
         })?,
@@ -622,6 +657,7 @@ mod tests {
         slots.insert(
             1,
             crate::script::container::ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,

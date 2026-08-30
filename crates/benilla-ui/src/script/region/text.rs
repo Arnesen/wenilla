@@ -92,8 +92,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // metric — serving it is how the whisper header's `GetWidth()` latched the edit-box insets on
     // the previous header's width. A poll-until-nonzero caller (the chat header machine) now
     // converges on the RIGHT measure instead of settling on a stale one.
-    // `GetWidth`/`GetHeight` prefer the measured extent, falling back to an explicit `SetSize` — the
-    // real client's `SmallTextTooltipText:GetWidth()` idiom (ref-GameTooltip.xml l.63).
+    // `GetWidth`/`GetHeight` are the neighbouring law and NOT this one ([`super::virtual_span`]):
+    // they take the authored size first and the measure only on an axis authored `0` — and on that
+    // axis the width they return is *this* number, because the reference reads both getters out of
+    // the one cell `[fs+0xfc]` (`0x772890` is `0x79e510`'s callee). So the two agree exactly where
+    // the reference makes them agree, and differ exactly where a width was declared.
     // GetStringWidth is the **natural, unwrapped** extent — never the declared box, and never the
     // wrapped one (wow-re `fontstring-overflow.md`, "The measurement echo": the reference's getter
     // re-measures the raw text with NO wrap constraint). Unlike `GetWidth` below it deliberately

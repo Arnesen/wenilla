@@ -64,6 +64,7 @@ fn text_color(quads: &[ExtractedQuad], t: &str) -> Option<[f32; 4]> {
 fn coin_and_two_items() -> LootState {
     LootState {
         fishing: false,
+        master_candidates: Vec::new(),
         rows: vec![
             Some(LootRow {
                 item_id: 0,
@@ -111,11 +112,14 @@ fn shipped_loot_frame_drives_end_to_end() {
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
-    // window + 4 rows + up + down + close.
+    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
+    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
+    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
+    load_xml(&s, "UIDropDownMenu.xml");
     assert_eq!(
         load_xml(&s, "LootFrame.xml"),
-        8,
-        "window + 4 rows + up + down + close"
+        10,
+        "window + 4 rows + up + down + close + GroupLootDropDown and its template's own $parentButton"
     );
 
     // Hidden by default: no coin icon on screen, left slot empty.
@@ -291,6 +295,10 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
+    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
+    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
+    load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
 
     // A normal, non-empty loot open queues no sound (the normal open kit is C-side).
@@ -309,6 +317,7 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
     // Re-open with an EMPTY roll: OnShow's numItems==0 fork queues exactly LOOTWINDOWOPENEMPTY.
     s.set_loot(Some(LootState {
         fishing: false,
+        master_candidates: Vec::new(),
         rows: vec![],
     }));
     s.fire_event("LOOT_OPENED", vec![]);
@@ -331,6 +340,10 @@ fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
+    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
+    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
+    load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
     let has_icon = |quads: &[ExtractedQuad], needle: &str| {
         quads.iter().any(|q| {
@@ -382,6 +395,10 @@ fn shipped_loot_frame_pages_five_items() {
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
+    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
+    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
+    load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
 
     let rows: Vec<Option<LootRow>> = (0..5)
@@ -400,6 +417,7 @@ fn shipped_loot_frame_pages_five_items() {
         .collect();
     s.set_loot(Some(LootState {
         fishing: false,
+        master_candidates: Vec::new(),
         rows: rows.clone(),
     }));
     s.fire_event("LOOT_OPENED", vec![]);
@@ -442,6 +460,7 @@ fn shipped_loot_frame_pages_five_items() {
     cleared[2] = None;
     s.set_loot(Some(LootState {
         fishing: false,
+        master_candidates: Vec::new(),
         rows: cleared,
     }));
     s.fire_event("LOOT_UPDATE", vec![]);
@@ -467,6 +486,10 @@ fn shipped_loot_pushed_to_center_by_merchant() {
     load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
+    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
+    // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
+    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
+    load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -603,6 +626,8 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "MoneyFrame.xml",
         "UiPanels.xml",
         "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
+        "GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
+        "UIDropDownMenu.xml", // LootFrame owns GroupLootDropDown, initialized at its OnLoad
         "LootFrame.xml",
         "DressUpFrame.xml",
         "ChatFrame.xml",
@@ -613,6 +638,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     // A coin row + one resolved item: the item's link is fed exactly as `ui_loot.rs` builds it.
     s.set_loot(Some(LootState {
         fishing: false,
+        master_candidates: Vec::new(),
         rows: vec![
             Some(LootRow {
                 item_id: 0,
@@ -721,4 +747,235 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "a ctrl-click must not also loot the row"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Master loot, end to end through the shipped XML** (decision 1675).
+///
+/// The whole interaction in one pass: a row click stashes the four `LootFrame.selected*` fields
+/// the dropdown reads, `OPEN_MASTER_LOOT_LIST` raises the menu anchored on that row, a candidate
+/// row hands the item straight out when the item is below `MASTER_LOOT_THREHOLD`, and an at-or-
+/// above-threshold item raises `CONFIRM_LOOT_DISTRIBUTION` first and only sends on accept.
+///
+/// The two thresholds matter: `MASTER_LOOT_THREHOLD` is 4 (epic), so an uncommon goes straight
+/// out and an epic asks. The misspelling is the reference's own (`LootFrame.lua:3`).
+#[test]
+fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "LootFrame.xml");
+
+    let row = |name: &str, quality: u32| {
+        Some(LootRow {
+            item_id: 17182,
+            name: Some(name.into()),
+            texture: Some("Interface\\Icons\\INV_Sword_39".into()),
+            quantity: 1,
+            quality: Some(quality),
+            is_coin: false,
+            link: None,
+            random_property_id: 0,
+        })
+    };
+    s.set_loot(Some(LootState {
+        fishing: false,
+        master_candidates: vec![Some("Thrall".into()), Some("Cairne".into())],
+        rows: vec![row("Wool Cloth", 2), row("Thunderfury", 4)],
+    }));
+    s.fire_event("LOOT_OPENED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    let _ = s.take_loot_picks();
+
+    // ── The row click stashes the selection the dropdown will read ────────────────────────────
+    let click = |s: &mut UiScript, frame: &str| {
+        let (x, y) = s
+            .eval::<(f64, f64)>(&format!("return {frame}:GetCenter()"))
+            .unwrap();
+        s.mouse_button(x as f32, y as f32, "LeftButton", true);
+        s.mouse_button(x as f32, y as f32, "LeftButton", false);
+        s.resolve();
+    };
+    click(&mut s, "LootButton1");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(s.eval::<i64>("return LootFrame.selectedSlot").unwrap(), 1);
+    assert_eq!(
+        s.eval::<i64>("return LootFrame.selectedQuality").unwrap(),
+        2
+    );
+    assert_eq!(
+        s.eval::<String>("return LootFrame.selectedItemName")
+            .unwrap(),
+        "Wool Cloth"
+    );
+    assert_eq!(
+        s.eval::<String>("return LootFrame.selectedLootButton")
+            .unwrap(),
+        "LootButton1",
+        "the dropdown anchors on the clicked row, not the window"
+    );
+    // The click still queues the pick — deciding whether it is a take or a master-loot open is
+    // the app's, off the wire slot type, exactly as the real client decides it in C.
+    assert_eq!(s.take_loot_picks(), vec![1]);
+
+    // ── The app answers a MASTER row with the event; the menu lists the candidates ─────────────
+    s.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
+        "the candidate menu is up"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button1:GetText()")
+            .unwrap(),
+        "Thrall"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button2:GetText()")
+            .unwrap(),
+        "Cairne"
+    );
+
+    // ── Below the threshold: straight out, no confirmation ────────────────────────────────────
+    click(&mut s, "DropDownList1Button2");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_loot_master_gives(),
+        vec![(1, 2)],
+        "row 1 to candidate 2"
+    );
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "an uncommon item is under MASTER_LOOT_THREHOLD — no confirmation"
+    );
+
+    // ── At the threshold: the confirmation stands between the click and the send ──────────────
+    click(&mut s, "LootButton2");
+    assert_eq!(
+        s.eval::<i64>("return LootFrame.selectedQuality").unwrap(),
+        4
+    );
+    let _ = s.take_loot_picks();
+    s.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
+    s.resolve();
+    click(&mut s, "DropDownList1Button1");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.take_loot_master_gives().is_empty(),
+        "an epic asks first — nothing is sent on the dropdown click"
+    );
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "CONFIRM_LOOT_DISTRIBUTION is up"
+    );
+    s.run("StaticPopup1Button1:Click()").unwrap(); // Yes
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_loot_master_gives(),
+        vec![(2, 1)],
+        "row 2 to candidate 1, only after the accept"
+    );
+
+    // A fresh row click hides a standing confirmation, so an accept can never land on a row the
+    // player has since clicked away from (the ref's own reason for the StaticPopup_Hide).
+    s.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
+    s.resolve();
+    click(&mut s, "DropDownList1Button1");
+    assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
+    click(&mut s, "LootButton1");
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "clicking another row closes the standing confirmation"
+    );
+}
+
+/// **The raid arm of the master-loot menu** (decision 1675) — the half the wow-re §5 corrected.
+///
+/// In a raid the candidate array is not the wire order: the client files each candidate into its
+/// own subgroup's five-slot block, leaving holes. `GroupLootDropDown_Initialize` reads those holes
+/// as raid-group membership — it walks `1..40` in blocks of five and keeps a "Group N" submenu only
+/// where the block has an occupant. This drives the shipped XML with a hole-shaped list and asserts
+/// the menu that comes out, which a densely-packed list could not produce.
+#[test]
+fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
+    use benilla_ui::script::{PartyState, RaidMemberInfo};
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "LootFrame.xml");
+
+    // A raid, so the dropdown takes its nested arm (GetNumRaidMembers() > 0 is the whole gate).
+    s.set_party(PartyState {
+        raid: vec![RaidMemberInfo::default(); 7],
+        loot_method: "master".into(),
+        master_looter: Some(0),
+        loot_threshold: 2,
+        ..PartyState::default()
+    });
+
+    // Subgroup 1 holds slots 1-2, subgroup 3 holds slot 11 — everything else is a hole. That is
+    // the placement `SMSG_LOOT_MASTER_LIST`'s handler produces for a raid.
+    let mut candidates = vec![None; 12];
+    candidates[0] = Some("Thrall".to_string());
+    candidates[1] = Some("Cairne".to_string());
+    candidates[10] = Some("Sylvanas".to_string());
+    s.set_loot(Some(LootState {
+        fishing: false,
+        master_candidates: candidates,
+        rows: vec![Some(LootRow {
+            item_id: 17182,
+            name: Some("Thunderfury".into()),
+            texture: Some("Interface\\Icons\\INV_Sword_39".into()),
+            quantity: 1,
+            quality: Some(2),
+            is_coin: false,
+            link: None,
+            random_property_id: 0,
+        })],
+    }));
+    s.fire_event("LOOT_OPENED", vec![]);
+    let (x, y) = s
+        .eval::<(f64, f64)>("return LootButton1:GetCenter()")
+        .unwrap();
+    s.mouse_button(x as f32, y as f32, "LeftButton", true);
+    s.mouse_button(x as f32, y as f32, "LeftButton", false);
+    s.resolve();
+    let _ = s.take_loot_picks();
+    s.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // A title row, then ONE row per occupied block — not one per candidate, and labelled by the
+    // block's own number rather than by position in the list.
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button1:GetText()")
+            .unwrap(),
+        "Give Loot To:",
+        "the raid arm opens with the title row the party arm has no such thing for"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button2:GetText()")
+            .unwrap(),
+        "Group 1"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button3:GetText()")
+            .unwrap(),
+        "Group 3",
+        "the empty group 2 block contributes no row — and group 3 is NOT relabelled 2"
+    );
+    assert_eq!(
+        s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
+        3,
+        "title + two occupied groups, out of eight blocks"
+    );
 }

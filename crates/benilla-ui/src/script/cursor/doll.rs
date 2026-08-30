@@ -105,7 +105,10 @@ pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
             other @ (CursorPayload::Spell(_)
             | CursorPayload::Action(_)
             | CursorPayload::Macro(_)
-            | CursorPayload::PetAction(_)),
+            | CursorPayload::PetAction(_)
+            // Mode 10 (decision 1677) — a stabled pet refuses a bag/doll slot exactly as the
+            // spell/action family does, and stays on the cursor for the stable window to take.
+            | CursorPayload::StablePet(_)),
         ) => {
             model.cursor = Some(other);
             false
@@ -311,6 +314,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,
@@ -491,6 +495,7 @@ mod tests {
         slots.insert(
             3,
             ContainerSlot {
+                petition: None,
                 already_bound: false,
                 bar_placeable: true,
                 durability: None,

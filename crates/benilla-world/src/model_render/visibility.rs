@@ -302,7 +302,18 @@ pub(super) fn apply_model_visibility(
         // …and the same exterior-window term as the submesh walk: another building's canal is
         // exterior content, the canal of the building you are standing in is not.
         let exterior_ok = !exterior || Some(gv.instance) == own_instance || gate.admits(xf, aabb);
-        let want = if portal_ok && exterior_ok {
+        // **A building's water rides the building's own toggle** — the reference's WMO liquid drain
+        // `0x684cd0` gates on `[0xc7b2a4] & 0x100`, the "Map objects" bit, NOT on the `0x1000000`
+        // "Water" bit the three ADT drains test (wow-re `terrain/scratch/liquid-window-gate.md` §5,
+        // decision 1657). Our `ModelKind::Wmo` toggle is that bit, and until now it hid a building
+        // and left its pool hanging in the air — which is also the shape a mis-placed pool takes, so
+        // the one instrument for telling those apart was itself producing the symptom.
+        //
+        // ADT liquid must NOT take this term and does not: it is `apply_exterior_cull`'s, which
+        // composes no toggles. The asymmetry is the reference's own, and it is per-*bit*, not an
+        // oversight to tidy up.
+        let toggled_on = m.kind_visible[kind_index(ModelKind::Wmo)];
+        let want = if portal_ok && exterior_ok && toggled_on {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -515,6 +526,75 @@ mod tests {
             *app.world().entity(card).get::<Visibility>().unwrap(),
             Visibility::Inherited,
             "an unreadable owner fails OPEN"
+        );
+    }
+
+    /// **A building's pool rides the building's own toggle** (decision 1657) — and ADT liquid must
+    /// not, which is the half that makes this a fidelity fact rather than a tidy-up.
+    ///
+    /// The reference gates its WMO liquid drain `0x684cd0` on `[0xc7b2a4] & 0x100`, the "Map
+    /// objects" bit, while the three ADT drains test the separate `0x1000000` "Water" bit (wow-re
+    /// `terrain/scratch/liquid-window-gate.md` §5). `ModelKind::Wmo` is our "Map objects" bit, and
+    /// without this term switching buildings off left every canal, fountain and dungeon pool
+    /// hanging in mid-air — which happens to be exactly what a mis-placed pool looks like, so the
+    /// one instrument for telling a water bug from a wall bug was manufacturing the symptom.
+    #[test]
+    fn a_wmo_pool_rides_the_map_objects_toggle() {
+        let mut app = App::new();
+        app.init_resource::<DebugState>()
+            .init_resource::<ViewDistance>()
+            .init_resource::<crate::wmo_portal::ExteriorWindows>()
+            .init_resource::<crate::wmo_portal::CameraInteriorClaim>()
+            .init_resource::<super::super::FarSideTwins>()
+            .add_systems(Update, apply_model_visibility);
+        // A portal-less prop's pool: `WmoGroupVis` with no `ModelPart` (the `group_only` audience),
+        // and an instance that carries no latch, so `portal_ok` fails open and the toggle is the
+        // only term in play.
+        let instance = app.world_mut().spawn(()).id();
+        let pool = app
+            .world_mut()
+            .spawn((
+                crate::wmo_portal::WmoGroupVis {
+                    instance,
+                    groups: std::sync::Arc::from([0u16].as_slice()),
+                },
+                GlobalTransform::IDENTITY,
+                Visibility::Inherited,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            *app.world().entity(pool).get::<Visibility>().unwrap(),
+            Visibility::Inherited,
+            "buildings on: the canal draws"
+        );
+
+        app.world_mut()
+            .resource_mut::<DebugState>()
+            .models
+            .kind_visible[kind_index(ModelKind::Wmo)] = false;
+        app.update();
+        assert_eq!(
+            *app.world().entity(pool).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "buildings off: the water goes with the building, not on without it"
+        );
+
+        // The control: the toggle that is NOT the Map-objects bit must not reach a pool. Doodads
+        // off leaves the canal alone — a single `kind_visible` bool ANDed carelessly would take it.
+        app.world_mut()
+            .resource_mut::<DebugState>()
+            .models
+            .kind_visible[kind_index(ModelKind::Wmo)] = true;
+        app.world_mut()
+            .resource_mut::<DebugState>()
+            .models
+            .kind_visible[kind_index(ModelKind::Doodad)] = false;
+        app.update();
+        assert_eq!(
+            *app.world().entity(pool).get::<Visibility>().unwrap(),
+            Visibility::Inherited,
+            "the doodad toggle is a different bit and must not touch a building's water"
         );
     }
 }

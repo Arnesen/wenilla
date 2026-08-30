@@ -194,9 +194,10 @@ pub(super) fn update_model_particles(
             rgba[3] *= emitter.render_alpha();
             let tf = if anchored {
                 Transform {
-                    // World mode: the instance transform IS the stored one (decision 1585).
-                    translation: p.pos,
-                    rotation: p.quat,
+                    // World mode: the instance transform IS the stored one (decision 1585) —
+                    // through the ride frame, which is the identity off a transport (1591).
+                    translation: emitter.ride.to_world(p.pos),
+                    rotation: emitter.ride.rotation() * p.quat,
                     scale: Vec3::splat(size * inst_scale),
                 }
             } else {

@@ -412,3 +412,136 @@ fn hostile_submesh_count_errs_cleanly_not_oom() {
         Err(Error::Truncated)
     ));
 }
+
+// --- cameras (header 0x124/0x128) + the cubic samplers ---------------------------------------
+
+/// The camera array sits past [`HEADER_LEN`], so camera fixtures carry a header long enough to
+/// hold `cameras`@`0x124` and `cameraLookup`@`0x12c`.
+const CAM_HEADER_LEN: usize = 0x134;
+const OFS_CAMERAS: usize = 0x124;
+const OFS_CAMERA_LOOKUP: usize = 0x12c;
+
+fn cam_header() -> Vec<u8> {
+    let mut b = header();
+    b.resize(CAM_HEADER_LEN, 0);
+    b
+}
+
+/// One fixture key: `(ms, value, in_tan, out_tan)`.
+type SplineKeyFixture = (u32, [f32; 3], [f32; 3], [f32; 3]);
+
+/// Append a cubic `C3Vector` track's payload and return the 28 track bytes pointing at it, laid
+/// out `{value, inTan, outTan}` per the 0x24 key.
+fn spline_vec3_track(b: &mut Vec<u8>, interp: u16, keys: &[SplineKeyFixture]) -> Vec<u8> {
+    let times_ofs = b.len() as u32;
+    for (ms, ..) in keys {
+        b.extend_from_slice(&ms.to_le_bytes());
+    }
+    let vals_ofs = b.len() as u32;
+    for (_, v, i, o) in keys {
+        for triple in [v, i, o] {
+            for c in triple {
+                b.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
+    let mut t = Vec::new();
+    t.extend_from_slice(&interp.to_le_bytes());
+    t.extend_from_slice(&0xffffu16.to_le_bytes()); // gseq: an ordinary sequence-timeline track
+    t.extend_from_slice(&0u32.to_le_bytes()); // ranges count
+    t.extend_from_slice(&0u32.to_le_bytes()); // ranges offset
+    t.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    t.extend_from_slice(&times_ofs.to_le_bytes());
+    t.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    t.extend_from_slice(&vals_ofs.to_le_bytes());
+    t
+}
+
+/// A one-camera model whose position track carries the two keys `interp` will be sampled between:
+/// `value 0 → 3` on X with tangents `out[k0] = 1`, `in[k1] = 2` — four numbers chosen so the four
+/// interpolation legs land on four *different* answers.
+fn model_with_one_camera(interp: u16) -> Vec<u8> {
+    let mut b = cam_header();
+    let rec = b.len() as u32;
+    b.resize(rec as usize + 0x7c, 0);
+    // fov / far / near, then the two bases.
+    b[rec as usize + 0x04..rec as usize + 0x08]
+        .copy_from_slice(&std::f32::consts::FRAC_PI_4.to_le_bytes());
+    b[rec as usize + 0x08..rec as usize + 0x0c].copy_from_slice(&27.777779f32.to_le_bytes());
+    b[rec as usize + 0x0c..rec as usize + 0x10].copy_from_slice(&0.22222222f32.to_le_bytes());
+    for (ofs, base) in [(0x2c, [10.0f32, 20.0, 30.0]), (0x54, [40.0f32, 50.0, 60.0])] {
+        for (i, c) in base.iter().enumerate() {
+            let at = rec as usize + ofs + i * 4;
+            b[at..at + 4].copy_from_slice(&c.to_le_bytes());
+        }
+    }
+    let track = spline_vec3_track(
+        &mut b,
+        interp,
+        &[
+            (0, [0.0; 3], [0.0; 3], [1.0, 0.0, 0.0]),
+            (1000, [3.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0; 3]),
+        ],
+    );
+    let at = rec as usize + 0x10;
+    b[at..at + 0x1c].copy_from_slice(&track);
+    // The lookup: one entry, pointing at camera 0.
+    let lk = b.len() as u32;
+    b.extend_from_slice(&0u16.to_le_bytes());
+    set_arr(&mut b, OFS_CAMERAS, 1, rec);
+    set_arr(&mut b, OFS_CAMERA_LOOKUP, 1, lk);
+    b
+}
+
+#[test]
+fn camera_record_fields_and_lookup_parse() {
+    let b = model_with_one_camera(2);
+    let cams = parse_cameras(&b);
+    assert_eq!(cams.len(), 1);
+    let c = &cams[0];
+    assert!((c.fov - std::f32::consts::FRAC_PI_4).abs() < 1e-6);
+    assert!((c.far_clip - 27.777779).abs() < 1e-4);
+    assert!((c.near_clip - 0.22222222).abs() < 1e-7);
+    assert_eq!(c.position_base, [10.0, 20.0, 30.0]);
+    assert_eq!(c.target_base, [40.0, 50.0, 60.0]);
+    assert_eq!(c.positions.keys.len(), 2);
+    assert_eq!(parse_camera_lookup(&b), vec![0]);
+    // …and the whole-model parse carries the same records.
+    let fmt = parse(&b).expect("fixture parses");
+    assert_eq!(fmt.model().cameras.len(), 1);
+    assert_eq!(fmt.model().camera_lookup, vec![0]);
+}
+
+#[test]
+fn cubic_sampler_takes_all_four_interp_legs() {
+    // Between `value 0` and `value 3`, with `outTan[k0] = 1` and `inTan[k1] = 2`, at the exact
+    // midpoint. Hand-computed from the bases in `M2Track::sample_ms`:
+    //   step   → value[k0]                                              = 0
+    //   linear → 0 + (3−0)·0.5                                          = 1.5
+    //   Bézier → 0.125·0 + 0.375·1 + 0.375·2 + 0.125·3                  = 1.5
+    //   Hermite→ 0.5·0 + 0.125·1 + 0.5·3 + (−0.125)·2                   = 1.375
+    for (interp, want) in [(0u16, 0.0f32), (1, 1.5), (2, 1.5), (3, 1.375)] {
+        let b = model_with_one_camera(interp);
+        let cam = parse_cameras(&b).remove(0);
+        let got = cam.positions.sample_ms(500).expect("keyed track samples")[0];
+        assert!(
+            (got - want).abs() < 1e-5,
+            "interp {interp}: got {got}, want {want}"
+        );
+        // End-clamped at both ends, on every leg.
+        assert_eq!(cam.positions.sample_ms(0).unwrap()[0], 0.0);
+        assert_eq!(cam.positions.sample_ms(9_999).unwrap()[0], 3.0);
+    }
+}
+
+#[test]
+fn a_truncated_camera_record_is_dropped_not_half_read() {
+    let mut b = model_with_one_camera(2);
+    // Claim two records where only one fits: the second must not appear with default tracks.
+    let (rec, _) = (
+        u32::from_le_bytes(b[OFS_CAMERAS + 4..OFS_CAMERAS + 8].try_into().unwrap()),
+        0,
+    );
+    set_arr(&mut b, OFS_CAMERAS, 2, rec);
+    assert_eq!(parse_cameras(&b).len(), 1);
+}

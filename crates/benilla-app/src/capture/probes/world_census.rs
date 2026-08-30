@@ -45,23 +45,24 @@ fn fire_node_probe(world: &mut World) {
         .iter(world)
         .next()
         .map_or(1.0, bevy::window::Window::scale_factor);
+    // **`UiGlobalTransform`, not `GlobalTransform`.** Bevy moved UI onto its own 2-D transform;
+    // a UI entity no longer carries `GlobalTransform` at all, so the old query matched *nothing*
+    // and this probe answered "0 nodes" — a plausible-looking reading rather than a failure —
+    // for every run since that upgrade (found 2026-08-29, reaching for it to check a caret).
     let mut q = world.query::<(
         Entity,
         &bevy::ui::ComputedNode,
-        &GlobalTransform,
+        &bevy::ui::UiGlobalTransform,
         Option<&InheritedVisibility>,
     )>();
-    let rows: Vec<(Entity, Vec2, Vec3, bool)> = q
+    let rows: Vec<(Entity, Vec2, Vec2, bool)> = q
         .iter(world)
-        .map(|(e, node, gt, vis)| {
-            (
-                e,
-                node.size(),
-                gt.translation(),
-                vis.is_none_or(|v| v.get()),
-            )
-        })
+        .map(|(e, node, gt, vis)| (e, node.size(), gt.translation, vis.is_none_or(|v| v.get())))
         .collect();
+    // A zero here is now itself the anomaly — the screen has no UI, or the query has rotted again.
+    if rows.is_empty() {
+        warn!("node probe: NO ui nodes matched — the screen is bare, or this probe has rotted");
+    }
     info!("node probe: {} nodes, scale {scale}", rows.len());
     for (e, size, center, vis) in rows {
         let comps: Vec<String> = world.inspect_entity(e).map_or_else(

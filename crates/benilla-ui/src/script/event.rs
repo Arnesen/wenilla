@@ -194,6 +194,14 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
                 .expect("model")
                 .record_script_error(e.to_string());
         }
+        // **And the EditBox's own OnShow/OnHide vtable overrides** (`0x81c910` +0x30/+0x34): an
+        // `autoFocus` box grabs the keyboard when it appears if nothing else holds it, and hiding
+        // the box that holds it releases it. Both overrides call the base notify FIRST and act
+        // after, which is why this sits below the `fire` and not above it. A no-op for every frame
+        // that is not an EditBox. Here rather than at the Lua `Show`/`Hide` bindings for the same
+        // reason the toplevel raise is: every visibility transition this engine performs runs
+        // through this seam, and a second one is how a path gets forgotten.
+        super::editbox::visibility_focus(lua, h, visible);
     }
 }
 

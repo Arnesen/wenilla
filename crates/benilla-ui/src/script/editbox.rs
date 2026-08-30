@@ -5,10 +5,19 @@
 //!
 //! - **Focus (§1):** a single class-owned focus owner ([`Model::focused_editbox`], the client's
 //!   `DAT_00cf4dc8`). `SetFocus` gates on effective-visibility, is a no-op if already focused, and
-//!   fires `OnEditFocusLost` on the old box then `OnEditFocusGained` on the new. `autoFocus` does NOT
-//!   focus on show — it only lets a box self-acquire on the first keyboard/char event while nothing is
-//!   focused (verified by absence: no OnShow/OnLoad `SetFocus` caller). A LeftButton click focuses
-//!   UNCONDITIONALLY.
+//!   fires `OnEditFocusLost` on the old box then `OnEditFocusGained` on the new. A LeftButton click
+//!   focuses UNCONDITIONALLY — and **collapses the selection to the clicked byte index** on its way
+//!   (`0x77b86f call 0x77ccf0`, immediately before `0x77b881 SetFocus`), so a fresh click-focus leaves
+//!   an EMPTY selection at the click point, never a select-all. `SetFocus` itself writes no selection
+//!   field, and `0x77e3f6` is the only instruction image-wide that gives a box focus — so *every*
+//!   focus gain, whatever triggers it, is selection-neutral.
+//!
+//!   **`autoFocus` DOES focus on show** (corrected 2026-08-29, wow-re `editbox-selection-focus-law.md`
+//!   §6): the OnShow override tail-jumps `SetFocus` when nothing else holds focus, and the OnHide
+//!   mirror tail-jumps `ClearFocus`. The old "verified by absence" negative came from a `call`-only
+//!   census that could not see a tail-`jmp`. **Not implemented here yet** — see [`EditBoxState::
+//!   auto_focus`](crate::widget::EditBoxState::auto_focus) for why it waits on the attribute default.
+//!   The self-acquire-on-first-key half stands and is what this module implements.
 //! - **Routing (§2):** a focused box processes and CONSUMES every key/char (`return 1` past the
 //!   guard); an unfocused non-autoFocus box ignores input. The override fires ONLY the specialized
 //!   scripts (Enter/Escape/Space/Tab/TextChanged/TextSet/focus), never generic `OnKeyDown`/`OnChar`.
@@ -217,6 +226,10 @@ fn topmost_autofocus(lua: &Lua) -> Option<FrameHandle> {
 
 /// `SetFocus` (`0x77e3d0`): gate on effective-visibility, no-op if already focused; else fire
 /// `OnEditFocusLost` on the old box, move focus, fire `OnEditFocusGained` on the new.
+///
+/// `0x77e3f6` (inside this) is the ONLY instruction image-wide that grants a box the focus, and it
+/// writes no selection field — so every focus gain in the client, whatever triggers it, is
+/// selection-neutral.
 fn set_focus_handle(lua: &Lua, h: FrameHandle) {
     let (old_id, new_id) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -243,7 +256,43 @@ fn set_focus_handle(lua: &Lua, h: FrameHandle) {
     fire_script(lua, new_id, "OnEditFocusGained");
 }
 
-/// `ClearFocus` (`0x77e410`): only if this box holds focus; fire `OnEditFocusLost`.
+/// The EditBox's own **OnShow/OnHide vtable overrides** (`0x81c910` slots +0x30/+0x34), run by
+/// [`crate::script::event::fire_visibility_changes`] after the frame's Lua handler — the order the
+/// reference has, since both overrides call the base notify *first* and only then act.
+///
+/// - **Show** (`0x77a750`): `if ([0xcf4dc8] == 0 && (flags & 1)) SetFocus(this)` — an `autoFocus`
+///   box grabs the keyboard when it appears, **iff nothing else holds it**. Not a
+///   "topmost/best" choice: whichever box's show runs first while the focus is free takes it.
+/// - **Hide** (`0x77a780`): tail-jumps `ClearFocus`, whose own guard makes it per-box — hiding a
+///   box that does not hold the keyboard writes nothing and fires nothing.
+///
+/// Both were missing until 2026-08-29 (decision 1686). wow-re had published "autoFocus does NOT
+/// focus on show — VERIFIED by enumerating callers" off a census written over `call` alone, which
+/// cannot see the override's tail-`jmp`; benilla had transcribed the negative.
+pub(super) fn visibility_focus(lua: &Lua, h: FrameHandle, visible: bool) {
+    if !visible {
+        // The guard lives in `clear_focus_handle`, exactly as it does in `0x77e410` — so this is
+        // called unconditionally here, like the reference's own unconditional tail-jmp.
+        clear_focus_handle(lua, h);
+        return;
+    }
+    let wants = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        model.focused_editbox.is_none()
+            && matches!(
+                model.arena.frame(h).map(|f| &f.kind_state),
+                Some(KindState::EditBox(eb)) if eb.auto_focus,
+            )
+    };
+    if wants {
+        // `SetFocus` re-checks effective-visibility itself, which is the reference's gate too.
+        set_focus_handle(lua, h);
+    }
+}
+
+/// `ClearFocus` (`0x77e410`): only if this box holds focus; fire `OnEditFocusLost`. The guard is
+/// `mov eax,ecx; mov ecx,[0xcf4dc8]; cmp ecx,eax; jne ret` — verified per-box, which is what makes
+/// the OnHide override's *unconditional* tail-jmp into it harmless.
 fn clear_focus_handle(lua: &Lua, h: FrameHandle) {
     let id = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -272,6 +321,23 @@ fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
     }
     sync_text_region(lua, h);
     let id = frame_id_of(lua, h);
+    // **The EditBox DOES fire generic `OnChar`** — with the spliced string as `arg1`, from inside
+    // Insert itself (`0x77c13c`, the varargs firer `0x7026f0` with fmt `"%s"`), before the dirty
+    // flush gets round to `OnTextChanged`. RF-0082's "never generic `OnKeyDown`/`OnChar`" was
+    // scoped to one member of a two-member fire family and missed the varargs half; the
+    // `OnKeyDown` (`+0x188`) half of that claim stands (wow-re, corrected 2026-08-29). It rides
+    // the one choke point every insert path goes through — typed char, the `|`→`||` escape, the
+    // multiLine Enter newline, the Lua `Insert` — and so is absent from `SetText`, which is where
+    // the reference has it absent too.
+    let on_char = lua
+        .create_string(ins)
+        .and_then(|s| event::fire_widget_handler(lua, id, "OnChar", vec![mlua::Value::String(s)]));
+    if let Err(e) = on_char {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .errors
+            .push(e.to_string());
+    }
     fire_script(lua, id, "OnTextChanged");
     if fire_space {
         for _ in 0..out.spaces {

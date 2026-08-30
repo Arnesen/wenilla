@@ -253,7 +253,11 @@ mod tests {
     // Field indices mirrored from the protocol crate's own consts (private there): health 22,
     // power1 23, flags 46, aurastate 125, bytes_1 138.
     fn player(pairs: &[(u16, u32)]) -> ObjectStore {
-        let mut base = vec![(22u16, 100u32), (23, 500)];
+        // `UNIT_FIELD_FLAGS` bit 3 (`UNIT_FLAG_PVP_ATTACKABLE`, behaviourally "player-controlled")
+        // — every real player carries it, and `CanAttack 0x606980` selects which of its three
+        // terminal arms to run on that bit for BOTH parties (1674). Without it the fixture takes
+        // the NPC-vs-NPC arm, which wants a hostile reaction rather than a non-friendly one.
+        let mut base = vec![(22u16, 100u32), (23, 500), (46, 1 << 3)];
         base.extend_from_slice(pairs);
         ObjectStore(ObjectFields::from_pairs(&base))
     }

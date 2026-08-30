@@ -182,6 +182,10 @@ pub enum PartyRequest {
     LootMethod {
         method: String,
         master_name: Option<String>,
+        /// `SetLootMethod`'s optional THIRD argument. The binding reads it whatever the method is
+        /// (`0x4e92a0`, presence-checked via `0x6f34d0`), unlike the master-looter argument, which
+        /// it reads only for `"master"` (decision 1675).
+        threshold: Option<u32>,
     },
     /// `SetLootThreshold(n)` — the new quality floor.
     LootThreshold(u32),
@@ -516,16 +520,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // SetLootMethod("method" [,master] [,threshold]) — the reference's own usage string
+    // (`0x84c42c`). The master-looter argument is read ONLY for "master"; the threshold argument
+    // is optional for every method (decision 1675).
     g.set(
         "SetLootMethod",
-        lua.create_function(|lua, (method, master_name): (String, Option<String>)| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.party_requests.push(PartyRequest::LootMethod {
-                method,
-                master_name,
-            });
-            Ok(())
-        })?,
+        lua.create_function(
+            |lua, (method, master_name, threshold): (String, Option<String>, Option<u32>)| {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.party_requests.push(PartyRequest::LootMethod {
+                    method,
+                    master_name,
+                    threshold,
+                });
+                Ok(())
+            },
+        )?,
     )?;
     g.set(
         "SetLootThreshold",
@@ -1092,6 +1102,7 @@ mod tests {
                 PartyRequest::LootMethod {
                     method: "master".into(),
                     master_name: Some("Bob".into()),
+                    threshold: None,
                 },
                 PartyRequest::LootThreshold(3),
             ]
@@ -1109,6 +1120,19 @@ mod tests {
             vec![PartyRequest::LootMethod {
                 method: "freeforall".into(),
                 master_name: None,
+                threshold: None,
+            }]
+        );
+
+        // The optional THIRD argument, which the real binding reads for every method — not only
+        // for "master", the way the master-looter argument is read (decision 1675).
+        s.run(r#"SetLootMethod("group", nil, 4)"#).unwrap();
+        assert_eq!(
+            s.take_party_requests(),
+            vec![PartyRequest::LootMethod {
+                method: "group".into(),
+                master_name: None,
+                threshold: Some(4),
             }]
         );
     }

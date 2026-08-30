@@ -6,9 +6,10 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 use super::{
     auction, backdrop, bank, char_stats, chat_window, colorselect, container, craft, cursor, death,
     duel, follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant,
-    party, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider, social,
-    spellbook, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject,
-    ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    party, petition, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider,
+    social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot,
+    AuraState, FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest,
+    UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -17,6 +18,9 @@ use super::{
 
 /// The host's texture-path resolvability oracle — see [`Model::texture_probe`].
 pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
+
+/// The host's texture **texel-size** oracle — see [`Model::texture_size_probe`].
+pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
 
 /// The Rust-side model behind the Lua VM — the arena, the layout inputs + resolved rects, the
 /// id↔handle bijection, region visuals, and the event/script registrations. Held in `lua.app_data`
@@ -38,6 +42,20 @@ pub(crate) struct Model {
     /// engine-less VM (tests, the addon harness), where the path form keeps answering nil: no
     /// backend, nothing loads — which is also exactly what those tests always saw.
     pub(crate) texture_probe: Option<TextureProbe>,
+    /// The host's texture **texel-size** oracle ([`super::UiScript::set_texture_size_probe`]): how
+    /// many texels wide and tall is the art at this path?
+    ///
+    /// What lets a region whose authored size on an axis is exactly `0` take its span from its
+    /// CONTENT, the way the real client's size getters do — `CSimpleTexture::GetWidth 0x770720` /
+    /// `GetHeight 0x770790` return the authored value only when it is not `0.0`, and otherwise read
+    /// the loaded texture's `[tex+0x144]`/`[tex+0x148]` through the same converter `<AbsDimension>`
+    /// uses, so **one texel is one FrameXML unit** (wow-re `region-size-fallback.md` §2, decision
+    /// 1349). The host answers off the same candidate walk the renderer decodes with and memoises,
+    /// so the size layout resolves with is the size the screen shows.
+    ///
+    /// `None` in an engine-less VM (tests, the addon harness), where a zero-size texture keeps the
+    /// rect it always had — there is no art to measure without a backend.
+    pub(crate) texture_size_probe: Option<TextureSizeProbe>,
     /// Where per-addon saved variables live: the account-scoped folder, then this character's.
     /// Both are directories holding one `<Addon>.lua` per declaring addon.
     pub(crate) addons_saved_account: Option<std::path::PathBuf>,
@@ -435,6 +453,16 @@ pub(crate) struct Model {
     /// the app's last [`super::UiScript::take_guild_requests`] drain — the outbound seam
     /// ([`guild`]).
     pub(crate) guild_requests: Vec<guild::GuildRequest>,
+    /// The guild-charter snapshot the app pushes (the registrar's price and the open petition —
+    /// decision 1672): `GetPetitionInfo`/`GetPetitionNameInfo`/`GetGuildCharterCost`/… read it
+    /// ([`petition`]). Names and the proposed guild's title are already resolved, because in the
+    /// real client too they come from caches the engine owns and not from the packet that opens
+    /// the window.
+    pub(crate) petition: petition::PetitionState,
+    /// Charter intents (`BuyGuildCharter`/`SignPetition`/`TurnInGuildCharter`/…) queued since the
+    /// app's last [`super::UiScript::take_petition_requests`] drain — the outbound seam
+    /// ([`petition`]).
+    pub(crate) petition_requests: Vec<petition::PetitionRequest>,
     /// Whisper targets `ChatFrame_SendTell` queued since the app's last
     /// [`super::UiScript::take_tell_requests`] drain — the app opens its chat edit box prefilled
     /// `/w <name> ` (the unit popup's WHISPER action; [`party`] registers the global).
@@ -846,6 +874,11 @@ pub(crate) struct Model {
     pub(crate) repair_all: bool,
     pub(crate) repair_mode: bool,
 
+    /// The stable window's whole state — the pushed snapshot, the selection, the frame-local
+    /// drag, and the queued verbs (the stable seam, [`stable`], decision 1676). One sub-struct
+    /// rather than five loose fields because the close path resets several of them together.
+    pub(crate) stable: stable::StableModel,
+
     /// The open bank's purchase-row snapshot the app pushes (`None` = no bank open), the
     /// `PurchaseSlot` intent, and whether `CloseBankFrame` was called — the bank seam ([`bank`],
     /// decision 0604; the bank's *contents* ride the container seam as bags −1/5..=10).
@@ -943,6 +976,11 @@ pub(crate) struct Model {
     pub(crate) loot: Option<loot::LootState>,
     pub(crate) loot_picks: Vec<u32>,
     pub(crate) loot_close: bool,
+    /// The `GiveMasterLoot(slot, candidateIndex)` assignments the app drains — both 1-based and
+    /// both display-side: the row as the window numbers it, and the candidate's position in
+    /// [`loot::LootState::master_candidates`]. The app owns the translation to the wire slot and
+    /// the recipient's guid (decision 1675).
+    pub(crate) loot_master_gives: Vec<(u32, u32)>,
 
     /// The open group-loot rolls the app pushes (empty = none open) and the `RollOnLoot`
     /// `(roll_id, roll_type)` votes it drains — the roll seam ([`loot_roll`], decision 0591).
@@ -1130,6 +1168,13 @@ pub(crate) struct Model {
     pub(crate) rest_state: u8,
     pub(crate) rest_pool: u32,
     pub(crate) resting: bool,
+    /// Is a cinematic playing? What `InCinematic()` reports, pushed by the cinematic plugin.
+    ///
+    /// Read by more than the letterbox: `StaticPopup_Show` refuses any dialog whose entry lacks
+    /// `interruptCinematic` while this is set, exactly as the reference's `StaticPopup.lua:1454`
+    /// does — which is what stops a "your character will be logged out" box from landing on top
+    /// of a first login's race intro.
+    pub(crate) in_cinematic: bool,
     /// Exhaustion.dbc as the rest bindings consume it — rest-state byte → (localized name,
     /// factor), the table `GetRestState` indexes directly and whose row 1 scales
     /// `GetXPExhaustion` (wow-re rested-xp-bindings.md; decision 1087). Seeded with the shipped
@@ -1294,6 +1339,19 @@ pub(crate) struct Model {
     /// `ConfirmBinder()` calls queued since the app last drained them — each is one
     /// `CMSG_BINDER_ACTIVATE`. A COUNT for [`Self::played_time_asks`]'s reason: the intent carries
     /// no payload (the app holds the innkeeper's guid), so two calls are two sends.
+    /// The `GMTicketCategory.dbc` rows behind `GetGMTicketCategories()` — `(id, name)` in file
+    /// order, pushed once by the app ([`super::UiScript::set_gm_ticket_categories`]). The ids are
+    /// the wire values, so this is an ordered pair list rather than an indexable table
+    /// (decision 1673).
+    pub(crate) gm_ticket_categories: Vec<(u32, String)>,
+    /// Every ticket verb the window called since the app's last drain, **in call order** — ask,
+    /// status-ask, delete, create, edit, one packet each. ONE queue rather than a counter per verb
+    /// so that `DeleteGMTicket(); GetGMTicket()` in a single chunk reaches the wire in that order;
+    /// per-verb drains cannot express it, and the get would answer with the pre-delete state
+    /// (decision 1673).
+    pub(crate) gm_ticket_intents: Vec<super::gm_ticket::GmTicketIntent>,
+    /// `Stuck()` calls queued — each is one cast of spell 7355, the Help window's Auto-Unstuck.
+    pub(crate) stuck_casts: u32,
     pub(crate) binder_confirms: u32,
     /// Is an innkeeper's bind question still live and in range — the answer `CheckBinderDist()`
     /// gives, pushed by the app each frame ([`super::UiScript::set_binder_pending`]). The
@@ -1360,6 +1418,7 @@ impl Model {
             addons_root: None,
             measurer: None,
             texture_probe: None,
+            texture_size_probe: None,
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),
@@ -1431,6 +1490,8 @@ impl Model {
             guild: guild::GuildState::default(),
             guild_control: guild::GuildRankEdit::default(),
             guild_requests: Vec::new(),
+            petition: petition::PetitionState::default(),
+            petition_requests: Vec::new(),
             tell_requests: Vec::new(),
             open_chat_requests: Vec::new(),
             chat_window_looks: [chat_window::ChatWindowLook::DEFAULT;
@@ -1526,6 +1587,7 @@ impl Model {
             merchant_buybacks: Vec::new(),
             repair_all: false,
             repair_mode: false,
+            stable: Default::default(),
             bank: None,
             bank_purchase: false,
             bank_close: false,
@@ -1556,6 +1618,7 @@ impl Model {
             loot: None,
             loot_picks: Vec::new(),
             loot_close: false,
+            loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),
             loot_roll_votes: Vec::new(),
             loot_roll_confirms: Vec::new(),
@@ -1628,6 +1691,9 @@ impl Model {
             screenshot_asks: 0,
             realm_name: String::new(),
             bind_location: String::new(),
+            gm_ticket_categories: Vec::new(),
+            gm_ticket_intents: Vec::new(),
+            stuck_casts: 0,
             binder_confirms: 0,
             binder_pending: false,
             framerate: 0.0,
@@ -1641,6 +1707,7 @@ impl Model {
             rest_state: 2,
             rest_pool: 0,
             resting: false,
+            in_cinematic: false,
             exhaustion: [
                 (1, ("Rested".to_string(), 2.0)),
                 (2, ("Normal".to_string(), 1.0)),

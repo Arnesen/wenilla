@@ -57,12 +57,21 @@ pub(super) use redress::redress_player_looks;
 /// has no inverse bindposes. Slot `0` = the palette table was full: anchors still resolve
 /// (emitters/attachments ride them), but parts fall back to the static bind-pose mesh. No
 /// animations ⇒ the pose just holds bind pose (Milestone A).
+///
+/// `skins` is whether anything will actually **skin through this slot** — the same law the item
+/// lane's rider states (`equipment::spawn`: "a slot only earns its keep if something will
+/// actually SKIN through it"). A body that drew no batch at all (the invisible trigger creature
+/// holding a visible weapon — decision 1656) still needs the *pose*, because its attachment
+/// points carry what IS drawn, but it has nothing of its own to skin: it takes the slot-less rig
+/// [`benilla_world::rig_anim::finalize_rig_worlds`] has supported since 1365, and no `RigStarved`
+/// marker either (there is no starvation to heal).
 fn setup_skinned_instance(
     commands: &mut Commands,
     palettes: &mut benilla_world::rig_palette::RigPalettes,
     entity: Entity,
     joints_root: Entity,
     d: &DisplayModel,
+    skins: bool,
 ) -> Option<RigBuild> {
     let ibp = d.inverse_bindposes.as_ref()?;
     let nbones = d.skeleton.joints.len();
@@ -80,11 +89,16 @@ fn setup_skinned_instance(
     // The owned palette rig (decision 0720): the world pass writes this rig's composed frames ×
     // these bindposes into the slot; every skinned part below tags the slot so the vertex stage
     // finds its palette. The on-replace hook frees the slot with the visual teardown.
-    let slot = match benilla_world::rig_palette::RigSkin::allocate_bones(
-        palettes,
-        nbones as u32,
-        ibp.clone(),
-    ) {
+    let slot = match skins
+        .then(|| {
+            benilla_world::rig_palette::RigSkin::allocate_bones(
+                palettes,
+                nbones as u32,
+                ibp.clone(),
+            )
+        })
+        .flatten()
+    {
         Some(rig) => {
             let slot = rig.slot;
             // The marker's invariant is "currently slot-less": a heal-triggered (or any
@@ -95,6 +109,10 @@ fn setup_skinned_instance(
                 .remove::<benilla_world::rig_palette::RigStarved>();
             slot
         }
+        // Nothing to skin (`skins == false`): the slot-less rig, on purpose and for ever — no
+        // starvation marker, or `heal_rig_starved` would rebuild this body every time the table
+        // gained headroom, chasing a slot it will never ask for.
+        None if !skins => 0,
         None => {
             // Table full (warned): parts render the static bind-pose mesh — but no longer
             // for ever. The marker hands the unit to `heal_rig_starved` (decision 0863),
@@ -300,30 +318,38 @@ pub(super) fn attach_entity_visuals(
         // CreatureDisplayInfoExtra columns. Zeroed (a beast / GameObject / no data) = the naked body.
         let worn = resolve_worn_equip(net, equipment, dm);
         let equip = worn.bodyslots;
-        // A model still loading (`parts == None`) waits — leave it un-attached and retry next frame
-        // rather than flash a cube we'd swap out. A built-but-empty model draws nothing.
-        let model = match dm {
-            Some(d) => match &d.parts {
-                None => continue,
-                Some(parts) if !parts.is_empty() => Some(parts.as_slice()),
-                Some(_) => None,
-            },
-            None => None,
-        };
         // **Did the display name a model file at all?** An empty `parts` list means two opposite
         // things, and the cube below may only answer one of them (decision 1403): a display that
         // resolved to a model which built zero batches has been *answered* — the model draws
         // nothing — while a display that resolved to no model at all is a gap of ours.
         let named_a_model = dm.is_some_and(DisplayModel::names_a_model);
+        // A model still loading (`parts == None`) waits — leave it un-attached and retry next frame
+        // rather than flash a cube we'd swap out.
+        //
+        // **The gate is "did the display name a model", not "did it build a batch"** (decision
+        // 1656). A model that named a file and built ZERO batches is a *loaded model instance that
+        // draws nothing* — the reference builds its `CM2Model` like any other and the per-batch
+        // loop simply has no trip to make — and everything an entity takes from its model but its
+        // pixels comes from that instance: the skeleton, the attachment points a held weapon rides,
+        // the sequence clock, the PlayerName anchor, the emitters. Keying the whole build on a
+        // drawn batch is what left the Naxxramas weapon mobs — an `InvisibleStalker` body holding
+        // a visible axe — with no axe and their name plate flat on the floor.
+        let model = match dm {
+            Some(d) => match &d.parts {
+                None => continue,
+                Some(parts) => named_a_model.then_some(parts.as_slice()),
+            },
+            None => None,
+        };
 
         // Invisible interaction-zone GameObjects (the forge, fishing-bobber zone, aura generators, …)
         // carry a *transparent* placeholder M2, and invisible **trigger creatures** an empty or
         // constant-zero-alpha one: the real client's mesh gate is **type-independent** — it draws
         // any loaded model and the per-batch zero-alpha cull skips the transparent geometry
         // (decision 0024, superseding 0023's wrong marker-type gate; verified wow-re go-render-gate).
-        // Our M2 alpha cull already reduces those models to zero submeshes, so `model` is `None`
-        // here and they render nothing — neither kind needs a special case, and `named_a_model`
-        // above is what keeps the unit arm's debug cube off them (1403).
+        // Our M2 alpha cull already reduces those models to zero submeshes, so `parts` below is
+        // EMPTY for them: the spawn loop draws nothing, and `named_a_model` is what keeps the unit
+        // arm's debug cube off them (1403).
         if let Some(parts) = model {
             // ── Mounts (decision 0441): a mounted unit is TWO skeletons. The mount is a child
             // entity carrying a plain creature `NetEntity` — this very system builds it like any
@@ -437,6 +463,11 @@ pub(super) fn attach_entity_visuals(
                 && stores
                     .get(entity)
                     .is_ok_and(|s| crate::go_anim::go_animates(s.0.gameobject_type_id()));
+            // Will anything actually SKIN through this instance's palette slot? Every M2 part
+            // carries a skinned twin, so for an ordinary body this is simply "it drew something";
+            // a body that drew NOTHING (decision 1656's invisible weapon-holder) gets the rig
+            // without the slot — see [`setup_skinned_instance`].
+            let skins = parts.iter().any(|p| p.skinned_mesh.is_some());
             let mut skin: Option<RigBuild> = match (net.kind, dm) {
                 // A creature (or player body — decision 0041) with a real skeleton. The `!is_empty`
                 // guard keeps a degenerate boneless model on the static mesh (its skinned twin would
@@ -472,7 +503,14 @@ pub(super) fn attach_entity_visuals(
                         commands.entity(entity).add_child(node);
                         joints_root = node;
                     }
-                    setup_skinned_instance(&mut commands, &mut palettes, entity, joints_root, d)
+                    setup_skinned_instance(
+                        &mut commands,
+                        &mut palettes,
+                        entity,
+                        joints_root,
+                        d,
+                        skins,
+                    )
                 }
                 // A GameObject whose model authors a real skeleton + animation draws through the
                 // skinned twin like a creature. Two flavours share the rig: a door/button/chest
@@ -501,7 +539,14 @@ pub(super) fn attach_entity_visuals(
                         .is_some_and(|a| a.clips.iter().any(|c| c.poses_bones));
                     ((state_machine && poses) || ambient)
                         .then(|| {
-                            setup_skinned_instance(&mut commands, &mut palettes, entity, entity, d)
+                            setup_skinned_instance(
+                                &mut commands,
+                                &mut palettes,
+                                entity,
+                                entity,
+                                d,
+                                skins,
+                            )
                         })
                         .flatten()
                 }
@@ -1018,4 +1063,85 @@ fn display_label(handle: &ModelHandle) -> String {
     };
     path.map(|p| p.path().to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_assets::{ModelJoint, ModelSkeleton};
+    use bevy::ecs::world::CommandQueue;
+    use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
+
+    /// A one-bone rest skeleton + its bindposes — the smallest rig `setup_skinned_instance` will
+    /// build, so the test is about the slot policy and nothing else.
+    fn one_bone(ibps: &mut Assets<SkinnedMeshInverseBindposes>) -> DisplayModel {
+        DisplayModel {
+            skeleton: ModelSkeleton {
+                joints: vec![ModelJoint {
+                    parent: -1,
+                    local_translation: Vec3::ZERO,
+                    billboard: None,
+                    parent_arm: None,
+                }],
+                spine_bone: None,
+                head_bone: None,
+            },
+            inverse_bindposes: Some(
+                ibps.add(SkinnedMeshInverseBindposes::from(vec![Mat4::IDENTITY])),
+            ),
+            ..super::super::display::empty_shell()
+        }
+    }
+
+    /// **A body with nothing to skin gets the rig without the palette slot** (decision 1656).
+    ///
+    /// The invisible trigger creature holding a visible weapon is a complete model instance — it
+    /// needs the pose, because its attachment points carry what IS drawn — and has no geometry of
+    /// its own for a palette slot to serve. It must also take **no `RigStarved`**: that marker
+    /// means "currently slot-less and wants one", and `heal_rig_starved` would rebuild this body
+    /// every time the table gained headroom, for ever, chasing a slot it never asks for.
+    #[test]
+    fn a_body_that_skins_nothing_takes_the_rig_without_a_slot() {
+        use benilla_world::rig_palette::{RigPalettes, RigSkin, RigStarved};
+
+        let mut app = App::new();
+        app.init_resource::<RigPalettes>()
+            .init_resource::<Assets<SkinnedMeshInverseBindposes>>();
+        let mut ibps = app
+            .world_mut()
+            .remove_resource::<Assets<SkinnedMeshInverseBindposes>>()
+            .unwrap();
+        let d = one_bone(&mut ibps);
+
+        for (skins, want_slot) in [(false, false), (true, true)] {
+            let mut world = std::mem::take(app.world_mut());
+            let entity = world.spawn_empty().id();
+            let mut palettes = world.remove_resource::<RigPalettes>().unwrap();
+            let build = {
+                let mut queue = CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, &world);
+                let build =
+                    setup_skinned_instance(&mut commands, &mut palettes, entity, entity, &d, skins);
+                queue.apply(&mut world);
+                build
+            };
+            world.insert_resource(palettes);
+            assert!(
+                build.is_some(),
+                "the pose is built either way (skins={skins})"
+            );
+            let e = world.entity(entity);
+            assert_eq!(
+                e.contains::<RigSkin>(),
+                want_slot,
+                "skins={skins} ⇒ palette slot {want_slot}"
+            );
+            assert!(
+                !e.contains::<RigStarved>(),
+                "skins={skins}: a table with room never starves — and a body that skins nothing \
+                 must never ask to be healed"
+            );
+            *app.world_mut() = world;
+        }
+    }
 }

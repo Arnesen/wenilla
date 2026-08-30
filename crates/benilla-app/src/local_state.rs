@@ -15,8 +15,11 @@
 //! resolve took your config with it. benilla reads a WoW install; it does not live in one. One
 //! behaviour improves as a result: the state folder no longer depends on finding the install at
 //! all. Everything else about 0954 stands, including this module being the only place in the tree
-//! that may compute a persistence path (grep `local_state::` for every resident) — new files get a
-//! name here and a line in 0954's layout table.
+//! that may compute a persistence path (grep `local_state::` for every resident) — a new file gets
+//! a path fn here with a doc comment saying what it holds and why it is scoped the way it is.
+//! **Those doc comments are the layout table** (decision 1689): 0954's own table is a
+//! point-in-time snapshot of the law it set and, like every decision record, immutable — it lists
+//! none of the residents added since, and it should not.
 //!
 //! Resolution, in order — deliberately the **same three-step shape** as
 //! [`benilla_formats::wow_data`], because it is one law over two folders:
@@ -252,6 +255,28 @@ pub(crate) fn layout_character_path(realm: &str, character: &str) -> Option<Path
         file_token(realm),
         file_token(character)
     )))
+}
+
+/// `benilla-config/cache/<realm>.tsv` — the **name cache**: the player, creature and pet names the
+/// server has already answered for, kept across sessions (decision 1689).
+///
+/// The reference's residents are `WDB/namecache.wdb`, `creaturecache.wdb` and `petnamecache.wdb`
+/// — three files **inside the install**, which is exactly where benilla may not write (the install
+/// is read-only, the contract's hard rule), so ours lives here like every other thing we persist.
+/// One file rather than three because our three stores share a lifetime and a realm; the
+/// reference's split follows its `DBCache<T>` template instantiation, not a property of the data.
+///
+/// **Realm-scoped, where the reference's is not** — and that is a correctness fix, not a
+/// preference. Every key here is realm-local: a player guid, a creature template entry and a pet
+/// number all mean something different on another realm, so one shared file would serve a second
+/// realm another realm's names. The reference gets away with it because a 1.12 install typically
+/// saw one realm.
+pub(crate) fn name_cache_path(realm: &str) -> Option<PathBuf> {
+    Some(
+        home()?
+            .join("cache")
+            .join(format!("{}.tsv", file_token(realm))),
+    )
 }
 
 /// `benilla-config/shots.txt` — the framing instrument's appended camera poses (decision 0600). A dev

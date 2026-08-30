@@ -201,6 +201,33 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_GROUND_CENSUS").is_ok() {
                 app.add_plugins(crate::capture::GroundCensusPlugin);
             }
+            // The transport census: `WOW_LIFT_CENSUS=<secs>[,<every>]` prints one line per
+            // type-11/15 transport GameObject on the map — its arm stage, its cycle, its
+            // visibility pair and its render-descendant count. The instrument B168 was missing: a
+            // lift that isn't on screen is either unsent, unarmed (and so still wearing its spawn
+            // hide), model-less, or simply elsewhere in its cycle, and only numbers tell those
+            // four apart (see `capture::LiftCensusPlugin`).
+            if std::env::var("WOW_LIFT_CENSUS").is_ok() {
+                app.add_plugins(crate::capture::LiftCensusPlugin);
+            }
+            // The frame-stall injector: `WOW_STALL="<ms>[,<every_s>[,<after_s>]]"` blocks the
+            // main loop on a schedule — the reproduction for "I tabbed away and came back to X",
+            // which no probe can otherwise stage (every scripted probe asserts `AlwaysOnTop`
+            // precisely so the OS cannot throttle it). `WOW_STALL=0` injects nothing and leaves
+            // the frame-delta/occlusion monitor, which is how the premise gets checked rather
+            // than assumed (see `capture::StallPlugin`).
+            if std::env::var("WOW_STALL").is_ok() {
+                app.add_plugins(crate::capture::StallPlugin);
+            }
+            // The ribbon-trail census: `WOW_TRAIL_CENSUS=<secs>[,<every>]` prints one line per live
+            // weapon/spell streak — its committed extent in WORLD space, which is the observable:
+            // a rider standing still on a moving deck must draw a SHORT streak, because its edges
+            // are stored on the deck and re-projected through the deck's live pose. A long one is
+            // a streak drawn against the world while its owner stands still (see
+            // `capture::TrailCensusPlugin`).
+            if std::env::var("WOW_TRAIL_CENSUS").is_ok() {
+                app.add_plugins(crate::capture::TrailCensusPlugin);
+            }
             // The unit-visual census: `WOW_UNIT_VISUALS=<secs>[,<every>]` prints one line per
             // streamed entity near the body — whether it got a debug cube, real geometry, or
             // nothing at all. The instrument B13 was missing: a black slab in a screenshot cannot
@@ -295,6 +322,21 @@ impl Plugin for DevProbesPlugin {
             // closes B249 (see `capture::ProbeBinderPlugin`).
             if std::env::var("WOW_PROBE_BINDER").is_ok() {
                 app.add_plugins(crate::capture::ProbeBinderPlugin);
+            }
+            // The GM trouble-ticket live probe: `WOW_PROBE_GMTICKET=1` drives the whole five-opcode
+            // ticket wire through the live VM's own bindings — queue status, clean slate, file, edit,
+            // abandon — and prints the row the server must have stored so the operator can check the
+            // map/position the client never reads back (decision 1673's end-to-end instrument; see
+            // `capture::ProbeGmTicketPlugin`).
+            if std::env::var("WOW_PROBE_GMTICKET").is_ok() {
+                app.add_plugins(crate::capture::ProbeGmTicketPlugin);
+            }
+            // The guild-charter live probe: `WOW_PROBE_CHARTER=1` GM-hops to the Stormwind guild
+            // registrar, asserts the charter row's icon reads "petition", buys a charter through the
+            // registrar's own window, opens it with a real bag right-click and renames it — decision
+            // 1672's end-to-end instrument (see `capture::ProbeCharterPlugin`).
+            if std::env::var("WOW_PROBE_CHARTER").is_ok() {
+                app.add_plugins(crate::capture::ProbeCharterPlugin);
             }
             // The world-book live probe: `WOW_PROBE_BOOK=1` teleports to the Old Town plaque and
             // measures what having the item-text reader open costs per frame, closed vs open —

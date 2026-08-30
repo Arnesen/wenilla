@@ -15,6 +15,16 @@ use super::{recv_packet, send_packet};
 /// Generous — a local vmangos answers in milliseconds; this only bounds the pathological stall.
 const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The read bound while **queued** — a different question from the handshake's.
+///
+/// [`HANDSHAKE_READ_TIMEOUT`] is 10 s because every handshake step should answer promptly. Sitting
+/// in a login queue is the one step that should not: the server speaks when our place moves, which
+/// on a full realm can be minutes apart. Keeping the handshake bound would abort every queue that
+/// mattered. The real client bounds this not at all (it is event-driven and simply waits), but an
+/// unbounded blocking read here would make a server that dies mid-queue indistinguishable from a
+/// long wait, so the wait is generous rather than infinite.
+const QUEUE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// The server requires Warden, which benilla does not implement — raised by
 /// [`WorldSession::connect`] and recoverable through the `anyhow` chain with
 /// `err.downcast_ref::<WardenRequired>()`, so the login screen can say so plainly.
@@ -26,6 +36,35 @@ const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// in the world: refusing at the handshake is the honest outcome, not a policy choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WardenRequired;
+
+/// The **world server** refused the session (`SMSG_AUTH_RESPONSE` with anything but
+/// [`messages::AUTH_OK`]).
+///
+/// Typed, and carrying its raw code, for the same reason [`crate::AuthReject`] is: the screen owes
+/// the player the client's own authored words for what happened, and it cannot look them up from a
+/// formatted string. Before this the code was interpolated into a `bail!` and thrown away, so every
+/// world-side refusal — expired session, server shutting down, already logging in — arrived at the
+/// login screen as the same generic "Unable to connect".
+///
+/// **Its codes are `messages`' `AUTH_*` block, NOT [`crate::AuthReject`]'s.** See that block for
+/// why the distinction is load-bearing: the two enums overlap numerically and mean unrelated
+/// things.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldAuthReject {
+    pub code: u8,
+}
+
+impl std::fmt::Display for WorldAuthReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "world server refused the session: result {:#04x}",
+            self.code
+        )
+    }
+}
+
+impl std::error::Error for WorldAuthReject {}
 
 impl std::fmt::Display for WardenRequired {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,19 +100,55 @@ impl WorldSession {
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
     ) -> Result<Self> {
-        futures_lite::future::block_on(Self::connect_async(addr, username, session_key))
+        Self::connect_queued(addr, username, session_key, &mut |_| true)
     }
 
-    /// Connect to the world server and complete the auth handshake, leaving header obfuscation
-    /// enabled. `addr` is `host[:port]` (the realm list's own address form; a bare host gets
-    /// [`WORLD_PORT`](crate::WORLD_PORT)). `username` must be the same account used at logon;
-    /// `session_key` is what [`crate::logon_async`] returned.
+    /// [`Self::connect`] as a future — the browser build's lane (no thread to block).
     pub async fn connect_async(
         addr: &str,
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
     ) -> Result<Self> {
+        Self::connect_queued_async(addr, username, session_key, &mut |_| true).await
+    }
+
+    /// [`Self::connect`], reporting our place in the **login queue** as it moves.
+    ///
+    /// `on_queue` fires once per `AUTH_WAIT_QUEUE` the server sends — `None` when the packet
+    /// carried no readable position — and the call returns only once we are admitted (`AUTH_OK`),
+    /// refused, or the socket fails. The queue is a wait, not an outcome, so it is a callback
+    /// rather than a return value: the screen has to be able to show the position *while* the
+    /// handshake is still parked here.
+    ///
+    /// **Returning `false` abandons the queue** and fails the connect. That is the only way out of
+    /// a wait that can last minutes: every other stage of the handshake is bounded tightly enough
+    /// that a cancel is honoured at its next boundary, and a queue is not. Abandoning is checked
+    /// once per packet rather than per frame — the reference tears the socket down on the next
+    /// tick, which is finer-grained, but it costs a player at most one server update.
+    pub fn connect_queued(
+        addr: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+    ) -> Result<Self> {
+        futures_lite::future::block_on(Self::connect_queued_async(
+            addr,
+            username,
+            session_key,
+            on_queue,
+        ))
+    }
+
+    /// [`Self::connect_queued`] as a future. `addr` is `host[:port]` (the realm list's own
+    /// address form; a bare host gets [`WORLD_PORT`](crate::WORLD_PORT)).
+    pub async fn connect_queued_async(
+        addr: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+    ) -> Result<Self> {
         let (host, port) = crate::host_port(addr, super::WORLD_PORT);
+        let mut queued = false;
         let mut stream = Conn::connect(host, port)
             .await
             .context("connecting to world server")?;
@@ -143,15 +218,40 @@ impl WorldSession {
         // honest message at the login screen.
         loop {
             match session.recv_async().await? {
-                ServerPacket::AuthResponse { result } if result == messages::AUTH_OK => break,
-                ServerPacket::AuthResponse { result } => {
-                    bail!("world auth rejected: result {result:#x}")
+                ServerPacket::AuthResponse { result, .. } if result == messages::AUTH_OK => break,
+                // **Queued, not refused** — the realm is full and we keep our place in line. Report
+                // the position and go back to reading; the server re-sends as we move up and ends
+                // the wait with an `AUTH_OK`. Treating this as an ending (which it was until now)
+                // meant benilla could not log into a busy server at all.
+                ServerPacket::AuthResponse {
+                    result,
+                    queue_position,
+                } if result == messages::AUTH_WAIT_QUEUE => {
+                    if !queued {
+                        queued = true;
+                        session
+                            .set_read_timeout(Some(QUEUE_READ_TIMEOUT))
+                            .context("relaxing the read timeout for the login queue")?;
+                    }
+                    if !on_queue(queue_position) {
+                        bail!("login queue abandoned");
+                    }
+                }
+                ServerPacket::AuthResponse { result, .. } => {
+                    return Err(WorldAuthReject { code: result }.into())
                 }
                 ServerPacket::Other {
                     opcode: opcode::SMSG_WARDEN_DATA,
                 } => return Err(WardenRequired.into()),
                 _ => continue,
             }
+        }
+        // Admitted. The rest of the handshake is prompt again, so it gets the prompt bound back —
+        // leaving the queue's 300 s in place would make a stalled roster step look like a long wait.
+        if queued {
+            session
+                .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))
+                .context("restoring the handshake read timeout after the queue")?;
         }
 
         Ok(session)

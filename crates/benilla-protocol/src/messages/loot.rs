@@ -4,8 +4,9 @@
 //! (`operator<<(LootItem)`/`operator<<(LootView)`) and `Player.cpp` (`SendLoot`/`SendLootError`).
 //! The group-roll family (opcodes 670-674 — `SMSG_LOOT_START_ROLL`/`SMSG_LOOT_ROLL`/
 //! `SMSG_LOOT_ROLL_WON`/`SMSG_LOOT_ALL_PASSED` + our `CMSG_LOOT_ROLL`) rides here too, from
-//! vmangos `Group/Group.cpp`'s four senders (decision 0591). Master loot (`CMSG_LOOT_MASTER_GIVE`
-//! 675 / `SMSG_LOOT_MASTER_LIST` 676) remains out of scope.
+//! vmangos `Group/Group.cpp`'s four senders (decision 0591). Master loot
+//! (`CMSG_LOOT_MASTER_GIVE` 675 / `SMSG_LOOT_MASTER_LIST` 676) lands here too, from
+//! `Group::MasterLoot` + `WorldSession::HandleLootMasterGiveOpcode` (decision 1675).
 
 use std::io;
 
@@ -28,7 +29,8 @@ pub struct LootItem {
     pub display_info_id: u32,
     pub random_property_id: u32,
     /// A [`slot_type`] code. Solo paths (`ALL_PERMISSION`/`OWNER_PERMISSION`) always write
-    /// `ALLOW_LOOT` (`LootMgr.cpp:918-926`); the others are group-loot only, out of scope for v1.
+    /// `ALLOW_LOOT` (`LootMgr.cpp:918-926`); `MASTER` rides the master-loot path (decision 1675),
+    /// `ROLL_ONGOING` a group roll in flight, `LOCKED` a requirement the viewer fails.
     pub slot_type: u8,
 }
 
@@ -39,7 +41,16 @@ pub mod slot_type {
     pub const ALLOW_LOOT: u8 = 0;
     /// A group roll is ongoing on this item — shown, not yet lootable.
     pub const ROLL_ONGOING: u8 = 1;
-    /// Only the group's loot master can distribute this item.
+    /// Only the group's loot master can distribute this item — the row is not takeable by a
+    /// `CMSG_AUTOSTORE_LOOT_ITEM` from anyone, and the master looter assigns it with
+    /// [`loot_master_give`] instead (decision 1675).
+    ///
+    /// **vmangos stamps this on *every* row it shows a group member under master loot**
+    /// (`LootMgr.cpp:917-941`, the `MASTER_PERMISSION` arm, which never consults
+    /// `is_underthreshold`) — even greys, which the server's own take handler would have allowed
+    /// (`LootHandler.cpp:171-182`). `LootItem::GetSlotTypeForSharedLoot` (`LootMgr.cpp:443-459`)
+    /// encodes the threshold-aware answer but is not on this path. So under vmangos the whole
+    /// window reads as master-only; we render the wire (decision 0086's rule).
     pub const MASTER: u8 = 2;
     /// Shown red — not lootable (a missing-requirement item in a group).
     pub const LOCKED: u8 = 3;
@@ -68,9 +79,10 @@ pub mod loot_type {
 /// creature/player/corpse, or the creature check fails — `LootHandler.cpp:342-346`,
 /// `Player.cpp:7938-7943`), `PLAYER_NOT_FOUND` (dead/not-in-world — `LootHandler.cpp:349-353`),
 /// `PLAY_TIME_EXCEEDED`, `NOTSTANDING`, `STUNNED` (`LootHandler.cpp:358-373`), and `TOO_FAR`
-/// (range check in `Player.cpp:7938-7947`). The rest (`BAD_FACING`/`LOCKED`/the `MASTER_*`
-/// trio/`ALREADY_PICKPOCKETED`/`NOT_WHILE_SHAPESHIFTED`) ride other loot sources or group/master
-/// loot — out of scope for v1, pinned for completeness.
+/// (range check in `Player.cpp:7938-7947`). The `MASTER_*` trio answers a refused
+/// [`loot_master_give`] and reaches only the master looter (`LootHandler.cpp:618-750`, decision
+/// 1675); `BAD_FACING`/`LOCKED`/`ALREADY_PICKPOCKETED`/`NOT_WHILE_SHAPESHIFTED` ride other loot
+/// sources, pinned for completeness.
 pub mod loot_error {
     pub const DIDNT_KILL: u8 = 0;
     pub const TOO_FAR: u8 = 4;
@@ -155,6 +167,22 @@ pub fn loot_roll(looted_target: u64, item_slot: u32, roll_type: u8) -> Vec<u8> {
     let mut body = looted_target.to_le_bytes().to_vec();
     body.extend_from_slice(&item_slot.to_le_bytes());
     body.push(roll_type);
+    body
+}
+
+/// Body of `CMSG_LOOT_MASTER_GIVE` (VERIFIED vmangos `Server/Packets/Loot.{h:50-59,cpp:25-30}`,
+/// `LootMasterGive::ReadFromWorldPacket`): `u64 lootGuid, u8 slotId, u64 playerGuid` — the open
+/// loot source, the **wire** loot slot (see [`LootItem::slot`], not the display row), and the
+/// group member to hand the item to.
+///
+/// Sent only by the master looter; the server re-checks all three (`LootHandler.cpp:618-750`) and
+/// answers a refusal with a [`loot_error`] `MASTER_*` code on `SMSG_LOOT_RESPONSE`. Note the slot
+/// width: this one is a `u8` where the roll family's `item_slot` is a `u32`, so the two are not
+/// interchangeable even though they index the same array.
+pub fn loot_master_give(loot_guid: u64, slot: u8, player_guid: u64) -> Vec<u8> {
+    let mut body = loot_guid.to_le_bytes().to_vec();
+    body.push(slot);
+    body.extend_from_slice(&player_guid.to_le_bytes());
     body
 }
 
@@ -338,6 +366,24 @@ pub(super) fn read_loot_all_passed(r: &mut &[u8]) -> io::Result<LootAllPassed> {
     })
 }
 
+/// Read `SMSG_LOOT_MASTER_LIST` (VERIFIED vmangos `Server/Packets/Group.{h:288-296,cpp:182-187}`,
+/// `LootMasterList::AppendBodyTo`): `u8 count`, then `count` full guids — the group members
+/// eligible to be handed an item from the loot window that is opening.
+///
+/// It rides the **open**, not a click: `Player::SendLoot` calls `Group::MasterLoot`
+/// (`Player.cpp:8077-8081`) before it writes `SMSG_LOOT_RESPONSE`, so the candidate list is
+/// already in hand by the time the window paints. vmangos sends it to *every* group member who
+/// opens the corpse, not only the master looter (the `MASTER_PERMISSION` arm is unconditional),
+/// and filters the list by loot-XP distance and `IsAllowedLooter` (`Group.cpp:914-940`).
+pub(super) fn read_loot_master_list(r: &mut &[u8]) -> io::Result<Vec<u64>> {
+    let count = read_u8(r)?;
+    let mut candidates = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        candidates.push(read_u64_le(r)?);
+    }
+    Ok(candidates)
+}
+
 /// Read `SMSG_LOOT_RESPONSE` — both shapes (see [`LootResponseBody`]). Wire order (VERIFIED
 /// vmangos `Player.cpp:8135-8138`): `u64 guid, u8 lootType`, then either the error tail (`lootType
 /// == 0`) or `u32 gold, u8 itemCount` + `itemCount` × [`LootItem`] rows (each `u8 slot, u32
@@ -496,9 +542,21 @@ mod tests {
             hx("f0debc9a785634120200000002"),
             "CMSG_LOOT_ROLL body"
         );
+
+        // CMSG_LOOT_MASTER_GIVE (Loot.cpp:25-30): u64 lootGuid, u8 slotId, u64 playerGuid. The
+        // slot is a BYTE here — the roll family's itemSlot is a u32 over the same array, so the
+        // two builders are not interchangeable and the byte count proves which one this is.
+        let give = loot_master_give(0x1234_5678_9abc_def0, 2, 0x0fed_cba9_8765_4321);
+        assert_eq!(
+            give,
+            hx("f0debc9a785634120221436587a9cbed0f"),
+            "CMSG_LOOT_MASTER_GIVE body"
+        );
+        assert_eq!(give.len(), 17, "8 + 1 + 8, not 8 + 4 + 8");
     }
 
-    /// The five group-roll opcode values (VERIFIED vmangos `Opcodes_1_12_1.h:671-675`).
+    /// The five group-roll opcode values (VERIFIED vmangos `Opcodes_1_12_1.h:671-675`) and the
+    /// master-loot pair that follows them (`:676-677`).
     #[test]
     fn roll_opcode_values() {
         assert_eq!(opcode::SMSG_LOOT_ALL_PASSED, 670);
@@ -506,6 +564,35 @@ mod tests {
         assert_eq!(opcode::CMSG_LOOT_ROLL, 672);
         assert_eq!(opcode::SMSG_LOOT_START_ROLL, 673);
         assert_eq!(opcode::SMSG_LOOT_ROLL, 674);
+        assert_eq!(opcode::CMSG_LOOT_MASTER_GIVE, 675);
+        assert_eq!(opcode::SMSG_LOOT_MASTER_LIST, 676);
+    }
+
+    #[test]
+    fn loot_master_list_decodes() {
+        // Group.cpp:182-187: u8 count, then count full guids.
+        let mut body = vec![3u8];
+        for guid in [0xAAu64, 0xBB, 0xCC] {
+            body.extend_from_slice(&guid.to_le_bytes());
+        }
+
+        match parse_server(opcode::SMSG_LOOT_MASTER_LIST, &body).unwrap() {
+            ServerPacket::LootMasterList { candidates } => {
+                assert_eq!(candidates, vec![0xAA, 0xBB, 0xCC]);
+            }
+            other => panic!("expected LootMasterList, got {}", other.name()),
+        }
+    }
+
+    /// An empty candidate list is a legal body, not a truncation: `Group::MasterLoot`
+    /// (`Group.cpp:925-937`) filters by loot-XP distance and `IsAllowedLooter`, so a group whose
+    /// other members are all out of range sends `count = 0` and nothing else.
+    #[test]
+    fn loot_master_list_accepts_an_empty_list() {
+        match parse_server(opcode::SMSG_LOOT_MASTER_LIST, &[0u8]).unwrap() {
+            ServerPacket::LootMasterList { candidates } => assert!(candidates.is_empty()),
+            other => panic!("expected LootMasterList, got {}", other.name()),
+        }
     }
 
     #[test]

@@ -22,6 +22,15 @@ pub(super) const STAND: u16 = 0;
 
 pub(super) const DEATH: u16 = 1;
 
+/// ShuffleLeft (11) / ShuffleRight (12) — the **turn-in-place foot-shuffle**, picked below when
+/// the unit turns without translating. Named because their *lifecycle* is unlike any other gait:
+/// once armed they are held to their own clip window rather than released when the turn ends
+/// (decision 1655, wow-re `object-layer/scratch/turn-shuffle-lifecycle.md`), and the driver has
+/// to be able to say so.
+pub(super) const SHUFFLE_LEFT: u16 = 11;
+/// See [`SHUFFLE_LEFT`].
+pub(super) const SHUFFLE_RIGHT: u16 = 12;
+
 /// StealthWalk (119) — the **prowl creep**, and with [`STEALTH_STAND`] the entire difference
 /// stealth makes to a body's *pose*. Byte-verified (wow-re `rf57-movement-anim-select.md`, the
 /// 2026-07-18 §5): both ids are gated by the same descriptor bit — `[[unit+0x110]+0x213] & 2`,
@@ -516,10 +525,10 @@ pub(super) fn gait_candidates(
     // ShuffleLeft 11 / ShuffleRight 12). Only reached when not moving — moving with a turn curves the
     // run path and plays the gait above.
     if f & TURN_LEFT != 0 {
-        return &[11, 0];
+        return &[SHUFFLE_LEFT, STAND];
     }
     if f & TURN_RIGHT != 0 {
-        return &[12, 0];
+        return &[SHUFFLE_RIGHT, STAND];
     }
     // Standing + engaged in melee: the weapon-class Ready idle (decision 0073 — gated on engagement,
     // not sheath state; outranks the chair poses, since a fighting unit isn't seated).

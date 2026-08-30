@@ -15,10 +15,12 @@
 //! 0230/0231 — a swap changes it without touching the action table). Gating those on the same flag
 //! is what leaves a stale Count fontstring or a stale Attack face.
 //!
-//! The feed also pumps the four red-error-line queues (cast fails, mount refusals, the app's
-//! by-key local refusals, and the ENGINE's own — `benilla_ui` is engine-free and cannot reach
+//! The feed also pumps the UIErrorsFrame queues (cast fails, mount refusals, the app's by-key
+//! local refusals, the ENGINE's own — `benilla_ui` is engine-free and cannot reach
 //! [`UiErrorKeys`], so a refusal raised inside the script crate queues its GlobalStrings key here
-//! instead) into `UI_ERROR_MESSAGE`, and the stance page (`GetBonusBarOffset`) — our descriptor's
+//! instead — and [`UiErrorTexts`], the lines that arrive already resolved) into
+//! `UI_ERROR_MESSAGE`, or `UI_INFO_MESSAGE` for the yellow arm; and the stance page
+//! (`GetBonusBarOffset`) — our descriptor's
 //! shapeshift-form byte indexed into `SpellShapeshiftForm.dbc`'s BonusActionBar column, wow-re
 //! byte-verified, firing `UPDATE_BONUS_ACTIONBAR` on change.
 
@@ -38,6 +40,7 @@ use super::errors::{first_missing_totem, first_short_reagent, mount_result_key};
 use super::weapon_icon::{auto_attack_icon, substitutes_weapon_icon};
 use super::{
     cast_fail, ui_error_text, CastErrors, MountErrors, PlayerActions, Spells, UiError, UiErrorKeys,
+    UiErrorTexts,
 };
 
 /// What an ITEM action shows when its icon cannot be resolved — the reference's own hardcoded
@@ -79,6 +82,7 @@ pub(super) fn feed_actions(
     mut cast_errors: ResMut<CastErrors>,
     mut mount_errors: ResMut<MountErrors>,
     mut ui_error_keys: ResMut<UiErrorKeys>,
+    mut ui_error_texts: ResMut<UiErrorTexts>,
     spells: Option<Res<Spells>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut items: ResMut<Items>,
@@ -235,6 +239,17 @@ pub(super) fn feed_actions(
         })
         .collect();
     for (text, info) in key_texts {
+        let event = if info {
+            "UI_INFO_MESSAGE"
+        } else {
+            "UI_ERROR_MESSAGE"
+        };
+        script.fire_event(event, vec![ScriptValue::Str(text)]);
+    }
+
+    // Already-resolved lines ([`UiErrorTexts`]) — the wire's own text, no key to look up. Same
+    // frame, same two events; the queued bool IS the reference's `0x4945b0` flag.
+    for (text, info) in ui_error_texts.0.drain(..) {
         let event = if info {
             "UI_INFO_MESSAGE"
         } else {

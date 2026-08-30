@@ -52,3 +52,34 @@ fn ring_footprint_matches_reference_pixels() {
         );
     }
 }
+
+/// The sizer's **other** branch: a box whose X and Y extents are both exactly zero takes the
+/// literal 1.2 (`0x60af4f..0x60af67`, `0x3f99999a`) and never reaches the formula.
+///
+/// wow-re recorded this branch as one that "never fires for real creatures" — true of the four
+/// life-size units it measured, false of the whole trigger-creature family. `InvisibleStalker`
+/// authors **all 135** of its sequence boxes at zero, so 1.2 is its ring, and the Naxxramas weapon
+/// mobs (an `InvisibleStalker` body holding a visible axe, display 15294 at scale 2.25 ⇒ a 2.7 yd
+/// ring) are exactly where a player meets it. We computed `sqrt(0.5·sqrt(0))` = 0 and drew a ring
+/// the width of a coin — the director's A/B against the reference is what caught it. Decision 1658.
+#[test]
+fn a_degenerate_stand_box_rings_at_the_reference_constant() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open chain");
+
+    let path = "Creature\\InvisibleStalker\\InvisibleStalker.mdx";
+    let b = load_m2_bounds(&mut chain, path).unwrap_or_else(|e| panic!("bounds {path}: {e}"));
+    // The premise: this model really is the degenerate case, on the header box and the Stand box
+    // alike (0 vertices ⇒ nothing to bound). If Blizzard had authored a box here the constant
+    // below would be the wrong answer, so pin the input, not just the output.
+    assert_eq!(
+        (b.bbox_min, b.bbox_max, b.sphere_radius),
+        ([0.0; 3], [0.0; 3], 0.0),
+        "{path}: expected an entirely unauthored bound"
+    );
+    assert_eq!(
+        b.ring_footprint,
+        benilla_formats::DEGENERATE_RING_FOOTPRINT,
+        "{path}: a zero-extent box takes the writer's 1.2, not the formula's 0"
+    );
+}

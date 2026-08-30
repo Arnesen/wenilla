@@ -53,6 +53,11 @@ pub const SMSG_DESTROY_OBJECT: u16 = 0x00AA;
 // runs UNACKED, vmangos re-anchors object visibility to the flying cinematic camera
 // (`Player::UpdateCinematic`), despawning everything around the body — so the client must answer.
 pub const SMSG_TRIGGER_CINEMATIC: u16 = 0x00FA;
+/// Sent when playback advances from one camera of a multi-camera `CinematicSequences` row to the
+/// next — empty body, exactly like the completion ack. VERIFIED in the reference at `0x48efe0`
+/// (`NextCamera`): it bumps the camera index, and the send is `push 0xfb; call 0x418190` with
+/// nothing written between the CDataStore open and `call 0x5ab630`.
+pub const CMSG_NEXT_CINEMATIC_CAMERA: u16 = 0x00FB;
 pub const CMSG_COMPLETE_CINEMATIC: u16 = 0x00FC;
 pub const SMSG_MONSTER_MOVE: u16 = 0x00DD;
 pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;
@@ -728,6 +733,47 @@ pub const CMSG_BINDER_ACTIVATE: u16 = 0x01B5; // 437
 pub const SMSG_PLAYERBOUND: u16 = 0x0158; // 344
 pub const SMSG_BINDER_CONFIRM: u16 = 0x02EB; // 747
 
+// The GM trouble-ticket set (VERIFIED vmangos `Opcodes_1_12_1.h` + `Opcodes.cpp:608-630`; decision
+// 1673). Five request/answer pairs behind the Help window, and the client asks for all of them —
+// there is no ticket state pushed at login, so `CMSG_GMTICKET_GETTICKET` right after world entry is
+// the client's own (seen in the 1.12.1 retail sniff, answered `TicketStatus: 10 (NoText)`).
+//
+// **Two of these answers can also arrive UNSOLICITED on vmangos**, which is why they are decoded
+// rather than correlated to a pending ask: `.ticket viewid`/`viewname`/`escalate`/`complete` push a
+// fresh `SMSG_GMTICKET_GETTICKET` at the ticket's author (`GMTicketMgr.cpp:153-159`,
+// `TicketCommands.cpp:265,443-452`), and `.ticket delete <id>` pushes a
+// `SMSG_GMTICKET_DELETETICKET` = `TICKET_DELETED` (`TicketCommands.cpp:100-103`).
+//
+// **And two requests can be answered with SILENCE**, which is why nothing in the client blocks on a
+// reply: `HandleGMTicketCreateOpcode` simply returns — no packet at all — when the queue is off,
+// when the player is under `GMTickets.MinLevel`, or when the category is >= 11
+// (`GMTicketHandler.cpp:91,106-113`), and delete-with-no-ticket likewise returns silently (`:73-86`).
+// Bodies in [`super::gm_ticket`].
+pub const CMSG_GMTICKET_CREATE: u16 = 0x0205; // 517
+pub const SMSG_GMTICKET_CREATE: u16 = 0x0206; // 518
+pub const CMSG_GMTICKET_UPDATETEXT: u16 = 0x0207; // 519
+pub const SMSG_GMTICKET_UPDATETEXT: u16 = 0x0208; // 520
+pub const CMSG_GMTICKET_GETTICKET: u16 = 0x0211; // 529
+pub const SMSG_GMTICKET_GETTICKET: u16 = 0x0212; // 530
+pub const CMSG_GMTICKET_DELETETICKET: u16 = 0x0217; // 535
+pub const SMSG_GMTICKET_DELETETICKET: u16 = 0x0218; // 536
+pub const CMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021A; // 538
+pub const SMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021B; // 539
+
+/// The GM's own ticket-state push (VERIFIED vmangos `Opcodes_1_12_1.h`: 808). Body is a bare `u32`:
+/// 1 = updated, 2 = closed, 3 = a survey is offered.
+///
+/// **vmangos never constructs this packet on any path** — it is registered in its opcode table and
+/// nothing in its source sends it — so on the server benilla talks to this arm is dead. cmangos-
+/// classic makes it the core of its notification model (escalation, first GM read, re-sort, text
+/// update, assignment, queue toggle, close), which is why it is parsed rather than dropped.
+///
+/// It is decoded for one reason beyond completeness: the reference engine answers value 1 by
+/// re-asking for the ticket (`0x5e7932`, wow-re §5), the same leg the create/update success codes
+/// take. Values 2 and 3 are recorded but not acted on — 3 is the GM-survey trigger, and the survey
+/// window is deferred (decision 1673).
+pub const SMSG_GM_TICKET_STATUS_UPDATE: u16 = 0x0328; // 808
+
 // The bank set (VERIFIED vmangos `Opcodes_1_12_1.h`: 439,440-441,642-643).
 // `CMSG_BANKER_ACTIVATE` right-clicks a pure banker;
 // `SMSG_SHOW_BANK` also arrives unprompted from the `GOSSIP_OPTION_BANKER` gossip option. Slot
@@ -738,6 +784,27 @@ pub const CMSG_BUY_BANK_SLOT: u16 = 0x01B9; // 441
 pub const SMSG_BUY_BANK_SLOT_RESULT: u16 = 0x01BA; // 442
 pub const CMSG_AUTOSTORE_BANK_ITEM: u16 = 0x0282; // 642
 pub const CMSG_AUTOBANK_ITEM: u16 = 0x0283; // 643
+
+// The pet-stable set (VERIFIED vmangos `Opcodes_1_12_1.h`: 623-629). `MSG_LIST_STABLED_PETS` is one
+// opcode in BOTH directions: the gossip stable option makes the server send the list unprompted
+// (that is how the window opens), and the client sends the same number back — one guid — to
+// refresh. The four mutations are all answered by a single `SMSG_STABLE_RESULT` byte and nothing
+// else, so a successful one is a cue to re-ask the list. Bodies in [`super::stable`]
+// (decision 1676). `CMSG_STABLE_REVIVE_PET` (0x0274, 628) is deliberately absent: vmangos's handler
+// is an empty no-op and whether the 5875 client ever sends it is an open RE question.
+/// Forget a cached player name (VERIFIED vmangos `Opcodes_1_12_1.h`: 796) — body `{u64 guid}`.
+/// The client's name cache has **no TTL**: eviction is explicit, and this is the one packet that
+/// does it for a player (wow-re `system/dbcache/dbcache.md` Contracts, remove-by-key `0x556ff0`).
+/// Decision 1689. vmangos never sends it, so this is the mechanism present and correct rather
+/// than a path our own server exercises.
+pub const SMSG_INVALIDATE_PLAYER: u16 = 0x031C; // 796
+
+pub const MSG_LIST_STABLED_PETS: u16 = 0x026F; // 623
+pub const CMSG_STABLE_PET: u16 = 0x0270; // 624
+pub const CMSG_UNSTABLE_PET: u16 = 0x0271; // 625
+pub const CMSG_BUY_STABLE_SLOT: u16 = 0x0272; // 626
+pub const SMSG_STABLE_RESULT: u16 = 0x0273; // 627
+pub const CMSG_STABLE_SWAP_PET: u16 = 0x0275; // 629
 
 /// Spend talent points (VERIFIED vmangos `Opcodes_1_12_1.h`: 593) — body in
 /// [`super::progression::learn_talent`]; the server answers with the rank spell's learn effects
@@ -804,13 +871,18 @@ pub const SMSG_ITEM_PUSH_RESULT: u16 = 0x0166; // 358
 
 // The group-loot roll family (VERIFIED vmangos `Opcodes_1_12_1.h:671-675`) — the Need/Greed/Pass
 // flow the `GroupLootFrame`s drive when the group's loot method is group/need-before-greed and a
-// drop is at or above the quality threshold (decision 0591). Bodies in [`super::loot`]. Master
-// loot (`CMSG_LOOT_MASTER_GIVE` 675 / `SMSG_LOOT_MASTER_LIST` 676) stays out of scope.
+// drop is at or above the quality threshold (decision 0591). Bodies in [`super::loot`].
 pub const SMSG_LOOT_ALL_PASSED: u16 = 0x029E; // 670
 pub const SMSG_LOOT_ROLL_WON: u16 = 0x029F; // 671
 pub const CMSG_LOOT_ROLL: u16 = 0x02A0; // 672
 pub const SMSG_LOOT_START_ROLL: u16 = 0x02A1; // 673
 pub const SMSG_LOOT_ROLL: u16 = 0x02A2; // 674
+
+// Master loot (VERIFIED vmangos `Opcodes_1_12_1.h:676-677`) — the other answer to an
+// above-threshold drop: no roll, the master looter is handed the eligible-member list at
+// window-open and assigns each row from a dropdown (decision 1675). Bodies in [`super::loot`].
+pub const CMSG_LOOT_MASTER_GIVE: u16 = 0x02A3; // 675
+pub const SMSG_LOOT_MASTER_LIST: u16 = 0x02A4; // 676
 
 // The death arc (decision 0308) — release/repop, corpse query, reclaim, spirit healer, resurrect
 // requests (all VERIFIED vmangos `Opcodes_1_12_1.h`: 346-348, 466, 534, 540, 546, 617). Bodies in
@@ -882,7 +954,8 @@ pub const CMSG_DEL_IGNORE: u16 = 0x006D; // 109
 // The numbers are two contiguous runs plus two strays: the query pair sits with the other ask-once
 // caches at 0x54/0x55, the core family runs 0x81-0x93 immediately after the group family, rank
 // administration was appended at 0x231-0x235, and the guild info text at 0x2FC. The
-// charter/petition/tabard opcodes that *found* a guild are a separate slice and are not here.
+// charter/petition opcodes that *found* a guild are their own family, below; the tabard
+// opcodes that dress one are not built.
 pub const CMSG_GUILD_QUERY: u16 = 0x0054; // 84
 pub const SMSG_GUILD_QUERY_RESPONSE: u16 = 0x0055; // 85
 /// vmangos registers this `STATUS_NEVER` (`Opcodes.cpp:210`): at 1.12 a guild is founded through
@@ -914,6 +987,39 @@ pub const CMSG_GUILD_DEL_RANK: u16 = 0x0233; // 563
 pub const CMSG_GUILD_SET_PUBLIC_NOTE: u16 = 0x0234; // 564
 pub const CMSG_GUILD_SET_OFFICER_NOTE: u16 = 0x0235; // 565
 pub const CMSG_GUILD_INFO_TEXT: u16 = 0x02FC; // 764
+
+// The petition family — the guild-charter flow that FOUNDS a guild (VERIFIED vmangos
+// `Opcodes_1_12_1.h:444-456`, `:705-706` + `Server/Packets/Petition.{h,cpp}`,
+// `Handlers/PetitionsHandler.cpp`; the handler table is `Opcodes.cpp:528-540` and `:800-801`).
+// Bodies in [`super::petition`]; decision 1672.
+//
+// Two shapes to know. The three `MSG_` opcodes are genuinely bidirectional with *different*
+// bodies each way — decline sends an item guid and receives a player guid — so each has its own
+// reader and its own builder rather than one shared body. And `MSG_DELETE_GUILD_CHARTER` (0x2C0)
+// is deliberately **absent**: vmangos registers it `INVALID_PACKET(…, Unhandled)`
+// (`Opcodes.cpp:800`) and has no handler at all, because destroying a charter runs through the
+// ordinary item-destroy path, which cascades into deleting the petition (`Player.cpp:10811-10817`,
+// `Item.cpp:515-516`). Declaring it would model traffic that nothing on either end sends.
+pub const CMSG_PETITION_SHOWLIST: u16 = 0x01BB; // 443
+pub const SMSG_PETITION_SHOWLIST: u16 = 0x01BC; // 444
+pub const CMSG_PETITION_BUY: u16 = 0x01BD; // 445
+pub const CMSG_PETITION_SHOW_SIGNATURES: u16 = 0x01BE; // 446
+/// The answer to **two** different asks — our own `CMSG_PETITION_SHOW_SIGNATURES`, and someone
+/// else's `CMSG_OFFER_PETITION` aimed at us. Only its `owner` field tells the two apart.
+pub const SMSG_PETITION_SHOW_SIGNATURES: u16 = 0x01BF; // 447
+pub const CMSG_PETITION_SIGN: u16 = 0x01C0; // 448
+pub const SMSG_PETITION_SIGN_RESULTS: u16 = 0x01C1; // 449
+/// Bidirectional with different bodies: we send the charter **item's** guid, the owner receives
+/// the declining **player's** guid.
+pub const MSG_PETITION_DECLINE: u16 = 0x01C2; // 450
+pub const CMSG_OFFER_PETITION: u16 = 0x01C3; // 451
+pub const CMSG_TURN_IN_PETITION: u16 = 0x01C4; // 452
+pub const SMSG_TURN_IN_PETITION_RESULTS: u16 = 0x01C5; // 453
+pub const CMSG_PETITION_QUERY: u16 = 0x01C6; // 454
+pub const SMSG_PETITION_QUERY_RESPONSE: u16 = 0x01C7; // 455
+/// Bidirectional, and here the two bodies agree: `u64 item` + the new name, both ways. The echo
+/// comes back only on success.
+pub const MSG_PETITION_RENAME: u16 = 0x02C1; // 705
 
 // The group/party family — invite/accept/decline/kick/leader/disband, the loot-method setting, the
 // roster push (`SMSG_GROUP_LIST`), party command feedback, live member stats for the party/raid

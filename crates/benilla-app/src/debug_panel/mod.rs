@@ -266,7 +266,28 @@ fn feed_gated_egui_output(
 fn spawn_egui_camera(mut commands: Commands) {
     commands.spawn((
         PrimaryEguiContext, // `#[require(EguiContext)]` ⇒ this camera carries EguiContext
+        // Named so [`crate::preflight`]'s MSAA check can say WHICH cameras disagree — an
+        // entity id in that error is a lookup, a name is the answer (decision 1659).
+        Name::new("egui dev-overlay camera"),
         Camera2d,
+        // **No MSAA — and saying so is what keeps the panel openable at all** (decision 1659).
+        // Silence here does not mean "none": `Camera` requires `Msaa`, whose `Default` is
+        // `Sample4`, so this camera used to carry four samples without ever naming them. That was
+        // invisible while the player-UI camera silently carried four too — and became a fatal
+        // `Attachments have differing sample counts` the moment 1628 gave that one `Msaa::Off`,
+        // because Bevy's two prepare passes disagree about whether MSAA is part of a texture's
+        // identity: `prepare_view_targets` keys the COLOUR target on `(target, usage, hdr, msaa)`,
+        // while `core_2d::prepare_core_2d_depth_textures` keys the DEPTH texture on the target
+        // ALONE (`core_3d`'s equivalent does include it — the asymmetry is 2D-only). Two
+        // `Camera2d`s on one window then share one depth texture at whichever sample count the
+        // first-iterated camera stamped on it, and the other one's pass is invalid.
+        //
+        // Off is also simply right here: egui feathers its own edges in the tessellator, so
+        // multisampling this overlay buys nothing and costs a full-window 4× colour texture and 4×
+        // the fill — the same arithmetic as 1628. [`crate::preflight`] now checks the agreement
+        // every run, so the next camera that stays silent is named in the log instead of in a wgpu
+        // validation error that names no camera at all.
+        bevy::render::view::Msaa::Off,
         RenderLayers::none(),
         Camera {
             order: 2,

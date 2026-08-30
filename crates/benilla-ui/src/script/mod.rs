@@ -71,6 +71,7 @@ mod extract;
 mod follow;
 pub(crate) mod font;
 mod font_block;
+mod gm_ticket;
 mod gossip;
 mod guild;
 mod handler_prof;
@@ -97,6 +98,7 @@ mod net_stats;
 mod object;
 mod party;
 mod pet;
+mod petition;
 mod pointer;
 mod pvp;
 mod quest;
@@ -117,6 +119,7 @@ mod slider;
 mod social;
 mod sound;
 mod spellbook;
+mod stable;
 mod statusbar;
 mod stdlib;
 mod talent;
@@ -155,23 +158,30 @@ pub use char_stats::{
 pub use chat_send::ChatSend;
 pub use chat_window::ChatWindowLook;
 pub use container::{
-    ContainerMove, ContainerSlot, ContainerState, EnchantView, RandomPropertyView, UiCursorMode,
+    ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
+    RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
-    EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use cvars::MultisampleFormat;
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
 pub use follow::FollowRequest;
+pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
 pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use petition::{
+    validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
+    PETITION_TYPE_PETITION,
+};
+
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
@@ -183,7 +193,7 @@ pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
-pub use model::TextureProbe;
+pub use model::{TextureProbe, TextureSizeProbe};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{HonorState, InspectHonorData};
@@ -203,6 +213,7 @@ pub use sound::SoundRequest;
 pub use spellbook::{
     resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
 };
+pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_spell::SpellTooltipView;
@@ -540,7 +551,9 @@ impl UiScript {
         party::install(&lua)?;
         social::install(&lua)?;
         guild::install(&lua)?;
+        petition::install(&lua)?;
         binder::install(&lua)?;
+        gm_ticket::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;
         session::install(&lua)?;
@@ -566,6 +579,7 @@ impl UiScript {
         gossip::install(&lua)?;
         merchant::install(&lua)?;
         bank::install(&lua)?;
+        stable::install(&lua)?;
         item_text::install(&lua)?;
         mail::install(&lua)?;
         auction::install(&lua)?;
@@ -1106,8 +1120,10 @@ impl UiScript {
     // benilla speaks *key names*, not scancodes — the host maps its window keycodes to these. The
     // routing is the client's exactly: if a box is focused it processes and CONSUMES every event; if
     // none is focused, the topmost effectively-visible `autoFocus` box self-acquires focus and
-    // processes this same event; otherwise nothing is consumed. `autoFocus` never focuses on show —
-    // only this self-acquire path, a click, or Lua `SetFocus` focuses a box.
+    // processes this same event; otherwise nothing is consumed. Today the ways a box gets focus here
+    // are this self-acquire path, a click, and Lua `SetFocus` — the reference has a fourth, an
+    // `autoFocus` box focusing itself on SHOW, which we do not implement yet (the flag's own doc
+    // carries the correction and what it waits on).
 
     /// A typed character (may be multi-byte UTF-8) arriving from the host. Routes per §1/§2 and, on a
     /// focused box, inserts it (numeric/cap/password rules apply) or — for the Ctrl+A control code —

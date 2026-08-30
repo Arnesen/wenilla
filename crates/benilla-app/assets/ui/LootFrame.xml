@@ -66,6 +66,50 @@
             return BENILLA_LOOT_QUALITY_COLORS[quality] or BENILLA_LOOT_QUALITY_COLORS[1]
         end
 
+        -- ── Master loot (decision 1675) ───────────────────────────────────────────────────────
+        -- The quality at or above which handing an item out asks for confirmation first. Ref
+        -- LootFrame.lua l.3 — and the misspelling is Blizzard's own, kept because the corpus
+        -- reads THIS name: `MASTER_LOOT_THRESHOLD` (with the S) exists nowhere in 1.12.
+        MASTER_LOOT_THREHOLD = 4
+
+        GIVE_LOOT = GIVE_LOOT or "Give Loot To:"                                       -- l.2006
+        GROUP = GROUP or "Group"                                                       -- l.2029
+        -- The party bound the dropdown's party arm sweeps to (ref PartyMemberFrame.lua l.1; ours
+        -- is declared in PartyFrame.xml, which the manifest loads far ahead of this file). Stated
+        -- through the same first-writer-wins idiom as the strings above rather than assumed: the
+        -- dropdown's init function RUNS at this file's load (UIDropDownMenu_Initialize calls it
+        -- immediately), so a missing constant is an arithmetic error at load, not at first use.
+        MAX_PARTY_MEMBERS = MAX_PARTY_MEMBERS or 4
+        -- The raid arm's two bounds, same idiom and same reason (declared in PartyFrame.xml /
+        -- RaidFrame.xml, both loaded first). The reference writes them inline as literal `40` and
+        -- `5` (l.194/:195); naming them is ours, so the names have to be guaranteed here.
+        MAX_RAID_MEMBERS = MAX_RAID_MEMBERS or 40
+        MEMBERS_PER_RAID_GROUP = MEMBERS_PER_RAID_GROUP or 5
+        CONFIRM_LOOT_DISTRIBUTION = CONFIRM_LOOT_DISTRIBUTION
+            or "You wish to assign %s to %s.  Is this correct?"                        -- l.848
+        -- The dialog below captures these two by VALUE at load, so a load-order slip would bake a
+        -- nil into its buttons rather than fail loudly. FriendsFrame.xml declares them and the
+        -- manifest loads it first; stated again here so this file's own dialog cannot depend on
+        -- that staying true.
+        YES = YES or "Yes"                                                             -- l.5463
+        NO = NO or "No"                                                                -- l.2794
+
+        -- The confirmation the dropdown raises for an at-or-above-threshold item (ref
+        -- StaticPopup.lua l.85-94). `data` is the candidate index the dropdown stashed; the SLOT
+        -- is re-read live from LootFrame.selectedSlot at accept time, exactly as the ref does —
+        -- which is precisely why the row click below hides this popup first, so an accept can
+        -- never land on a row the player has since clicked away from.
+        StaticPopupDialogs["CONFIRM_LOOT_DISTRIBUTION"] = {
+            text = CONFIRM_LOOT_DISTRIBUTION,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function(data)
+                GiveMasterLoot(LootFrame.selectedSlot, data)
+            end,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+
         function BenillaLootItem_OnLoad(button, index)
             button.lootButton = index
             button.icon = getglobal(button:GetName() .. "Icon")
@@ -117,9 +161,10 @@
             -- The row remembers its resolved loot slot from the last Update; act on it (LootFrame.lua
             -- l.94-95 stores button.slot, the click calls LootSlot on it).
             if not button.slot then return end
+            local modified = false
             if IsControlKeyDown() then
                 DressUpItemLink(GetLootSlotLink(button.slot)) -- ref l.148-149
-                return
+                modified = true
             elseif IsShiftKeyDown() then
                 -- ref l.150-153, through the shared helper (UIParent.xml): it carries the ref's own
                 -- "only when the edit box is up" guard AND our nil-link one, which this row needs
@@ -127,13 +172,32 @@
                 -- its template lands. A shift-click with chat closed does nothing here: a loot row
                 -- has no stack to split, unlike a bag slot.
                 BenillaChatEdit_InsertLink(GetLootSlotLink(button.slot))
-                return
+                modified = true
             elseif IsAltKeyDown() then
                 -- The C gate's third modifier (`0x41f8f0(2)` @ `0x4c1841`). Nothing is bound to
                 -- alt in FrameXML, so this arm does nothing at all — its entire job is to NOT
                 -- loot, which is what the real client does and what we did not.
-                return
+                modified = true
             end
+
+            -- The ref's tail (l.155-161), and it runs on EVERY click — modified ones included,
+            -- because in the reference this bookkeeping is the Lua <OnClick> and the take is the
+            -- C handler that runs after it; the modifier gate lives in the C half, so it never
+            -- skipped these four. Ours folds the take into this function (1067), so the tail is
+            -- lifted above the early return rather than left below it — same observable.
+            --
+            -- What reads them: GroupLootDropDown, which the app opens by firing
+            -- OPEN_MASTER_LOOT_LIST when the clicked row's wire slot_type is MASTER. That event
+            -- is raised from the pick drain, i.e. AFTER this handler returns, so the four fields
+            -- must already be stashed by then — they are the dropdown's only knowledge of WHICH
+            -- row is being handed out, and its anchor.
+            StaticPopup_Hide("CONFIRM_LOOT_DISTRIBUTION")
+            LootFrame.selectedLootButton = button:GetName()
+            LootFrame.selectedSlot = button.slot
+            LootFrame.selectedQuality = button.quality
+            LootFrame.selectedItemName = button.name:GetText()
+
+            if modified then return end
             LootSlot(button.slot)
         end
 
@@ -204,6 +268,9 @@
                     end
                     button.slot = slot
                     button.itemId = itemId
+                    -- Ref l.96. Read back by the row click into LootFrame.selectedQuality, which
+                    -- is what decides whether handing this row out asks for confirmation first.
+                    button.quality = quality
                     button:Show()
                 else
                     button:Hide()
@@ -241,6 +308,10 @@
             frame:RegisterEvent("LOOT_OPENED")
             frame:RegisterEvent("LOOT_UPDATE")
             frame:RegisterEvent("LOOT_CLOSED")
+            -- Master loot (ref l.9-10). Neither event carries an argument: the candidate list is
+            -- read back through GetMasterLootCandidate at menu-build time, not pushed.
+            frame:RegisterEvent("OPEN_MASTER_LOOT_LIST")
+            frame:RegisterEvent("UPDATE_MASTER_LOOT_LIST")
         end
 
         function LootFrame_OnEvent(event)
@@ -268,6 +339,14 @@
                 end
             elseif event == "LOOT_CLOSED" then
                 HideUIPanel(frame)
+            elseif event == "OPEN_MASTER_LOOT_LIST" then
+                -- Ref l.58-61. Anchored to the ROW that was clicked, not to the frame — the name
+                -- the click stashed a moment ago.
+                ToggleDropDownMenu(1, nil, GroupLootDropDown, LootFrame.selectedLootButton, 0, 0)
+            elseif event == "UPDATE_MASTER_LOOT_LIST" then
+                -- Ref l.62-64: refresh IN PLACE, never re-toggle — re-toggling an open menu would
+                -- close it under the player's cursor.
+                UIDropDownMenu_Refresh(GroupLootDropDown)
             end
         end
 
@@ -303,6 +382,115 @@
         function BenillaLootCloseButton_OnClick()
             -- Hide immediately (client-authoritative); OnHide's CloseLoot() sends the release.
             HideUIPanel(getglobal("LootFrame"))
+        end
+
+        -- ── GroupLootDropDown — the master looter's "Give Loot To:" menu ──────────────────────
+        -- Ref LootFrame.lua l.164-244, transcribed. The frame keeps the reference's BARE name for
+        -- the same mechanical reason the four GroupLootFrames do (decision 1254/0591 §3):
+        -- LootFrame_OnEvent resolves it by literal global lookup, and a real 1.12 addon that
+        -- hooks the master-loot menu expects to find it under this name.
+
+        function GroupLootDropDown_OnLoad()
+            -- "MENU" style: a bare context menu, no capsule chrome — it is opened at the loot row
+            -- by ToggleDropDownMenu, never drawn in place. Passed by name rather than the ref's
+            -- bare `this`, the house calling convention (TradeSkillFrame/TrainerFrame precedent).
+            UIDropDownMenu_Initialize(GroupLootDropDown, GroupLootDropDown_Initialize, "MENU")
+        end
+
+        function GroupLootDropDown_Initialize()
+            local candidate, info
+
+            -- Level 2: one raid group's five candidate slots (ref l.170-184). The parent row
+            -- stashed the index its probe found, and this walks the five starting THERE — so a
+            -- group whose first present candidate is not its first slot yields a window offset by
+            -- the same amount. That is the reference's own arithmetic; kept as-is.
+            if UIDROPDOWNMENU_MENU_LEVEL == 2 then
+                local lastIndex = UIDROPDOWNMENU_MENU_VALUE + 5 - 1
+                for i = UIDROPDOWNMENU_MENU_VALUE, lastIndex do
+                    candidate = GetMasterLootCandidate(i)
+                    if candidate then
+                        info = {}
+                        info.text = candidate
+                        info.textHeight = 12
+                        info.value = i
+                        info.notCheckable = 1
+                        info.func = GroupLootDropDown_GiveLoot
+                        UIDropDownMenu_AddButton(info, UIDROPDOWNMENU_MENU_LEVEL)
+                    end
+                end
+                return
+            end
+
+            if GetNumRaidMembers() > 0 then
+                -- In a raid: a title, then one nested row per group that has any candidate at all
+                -- (ref l.186-212). The probe is "does any of this block of five answer non-nil".
+                info = {}
+                info.text = GIVE_LOOT
+                info.textHeight = 12
+                info.notCheckable = 1
+                info.isTitle = 1
+                UIDropDownMenu_AddButton(info)
+                for i = 1, MAX_RAID_MEMBERS, MEMBERS_PER_RAID_GROUP do
+                    for j = i, i + MEMBERS_PER_RAID_GROUP - 1 do
+                        candidate = GetMasterLootCandidate(j)
+                        if candidate then
+                            info = {}
+                            -- The label counts from the loop step `i`, the value from the found
+                            -- slot `j` — the ref uses the two differently on purpose (l.196/:200).
+                            info.text = GROUP .. " " .. math.ceil(i / MEMBERS_PER_RAID_GROUP)
+                            info.textHeight = 12
+                            info.hasArrow = 1
+                            info.notCheckable = 1
+                            info.value = j
+                            info.func = nil
+                            UIDropDownMenu_AddButton(info)
+                            break
+                        end
+                    end
+                end
+            else
+                -- In a party: a flat list, no title row and no nesting (ref l.214-232). The sweep
+                -- is MAX_PARTY_MEMBERS+1 because the master looter can hand loot to THEMSELVES —
+                -- the server includes us in the candidate list too (Group::MasterLoot walks the
+                -- whole group).
+                for i = 1, MAX_PARTY_MEMBERS + 1, 1 do
+                    candidate = GetMasterLootCandidate(i)
+                    if candidate then
+                        info = {}
+                        info.text = candidate
+                        info.textHeight = 12
+                        info.value = i
+                        info.notCheckable = 1
+                        info.func = GroupLootDropDown_GiveLoot
+                        UIDropDownMenu_AddButton(info)
+                    end
+                end
+            end
+        end
+
+        function GroupLootDropDown_GiveLoot()
+            -- Ref l.234-244. At or above the threshold the assignment is confirmed first; below
+            -- it, it goes straight out. The popup's message takes the quality-coloured item name
+            -- and the candidate's own row text.
+            --
+            -- The `selectedQuality and` guard is ours, and it is required rather than defensive:
+            -- benilla resolves an item template asynchronously, so GetLootSlotInfo answers a nil
+            -- quality (and a nil name) for a row whose template is still in flight — a state the
+            -- real client's C-side loot record never has. Unguarded, that comparison raises. A nil
+            -- quality takes the below-threshold arm, which is the safe direction: the assignment
+            -- still happens, it just doesn't ask first.
+            if LootFrame.selectedQuality and LootFrame.selectedQuality >= MASTER_LOOT_THREHOLD then
+                local color = ITEM_QUALITY_COLORS[LootFrame.selectedQuality]
+                local dialog = StaticPopup_Show("CONFIRM_LOOT_DISTRIBUTION",
+                    color.hex .. (LootFrame.selectedItemName or "") .. FONT_COLOR_CODE_CLOSE,
+                    this:GetText())
+                if dialog then
+                    dialog.data = this.value
+                end
+            else
+                GiveMasterLoot(LootFrame.selectedSlot, this.value)
+            end
+            CloseDropDownMenus()
         end
     ]]></Script>
 
@@ -465,6 +653,22 @@
             <OnEvent>LootFrame_OnEvent(event)</OnEvent>
             <OnShow>LootFrame_OnShow()</OnShow>
             <OnHide>LootFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+
+    <!--
+        The master looter's candidate menu (ref LootFrame.xml l.233-242). Bare reference name, and
+        the reason is mechanical rather than stylistic — the same one decision 1254 recorded for
+        GroupLootFrame1..4: LootFrame_OnEvent hands ToggleDropDownMenu this frame by literal global
+        lookup, and a 1.12 addon that wants to extend the master-loot menu expects to find it here.
+        Hidden and unanchored: ToggleDropDownMenu positions it at the clicked loot row.
+    -->
+    <Frame name="GroupLootDropDown" parent="UIParent" inherits="UIDropDownMenuTemplate" id="1" hidden="true">
+        <Anchors>
+            <Anchor point="TOPLEFT"/>
+        </Anchors>
+        <Scripts>
+            <OnLoad>GroupLootDropDown_OnLoad()</OnLoad>
         </Scripts>
     </Frame>
 </Ui>

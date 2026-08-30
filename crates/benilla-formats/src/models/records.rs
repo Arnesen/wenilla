@@ -277,19 +277,10 @@ pub struct M2PortraitCamera {
 /// (stride `0x7c`), selected via `cameraLookup[0]` (`count@0x12c`/`ofs@0x130`, u16 entries) — exactly
 /// the real client's selection (see [`M2PortraitCamera`]). `None` when the model carries no camera
 /// table / no lookup slot 0 (some props and a few creatures — the caller falls back to heuristic
-/// framing). Track key 0 reads are layout-safe for both linear and hermite tracks (a spline key's
-/// value triple *starts* with the value).
+/// framing). The `0xffff` "none" sentinel and a malformed lookup both fall out as an out-of-range
+/// index, which [`parse_m2_camera`] answers with `None`.
 pub fn parse_m2_portrait_camera(bytes: &[u8]) -> Option<M2PortraitCamera> {
-    let cam_count = bytes.u32_at(0x124)? as usize;
-    let look_count = bytes.u32_at(0x12c)? as usize;
-    let look_ofs = bytes.u32_at(0x130)? as usize;
-    if look_count == 0 {
-        return None;
-    }
-    let idx = bytes.u16_at(look_ofs)? as usize;
-    if idx >= cam_count {
-        return None; // 0xffff "none" sentinel or a malformed lookup
-    }
+    let idx = *benilla_m2::parse_camera_lookup(bytes).first()? as usize;
     parse_m2_camera(bytes, idx)
 }
 
@@ -297,32 +288,23 @@ pub fn parse_m2_portrait_camera(bytes: &[u8]) -> Option<M2PortraitCamera> {
 /// create/select background scenes carry exactly one camera whose *lookup* slot holds the 0xffff
 /// none sentinel, so the portrait selection above sees nothing; the client indexes the table
 /// directly there). Same record read as the portrait camera.
+/// This is the **key-0 reduction** of [`benilla_m2::parse_cameras`], which is the one place the
+/// record's offsets are written down. A pane/portrait camera is static in practice — one key or
+/// none — so key 0 *is* its evaluated value; a camera whose tracks actually move over time (the
+/// `Cameras\*.m2` cinematic fly-bys) is sampled through the parsed record instead, never here.
 pub fn parse_m2_camera(bytes: &[u8], index: usize) -> Option<M2PortraitCamera> {
-    let cam_count = bytes.u32_at(0x124)? as usize;
-    let cam_ofs = bytes.u32_at(0x128)? as usize;
-    if index >= cam_count {
-        return None;
-    }
-    let rec = cam_ofs.checked_add(index.checked_mul(0x7c)?)?;
-    if rec.checked_add(0x7c)? > bytes.len() {
-        return None;
-    }
-    let base_plus_key = |base_ofs: usize, track_ofs: usize| -> Option<[f32; 3]> {
-        let b = [
-            bytes.f32_at(base_ofs)?,
-            bytes.f32_at(base_ofs + 4)?,
-            bytes.f32_at(base_ofs + 8)?,
-        ];
-        let k = track_first_vec3(bytes, track_ofs).unwrap_or([0.0; 3]);
-        Some([b[0] + k[0], b[1] + k[1], b[2] + k[2]])
+    let cam = benilla_m2::parse_cameras(bytes).into_iter().nth(index)?;
+    let base_plus_key = |base: [f32; 3], track: &benilla_m2::M2Vec3SplineTrack| {
+        let k = track.keys.first().map_or([0.0; 3], |(_, k)| k.value);
+        [base[0] + k[0], base[1] + k[1], base[2] + k[2]]
     };
     Some(M2PortraitCamera {
-        fov: bytes.f32_at(rec + 0x04)?,
-        far_clip: bytes.f32_at(rec + 0x08)?,
-        near_clip: bytes.f32_at(rec + 0x0c)?,
-        position: base_plus_key(rec + 0x2c, rec + 0x10)?,
-        target: base_plus_key(rec + 0x54, rec + 0x38)?,
-        roll: track_first_f32(bytes, rec + 0x60).unwrap_or(0.0),
+        fov: cam.fov,
+        far_clip: cam.far_clip,
+        near_clip: cam.near_clip,
+        position: base_plus_key(cam.position_base, &cam.positions),
+        target: base_plus_key(cam.target_base, &cam.target),
+        roll: cam.roll.keys.first().map_or(0.0, |(_, k)| k.value),
     })
 }
 

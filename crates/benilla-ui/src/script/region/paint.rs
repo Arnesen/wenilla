@@ -148,83 +148,112 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(
             |lua, (this, arg, g, b, a): (Table, Value, Value, Value, Value)| {
                 let rh = region_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                // A plain SetTexture makes the region ordinary again — drop any portrait circular mask
-                // and any live-unit-portrait binding.
-                let data = model.region_data.entry(rh).or_default();
-                data.circular = false;
-                data.portrait_unit = None;
-                // **`SetTexture` CLEARS the desaturation** (wow-re `texture-desaturate-law.md` §2.3,
-                // VERIFIED): `+0x128` is a `CGxShader*`, and `CSimpleTexture::SetTexture`
-                // (`0x770200`) writes it from its 4th stack arg, for which the Lua binding
-                // (`0x79bb40`) pushes slot 0 — permanently NULL — on both of its legs. A
-                // re-implementation that keeps a desaturate boolean independent of the texture
-                // handle diverges on every `icon:SetDesaturated(1)` followed by `icon:SetTexture(t)`.
-                //
-                // Scoped exactly as the binary scopes it:
-                //  · the **same path** is inert — `0x770225` returns before ever reaching the write,
-                //    so a repaint that re-sets the icon it already shows keeps its grey;
-                //  · `nil`/`""` DO clear — the `test esi,esi` leg falls through to the write;
-                //  · the **colour form** does NOT — that is `0x770360`, which is not among the four
-                //    writers of the field.
-                let same_path = matches!((&arg, &data.texture),
+                // Scoped, so the model borrow is provably gone before the layout touch below —
+                // the path arm hands it back mid-way (to call the host probe without holding a
+                // mutable borrow across a host callback) and the others do not.
+                let (loaded, derived) = {
+                    let mut model = lua.app_data_mut::<Model>().expect("model");
+                    // A plain SetTexture makes the region ordinary again — drop any portrait circular mask
+                    // and any live-unit-portrait binding.
+                    let data = model.region_data.entry(rh).or_default();
+                    data.circular = false;
+                    data.portrait_unit = None;
+                    // **`SetTexture` CLEARS the desaturation** (wow-re `texture-desaturate-law.md` §2.3,
+                    // VERIFIED): `+0x128` is a `CGxShader*`, and `CSimpleTexture::SetTexture`
+                    // (`0x770200`) writes it from its 4th stack arg, for which the Lua binding
+                    // (`0x79bb40`) pushes slot 0 — permanently NULL — on both of its legs. A
+                    // re-implementation that keeps a desaturate boolean independent of the texture
+                    // handle diverges on every `icon:SetDesaturated(1)` followed by `icon:SetTexture(t)`.
+                    //
+                    // Scoped exactly as the binary scopes it:
+                    //  · the **same path** is inert — `0x770225` returns before ever reaching the write,
+                    //    so a repaint that re-sets the icon it already shows keeps its grey;
+                    //  · `nil`/`""` DO clear — the `test esi,esi` leg falls through to the write;
+                    //  · the **colour form** does NOT — that is `0x770360`, which is not among the four
+                    //    writers of the field.
+                    let same_path = matches!((&arg, &data.texture),
                     (Value::String(s), Some(cur)) if s.to_str().is_ok_and(|s| *s == **cur));
-                let colour_form = matches!(&arg, Value::Number(_) | Value::Integer(_));
-                if !same_path && !colour_form {
-                    data.desaturated = false;
-                }
-                // Both forms write the SAME `+0xcc` texture slot — the path form loads a file
-                // there (`0x770200`), the colour form generates an 8×8 solid into it
-                // (`0x770360`) — so each clears the other. NEITHER touches the vertex colour at
-                // `+0xb8`: a tint outlives the art it was tinting.
-                let loaded = match &arg {
-                    // SetTexture("") clears, same as SetTexture(nil) — the ref lua blanks state
-                    // art with the empty string (QuestLogFrame.lua:165-166). The return for ""
-                    // is read as the path form's failure (nothing loads from an empty name);
-                    // INFERRED — no corpus caller reads it.
-                    Value::String(s) if s.to_str()?.is_empty() => {
-                        data.texture = None;
-                        data.fill = None;
-                        false
+                    let colour_form = matches!(&arg, Value::Number(_) | Value::Integer(_));
+                    if !same_path && !colour_form {
+                        data.desaturated = false;
                     }
-                    Value::String(s) => {
-                        let path = s.to_str()?.to_string();
-                        data.texture = Some(path.clone());
-                        data.fill = None;
-                        drop(model);
-                        let model = lua.app_data_ref::<Model>().expect("model");
-                        model
-                            .texture_probe
-                            .as_ref()
-                            .is_some_and(|probe| probe(&path))
-                    }
-                    // The colour form, and the ONLY branch that looks at the trailing three. A
-                    // non-numeric there takes the same default a missing one does, which is what
-                    // reading off a C stack does: `lua_tonumber` on a non-number yields 0.
-                    Value::Number(_) | Value::Integer(_) => {
-                        let chan = |v: &Value, dflt: f32| match v {
-                            Value::Number(_) | Value::Integer(_) => as_f32(v),
-                            Value::String(s) => s
-                                .to_str()
-                                .ok()
-                                .and_then(|s| s.parse::<f32>().ok())
-                                .unwrap_or(dflt),
-                            _ => dflt,
-                        };
-                        data.fill =
-                            Some([as_f32(&arg), chan(&g, 0.0), chan(&b, 0.0), chan(&a, 1.0)]);
-                        data.texture = None;
-                        true
-                    }
-                    // SetTexture(nil) clears (the live API's blank-the-region form); a cleared
-                    // texture region draws nothing. Returns 1 (Q1's `SetTexture(nil) / ()` row).
-                    Value::Nil => {
-                        data.texture = None;
-                        data.fill = None;
-                        true
-                    }
-                    _ => false,
+                    // Does this region's rect come from its ART? An axis authored `0` takes its span
+                    // from the content (decision 1349, `script::layout::content_span`), so on that
+                    // shape — and only there — swapping the texture MOVES the region and the resolve
+                    // has to hear about it. Read before the match, which writes the art and never the
+                    // size.
+                    //
+                    // **An ANCHOR-LESS region is not that shape**, whatever its size: with no
+                    // pinned edge and no center there is nothing for a span to be added to
+                    // (`combine_edge` needs one), so every edge stays unset — which is why the
+                    // resolve sweep skips such regions outright. Painting one is a paint, not a
+                    // layout change, and saying otherwise would re-open the change gate on every
+                    // `CreateTexture(…):SetTexture(…)` in the UI (decisions 0740/1385/1388).
+                    let derived = !data.anchors.is_empty()
+                        && data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0);
+                    // Both forms write the SAME `+0xcc` texture slot — the path form loads a file
+                    // there (`0x770200`), the colour form generates an 8×8 solid into it
+                    // (`0x770360`) — so each clears the other. NEITHER touches the vertex colour at
+                    // `+0xb8`: a tint outlives the art it was tinting.
+                    let loaded = match &arg {
+                        // SetTexture("") clears, same as SetTexture(nil) — the ref lua blanks state
+                        // art with the empty string (QuestLogFrame.lua:165-166). The return for ""
+                        // is read as the path form's failure (nothing loads from an empty name);
+                        // INFERRED — no corpus caller reads it.
+                        Value::String(s) if s.to_str()?.is_empty() => {
+                            data.texture = None;
+                            data.fill = None;
+                            false
+                        }
+                        Value::String(s) => {
+                            let path = s.to_str()?.to_string();
+                            data.texture = Some(path.clone());
+                            data.fill = None;
+                            drop(model);
+                            let model = lua.app_data_ref::<Model>().expect("model");
+                            model
+                                .texture_probe
+                                .as_ref()
+                                .is_some_and(|probe| probe(&path))
+                        }
+                        // The colour form, and the ONLY branch that looks at the trailing three. A
+                        // non-numeric there takes the same default a missing one does, which is what
+                        // reading off a C stack does: `lua_tonumber` on a non-number yields 0.
+                        Value::Number(_) | Value::Integer(_) => {
+                            let chan = |v: &Value, dflt: f32| match v {
+                                Value::Number(_) | Value::Integer(_) => as_f32(v),
+                                Value::String(s) => s
+                                    .to_str()
+                                    .ok()
+                                    .and_then(|s| s.parse::<f32>().ok())
+                                    .unwrap_or(dflt),
+                                _ => dflt,
+                            };
+                            data.fill =
+                                Some([as_f32(&arg), chan(&g, 0.0), chan(&b, 0.0), chan(&a, 1.0)]);
+                            data.texture = None;
+                            true
+                        }
+                        // SetTexture(nil) clears (the live API's blank-the-region form); a cleared
+                        // texture region draws nothing. Returns 1 (Q1's `SetTexture(nil) / ()` row).
+                        Value::Nil => {
+                            data.texture = None;
+                            data.fill = None;
+                            true
+                        }
+                        _ => false,
+                    };
+                    (loaded, derived)
                 };
+                // Named precisely, and only on the content-derived shape: an ordinary sized icon's
+                // rect cannot move here, and touching the layout on every icon repaint would
+                // re-open the resolve's change gate every frame for a rect nobody moved
+                // (decisions 0740/1385/1388).
+                if derived {
+                    lua.app_data_mut::<Model>()
+                        .expect("model")
+                        .touch_layout_region(rh);
+                }
                 Ok(if loaded {
                     Value::Number(1.0)
                 } else {
@@ -453,5 +482,13 @@ impl crate::script::UiScript {
     /// answering nil for every path, the engine-less truth.
     pub fn set_texture_probe(&mut self, probe: crate::script::TextureProbe) {
         self.model_mut().texture_probe = Some(probe);
+    }
+
+    /// Install the host's texture **texel-size** oracle — what lets a region with an authored size
+    /// of `0` on an axis take that span from its art, as the client's virtual size getters do
+    /// ([`Model::texture_size_probe`], decision 1349 / wow-re `region-size-fallback.md` §2). A VM
+    /// that never gets one leaves such a region exactly where it was.
+    pub fn set_texture_size_probe(&mut self, probe: crate::script::TextureSizeProbe) {
+        self.model_mut().texture_size_probe = Some(probe);
     }
 }

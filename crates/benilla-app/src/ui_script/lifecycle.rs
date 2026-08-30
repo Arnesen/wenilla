@@ -67,13 +67,20 @@ fn install_boot_vm(world: &mut World) {
     world.insert_non_send_resource(script);
 }
 
-/// Wire up the two halves of `Interface\AddOns\` texture art (decision 1322): the sprite
-/// decoder's **loose-file root** (so addon-shipped BLP/TGA files render at all — the store's
+/// Wire up the halves of `Interface\AddOns\` texture art (decision 1322): the sprite decoder's
+/// **loose-file root** (so addon-shipped BLP/TGA files render at all — the store's
 /// [`benilla_assets::WorldAssets::set_loose_sprite_root`]) and the VM's **texture probe** (so the
 /// path form of `SetTexture` can answer the reference's 1|nil load verdict — Atlas picks its map
 /// art by that return). Both resolve the same one folder ([`addons::root`], hermetic-`None` under
 /// `$WOW_CAPTURE`), and the probe walks the same [`benilla_assets::sprite_candidates`] the
 /// renderer decodes with, so the verdict the Lua caller gets is the verdict the screen shows.
+///
+/// The **size probe** beside it is the same oracle answering a different question — how many texels
+/// wide and tall is the art — which is what lets a region that authored no size on an axis take
+/// that span from its content, as the client's virtual size getters do (decision 1349, the fix for
+/// B342's page-sized book crest). It goes through the decoder, so the number layout resolves with
+/// is the number the screen shows, and memoises per texture key: the ask is per zero-size region
+/// per resolve, and the answer cannot change for a key that already read.
 ///
 /// No `WorldAssets` (no client data) means no backend: nothing to install, and the VM's path form
 /// keeps answering nil — the engine-less truth.
@@ -84,6 +91,8 @@ fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
     };
     assets.set_loose_sprite_root(root.clone());
     let chain = assets.chain.clone();
+    let size_chain = chain.clone();
+    let size_root = root.clone();
     script.set_texture_probe(Box::new(move |path| {
         benilla_assets::sprite_candidates(path).iter().any(|c| {
             chain.lock_recover().contains(c)
@@ -91,6 +100,21 @@ fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
                     .as_deref()
                     .is_some_and(|r| benilla_assets::loose_sprite_file(r, c).is_some())
         })
+    }));
+    // Keyed by the reference string exactly as the region carries it, so the hit path allocates
+    // nothing: this is asked from inside the layout sweep, once per zero-size textured region per
+    // pass. Two spellings of one file (`Foo` and `Foo.blp`) cost two entries holding the same
+    // number, which is cheaper than normalising every ask to avoid it. Misses are cached too — a
+    // path that resolves to nothing measures nothing however often we look.
+    let sizes: std::cell::RefCell<std::collections::HashMap<String, Option<(u32, u32)>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    script.set_texture_size_probe(Box::new(move |path| {
+        if let Some(cached) = sizes.borrow().get(path) {
+            return *cached;
+        }
+        let measured = benilla_assets::sprite_dimensions(&size_chain, size_root.as_deref(), path);
+        sizes.borrow_mut().insert(path.to_string(), measured);
+        measured
     }));
 }
 

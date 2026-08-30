@@ -84,16 +84,22 @@ mod spatial;
 mod surface; // the against-real-client-files tests — they span both halves
 
 // The submodules are private, so this list IS the subsystem's face: everything the rest of the
-// client may name. `LiquidSurface` is deliberately absent — it is spawned, never named from
-// outside; add it here the day something needs it. Most of this list is now reached through
-// `crate::world_point::WorldPoint` rather than directly (decision 1164).
+// client may name. Most of this list is now reached through `crate::world_point::WorldPoint`
+// rather than directly (decision 1164).
+//
+// `LiquidSurface` used to be deliberately absent — "spawned, never named from outside; add it here
+// the day something needs it". Decision 1652 is that day: the exterior-window cull counts liquid
+// apart from the rest of the scene, because a few dozen surfaces summed into tens of thousands of
+// terrain cells is a leg that could reach nothing at all and never show it.
 pub use query::{
     camera_claim, describe_at, liquid_at, player_claim, surfaces_at, unit_claim, water_surface_at,
     FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, Underwater, WaterChunkInfo,
     WmoPool,
 };
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
-pub(crate) use surface::{spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource};
+pub(crate) use surface::{
+    spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,
+};
 
 /// The frame slot where [`Underwater`] is written — the label every consumer of the submersion
 /// verdict orders itself `.after(..)`. The submerged view is a whole-screen swap (atmosphere, clear
@@ -134,9 +140,19 @@ impl Plugin for LiquidPlugin {
             )
             // The surface-render kill-switch (see [`hide_liquid_surfaces`]) — inert without the env
             // var, so it costs nothing when it isn't being used.
+            //
+            // `PostUpdate`, after the two systems that now own a liquid surface's `Visibility`
+            // every frame — the exterior-window cull (ADT surfaces, decision 1652) and the
+            // model-visibility authority (WMO pools, 0689/0784) — and before Bevy consumes the
+            // result. An *override* that runs last, deliberately, rather than a second writer
+            // trying to compose with them (decision 0025's law, and 0784's reasoning for why
+            // ordering is the wrong tool for two real terms but the right one for a kill-switch:
+            // there is nothing to AND here, the switch simply wins).
             .add_systems(
-                Update,
+                PostUpdate,
                 surface::hide_liquid_surfaces
+                    .after(crate::exterior_cull::ExteriorCullSet)
+                    .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
                     .run_if(|| std::env::var_os("WOW_NO_LIQUID").is_some()),
             );
     }

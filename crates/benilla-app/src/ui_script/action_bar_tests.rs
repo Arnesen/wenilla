@@ -812,6 +812,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     slots.insert(
         1,
         ContainerSlot {
+            petition: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,

@@ -56,7 +56,8 @@ use crate::net::{ClientCommand, Guid, NetEntity, ObjectStore, Reputations, SelfP
 use benilla_assets::{LockRecover, WorldAssets};
 
 use super::relations::can_attack;
-use super::{ring_reaction, Factions, Selection};
+use super::ring::reaction_from_player;
+use super::{Factions, Selection};
 
 // == The Classic-priority dials ==
 // Each names the Classic Era cvar it stands in for. The VALUES are tuned, not pinned — the
@@ -263,9 +264,18 @@ impl EnemyScan<'_, '_> {
     /// `0x6130a3`'s keep-or-drop test on a guid we are already holding: is the actor hostile to it?
     ///
     /// The reference reads `0x6061e0(actor, target) >= 4` — the **reaction alone**, not the full
-    /// `0x606980` CanAttack, which it saves for the final gate at `0x613167`. So this is
-    /// [`ring_reaction`] and nothing else. A guid whose unit is not streamed answers `false`,
-    /// which is the same exit `0x613099` takes when its object lookup misses.
+    /// `0x606980` CanAttack, which it saves for the final gate at `0x613167`. A guid whose unit is
+    /// not streamed answers `false`, which is the same exit `0x613099` takes when its object lookup
+    /// misses.
+    ///
+    /// **The direction is ACTOR → target**, byte-read at the call: `0x61309b push eax` (the
+    /// candidate) `; mov ecx,edi` (the actor) `; call 0x6061e0`, then `cmp eax,4; jl keep`. So it is
+    /// [`reaction_from_player`], the leg-3 direction that answers a reputation-slot faction with the
+    /// **at-war bit** — *not* [`ring_reaction`], which this used to call and which reads the
+    /// standing from the other side (1674; the two are deliberately not each other's mirror, and
+    /// substituting one for the other is the defect 1530 named). With the standing here, pressing
+    /// Attack while holding a not-at-war Cenarion Circle NPC kept it as the target and then failed
+    /// the final gate; the reference drops it and goes and finds a real enemy.
     ///
     /// **The actor is the player here, and in the reference it is the caller's** — the pet on the
     /// pet arm (`0x4bd40d` passes the pet object). The two agree: vmangos gives a pet its owner's
@@ -278,12 +288,12 @@ impl EnemyScan<'_, '_> {
             .iter()
             .find(|(_, _, g, _, _, _)| g.0 == guid)
             .is_some_and(|(_, _, _, _, store, _)| {
-                ring_reaction(
+                reaction_from_player(
                     self.factions.as_deref(),
                     &self.reputations,
                     store,
                     self_store,
-                ) <= 3
+                ) < 4
             })
     }
 
@@ -724,8 +734,12 @@ fn keeps_held_target(selection: Option<u64>, hostile: impl Fn(u64) -> bool) -> O
 ///   `UNIT_DYNAMIC_FLAGS` bit 5 is set (`0x613159 shr edx,5; test dl,1`);
 /// - `CanAttack 0x606980` — the full predicate this time, not the bare reaction the fork above uses.
 ///
-/// A target with no streamed descriptor passes both, matching [`can_attack`]'s own missing-data
-/// posture: nothing known to disqualify is not a disqualification.
+/// A target with no streamed descriptor is alive by the first leg (nothing known to disqualify) and
+/// then **refused by the second**, which is [`can_attack`]'s own missing-data posture since 1674:
+/// the reference reaches this gate holding two live CGUnits and has no null path at all, so the
+/// honest stand-in is to refuse rather than to swing at an object we know nothing about. The result
+/// is `ERR_INVALID_ATTACK_TARGET`, which is the same answer the gate gives for every other way a
+/// target can be wrong.
 fn attack_target_valid(
     store: Option<&ObjectStore>,
     factions: Option<&Factions>,
@@ -1070,9 +1084,14 @@ mod tests {
         const HEALTH: u16 = 22;
         const DYNFLAGS: u16 = 143;
         const FLAGS: u16 = 46;
+        const TPL: u16 = 35;
         let reps = Reputations::default();
         let unit = |pairs: &[(u16, u32)]| ObjectStore(ObjectFields::from_pairs(pairs));
-        let valid = |s: &ObjectStore| attack_target_valid(Some(s), None, &reps, None);
+        // `CanAttack` needs both sides now (1674), and with no catalog both reactions resolve to
+        // neutral — the mixed arm's `< 4`, so a plain live mob is attackable and the legs below
+        // are the ones actually under test.
+        let me = unit(&[(TPL, 1), (FLAGS, 1 << 3)]);
+        let valid = |s: &ObjectStore| attack_target_valid(Some(s), None, &reps, Some(&me));
 
         assert!(valid(&unit(&[(HEALTH, 120)])), "a live mob");
         assert!(!valid(&unit(&[(HEALTH, 0)])), "a corpse");
@@ -1084,8 +1103,16 @@ mod tests {
             !valid(&unit(&[(HEALTH, 120), (FLAGS, 1 << 25)])),
             "NOT_SELECTABLE is one of CanAttack's disqualifiers"
         );
-        // No descriptor is no disqualification — `can_attack`'s own posture, unchanged.
-        assert!(attack_target_valid(None, None, &reps, None));
+        // No descriptor on either side is a REFUSAL now — see the fn doc. The reference holds two
+        // live CGUnits here and has no null path; swinging at an object we know nothing about was
+        // the approximation's posture, not the binary's.
+        assert!(!attack_target_valid(None, None, &reps, Some(&me)));
+        assert!(!attack_target_valid(
+            Some(&unit(&[(HEALTH, 120)])),
+            None,
+            &reps,
+            None
+        ));
     }
 
     /// The history: pruning honors the window, a re-visit moves to most-recent.

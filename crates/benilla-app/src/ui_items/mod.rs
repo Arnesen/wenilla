@@ -185,12 +185,6 @@ pub(crate) struct EquipError {
 #[derive(Resource, Default)]
 pub(crate) struct EquipErrors(pub Vec<EquipError>);
 
-/// Pre-formatted red error lines from the net drain (`UI_ERROR_MESSAGE` verbatim text — the
-/// death durability notice today; anything whose message isn't a code map). Drained beside
-/// [`EquipErrors`] by the container feed.
-#[derive(bevy::prelude::Resource, Default)]
-pub(crate) struct UiErrorLines(pub Vec<String>);
-
 /// The item guid in a Lua-space bag slot, read off the player descriptor (backpack), the bag
 /// object's own slot array, or — [`EQUIPMENT_BAG`], decision 0208 phase 1b — the player
 /// descriptor's own `INV_SLOT` array directly (`slot0` is already the wire `EQUIPMENT_SLOT_*`
@@ -611,6 +605,9 @@ pub(crate) struct ItemUse {
     /// The GameObject this use is aimed at — the key-in-a-lock arm (decision 0769), which is
     /// `CGItem::Use`'s own target argument. `None` for every ordinary click.
     pub(crate) on_object: Option<u64>,
+    /// The template's `ITEM_FLAG_CHARTER` (`0x2000`) — a signable guild petition
+    /// (decision 1672). Diverts to [`ItemUseRoute::ShowPetition`].
+    pub(crate) is_charter: bool,
 }
 
 /// **The item-use fork** — our `CGItem::Use` (`0x5d8d00`): the one place that decides what "using"
@@ -653,6 +650,31 @@ pub(crate) enum ItemUseRoute {
     /// with **nothing sent**. (Before decision 0914 we sent anyway, and vmangos answered
     /// `EQUIP_ERR_ITEM_NOT_FOUND` — a red "Item not found." the reference never shows.)
     Nothing,
+    /// **The charter arm** (decision 1672): using an item whose template flags carry
+    /// `ITEM_FLAG_CHARTER` (`0x2000`) opens the petition window — it sends
+    /// `CMSG_PETITION_SHOW_SIGNATURES` for the instance, not `CMSG_USE_ITEM`.
+    ///
+    /// **INFERRED, and this is the whole of the evidence.** wow-re has not carved `CGItem::Use`'s
+    /// charter branch, so the *position* of this arm and the opcode it sends are reasoned rather
+    /// than read:
+    ///
+    /// - 1.12's shipped FrameXML special-cases a charter **nowhere** — `UseContainerItem` and
+    ///   `UseAction` are entirely generic — so whatever opens the window is engine-side.
+    /// - The charter template (entry 5863) has no ON_USE spell, no `StartQuest`, and
+    ///   `InventoryType = 0`, so *every* other arm of this fork declines it and the click currently
+    ///   reaches [`Self::Nothing`] and sends nothing at all. Right-clicking a charter in 1.12
+    ///   plainly does something, so an arm must exist.
+    /// - `CMSG_PETITION_SHOW_SIGNATURES` is the only opcode that opens the window, and vmangos's
+    ///   `HandleUseItemOpcode` has no charter branch — a `CMSG_USE_ITEM` here would be answered
+    ///   with nothing.
+    /// - The reference already keys other charter behaviour on this exact flag bit: the item
+    ///   tooltip's `ITEM_SIGNABLE` line and its enchant-line suppression both test `0x2000`
+    ///   (wow-re `system/ui/scratch/tooltip-content-law.md:485-505`).
+    ///
+    /// The arm sits directly after the quest fork. Its **order relative to the quest fork is
+    /// unobservable** — no 1.12 item is both a charter and a quest starter — so nothing here rests
+    /// on it; a byte read of `0x5d8d00` settles both the position and the opcode.
+    ShowPetition { item: u64 },
 }
 
 /// [`ItemUseRoute`]'s decision. `guid: None` (the instance never resolved) cannot address a
@@ -668,6 +690,12 @@ pub(crate) fn item_use_route(it: ItemUse, aura_cancels: impl Fn(u32) -> bool) ->
             npc,
             quest: it.start_quest,
         };
+    }
+    // The charter arm (decision 1672) — see `ItemUseRoute::ShowPetition` for its evidence and for
+    // why its position here is unobservable. A charter with no resolved instance cannot be
+    // addressed, so it falls through to the ordinary path exactly as the quest fork does.
+    if let Some(item) = it.guid.filter(|_| it.is_charter) {
+        return ItemUseRoute::ShowPetition { item };
     }
     match it.use_spell {
         Some(spell) if aura_cancels(spell) => ItemUseRoute::ToggleCancel(spell),
@@ -748,6 +776,13 @@ pub(crate) fn send_item_use(
                 .commands
                 .0
                 .send(crate::net::ClientCommand::QuestgiverQuery { npc, quest });
+            true
+        }
+        ItemUseRoute::ShowPetition { item } => {
+            let _ = ladder
+                .commands
+                .0
+                .send(crate::net::ClientCommand::PetitionShowSignatures { item });
             true
         }
         ItemUseRoute::Nothing => {
@@ -988,7 +1023,6 @@ impl Plugin for UiItemsPlugin {
         // The icon source — `ItemDisplayInfo.dbc` — is the `ItemDisplays` resource the equipment
         // renderer already loads (one parse serves the world and the bags).
         app.init_resource::<EquipErrors>()
-            .init_resource::<UiErrorLines>()
             .init_resource::<PendingItemOps>()
             .init_resource::<LockClearedByFailure>()
             // AFTER the chain opens — a bare Startup slot raced AssetSet::Open and, when it
@@ -1098,6 +1132,7 @@ mod tests {
             spell_index: 0,
             use_spell,
             on_object: None,
+            is_charter: false,
         };
         let never = |_| false;
         assert_eq!(
@@ -1125,6 +1160,52 @@ mod tests {
         );
     }
 
+    /// **The charter arm** (decision 1672): an item whose template carries `ITEM_FLAG_CHARTER`
+    /// opens the petition window instead of taking the cast tail.
+    ///
+    /// This is the arm's whole justification as a test: the live charter template (entry 5863) has
+    /// **no** ON_USE spell, **no** `StartQuest` and `InventoryType = 0`, so without this arm the
+    /// click reaches `Nothing` and sends absolutely nothing — a charter you can buy and never open.
+    /// The `Nothing` case below is that pre-1672 behaviour, pinned beside the fix so the two are
+    /// visibly one decision.
+    #[test]
+    fn a_charter_click_opens_the_petition_instead_of_casting() {
+        let charter = 0x4000_0000_0000_5863_u64;
+        let it = |guid, is_charter, use_spell| ItemUse {
+            entry: 5863,
+            guid,
+            start_quest: 0,
+            bag_index: 255,
+            slot: 23,
+            spell_index: 0,
+            use_spell,
+            on_object: None,
+            is_charter,
+        };
+        let never = |_| false;
+        assert_eq!(
+            item_use_route(it(Some(charter), true, None), never),
+            ItemUseRoute::ShowPetition { item: charter },
+            "the charter opens its petition window"
+        );
+        // Without the flag, the very same item is the reference's silent no-op — which is what a
+        // charter click did before this arm existed.
+        assert_eq!(
+            item_use_route(it(Some(charter), false, None), never),
+            ItemUseRoute::Nothing
+        );
+        // No resolved instance: nothing to address the show-signatures with, so it falls through
+        // exactly as the quest fork does on the same condition.
+        assert_eq!(
+            item_use_route(it(None, true, None), never),
+            ItemUseRoute::Nothing
+        );
+        assert_eq!(
+            item_use_route(it(None, true, Some(8690)), never),
+            ItemUseRoute::Cast(8690)
+        );
+    }
+
     /// **The mount click, both ways** (the director, 08-03: "clicking the mount while mounted
     /// should dismount"). `CGItem::Use`'s toggle scan sits above the cast tail, so an item whose
     /// ON_USE spell is already live on the caster cancels its aura and never casts — and the same
@@ -1143,6 +1224,7 @@ mod tests {
             spell_index: 0,
             use_spell,
             on_object: None,
+            is_charter: false,
         };
         let mounted = |spell: u32| spell == SUMMON_HORSE;
         assert_eq!(

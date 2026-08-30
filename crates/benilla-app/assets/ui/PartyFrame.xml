@@ -52,6 +52,11 @@
         -- as one.
         NUM_RAID_GROUPS = 8
         MEMBERS_PER_RAID_GROUP = 5
+        -- The party's own bound (ref PartyMemberFrame.lua l.1) — four *other* members, so a full
+        -- party sweep that includes the player runs `1, MAX_PARTY_MEMBERS+1`, which is exactly how
+        -- GroupLootDropDown_Initialize walks the master-loot candidates (LootFrame.lua l.219).
+        -- Published for the same reason as its raid siblings: the addon corpus reads it.
+        MAX_PARTY_MEMBERS = 4
 
         -- ── The group-invite popup ────────────────────────────────────────────────────────────
         -- The strings and the three flags are the reference's own (INVITATION = "%s invites you to

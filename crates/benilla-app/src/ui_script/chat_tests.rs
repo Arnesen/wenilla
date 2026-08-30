@@ -115,8 +115,13 @@ fn newest_line_sits_at_the_bottom() {
     assert!(y("newer") < y("older"), "newest renders at the bottom");
 }
 
+/// The whole fade round trip as it reaches a real chat window: a line ramps down, a scroll brings
+/// it back to full, the scrolled-up view then holds it there, and returning to the bottom lets it
+/// ramp again. The re-arm half is `msgframe-fade-rearm-law.md` — every scroll entry reaches
+/// `0x788b80` or the relayout's `0x788af0`; before it, a faded-out chat could not be recovered by
+/// any input the client offers (director-reported, 2026-08-29).
 #[test]
-fn wheel_scroll_freezes_the_fade_then_resumes() {
+fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
     let mut s = chat_frame();
     // Short fade so a tick visibly ramps: straight into phase 2 (timeVisible 0), 4s ramp.
     s.run("ChatFrame1:SetTimeVisible(0); ChatFrame1:SetFadeDuration(4)")
@@ -133,23 +138,24 @@ fn wheel_scroll_freezes_the_fade_then_resumes() {
     assert!(a1 < 1.0 && a1 > 0.0, "the line faded partway: {a1}");
 
     // Scroll up via the wheel (a point inside the docked frame: BOTTOMLEFT (32,85), 430x160). The
-    // Lua OnMouseWheel handler calls ScrollUp → no longer AtBottom → the fade must freeze.
+    // Lua OnMouseWheel handler calls ScrollUp, which re-arms every displayed line to full alpha —
+    // and, no longer AtBottom, the tick then holds it there.
     s.mouse_wheel(100.0, 150.0, 1.0);
+    s.resolve();
+    let a2 = text_color(&s.extract(), "L1").expect("L1 still visible")[3];
+    assert!(close(a2, 1.0), "the scroll brought the line back: {a2}");
     s.tick(2.0);
     s.resolve();
-    let a2 = text_color(&s.extract(), "L1").expect("L1 still visible");
-    assert!(
-        close(a2[3], a1),
-        "frozen while scrolled up: {} vs {a1}",
-        a2[3]
-    );
+    let a3 = text_color(&s.extract(), "L1").expect("L1 still visible")[3];
+    assert!(close(a3, 1.0), "frozen while scrolled up: {a3}");
 
-    // Wheel back down to the bottom → the fade resumes.
+    // Wheel back down to the bottom — that scroll re-arms too, so the ramp restarts from full.
     s.mouse_wheel(100.0, 150.0, -1.0);
     s.tick(1.0);
     s.resolve();
-    let a3 = text_color(&s.extract(), "L1").expect("L1 visible")[3];
-    assert!(a3 < a1, "the fade resumed at the bottom: {a3} < {a1}");
+    let a4 = text_color(&s.extract(), "L1").expect("L1 visible")[3];
+    assert!(a4 < 1.0 && a4 > 0.0, "the fade resumed at the bottom: {a4}");
+    assert!(close(a4, a1), "and from a full re-arm: {a4} vs {a1}");
 }
 
 #[test]
@@ -319,6 +325,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            petition: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,

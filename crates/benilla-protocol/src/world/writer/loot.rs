@@ -58,4 +58,20 @@ impl WorldWriter {
             &messages::loot_roll(looted_target, item_slot, roll_type),
         )
     }
+
+    /// Hand one loot-window row to a group member (`CMSG_LOOT_MASTER_GIVE`, layout in
+    /// [`messages::loot_master_give`]) — the master looter's replacement for taking the row
+    /// themselves. `loot_guid` is the open loot source and `slot` the wire's 0-based row index,
+    /// the same one [`WorldWriter::autostore_loot_item`] would carry.
+    ///
+    /// Success looks like anyone else's loot from here: `SMSG_LOOT_REMOVED` clears the row for
+    /// every looter, and the *recipient* (not us) gets the item-create traffic. A refusal comes
+    /// back on `SMSG_LOOT_RESPONSE`'s error shape carrying a `MASTER_*`
+    /// [`messages::loot_error`] code.
+    pub fn loot_master_give(&mut self, loot_guid: u64, slot: u8, player_guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_LOOT_MASTER_GIVE,
+            &messages::loot_master_give(loot_guid, slot, player_guid),
+        )
+    }
 }

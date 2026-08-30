@@ -70,10 +70,18 @@ pub(super) fn publish_view_focus(
     mut focus: ResMut<ViewFocus>,
     player: Option<Res<Player>>,
     roster: Option<Res<crate::char_select::Roster>>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
 ) {
     let entry = roster
         .as_deref()
         .and_then(crate::char_select::Roster::pending_entry);
+    // A cinematic flies the eye away from the body — a Tauren's intro opens 1741 yards out — so
+    // the stream has to follow the *camera* for its duration or the shot crosses unstreamed
+    // terrain. That is what `detached` already means here (the eye is off the body; the zone
+    // authority stays on it), so a fly-by borrows free-fly's answer rather than inventing a third
+    // mode. The server does the mirror-image thing on its side: while a cinematic runs it
+    // re-anchors object visibility to its own copy of the flying camera (decision 0196).
+    let flying = cinematic.as_deref().is_some_and(|c| c.is_playing());
     // The pacing bit: spawn caps apply only to a live avatar standing in a settled world. Through
     // entry, a teleport and a world swap the loading cover is absorbing the burst, and a cap there
     // would only lengthen the reveal.
@@ -81,7 +89,7 @@ pub(super) fn publish_view_focus(
         Some(p) if p.active => {
             let wow = benilla_assets::coords::bevy_to_wow(p.pos);
             let paced = !p.settling && !p.world_stale;
-            if p.detached {
+            if p.detached || flying {
                 ViewFocus::detached(wow, paced)
             } else {
                 ViewFocus::body(wow, paced)

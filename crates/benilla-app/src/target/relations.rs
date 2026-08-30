@@ -1,50 +1,89 @@
-//! **Who may I attack, who may I help** — the two unit-relationship predicates the reference
-//! shares across systems, kept together because they are one concern and neither belongs to the
-//! system that happens to call them first.
+//! **Who may I attack, who may I interact with, who may I help** — the three unit-relationship
+//! predicates the reference shares across systems, kept together because they are one concern and
+//! none belongs to the system that happens to call it first.
 //!
-//! Both are byte-derived and both key off [`ring_reaction`], on opposite sides of the same bar:
-//! `CanAttack 0x606980` wants reaction ≤ 3 (not friendly), `CanAssist 0x6066f0` wants ≥ 4
-//! (friendly) plus two flag clauses. They lived in `scan.rs` while `can_attack` had exactly one
-//! caller; `can_assist` (the `UnitBuff` gate, decision 1035) made that a second concern in a file
-//! about TAB targeting.
+//! The first two are byte-verified **complete** functions and live next door in [`super::ring`],
+//! beside the two reaction directions they turn on — because *which direction* is the whole
+//! content of both (`0x6061e0(this = player)` answers a reputation-slot faction with the **at-war
+//! bit**; `0x6061e0(this = unit)` reads the standing, and the two routinely disagree). This file
+//! is the shared store-only entry point every consumer calls:
+//!
+//! - `CanAttack 0x606980` → [`super::ring::can_attack_from_player`],
+//! - `CanInteract 0x6067f0` → [`super::ring::can_interact_from_player`],
+//! - `CanAssist 0x6066f0` → still the reaction-rank derivation below, on [`ring_reaction`].
+//!
+//! They lived in `scan.rs` while `can_attack` had exactly one caller; `can_assist` (the `UnitBuff`
+//! gate, decision 1035) made that a second concern in a file about TAB targeting.
 
-use benilla_protocol::messages::OwnerFallback;
+use benilla_protocol::messages::{ObjectType, OwnerFallback};
 
 use crate::net::{ObjectStore, Reputations};
 
 use super::{ring_reaction, Factions};
 
-/// The five `UNIT_FIELD_FLAGS` disqualifiers `CanAttack 0x606980` tests (bit positions
-/// byte-verified; names vmangos-corroborated): NON_ATTACKABLE(1), NOT_ATTACKABLE_1(7),
-/// NON_ATTACKABLE_2(16), TAXI_FLIGHT(20), NOT_SELECTABLE(25).
-pub(super) const FLAG_DISQUALIFIERS: u32 = (1 << 1) | (1 << 7) | (1 << 16) | (1 << 20) | (1 << 25);
-
-/// `CanAttack 0x606980` — the shared attackability predicate (the combat flash's gate and the
-/// scan's filter 3): the flag disqualifiers clear AND an attackable reaction. A unit without a
-/// store passes the flag leg (nothing known to disqualify). The duel/PVP legs are deferred with
-/// duels/PvP.
+/// `OBJECT_FIELD_TYPE` bit 4 — the reference's own "is this a Player" test, read as
+/// `[obj->descriptorBlock[2] + 8] >> 4 & 1` (`0x606984` in `CanAttack`, `0x6067fc` in
+/// `CanInteract`). Taken off the object's own field rather than the spawning `NetEntity`, because
+/// that is the bit the binary reads and it cannot drift from the store the rest of the predicate
+/// walks.
 ///
-/// The reaction leg is **≤ neutral (rank ≤ 3)** — attackable means *not friendly*. First
-/// director-observed (0170), then **byte-confirmed** by the `0x606980` re-pin: the function has
-/// three reaction legs selected by `UNIT_FLAG_PVP_ATTACKABLE` (bit 3) on both parties, and the
-/// player-vs-creature case is Leg B — `UnitReaction(player→target) < 4` (`cmp eax,4; setl`),
-/// single direction, friendly-only blocked. The old "≤ 1 hostile" gloss was Leg A (both parties
-/// UN-flagged: NPC-vs-NPC, bidirectional), never the player's check. Leg C (both flagged: the
-/// PvP/duel/group machinery) is deferred with PvP.
+/// **The one thing not verified against a live stream** is whether the server always puts field 2
+/// in the create block (vmangos sends every non-zero field, and a player's is `0x19`, so it should
+/// always be there — but that is a reading of the emulator, not an observation). The failure mode
+/// is bounded and inert: this feeds only `CanAttack`'s ghost leg, so a false negative on a real
+/// player skips a refusal that the both-player-controlled arm then makes anyway — a ghost carries
+/// no duel, PvP flag or FFA pair. `/reaction` prints this beside the `NetEntity` kind so the first
+/// hover over a player settles it by observation.
+fn is_player_object(store: Option<&ObjectStore>) -> bool {
+    store.and_then(|s| s.0.object_type()) == Some(ObjectType::Player)
+}
+
+/// `CanAttack 0x606980` — the shared attackability predicate: the world cursor's sword leg
+/// (`0x48269a`), the combat flash's gate, the TAB scan's filter 3, `UnitCanAttack`, and hostile
+/// spell targeting all ask this one question.
+///
+/// **This forwards to the byte-verified complete function** ([`super::ring::can_attack_from_player`],
+/// wow-re `object-layer/scratch/nameplate-category-gate.md` §3, §5 cross-checked 2026-08-22) — a
+/// ghost gate, five `UNIT_FIELD_FLAGS` refusal bits on the target, four cross-flag immunity legs,
+/// then three terminal arms selected by `UNIT_FLAG_PVP_ATTACKABLE` on both parties.
+///
+/// It used to be `flag disqualifiers && ring_reaction ≤ 3`, and **the threshold was reading the
+/// wrong reaction direction** — the very substitution decision 1530 named as the shipped defect
+/// and corrected for nameplates alone. `0x606980`'s mixed arm is `UnitReaction(**player** → target)
+/// < 4`, and that direction answers a reputation-slot faction with the **at-war bit**, never the
+/// standing. Keeping the standing here made every not-at-war neutral faction attackable: hovering
+/// a Cenarion Circle NPC drew the sword, TAB targeted it, and `UnitCanAttack` agreed (decision 1674).
 pub(crate) fn can_attack(
     store: Option<&ObjectStore>,
     factions: Option<&Factions>,
     reputations: &Reputations,
     self_store: Option<&ObjectStore>,
 ) -> bool {
-    if store.is_some_and(|s| s.0.unit_flags() & FLAG_DISQUALIFIERS != 0) {
-        return false;
-    }
-    ring_reaction(factions, reputations, store, self_store) <= 3
+    super::ring::can_attack_from_player(
+        factions,
+        reputations,
+        store,
+        self_store,
+        is_player_object(store),
+    )
+}
+
+/// `CanInteract 0x6067f0` — "may I take a service from this unit?", the gate the world-cursor
+/// classifier runs at `0x482310` (through the `CanInteractNow 0x606880` wrapper) to choose between
+/// the NPC service ladder and the loot/skin/attack block.
+///
+/// Forwards to [`super::ring::can_interact_from_player`], which is the complete `0x6067f0`.
+pub(crate) fn can_interact(
+    store: Option<&ObjectStore>,
+    factions: Option<&Factions>,
+    reputations: &Reputations,
+    self_store: Option<&ObjectStore>,
+) -> bool {
+    super::ring::can_interact_from_player(factions, reputations, store, self_store)
 }
 
 /// `UNIT_FLAG_NOT_SELECTABLE` (bit 25) — `CanAssist`'s own first disqualifier, and one of
-/// [`FLAG_DISQUALIFIERS`]' five (vmangos `UnitDefines.h`).
+/// `CanAttack`'s five refusal bits (vmangos `UnitDefines.h`).
 const UNIT_FLAG_NOT_SELECTABLE: u32 = 1 << 25;
 /// `UNIT_FLAG_PVP` (bit 12) — what `IsPvP 0x605ff0` tests, after resolving the unit's owner
 /// (vmangos `UnitDefines.h:UNIT_FLAG_PVP = 0x1000`).

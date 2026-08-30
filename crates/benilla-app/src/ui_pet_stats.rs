@@ -116,32 +116,38 @@ impl Plugin for UiPetStatsPlugin {
 ///
 /// This is the **resolving** read — it issues the ask-once creature query on a miss — and it is the
 /// only one for the pet, so the answer lands in the shared cache for anything else that wants it.
-/// A miss returns `(None, vec![])`, which is the same shape as "this template has no family": the
-/// binding's nil either way, and the query is in flight for the next frame.
+/// A miss returns the all-absent triple, which is the same shape as "this template has no family":
+/// the binding's nil either way, and the query is in flight for the next frame.
+///
+/// The **icon** rides here rather than in a lookup of its own because it comes off the very same
+/// family row as the word — `CreatureFamily.dbc`'s own icon column, which is a pet's only icon
+/// (there is no item behind it). `GetPetIcon`'s answer, and the stable window's slot art
+/// (decision 1676).
 fn family_for(
     pet: Option<&ObjectStore>,
     names: &mut NameCache,
     commands: &NetCommands,
     tables: Option<&PetFamilyTables>,
-) -> (Option<String>, Vec<String>) {
+) -> (Option<String>, Option<String>, Vec<String>) {
     let Some(entry) = pet.and_then(|s| s.0.object_entry()).filter(|&e| e != 0) else {
-        return (None, Vec::new());
+        return (None, None, Vec::new());
     };
     // The guid argument is the query body's second field and the server ignores it entirely
     // (vmangos `HandleCreatureQueryOpcode` answers off `packet.entry` alone), so the template-only
     // `0` convention `Items::template` already uses applies here too.
     let _ = names.resolve_creature(entry, 0, commands);
     let Some(tables) = tables else {
-        return (None, Vec::new());
+        return (None, None, Vec::new());
     };
-    let Some(family) = names
-        .creature_record(entry)
-        .and_then(|r| tables.families.get(r.pet_family))
-    else {
-        return (None, Vec::new());
+    let Some(family_id) = names.creature_record(entry).map(|r| r.pet_family) else {
+        return (None, None, Vec::new());
+    };
+    let Some(family) = tables.families.get(family_id) else {
+        return (None, None, Vec::new());
     };
     (
         Some(family.name.clone()),
+        tables.families.icon(family_id).map(str::to_string),
         tables
             .foods
             .for_mask(family.pet_food_mask)
@@ -164,9 +170,9 @@ fn stats_for(
     pet: Option<&ObjectStore>,
     self_store: Option<&ObjectStore>,
     tables: Option<&PetStatTables>,
-    family: (Option<String>, Vec<String>),
+    family: (Option<String>, Option<String>, Vec<String>),
 ) -> (bool, PetStats) {
-    let (family, food_types) = family;
+    let (family, icon, food_types) = family;
     let Some(fields) = pet.map(|s| &s.0) else {
         return (false, PetStats::default());
     };
@@ -193,6 +199,9 @@ fn stats_for(
             has_ui,
             PetStats {
                 family,
+                // The icon rides past the gate with the WORD, not with the diet — same family
+                // row, same reasoning (decision 1676; the placement is INFERRED, see `PetStats`).
+                icon,
                 ..PetStats::default()
             },
         );
@@ -220,6 +229,7 @@ fn stats_for(
             training_points: fields.unit_training_points(),
             experience: fields.unit_pet_experience(),
             family,
+            icon,
             food_types,
         },
     )
@@ -385,8 +395,8 @@ mod tests {
     }
 
     /// The "no family resolved" pair, for the stat tests that are not about the family.
-    fn no_family() -> (Option<String>, Vec<String>) {
-        (None, Vec::new())
+    fn no_family() -> (Option<String>, Option<String>, Vec<String>) {
+        (None, None, Vec::new())
     }
 
     /// A `NameCache` with `entry`'s creature record already cached, carrying `pet_family` —
@@ -404,6 +414,7 @@ mod tests {
                 type_flags: 0,
                 civilian: false,
                 racial_leader: false,
+                display_id: 0,
             }),
         );
         names
@@ -604,13 +615,29 @@ mod tests {
         let mut names = cache_with(IMP_ENTRY, 23);
         assert_eq!(
             family_for(Some(&pet), &mut names, &cmds, Some(&t)),
-            (Some("Imp".into()), Vec::new())
+            (
+                Some("Imp".into()),
+                // The family row's own icon column (decision 1676) — and the shipped value for a
+                // warlock minion is **`Ability_Druid_CatForm`**, not any imp art. That is not a
+                // misread: rows 15 (Felhunter) and 23 (Imp) both carry it in the real 5875 file,
+                // where every one of the 22 hunter families carries its correct
+                // `Ability_Hunter_Pet_<Family>`. It is placeholder data Blizzard never filled in,
+                // and nothing in the reference can show it — the stable is the column's only
+                // consumer and it early-returns for warlocks before reading one. Asserted as
+                // shipped rather than as expected.
+                Some("Interface\\Icons\\Ability_Druid_CatForm".into()),
+                Vec::new()
+            )
         );
 
         // 5. A hunter's boar (entry 113 → family 5): a word AND the six-diet list, in bit order.
         let mut names = cache_with(BOAR_ENTRY, 5);
-        let (name, diet) = family_for(Some(&boar()), &mut names, &cmds, Some(&t));
+        let (name, icon, diet) = family_for(Some(&boar()), &mut names, &cmds, Some(&t));
         assert_eq!(name.as_deref(), Some("Boar"));
+        assert_eq!(
+            icon.as_deref(),
+            Some("Interface\\Icons\\Ability_Hunter_Pet_Boar")
+        );
         assert_eq!(diet, ["Meat", "Fish", "Cheese", "Bread", "Fungus", "Fruit"]);
 
         // 6. No DBC tables at all: nil, degraded to exactly the blank level line 1057 shipped.
@@ -641,7 +668,7 @@ mod tests {
             Some(&boar()),
             Some(&warlock()),
             Some(&t),
-            (Some("Boar".into()), boar_diet.clone()),
+            (Some("Boar".into()), None, boar_diet.clone()),
         );
         assert!(!s.hunter_pet);
         assert_eq!(s.family.as_deref(), Some("Boar"), "the word is ungated");
@@ -657,7 +684,7 @@ mod tests {
             Some(&boar()),
             Some(&hunter()),
             Some(&t),
-            (Some("Boar".into()), boar_diet.clone()),
+            (Some("Boar".into()), None, boar_diet.clone()),
         );
         assert_eq!(s.family.as_deref(), Some("Boar"));
         assert_eq!(s.food_types, boar_diet);
@@ -667,7 +694,12 @@ mod tests {
     /// would outlive the pet on a page that is about to close.
     #[test]
     fn no_pet_drops_the_family_too() {
-        let (_, s) = stats_for(None, Some(&hunter()), None, (Some("Imp".into()), vec![]));
+        let (_, s) = stats_for(
+            None,
+            Some(&hunter()),
+            None,
+            (Some("Imp".into()), None, vec![]),
+        );
         assert_eq!(s.family, None);
         assert!(s.food_types.is_empty());
     }

@@ -872,8 +872,8 @@ impl ObjectFields {
     }
 
     /// The object's class from the type field (`OBJECT_FIELD_TYPE`), used for `Values`/`Movement`
-    /// updates that carry no separate `TypeId`. Unused by the create path (which has a `TypeId`).
-    #[allow(dead_code)]
+    /// updates that carry no separate `TypeId`. Also the reference's own "is this a Player" test
+    /// (`[obj->descriptorBlock[2] + 8] >> 4 & 1`), which is how `CanAttack`/`CanInteract` ask.
     pub fn object_type(&self) -> Option<ObjectType> {
         self.get_u32(FIELD_OBJECT_TYPE).map(|bits| {
             if bits & 0x10 != 0 {

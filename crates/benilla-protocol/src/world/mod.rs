@@ -28,7 +28,7 @@ mod session;
 mod writer;
 
 pub use reader::WorldReader;
-pub use session::{WardenRequired, WorldSession};
+pub use session::{WardenRequired, WorldAuthReject, WorldSession};
 pub use writer::WorldWriter;
 
 /// Default `mangosd` world-server port — the stock one, which our vmangos deploy maps straight

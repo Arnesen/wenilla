@@ -293,48 +293,92 @@ fn moving_cast_hold_keeps_its_stow_between_plays() {
     assert_eq!(sheath(&app), Some(1), "the stop's Ready play re-draws");
 }
 
-/// A fidgeter's model: Stand as a two-variation chain — a zero-frequency head plus a
-/// max-frequency "look around" variation, so the first `_rand` roll (38, from the LCG's zero
-/// seed) deterministically lands on the variation — and a ShuffleLeft clip for the turn latch.
-fn fidget_model() -> ModelAnimations {
-    let mut head = clip(0, 1, true); // Stand — the head variation
-    head.frequency = 0;
-    let mut look = clip(0, 6, true); // Stand — the rare look-around variation
-    look.frequency = 32767;
-    ModelAnimations {
-        graph: Handle::default(),
-        clips: vec![head, look, clip(11, 7, true) /* ShuffleLeft */],
+/// A fidgeter's model, on **real Bevy clip assets** (see [`spawn_vendor`] for why: this tenant now
+/// runs to a window completion, and `completions()` only ticks for a real graph): Stand as a
+/// two-variation chain — a zero-frequency head plus a max-frequency "look around" variation, so
+/// the first `_rand` roll (38, from the LCG's zero seed) deterministically lands on the variation —
+/// and a ShuffleLeft for the turn latch. Stand's span is long enough that its own window never
+/// completes inside the test; the shuffle's is short so the test does not have to run a real
+/// half-second to reach the release.
+///
+/// Returns the entity and the graph nodes in clip order: Stand-head, Stand-look, ShuffleLeft.
+fn spawn_fidgeter(app: &mut App) -> (Entity, Vec<AnimationNodeIndex>) {
+    use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+    use bevy::animation::AnimationClip;
+
+    const STAND_SPAN: f32 = 4.0;
+    const SHUFFLE_SPAN: f32 = 0.1;
+    let handles: Vec<_> = [STAND_SPAN, STAND_SPAN, SHUFFLE_SPAN]
+        .iter()
+        .map(|d| {
+            let mut c = AnimationClip::default();
+            c.set_duration(*d);
+            app.world_mut()
+                .resource_mut::<Assets<AnimationClip>>()
+                .add(c)
+        })
+        .collect();
+    let (graph, nodes) = AnimationGraph::from_clips(handles);
+    let graph_handle = app
+        .world_mut()
+        .resource_mut::<Assets<AnimationGraph>>()
+        .add(graph);
+    let seq = |id: u16, node, duration: f32, frequency: u16| AnimClip {
+        node,
+        duration,
+        blend_time: 0.0,
+        frequency,
+        replay: (0, 0),
+        ..clip(id, 0, true)
+    };
+    let anims = ModelAnimations {
+        graph: graph_handle.clone(),
+        clips: vec![
+            seq(0, nodes[0], STAND_SPAN, 0),     // Stand — the head variation
+            seq(0, nodes[1], STAND_SPAN, 32767), // Stand — the rare look-around variation
+            seq(11, nodes[2], SHUFFLE_SPAN, 0),  // ShuffleLeft
+        ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
         pose: Default::default(),
-    }
+    };
+    let unit = app
+        .world_mut()
+        .spawn((
+            anims,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimationGraphHandle(graph_handle),
+            AnimDriver::default(),
+        ))
+        .id();
+    (unit, nodes)
 }
 
 /// The emergent idle fidget (decision 0123 — wow-re `loop-replay-fidget.md` §5b): a RELAXED base
 /// arm rolls its variation (the client's `variationIdx = −1`), an engaged one is forced to the
 /// deterministic head, and the idle re-face turn-shuffle ([`crate::net::FacingStep`]) drives the
 /// Shuffle↔Stand churn whose every return to Stand re-rolls.
+///
+/// **What the return is triggered BY changed in 1655**, and that is the middle of this test. 0123
+/// had the shuffle released the frame the yaw ease settled; the reference cannot do that
+/// (`0x607ed0`'s tail refuses to recompute a shuffle with no turn bit set — `0x5fce30`'s gate),
+/// and releases it a clip window later through the completion callback instead. The churn 0123
+/// describes is intact and the re-roll still rides it; it simply happens at the window boundary,
+/// which is also why the shuffle is long enough to be seen.
 #[test]
 fn relaxed_base_arms_roll_variations_and_the_shuffle_drives_them() {
     let mut app = app();
-    let unit = app
-        .world_mut()
-        .spawn((
-            fidget_model(),
-            AnimationPlayer::default(),
-            AnimationTransitions::new(),
-            AnimDriver::default(),
-        ))
-        .id();
-    let active = |app: &App, node: u32| {
+    let (unit, nodes) = spawn_fidgeter(&mut app);
+    let active = |app: &App, node: AnimationNodeIndex| {
         app.world()
             .entity(unit)
             .get::<AnimationPlayer>()
             .unwrap()
-            .animation(AnimationNodeIndex::new(node as usize))
+            .animation(node)
             .is_some()
     };
     let gait = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
@@ -342,8 +386,8 @@ fn relaxed_base_arms_roll_variations_and_the_shuffle_drives_them() {
     // The first (relaxed) Stand arm rolls: the weighted walk lands on the look-around variation.
     app.update();
     assert_eq!(gait(&app), Some(0));
-    assert!(active(&app, 6), "the rolled variation is what armed");
-    assert!(!active(&app, 1), "not the head");
+    assert!(active(&app, nodes[1]), "the rolled variation is what armed");
+    assert!(!active(&app, nodes[0]), "not the head");
 
     // The idle re-face steps its yaw: the turn latch routes the gait to the foot-shuffle.
     app.world_mut()
@@ -352,14 +396,25 @@ fn relaxed_base_arms_roll_variations_and_the_shuffle_drives_them() {
     app.update();
     assert_eq!(gait(&app), Some(11), "stepping yaw → ShuffleLeft");
 
-    // The ease settles: Shuffle → Stand is a fresh relaxed re-arm — a fresh roll (the fidget).
+    // The ease settles — and the feet keep going, because the settle is not what releases them.
     app.world_mut()
         .entity_mut(unit)
         .remove::<crate::net::FacingStep>();
-    app.update();
-    assert_eq!(gait(&app), Some(0), "settled → back to Stand");
+    advance(&mut app, 25);
+    assert_eq!(
+        gait(&app),
+        Some(11),
+        "the settle does not release the shuffle (1655)"
+    );
+
+    // Its window completes: THAT is the release, and the re-selection it runs re-arms Stand with a
+    // fresh roll — the fidget.
+    for _ in 0..6 {
+        advance(&mut app, 25);
+    }
+    assert_eq!(gait(&app), Some(0), "the completed window → back to Stand");
     assert!(
-        active(&app, 1) || active(&app, 6),
+        active(&app, nodes[0]) || active(&app, nodes[1]),
         "some Stand variation re-armed"
     );
 }
@@ -369,25 +424,14 @@ fn relaxed_base_arms_roll_variations_and_the_shuffle_drives_them() {
 #[test]
 fn engaged_base_arms_keep_the_head_variation() {
     let mut app = app();
-    let unit = app
-        .world_mut()
-        .spawn((
-            fidget_model(),
-            AnimationPlayer::default(),
-            AnimationTransitions::new(),
-            AnimDriver::default(),
-            Engaged,
-        ))
-        .id();
+    let (unit, nodes) = spawn_fidgeter(&mut app);
+    app.world_mut().entity_mut(unit).insert(Engaged);
     app.update();
     let player = app.world().entity(unit).get::<AnimationPlayer>().unwrap();
     // Engaged with no weapon: the Ready pick resolves down to Stand — armed as the HEAD.
+    assert!(player.animation(nodes[0]).is_some(), "the head variation");
     assert!(
-        player.animation(AnimationNodeIndex::new(1)).is_some(),
-        "the head variation"
-    );
-    assert!(
-        player.animation(AnimationNodeIndex::new(6)).is_none(),
+        player.animation(nodes[1]).is_none(),
         "no roll while engaged"
     );
 }
@@ -3210,4 +3254,196 @@ fn every_shot_of_a_volley_re_arms_the_fire_clip_through_the_emote_lane() {
         Some(0),
         "dropping the arm stands the shooter up"
     );
+}
+
+/// A vendor built on **real Bevy clip assets**, not the stand-in `clip()` handles the rest of this
+/// file uses: this tenant is about a window *completing*, and `completions()` only ticks for an
+/// entity whose graph is a real asset (`advance_animations` skips the others — see [`app`]). The
+/// timings are the shipped HumanMale's (`benilla-extract m2seq`): Stand 2.667 s / blend 0.500 s,
+/// ShuffleLeft & ShuffleRight 0.500 s / blend 0.250 s, and `replay = (0,0)` on both shuffles —
+/// which is what every one of the 1130 shipped shuffle records carries, so `R` is a deterministic
+/// 1 and the window is exactly one span.
+///
+/// Returns the entity plus the three graph nodes, in id order: Stand, ShuffleLeft, ShuffleRight.
+fn spawn_vendor(app: &mut App) -> (Entity, Vec<AnimationNodeIndex>) {
+    use benilla_protocol::EntityKind;
+    use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+    use bevy::animation::AnimationClip;
+
+    let handles: Vec<_> = [2.667f32, 0.5, 0.5]
+        .iter()
+        .map(|d| {
+            let mut c = AnimationClip::default();
+            c.set_duration(*d);
+            app.world_mut()
+                .resource_mut::<Assets<AnimationClip>>()
+                .add(c)
+        })
+        .collect();
+    let (graph, nodes) = AnimationGraph::from_clips(handles);
+    let graph_handle = app
+        .world_mut()
+        .resource_mut::<Assets<AnimationGraph>>()
+        .add(graph);
+    let seq = |id: u16, node, duration: f32, blend_time: f32| AnimClip {
+        node,
+        duration,
+        blend_time,
+        replay: (0, 0),
+        ..clip(id, 0, true)
+    };
+    let anims = ModelAnimations {
+        graph: graph_handle.clone(),
+        clips: vec![
+            seq(0, nodes[0], 2.667, 0.5),
+            seq(11, nodes[1], 0.5, 0.25),
+            seq(12, nodes[2], 0.5, 0.25),
+        ],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    };
+    // The vendor five yards east of the world origin, authored facing +x — its back to a player
+    // standing north-west of it, which is the reporter's own screenshot in B110.
+    let npc = app
+        .world_mut()
+        .spawn((
+            anims,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimationGraphHandle(graph_handle),
+            AnimDriver::default(),
+            crate::net::NetEntity {
+                kind: EntityKind::Unit,
+                display_id: None,
+                scale: 1.0,
+            },
+            crate::net::ObjectStore::default(),
+            Transform {
+                translation: benilla_assets::coords::wow_to_bevy([5.0, 0.0, 0.0]),
+                rotation: Quat::from_rotation_y(0.0),
+                ..default()
+            },
+        ))
+        .id();
+    (npc, nodes)
+}
+
+/// The **cross-seam** test for the turn-shuffle (decision 1655): `net::motion::facing` produces the
+/// [`crate::net::FacingStep`] latch and this driver consumes it, and until this test the two had
+/// only ever been exercised apart — the producer's tests read the transform, the consumer's tests
+/// inserted the component by hand. Neither could see the seam, which is how a mechanism that was
+/// all present and firing produced nothing anyone could see: "when interacting with a vendor the
+/// NPC doesn't shuffle its feet, it turns frozen" (director, 2026-08-27).
+///
+/// Two laws meet here, and the test is written so that failing either one is legible:
+///
+/// - **the latch runs the ease out** — the client tests the yaw its pump APPLIED against ±1e-5,
+///   not the gap remaining against an eyeballed 3°, so the shuffle blends in properly instead of
+///   being handed back at 0.32 weight;
+/// - **the shuffle is released by its own clip window, never by the turn ending** — `0x607ed0`'s
+///   tail can only start one (`0x5fce30`'s gate needs a turn bit, which is exactly what going
+///   still clears), so what ends it is the completion callback one span later. That is why the
+///   reference plays a discrete little step and not a stub of one, and it is why the middle
+///   assertion here is that the feet are STILL moving long after the body has stopped.
+#[test]
+fn the_interaction_face_me_shuffles_its_feet_for_the_whole_turn() {
+    let mut app = app();
+    app.init_resource::<crate::net::GuidIndex>()
+        .init_resource::<crate::ui_session::InteractNpc>();
+    app.add_systems(
+        Update,
+        crate::net::drive_display_facing.before(drive_animations),
+    );
+    // Us off the vendor's axis — a bearing of ~2.60 rad, the representative case. (A goal at
+    // exactly ±pi sits on the yaw wrap, where the client's own unfolded-delta dead-band never
+    // snaps and the ease runs to float underflow instead; `net::motion::facing`'s tests say the
+    // same thing about the same corner.)
+    app.world_mut().spawn((
+        crate::net::SelfPlayer,
+        crate::net::ActiveMover,
+        Transform::from_translation(benilla_assets::coords::wow_to_bevy([0.0, 3.0, 0.0])),
+    ));
+    let (npc, nodes) = spawn_vendor(&mut app);
+
+    let gait = |app: &App| app.world().entity(npc).get::<AnimDriver>().unwrap().gait;
+    let turning = |app: &App| app.world().entity(npc).contains::<crate::net::FacingStep>();
+    // How heavily either shuffle is being blended in — the "is it actually on screen" number.
+    let shuffle_weight = |app: &App| {
+        let p = app.world().entity(npc).get::<AnimationPlayer>().unwrap();
+        nodes[1..]
+            .iter()
+            .filter_map(|n| p.animation(*n).map(|a| a.weight()))
+            .fold(0.0f32, f32::max)
+    };
+    // Run `ms` of 16 ms frames, reporting the heaviest the shuffle got and whether it held the
+    // gait slot throughout.
+    let run = |app: &mut App, ms: u64, want: u16| {
+        let (mut peak, mut held) = (0.0f32, true);
+        for _ in 0..(ms / 16) {
+            advance(app, 16);
+            peak = peak.max(shuffle_weight(app));
+            held &= gait(app) == Some(want);
+        }
+        (peak, held)
+    };
+
+    // The control: nothing open, nothing turning — the vendor stands, and keeps standing.
+    let (peak, _) = run(&mut app, 128, 0);
+    assert_eq!(gait(&app), Some(0), "no window, no turn");
+    assert_eq!(peak, 0.0, "and no shuffle to be seen");
+
+    // Open its window. It turns to us — and its feet move while it does. 256 ms is past the ease
+    // (this bearing closes in ten pumps ~= 160 ms) and past the shuffle's own 250 ms blend-in.
+    app.world_mut()
+        .resource_mut::<crate::ui_session::InteractNpc>()
+        .0 = Some(npc);
+    let (peak, held) = run(&mut app, 256, 11);
+    assert!(held, "the whole turn is ShuffleLeft, got {:?}", gait(&app));
+    assert!(
+        peak > 0.95,
+        "the shuffle blends the whole way in; the frozen-feet defect peaked at 0.32, got {peak}"
+    );
+
+    // **The body has stopped and the feet have not.** The ease settled ~100 ms ago; the shuffle is
+    // held to its 500 ms window, which is what makes it a step rather than a twitch. A driver that
+    // released on the settle fails here — and so does one that released on the latch, one frame
+    // after the yaw went quiet.
+    assert!(!turning(&app), "the ease has settled");
+    let (_, held) = run(&mut app, 192, 11);
+    assert!(
+        held,
+        "the shuffle is held past the settle to its own window, got {:?}",
+        gait(&app)
+    );
+
+    // …and released AT that window, not never. `0x5fc3f0`'s completion row is a
+    // `RecomputeBaseAnim(-1)`, so the chain now answers Stand — with a freshly rolled variation,
+    // which is the idle fidget of 0123.
+    run(&mut app, 160, 0);
+    assert_eq!(
+        gait(&app),
+        Some(0),
+        "the completed window returns it to Stand"
+    );
+    // Let the idle finish arriving before the next half — Stand's own blend is 500 ms, and a
+    // window closed mid-fade would put THREE tracks on the slot at once (the retiring shuffle,
+    // the half-arrived Stand, the new shuffle) and split the weight three ways. That is a real
+    // divergence we carry knowingly — the reference's `0x7125d4` refuses to re-seed a blend that
+    // has not passed half weight (1565 §6, 1570) — but it is not what this test is about, and a
+    // player browsing a vendor's stock is well past it either way.
+    run(&mut app, 640, 0);
+
+    // Close it. The goal falls back to the untouched wire facing and it swings home — "and again
+    // when it turns back" (the report's second half), so the feet move for that turn too, on the
+    // other side.
+    app.world_mut()
+        .resource_mut::<crate::ui_session::InteractNpc>()
+        .0 = None;
+    let (peak, held) = run(&mut app, 256, 12);
+    assert!(held, "the swing back is ShuffleRight, got {:?}", gait(&app));
+    assert!(peak > 0.95, "and blends the whole way in: {peak}");
 }

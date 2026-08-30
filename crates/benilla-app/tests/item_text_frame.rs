@@ -268,6 +268,134 @@ fn the_reported_html_page_draws_as_blocks_not_as_its_own_markup() {
     );
 }
 
+/// **B342, on the reported page, through the real archives.** Goudy, 2026-08-27 (`#bugs`
+/// `1542371921486811236`): *"html images in books are not scaled correctly"* — the Alliance crest
+/// on *A Treatise on Military Ranks* drawn several times the reference's size with the page's own
+/// text over it, beside a 1.12.1 shot of the same page for comparison.
+///
+/// The body is `page_text` 2654, quoted verbatim below, and its one `<IMG>` carries **no `width=`
+/// and no `height=`**. In the reference that is the CONTENT-derived span: the resolver's size call
+/// is virtual, and `CSimpleTexture`'s override answers an authored `0.0` with the loaded texture's
+/// texel extent, one texel to one FrameXML unit (wow-re `region-size-fallback.md` §2, decision
+/// 1349). `Interface\PvPRankBadges\PvPRankAlliance` is a 128×128 BLP, so the crest is a 128-unit
+/// square inside a 270-wide page.
+///
+/// The engine half is pinned in `benilla-ui`'s own `simplehtml` tests against a stub oracle; what
+/// this adds is the two ends only the app has — the **real** reader XML the report was
+/// photographed against, and the **real** file, measured by the same decoder the renderer draws
+/// with. It skips on a machine with no client data, like every other archive-backed sweep.
+#[test]
+fn the_reported_book_crest_draws_at_the_blps_own_size() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let chain = std::sync::Mutex::new(benilla_formats::open_chain(&data).expect("open chain"));
+
+    let mut s = UiScript::new().unwrap();
+    // The host oracle, wired exactly as `ui_script::lifecycle::install_texture_resolvers` wires the
+    // live one: the same decoder, so the size the layout resolves with is the size the screen shows.
+    s.set_texture_size_probe(Box::new(move |path| {
+        benilla_assets::sprite_dimensions(&chain, None, path)
+    }));
+    load_ui(&s);
+    s.set_item_text(Some(ItemTextState {
+        item: "A Treatise on Military Ranks".into(),
+        creator: None,
+        text: "<HTML>\n<BODY>\n\
+               <H1 align=\"center\">A TREATISE ON MILITARY RANKS</H1>\n\
+               <BR/>\n<BR/>\n\
+               <IMG src=\"Interface\\PvPRankBadges\\PvPRankAlliance\" align=\"left\"/>\n\
+               <BR/>\n\
+               <P align=\"right\">What follows are</P>\n\
+               <P align=\"right\">the military ranks</P>\n\
+               </BODY>\n</HTML>"
+            .into(),
+        page: 1,
+        has_next: true,
+        material: None,
+    }));
+    s.fire_event("ITEM_TEXT_BEGIN", vec![]);
+    s.fire_event("ITEM_TEXT_READY", vec![]);
+    s.resolve();
+
+    let crest: Vec<_> = s
+        .extract()
+        .into_iter()
+        .filter(|q| match &q.content {
+            benilla_ui::script::QuadContent::Texture { path, .. } => {
+                path.as_deref().is_some_and(|t| {
+                    t.eq_ignore_ascii_case("Interface\\PvPRankBadges\\PvPRankAlliance")
+                })
+            }
+            _ => false,
+        })
+        .filter_map(|q| q.rect)
+        .collect();
+    assert_eq!(crest.len(), 1, "one crest quad on the page");
+    let r = crest[0];
+    assert_eq!(
+        (r.right - r.left, r.top - r.bottom),
+        (128.0, 128.0),
+        "the crest draws at the BLP's own 128x128 — a texel is a FrameXML unit"
+    );
+    // The reported symptom, stated as the thing that must not come back: the page is 270 units
+    // wide, and the crest used to be stretched across all of it with the text over the top.
+    assert!(
+        r.right - r.left < 270.0,
+        "the crest spans the whole page again — that is the photograph"
+    );
+
+    // **The adjacent state**: page 2 of the same book (`page_text` 2655) is five unsized `<IMG>`s,
+    // one rank badge per officer rank, and every one of them is a 32x32 BLP. Under the reported
+    // defect all five were page-wide slabs stacked over each other's text; each is now its own
+    // 32-unit square. (What separates them vertically is the `<BR/>`/`<P>` blocks between them —
+    // a floated image reserves nothing — so their spacing is the font engine's business and this VM
+    // has none: every text block measures zero here and the five land on one line. The SIZES are
+    // the claim.)
+    s.set_item_text(Some(ItemTextState {
+        item: "A Treatise on Military Ranks".into(),
+        creator: None,
+        text: "<HTML>\n<BODY>\n\
+               <H1 align=\"center\">OFFICER RANKS OF THE ALLIANCE</H1><BR/>\n\
+               <P align=\"center\">Part 1</P>\n\
+               <IMG src=\"Interface\\PvPRankBadges\\PvPRank14\" align=\"left\"/><BR/>\n\
+               <P align=\"right\">Grand Marshal</P><BR/><BR/>\n\
+               <IMG src=\"Interface\\PvPRankBadges\\PvPRank13\" align=\"left\"/><BR/>\n\
+               <P align=\"right\">Field Marshal</P><BR/><BR/>\n\
+               <IMG src=\"Interface\\PvPRankBadges\\PvPRank12\" align=\"left\"/><BR/>\n\
+               <P align=\"right\">Marshal</P><BR/><BR/>\n\
+               <IMG src=\"Interface\\PvPRankBadges\\PvPRank11\" align=\"left\"/><BR/>\n\
+               <P align=\"right\">Commander</P><BR/><BR/>\n\
+               <IMG src=\"Interface\\PvPRankBadges\\PvPRank10\" align=\"left\"/><BR/>\n\
+               <P align=\"right\">Lieutenant Commander</P><BR/><BR/>\n\
+               </BODY>\n</HTML>"
+            .into(),
+        page: 2,
+        has_next: true,
+        material: None,
+    }));
+    s.fire_event("ITEM_TEXT_READY", vec![]);
+    s.resolve();
+
+    let badges: Vec<_> = s
+        .extract()
+        .into_iter()
+        .filter(|q| match &q.content {
+            benilla_ui::script::QuadContent::Texture { path, .. } => path
+                .as_deref()
+                .is_some_and(|t| t.starts_with("Interface\\PvPRankBadges\\PvPRank")),
+            _ => false,
+        })
+        .filter_map(|q| q.rect)
+        .collect();
+    assert_eq!(badges.len(), 5, "one quad per officer rank");
+    for b in &badges {
+        assert_eq!(
+            (b.right - b.left, b.top - b.bottom),
+            (32.0, 32.0),
+            "each rank badge is its own 32x32 BLP, not a page-wide slab"
+        );
+    }
+}
+
 /// **B288, closed at the reported symptom** (CarlG, decision 1507): the Verdant Note open from
 /// the bag, then a quest giver's gossip — both frames drew at the same TOPLEFT 0,-104 anchor,
 /// page text and greeting interleaved. The cause was the reader's missing `UIPanelWindows` row:

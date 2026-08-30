@@ -64,6 +64,15 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // rather than its value and nothing here needs to resolve it — `""` is what `ace.trim` handles
     // cleanly, and inventing a realm name would be worse than admitting we have none yet.
     ("realmName", ""),
+    // The address of the logon server — the reference's own CVar, byte-verified in `WoW.exe`
+    // (the registration's string neighbours are `realmlist.wtf`, "Address of realm list server"
+    // and `us.logon.worldofwarcraft.com:3724`; wow-re `mpq/scratch/startup-order-A.md` row 62).
+    // A **string** row, so it is matched ahead of the numeric parse in `apply_to_knobs`.
+    // The default diverges knowingly — see `realmlist::DEFAULT_REALMLIST`.
+    (
+        crate::realmlist::CVAR_REALMLIST,
+        crate::realmlist::DEFAULT_REALMLIST,
+    ),
     ("MasterVolume", "1"),
     ("SoundVolume", "1"),
     ("MusicVolume", "0.4"),
@@ -479,6 +488,7 @@ pub(crate) struct KnobParams<'w> {
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
     pane_rate: ResMut<'w, PaneRate>,
     guild_notify: ResMut<'w, crate::ui_guild::GuildMemberNotify>,
+    realmlist: ResMut<'w, crate::realmlist::Realmlist>,
 }
 
 impl KnobParams<'_> {
@@ -511,6 +521,7 @@ impl KnobParams<'_> {
             tex_filter: &mut self.tex_filter,
             pane_rate: &mut self.pane_rate,
             guild_notify: &mut self.guild_notify,
+            realmlist: &mut self.realmlist,
         }
     }
 }
@@ -539,24 +550,35 @@ struct Knobs<'a> {
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
     pane_rate: &'a mut PaneRate,
     guild_notify: &'a mut crate::ui_guild::GuildMemberNotify,
+    realmlist: &'a mut crate::realmlist::Realmlist,
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
 /// build knows (the caller decides whether that warns or rides through).
 fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
     let key = name.to_ascii_lowercase();
-    // `gxResolution` is a **string** CVar — `"WxH"`, the reference's own spelling — so it has to be
-    // matched ahead of the numeric parse every other row goes through, which would reject it as a
-    // bad value (decision 1627). It is the only such row; if a second one ever lands, this is the
-    // shape it joins, not a second special case somewhere else.
-    if key == "gxresolution" {
-        match crate::video::parse_resolution(value) {
-            Some(size) => knobs.video.windowed = size,
-            // Same posture as the numeric miss below: known key, bad value — consumed, and the
-            // resource keeps its truth.
-            None => warn!("cvar {name}: unparseable value '{value}' ignored"),
+    // **The string-valued rows**, matched ahead of the numeric parse every other row goes through
+    // — which would reject them as bad values. `gxResolution` was the first (decision 1627) and
+    // its comment named this as the shape a second one would join rather than a second special
+    // case somewhere else; `realmList` (1667) is that second one, so this is now that shape.
+    // Every arm shares the numeric miss's posture below: known key, bad value — consumed, with a
+    // warn, and the resource keeps its truth.
+    match key.as_str() {
+        "gxresolution" => {
+            match crate::video::parse_resolution(value) {
+                Some(size) => knobs.video.windowed = size,
+                None => warn!("cvar {name}: unparseable value '{value}' ignored"),
+            }
+            return true;
         }
-        return true;
+        "realmlist" => {
+            match crate::realmlist::normalize(value) {
+                Some(address) => knobs.realmlist.set(&address),
+                None => warn!("cvar {name}: unusable realmlist '{value}' ignored"),
+            }
+            return true;
+        }
+        _ => {}
     }
     let Ok(v) = value.parse::<f32>() else {
         warn!("cvar {name}: unparseable value '{value}' ignored");
@@ -767,6 +789,12 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     if crate::webenv::var("WOW_RENDER_SCALE").is_some() {
         persist.env_overridden.insert("renderscale".into());
     }
+    // `$WOW_HOST` is the realmlist for the session (1667) — every probe, smoke run and harness leg
+    // sets it, and a value pinned into the file would silently repoint the player's client at
+    // whatever a test dialed. `Realmlist::default()` has already taken it; this keeps it off disk.
+    if crate::webenv::var("WOW_HOST").is_some() {
+        persist.env_overridden.insert("realmlist".into());
+    }
     let cvars = match stored_config() {
         StoredConfig::Absent => {
             // No file, hermetic capture, or no install — the URL levers still apply.
@@ -918,6 +946,7 @@ fn sync_cvars(
             msaa,
             msaa_formats,
             tex_filter,
+            realmlist,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -950,7 +979,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 39] = [
+        let session: [(&str, String); 40] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1004,6 +1033,12 @@ fn sync_cvars(
             ("gxMultisample", msaa.samples.to_string()),
             ("trilinear", flag(tex_filter.trilinear)),
             ("anisotropic", tex_filter.aniso.to_string()),
+            // The other string-valued row (1667): what the next logon attempt will actually dial,
+            // including a `$WOW_HOST` the player never typed.
+            (
+                crate::realmlist::CVAR_REALMLIST,
+                realmlist.address().to_string(),
+            ),
         ];
         for (name, value) in session {
             script.set_cvar_host(name, &value);
@@ -1311,6 +1346,10 @@ mod tests {
             trilinear: true,
             aniso: 1,
         };
+        // Literal for the same reason once more (1667): Realmlist::default() reads $WOW_HOST, and
+        // a shell that happens to export it must not decide what this test asserts against.
+        let mut realmlist =
+            crate::realmlist::Realmlist::unpinned(crate::realmlist::DEFAULT_REALMLIST);
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -1332,9 +1371,31 @@ mod tests {
             msaa: &mut msaa,
             tex_filter: &mut tex_filter,
             msaa_formats: &msaa_formats,
+            realmlist: &mut realmlist,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
+        // The second string-valued row (1667): it must reach the knob rather than being rejected
+        // by the numeric parse every other row goes through, and a value that is not an address
+        // must be consumed (known key) while leaving the knob's truth alone.
+        assert!(apply_to_knobs(
+            "realmList",
+            "logon.example.org:3724",
+            &mut knobs
+        ));
+        assert_eq!(knobs.realmlist.address(), "logon.example.org:3724");
+        assert!(apply_to_knobs(
+            "realmlist",
+            r#"SET realmlist "elsewhere.example.org""#,
+            &mut knobs
+        ));
+        assert_eq!(knobs.realmlist.address(), "elsewhere.example.org");
+        assert!(apply_to_knobs("realmList", "not an address", &mut knobs));
+        assert_eq!(
+            knobs.realmlist.address(),
+            "elsewhere.example.org",
+            "a known key with a bad value is consumed, and the resource keeps its truth",
+        );
         // Clamps are the knob's own: volume to [0,1], farclip to FARCLIP_RANGE.
         assert!(apply_to_knobs("mastervolume", "7", &mut knobs));
         assert_eq!(knobs.sound.master, 1.0);
@@ -1578,6 +1639,10 @@ mod tests {
             .init_resource::<VideoConfig>()
             // Literal, not Default: RenderScale::default() reads $WOW_RENDER_SCALE.
             .insert_resource(RenderScale(1.0))
+            // Literal for the same reason again (1667): Realmlist::default() reads $WOW_HOST.
+            .insert_resource(crate::realmlist::Realmlist::unpinned(
+                crate::realmlist::DEFAULT_REALMLIST,
+            ))
             .init_resource::<PaneRate>()
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .add_plugins(CvarPlugin);
@@ -1766,11 +1831,15 @@ mod tests {
     /// resolved — `""` is what `Ace/AceState.lua:27`'s `ace.trim(GetCVar("realmName"))` handles
     /// cleanly, and inventing a realm name would be worse than admitting we have none yet.
     ///
-    /// **`gxResolution` defaults to the pre-1627 window** (decision 1627). It is the one row
-    /// [`apply_to_knobs`] matches ahead of its numeric parse, so its default is asserted through
-    /// the same parser the live value goes through — a spelling this table accepts but
-    /// [`crate::video::parse_resolution`] rejects would otherwise ship as a silent fall back to
-    /// `DEFAULT_WINDOWED`.
+    /// **`gxResolution` defaults to the pre-1627 window** (decision 1627), and **`realmList` to
+    /// `localhost`** (1667). These are the rows [`apply_to_knobs`] matches ahead of its numeric
+    /// parse, so each default is asserted through the same parser the live value goes through — a
+    /// spelling this table accepts but [`crate::video::parse_resolution`] or
+    /// [`crate::realmlist::normalize`] rejects would otherwise ship as a silent fall back.
+    ///
+    /// The list itself is the load-bearing half: a new string-valued row that forgets its arm in
+    /// `apply_to_knobs` is a CVar the player can set and the client will never honour, and this is
+    /// what makes adding one impossible to do quietly.
     #[test]
     fn the_string_valued_cvars_are_the_realm_and_the_windowed_size() {
         let mut strings: Vec<&str> = REGISTERED
@@ -1779,7 +1848,7 @@ mod tests {
             .map(|(n, _)| *n)
             .collect();
         strings.sort_unstable(); // the list is the claim, not where the rows sit in the table
-        assert_eq!(strings, vec!["gxResolution", "realmName"]);
+        assert_eq!(strings, vec!["gxResolution", "realmList", "realmName"]);
         let default_of = |name: &str| {
             REGISTERED
                 .iter()
@@ -1791,6 +1860,12 @@ mod tests {
         assert_eq!(
             crate::video::parse_resolution(default_of("gxResolution")),
             Some(crate::video::DEFAULT_WINDOWED)
+        );
+        // Same posture for the third row (1667): a default this table accepts but
+        // `realmlist::normalize` rejects would ship as a client that silently cannot dial.
+        assert_eq!(
+            crate::realmlist::normalize(default_of(crate::realmlist::CVAR_REALMLIST)).as_deref(),
+            Some(crate::realmlist::DEFAULT_REALMLIST),
         );
     }
 }

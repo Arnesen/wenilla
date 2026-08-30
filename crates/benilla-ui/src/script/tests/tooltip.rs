@@ -85,13 +85,17 @@ fn line_stack_autosize_and_right_flush() {
 }
 
 /// An EMPTY line mid-stack (the corpus' `AddLine("")`; the live shape was an empty-string
-/// subtitle from the wire): a ZERO-height row that still charges its 2px slot gap — the ref's
-/// empty-line shape. Pre-fix, an empty FontString never measures, so its unpinned bottom edge
-/// fell back to the OWNER frame's bottom (the v1 region fallback): the line stretched to the
-/// plate's bottom and the anchor chain marched every later line OUT of the plate (the live
-/// NPC-tooltip spill — name inside, "Level 20"/"PvP" below the frame under the health bar).
+/// subtitle from the wire): a ONE-UNIT row that also charges its 2px slot gap. Two fallbacks died
+/// to get here. First the owner-edge one: an empty FontString never measures, so its unpinned
+/// bottom edge fell back to the OWNER frame's bottom (0068's v1 region rule), the line stretched
+/// to the plate's bottom and the anchor chain marched every later line OUT of the plate (the live
+/// NPC-tooltip spill — name inside, "Level 20"/"PvP" below the frame under the health bar). Then
+/// the zero-span collapse that replaced it, which the reference does not have either: its size
+/// getters floor at one FrameXML unit, so `0.0` is not a span a FontString can have (decision
+/// 1664). The row and the plate read that floor off ONE constant, which is what keeps them from
+/// drifting apart the way B309's did.
 #[test]
-fn empty_line_is_a_zero_row_and_the_chain_stays_inside_the_plate() {
+fn empty_line_is_a_one_unit_row_and_the_chain_stays_inside_the_plate() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -118,13 +122,17 @@ fn empty_line_is_a_zero_row_and_the_chain_stays_inside_the_plate() {
             ("PvP", 24.0, 12.0),
         ],
     );
-    // Rows 14 + 0 + 12 + 12 with 3 slot gaps ⇒ totalh 44, height 64; maxw 90 ⇒ width 110.
+    // Rows 14 + 1 + 12 + 12 with 3 slot gaps ⇒ totalh 45, height 65; maxw 90 ⇒ width 110.
+    // The blank row is ONE unit, not zero: a FontString's span floors at one FrameXML unit on
+    // both the plate's metric and the line's own rect, from one constant (decision 1664).
+    // (That this row exists at all is a separate open question — on the reference `AddLine("")`
+    // returns without incrementing the line count, wow-re `tooltip-blank-line-height.md` §3.)
     s.run(
         r#"
         assert(TTE:GetWidth() == 110, "auto width, got " .. tostring(TTE:GetWidth()))
-        assert(TTE:GetHeight() == 64, "auto height, got " .. tostring(TTE:GetHeight()))
-        -- The chain stays contiguous through the zero row: Level 20 sits gap+0+gap under the name.
-        assert(TTETextLeft3:GetTop() == TTETextLeft1:GetBottom() - 4,
+        assert(TTE:GetHeight() == 65, "auto height, got " .. tostring(TTE:GetHeight()))
+        -- The chain stays contiguous through the blank row: Level 20 sits gap+1+gap under the name.
+        assert(TTETextLeft3:GetTop() == TTETextLeft1:GetBottom() - 5,
                "chain contiguous through the empty row, got " .. tostring(TTETextLeft3:GetTop())
                .. " vs " .. tostring(TTETextLeft1:GetBottom()))
         -- And the tail line lands INSIDE the plate, a full pad above its bottom edge.
@@ -565,16 +573,16 @@ fn an_emptied_pooled_line_drops_its_stale_box_and_the_plate_still_contains_the_c
     measure_all(&mut s, sizes);
     s.run(
         r#"
-        -- Rows 14 + 0 + 12 with two slot gaps ⇒ totalh 30, height 50: the blank costs its gap
-        -- and nothing else, exactly as it does on a cell that never held text.
-        assert(TTR:GetHeight() == 50, "auto height, got " .. tostring(TTR:GetHeight()))
+        -- Rows 14 + 1 + 12 with two slot gaps ⇒ totalh 31, height 51: the blank costs its gap
+        -- and one floored unit, exactly as it does on a cell that never held text.
+        assert(TTR:GetHeight() == 51, "auto height, got " .. tostring(TTR:GetHeight()))
         -- The one that was wrong: the tail line sits a full pad above the plate's bottom edge.
         -- Pre-fix it sat 12 BELOW it — line 2's dead "Level 20" box, drawn but never counted.
         assert(TTRTextLeft3:GetBottom() == TTR:GetBottom() + 10,
                "tail line inside the plate, got " .. tostring(TTRTextLeft3:GetBottom())
                .. " vs plate bottom " .. tostring(TTR:GetBottom()))
-        -- And the chain is contiguous through the zero row, as on a cold cell.
-        assert(TTRTextLeft3:GetTop() == TTRTextLeft1:GetBottom() - 4,
+        -- And the chain is contiguous through the blank row, as on a cold cell.
+        assert(TTRTextLeft3:GetTop() == TTRTextLeft1:GetBottom() - 5,
                "chain contiguous through the emptied row, got " .. tostring(TTRTextLeft3:GetTop()))
     "#,
     )

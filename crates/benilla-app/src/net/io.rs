@@ -2,7 +2,8 @@
 //!
 //! [`spawn_net`] starts a read thread with **two park points** (decisions 0193 + 0539): it first
 //! parks **pre-logon** on the credentials channel — the login screen's pause — then, once a
-//! [`LoginRequest`] walks logon → realm → world handshake (emitting [`SessionEvent::LoginStage`]s,
+//! [`LoginRequest`] (credentials *and* the realmlist to dial) walks logon → realm → world
+//! handshake (emitting [`SessionEvent::LoginStage`]s,
 //! and [`SessionEvent::LoginFailed`] + re-park on any pre-roster failure), it **parks at character
 //! select**: it emits the roster as a [`SessionEvent::CharacterList`] and blocks until the app
 //! answers with a guid over the pick channel. The pick sends `CMSG_PLAYER_LOGIN`, and the thread
@@ -84,6 +85,12 @@ pub(crate) fn inbound_census() -> (u64, Option<u64>) {
 pub(crate) struct LoginRequest {
     pub(crate) user: String,
     pub(crate) pass: String,
+    /// The realmlist to dial, `host[:port]` (decision 1667). **Per-attempt, exactly like the
+    /// credentials beside it** — the login screen can now repoint the client between attempts, and
+    /// an address travelling with its attempt means an edit made mid-dial cannot silently retarget
+    /// the connection already in flight. It is also the only shape under which the abandon
+    /// generation stays meaningful: what a cancel abandons is *this* attempt, at *that* server.
+    pub(crate) host: String,
     pub(crate) generation: u64,
 }
 
@@ -111,11 +118,14 @@ pub(crate) struct PingClock {
 /// during an outage can't flood the log. Reset when a fresh writer arrives.
 pub(super) const SEND_WARN_CAP: u32 = 8;
 
-/// Connection parameters, from env (`WOW_HOST` as `host[:port]`, `WOW_CHAR`). Credentials are NOT here anymore
-/// (decision 0539): they arrive per-attempt over the login channel — the app's policy owns the
-/// env fast path and its `one`/`pone` defaults.
+/// What is left of the per-process connection parameters: `WOW_CHAR`, and nothing else.
+///
+/// Neither the credentials nor the **address** live here any more. 0539 moved the credentials onto
+/// each [`LoginRequest`]; decision 1667 moved the host the same way and for the same reason — it
+/// is now a setting the player edits on the login screen (`crate::realmlist`), so a value latched
+/// out of the environment once at spawn could only ever be stale. `$WOW_HOST` is still honoured;
+/// it is read where every other env-overridable setting is read, by `Realmlist::default()`.
 pub(super) struct NetConfig {
-    host: String,
     /// `WOW_CHAR`, when explicitly set. Here it only names the create-if-empty character on a fresh
     /// account; as a *pick* it is app-side policy (`crate::char_select` auto-answers the roster with
     /// it — the dev fast path past the select screen).
@@ -125,7 +135,6 @@ pub(super) struct NetConfig {
 impl NetConfig {
     pub(super) fn from_env() -> Self {
         NetConfig {
-            host: crate::webenv::var("WOW_HOST").unwrap_or_else(crate::webenv::default_wow_host),
             character: crate::webenv::var("WOW_CHAR"),
         }
     }
@@ -306,36 +315,56 @@ async fn run(
     let stage = |s: LoginStage| {
         let _ = events_tx.send(SessionEvent::LoginStage { stage: s });
     };
-    let fail = |code: Option<u8>, reason: String| {
+    let fail = |refusal: Option<benilla_protocol::LoginRefusal>, reason: String| {
         let _ = events_tx.send(SessionEvent::LoginFailed {
-            code,
+            refusal,
             reason,
             terminal: false,
+            dial: None,
+        });
+        Ok(Cycle::Repark)
+    };
+    // The dial that never opened a socket — the only failure whose cause the *screen* can act on,
+    // now that the address is something a player types (1667). Kept separate from `fail` so the
+    // classification happens once, at the one place holding the error object.
+    let fail_dial = |dial: benilla_protocol::DialFailure, reason: String| {
+        let _ = events_tx.send(SessionEvent::LoginFailed {
+            refusal: None,
+            reason,
+            terminal: false,
+            dial: Some(dial),
         });
         Ok(Cycle::Repark)
     };
     // A failure resubmitting cannot fix — the app shows it and stops (no paced retry).
     let fail_terminal = |reason: String| {
         let _ = events_tx.send(SessionEvent::LoginFailed {
-            code: None,
+            refusal: None,
             reason,
             terminal: true,
+            dial: None,
         });
         Ok(Cycle::Repark)
     };
 
     // Logon (the dial + SRP6 exchange — one blocking sequence against realmd).
     stage(LoginStage::Connecting);
-    let logon = match benilla_protocol::logon_async(&cfg.host, &req.user, &req.pass).await {
+    let logon = match benilla_protocol::logon_async(&req.host, &req.user, &req.pass).await {
         Ok(l) => l,
         Err(e) => {
             if canceled() {
                 return Ok(Cycle::Repark);
             }
             // A server refusal carries its auth result byte (the app maps it to the client's
-            // own AUTH_* string); a transport failure carries None.
-            let code = e.downcast_ref::<AuthReject>().map(|r| r.code);
-            return fail(code, format!("{e:#}"));
+            // own AUTH_* string); a transport failure carries None. A failure to get a socket at
+            // all carries the dial verdict, which is the one the screen can turn into advice.
+            if let Some(dial) = e.downcast_ref::<benilla_protocol::DialFailure>() {
+                return fail_dial(dial.clone(), format!("{e:#}"));
+            }
+            let refusal = e
+                .downcast_ref::<AuthReject>()
+                .map(|r| benilla_protocol::LoginRefusal::Logon(r.code));
+            return fail(refusal, format!("{e:#}"));
         }
     };
     if canceled() {
@@ -347,25 +376,58 @@ async fn run(
     let world_addr = realm
         .as_ref()
         .map(|r| r.address.clone())
-        // Strip any explicit auth `:port` off `WOW_HOST` — the fallback world port is its own.
-        .unwrap_or_else(|| format!("{}:{}", host_port(&cfg.host, WORLD_PORT).0, WORLD_PORT));
+        // Strip any explicit auth `:port` off the realmlist — the fallback world port is its own.
+        .unwrap_or_else(|| format!("{}:{}", host_port(&req.host, WORLD_PORT).0, WORLD_PORT));
 
     stage(LoginStage::Handshaking);
-    let mut session =
-        match WorldSession::connect_async(&world_addr, &req.user, logon.session_key).await {
-            Ok(s) => s,
-            Err(e) => {
-                if canceled() {
-                    return Ok(Cycle::Repark);
-                }
-                // A Warden refusal is the server's own answer, not a transport fault — say it plainly
-                // rather than wrapping it in handshake noise.
-                if let Some(w) = e.downcast_ref::<WardenRequired>() {
-                    return fail_terminal(w.to_string());
-                }
-                return fail(None, format!("world handshake with {world_addr}: {e:#}"));
+    // The realm we are dialing, for the queue dialog to name — the roster that would otherwise
+    // carry it is on the far side of the queue, which is exactly when the name is wanted.
+    let realm_name = realm.as_ref().map(|r| r.name.clone());
+    // Report our place, and keep waiting only while the attempt is still wanted. A queue can
+    // last minutes, so unlike every other handshake stage it has to test the abandon generation
+    // itself — otherwise a Cancel would close the dialog while this thread quietly held its place
+    // in line and then walked into the world anyway.
+    let mut on_queue = |position: Option<u32>| {
+        let _ = events_tx.send(SessionEvent::LoginQueued {
+            position,
+            realm: realm_name.clone(),
+        });
+        !canceled()
+    };
+    let mut session = match WorldSession::connect_queued_async(
+        &world_addr,
+        &req.user,
+        logon.session_key,
+        &mut on_queue,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            if canceled() {
+                return Ok(Cycle::Repark);
             }
-        };
+            // A Warden refusal is the server's own answer, not a transport fault — say it plainly
+            // rather than wrapping it in handshake noise.
+            if let Some(w) = e.downcast_ref::<WardenRequired>() {
+                return fail_terminal(w.to_string());
+            }
+            // The world server's own refusal, in its own enum — the screen owes the player the
+            // authored `AUTH_*` string for it, which it cannot recover from a formatted message.
+            if let Some(r) = e.downcast_ref::<benilla_protocol::WorldAuthReject>() {
+                return fail(
+                    Some(benilla_protocol::LoginRefusal::World(r.code)),
+                    format!("{e:#}"),
+                );
+            }
+            return fail(None, format!("world handshake with {world_addr}: {e:#}"));
+        }
+    };
+    // The handshake can now block for minutes (the queue), so a cancel that landed while it did
+    // must not be overtaken by the roster it is about to fetch.
+    if canceled() {
+        return Ok(Cycle::Repark);
+    }
 
     // The roster (creating a starter character on a fresh account so PLAYER_LOGIN has a target).
     // Failures here are still pre-roster: surface as LoginFailed, re-park. (An immediately-awaited
@@ -732,7 +794,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             ChatKind::Say => w.send_chat(&text),
             ChatKind::Yell => w.send_yell(&text),
             ChatKind::Emote => w.send_emote_chat(&text),
-            ChatKind::Whisper => w.send_whisper(target.as_deref().unwrap_or_default(), &text),
+            ChatKind::Whisper => {
+                w.send_whisper(target.as_deref().unwrap_or_default(), &text)
+            }
             ChatKind::Party => w.send_party(&text),
             ChatKind::Raid => w.send_raid(&text),
             ChatKind::RaidLeader => w.send_raid_leader(&text),
@@ -743,7 +807,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             ChatKind::BattlegroundLeader => w.send_battleground_leader(&text),
             ChatKind::Afk => w.send_afk(&text),
             ChatKind::Dnd => w.send_dnd(&text),
-            ChatKind::Channel => w.send_channel(target.as_deref().unwrap_or_default(), &text),
+            ChatKind::Channel => {
+                w.send_channel(target.as_deref().unwrap_or_default(), &text)
+            }
         },
         // The addon lane (decision 1235). The distribution arrived as an enum and the
         // map is TOTAL — no "unknown, guess SAY" arm exists, which is what the enum
@@ -751,14 +817,18 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::AddonMessage { distribution, text } => {
             w.send_addon_message(super::addon_wire_chat_type(distribution), &text)
         }
-        ClientCommand::JoinChannel { name, password } => w.join_channel(&name, &password),
+        ClientCommand::JoinChannel { name, password } => {
+            w.join_channel(&name, &password)
+        }
         ClientCommand::LeaveChannel { name } => w.leave_channel(&name),
         ClientCommand::ChannelList { name } => w.channel_list(&name),
         ClientCommand::RandomRoll { min, max } => w.random_roll(min, max),
         ClientCommand::PlayedTime => w.played_time(),
         ClientCommand::NameQuery { guid } => w.name_query(guid),
         ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
-        ClientCommand::PetNameQuery { pet_number, guid } => w.pet_name_query(pet_number, guid),
+        ClientCommand::PetNameQuery { pet_number, guid } => {
+            w.pet_name_query(pet_number, guid)
+        }
         ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
         ClientCommand::UseItem {
             bag_index,
@@ -767,9 +837,13 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             target,
         } => w.use_item(bag_index, slot, spell_index, target),
         ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
-        ClientCommand::AutoEquipItem { bag_index, slot } => w.auto_equip_item(bag_index, slot),
+        ClientCommand::AutoEquipItem { bag_index, slot } => {
+            w.auto_equip_item(bag_index, slot)
+        }
         ClientCommand::SetAmmo { entry } => w.set_ammo(entry),
-        ClientCommand::SwapInvItem { src_slot, dst_slot } => w.swap_inv_item(src_slot, dst_slot),
+        ClientCommand::SwapInvItem { src_slot, dst_slot } => {
+            w.swap_inv_item(src_slot, dst_slot)
+        }
         ClientCommand::SwapItem {
             dst_bag,
             dst_slot,
@@ -789,16 +863,24 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             count,
         } => w.destroy_item(bag_index, slot, count),
         ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
-        ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
+        ClientCommand::CastSpellAtDest { spell_id, dest } => {
+            w.cast_spell_at_dest(spell_id, dest)
+        }
         ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
-        ClientCommand::SetActionButton { button, packed } => w.set_action_button(button, packed),
-        ClientCommand::SetActionBarToggles { toggles } => w.set_actionbar_toggles(toggles),
+        ClientCommand::SetActionButton { button, packed } => {
+            w.set_action_button(button, packed)
+        }
+        ClientCommand::SetActionBarToggles { toggles } => {
+            w.set_actionbar_toggles(toggles)
+        }
         ClientCommand::PetAction {
             pet_guid,
             packed,
             target_guid,
         } => w.pet_action(pet_guid, packed, target_guid),
-        ClientCommand::PetSetAction { pet_guid, entries } => w.pet_set_action(pet_guid, &entries),
+        ClientCommand::PetSetAction { pet_guid, entries } => {
+            w.pet_set_action(pet_guid, &entries)
+        }
         ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
         ClientCommand::PetCancelAura { pet_guid, spell_id } => {
             w.pet_cancel_aura(pet_guid, spell_id)
@@ -834,18 +916,45 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             count,
         } => w.sell_item(vendor, item_guid, count),
         ClientCommand::BuybackItem { vendor, slot } => w.buyback_item(vendor, slot),
-        ClientCommand::RepairItem { vendor, item_guid } => w.repair_item(vendor, item_guid),
+        ClientCommand::RepairItem { vendor, item_guid } => {
+            w.repair_item(vendor, item_guid)
+        }
+        ClientCommand::GmTicketCreate {
+            category,
+            map,
+            pos,
+            text,
+        } => w.gm_ticket_create(category, map, pos, &text),
+        ClientCommand::GmTicketUpdate { category, text } => {
+            w.gm_ticket_updatetext(category, &text)
+        }
+        ClientCommand::GmTicketGet => w.gm_ticket_get(),
+        ClientCommand::GmTicketDelete => w.gm_ticket_delete(),
+        ClientCommand::GmTicketSystemStatus => w.gm_ticket_system_status(),
         ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
         ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
         ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
         ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
         ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
-        ClientCommand::AutoStoreBankItem { bag, slot } => w.autostore_bank_item(bag, slot),
+        ClientCommand::AutoStoreBankItem { bag, slot } => {
+            w.autostore_bank_item(bag, slot)
+        }
         ClientCommand::TrainerList { trainer } => w.trainer_list(trainer),
         ClientCommand::TrainerBuySpell { trainer, spell_id } => {
             w.trainer_buy_spell(trainer, spell_id)
         }
-        ClientCommand::LearnTalent { talent_id, rank } => w.learn_talent(talent_id, rank),
+        ClientCommand::ListStabledPets { npc } => w.list_stabled_pets(npc),
+        ClientCommand::StablePet { npc } => w.stable_pet(npc),
+        ClientCommand::UnstablePet { npc, pet_number } => {
+            w.unstable_pet(npc, pet_number)
+        }
+        ClientCommand::StableSwapPet { npc, pet_number } => {
+            w.stable_swap_pet(npc, pet_number)
+        }
+        ClientCommand::BuyStableSlot { npc } => w.buy_stable_slot(npc),
+        ClientCommand::LearnTalent { talent_id, rank } => {
+            w.learn_talent(talent_id, rank)
+        }
         ClientCommand::UnlearnSkill { skill_id } => w.unlearn_skill(skill_id),
         ClientCommand::SetFactionAtWar {
             rep_list_id,
@@ -855,11 +964,15 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             rep_list_id,
             inactive,
         } => w.set_faction_inactive(rep_list_id, inactive),
-        ClientCommand::SetWatchedFaction { rep_list_id } => w.set_watched_faction(rep_list_id),
+        ClientCommand::SetWatchedFaction { rep_list_id } => {
+            w.set_watched_faction(rep_list_id)
+        }
         ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
         ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
         ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),
-        ClientCommand::PageTextQuery { page_id, guid } => w.page_text_query(page_id, guid),
+        ClientCommand::PageTextQuery { page_id, guid } => {
+            w.page_text_query(page_id, guid)
+        }
         ClientCommand::CastSpellGameObject { spell_id, go_guid } => {
             w.cast_spell_gameobject(spell_id, go_guid)
         }
@@ -867,6 +980,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             spell_id,
             item_guid,
         } => w.cast_spell_item(spell_id, item_guid),
+        ClientCommand::LootMasterGive { guid, slot, target } => {
+            w.loot_master_give(guid, slot, target)
+        }
         ClientCommand::Loot { guid } => w.loot(guid),
         ClientCommand::AutostoreLootItem { slot } => w.autostore_loot_item(slot),
         ClientCommand::LootMoney => w.loot_money(),
@@ -876,9 +992,15 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             item_slot,
             roll_type,
         } => w.loot_roll(looted_target, item_slot, roll_type),
-        ClientCommand::QuestgiverQuery { npc, quest } => w.questgiver_query_quest(npc, quest),
-        ClientCommand::QuestgiverAccept { npc, quest } => w.questgiver_accept_quest(npc, quest),
-        ClientCommand::QuestgiverComplete { npc, quest } => w.questgiver_complete_quest(npc, quest),
+        ClientCommand::QuestgiverQuery { npc, quest } => {
+            w.questgiver_query_quest(npc, quest)
+        }
+        ClientCommand::QuestgiverAccept { npc, quest } => {
+            w.questgiver_accept_quest(npc, quest)
+        }
+        ClientCommand::QuestgiverComplete { npc, quest } => {
+            w.questgiver_complete_quest(npc, quest)
+        }
         ClientCommand::QuestgiverRequestReward { npc, quest } => {
             w.questgiver_request_reward(npc, quest)
         }
@@ -904,17 +1026,27 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             // rides the wire here.
             41, 0, item_guid, money, cod,
         ),
-        ClientCommand::MailTakeMoney { mailbox, mail_id } => w.mail_take_money(mailbox, mail_id),
-        ClientCommand::MailTakeItem { mailbox, mail_id } => w.mail_take_item(mailbox, mail_id),
-        ClientCommand::MailMarkAsRead { mailbox, mail_id } => w.mail_mark_as_read(mailbox, mail_id),
+        ClientCommand::MailTakeMoney { mailbox, mail_id } => {
+            w.mail_take_money(mailbox, mail_id)
+        }
+        ClientCommand::MailTakeItem { mailbox, mail_id } => {
+            w.mail_take_item(mailbox, mail_id)
+        }
+        ClientCommand::MailMarkAsRead { mailbox, mail_id } => {
+            w.mail_mark_as_read(mailbox, mail_id)
+        }
         ClientCommand::MailReturnToSender { mailbox, mail_id } => {
             w.mail_return_to_sender(mailbox, mail_id)
         }
-        ClientCommand::MailDelete { mailbox, mail_id } => w.mail_delete(mailbox, mail_id),
+        ClientCommand::MailDelete { mailbox, mail_id } => {
+            w.mail_delete(mailbox, mail_id)
+        }
         ClientCommand::MailCreateTextItem { mailbox, mail_id } => {
             w.mail_create_text_item(mailbox, mail_id)
         }
-        ClientCommand::ItemTextQuery { text_id, mail_id } => w.item_text_query(text_id, mail_id),
+        ClientCommand::ItemTextQuery { text_id, mail_id } => {
+            w.item_text_query(text_id, mail_id)
+        }
         ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
         // The auction house arc (decision 1511 P0) — the CMSG verbs onto the
         // P0 writers; the auctioneer guid rides on every one.
@@ -989,6 +1121,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::Logout => w.logout_request(),
         ClientCommand::LogoutCancel => w.logout_cancel(),
         ClientCommand::CompleteCinematic => w.complete_cinematic(),
+        ClientCommand::NextCinematicCamera => w.next_cinematic_camera(),
         ClientCommand::MoveModeAck {
             guid,
             counter,
@@ -1002,7 +1135,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::CorpseQuery => w.corpse_query(),
         ClientCommand::ReclaimCorpse { corpse } => w.reclaim_corpse(corpse),
         ClientCommand::SpiritHealerActivate { npc } => w.spirit_healer_activate(npc),
-        ClientCommand::ResurrectResponse { caster, accept } => w.resurrect_response(caster, accept),
+        ClientCommand::ResurrectResponse { caster, accept } => {
+            w.resurrect_response(caster, accept)
+        }
         ClientCommand::GroupInvite { name } => w.group_invite(&name),
         ClientCommand::GroupAccept => w.group_accept(),
         ClientCommand::GroupDecline => w.group_decline(),
@@ -1010,7 +1145,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::GroupSetLeader { guid } => w.group_set_leader(guid),
         ClientCommand::GroupLeave => w.group_disband(),
         ClientCommand::GroupRaidConvert => w.group_raid_convert(),
-        ClientCommand::RequestPartyMemberStats { guid } => w.request_party_member_stats(guid),
+        ClientCommand::RequestPartyMemberStats { guid } => {
+            w.request_party_member_stats(guid)
+        }
         ClientCommand::LootMethod {
             method,
             master,
@@ -1021,7 +1158,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::GroupChangeSubGroup { name, group } => {
             w.group_change_sub_group(&name, group)
         }
-        ClientCommand::GroupSwapSubGroup { name, other } => w.group_swap_sub_group(&name, &other),
+        ClientCommand::GroupSwapSubGroup { name, other } => {
+            w.group_swap_sub_group(&name, &other)
+        }
         ClientCommand::GroupAssistantLeader { guid, grant } => {
             w.group_assistant_leader(guid, grant)
         }
@@ -1061,9 +1200,27 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         } => w.guild_rank(rank_id, rights, &name),
         ClientCommand::GuildAddRank { name } => w.guild_add_rank(&name),
         ClientCommand::GuildDelRank => w.guild_del_rank(),
-        ClientCommand::GuildSetPublicNote { name, note } => w.guild_set_public_note(&name, &note),
-        ClientCommand::GuildSetOfficerNote { name, note } => w.guild_set_officer_note(&name, &note),
+        ClientCommand::GuildSetPublicNote { name, note } => {
+            w.guild_set_public_note(&name, &note)
+        }
+        ClientCommand::GuildSetOfficerNote { name, note } => {
+            w.guild_set_officer_note(&name, &note)
+        }
         ClientCommand::GuildInfoText { text } => w.guild_info_text(&text),
+        // The petition family (decision 1672) — founding a guild.
+        ClientCommand::PetitionShowList { npc } => w.petition_show_list(npc),
+        ClientCommand::PetitionBuy { npc, name } => w.petition_buy(npc, &name),
+        ClientCommand::PetitionShowSignatures { item } => {
+            w.petition_show_signatures(item)
+        }
+        ClientCommand::PetitionSign { item, byte } => w.petition_sign(item, byte),
+        ClientCommand::OfferPetition { item, player } => w.offer_petition(item, player),
+        ClientCommand::TurnInPetition { item } => w.turn_in_petition(item),
+        ClientCommand::PetitionQuery { petition_id, item } => {
+            w.petition_query(petition_id, item)
+        }
+        ClientCommand::PetitionRename { item, name } => w.petition_rename(item, &name),
+        ClientCommand::PetitionDecline { item } => w.petition_decline(item),
         ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
         ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
         ClientCommand::ActivateTaxi {
@@ -1076,5 +1233,6 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             total_cost,
             nodes,
         } => w.activate_taxi_express(guid, total_cost, &nodes),
+
     }
 }

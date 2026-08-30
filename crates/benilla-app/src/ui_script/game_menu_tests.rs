@@ -240,6 +240,10 @@ fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
 fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     let mut s = harness_with(&[
         "MerchantFrame.xml",
+        // LootFrame.xml owns GroupLootDropDown, whose OnLoad needs the dropdown kit — which in
+        // turn reads TOOLTIP_DEFAULT_COLOR from GameTooltip.xml. Shipped toc order.
+        "GameTooltip.xml",
+        "UIDropDownMenu.xml",
         "LootFrame.xml",
         "Cooldown.xml",
         "BagFrame.xml",
@@ -249,6 +253,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     s.run("BenillaBagToggle_OnClick()").unwrap();
     s.set_loot(Some(LootState {
         fishing: false,
+        master_candidates: Vec::new(),
         rows: vec![Some(LootRow {
             item_id: 0,
             name: Some("Wool Cloth".into()),
@@ -695,6 +700,7 @@ fn backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            petition: None,
             already_bound: false,
             bar_placeable: true,
             durability: None,

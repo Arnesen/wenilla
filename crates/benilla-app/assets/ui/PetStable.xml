@@ -1,0 +1,738 @@
+<Ui>
+    <!--
+        benilla's stable-master window (decision 1676) — the hunter's three-slot pet stable, dressed
+        from the real 1.12 `PetStable.xml`/`PetStable.lua`. Every rule below is cited back to that
+        extraction: `xml l.N` is `ref-PetStable.xml`, `lua l.N` is `ref-PetStable.lua`, and
+        `GlobalStrings l.N` is the shipped `GlobalStrings.lua`.
+
+        **The Lua lives here, inline.** The reference splits it (`<Script file="PetStable.lua"/>`,
+        xml l.3); benilla ships one file per window, so the transcription sits in the CDATA block
+        below in the reference's own order (OnLoad, OnEvent, Update, NoPetsAllowed).
+
+        **An NPC session, reached through gossip**, and it behaves like every other one here
+        (TrainerFrame.xml/MerchantFrame.xml's shape): a left-slot UIPanel (registered in
+        UiPanels.xml, the reference's own `UIParent.lua:39` row), a "npc" portrait bake, and an
+        `OnHide` that ends the session. The one thing that differs from its neighbours is that the
+        close sends NO PACKET: `ClosePetStables()` is purely client-side (there is no close opcode
+        in 5875 — `benilla-ui/src/script/stable.rs`'s own note), so the hide just clears the app's
+        session.
+
+        **Three slots, indices 0..2.** `NUM_PET_STABLE_SLOTS = 2` (lua l.1) is the count of *stable*
+        slots a hunter can buy; slot 0 is the pet at their side, which is why every loop below runs
+        `1..NUM_PET_STABLE_SLOTS` for the stabled pair and treats 0 separately.
+
+        Named deferrals / deviations, each re-cited at its own site below:
+
+          - **The model pane is a booth-texture stand-in, not a live `<PlayerModel>`** — the same
+            0208 §5 decision the character and pet paper dolls already ship under. The reference
+            declares `<PlayerModel name="PetStableModel">` (xml l.182-280); ours is a plain
+            `<Frame>` whose one texture samples an app-side bake, so the widget's own script trio
+            goes with the widget: `Model_OnLoad`/`Model_OnUpdate` (xml l.194-203) and the
+            `DISPLAY_SIZE_CHANGED` → `this:RefreshUnit()` pair (xml l.196-200) have no analogue
+            here, exactly as `PetPaperDollFrame.xml` records for its own pane. `Model_RotateLeft`/
+            `Model_RotateRight` (xml l.222/241) become `BenillaPaperDollModel_RotateLeft`/`_Right`,
+            the shared helpers `CharacterFrame.xml` defines.
+          - The pane's booth is the `"stable"` slot in `crates/benilla-app/src/portrait`, and its yaw
+            binding is `BenillaStableModel_SetFacing`, the fourth beside the paperdoll/petdoll/
+            inspect three. The app resolves `GetSelectedStablePet()`'s slot into either the live
+            pet's entity or — for a stabled or dismissed pet, which has no world object at all —
+            the creature query's `CreatureDisplayInfo` id, and the booth mirrors whichever it got.
+          - **`GetPetIcon()` does not exist in this client** (reference/1.12-globals.tsv has it as
+            an engine global; benilla has never needed it). `PetStable_Update` calls it at lua l.51
+            and l.161-162 and it is transcribed verbatim rather than guarded: the window's current
+            pet slot cannot paint without it, and a guard here would hide a missing binding instead
+            of reporting it.
+          - `parent="UIParent"` (xml l.72) is dropped: this engine reads no XML `parent=` attribute
+            (`PetPaperDollFrame.xml`'s header). The frame's own `<Anchors>` are kept verbatim even
+            though `ShowUIPanel` re-`SetPoint`s it into the left slot — they name the same
+            TOPLEFT (0,-104) the slot manager writes, so the two agree (ItemTextFrame.xml keeps its
+            reference anchor for the same reason).
+          - `PetStableMoneyFrame`'s instance `<OnLoad>SmallMoneyFrame_OnLoad()</OnLoad>` (xml
+            l.360-362) is dropped, and the cost frame's OnLoad keeps BOTH calls. benilla's
+            `SmallMoneyFrameTemplate` already wires `SmallMoneyFrame_OnLoad` as its own OnLoad
+            (MoneyFrame.xml) where the reference's template does not, and an instance `<Scripts>`
+            block SetScripts over the inherited handler rather than adding to it — so the purse
+            wants no OnLoad at all, and any instance that needs `MoneyFrame_SetType` must re-call
+            the loader beside it. That is the idiom AuctionFrame.xml and MailFrame.xml already use.
+          - Two housekeeping fixes inside `PetStable_Update`, both behaviour-identical: `background`
+            is a LOCAL here (lua l.76 leaks it as a global), and the reference's `numSlots`/`numPets`
+            locals (lua l.69-70) are dropped because nothing reads them — the loop asks
+            `GetNumStableSlots()` directly, exactly as the reference's own l.79 does.
+          - The GlobalStrings the window reads are declared below with the `X = X or "..."` idiom
+            this codebase uses: the real localized file loads off the patch chain before our own
+            files (`ui_script/lifecycle.rs`'s `load_global_strings`) and always wins; the fallbacks
+            are what make the strings resolve in the test harnesses, which load no chain. They
+            matter at LOAD, not just at runtime: a `text=` attribute is a global-string lookup
+            performed while the frames below are being built.
+    -->
+    <Script><![CDATA[
+        -- ── GlobalStrings this window uses (values + line cites from the shipped file) ───────────
+        STABLES = STABLES or "Stables"                                    -- :4189
+        CURRENT_PET = CURRENT_PET or "Current Pet:"                       -- :881
+        STABLED_PETS = STABLED_PETS or "Stabled Pets:"                    -- :4188
+        EMPTY_STABLE_SLOT = EMPTY_STABLE_SLOT or "Empty Stable Slot"      -- :1434
+        STABLE_SLOT_TEXT = STABLE_SLOT_TEXT
+            or "Do you wish to purchase another stable slot?"             -- :4190
+        COSTS_LABEL = COSTS_LABEL or "Cost:"                              -- :870
+        PURCHASE = PURCHASE or "Purchase"                                 -- :3128
+        PET_DIET_TEMPLATE = PET_DIET_TEMPLATE or "Diet: %s"               -- :3037
+        UNIT_LEVEL_TEMPLATE = UNIT_LEVEL_TEMPLATE or "Level %d"           -- :4436
+
+        -- lua l.1. The count of STABLE slots (the two a hunter buys), not of window slots: the
+        -- buttons run 0..2 with 0 being the pet at the player's side, which is why the loops below
+        -- iterate 1..NUM_PET_STABLE_SLOTS and handle 0 on its own.
+        NUM_PET_STABLE_SLOTS = 2
+
+        -- ── The model pane's yaw ─────────────────────────────────────────────────────────────────
+        -- Every booth pane names its own engine yaw binding in `frame.setFacing`
+        -- (`BenillaPaperDollModel_SetFacing`, `BenillaPetPaperDollModel_SetFacing`,
+        -- `BenillaInspectModel_SetFacing`); this pane's is `BenillaStableModel_SetFacing`. The
+        -- named forwarder stays because `frame.setFacing` wants a plain function value and this
+        -- file's OnLoad is where the pane's own name for it belongs.
+        function BenillaPetStableModel_SetFacing(radians)
+            BenillaStableModel_SetFacing(radians)
+        end
+
+        -- ── The window ──────────────────────────────────────────────────────────────────────────
+        -- lua l.3-9, verbatim. UNIT_PET is here because a pet summoned or dismissed while the
+        -- window is open changes slot 0 without the server sending a stable list.
+        function PetStable_OnLoad()
+            this:RegisterEvent("PET_STABLE_SHOW")
+            this:RegisterEvent("PET_STABLE_UPDATE")
+            this:RegisterEvent("PET_STABLE_UPDATE_PAPERDOLL")
+            this:RegisterEvent("PET_STABLE_CLOSED")
+            this:RegisterEvent("UNIT_PET")
+        end
+
+        -- lua l.11-32, all four arms. NOTE the SHOW arm's shape: `ShowUIPanel` can REFUSE (dead
+        -- player, a native-center frame holding the screen — UiPanels.xml's `AdmitPanel`), and the
+        -- reference reads that refusal back off `IsVisible()` and ends the session rather than
+        -- leaving one open behind a window nobody can see. Ours can refuse for the same reasons and
+        -- has the same session to end (`crate::ui_stable`'s), so the check is load-bearing here
+        -- too, not defensive.
+        function PetStable_OnEvent()
+            if event == "PET_STABLE_SHOW" then
+                ShowUIPanel(this)
+                if not this:IsVisible() then
+                    ClosePetStables()
+                    return
+                end
+                PetStable_Update()
+            elseif event == "PET_STABLE_UPDATE" or (event == "UNIT_PET" and arg1 == "player") then
+                PetStable_Update()
+            elseif event == "PET_STABLE_UPDATE_PAPERDOLL" then
+                -- So warlock pets don't show (lua l.23-27, the reference's own comment). A warlock
+                -- standing at a stable master has a pet but no pet UI, and the window must not
+                -- offer to stable it.
+                if UnitExists("pet") and not HasPetUI() then
+                    PetStable_NoPetsAllowed()
+                    return
+                end
+                SetPetStablePaperdoll(PetStableModel)
+            elseif event == "PET_STABLE_CLOSED" then
+                HideUIPanel(this)
+            end
+        end
+
+        -- lua l.34-209 — the whole repaint, in the reference's own order and with its own
+        -- structure. Read it as five passes: the portrait, the warlock gate, the auto-selection,
+        -- the two stabled slots, the current-pet slot, and the purchase row.
+        function PetStable_Update()
+            -- Set stablemaster portrait (lua l.35-36): the "npc" unit token, the same live model
+            -- bake every other NPC-session window binds.
+            SetPortraitTexture(PetStableFramePortrait, "npc")
+
+            -- So warlock pets don't show (lua l.38-46, the reference's own comment). NOTE this arm
+            -- reads `isHunterPet`, the SECOND return, where the paperdoll arm above reads the
+            -- first: a warlock's minion answers hasPetUI true and isHunterPet false, and it is the
+            -- second that decides whether this window has anything to do.
+            local hasPetUI, isHunterPet = HasPetUI()
+            if UnitExists("pet") and not isHunterPet then
+                PetStable_NoPetsAllowed()
+                PetStableCurrentPet:Disable()
+                return
+            else
+                PetStableCurrentPet:Enable()
+            end
+
+            -- If no selected pet try to set one (lua l.48-63). The -1 sentinel IS the API
+            -- (`GetSelectedStablePet` returns it, and `stable.rs` defaults its selection to it for
+            -- exactly this branch): a freshly opened window picks the current pet if there is one,
+            -- otherwise the first occupied stable slot, so the pane is never blank when it has
+            -- something to show.
+            local selectedPet = GetSelectedStablePet()
+            if selectedPet == -1 then
+                if GetPetIcon() then
+                    selectedPet = 0
+                    ClickStablePet(0)
+                else
+                    for i = 0, NUM_PET_STABLE_SLOTS do
+                        if GetStablePetInfo(i) then
+                            selectedPet = i
+                            ClickStablePet(i)
+                            break
+                        end
+                    end
+                end
+            end
+
+            -- Set slot cost (lua l.65-66).
+            MoneyFrame_Update("PetStableCostMoneyFrame", GetNextStableSlotCost())
+
+            -- Set slot statuseses (lua l.68-119, the reference's own spelling of the comment).
+            -- An UNBOUGHT slot is drawn differently from an EMPTY one: bought-and-empty keeps its
+            -- white empty-slot art and stays clickable, unbought goes red and disabled. That is the
+            -- whole visual difference between "you may stable a pet here" and "buy this first".
+            local button
+            local background
+            local icon, name, level, family, loyalty
+            for i = 1, NUM_PET_STABLE_SLOTS do
+                button = getglobal("PetStableStabledPet" .. i)
+                background = getglobal("PetStableStabledPet" .. i .. "Background")
+                icon, name, level, family, loyalty = GetStablePetInfo(i)
+                SetItemButtonTexture(button, icon)
+                if i <= GetNumStableSlots() then
+                    background:SetVertexColor(1.0, 1.0, 1.0)
+                    button:Enable()
+                    if icon then
+                        button.tooltip = name
+                        button.tooltipSubtext = format(TEXT(UNIT_LEVEL_TEMPLATE), level) .. " " .. family
+                    else
+                        button.tooltip = EMPTY_STABLE_SLOT
+                        button.tooltipSubtext = ""
+                    end
+                    if i == selectedPet then
+                        if icon then
+                            button:SetChecked(1)
+                            PetStableLevelText:SetText(
+                                name .. " " .. format(TEXT(UNIT_LEVEL_TEMPLATE), level) .. " " .. family)
+                            PetStableLoyaltyText:SetText(loyalty)
+                            SetPetStablePaperdoll(PetStableModel)
+                            PetStablePetInfo.tooltip =
+                                format(PET_DIET_TEMPLATE, BuildListString(GetStablePetFoodTypes(i)))
+                            if not PetStableModel:IsShown() then
+                                PetStableModel:Show()
+                            end
+                        else
+                            button:SetChecked(nil)
+                            PetStableLevelText:SetText("")
+                            PetStableLoyaltyText:SetText("")
+                            PetStableModel:Hide()
+                        end
+                    else
+                        button:SetChecked(nil)
+                    end
+                    -- lua l.109-114: if this button's tooltip is the one currently up, rebuild it
+                    -- in place. A repaint that changed a slot under a resting cursor would
+                    -- otherwise leave the previous pet's name on screen.
+                    if GameTooltip:IsOwned(button) then
+                        GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+                        GameTooltip:SetText(button.tooltip)
+                        GameTooltip:AddLine(button.tooltipSubtext, "", 1.0, 1.0, 1.0)
+                        GameTooltip:Show()
+                    end
+                else
+                    background:SetVertexColor(1.0, 0.1, 0.1)
+                    button:Disable()
+                end
+            end
+
+            -- Current pet slot (lua l.121-159). Three cases, and the middle one is the interesting
+            -- one: a hunter whose pet is dismissed still has a slot-0 row from the server (read off
+            -- the character-pet cache), so the reference falls back to `GetStablePetInfo(0)` rather
+            -- than showing an empty current-pet slot for a pet that merely is not out.
+            if selectedPet == 0 then
+                if UnitExists("pet") then
+                    PetStableCurrentPet:SetChecked(1)
+                    local family = UnitCreatureFamily("pet")
+                    if not family then
+                        family = ""
+                    end
+                    PetStableLevelText:SetText(
+                        UnitName("pet") .. " " .. format(TEXT(UNIT_LEVEL_TEMPLATE), UnitLevel("pet"))
+                        .. " " .. family)
+                    PetStableLoyaltyText:SetText(GetPetLoyalty())
+                    SetPetStablePaperdoll(PetStableModel)
+                    if not PetStableModel:IsShown() then
+                        PetStableModel:Show()
+                    end
+                    if GetPetFoodTypes() then
+                        PetStablePetInfo.tooltip =
+                            format(PET_DIET_TEMPLATE, BuildListString(GetPetFoodTypes()))
+                    end
+                elseif GetStablePetInfo(0) then
+                    -- If pet doesn't exist it might be dismissed, so check stable slot 0 for
+                    -- current pet info (lua l.139, the reference's own comment).
+                    PetStableCurrentPet:SetChecked(1)
+                    icon, name, level, family, loyalty = GetStablePetInfo(0)
+                    PetStableLevelText:SetText(
+                        name .. " " .. format(TEXT(UNIT_LEVEL_TEMPLATE), level) .. " " .. family)
+                    PetStableLoyaltyText:SetText(loyalty)
+                    SetPetStablePaperdoll(PetStableModel)
+                    if not PetStableModel:IsShown() then
+                        PetStableModel:Show()
+                    end
+                    if GetStablePetFoodTypes(0) then
+                        PetStablePetInfo.tooltip =
+                            format(PET_DIET_TEMPLATE, BuildListString(GetStablePetFoodTypes(0)))
+                    end
+                else
+                    PetStableCurrentPet:SetChecked(nil)
+                    PetStableLevelText:SetText("")
+                    PetStableLoyaltyText:SetText("")
+                    PetStableModel:Hide()
+                end
+            else
+                PetStableCurrentPet:SetChecked(nil)
+            end
+
+            -- Set tooltip and icon info (lua l.160-181). The same live/dismissed/absent ladder as
+            -- the block above, for the BUTTON's own icon and hover rather than the pane.
+            if GetPetIcon() then
+                SetItemButtonTexture(PetStableCurrentPet, GetPetIcon())
+                PetStableCurrentPet.tooltip = UnitName("pet")
+                PetStableCurrentPet.tooltipSubtext =
+                    format(TEXT(UNIT_LEVEL_TEMPLATE), UnitLevel("pet")) .. " " .. UnitCreatureFamily("pet")
+            elseif GetStablePetInfo(0) then
+                icon, name, level, family, loyalty = GetStablePetInfo(0)
+                SetItemButtonTexture(PetStableCurrentPet, icon)
+                PetStableCurrentPet.tooltip = name
+                PetStableCurrentPet.tooltipSubtext =
+                    format(TEXT(UNIT_LEVEL_TEMPLATE), level) .. " " .. family
+            else
+                SetItemButtonTexture(PetStableCurrentPet, "")
+                PetStableCurrentPet.tooltip = EMPTY_STABLE_SLOT
+                PetStableCurrentPet.tooltipSubtext = ""
+                PetStableCurrentPet:SetChecked(nil)
+            end
+            if GameTooltip:IsOwned(PetStableCurrentPet) then
+                GameTooltip:SetOwner(PetStableCurrentPet, "ANCHOR_RIGHT")
+                GameTooltip:SetText(PetStableCurrentPet.tooltip)
+                GameTooltip:AddLine(PetStableCurrentPet.tooltipSubtext, "", 1.0, 1.0, 1.0)
+                GameTooltip:Show()
+            end
+
+            -- If no selected pet clear everything out (lua l.183-189). Reachable even after the
+            -- auto-selection above: a hunter with no pet and an empty stable has nothing to select.
+            if selectedPet == -1 then
+                -- no pet
+                PetStableModel:Hide()
+                PetStableLevelText:SetText("")
+                PetStableLoyaltyText:SetText("")
+            end
+
+            -- Enable, disable, or hide purchase button (lua l.191-208). Three states, and the first
+            -- is a HIDE of the whole row: with both slots bought there is nothing left to sell, so
+            -- the button, the "Cost:" label, its coins and the slot-purchase line all go. Below
+            -- that the button only enables when the player can afford it, and the coins turn red
+            -- when they cannot. The leading unconditional Show() is the reference's own and it is
+            -- what brings the button back after a NoPetsAllowed() pass hid it.
+            PetStablePurchaseButton:Show()
+            if GetNumStableSlots() == NUM_PET_STABLE_SLOTS then
+                PetStablePurchaseButton:Hide()
+                PetStableCostLabel:Hide()
+                PetStableCostMoneyFrame:Hide()
+                PetStableSlotText:Hide()
+            elseif GetMoney() >= GetNextStableSlotCost() then
+                PetStablePurchaseButton:Enable()
+                PetStableCostLabel:Show()
+                PetStableCostMoneyFrame:Show()
+                SetMoneyFrameColor("PetStableCostMoneyFrame",
+                    HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            else
+                PetStablePurchaseButton:Disable()
+                PetStableCostLabel:Show()
+                PetStableCostMoneyFrame:Show()
+                SetMoneyFrameColor("PetStableCostMoneyFrame",
+                    RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
+            end
+        end
+
+        -- lua l.211-229 — the warlock face of the window, called from BOTH the paperdoll event arm
+        -- and the top of Update. It is not "clear the window": it is the window with nothing on
+        -- offer — every slot unchecked and tooltipped as empty, the pane hidden, and the whole
+        -- purchase row gone, because a warlock cannot buy a stable slot either.
+        function PetStable_NoPetsAllowed()
+            local button
+            for i = 1, NUM_PET_STABLE_SLOTS do
+                button = getglobal("PetStableStabledPet" .. i)
+                button.tooltip = EMPTY_STABLE_SLOT
+                button:SetChecked(nil)
+            end
+
+            PetStableCurrentPet:SetChecked(nil)
+            PetStableLevelText:SetText("")
+            PetStableLoyaltyText:SetText("")
+            PetStableModel:Hide()
+            SetItemButtonTexture(PetStableCurrentPet, "")
+            PetStableCurrentPet.tooltip = EMPTY_STABLE_SLOT
+            PetStableCurrentPet:SetChecked(nil)
+            PetStablePurchaseButton:Hide()
+            PetStableCostLabel:Hide()
+            PetStableCostMoneyFrame:Hide()
+            PetStableSlotText:Hide()
+        end
+    ]]></Script>
+
+    <!--
+        One slot button (xml l.4-71): a 37x37 CheckButton wearing the standard quickslot ring, with
+        the empty-slot art behind it and the pet's icon in front. `$parentIconTexture` is the name
+        `SetItemButtonTexture` addresses (ItemButtonTemplate.xml's naming contract), and
+        `$parentBackground` is the one Update tints red for an unbought slot.
+
+        **`ClickStablePet` is wired to BOTH `OnClick` and `OnReceiveDrag`, and the frame repaints
+        only when it returns true.** That is the reference's own arrangement and it is transcribed
+        exactly, deliberately: the binding carries two jobs behind one name (commit a drag if one is
+        in flight, otherwise select) and its drag half is still being reverse-engineered
+        (`benilla-ui/src/script/stable.rs`'s `drag_verb`, INFERRED). Baking an assumption about
+        which it does into this XML would put the wrong answer in two places instead of one, so the
+        XML asks the same question the reference asks and repaints on the same answer.
+
+        `RegisterForDrag("LeftButton")` is what arms `OnDragStart` on a press-and-move; the pickup
+        it starts is FRAME-LOCAL, not the global cursor (there is no stable-pet cursor mode in
+        1.12 — stable.rs's module doc), so nothing else on screen can be holding a stable pet.
+    -->
+    <CheckButton name="PetStableSlotTemplate" virtual="true">
+        <Size><AbsDimension x="37" y="37"/></Size>
+        <Layers>
+            <Layer level="BORDER">
+                <Texture name="$parentIconTexture"/>
+            </Layer>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentBackground" file="Interface\Buttons\UI-EmptySlot">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="-13" y="13"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>this:RegisterForDrag("LeftButton")</OnLoad>
+            <OnEnter>
+                -- xml l.31-38. Guarded on `this.tooltip` because Update has not necessarily run
+                -- yet: a hover before the first repaint has nothing to say and says nothing.
+                if this.tooltip then
+                    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(this.tooltip)
+                    GameTooltip:AddLine(this.tooltipSubtext, "", 1.0, 1.0, 1.0)
+                    GameTooltip:Show()
+                end
+            </OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+            <OnClick>
+                if ClickStablePet(this:GetID()) then
+                    PetStable_Update()
+                end
+            </OnClick>
+            <OnDragStart>PickupStablePet(this:GetID())</OnDragStart>
+            <OnReceiveDrag>
+                if ClickStablePet(this:GetID()) then
+                    PetStable_Update()
+                end
+            </OnReceiveDrag>
+        </Scripts>
+        <NormalTexture name="$parentNormalTexture" file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="64" y="64"/></Size>
+            <Anchors>
+                <Anchor point="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+            </Anchors>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+    </CheckButton>
+
+    <Frame name="PetStableFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+        <!-- xml l.72-85: the standard 384x512 panel window. The HitRectInsets pull the mouse rect
+             in from the art's transparent right edge and bottom skirt. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Anchors>
+            <Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-104"/></Offset></Anchor>
+        </Anchors>
+        <HitRectInsets><AbsInset left="0" right="34" top="0" bottom="75"/></HitRectInsets>
+        <Layers>
+            <!-- The stable master's portrait, 60x60 TOPLEFT (7,-6) (xml l.88-99). Bound in Update
+                 via SetPortraitTexture(region, "npc") — the live model bake of whoever we are
+                 talking to, the same binding every NPC-session window here uses. -->
+            <Layer level="BACKGROUND">
+                <Texture name="PetStableFramePortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="BORDER">
+                <!-- The four quadrant slabs that ARE the window art (xml l.102-133): 256-wide left
+                     halves, 128-wide right halves, each 256 tall, pinned to their own corner. -->
+                <Texture file="Interface\PetStableFrame\UI-PetStable-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\PetStableFrame\UI-PetStable-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                </Texture>
+                <Texture name="PetStableFrameBottomLeft" file="Interface\PetStableFrame\UI-PetStable-BottomLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                </Texture>
+                <Texture name="PetStableFrameBottomRight" file="Interface\PetStableFrame\UI-PetStable-BottomRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                </Texture>
+                <!-- Title (xml l.134-142). -->
+                <FontString name="PetStableTitleLabel" inherits="GameFontHighlight" text="STABLES">
+                    <Anchors>
+                        <Anchor point="TOP"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <!-- The selected pet's name/level/family line and its loyalty line (xml l.143-160).
+                     The reference ships them carrying PLACEHOLDER text ("Bobby The Fleshripper
+                     (Level 99 Raptor)", "Loyalty: Mans Best Friend") — an authoring artifact that
+                     is on screen for the instant before the first Update, and one this engine would
+                     render literally (a `text=` that misses the global string table falls back to
+                     the literal). Dropped: the strings are Update's to write. -->
+                <FontString name="PetStableLevelText" inherits="GameFontNormal">
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="PetStableTitleLabel" relativePoint="BOTTOM">
+                            <Offset><AbsDimension x="0" y="-8"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="PetStableLoyaltyText" inherits="GameFontNormalSmall">
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="PetStableLevelText" relativePoint="BOTTOM">
+                            <Offset><AbsDimension x="0" y="-1"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </FontString>
+                <!-- "Do you wish to purchase another stable slot?" and the "Cost:" label
+                     (xml l.161-178) — both hidden by Update once both slots are bought. -->
+                <FontString name="PetStableSlotText" inherits="GameFontHighlightSmall" text="STABLE_SLOT_TEXT">
+                    <Anchors>
+                        <Anchor point="BOTTOM"><Offset><AbsDimension x="-10" y="132"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="PetStableCostLabel" inherits="GameFontNormal" text="COSTS_LABEL">
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="74" y="110"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The model pane (ref `<PlayerModel name="PetStableModel">`, xml l.182-280): 313x223
+                 at TOPLEFT (23,-76). A plain Frame sampling a booth bake, not a live 3D widget
+                 (header, deferral 1) — so the reference's `Model_OnLoad`, its
+                 `DISPLAY_SIZE_CHANGED`/`RefreshUnit` pair and its `Model_OnUpdate` all drop with
+                 the widget, exactly as they do on the two paper dolls.
+
+                 The pane keeps its reference NAME because the Lua passes it by name to
+                 `SetPetStablePaperdoll` at four sites, and an addon may too. -->
+            <Frame name="PetStableModel">
+                <Size><AbsDimension x="313" y="223"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="23" y="-76"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <!-- BACKGROUND, not ARTWORK — decision 1070, and PetPaperDollFrame.xml's own
+                         pane carries the same note. The booth quad stands in for a widget whose 3D
+                         content the reference renders outside the layer batches with a transparent
+                         background; ours is one OPAQUE texture inside them, and the draw layer is
+                         BUCKET-WIDE and outranks the frame (0884). At ARTWORK this quad would paint
+                         over the diet icon below it, which is exactly the bug that pane hit. At
+                         BACKGROUND the two tie and declaration order decides, which restores the
+                         reference's own ordering. -->
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentTexture">
+                            <Size><AbsDimension x="313" y="223"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- Rotate buttons (xml l.206-247): 35x35, the left one at the pane's own
+                         TOPLEFT and the right one chained off its TOPRIGHT. The click helpers are
+                         CharacterFrame.xml's shared `BenillaPaperDollModel_Rotate*` in place of the
+                         reference's `Model_RotateLeft/Right`, and they drive `frame.setFacing`,
+                         which the pane names for itself in OnLoad below. -->
+                    <Button name="PetStableModelRotateLeftButton">
+                        <Size><AbsDimension x="35" y="35"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                        </Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-RotationLeft-Button-Up"/>
+                        <PushedTexture file="Interface\Buttons\UI-RotationLeft-Button-Down"/>
+                        <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
+                        <Scripts>
+                            <OnLoad>this:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
+                            <OnClick>BenillaPaperDollModel_RotateLeft(getglobal("PetStableModel"))</OnClick>
+                        </Scripts>
+                    </Button>
+                    <Button name="PetStableModelRotateRightButton">
+                        <Size><AbsDimension x="35" y="35"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="PetStableModelRotateLeftButton" relativePoint="TOPRIGHT"/>
+                        </Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-RotationRight-Button-Up"/>
+                        <PushedTexture file="Interface\Buttons\UI-RotationRight-Button-Down"/>
+                        <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
+                        <Scripts>
+                            <OnLoad>this:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
+                            <OnClick>BenillaPaperDollModel_RotateRight(getglobal("PetStableModel"))</OnClick>
+                        </Scripts>
+                    </Button>
+                    <!-- The diet icon (xml l.248-278): 24x23 under the rotate buttons, its texcoords
+                         STATIC. This is the pet's DIET affordance (its tooltip lists what it eats),
+                         not a happiness readout — the happiness face that does move lives on the pet
+                         unit frame (decisions 1005/0990), and PetPaperDollFrame.xml's twin carries
+                         the same note.
+
+                         Kept as a CHILD of the pane, where the reference has it, and not lifted to a
+                         sibling the way the pet paper doll's was: Update hides the pane whenever
+                         there is no pet to show, and being a child is what makes the icon go with
+                         it. Declared after the pane's own quad, so at the shared BACKGROUND layer
+                         the link stamp draws it on top. -->
+                    <Frame name="PetStablePetInfo" enableMouse="true" hidden="false">
+                        <Size><AbsDimension x="24" y="23"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="PetStableModelRotateLeftButton" relativePoint="BOTTOMLEFT">
+                                <Offset><AbsDimension x="7" y="0"/></Offset>
+                            </Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture file="Interface\PetPaperDollFrame\UI-PetHappiness" setAllPoints="true">
+                                    <Size><AbsDimension x="24" y="23"/></Size>
+                                    <TexCoords left="0" right="0.1875" top="0" bottom="0.359375"/>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEnter>
+                                GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                                GameTooltip:SetText(this.tooltip)
+                            </OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                    </Frame>
+                </Frames>
+                <Scripts>
+                    <!-- The pane's booth + its yaw. `BenillaPaperDollModel_OnLoad` seeds the
+                         reference's own 0.61 default facing and pushes it through `setFacing`; the
+                         OnUpdate is the shared held-button continuous spin. The booth token is
+                         "stable" and the yaw goes through this file's named forwarder onto
+                         `BenillaStableModel_SetFacing`. -->
+                    <OnLoad>
+                        this.setFacing = BenillaPetStableModel_SetFacing
+                        BenillaPaperDollModel_OnLoad(this)
+                        BenillaSetBoothTexture(getglobal(this:GetName() .. "Texture"), "stable")
+                    </OnLoad>
+                    <OnUpdate>BenillaPaperDollModel_OnUpdate(this, arg1)</OnUpdate>
+                </Scripts>
+            </Frame>
+
+            <!-- The three slots (xml l.281-333). `id=` is what `this:GetID()` reads in the
+                 template's handlers, and it IS the binding's slot index: 0 is the pet at your side,
+                 1 and 2 the bought stable slots. The two labels are extra regions on the instances,
+                 anchored above their buttons; note the reference hangs "Stabled Pets:" off slot 1
+                 offset +24 so it centres over the PAIR. -->
+            <CheckButton name="PetStableCurrentPet" inherits="PetStableSlotTemplate" id="0">
+                <Anchors>
+                    <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="95" y="150"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString inherits="GameFontNormalSmall" text="CURRENT_PET">
+                            <Anchors>
+                                <Anchor point="BOTTOM" relativePoint="TOP">
+                                    <Offset><AbsDimension x="0" y="6"/></Offset>
+                                </Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </CheckButton>
+            <CheckButton name="PetStableStabledPet1" inherits="PetStableSlotTemplate" id="1">
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="PetStableCurrentPet" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="53" y="0"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString inherits="GameFontNormalSmall" text="STABLED_PETS">
+                            <Anchors>
+                                <Anchor point="BOTTOM" relativePoint="TOP">
+                                    <Offset><AbsDimension x="24" y="6"/></Offset>
+                                </Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </CheckButton>
+            <CheckButton name="PetStableStabledPet2" inherits="PetStableSlotTemplate" id="2">
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="PetStableStabledPet1" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="15" y="0"/></Offset>
+                    </Anchor>
+                </Anchors>
+            </CheckButton>
+
+            <!-- Buy the next stable slot (xml l.334-350). The server prices it and picks which slot
+                 it is; Update decides whether this button is even on screen. -->
+            <Button name="PetStablePurchaseButton" inherits="UIPanelButtonTemplate" text="PURCHASE">
+                <Size><AbsDimension x="80" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-110" y="105"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>BuyStableSlot()</OnClick>
+                </Scripts>
+            </Button>
+            <!-- The player's purse (xml l.351-364). NO <Scripts> here: benilla's
+                 SmallMoneyFrameTemplate already wires SmallMoneyFrame_OnLoad as its own OnLoad
+                 where the reference's template does not, and an instance block would SetScript OVER
+                 it rather than add to it (header, deferral 5). Type PLAYER by default, which is
+                 what a purse wants. -->
+            <Frame name="PetStableMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-45" y="84"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <!-- The next slot's price (xml l.365-379): a STATIC frame, so it shows whatever
+                 MoneyFrame_Update last parked on it rather than tracking the purse. This one DOES
+                 declare an OnLoad, and therefore has to re-call the template's loader beside
+                 MoneyFrame_SetType (the AuctionFrame.xml/MailFrame.xml idiom). -->
+            <Frame name="PetStableCostMoneyFrame" inherits="SmallMoneyFrameTemplate">
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="PetStableCostLabel" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="5" y="0"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>SmallMoneyFrame_OnLoad() MoneyFrame_SetType("STATIC")</OnLoad>
+                </Scripts>
+            </Frame>
+            <!-- xml l.380-388. UIPanelCloseButton's own OnClick is HideUIPanel(this:GetParent()),
+                 and this window's OnHide is what ends the session — so the X needs no handler. -->
+            <Button name="PetStableFrameCloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor>
+                </Anchors>
+            </Button>
+        </Frames>
+        <!-- xml l.390-404. The NPC-session lifecycle: OnHide fires ClosePetStables() so the session
+             ends whenever this window hides for ANY reason (ESC, the X, PET_STABLE_CLOSED, or
+             another left-slot window displacing it). Unlike its neighbours that close is purely
+             client-side — no packet exists for it in 5875. -->
+        <Scripts>
+            <OnLoad>PetStable_OnLoad()</OnLoad>
+            <OnShow>PlaySound("igCharacterInfoOpen")</OnShow>
+            <OnHide>ClosePetStables() PlaySound("igCharacterInfoClose")</OnHide>
+            <OnEvent>PetStable_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

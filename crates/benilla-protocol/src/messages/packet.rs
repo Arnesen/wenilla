@@ -8,15 +8,17 @@ use super::{
     ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
     AuctionOwnerNotification, CastOutcome, ChannelNotify, Character, ChatMessage, CorpseLocation,
     DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate,
-    GameObjectQueryInfo, GossipOption, GossipPoi, GroupLootInfo, GroupMemberEntry,
+    GameObjectQueryInfo, GmTicket, GossipOption, GossipPoi, GroupLootInfo, GroupMemberEntry,
     GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
     LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
-    MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, PvpCredit,
-    QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems,
-    QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown,
-    SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask,
-    TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    MoveMode, Object, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
+    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
+    PetitionSignResults, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
+    QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind,
+    SpellChainTargets, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog,
+    SpellLogMiss, SpellStart, StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
+    TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -61,6 +63,14 @@ pub struct CreatureQueryInfo {
     pub civilian: bool,
     /// The racial-leader flag (the tooltip's white LEADER line; `0x6125c0` on the record's `+0x31`).
     pub racial_leader: bool,
+    /// `CreatureDisplayInfo.dbc` id (`creature_template.display_id[0]`, vmangos
+    /// `QueryHandler.cpp:179`); `0` when the template has none. The one field that lets the client
+    /// draw a creature it has **never seen in the world** — a stabled pet, whose wire record names
+    /// only a `creature_template` entry and has no world object to read a display id from
+    /// (decision 1676). vmangos randomizes among a template's four display ids when it *spawns* a
+    /// creature, so this is the template's first entry, not necessarily what a given live unit
+    /// shows: for anything actually on screen, the unit's own `UNIT_FIELD_DISPLAYID` still wins.
+    pub display_id: u32,
 }
 
 /// A decoded server packet (only the opcodes benilla handles; everything else is [`Self::Other`]).
@@ -70,6 +80,9 @@ pub enum ServerPacket {
     },
     AuthResponse {
         result: u8,
+        /// Our place in the login queue, when `result` is [`super::AUTH_WAIT_QUEUE`] — `None` for
+        /// every other result, and also for a queue packet whose body was too short to carry one.
+        queue_position: Option<u32>,
     },
     CharEnum {
         characters: Vec<Character>,
@@ -207,6 +220,39 @@ pub enum ServerPacket {
         position: Vector3d,
         map: u32,
         area: u32,
+    },
+    /// `SMSG_GMTICKET_GETTICKET` — the player's open GM ticket, or `None` for the ordinary
+    /// "you have no ticket" answer (decision 1673). **Not always solicited**: vmangos pushes a
+    /// fresh one at the ticket's author when a GM views, escalates or completes it
+    /// (`GMTicketMgr.cpp:153-159`), which is how a reply reaches the player at all in 1.12.
+    GmTicketAnswer {
+        ticket: Option<Box<GmTicket>>,
+    },
+    /// `SMSG_GMTICKET_CREATE` — the answer to filing a ticket: 2 = created, 3 = refused,
+    /// 1 = you already have one (decision 1673). vmangos never sends 1 (an existing ticket just
+    /// yields 3), and answers several refusals with **silence** rather than a code at all.
+    GmTicketCreated {
+        response: u32,
+    },
+    /// `SMSG_GMTICKET_UPDATETEXT` — the answer to editing a ticket: 4 = saved, 5 = refused.
+    GmTicketUpdated {
+        response: u32,
+    },
+    /// `SMSG_GMTICKET_DELETETICKET` — the answer to abandoning a ticket: 9 = deleted.
+    /// Also arrives **unsolicited** when a GM runs `.ticket delete` (`TicketCommands.cpp:100-103`).
+    GmTicketDeleted {
+        response: u32,
+    },
+    /// `SMSG_GMTICKETSYSTEMSTATUS` — 1 = the petition queue is taking tickets, 0 = it is not.
+    /// Answers `CMSG_GMTICKET_SYSTEMSTATUS`; cmangos also broadcasts it to every session when a
+    /// GM toggles the queue, vmangos never does.
+    GmTicketSystemStatus {
+        status: i32,
+    },
+    /// `SMSG_GM_TICKET_STATUS_UPDATE` — a GM touched the ticket: 1 = updated, 2 = closed,
+    /// 3 = a survey is offered. Never sent by vmangos; the core of cmangos's notification model.
+    GmTicketStatusUpdate {
+        status: u32,
     },
     /// `SMSG_BINDER_CONFIRM` — an innkeeper is *asking* whether to make this your home
     /// (decision 1331). The body is the innkeeper's guid, which must come back in
@@ -796,6 +842,34 @@ pub enum ServerPacket {
         spell_id: u32,
         error: u32,
     },
+    /// `MSG_LIST_STABLED_PETS` — the stable master's pet list (layout in
+    /// [`super::stable::read_list_stabled_pets`], decision 1676). Arrives **unprompted** when the
+    /// gossip stable option is chosen — that is how the window opens — and again in answer to our
+    /// own send of the same opcode, which is the only refresh there is (a successful mutation
+    /// answers with nothing but a [`Self::StableResult`] byte).
+    ///
+    /// `num_stable_slots` is how many stable slots the player has *bought* (0..=2), not how many
+    /// are occupied. `pets` carries the current pet **and** the stabled ones, each keyed by its own
+    /// already-rebased [`StabledPet::slot`] (`0` = current) — the current-pet row is absent for a
+    /// petless hunter or a warlock, so the list must be read by slot, never by position.
+    ListStabledPets {
+        npc: u64,
+        num_stable_slots: u8,
+        pets: Vec<StabledPet>,
+    },
+    /// `SMSG_INVALIDATE_PLAYER` — drop this guid from the player-name cache (decision 1689). The
+    /// cache ages nothing out, so this packet is the only thing that unsticks a name short of a
+    /// reconnect; it matters more to benilla than to the reference only because ours now persists.
+    InvalidatePlayer {
+        guid: u64,
+    },
+    /// `SMSG_STABLE_RESULT` — the whole answer to a stable/unstable/swap/buy-slot ask (vmangos
+    /// `StableResult::AppendBodyTo`). `result` is a [`super::stable::stable_result`] code; success
+    /// codes carry no updated list, so repainting the window takes a fresh
+    /// `MSG_LIST_STABLED_PETS` send.
+    StableResult {
+        result: u8,
+    },
     /// `SMSG_LOOT_RESPONSE`, normal shape — a loot window opened, answering `CMSG_LOOT` (layout in
     /// [`super::loot::read_loot_response`]). `loot_type` is a [`super::loot::loot_type`] code; `items` includes
     /// any quest-item rows riding the same list.
@@ -838,6 +912,12 @@ pub enum ServerPacket {
     /// `SMSG_LOOT_ALL_PASSED` — everyone passed; the roll closes and the item returns to the
     /// corpse for ordinary looting (layout in [`LootAllPassed`]).
     LootAllPassed(LootAllPassed),
+    /// `SMSG_LOOT_MASTER_LIST` — the group members eligible to be handed an item from the loot
+    /// window that is opening (layout in [`super::loot::read_loot_master_list`]). It precedes the
+    /// `SMSG_LOOT_RESPONSE` it belongs to.
+    LootMasterList {
+        candidates: Vec<u64>,
+    },
     /// `SMSG_ITEM_PUSH_RESULT` — an item landed in our bags (looted or received from an NPC);
     /// drives the "You receive loot: …" chat line (layout in [`ItemPushResult`]).
     ItemPushResult(ItemPushResult),
@@ -1063,6 +1143,31 @@ pub enum ServerPacket {
     /// `SMSG_GUILD_INFO` — the "founded on / N members / N accounts" summary; a separate ask from
     /// the roster, with no overlapping fields.
     GuildInfo(GuildInfo),
+    /// `SMSG_PETITION_SHOWLIST` — a guild registrar's charter list. In 1.12 always one row, and
+    /// the packet that opens the registrar window.
+    PetitionShowList(PetitionShowList),
+    /// `SMSG_PETITION_SHOW_SIGNATURES` — who has signed a charter. Answers **two** different asks
+    /// (our own show-signatures, and someone else's offer aimed at us); only `owner` tells them
+    /// apart.
+    PetitionShowSignatures(PetitionShowSignatures),
+    /// `SMSG_PETITION_SIGN_RESULTS` — the verdict on one signature. Sent to *both* parties on
+    /// success, and both copies name the signer.
+    PetitionSignResults(PetitionSignResults),
+    /// `SMSG_PETITION_QUERY_RESPONSE` — a petition's record: the proposed guild name and the
+    /// signature requirement, neither of which is on any other packet.
+    PetitionQueryResponse(PetitionQueryResponse),
+    /// `SMSG_TURN_IN_PETITION_RESULTS` — a bare result code. A name collision produces no packet
+    /// at all, so silence is a real outcome.
+    TurnInPetitionResults {
+        result: u32,
+    },
+    /// `MSG_PETITION_DECLINE` inbound — the guid of the player who declined our charter. Sent only
+    /// to the charter's owner.
+    PetitionDeclined {
+        player: u64,
+    },
+    /// `MSG_PETITION_RENAME` inbound — the server's echo of a rename that took. Only on success.
+    PetitionRenamed(PetitionRename),
     /// A `SMSG_SPLINE_SET_*_SPEED` — a speed change on a unit we don't control (a creature, or a
     /// player mid-spline): `[packed guid][f32 speed]`, no counter, no ack (decision 0441 — how an
     /// observed unit's mounted speed reaches us).
@@ -1273,6 +1378,12 @@ impl ServerPacket {
             ServerPacket::TimeSpeed { .. } => "SMSG_LOGIN_SETTIMESPEED".into(),
             ServerPacket::QueryTimeResponse { .. } => "SMSG_QUERY_TIME_RESPONSE".into(),
             ServerPacket::BindPoint { .. } => "SMSG_BINDPOINTUPDATE".into(),
+            ServerPacket::GmTicketAnswer { .. } => "SMSG_GMTICKET_GETTICKET".into(),
+            ServerPacket::GmTicketCreated { .. } => "SMSG_GMTICKET_CREATE".into(),
+            ServerPacket::GmTicketUpdated { .. } => "SMSG_GMTICKET_UPDATETEXT".into(),
+            ServerPacket::GmTicketDeleted { .. } => "SMSG_GMTICKET_DELETETICKET".into(),
+            ServerPacket::GmTicketSystemStatus { .. } => "SMSG_GMTICKETSYSTEMSTATUS".into(),
+            ServerPacket::GmTicketStatusUpdate { .. } => "SMSG_GM_TICKET_STATUS_UPDATE".into(),
             ServerPacket::BinderConfirm { .. } => "SMSG_BINDER_CONFIRM".into(),
             ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
             ServerPacket::TalentWipeConfirm { .. } => "MSG_TALENT_WIPE_CONFIRM".into(),
@@ -1374,6 +1485,9 @@ impl ServerPacket {
             ServerPacket::TrainerList { .. } => "SMSG_TRAINER_LIST".into(),
             ServerPacket::TrainerBuySucceeded { .. } => "SMSG_TRAINER_BUY_SUCCEEDED".into(),
             ServerPacket::TrainerBuyFailed { .. } => "SMSG_TRAINER_BUY_FAILED".into(),
+            ServerPacket::ListStabledPets { .. } => "MSG_LIST_STABLED_PETS".into(),
+            ServerPacket::StableResult { .. } => "SMSG_STABLE_RESULT".into(),
+            ServerPacket::InvalidatePlayer { .. } => "SMSG_INVALIDATE_PLAYER".into(),
             ServerPacket::LootResponse { .. } => "SMSG_LOOT_RESPONSE".into(),
             ServerPacket::LootError { .. } => "SMSG_LOOT_RESPONSE (error)".into(),
             ServerPacket::LootReleaseResponse { .. } => "SMSG_LOOT_RELEASE_RESPONSE".into(),
@@ -1384,6 +1498,7 @@ impl ServerPacket {
             ServerPacket::LootRoll(_) => "SMSG_LOOT_ROLL".into(),
             ServerPacket::LootRollWon(_) => "SMSG_LOOT_ROLL_WON".into(),
             ServerPacket::LootAllPassed(_) => "SMSG_LOOT_ALL_PASSED".into(),
+            ServerPacket::LootMasterList { .. } => "SMSG_LOOT_MASTER_LIST".into(),
             ServerPacket::ItemPushResult(_) => "SMSG_ITEM_PUSH_RESULT".into(),
             ServerPacket::CorpseQuery(_) => "MSG_CORPSE_QUERY".into(),
             ServerPacket::CorpseReclaimDelay { .. } => "SMSG_CORPSE_RECLAIM_DELAY".into(),
@@ -1448,6 +1563,13 @@ impl ServerPacket {
             ServerPacket::GuildInvite { .. } => "SMSG_GUILD_INVITE".into(),
             ServerPacket::GuildDecline { .. } => "SMSG_GUILD_DECLINE".into(),
             ServerPacket::GuildInfo(..) => "SMSG_GUILD_INFO".into(),
+            ServerPacket::PetitionShowList(..) => "SMSG_PETITION_SHOWLIST".into(),
+            ServerPacket::PetitionShowSignatures(..) => "SMSG_PETITION_SHOW_SIGNATURES".into(),
+            ServerPacket::PetitionSignResults(..) => "SMSG_PETITION_SIGN_RESULTS".into(),
+            ServerPacket::PetitionQueryResponse(..) => "SMSG_PETITION_QUERY_RESPONSE".into(),
+            ServerPacket::TurnInPetitionResults { .. } => "SMSG_TURN_IN_PETITION_RESULTS".into(),
+            ServerPacket::PetitionDeclined { .. } => "MSG_PETITION_DECLINE".into(),
+            ServerPacket::PetitionRenamed(..) => "MSG_PETITION_RENAME".into(),
             ServerPacket::SplineSpeedChange { kind, .. } => {
                 format!("SMSG_SPLINE_SET_{kind:?}_SPEED")
             }

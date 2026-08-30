@@ -88,9 +88,11 @@ mod probe_binder;
 mod probe_book;
 mod probe_castcancel;
 mod probe_charcreate;
+mod probe_charter;
 mod probe_chest;
 mod probe_clam;
 mod probe_crossing;
+mod probe_gm_ticket;
 mod probe_guard_poi;
 mod probe_mail;
 mod probe_melee;
@@ -111,9 +113,11 @@ pub(crate) use probe_binder::ProbeBinderPlugin;
 pub(crate) use probe_book::ProbeBookPlugin;
 pub(crate) use probe_castcancel::ProbeCastCancelPlugin;
 pub(crate) use probe_charcreate::ProbeCharCreatePlugin;
+pub(crate) use probe_charter::ProbeCharterPlugin;
 pub(crate) use probe_chest::ProbeChestPlugin;
 pub(crate) use probe_clam::ProbeClamPlugin;
 pub(crate) use probe_crossing::ProbeCrossingPlugin;
+pub(crate) use probe_gm_ticket::ProbeGmTicketPlugin;
 pub(crate) use probe_guard_poi::ProbeGuardPoiPlugin;
 pub(crate) use probe_mail::ProbeMailPlugin;
 pub(crate) use probe_melee::ProbeMeleePlugin;
@@ -122,10 +126,10 @@ pub(crate) use probe_rig::ProbeRigPlugin;
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, DressCensusPlugin, EntityCensusPlugin, GroundCensusPlugin,
-    JitterMeterPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
-    ProbeClock, ProbeDragPlugin, ProbeExitPlugin, ProbeFocusPlugin, ProbeHoverPlugin,
-    ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin, RevealAuditPlugin, SchedCensusPlugin,
-    UnitVisualsPlugin,
+    JitterMeterPlugin, LiftCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin,
+    ProbeChatPlugin, ProbeClock, ProbeDragPlugin, ProbeExitPlugin, ProbeFocusPlugin,
+    ProbeHoverPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin, RevealAuditPlugin,
+    SchedCensusPlugin, StallPlugin, TrailCensusPlugin, UnitVisualsPlugin,
 };
 use scenarios::GlueScreen;
 use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};

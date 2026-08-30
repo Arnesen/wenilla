@@ -21,21 +21,23 @@
 //!   Loot *rights* never gray — they gate whether the loot cursor shows at all; the mid-loot state
 //!   block and the open-loot-window able-override are not modeled.
 //!
-//! *Interim*: the reference's interactability predicate (`CGUnit::CanInteract 0x606880`) isn't
-//! fully derived; we approximate it as "has service flags and isn't attack-worthy (reaction ≥
-//! neutral)". Attackability approximates the PvP/attack matrix as "reaction rank ≤ neutral" —
-//! the same approximation the ring's player branch documents. (The questgiver bit's own
-//! quest-status gate, `0x5df490`, and the auto-loot Pickup/LootAll split, `0x41f8f0`, both used
-//! to be listed here as unmodelled; both are modelled now — [`questgiver_has_quest`],
+//! **Both branch predicates are the reference's own, not thresholds** (decision 1674): the
+//! service/loot split is `CanInteract 0x6067f0` (`0x482310`, via the `CanInteractNow 0x606880`
+//! wrapper) and the sword is `CanAttack 0x606980` (`0x48269a`) — [`super::can_interact`] /
+//! [`super::can_attack`], both byte-verified complete. That matters because each reads
+//! `UnitReaction` in the **player → unit** direction, which answers a reputation-slot faction with
+//! the **at-war bit** and never the standing. The reaction-rank approximation these legs used to
+//! carry read the *other* direction, and drew the sword over every not-at-war neutral faction —
+//! a Cenarion Circle druid, a Booty Bay goblin, an Argent Dawn quartermaster. (The questgiver
+//! bit's own quest-status gate, `0x5df490`, and the auto-loot Pickup/LootAll split, `0x41f8f0`,
+//! both used to be listed here as unmodelled; both are modelled now — [`questgiver_has_quest`],
 //! [`loot_cursor`].)
 
 use bevy::prelude::*;
 
-use benilla_protocol::EntityKind;
+use crate::net::{ObjectStore, Reputations, SelfPlayer};
 
-use crate::net::{NetEntity, ObjectStore, Reputations, SelfPlayer};
-
-use super::ring::{ring_reaction, Factions};
+use super::ring::Factions;
 use super::{go_is_nearest, Hovered, HoveredObject};
 
 /// The blp-name set of world cursor modes benilla can currently trigger (named off the client's own
@@ -144,9 +146,12 @@ impl WorldCursor {
 
 /// Vanilla `UNIT_NPC_FLAGS` bits (vmangos `UnitDefines.h`, 1.12 values — later expansions differ).
 /// REPAIR (0x4000) exists but the classifier never consults it (falls `je 0x4826cb`).
-/// `pub(super)` so the right-click dispatch ([`super::click`]) reuses BANKER to split the shared
-/// Buy cursor kind (banker vs auctioneer) without a duplicate table (decision 0604).
-pub(super) mod npc_flags {
+/// `pub(crate)` so the right-click dispatch ([`super::click`]) reuses BANKER to split the shared
+/// Buy cursor kind (banker vs auctioneer) without a duplicate table (decision 0604), and so a live
+/// probe scans for a service NPC by the same bits the cursor classifies with instead of keeping a
+/// private copy ([`crate::capture::ProbeCharterPlugin`] and PETITIONER) — a duplicated flag table
+/// is how B249's icon map went stale.
+pub(crate) mod npc_flags {
     pub const GOSSIP: u32 = 0x1;
     pub const QUESTGIVER: u32 = 0x2;
     pub const VENDOR: u32 = 0x4;
@@ -706,7 +711,6 @@ pub(super) fn classify_cursor(
     units: Query<(
         &Transform,
         Option<&ObjectStore>,
-        Option<&NetEntity>,
         Option<&crate::go_anim::GoAnim>,
     )>,
     self_q: Query<(&Transform, &ObjectStore), With<SelfPlayer>>,
@@ -735,7 +739,7 @@ pub(super) fn classify_cursor(
     // grayed twin is still the interim distance gate (decision 0243); the client's fuller `usable`
     // (lock satisfaction, player-state) is later.
     let resolve_go = || {
-        let (go_tf, store, _, anim) = units.get(hovered_object.target?).ok()?;
+        let (go_tf, store, anim) = units.get(hovered_object.target?).ok()?;
         let store = store?;
         let (self_tf, self_store) = self_q.single().ok()?;
         let reaction = go_reaction(
@@ -794,7 +798,7 @@ pub(super) fn classify_cursor(
     // The reference makes one pick over all CGObjects and switches on type; benilla picks unit and
     // GameObject separately, then classifies whichever is nearer under the cursor.
     let resolve_unit = || {
-        let (unit_tf, store, net, _) = units.get(hovered.target?).ok()?;
+        let (unit_tf, store, _) = units.get(hovered.target?).ok()?;
         let store = store?;
         let (self_tf, self_store) = self_q.single().ok()?;
         let dist_sq = unit_tf.translation.distance_squared(self_tf.translation);
@@ -825,28 +829,35 @@ pub(super) fn classify_cursor(
             return None; // a plain corpse: Point
         }
 
-        // Reaction rank (0..=7) toward us — the ring's own resolver (reputation first, then the
-        // faction-template comparator).
-        let rank = ring_reaction(
+        // `CanInteract 0x6067f0` — the classifier's own gate (`0x482310`, through the
+        // `CanInteractNow 0x606880` wrapper), and it is not a reaction threshold: service bits
+        // plus BOTH reaction directions >= neutral, the player->unit one answered by the AT-WAR
+        // bit. TRUE goes to the ladder, FALSE to the loot/skin/attack block.
+        if super::can_interact(
+            Some(store),
             factions.as_deref(),
             &reputations,
-            Some(store),
             Some(self_store),
-        );
-        let is_player = net.is_some_and(|n| n.kind == EntityKind::Player);
-        // Interactable NPC (interim CanInteract): a consulted service bit + not attack-worthy.
-        // A repair-only unit yields None here and falls through, exactly like the binary.
-        if !is_player && rank >= 3 {
+        ) {
             let status = hovered.guid.and_then(|g| quest.status(g));
-            if let Some(kind) = service_cursor(store.0.unit_npc_flags(), status) {
-                return Some((kind, dist_sq > SERVICE_RANGE_SQ));
-            }
+            // A unit that reaches the ladder and matches no consulted bit — repair-only, or a
+            // QUESTGIVER with nothing on offer — falls `je 0x4826cb` straight to the cursor
+            // CLEAR. It never reaches the attack leg, so it reads Point, not the sword.
+            return service_cursor(store.0.unit_npc_flags(), status)
+                .map(|kind| (kind, dist_sq > SERVICE_RANGE_SQ));
         }
-        // Attackable (interim matrix): hostile/unfriendly/neutral NPC, or a hostile player.
-        if (!is_player && rank <= 3) || (is_player && rank <= 1) {
+        // `CanAttack 0x606980` (`0x48269a`) + the fixed 10.45 yd gray. The predicate is shared
+        // with TAB, the combat flash and `UnitCanAttack`, so the sword can never disagree with
+        // what a click or a spell will actually be allowed to do.
+        if super::can_attack(
+            Some(store),
+            factions.as_deref(),
+            &reputations,
+            Some(self_store),
+        ) {
             return Some((CursorKind::Attack, dist_sq > ATTACK_RANGE_SQ));
         }
-        None // friendly non-service unit / friendly player: Point
+        None // nothing matched → the reference's `0x4826cb` cursor-clear: Point
     };
     let resolved = if go_is_nearest(&hovered, &hovered_object) {
         resolve_go()
@@ -1397,6 +1408,37 @@ mod tests {
         assert_eq!(service_cursor(0x4000, None), None);
         assert_eq!(service_cursor(0, None), None);
     }
+
+    /// **A unit that reaches the ladder and matches nothing falls to the cursor CLEAR, never to
+    /// the sword** (`je 0x4826cb`, past the attack leg's `0x48269a`). This is the second half of
+    /// 1674: the ladder's fall-out used to drop into benilla's attack leg, so a repair-only NPC —
+    /// or a QUESTGIVER with nothing on offer — read as attackable purely because its reaction was
+    /// neutral. `service_cursor` returning `None` inside the interactable branch must mean Point.
+    #[test]
+    fn the_ladder_falls_out_to_point_not_to_the_sword() {
+        use npc_flags::*;
+        // Both shapes that reach the ladder and match no consulted bit.
+        assert_eq!(service_cursor(REPAIR_ONLY, None), None);
+        assert_eq!(service_cursor(QUESTGIVER, Some(dialog_status::NONE)), None);
+        // The classifier's own expression for that branch: `Option::map` over the ladder, so a
+        // `None` returns `None` from `resolve_unit` and the caller's `unwrap_or` lands on Point.
+        // (Written as the identity it is, so a future edit that adds an `else` fall-through to the
+        // attack leg has to delete this test to compile a different shape.)
+        let unable = 20.0 > SERVICE_RANGE_SQ;
+        assert_eq!(
+            service_cursor(REPAIR_ONLY, None).map(|kind| (kind, unable)),
+            None,
+            "repair-only reads Point, not UnableAttack"
+        );
+        assert_eq!(
+            service_cursor(GOSSIP, None).map(|kind| (kind, unable)),
+            Some((CursorKind::Speak, false)),
+            "…while a bit that IS consulted still reaches its cursor"
+        );
+    }
+
+    /// `UNIT_NPC_FLAGS` REPAIR — the one service bit the ladder never tests.
+    const REPAIR_ONLY: u32 = 0x4000;
 
     /// The QUESTGIVER leg's `0x5df490` gate: the bit alone never makes a unit talkable. This is the
     /// "client invents 'Greetings NAME'" bug at its root — a questgiver-flagged NPC with nothing to

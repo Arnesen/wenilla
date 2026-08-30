@@ -569,7 +569,9 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     // The quality→colour table (BENILLA_LOOT_QUALITY_COLORS) ships in LootFrame.xml; at runtime
-    // every FrameXML file loads before any hover fires, so load it here too.
+    // every FrameXML file loads before any hover fires, so load it here too — with the dropdown
+    // kit its GroupLootDropDown initializes against at load (benilla.toc l.64 vs 383).
+    load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
     load_xml(&s, "MerchantFrame.xml");
 

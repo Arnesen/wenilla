@@ -1,0 +1,389 @@
+<Ui>
+    <!--
+        benilla's guild-charter window (decision 1672) — the sheet of parchment nine people have to
+        sign before a guild exists. It opens on a charter: yours, clicked in your bags, or somebody
+        else's, offered to you.
+
+        The geometry and art are the real `PetitionFrame.xml`'s (extracted at
+        `WoW/_extracted_framexml/PetitionFrame.{xml,lua}`; `ref l.N` cites are into those). Every
+        global, frame name, event, texture, string and number is the reference's — the contract
+        addons bind to. What is ours is the expression: `PetitionFrame_Update` is four small painters
+        over a loop instead of one function, the event ladder is a named function, and the nine name
+        rows are built by a loop rather than nine near-identical FontString blocks.
+
+        ONE WINDOW, TWO FACES, decided by a single value (ref PetitionFrame.lua:10-21):
+
+          isOriginator  → the LEADER's view: "Request Signature" + "Rename Guild", and the
+                          leader instructions.
+          not           → the SIGNER's view: "Sign Charter", and the member instructions.
+
+        The two buttons occupy the SAME anchor (ref l.304-336, both BOTTOMLEFT +22,+72) — they are
+        never both visible, which is why Show/Hide rather than Enable/Disable does the switching.
+
+        WHAT THE WINDOW OPENS WITHOUT, AND WHY IT REPAINTS. `SMSG_PETITION_SHOW_SIGNATURES` carries
+        an item guid, an owner guid, a petition id and a list of signer guids — no text at all. The
+        guild's proposed name comes from a separate petition-record query and the names from the
+        name cache, so the first paint is deliberately partial: the title reads empty and unresolved
+        signers read blank until their lookups land, at which point the engine re-fires
+        PETITION_SHOW and this file repaints. `ShowUIPanel` early-returns on an already-visible
+        frame and the open sound rides OnShow, so a repaint costs one `PetitionFrame_Update`.
+        (`ui_petition`'s module doc has the mechanism and flags what is INFERRED in it.)
+
+        THE TWO SIGNATURE NUMBERS ARE DIFFERENT NUMBERS, and this file uses both — that is the
+        reference's own doing, not a wrinkle we added. `MAX_PETITION_SIGNATURES` (9) sizes the name
+        ROWS; `maxSignatures`, from GetPetitionInfo, is what the wire says this charter REQUIRES and
+        is what disables Request Signature (ref l.30-40). They agree at 9 on a stock server and need
+        not on one that lowers its signature requirement.
+
+        UIPanel slot system (decision 0084 §2): no hardcoded <Anchors> — ShowUIPanel seats it in the
+        left slot from `UIPanelWindows["PetitionFrame"]` (UiPanels.xml), the reference's own
+        registration (`UIParent.lua:34`, area="left", pushable=0).
+    -->
+
+    <Script><![CDATA[
+        -- ── The charter's strings (GlobalStrings.lua, verbatim) ────────────────────────────────
+        -- The standalone-load copy of every key this file's `text=` attributes and Lua name; see
+        -- GuildRegistrarFrame.xml's twin block for why it is `X = X or "…"` and never a bare `=`.
+        GUILD_NAME = GUILD_NAME or "Guild Name"                                   -- l.2090
+        GUILD_RANK0_DESC = GUILD_RANK0_DESC or "Guild Master"                     -- l.2102
+        MEMBERS = MEMBERS or "Members"                                            -- l.2683
+        NOT_YET_SIGNED = NOT_YET_SIGNED or "<not yet signed>"                     -- l.2807
+        GUILD_CHARTER_TEMPLATE = GUILD_CHARTER_TEMPLATE or "%s Guild Charter"     -- l.2060
+        SIGN_CHARTER = SIGN_CHARTER or "Sign Charter"                             -- l.3464
+        REQUEST_SIGNATURE = REQUEST_SIGNATURE or "Request Signature"              -- l.3337
+        RENAME_GUILD = RENAME_GUILD or "Rename Guild"                             -- l.3318
+        RENAME_GUILD_LABEL = RENAME_GUILD_LABEL or "Enter new guild name:"        -- l.3319
+        GUILD_PETITION_LEADER_INSTRUCTIONS = GUILD_PETITION_LEADER_INSTRUCTIONS or "Select a player you wish to invite and click <request signature>.   To create this guild, turn it in to the guild registrar when you have filled the charter." -- l.2099
+        GUILD_PETITION_MEMBER_INSTRUCTIONS = GUILD_PETITION_MEMBER_INSTRUCTIONS or "Click the <Sign Charter> button to become a charter member of this guild." -- l.2100
+        ACCEPT = ACCEPT or "Accept"                                               -- l.11
+        CANCEL = CANCEL or "Cancel"                                               -- l.465
+        CLOSE = CLOSE or "Close"                                                  -- l.760
+
+        -- The nine name ROWS (ref PetitionFrame.lua:1). Not the signature requirement — that comes
+        -- off the wire per charter; see the file header.
+        MAX_PETITION_SIGNATURES = 9
+
+        -- The rename dialog (ref StaticPopup.lua:133-160). Registered here rather than in
+        -- UiPanels.xml for the same reason the guild dialogs live in FriendsFrame.xml: a popup
+        -- belongs to the window that raises it. 24 letters is the server's MAX_CHARTER_NAME, so
+        -- the box cannot compose a name that will be refused for length.
+        --
+        -- Accept and Enter run the same two lines, which is why they are one local function; the
+        -- reference spells them out twice (l.139-147). Note the ref's own Enter arm hides the
+        -- dialog and its Accept arm does not — the popup engine hides on a plain Accept anyway.
+        StaticPopupDialogs["RENAME_GUILD"] = {
+            text = RENAME_GUILD_LABEL,
+            button1 = ACCEPT,
+            button2 = CANCEL,
+            hasEditBox = 1,
+            maxLetters = 24,
+            OnAccept = function()
+                RenamePetition(getglobal(this:GetParent():GetName() .. "EditBox"):GetText())
+            end,
+            EditBoxOnEnterPressed = function()
+                RenamePetition(getglobal(this:GetParent():GetName() .. "EditBox"):GetText())
+                this:GetParent():Hide()
+            end,
+            OnShow = function()
+                getglobal(this:GetName() .. "EditBox"):SetFocus()
+            end,
+            OnHide = function()
+                if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                    ChatFrameEditBox:SetFocus()
+                end
+                getglobal(this:GetName() .. "EditBox"):SetText("")
+            end,
+            timeout = 0,
+            exclusive = 1,
+            whileDead = 1,
+        }
+
+        -- ref PetitionFrame.lua:2-42, as four painters. The reference has one function; the split
+        -- is ours, because the four jobs share nothing but the tuple they read.
+        function PetitionFrame_Update()
+            local petitionType, title, bodyText, maxSignatures, originatorName, isOriginator = GetPetitionInfo()
+            PetitionFrame_PaintRole(isOriginator)
+            PetitionFrame_PaintHeader(petitionType, title, originatorName)
+            local numNames = PetitionFrame_PaintSignatures()
+            PetitionFrame_PaintRequestButton(numNames, maxSignatures)
+        end
+
+        -- Which face the window wears. Show/Hide rather than Enable/Disable because the two
+        -- buttons sit on the same anchor (see the header).
+        function PetitionFrame_PaintRole(isOriginator)
+            if isOriginator then
+                PetitionFrameRequestButton:Show()
+                PetitionFrameRenameButton:Show()
+                PetitionFrameSignButton:Hide()
+                PetitionFrameInstructions:SetText(GUILD_PETITION_LEADER_INSTRUCTIONS)
+            else
+                PetitionFrameRequestButton:Hide()
+                PetitionFrameRenameButton:Hide()
+                PetitionFrameSignButton:Show()
+                PetitionFrameInstructions:SetText(GUILD_PETITION_MEMBER_INSTRUCTIONS)
+            end
+            -- The Sign button's own gate is a separate question from which face is showing: a
+            -- charter can be a signer's view and still not be signable (already signed, already
+            -- guilded, full).
+            if CanSignPetition() then
+                PetitionFrameSignButton:Enable()
+            else
+                PetitionFrameSignButton:Disable()
+            end
+        end
+
+        -- The banner and the two named lines. `petitionType` has exactly one value in 1.12,
+        -- "charter"; the else arm is the reference's own dead branch and is kept as written.
+        function PetitionFrame_PaintHeader(petitionType, title, originatorName)
+            if petitionType == "charter" then
+                PetitionFrameNpcNameText:SetText(format(GUILD_CHARTER_TEMPLATE, title))
+                PetitionFrameCharterName:SetText(title)
+                PetitionFrameMasterName:SetText(originatorName)
+            else
+                PetitionFrameNpcNameText:SetText("Petition")
+            end
+        end
+
+        -- Nine rows, always nine: a signed row shows its name, an unsigned one shows
+        -- "<not yet signed>". Returns how many have signed, which the Request button needs.
+        function PetitionFrame_PaintSignatures()
+            local numNames = GetNumPetitionNames()
+            for i = 1, MAX_PETITION_SIGNATURES do
+                local row = getglobal("PetitionFrameMemberName" .. i)
+                if i <= numNames then
+                    row:SetText(GetPetitionNameInfo(i))
+                else
+                    row:SetText(NOT_YET_SIGNED)
+                end
+            end
+            return numNames
+        end
+
+        -- Disabled once the charter is full. `maxSignatures` is the WIRE's requirement, not
+        -- MAX_PETITION_SIGNATURES (ref PetitionFrame.lua:38).
+        function PetitionFrame_PaintRequestButton(numNames, maxSignatures)
+            if numNames >= maxSignatures then
+                PetitionFrameRequestButton:Disable()
+            else
+                PetitionFrameRequestButton:Enable()
+            end
+        end
+
+        -- ref l.375-387. The `IsVisible` re-test after ShowUIPanel is the reference's own: the
+        -- panel manager can refuse, and a charter session the engine thinks is open with no window
+        -- on screen would strand it.
+        --
+        -- PETITION_SHOW also arrives for a REPAINT of a charter already on screen (a name or the
+        -- title resolving), which costs one Update and no sound — see the file header.
+        function PetitionFrame_OnEvent(event)
+            if event == "PETITION_SHOW" then
+                ShowUIPanel(PetitionFrame)
+                if not PetitionFrame:IsVisible() then
+                    ClosePetition()
+                    return
+                end
+                PetitionFrame_Update()
+            elseif event == "PETITION_CLOSED" then
+                HideUIPanel(PetitionFrame)
+            end
+        end
+    ]]></Script>
+
+    <Frame name="PetitionFrame" toplevel="true" parent="UIParent" movable="true" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="70"/></HitRectInsets>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- The charter's own icon, not an NPC portrait (ref l.20-30): this window has no
+                     NPC. It is a piece of paper. -->
+                <Texture name="PetitionFramePortrait" file="Interface\PetitionFrame\GuildCharter-Icon">
+                    <Size><AbsDimension x="58" y="58"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-8"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- The quest-greeting parchment, four quadrant slabs (ref l.32-63). -->
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-BotLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestGreeting-BotRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                </Texture>
+
+                <!-- ref l.66-77. Defined but never written by the shipped UI; kept because it is
+                     a name an addon can reach (GuildRegistrarText's twin). -->
+                <FontString name="PetitionText" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="270" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-10"/></Offset></Anchor></Anchors>
+                </FontString>
+
+                <!-- The header block: a static label over its value, three times — "Guild Name",
+                     "Guild Master", "Members" — then the nine signature rows, then the
+                     instructions (ref l.78-257). The labels come from GlobalStrings via `text=`
+                     and are never rewritten; only the two *Name strings and the rows are painted.
+                     The whole column is one anchor chain, so a row's height change pushes
+                     everything below it — which is what lets the instructions sit under a list
+                     that is always nine rows tall. -->
+                <FontString name="PetitionFrameCharterTitle" inherits="QuestTitleFont" text="GUILD_NAME" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="30" y="-95"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameCharterName" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="PetitionFrameCharterTitle" relativePoint="BOTTOMLEFT"/>
+                    </Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMasterTitle" inherits="QuestTitleFont" text="GUILD_RANK0_DESC" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="PetitionFrameCharterName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMasterName" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="PetitionFrameMasterTitle" relativePoint="BOTTOMLEFT"/>
+                    </Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberTitle" inherits="QuestTitleFont" text="MEMBERS" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="PetitionFrameMasterName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <!-- Row 1 anchors to the "Members" label; rows 2..9 chain off their predecessor
+                     (ref l.138-245, nine identical blocks). Written out because a FontString
+                     cannot be created from Lua in 1.12 and the chain is what makes the column. -->
+                <FontString name="PetitionFrameMemberName1" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberTitle" relativePoint="BOTTOMLEFT"/>
+                    </Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName2" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName1" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName3" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName2" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName4" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName3" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName5" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName4" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName6" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName5" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName7" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName6" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName8" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName7" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameMemberName9" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName8" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="PetitionFrameInstructions" inherits="QuestFont" justifyH="LEFT">
+                    <Size><AbsDimension x="285" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="PetitionFrameMemberName9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The title banner (ref l.261-286): "<Guild> Guild Charter". -->
+            <Frame name="PetitionNpcNameFrame">
+                <Size><AbsDimension x="300" y="14"/></Size>
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="PetitionFrame" relativePoint="TOP"><Offset><AbsDimension x="0" y="-23"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="PetitionFrameNpcNameText" inherits="GameFontHighlight"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>this:SetFrameLevel(this:GetFrameLevel() + 2)</OnLoad>
+                </Scripts>
+            </Frame>
+
+            <Button name="PetitionFrameCancelButton" inherits="UIPanelButtonTemplate" text="CLOSE">
+                <Size><AbsDimension x="75" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" relativeTo="PetitionFrame" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-40" y="72"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnClick>HideUIPanel(PetitionFrame)</OnClick></Scripts>
+            </Button>
+            <!-- Sign and Request share this anchor: exactly one of them is ever shown. -->
+            <Button name="PetitionFrameSignButton" inherits="UIPanelButtonTemplate" text="SIGN_CHARTER">
+                <Size><AbsDimension x="110" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="BOTTOMLEFT" relativeTo="PetitionFrame"><Offset><AbsDimension x="22" y="72"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnClick>SignPetition()</OnClick></Scripts>
+            </Button>
+            <!-- Offers the charter to the current TARGET — the verb carries no argument, so with
+                 nobody targeted nothing is sent (`ui_petition`'s drain). -->
+            <Button name="PetitionFrameRequestButton" inherits="UIPanelButtonTemplate" text="REQUEST_SIGNATURE">
+                <Size><AbsDimension x="140" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="BOTTOMLEFT" relativeTo="PetitionFrame"><Offset><AbsDimension x="22" y="72"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnClick>OfferPetition()</OnClick></Scripts>
+            </Button>
+            <Button name="PetitionFrameCloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="CENTER" relativeTo="PetitionFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-42" y="-30"/></Offset></Anchor>
+                </Anchors>
+            </Button>
+            <!-- Two-point width (ref l.347-362): the button stretches to fill whatever is left
+                 between Request and Close, so its label fits at any panel width. -->
+            <Button name="PetitionFrameRenameButton" inherits="UIPanelButtonTemplate" text="RENAME_GUILD">
+                <Size><AbsDimension x="10" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="PetitionFrameRequestButton" relativePoint="RIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+                    <Anchor point="RIGHT" relativeTo="PetitionFrameCancelButton" relativePoint="LEFT"/>
+                </Anchors>
+                <Scripts><OnClick>StaticPopup_Show("RENAME_GUILD")</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                this:RegisterEvent("PETITION_SHOW")
+                this:RegisterEvent("PETITION_CLOSED")
+            </OnLoad>
+            <OnEvent>PetitionFrame_OnEvent(event)</OnEvent>
+            <OnShow>PlaySound("igQuestListOpen")</OnShow>
+            <!-- ClosePetition() on hide clears the engine's charter session — the same load-bearing
+                 role CloseGossip() has on GossipFrame. -->
+            <OnHide>
+                PlaySound("igQuestListClose")
+                ClosePetition()
+            </OnHide>
+            <!-- ref l.395-397: the window swallows the wheel rather than letting it reach whatever
+                 is behind it. -->
+            <OnMouseWheel>return</OnMouseWheel>
+        </Scripts>
+    </Frame>
+</Ui>

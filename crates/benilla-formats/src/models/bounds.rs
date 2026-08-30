@@ -34,6 +34,10 @@ pub struct M2Bounds {
     /// `0x608e00`/`0x60aee0`): the ring's world radius = this × `OBJECT_FIELD_SCALE_X`. The nested sqrt is
     /// a range-compressor (which is why the render-sphere never fit). Falls back to the header render-box
     /// XY extents for a model with no animation sequences.
+    ///
+    /// A **degenerate** box — `max.x == min.x` *and* `max.y == min.y` — takes
+    /// [`DEGENERATE_RING_FOOTPRINT`] instead of the formula, which is the writer's own first branch
+    /// and not a floor of ours (decision 1658).
     pub ring_footprint: f32,
     /// Model-space **Z** of attachment id 17 — the reference's follow-camera pivot height (wow-re
     /// `follow-camera`: `feet + (attach17.z + 0.0972)·scale`). `None` for a model with no slot-17
@@ -65,6 +69,20 @@ pub fn load_m2_bounds(chain: &mut Chain, raw_path: &str) -> Result<M2Bounds> {
         .with_context(|| format!("reading M2 {path}"))?;
     parse_m2_bounds(&bytes).with_context(|| format!("parsing M2 bounds {path}"))
 }
+
+/// The ring footprint the real client stores for a **degenerate** box — one whose X *and* Y extents
+/// are both exactly zero. Byte-read at `0x60af4f..0x60af67` (wow-re `selection-ring-scale.md`): the
+/// writer `0x60aee0` compares `max.x==min.x` and `max.y==min.y` and, when both hold, stores the
+/// literal `0x3f99999a` = **1.2** into `[unit+0xcf0]` without ever running the `sqrt(0.5·sqrt(dx²+dy²))`
+/// formula. wow-re recorded it as a branch that "never fires for real creatures", which is true of
+/// the four life-size units it measured and false of the whole trigger-creature family: an
+/// `InvisibleStalker` body authors all 135 sequence boxes at zero, so this **is** its ring — and the
+/// Naxxramas weapon mobs, whose visible self is the axe in that body's hand, are exactly where a
+/// player sees it. Ours read 0 and drew a ring the width of a coin (decision 1658).
+///
+/// It is the model-less fallback too: "no box to measure" and "a box that measures zero" are the
+/// same question, and this is the reference's answer to it.
+pub const DEGENERATE_RING_FOOTPRINT: f32 = 1.2;
 
 /// Read the horizontal (X,Y) extents of the **Stand** animation's bounding box from a raw M2 — the input
 /// the real client's living-unit selection ring is sized from (wow-re selection-ring RE, `0x60aee0`).
@@ -128,7 +146,11 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
         h.bounding_box_max[1] - h.bounding_box_min[1],
         h.bounding_box_max[2] - h.bounding_box_min[2],
     ));
-    let ring_footprint = (0.5 * (rx * rx + ry * ry).sqrt()).sqrt();
+    let ring_footprint = if rx == 0.0 && ry == 0.0 {
+        DEGENERATE_RING_FOOTPRINT
+    } else {
+        (0.5 * (rx * rx + ry * ry).sqrt()).sqrt()
+    };
     Ok(M2Bounds {
         sphere_radius: h.bounding_sphere_radius,
         bbox_min: h.bounding_box_min,

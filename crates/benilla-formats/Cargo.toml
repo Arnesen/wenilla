@@ -24,7 +24,16 @@ benilla-dbc = { path = "../benilla-dbc" }
 benilla-m2 = { path = "../benilla-m2" }
 benilla-mpq = { path = "../benilla-mpq" }
 benilla-blp = { path = "../benilla-blp" }
-image = "0.25"
+# PNG only, matching every sibling crate. `image`'s DEFAULT features enable `avif`, which drags
+# in ravif -> rav1e -> av-scenechange: a complete AV1 video ENCODER, monomorphized into this
+# crate, for the two calls below that both write a PNG. Cutting it takes this crate's graph from
+# 112 to 48 dependencies and the workspace's from 499 to 466.
+#
+# It is NOT why `cargo play` used to fail to link -- that was rustc #86049, fixed by `lto = "off"`
+# in `[profile.play]` (decision 1698). The tempting story is that rav1e's monomorphized bulk is
+# what tripped it; the evidence says otherwise, since 2 of the 7 poisoned codegen units held only
+# our own DBC catalog loaders. Two independent wins, and this is the smaller one. Decision 1698.
+image = { version = "0.25", default-features = false, features = ["png"] }
 benilla-wdt = { path = "../benilla-wdt" }
 benilla-wmo = { path = "../benilla-wmo" }
 

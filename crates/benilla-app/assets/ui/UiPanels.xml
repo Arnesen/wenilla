@@ -25,10 +25,11 @@
     -->
     <Script><![CDATA[
         -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only
-        -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard, Petition,
-        -- GuildRegistrar, PetStable, Battlefield, Help, Cinematic, WorldStateScore, Minigame — and
-        -- the doublewide AuctionFrame) join as their windows land (audited row-by-row against the
-        -- bytes, decision 1507).
+        -- the rows benilla ships today; the ref rows with no benilla window yet (Tabard,
+        -- Battlefield, WorldStateScore, Minigame) join as their windows land (audited
+        -- row-by-row against the bytes, decision 1507). Four have since left that list: the
+        -- doublewide AuctionFrame with decision 1511, PetStableFrame with 1676, HelpFrame with
+        -- 1673, and Petition + GuildRegistrar with 1672 — all of them are rows below.
         UIPanelWindows = {}
         UIPanelWindows["GossipFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["MerchantFrame"] = { area = "left", pushable = 0 }
@@ -75,6 +76,13 @@
         -- registration line (`UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }`),
         -- quoted verbatim — same left-slot competition as Gossip/Merchant/Trainer above.
         UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }
+        -- The stable-master window (decision 1676, PetStable.xml): the ref's own UIParent.lua l.39
+        -- registration line (`UIPanelWindows["PetStableFrame"] = { area = "left", pushable = 0 }`),
+        -- quoted verbatim — the same left-slot competition as Gossip/Merchant/Trainer/Taxi above,
+        -- which is what makes the stable master's gossip window give way to the stable it opens.
+        -- The reference lists it between MailFrame (l.37) and DressUpFrame (l.41), which is where
+        -- it sits here too, inside the NPC-session cluster those rows are grouped into.
+        UIPanelWindows["PetStableFrame"] = { area = "left", pushable = 0 }
         -- The auction house (decision 1511, AuctionFrame.xml): the reference's own registration,
         -- quoted verbatim from `Blizzard_AuctionUI.lua` l.13 rather than UIParent.lua — the window
         -- ships as a loadable addon there, so it registers its own row. **The one and only
@@ -117,6 +125,15 @@
         -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
         -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
         UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }
+        -- The two guild-charter windows (decision 1672), the ref's own UIParent.lua l.33-34
+        -- verbatim. They are ordinary left-slot rivals of each other and of the gossip menu, all
+        -- pushable 0 — which is exactly right: selecting the registrar's gossip row makes the
+        -- server close the menu and push the charter list, so the registrar replacing the gossip
+        -- window in the same slot IS the handoff. Both must be registered or ShowUIPanel degrades
+        -- to a bare Show() in no slot, which is what left the item-text reader interleaved with a
+        -- gossip window in B288 (1507).
+        UIPanelWindows["GuildRegistrarFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["PetitionFrame"] = { area = "left", pushable = 0 }
         -- The macro window (decision 0983, MacroFrame.xml) — the ref's own registration line
         -- verbatim (`UIPanelWindows["MacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }`,
         -- Blizzard_MacroUI.lua:7). whileDead is the ref's and it earns its keep: writing a macro
@@ -148,6 +165,17 @@
         -- the client. (The ref's l.17-18 register SoundOptionsFrame/UIOptionsFrame the same way;
         -- those panels are this one window's category rows now, so the rows have no frames.)
         UIPanelWindows["OptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
+        -- The GM help window (HelpFrame.xml) — the ref's own registration verbatim
+        -- (`UIPanelWindows["HelpFrame"] = { area = "center", pushable = 0, whileDead = 1 }`,
+        -- UIParent.lua l.35): the THIRD native-center row, and the first one that is not part of
+        -- the settings shell. Same MODE as the two above — it keeps its own screen-CENTER anchor,
+        -- closes every other window on the way in, and while it holds the slot ShowUIPanel refuses
+        -- every non-center panel (`CanOpenPanels` below). That is deliberate here rather than
+        -- incidental: petitioning a GM is a full stop, not something you do beside your bags.
+        -- whileDead, because being dead somewhere you cannot leave is one of the things you page a
+        -- GM about — and it is what lets the ticket toast's HELP_TICKET dialog reach the window
+        -- from a corpse. (The ref's l.40 WorldStateScoreFrame row is center too; no frame here.)
+        UIPanelWindows["HelpFrame"] = { area = "center", pushable = 0, whileDead = 1 }
         -- (0997's KeyBindingFrame row is gone — decision 1008 folded key bindings into the
         -- options window above, the 1.15 layout's own placement; KeyBindingsPage.xml.)
         -- The world map (decision 0203 phase 2) — the ref's own line verbatim (UIParent.lua l.30)
@@ -156,6 +184,13 @@
         -- was the ONE window that still opened (director-reported). Routing its toggle through
         -- ShowUIPanel is what subjects it to the same rules as everything else.
         UIPanelWindows["WorldMapFrame"] = { area = "full", pushable = 0, whileDead = 1 }
+        -- The cinematic letterbox (CinematicFrame.xml) — the ref's own line verbatim
+        -- (UIParent.lua l.31). The row is what makes CINEMATIC_START's `ShowUIPanel(this, 1)`
+        -- actually seat the frame: unregistered, ShowUIPanel takes its bare-`Show()` branch and
+        -- the bars would appear without the panel manager ever closing what they cover. `full`
+        -- because a fly-by owns the screen, and no `whileDead` — the ref gives it none, and a
+        -- cinematic is not something a corpse needs.
+        UIPanelWindows["CinematicFrame"] = { area = "full", pushable = 0 }
 
         -- UIChildWindows — the ref's own table verbatim (UIParent.lua l.44-50; its comment:
         -- windows that "rely on a parent frame to be open. If the parent closes or a pushable
@@ -911,8 +946,10 @@
         --     child under the text, shown per entry, with the buttons dropping to -24 to clear it
         --     and the frame growing 16px. The AMOUNT is not the engine's — the entry's own
         --     OnShow/the event arm calls MoneyFrame_Update, exactly as the reference does.
-        --   · Accepted but v1-inert: exclusive, interruptCinematic (cinematics are acked
-        --     instantly — 0196), notClosableByLogout, preferredIndex.
+        --   · interruptCinematic is LIVE as of the cinematic arc: a dialog without it is
+        --     refused while one plays, the ref's own l.1454 gate (it was inert only while
+        --     0196 acked every cinematic instantly, so nothing could be playing).
+        --   · Accepted but v1-inert: exclusive, notClosableByLogout, preferredIndex.
         --   · text_arg1/2 stash on the DIALOG frame (the ref stashes them on the Text region;
         --     our regions don't carry Lua fields).
         --   · GetText("SECONDS"/"MINUTES") localization collapses to English singular/plural.
@@ -996,6 +1033,17 @@
             -- The whileDead gate (ref l.1447-1452). UnitIsDeadOrGhost lands with the death arc's
             -- ghost predicate — guarded like CursorHasItem in ToggleGameMenu until then.
             if UnitIsDeadOrGhost and UnitIsDeadOrGhost("player") and not info.whileDead then
+                if info.OnCancel then
+                    info.OnCancel()
+                end
+                return nil
+            end
+
+            -- The cinematic gate (ref l.1454-1459), the whileDead gate's twin: a fly-by owns the
+            -- screen, so a dialog that has not declared itself worth interrupting one is cancelled
+            -- rather than raised over it. `InCinematic` is guarded like the predicate above so a
+            -- VM without the binding behaves as it did before.
+            if InCinematic and InCinematic() and not info.interruptCinematic then
                 if info.OnCancel then
                     info.OnCancel()
                 end

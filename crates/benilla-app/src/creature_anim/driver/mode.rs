@@ -479,6 +479,34 @@ pub(super) fn run(
                     cands
                 };
                 let target = cands[0];
+                // **The turn-shuffle is released by its own clip window, not by the turn ending**
+                // (decision 1655, wow-re `object-layer/scratch/turn-shuffle-lifecycle.md`).
+                //
+                // The client's only per-frame poll of a standing unit's base animation is
+                // `0x607ed0`'s tail, and it *refuses* this exact transition: with the shuffle
+                // armed and no turn bit set it computes target 0, sees `0xb != 0`, and calls
+                // `0x5fce30` — whose first gate (`0x5fce33`/`0x5fce42`) needs `moveflags & 0x30`
+                // or `d58 & 0x1800`, precisely what just went false. `0x6084da je` then skips the
+                // recompute. **The tail can only START a shuffle, never stop one.** What stops it
+                // is the animation-completion callback every in-world unit installs
+                // (`0x60781b`), one clip window later — which is why the reference plays a
+                // discrete little step rather than a stub of one: with `replay = (0,0)` on all
+                // 1130 shipped shuffle records the window is exactly one span, 500 ms on 1100 of
+                // them, so the step is `ceil(t_turn / span) · span` long however brief the turn.
+                //
+                // Only against **Stand**. Every other target — a walk, the mount pin, the cast
+                // hold, the Ready idle, a state emote, the loot kneel — arrives in the client
+                // through one of `0x5fd9e0`'s 37 edge-triggered call sites, which fire regardless
+                // of the turn bits and preempt the shuffle at once. The refusal is the tail's
+                // alone, and the tail's target is a hardcoded 0.
+                let target = match drv.gait {
+                    Some(g @ (select::SHUFFLE_LEFT | select::SHUFFLE_RIGHT))
+                        if target == STAND && !window_complete(drv, player) =>
+                    {
+                        g
+                    }
+                    _ => target,
+                };
                 // Each RF-0057 candidate, in priority order, resolved through the model's own
                 // baked fallback (decision 0082) before moving to the next candidate — a model
                 // missing the exact id still plays its baked substitute rather than stepping
@@ -546,4 +574,19 @@ pub(super) fn run(
             }
         }
     }
+}
+
+/// Has the base slot's armed looping clip finished its **replay window** — the client's
+/// `windowHi = windowLo + span·R` (decision 0516 §7d, wow-re `loop-replay-fidget.md` §7a)?
+///
+/// `true` when there is no window to wait on at all: a slot with nothing armed, or one whose
+/// window a newer arm superseded, is not something to hold a shuffle against. The driver's own
+/// watchdog reads the same pair one phase earlier and, in the gait slot, answers a completion by
+/// clearing the target — so a `true` here and a re-selection there are the same event.
+fn window_complete(drv: &AnimDriver, player: &AnimationPlayer) -> bool {
+    drv.loop_window.is_none_or(|(node, budget)| {
+        player
+            .animation(node)
+            .is_none_or(|a| a.completions() >= budget)
+    })
 }
