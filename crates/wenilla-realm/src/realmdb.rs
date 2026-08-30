@@ -60,7 +60,7 @@ pub async fn online(db: &MySqlPool) -> Result<Vec<OnlineRow>> {
 
 pub async fn online_count(db: &MySqlPool) -> Result<(i64, i64)> {
     let (players, bots): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(a.username NOT LIKE 'RNDBOT%'), 0), COALESCE(SUM(a.username LIKE 'RNDBOT%'), 0) \
+        "SELECT CAST(COALESCE(SUM(a.username NOT LIKE 'RNDBOT%'), 0) AS SIGNED), CAST(COALESCE(SUM(a.username LIKE 'RNDBOT%'), 0) AS SIGNED) \
          FROM classiccharacters.characters c JOIN classicrealmd.account a ON a.id = c.account WHERE c.online = 1",
     )
     .fetch_one(db)
