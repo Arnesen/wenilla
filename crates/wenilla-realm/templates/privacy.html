@@ -1,16 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Privacy — {{ realm_name }}{% endblock %}
-{% block brand %}{{ realm_name }}{% endblock %}
-{% block content %}
-<div class="card">
-  <h1>Privacy</h1>
-  <p>This realm stores as little about you as it can:</p>
-  <ul>
-    <li><b>Your login</b>: the username and display name the admin gave you, a salted hash of your password, and your sign-in sessions.</li>
-    <li><b>Your web address</b>: the IP you signed in from, kept for 90 days for abuse handling, then removed.</li>
-    <li><b>Your characters</b>: everything the game itself keeps (characters, items, chat is not logged). The game server never sees your IP — it only sees this website.</li>
-    <li><b>The audit log</b>: what admins did (bans, resets) and when you signed in.</li>
-  </ul>
-  <p>Nothing is shared with anyone else, and nothing is sold. To have your account and characters deleted, ask the admin — deletion is immediate and complete.</p>
+{% block page %}<div class="center">
+  <svg class="watermark" viewBox="0 0 160 160" aria-hidden="true"><g fill="none" stroke="#d4af37" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M80 18 L128 44 V96 L80 142 L32 96 V44 Z"/><path d="M80 52 L104 66 V94 L80 108 L56 94 V66 Z"/></g></svg>
+  <div class="plate" style="width: min(640px, 100%); padding: 36px 40px 30px;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+    <div style="display: flex; flex-direction: column; gap: 16px;">
+      <h1 style="font-size: 22px; letter-spacing: 0.2em;">Privacy</h1>
+      <p>This realm stores as little about you as it can:</p>
+      <ul style="margin: 0; padding-left: 20px; color: var(--fg-2); font-size: 15px; line-height: 1.6;">
+        <li><b>Your login</b>: the username and display name the admin gave you, a salted hash of your password, and your sign-in sessions.</li>
+        <li><b>Your web address</b>: the IP you signed in from, kept for 90 days for abuse handling, then removed.</li>
+        <li><b>Your characters</b>: everything the game itself keeps. Chat is not logged. The game server never sees your IP — it only sees this website.</li>
+        <li><b>The audit log</b>: what admins did (bans, resets) and when you signed in.</li>
+      </ul>
+      <p>Nothing is shared with anyone else, and nothing is sold. To have your account and characters deleted, ask the admin — deletion is immediate and complete.</p>
+    </div>
+  </div>
+<span class="eyebrow footer-line">A 1.12.1-compatible realm for friends · <a href="/about">about</a> · <a href="/privacy">privacy</a> · not affiliated with or endorsed by Blizzard Entertainment</span>
 </div>
 {% endblock %}

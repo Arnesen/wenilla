@@ -1,51 +1,53 @@
-{% extends "base.html" %}
-{% block title %}Users{% endblock %}
-{% block brand %}Admin{% endblock %}
-{% block nav %}<nav><a href="/admin">Dashboard</a><a href="/admin/users">Users</a><a href="/admin/config">Settings</a><a href="/admin/audit">Audit</a><a href="/">Play</a><form class="inline" method="post" action="/logout"><button class="secondary small">Sign out</button></form></nav>{% endblock %}
+{% extends "admin_base.html" %}
+{% import "icons.html" as ic %}
+{% block title %}Users — {{ realm_name }}{% endblock %}
+{% block top_title %}Users{% endblock %}
+{% block flash %}
+{% if let Some(n) = notice %}<div class="flash notice">{% call ic::icon("check") %}<span>{{ n }}</span></div>{% endif %}
+{% if let Some(e) = error %}<div class="flash error">{% call ic::icon("alert") %}<span>{{ e }}</span></div>{% endif %}
+{% endblock %}
 {% block content %}
-{% if let Some(n) = notice %}<div class="flash notice">{{ n }}</div>{% endif %}
-{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
-{% if let Some((u, p)) = created %}<div class="flash notice">Created <b>{{ u }}</b>. Their password — shown once — is <code>{{ p }}</code>. They must change it at first sign-in.</div>{% endif %}
-<div class="card">
-  <h2>New user</h2>
-  <form method="post" action="/admin/users">
-    <input type="hidden" name="_csrf" value="{{ csrf }}">
-    <div class="row">
-      <div><label>Username (their sign-in)</label><input name="username" type="text" required></div>
-      <div><label>Display name</label><input name="display_name" type="text"></div>
-      <div><label>Password (blank = generate)</label><input name="password" type="text" autocomplete="off"></div>
-      <div><label>Role</label><select name="role"><option value="player">player</option><option value="admin">admin</option></select></div>
+{% if let Some((u, p)) = created %}<div class="flash notice">{% call ic::icon("check") %}<span>Created <b>{{ u }}</b>. Their password — shown once — is <code>{{ p }}</code>. They must change it at first sign-in.</span></div>{% endif %}
+<div class="head"><span class="eyebrow">Accounts</span><h1 class="headline" style="text-transform: none; letter-spacing: 0.02em;">Users</h1><p class="deck">Each person gets one web login and one hidden game account. Bans and kicks act on the game account.</p></div>
+<div class="plate" style="padding: 26px 28px;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+  <form method="post" action="/admin/users" style="display: flex; flex-direction: column; gap: 16px;"><input type="hidden" name="_csrf" value="{{ csrf }}">
+    <div class="ornament-rule"><span class="eyebrow" style="color: var(--accent);">Invite a friend</span></div>
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px;">
+      <div class="field"><span class="label">Username</span><div class="input-shell">{% call ic::icon("user") %}<input class="input" name="username" type="text" required placeholder="their sign-in"></div></div>
+      <div class="field"><span class="label">Display name</span><div class="input-shell plain"><input class="input" name="display_name" type="text" placeholder="shown in the realm"></div></div>
+      <div class="field"><div class="field-row"><span class="label">Password</span><span class="hint">blank = generate</span></div><div class="input-shell">{% call ic::icon("lock") %}<input class="input" name="password" type="text" autocomplete="off"></div></div>
+      <div class="field"><span class="label">Role</span><div class="seg"><label><input type="radio" name="role" value="player" checked><span>Player</span></label><label><input type="radio" name="role" value="admin"><span>Admin</span></label></div></div>
     </div>
-    <p><button>Create user</button></p>
+    <div class="wrap" style="gap: 14px;"><button class="btn-gold" type="submit">{% call ic::icon("sparkle") %}Create user</button><span class="hint">Their password is shown once; they must change it at first sign-in.</span></div>
   </form>
 </div>
 <div class="card">
-  <h2>Users</h2>
-  <table>
+  <div class="card-head"><span class="card-title">{{ users.len() }} user{% if users.len() != 1 %}s{% endif %}</span></div>
+  <table class="t">
     <tr><th>User</th><th>Role</th><th>Game account</th><th>Characters</th><th>Actions</th></tr>
     {% for u in users %}
-    <tr{% if u.disabled %} class="muted"{% endif %}>
-      <td><b>{{ u.username }}</b><br><span class="muted">{{ u.display_name }}</span>{% if u.disabled %}<br><span class="bad">disabled</span>{% endif %}{% if u.banned %}<br><span class="bad">banned</span>{% endif %}</td>
-      <td>{{ u.role }}</td>
-      <td class="muted">{{ u.game_username }}</td>
-      <td>{% for c in u.characters %}{{ c.name }} <span class="muted">{{ c.level }} {{ self::race(c.race) }} {{ self::class(c.class) }}{% if c.online != 0 %} · online{% endif %} · {{ self::hours(c.totaltime) }} h</span><br>{% endfor %}</td>
+    <tr>
+      <td><b>{{ u.username }}</b> {% if u.banned %}<span class="chip bad">banned</span>{% endif %}{% if u.disabled %}<span class="chip dim">disabled</span>{% endif %}<span class="sub">{{ u.display_name }}</span></td>
+      <td><span class="tag">{{ u.role }}</span></td>
+      <td class="k"><code>{{ u.game_username }}</code></td>
+      <td>{% if u.characters.is_empty() %}<span class="hint">no characters yet</span>{% endif %}{% for c in u.characters %}<div>{{ c.name }} <span class="hint">{{ c.level }} {{ self::race(c.race) }} {{ self::class(c.class) }}{% if c.online != 0 %} · online{% endif %} · {{ self::hours(c.totaltime) }} h</span></div>{% endfor %}</td>
       <td class="actions">
         {% if u.banned %}
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/unban"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="secondary small">Unban</button></form>
+        <form class="inline" method="post" action="/admin/users/{{ u.id }}/unban"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn sm" type="submit">Unban</button></form>
         {% else %}
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/ban"><input type="hidden" name="_csrf" value="{{ csrf }}"><input name="reason" type="text" placeholder="reason" style="width:9rem"> <input name="duration_hours" type="number" min="0" placeholder="hours (0=perm)" style="width:8rem"> <button class="danger small">Ban</button></form>
+        <form class="inline wrap" method="post" action="/admin/users/{{ u.id }}/ban"><input type="hidden" name="_csrf" value="{{ csrf }}"><div class="input-shell sm plain" style="width: 9rem;"><input class="input" name="reason" type="text" placeholder="reason"></div><div class="input-shell sm plain" style="width: 6.5rem;"><input class="input" name="duration_hours" type="number" min="0" placeholder="hours"></div><button class="btn-danger sm" type="submit">{% call ic::icon("ban") %}Ban</button></form>
         {% endif %}
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/kick"><input type="hidden" name="_csrf" value="{{ csrf }}"><input name="character" type="text" placeholder="character" style="width:9rem"> <button class="secondary small">Kick</button></form>
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/reset-web-password" onsubmit="return confirm('Reset the web password for {{ u.username }}?')"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="secondary small">Reset web password</button></form>
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/rotate-game-password"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="secondary small">Rotate game password</button></form>
+        <form class="inline wrap" method="post" action="/admin/users/{{ u.id }}/kick"><input type="hidden" name="_csrf" value="{{ csrf }}"><div class="input-shell sm plain" style="width: 8rem;"><input class="input" name="character" type="text" placeholder="character"></div><button class="btn sm" type="submit">{% call ic::icon("boot") %}Kick</button></form>
+        <form class="inline" method="post" action="/admin/users/{{ u.id }}/reset-web-password" onsubmit="return confirm('Reset the web password for {{ u.username }}?')"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn sm" type="submit">{% call ic::icon("key") %}Web password</button></form>
+        <form class="inline" method="post" action="/admin/users/{{ u.id }}/rotate-game-password"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn sm" type="submit">{% call ic::icon("refresh") %}Game password</button></form>
         {% if u.id != me.id %}
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/role"><input type="hidden" name="_csrf" value="{{ csrf }}"><input type="hidden" name="role" value="{% if u.role == "admin" %}player{% else %}admin{% endif %}"><button class="secondary small">Make {% if u.role == "admin" %}player{% else %}admin{% endif %}</button></form>
+        <form class="inline" method="post" action="/admin/users/{{ u.id }}/role"><input type="hidden" name="_csrf" value="{{ csrf }}"><input type="hidden" name="role" value="{% if u.role == "admin" %}player{% else %}admin{% endif %}"><button class="btn sm" type="submit">{% call ic::icon("shield") %}Make {% if u.role == "admin" %}player{% else %}admin{% endif %}</button></form>
         {% if u.disabled %}
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/enable"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="secondary small">Enable</button></form>
+        <form class="inline" method="post" action="/admin/users/{{ u.id }}/enable"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn sm" type="submit">Enable</button></form>
         {% else %}
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/disable"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="secondary small">Disable</button></form>
+        <form class="inline" method="post" action="/admin/users/{{ u.id }}/disable"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn sm" type="submit">Disable</button></form>
         {% endif %}
-        <form class="inline" method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Delete {{ u.username }} AND all their characters? This cannot be undone.')"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="danger small">Delete</button></form>
+        <form class="inline" method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Delete {{ u.username }} AND all their characters? This cannot be undone.')"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn-danger sm" type="submit">{% call ic::icon("trash") %}Delete</button></form>
         {% endif %}
       </td>
     </tr>

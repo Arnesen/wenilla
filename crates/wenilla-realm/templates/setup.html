@@ -1,32 +1,38 @@
 {% extends "base.html" %}
+{% import "icons.html" as ic %}
 {% block title %}Realm setup{% endblock %}
-{% block content %}
-<div class="card" style="max-width:40rem;margin:1rem auto">
-  <h1>Set up your realm</h1>
-  <p class="muted">One-time. The setup token was printed by the service when it started (<code>realmctl up</code> shows it).</p>
-  {% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
-  <form method="post" action="/setup">
-    <label>Setup token</label><input name="token" type="text" value="{{ token }}" required>
-    <h2 style="margin-top:1.2rem">Admin account</h2>
-    <label>Username</label><input name="admin_username" type="text" autocomplete="username" required>
-    <div class="row">
-      <div><label>Password (10+ characters)</label><input name="admin_password" type="password" autocomplete="new-password" required></div>
-      <div><label>Password again</label><input name="admin_password2" type="password" autocomplete="new-password" required></div>
-    </div>
-    <h2 style="margin-top:1.2rem">Realm</h2>
-    <label>Realm name (shown in the game's realm list)</label><input name="realm_name" type="text" maxlength="32" placeholder="Our Realm" value="Our Realm">
-    <label>Public address</label><input type="url" value="{{ public_url }}" disabled><p class="muted">From <code>REALM_PUBLIC_URL</code>; change it in <code>.env</code>.</p>
-    <div class="row">
-      <div><label>Experience rate</label><select name="xp_rate"><option value="1">1× (as shipped)</option><option value="2">2×</option><option value="3">3×</option><option value="5">5×</option></select></div>
-      <div><label>Loot drop rate</label><select name="loot_rate"><option value="1">1×</option><option value="2">2×</option><option value="3">3×</option></select></div>
-      <div><label>Money drop rate</label><select name="money_rate"><option value="1">1×</option><option value="2">2×</option><option value="3">3×</option></select></div>
-    </div>
-    <div class="row">
-      <div><label>Random bots populating the world (0 = none, max {{ bot_account_count }} without a restart)</label><input name="bots" type="number" min="0" max="2000" value="0"></div>
-      <div><label>Auction-house bot</label><label style="color:var(--fg)"><input name="ahbot" type="checkbox" value="1"> stock the auction house</label></div>
-    </div>
-    <label>Message of the day</label><input name="motd" type="text" maxlength="250" placeholder="Welcome!">
-    <p><button type="submit">Create realm</button></p>
-  </form>
+{% block page %}<div class="center">
+  <svg class="watermark" viewBox="0 0 160 160" aria-hidden="true"><g fill="none" stroke="#d4af37" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M80 18 L128 44 V96 L80 142 L32 96 V44 Z"/><path d="M80 52 L104 66 V94 L80 108 L56 94 V66 Z"/></g></svg>
+  <div class="plate" style="width: min(720px, 100%); padding: 36px 40px 30px; margin: 20px 0 60px;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+    <form method="post" action="/setup" style="display: flex; flex-direction: column; gap: 18px;">
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center;">{% include "wordmark.html" %}<h1 style="font-size: 22px; letter-spacing: 0.2em;">Found your realm</h1><span class="eyebrow">One-time setup</span></div>
+      <div class="ornament-rule">✦</div>
+      {% if let Some(e) = error %}<div class="flash error">{% call ic::icon("alert") %}<span>{{ e }}</span></div>{% endif %}
+      <div class="field"><div class="field-row"><span class="label">Setup token</span><span class="hint">printed by the service when it started (<code>realmctl up</code> shows it)</span></div><div class="input-shell">{% call ic::icon("key") %}<input class="input" name="token" type="text" value="{{ token }}" required></div></div>
+      <div class="ornament-rule"><span class="eyebrow" style="color: var(--accent);">Admin account</span></div>
+      <div class="grid-3">
+        <div class="field"><span class="label">Username</span><div class="input-shell">{% call ic::icon("user") %}<input class="input" name="admin_username" type="text" autocomplete="username" required></div></div>
+        <div class="field"><div class="field-row"><span class="label">Password</span><span class="hint">10+</span></div><div class="input-shell">{% call ic::icon("lock") %}<input class="input" name="admin_password" type="password" autocomplete="new-password" required></div></div>
+        <div class="field"><span class="label">Password again</span><div class="input-shell">{% call ic::icon("lock") %}<input class="input" name="admin_password2" type="password" autocomplete="new-password" required></div></div>
+      </div>
+      <div class="ornament-rule"><span class="eyebrow" style="color: var(--accent);">Realm</span></div>
+      <div class="grid-2">
+        <div class="field"><div class="field-row"><span class="label">Realm name</span><span class="hint">shown in the game's realm list</span></div><div class="input-shell plain"><input class="input" name="realm_name" type="text" maxlength="32" value="Our Realm"></div></div>
+        <div class="field"><div class="field-row"><span class="label">Public address</span><span class="hint">from <code>REALM_PUBLIC_URL</code></span></div><div class="input-shell plain"><input class="input" type="text" value="{{ public_url }}" disabled></div></div>
+      </div>
+      <div class="grid-3">
+        <div class="field"><span class="label">Experience</span><div class="seg"><label><input type="radio" name="xp_rate" value="1" checked><span>1×</span></label><label><input type="radio" name="xp_rate" value="2"><span>2×</span></label><label><input type="radio" name="xp_rate" value="3"><span>3×</span></label><label><input type="radio" name="xp_rate" value="5"><span>5×</span></label></div></div>
+        <div class="field"><span class="label">Loot drops</span><div class="seg"><label><input type="radio" name="loot_rate" value="1" checked><span>1×</span></label><label><input type="radio" name="loot_rate" value="2"><span>2×</span></label><label><input type="radio" name="loot_rate" value="3"><span>3×</span></label></div></div>
+        <div class="field"><span class="label">Money drops</span><div class="seg"><label><input type="radio" name="money_rate" value="1" checked><span>1×</span></label><label><input type="radio" name="money_rate" value="2"><span>2×</span></label><label><input type="radio" name="money_rate" value="3"><span>3×</span></label></div></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><div class="field-row"><span class="label">Random bots</span><span class="hint">0 = none · max {{ bot_account_count }} without a restart</span></div><div class="input-shell plain"><input class="input tabular" name="bots" type="number" min="0" max="2000" value="0"></div></div>
+        <div class="field"><span class="label">Auction house</span><label class="check" style="margin-top: 10px;"><input name="ahbot" type="checkbox" value="1"> a bot keeps the auction house stocked</label></div>
+      </div>
+      <div class="field"><span class="label">Message of the day</span><div class="input-shell plain"><input class="input" name="motd" type="text" maxlength="250" placeholder="Welcome!"></div></div>
+      <button class="btn-gold" type="submit" style="justify-content: center; height: 50px; font-size: 13.5px;">Create the realm</button>
+    </form>
+  </div>
+<span class="eyebrow footer-line">A 1.12.1-compatible realm for friends · <a href="/about">about</a> · <a href="/privacy">privacy</a> · not affiliated with or endorsed by Blizzard Entertainment</span>
 </div>
 {% endblock %}

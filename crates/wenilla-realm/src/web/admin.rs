@@ -53,7 +53,22 @@ async fn dashboard(
     let (players_online, bots_online) = realmdb::online_count(&state.realmdb)
         .await
         .unwrap_or((0, 0));
+    let s = mangos_conf::load(&state.conf).unwrap_or_else(|_| mangos_conf::Settings {
+        xp_rate: 1.0,
+        loot_rate: 1.0,
+        money_rate: 1.0,
+        player_limit: 0,
+        save_interval_secs: 0,
+        max_player_level: 60,
+        motd: String::new(),
+        bots: 0,
+        bot_account_count: 0,
+        ahbot: false,
+    });
     Ok(render(templates::AdminDashboard {
+        realm_name: state.realm_name().await,
+        nav: "dashboard",
+        s,
         csrf: session.csrf_token.clone(),
         me: session.user,
         status,
@@ -192,6 +207,8 @@ async fn users(
     Query(flash): Query<Flash>,
 ) -> Result<Response, AppError> {
     Ok(render(templates::AdminUsers {
+        realm_name: state.realm_name().await,
+        nav: "users",
         csrf: session.csrf_token.clone(),
         me: session.user,
         users: user_rows(&state).await?,
@@ -221,8 +238,11 @@ async fn create_user(
 ) -> Result<Response, AppError> {
     csrf::verify(&session, &f._csrf)?;
     let username = f.username.trim().to_string();
+    let realm_name = state.realm_name().await;
     let page = |created: Option<(String, String)>, error: Option<String>, users: Vec<UserRow>| {
         render(templates::AdminUsers {
+            realm_name: realm_name.clone(),
+            nav: "users",
             csrf: session.csrf_token.clone(),
             me: session.user.clone(),
             users,
@@ -435,6 +455,8 @@ async fn config_page(
 ) -> Result<Response, AppError> {
     let s = mangos_conf::load(&state.conf)?;
     Ok(render(templates::AdminConfig {
+        realm_name: state.realm_name().await,
+        nav: "settings",
         csrf: session.csrf_token.clone(),
         me: session.user,
         s,
@@ -537,6 +559,8 @@ async fn audit_page(
         None
     };
     Ok(render(templates::AdminAudit {
+        realm_name: state.realm_name().await,
+        nav: "audit",
         me: session.user,
         entries,
         next_before,

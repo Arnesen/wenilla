@@ -61,6 +61,8 @@ pub struct UserRow {
 #[derive(Template)]
 #[template(path = "admin_users.html")]
 pub struct AdminUsers {
+    pub realm_name: String,
+    pub nav: &'static str,
     pub csrf: String,
     pub me: User,
     pub users: Vec<UserRow>,
@@ -72,9 +74,12 @@ pub struct AdminUsers {
 #[derive(Template)]
 #[template(path = "admin_dashboard.html")]
 pub struct AdminDashboard {
+    pub realm_name: String,
+    pub nav: &'static str,
     pub csrf: String,
     pub me: User,
     pub status: crate::control::Status,
+    pub s: crate::mangos_conf::Settings,
     pub online: Vec<crate::realmdb::OnlineRow>,
     pub players_online: i64,
     pub bots_online: i64,
@@ -86,6 +91,8 @@ pub struct AdminDashboard {
 #[derive(Template)]
 #[template(path = "admin_config.html")]
 pub struct AdminConfig {
+    pub realm_name: String,
+    pub nav: &'static str,
     pub csrf: String,
     pub me: User,
     pub s: crate::mangos_conf::Settings,
@@ -97,6 +104,8 @@ pub struct AdminConfig {
 #[derive(Template)]
 #[template(path = "admin_audit.html")]
 pub struct AdminAudit {
+    pub realm_name: String,
+    pub nav: &'static str,
     pub me: User,
     pub entries: Vec<crate::audit::Entry>,
     pub next_before: Option<i64>,

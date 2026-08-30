@@ -1,36 +1,53 @@
-{% extends "base.html" %}
-{% block title %}Dashboard{% endblock %}
-{% block brand %}Admin{% endblock %}
-{% block nav %}<nav><a href="/admin">Dashboard</a><a href="/admin/users">Users</a><a href="/admin/config">Settings</a><a href="/admin/audit">Audit</a><a href="/">Play</a><form class="inline" method="post" action="/logout"><button class="secondary small">Sign out</button></form></nav>{% endblock %}
+{% extends "admin_base.html" %}
+{% import "icons.html" as ic %}
+{% block title %}Dashboard — {{ realm_name }}{% endblock %}
+{% block top_title %}Dashboard{% endblock %}
+{% block flash %}
+{% if let Some(n) = notice %}<div class="flash notice">{% call ic::icon("check") %}<span>{{ n }}</span></div>{% endif %}
+{% if let Some(e) = error %}<div class="flash error">{% call ic::icon("alert") %}<span>{{ e }}</span></div>{% endif %}
+{% endblock %}
 {% block content %}
-{% if let Some(n) = notice %}<div class="flash notice">{{ n }}</div>{% endif %}
-{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
-{% if restart_pending %}<div class="flash error">A settings change needs a world-server restart to take effect.</div>{% endif %}
-<div class="row">
+{% if restart_pending %}<div class="flash warn">{% call ic::icon("alert") %}<span>A settings change needs a world-server restart to take effect.</span></div>{% endif %}
+<div class="head"><span class="eyebrow">Realm</span><h1 class="headline" style="text-transform: none; letter-spacing: 0.02em;">{{ realm_name }}</h1></div>
+<div class="grid-3">
+  <div class="card"><div class="card-head"><span class="card-title">World server</span>{% if status.reachable %}<span class="pill"><span class="dot"></span>reachable</span>{% else %}<span class="pill"><span class="dot off"></span>unreachable</span>{% endif %}</div>
+    {% if status.reachable %}<div class="big">{{ players_online }}<small>player{% if players_online != 1 %}s{% endif %} online</small></div><span class="hint">{{ bots_online }} bots roaming</span>{% else %}<span class="hint" style="color: var(--danger-text);">{{ status.raw }}</span>{% endif %}</div>
+  <div class="card"><div class="card-head"><span class="card-title">Rates</span><a class="ghost" href="/admin/config">Change</a></div><div class="big">{{ s.xp_rate }}×<small>experience</small></div><span class="hint">Loot {{ s.loot_rate }}× · money {{ s.money_rate }}× · save every {{ s.save_interval_secs / 60 }} min</span></div>
+  <div class="card"><div class="card-head"><span class="card-title">Population</span><a class="ghost" href="/admin/config">Change</a></div><div class="big">{{ s.bots }}<small>random bots</small></div><span class="hint">Player limit {{ s.player_limit }}{% if s.ahbot %} · auction house stocked{% endif %}</span></div>
+</div>
+<div class="grid-2">
   <div class="card">
-    <h2>World server</h2>
-    {% if status.reachable %}<p class="ok">reachable</p>{% else %}<p class="bad">unreachable — {{ status.raw }}</p>{% endif %}
-    <p>{{ players_online }} player{% if players_online != 1 %}s{% endif %} online, {{ bots_online }} bots</p>
-    {% if status.reachable %}<details><summary>server info</summary><pre>{{ status.raw }}</pre></details>{% endif %}
+    <div class="card-head"><span class="card-title">Say something</span></div>
+    <form method="post" action="/admin/server/announce" class="field"><input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div class="field-row"><span class="label">Chat announcement</span><span class="hint">everyone online</span></div>
+      <div class="input-shell">{% call ic::icon("megaphone") %}<input class="input" name="text" type="text" maxlength="200" required placeholder="Server restarts in five minutes — find a safe spot."></div>
+      <div><button class="btn-gold" type="submit">Announce</button></div>
+    </form>
+    <form method="post" action="/admin/server/notify" class="field"><input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div class="field-row"><span class="label">On-screen notice</span></div>
+      <div class="input-shell">{% call ic::icon("sparkle") %}<input class="input" name="text" type="text" maxlength="200" required></div>
+      <div><button class="btn" type="submit">Notify</button></div>
+    </form>
   </div>
   <div class="card">
-    <h2>Say something</h2>
-    <form method="post" action="/admin/server/announce"><input type="hidden" name="_csrf" value="{{ csrf }}"><label>Chat announcement (everyone online)</label><input name="text" type="text" maxlength="200" required> <button class="small">Announce</button></form>
-    <form method="post" action="/admin/server/notify"><input type="hidden" name="_csrf" value="{{ csrf }}"><label>On-screen notice</label><input name="text" type="text" maxlength="200" required> <button class="small">Notify</button></form>
-  </div>
-  <div class="card">
-    <h2>Restart</h2>
-    <p class="muted">Counts down in chat, saves everyone, restarts. Back in a minute or two.</p>
-    <form method="post" action="/admin/server/restart"><input type="hidden" name="_csrf" value="{{ csrf }}"><label>Delay (seconds)</label><input name="delay" type="number" min="0" max="3600" value="60"> <button class="danger small">Restart world server</button></form>
-    <form method="post" action="/admin/server/cancel-restart"><input type="hidden" name="_csrf" value="{{ csrf }}"><p><button class="secondary small">Cancel a pending restart</button></p></form>
-    <form method="post" action="/admin/server/reload"><input type="hidden" name="_csrf" value="{{ csrf }}"><p><button class="secondary small">Reload config</button></p></form>
+    <div class="card-head"><span class="card-title">Restart the world server</span>{% if restart_pending %}<span class="chip bad">restart pending</span>{% else %}<span class="chip dim">no restart pending</span>{% endif %}</div>
+    <p style="font-size: 13.5px;">Counts down in chat, saves every character, restarts. Back in a minute or two.</p>
+    <form method="post" action="/admin/server/restart" class="wrap"><input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div class="input-shell sm" style="width: 140px;">{% call ic::icon("power") %}<input class="input" name="delay" type="number" min="0" max="3600" value="60"></div><span class="hint">seconds</span>
+      <button class="btn-danger" type="submit">{% call ic::icon("power") %}Restart</button>
+    </form>
+    <div class="wrap">
+      <form class="inline" method="post" action="/admin/server/cancel-restart"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn-outline sm" type="submit">Cancel pending restart</button></form>
+      <form class="inline" method="post" action="/admin/server/reload"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn-outline sm" type="submit">Reload config</button></form>
+    </div>
   </div>
 </div>
 <div class="card">
-  <h2>Online now</h2>
-  {% if online.is_empty() %}<p class="muted">Nobody.</p>{% else %}
-  <table><tr><th>Character</th><th>Level</th><th>Race / class</th><th>Zone</th><th>Account</th></tr>
-  {% for c in online %}<tr><td>{{ c.name }}</td><td>{{ c.level }}</td><td>{{ self::race(c.race) }} {{ self::class(c.class) }}</td><td>{{ c.zone }}</td><td class="muted">{{ c.account }}</td></tr>{% endfor %}
+  <div class="card-head"><span class="card-title">Online now</span></div>
+  {% if online.is_empty() %}<span class="hint">Nobody at the moment.</span>{% else %}
+  <table class="t"><tr><th>Character</th><th>Level</th><th>Race / class</th><th>Zone</th><th>Account</th></tr>
+  {% for c in online %}<tr><td><b>{{ c.name }}</b></td><td class="tabular">{{ c.level }}</td><td>{{ self::race(c.race) }} {{ self::class(c.class) }}</td><td class="tabular">{{ c.zone }}</td><td class="k">{{ c.account }}</td></tr>{% endfor %}
   </table>{% endif %}
 </div>
+{% if status.reachable %}<div class="card"><div class="card-head"><span class="card-title">server info</span></div><pre class="info">{{ status.raw }}</pre></div>{% endif %}
 {% endblock %}

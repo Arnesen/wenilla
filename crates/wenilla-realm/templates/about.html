@@ -1,11 +1,15 @@
 {% extends "base.html" %}
 {% block title %}About {{ realm_name }}{% endblock %}
-{% block brand %}{{ realm_name }}{% endblock %}
-{% block content %}
-<div class="card">
-  <h1>About</h1>
-  <p>{{ realm_name }} is a private, invite-only realm run for a group of friends. It is played entirely in the browser: there is nothing to install and no other way to connect.</p>
-  <p>The realm is non-commercial. It runs on open-source software (<a href="https://github.com/cmangos/mangos-classic">CMaNGOS</a>, <a href="https://github.com/samwhosung/benilla">benilla</a>, <a href="https://github.com/Arnesen/wenilla-realm">wenilla-realm</a>) and uses game data the operator supplied from their own client. It is not affiliated with or endorsed by Blizzard Entertainment.</p>
-  <p><a href="/login">Sign in</a></p>
+{% block page %}<div class="center">
+  <svg class="watermark" viewBox="0 0 160 160" aria-hidden="true"><g fill="none" stroke="#d4af37" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M80 18 L128 44 V96 L80 142 L32 96 V44 Z"/><path d="M80 52 L104 66 V94 L80 108 L56 94 V66 Z"/></g></svg>
+  <div class="plate" style="width: min(640px, 100%); padding: 36px 40px 30px;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+    <div style="display: flex; flex-direction: column; gap: 16px;">
+      <h1 style="font-size: 22px; letter-spacing: 0.2em;">About</h1>
+      <p>{{ realm_name }} is a private, invite-only realm run for a group of friends. It is played entirely in the browser: there is nothing to install and no other way to connect.</p>
+      <p>The realm is non-commercial. It runs on open-source software (<a href="https://github.com/cmangos/mangos-classic">CMaNGOS</a>, <a href="https://github.com/samwhosung/benilla">benilla</a>, <a href="https://github.com/Arnesen/wenilla-realm">wenilla-realm</a>) and uses game data the operator supplied from their own client. It is not affiliated with or endorsed by Blizzard Entertainment.</p>
+      <p><a href="/login">Sign in</a></p>
+    </div>
+  </div>
+<span class="eyebrow footer-line">A 1.12.1-compatible realm for friends · <a href="/about">about</a> · <a href="/privacy">privacy</a> · not affiliated with or endorsed by Blizzard Entertainment</span>
 </div>
 {% endblock %}

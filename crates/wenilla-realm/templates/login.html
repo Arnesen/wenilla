@@ -1,15 +1,23 @@
 {% extends "base.html" %}
+{% import "icons.html" as ic %}
 {% block title %}{{ realm_name }} — sign in{% endblock %}
-{% block brand %}{{ realm_name }}{% endblock %}
-{% block content %}
-<div class="card" style="max-width:26rem;margin:3rem auto">
-  <h1>Sign in</h1>
-  {% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
-  <form method="post" action="/login">
-    <label for="u">Username</label><input id="u" name="username" type="text" autocomplete="username" autofocus required>
-    <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required>
-    <p><button type="submit">Sign in</button></p>
-  </form>
-  <p class="muted">No account? Ask the realm's admin.</p>
+{% block page %}<div class="center">
+  <svg class="watermark" viewBox="0 0 160 160" aria-hidden="true"><g fill="none" stroke="#d4af37" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M80 18 L128 44 V96 L80 142 L32 96 V44 Z"/><path d="M80 52 L104 66 V94 L80 108 L56 94 V66 Z"/></g></svg>
+  <div class="plate" style="width: min(440px, 100%); padding: 40px 40px 32px;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+    <form method="post" action="/login" style="display: flex; flex-direction: column; gap: 22px;">
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center;">
+        {% include "wordmark.html" %}
+        <h1 style="font-size: 26px; letter-spacing: 0.2em;">{{ realm_name }}</h1>
+        <span class="eyebrow">Sign in to enter</span>
+      </div>
+      <div class="ornament-rule">✦</div>
+      {% if let Some(e) = error %}<div class="flash error">{% call ic::icon("alert") %}<span>{{ e }}</span></div>{% endif %}
+      <div class="field"><label class="label" for="u">Username</label><div class="input-shell">{% call ic::icon("user") %}<input class="input" id="u" name="username" type="text" autocomplete="username" autofocus required></div></div>
+      <div class="field"><label class="label" for="p">Password</label><div class="input-shell">{% call ic::icon("lock") %}<input class="input" id="p" name="password" type="password" autocomplete="current-password" required></div></div>
+      <button class="btn-gold" type="submit" style="justify-content: center; height: 50px; font-size: 13.5px;">Enter the realm</button>
+      <p style="font-size: 12.5px; text-align: center; color: var(--fg-3);">No account? Ask the realm's admin.</p>
+    </form>
+  </div>
+<span class="eyebrow footer-line">A 1.12.1-compatible realm for friends · <a href="/about">about</a> · <a href="/privacy">privacy</a> · not affiliated with or endorsed by Blizzard Entertainment</span>
 </div>
 {% endblock %}

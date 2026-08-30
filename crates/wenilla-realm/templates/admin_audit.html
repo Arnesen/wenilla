@@ -1,13 +1,13 @@
-{% extends "base.html" %}
-{% block title %}Audit{% endblock %}
-{% block brand %}Admin{% endblock %}
-{% block nav %}<nav><a href="/admin">Dashboard</a><a href="/admin/users">Users</a><a href="/admin/config">Settings</a><a href="/admin/audit">Audit</a><a href="/">Play</a><form class="inline" method="post" action="/logout"><button class="secondary small">Sign out</button></form></nav>{% endblock %}
+{% extends "admin_base.html" %}
+{% import "icons.html" as ic %}
+{% block title %}Audit — {{ realm_name }}{% endblock %}
+{% block top_title %}Audit{% endblock %}
 {% block content %}
+<div class="head"><span class="eyebrow">History</span><h1 class="headline" style="text-transform: none; letter-spacing: 0.02em;">Audit log</h1><p class="deck">Every sign-in and every admin action. Web addresses are kept for 90 days, then removed.</p></div>
 <div class="card">
-  <h2>Audit log</h2>
-  <table><tr><th>When (UTC)</th><th>Who</th><th>IP</th><th>Action</th><th>Target</th><th>Detail</th></tr>
-  {% for e in entries %}<tr><td class="muted">{{ self::when(e.at) }}</td><td>{{ e.actor.as_deref().unwrap_or("-") }}</td><td class="muted">{{ e.ip.as_deref().unwrap_or("") }}</td><td>{{ e.action }}</td><td>{{ e.target.as_deref().unwrap_or("") }}</td><td class="muted">{{ e.detail.as_deref().unwrap_or("") }}</td></tr>{% endfor %}
+  <div class="card-head"><span class="card-title">Newest first</span>{% if let Some(b) = next_before %}<a class="ghost" href="/admin/audit?before={{ b }}">Older →</a>{% endif %}</div>
+  <table class="t"><tr><th>When (UTC)</th><th>Who</th><th>IP</th><th>Action</th><th>Target</th><th>Detail</th></tr>
+  {% for e in entries %}<tr><td class="k tabular">{{ self::when(e.at) }}</td><td>{{ e.actor.as_deref().unwrap_or("—") }}</td><td class="k" style="font-family: var(--font-mono); font-size: 12px;">{{ e.ip.as_deref().unwrap_or("") }}</td><td><code>{{ e.action }}</code></td><td>{{ e.target.as_deref().unwrap_or("") }}</td><td class="k">{{ e.detail.as_deref().unwrap_or("") }}</td></tr>{% endfor %}
   </table>
-  {% if let Some(b) = next_before %}<p><a href="/admin/audit?before={{ b }}">Older →</a></p>{% endif %}
 </div>
 {% endblock %}

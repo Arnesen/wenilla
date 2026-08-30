@@ -4,48 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Realm{% endblock %}</title>
-<style>
-  :root { color-scheme: dark; --bg:#14161a; --panel:#1d2027; --line:#2c313b; --fg:#e6e6e6; --muted:#9aa3b2; --accent:#d8a94a; --danger:#d96a5b; --ok:#6fbf73; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  a { color: var(--accent); }
-  header { display:flex; gap:1rem; align-items:center; padding:.6rem 1.2rem; background:var(--panel); border-bottom:1px solid var(--line); }
-  header .brand { font-weight:700; letter-spacing:.02em; margin-right:auto; }
-  header nav a { margin-left:1rem; text-decoration:none; }
-  main { max-width: 1100px; margin: 1.5rem auto; padding: 0 1.2rem; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:1rem 1.2rem; margin-bottom:1.2rem; }
-  h1, h2 { margin:.2rem 0 .8rem; font-weight:600; }
-  h1 { font-size:1.4rem; } h2 { font-size:1.1rem; }
-  label { display:block; margin:.5rem 0 .2rem; color:var(--muted); font-size:.9rem; }
-  input[type=text], input[type=password], input[type=number], input[type=url], select, textarea { width:100%; max-width:26rem; padding:.45rem .6rem; background:#0f1115; border:1px solid var(--line); border-radius:6px; color:var(--fg); }
-  button, .btn { padding:.45rem .9rem; background:var(--accent); color:#111; border:0; border-radius:6px; cursor:pointer; font-weight:600; }
-  button.secondary { background:#3a404c; color:var(--fg); }
-  button.danger { background:var(--danger); color:#111; }
-  button.small { padding:.25rem .55rem; font-size:.85rem; }
-  form.inline { display:inline; }
-  .row { display:flex; gap:1rem; flex-wrap:wrap; }
-  .row > * { flex:1 1 18rem; }
-  table { width:100%; border-collapse:collapse; }
-  th, td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--muted); font-weight:500; font-size:.85rem; }
-  .muted { color:var(--muted); } .ok { color:var(--ok); } .bad { color:var(--danger); }
-  .flash { padding:.6rem .9rem; border-radius:6px; margin-bottom:1rem; }
-  .flash.notice { background:#233a25; border:1px solid #2f5a33; }
-  .flash.error { background:#3a2323; border:1px solid #5a2f2f; }
-  pre { background:#0f1115; padding:.6rem .8rem; border-radius:6px; overflow:auto; font-size:.85rem; }
-  details summary { cursor:pointer; color:var(--muted); }
-  footer { text-align:center; color:var(--muted); font-size:.8rem; padding:2rem 1rem; }
-  .actions form { margin:.15rem .2rem .15rem 0; }
-</style>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700;900&family=JetBrains+Mono:wght@400;500&family=Lexend:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>{% include "pisces.css" %}</style>
 </head>
 <body>
-<header>
-  <span class="brand">{% block brand %}Realm{% endblock %}</span>
-  {% block nav %}{% endblock %}
-</header>
-<main>
-{% block content %}{% endblock %}
-</main>
-<footer>A 1.12.1-compatible realm for friends · <a href="/about">about</a> · <a href="/privacy">privacy</a> · not affiliated with or endorsed by Blizzard Entertainment</footer>
+<div class="ab">
+{% block page %}{% endblock %}
+</div>
 </body>
 </html>

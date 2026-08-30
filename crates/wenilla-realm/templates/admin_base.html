@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% import "icons.html" as ic %}
+{% block page %}
+<header class="top">
+  {% include "wordmark.html" %}
+  <div class="top-title">{% block top_title %}{% endblock %}</div>
+  <div class="top-right">
+    <span class="pill">{% call ic::icon("user") %}{{ me.display_name }}</span>
+    <form class="inline" method="post" action="/logout"><button class="ibtn" type="submit">{% call ic::icon("logout") %}Sign out</button></form>
+  </div>
+</header>
+<div class="body">
+  <aside class="side">
+    <div class="side-list">
+      <a class="side-link{% if nav == "dashboard" %} on{% endif %}" href="/admin">{% call ic::icon("gauge") %}<span>Dashboard</span></a>
+      <a class="side-link{% if nav == "users" %} on{% endif %}" href="/admin/users">{% call ic::icon("users") %}<span>Users</span></a>
+      <a class="side-link{% if nav == "settings" %} on{% endif %}" href="/admin/config">{% call ic::icon("sliders") %}<span>Settings</span></a>
+      <a class="side-link{% if nav == "audit" %} on{% endif %}" href="/admin/audit">{% call ic::icon("scroll") %}<span>Audit</span></a>
+    </div>
+    <div class="side-foot">
+      <a class="side-link" href="/">{% call ic::icon("play") %}<span>Play</span></a>
+      <a class="side-link" href="/account/password">{% call ic::icon("key") %}<span>Password</span></a>
+      <span class="eyebrow" style="padding: 0 10px;">{{ realm_name }} · 1.12.1</span>
+    </div>
+  </aside>
+  <main class="main">
+    {% block flash %}{% endblock %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+{% endblock %}

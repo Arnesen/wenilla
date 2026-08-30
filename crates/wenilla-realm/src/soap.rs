@@ -48,9 +48,9 @@ pub struct Client {
 impl Client {
     pub fn new(url: &str, user: &str, pass: &str) -> Self {
         Self {
-            // No keep-alive pooling: mangosd's gSOAP server closes the connection after each
-            // reply, and a reused pooled socket fails with "error sending request" on the very
-            // next command (seen live: the second of two back-to-back commands failed).
+            // No keep-alive pooling: mangosd's gSOAP server answers one request per connection
+            // and closes it, so there is nothing to reuse — a fresh socket per command is the
+            // honest shape (and what curl does).
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .pool_max_idle_per_host(0)
@@ -78,7 +78,7 @@ impl Client {
              </SOAP-ENV:Envelope>",
             xml_escape(command)
         );
-        let resp = self
+        let sent = self
             .http
             .post(&self.url)
             .basic_auth(&user, Some(&pass))
@@ -86,12 +86,25 @@ impl Client {
             .header("SOAPAction", "urn:MaNGOS#executeCommand")
             .body(body)
             .send()
-            .await?;
+            .await;
+        // `account set password` is the one command whose handler leaves gSOAP with nothing to
+        // send: mangosd closes the connection without an HTTP reply (curl: "52 Empty reply")
+        // even though the verifier in `account.v` has changed. Verified live 2026-08-30. Treat
+        // that shape as success for that command only; everything else keeps failing loudly.
+        let silent_ok = command.starts_with("account set password ");
+        let resp = match sent {
+            Ok(r) => r,
+            Err(e) if silent_ok && !e.is_timeout() => return Ok(String::new()),
+            Err(e) => return Err(e.into()),
+        };
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(SoapError::Unauthorized);
         }
         let text = resp.text().await?;
-        parse_reply(&text)
+        match parse_reply(&text) {
+            Err(SoapError::Transport(m)) if silent_ok && m == "empty reply" => Ok(String::new()),
+            other => other,
+        }
     }
 }
 
