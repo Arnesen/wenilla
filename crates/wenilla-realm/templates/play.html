@@ -35,6 +35,9 @@
 <div id="msg">Loading the realm…</div>
 <canvas id="benilla"></canvas>
 <script type="module">
+  // #msg covers only the pre-boot failures (no WebGPU, credential fetch); the moment boot()
+  // takes over, its own overlay owns all progress — the old code hid #msg here and then did
+  // every expensive thing (download, compile, the catalog frame) behind a black canvas.
   const msg = document.getElementById('msg');
   if (!navigator.gpu) {
     msg.textContent = 'This browser has no WebGPU. Use a current Chrome or Edge (on Linux: chrome://flags/#enable-unsafe-webgpu).';
@@ -49,8 +52,9 @@
   window.__wenilla_env = { user: env.user, pass: env.pass, host: env.host, ...(env.dev_query_creds ? { dev_query_creds: '1' } : {}) };
   const { default: init } = await import('./wenilla.js');
   const { bind } = await import('./wasi_stubs.js');
-  msg.classList.add('hidden');
-  const w = await init();
+  const { boot } = await import('./boot.js');
+  msg.remove(); // boot()'s overlay takes over from here — see web/boot.js
+  const w = await boot(init);
   bind(w.memory);
   delete window.__wenilla_env;
 </script>

@@ -169,6 +169,7 @@ mod vplates;
 /// `benilla_app::webenv::var` by that exact path; every in-crate caller still just writes
 /// `crate::webenv::var` like any other module.
 pub mod webenv;
+mod webprogress;
 mod world_backdrop;
 mod world_state;
 mod world_state_ui;
@@ -811,6 +812,11 @@ pub fn run(build: BuildId) -> AppExit {
             eprintln!("executor: no render app — ExtractSchedule flip NOT applied");
         }
     }
+
+    // Boot-progress bridge (webprogress.rs): tell the hosting page the Startup pile is done.
+    // PostStartup runs at the tail of the same long first-update task the catalogs block in, so
+    // this is the earliest signal the page can actually paint on.
+    app.add_systems(PostStartup, webprogress::signal_startup);
 
     // **The probe fleet** — the capture harness and every scripted live probe, each armed by its
     // own environment variable and inert without it. Added last so they observe the fully-built
