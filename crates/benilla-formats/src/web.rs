@@ -44,6 +44,33 @@ mod wasm {
         format!("{origin}/data")
     }
 
+    /// Append `name` to the page's boot-read trace, if the page armed one — the input to
+    /// `web/boot-manifest.json` (see `web/boot.js`). A page that wants the trace defines
+    /// `window.__wenilla_boottrace = []` before `init()` (the `?boottrace=1` switch does);
+    /// every chain read then pushes its raw backslash name in true first-need order, and a
+    /// person copies the deduplicated array out of the console into the manifest. Without the
+    /// array this is one snapshotted `Reflect::get` for the whole session and per-call nothing —
+    /// tracing must cost the boot it measures as close to zero as possible.
+    pub fn trace(name: &str) {
+        use wasm_bindgen::JsCast;
+        thread_local! {
+            static TRACE: std::cell::OnceCell<Option<js_sys::Array>> =
+                const { std::cell::OnceCell::new() };
+        }
+        TRACE.with(|cell| {
+            let arr = cell.get_or_init(|| {
+                let window = web_sys::window()?;
+                js_sys::Reflect::get(&window, &"__wenilla_boottrace".into())
+                    .ok()?
+                    .dyn_into::<js_sys::Array>()
+                    .ok()
+            });
+            if let Some(arr) = arr {
+                arr.push(&name.into());
+            }
+        });
+    }
+
     /// A blocking `XMLHttpRequest` GET, returning the raw response bytes.
     ///
     /// Synchronous on purpose: [`crate::Chain::read`] is called from Bevy systems on the main
@@ -100,4 +127,4 @@ mod wasm {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{data_base, exists_sync, fetch_sync};
+pub use wasm::{data_base, exists_sync, fetch_sync, trace};

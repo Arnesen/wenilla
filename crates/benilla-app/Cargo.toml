@@ -135,6 +135,10 @@ rand = "0.8"
 arboard = "3"
 
 [dev-dependencies]
+# tests/boot_manifest.rs parses web/boot-manifest.json (the boot-prefetch read-set). Dev-only:
+# the 0978 decision to keep serde_json out of the shipped app stands.
+serde_json = "1"
+
 # The WMO portal-cull audit's raw-face instruments (`WOW_PIN_COL`): the pin probe compares the
 # filtered walking-collision set against the group file's FULL face list with per-face MOPY flags,
 # which only the raw parser exposes — benilla-formats' gathers are exactly the filtered views.

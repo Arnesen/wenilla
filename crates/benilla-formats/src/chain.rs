@@ -261,6 +261,7 @@ impl Chain {
     /// matches the native path's (`"file not in patch chain: {name}"`) so a caller that matches on
     /// that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
+        crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
         crate::web::fetch_sync(&self.url_for(name)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow!("file not in patch chain: {name}")

@@ -52,3 +52,5 @@ web-sys = { version = "0.3.99", features = [
     "XmlHttpRequestResponseType",
 ] }
 serde_json = "1"
+# The boot-read trace (web.rs::trace) reads window.__wenilla_boottrace as a js_sys::Array.
+js-sys = "0.3"

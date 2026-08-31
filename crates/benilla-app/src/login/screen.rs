@@ -146,6 +146,9 @@ pub(super) fn materialize_screen(
                     &realmlist,
                     &window,
                 );
+                // The page's boot overlay drops on this signal — the first spawn (artless or
+                // not) is the first frame a person can actually see and use.
+                crate::webprogress::signal_ready_once();
             }
         }
     }

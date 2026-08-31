@@ -143,6 +143,10 @@ pub(super) fn materialize_screen(
                     strings.as_deref(),
                     &window,
                 );
+                // Auto-login (the env fast path) skips the Login screen entirely, so char
+                // select can be the first thing a person sees — the boot overlay's "ready"
+                // has to fire from here too. Idempotent; whichever screen spawns first wins.
+                crate::webprogress::signal_ready_once();
             }
         }
     }

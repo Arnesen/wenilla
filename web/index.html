@@ -67,12 +67,14 @@
 <script type="module">
   import init from './wenilla.js';
   import { bind } from './wasi_stubs.js';
-  // `init()` instantiates the wasm module, which runs `#[wasm_bindgen(start)] start()` as part of
-  // instantiation (`wenilla/src/lib.rs`) — that's the whole boot, canvas included
-  // (`boot.rs` binds to `#benilla` by id, so no query/lookup belongs here). `bind(w.memory)` comes
-  // AFTER `init()` on purpose: the wasm Lua VM's WASI shims (`wasi_stubs.js`'s own header) can only
-  // zero a WASI caller's out-pointers once the module's linear memory exists to write into, and
-  // `init()` is what creates it.
-  const w = await init();
+  import { boot } from './boot.js';
+  // `boot(init)` is the loading overlay + parallel data prefetch (see boot.js's header); it calls
+  // `init()` with a byte-counted Response, and `init()` instantiates the wasm module, which runs
+  // `#[wasm_bindgen(start)] start()` as part of instantiation (`wenilla/src/lib.rs`) — that's the
+  // whole boot, canvas included (`boot.rs` binds to `#benilla` by id, so no query/lookup belongs
+  // here). `bind(w.memory)` comes AFTER on purpose: the wasm Lua VM's WASI shims
+  // (`wasi_stubs.js`'s own header) can only zero a WASI caller's out-pointers once the module's
+  // linear memory exists to write into, and `init()` is what creates it.
+  const w = await boot(init);
   bind(w.memory);
 </script>

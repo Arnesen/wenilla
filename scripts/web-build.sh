@@ -28,7 +28,10 @@ mkdir -p "${DIST}"
 strip=(--remove-name-section --remove-producers-section)
 [ "${WEB_DEBUG:-0}" = 1 ] && strip=()
 wasm-bindgen --target web --no-typescript "${strip[@]}" --out-dir "${DIST}" "${WASM}"
-cp web/index.html web/wasi_stubs.js "${DIST}/"
+cp web/index.html web/wasi_stubs.js web/boot.js "${DIST}/"
+# The boot prefetch manifest (see web/boot.js) — optional so a tree that hasn't captured one
+# yet still builds; the overlay just skips the data-prefetch line.
+if [ -f web/boot-manifest.json ]; then cp web/boot-manifest.json "${DIST}/"; fi
 
 # binaryen's wasm-opt -O3 (scripts/web-setup.sh puts it in tools/binaryen): ~35 s, and the
 # client is CPU-bound on its one wasm thread, so this is a speed pass, not a size pass —
