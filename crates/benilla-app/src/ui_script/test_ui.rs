@@ -102,8 +102,9 @@ pub(super) const BAG_UI: &[&str] = &[
     // `updateContainerFrameAnchors` measures every open bag against `BankFrame:GetRight()`
     // (ContainerFrame.lua l.505) on EVERY open and close, so the bank window is not optional
     // scenery for a bag test — it is a hard dependency of the reference's own layout pass. It is
-    // one in the real client too; the manifest just satisfies it far below the bags.
-    "BankFrame.xml",
+    // one in the real client too; the manifest just satisfies it far below the bags. The
+    // reference's own file since 1751's second window.
+    "Interface\\FrameXML\\BankFrame.xml",
 ];
 
 /// The name of the `ContainerFrame` currently showing bag `id`, or `None` if it is not open.

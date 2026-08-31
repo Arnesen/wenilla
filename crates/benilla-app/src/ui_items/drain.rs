@@ -124,6 +124,68 @@ pub(super) fn drain_container_autoequips(
     }
 }
 
+/// Drain the auto-stores `PutItemInBag`/`PutItemInBackpack` queued (`benilla_ui`'s
+/// `cursor::bag_verbs`) and send them on the wire.
+///
+/// **The destination is a BAG, not a slot** — that is the finding this drain exists to carry
+/// (wow-re `bag-verbs-law.md`): `CMSG_AUTOSTORE_BAG_ITEM` names `(srcbag, srcslot, dstbag)` and
+/// the server picks where inside it the item lands, which is why an ordinary item dropped on a
+/// bag BUTTON goes in the bag rather than swapping with it. The destination bag byte is
+/// [`wire_pos`]'s own answer for that container's first slot (255 for the backpack, the bag's
+/// player-array slot 19..22 / 63..68 for an equipped or bank bag), so one map serves both ends.
+///
+/// A **split carry** takes `CMSG_SPLIT_ITEM` instead — the reference's own fork on `[0xb4b40c]`
+/// — with the literal `0xFF` where a destination slot would go, because that wire has a slot
+/// field and this one does not.
+///
+/// No pending-lock recording, matching [`drain_container_autoequips`]'s own precedent for the same
+/// class of send: the destination is not a slot, so there is no second end to lock.
+pub(super) fn drain_bag_autostores(
+    script: Option<NonSendMut<UiScript>>,
+    commands: Res<NetCommands>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for a in script.take_bag_autostores() {
+        let (Some((src_bag, src_slot)), Some((dst_bag, _))) =
+            (wire_pos(a.src_bag, a.src_slot), wire_pos(a.dst_bag, 1))
+        else {
+            debug!("ui_items: bag autostore {a:?} out of range — ignored");
+            continue;
+        };
+        match a.count {
+            None => {
+                debug!(
+                    "ui_items: autostore lua {}/{} → bag {} (wire {src_bag}/{src_slot} → {dst_bag})",
+                    a.src_bag, a.src_slot, a.dst_bag
+                );
+                let _ = commands.0.send(ClientCommand::AutoStoreBagItem {
+                    src_bag,
+                    src_slot,
+                    dst_bag,
+                });
+            }
+            Some(n) => {
+                let count = n.min(u32::from(u8::MAX)) as u8;
+                debug!(
+                    "ui_items: autostore split lua {}/{} → bag {} × {count} (wire {src_bag}/{src_slot} → {dst_bag})",
+                    a.src_bag, a.src_slot, a.dst_bag
+                );
+                let _ = commands.0.send(ClientCommand::SplitItem {
+                    src_bag,
+                    src_slot,
+                    dst_bag,
+                    // `0xFF` — the reference's own literal for "no destination slot"; the split
+                    // wire has the field, the verb has no value for it.
+                    dst_slot: 0xFF,
+                    count,
+                });
+            }
+        }
+    }
+}
+
 /// Drain the inventory-slot ids `UseInventoryItem` queued (decision 0208 phase 1b: the doll
 /// slot's right-click) and route the equipped position (bag 255 plus the 0-based wire slot —
 /// `HandleUseItemOpcode` takes equipped positions the same as bag ones, vmangos `ItemHandler.cpp`)

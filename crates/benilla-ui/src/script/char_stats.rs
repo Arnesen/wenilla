@@ -267,17 +267,31 @@ pub struct InvSlotView {
 pub const INVENTORY_SLOT_COUNT: usize = 24;
 pub type InventorySlots = [Option<InvSlotView>; INVENTORY_SLOT_COUNT];
 
+/// The six BANK-BAG slots' snapshot, in button order (live-API ids 64..=69 —
+/// `BankButtonIDToInvSlotID(1..6, isBag)`). `None` = the slot is empty (or not purchased).
+///
+/// **A separate dense array rather than a wider [`InventorySlots`]**, because the live-id space
+/// between them is not ours to fill: 24..=39 is the backpack and 40..=63 the vault, and both of
+/// those the model already holds as CONTAINERS — [`Model::inv_slot`]'s bank band maps them rather
+/// than storing them twice. Growing the doll array to 70 would leave a 40-entry hole whose
+/// emptiness means "look somewhere else", which is exactly the kind of implicit second rule that
+/// lets a tooltip disagree with the icon under it. Three bands, three named sources.
+///
+/// Fed by the same system as the doll snapshot ([`super::UiScript::set_bank_bag_slots`]): these
+/// are player-descriptor inventory slots that exist whether or not the bank window is open, not
+/// part of the bank *window*'s state.
+pub const BANK_BAG_SLOT_COUNT: usize = 6;
+pub type BankBagSlots = [Option<InvSlotView>; BANK_BAG_SLOT_COUNT];
+
 /// The client's own `PaperDollItemFrame.dbc` rows (re-verified against the 1.12.1 (build 5875)
 /// MPQ this session, byte-exact — 36 records, 3 `u32` fields each: `SlotName` offset,
-/// `SlotTexture` offset, `SlotID`): `(slotName, slotId, empty-slot art suffix)` for the 24 rows
-/// `GetInventorySlotInfo` actually names — the 20 equipment+ammo rows plus `Bag0Slot`..`Bag3Slot`
-/// (ids **20..23**, confirmed this session — every one points at the same
-/// `interface\paperdoll\UI-PaperDoll-Slot-Bag.blp`, matching the reference `CharacterBag0Slot`
-/// bag-bar buttons' `GetID()`s). The DBC's remaining 12 rows (`"Bag1".."Bag12"`, ids 64..75) are a
-/// different, unrelated numbering — not `GetInventorySlotInfo` names, out of scope here — left
-/// untranscribed. The oddballs among the 24: `BackSlot` shows the **Chest** art and `AmmoSlot` the
-/// **Ranged** art (both confirmed by their `SlotTexture` offset pointing at that other row's
-/// string, not a fresh one).
+/// `SlotTexture` offset, `SlotID`): `(slotName, slotId, empty-slot art suffix)` for all 36 rows —
+/// the 20 equipment+ammo rows, `Bag0Slot`..`Bag3Slot` (ids **20..23**, every one pointing at the
+/// same `interface\paperdoll\UI-PaperDoll-Slot-Bag.blp`, matching the reference
+/// `CharacterBag0Slot` bag-bar buttons' `GetID()`s), and `Bag1`..`Bag12` (ids 64..75 — the
+/// bank-bag band; see the note over those rows). The oddballs: `BackSlot` shows the **Chest** art
+/// and `AmmoSlot` the **Ranged** art (both confirmed by their `SlotTexture` offset pointing at
+/// that other row's string, not a fresh one).
 const SLOT_INFO: [(&str, i64, &str); 36] = [
     ("AmmoSlot", 0, "Ranged"),
     ("HeadSlot", 1, "Head"),
@@ -418,6 +432,16 @@ impl super::UiScript {
         self.fire_event("UPDATE_INVENTORY_ALERTS", vec![]);
     }
 
+    /// Push the six bank-bag slots ([`BankBagSlots`] — live ids 64..=69). No event of its own:
+    /// the app pushes it in the same step as [`Self::set_inventory_slots`], whose
+    /// `UNIT_INVENTORY_CHANGED` is the repaint signal the reference's bank buttons already
+    /// register for (`BankFrameBaseButton_OnLoad` takes `PLAYERBANKSLOTS_CHANGED` /
+    /// `ITEM_LOCK_CHANGED` / `BANKFRAME_OPENED`, and `BankFrameItemButton_OnUpdate` re-reads
+    /// every frame besides).
+    pub fn set_bank_bag_slots(&mut self, slots: BankBagSlots) {
+        self.model_mut().bank_bag_slots = slots;
+    }
+
     /// Drain the inventory-slot ids `UseInventoryItem` queued (decision 0208 phase 1b) — the app
     /// resolves each to the equipped item's guid and sends `CMSG_USE_ITEM` (bag 255 + the
     /// 0-based wire slot).
@@ -491,20 +515,101 @@ fn player_inv_slot(lua: &Lua, token: &Option<String>, slot: i64) -> Option<InvSl
     let token = token.as_deref()?;
     let idx = usize::try_from(slot).ok()?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    model.inv_slot(token, idx).cloned()
+    model.inv_slot(token, idx)
 }
+
+/// The live-API inventory ids the BANK occupies — `BankButtonIDToInvSlotID`'s own two bands
+/// (`super::bank`): the 24 vault slots at 40..=63, the six bank-bag slots at 64..=69.
+const BANK_INV_SLOTS: std::ops::RangeInclusive<usize> = 40..=63;
+const BANK_BAG_INV_SLOTS: std::ops::RangeInclusive<usize> = 64..=69;
+
+/// The container id the vault's own slots live under — `ui_items`' constant of the same name,
+/// restated here because this file is the other end of the same map.
+const BANK_CONTAINER: i64 = -1;
 
 impl Model {
     /// The equipment slot `token` exposes at live-API id `slot`, or `None`. The one place the
-    /// two-source routing above is decided — shared by the `GetInventoryItem*` getters and
+    /// source routing is decided — shared by the `GetInventoryItem*` getters and
     /// `GameTooltip:SetInventoryItem`, so a tooltip can never disagree with the icon under it.
-    pub(super) fn inv_slot(&self, token: &str, slot: usize) -> Option<&InvSlotView> {
-        let slots = if token.eq_ignore_ascii_case("player") {
-            &self.inventory_slots
-        } else {
-            &self.inspect.as_ref().filter(|v| v.unit == token)?.slots
-        };
-        slots.get(slot)?.as_ref()
+    ///
+    /// **THREE sources now, and the third is a VIEW, not a store** (decision 1751's bank swap).
+    /// The reference's bank paints every one of its slots through the *inventory* API —
+    /// `BankFrameItemButton_OnUpdate` reads `GetInventoryItemTexture("player", BankButtonIDToInv
+    /// SlotID(id))` (BankFrame.lua:35) — while benilla feeds the very same items as *containers*
+    /// (`-1` for the vault, `5..10` for the bank bags), which is how our own bank window read
+    /// them. Those are two names for one set of descriptor fields, so the fix is a map, not a
+    /// second copy: a read in the bank band is answered from the container snapshot. Duplicating
+    /// the items into a wider `inventory_slots` array would put two truths in the model and let
+    /// a tooltip disagree with the icon under it, which is the one thing this function exists to
+    /// prevent.
+    pub(super) fn inv_slot(&self, token: &str, slot: usize) -> Option<InvSlotView> {
+        if token.eq_ignore_ascii_case("player") {
+            if let Some(view) = self.bank_inv_slot(slot) {
+                return Some(view);
+            }
+            return self.inventory_slots.get(slot)?.clone();
+        }
+        self.inspect
+            .as_ref()
+            .filter(|v| v.unit == token)?
+            .slots
+            .get(slot)?
+            .clone()
+    }
+
+    /// The bank band's answer, or `None` for any id outside it — see [`Model::inv_slot`].
+    fn bank_inv_slot(&self, slot: usize) -> Option<InvSlotView> {
+        if BANK_INV_SLOTS.contains(&slot) {
+            let vault = self.containers.get(&BANK_CONTAINER)?;
+            let n = (slot - BANK_INV_SLOTS.start() + 1) as u32;
+            return vault.slots.get(&n).map(InvSlotView::from_container_slot);
+        }
+        if BANK_BAG_INV_SLOTS.contains(&slot) {
+            // A bank BAG is not a slot in a container — it IS one, so there is no container slot
+            // to map and this band is a real store ([`BankBagSlots`], fed off the player
+            // descriptor's own `PLAYER_FIELD_BANK_BAG_SLOT_*` guids by the same system that feeds
+            // the doll). It has to be the whole item, not just its icon: the reference picks a
+            // bank bag up with `PickupBagFromSlot(BankButtonIDToInvSlotID(i, 1))` and describes it
+            // with `GameTooltip:SetInventoryItem("player", …)`, both of which read this band.
+            let i = slot - BANK_BAG_INV_SLOTS.start();
+            return self.bank_bag_slots.get(i)?.clone();
+        }
+        None
+    }
+}
+
+/// The display name inside an item link — the text between `|h[` and `]|h`.
+fn link_item_name(link: &str) -> Option<String> {
+    let (_, rest) = link.split_once("|h[")?;
+    let (name, _) = rest.split_once("]|h")?;
+    Some(name.to_string())
+}
+
+impl InvSlotView {
+    /// The same item, seen through the inventory API instead of the container API — the map
+    /// [`Model::inv_slot`]'s bank band is built on. Every field is the same descriptor field under
+    /// the other name; what a `ContainerSlot` has and this does not (`equip_slots`, `cooldown`,
+    /// `readable`) has no inventory-API reader, and what this has and a container slot does not
+    /// (`flags`) is not carried by the container feed.
+    fn from_container_slot(slot: &super::container::ContainerSlot) -> Self {
+        InvSlotView {
+            item_id: slot.item_id,
+            bar_placeable: slot.bar_placeable,
+            icon: slot.texture.clone(),
+            count: slot.count,
+            quality: slot.quality.map_or(0, |q| q as i32),
+            // A container slot carries no `name` of its own — the container API never asks for one
+            // — but its `link` is composed FROM the name (`|Hitem:…|h[Name]|h`), so the one field
+            // the inventory API adds is recoverable rather than absent.
+            name: slot.link.as_deref().and_then(link_item_name),
+            durability: slot.durability,
+            already_bound: slot.already_bound,
+            link: slot.link.clone(),
+            locked: slot.locked,
+            creator: slot.creator.clone(),
+            enchants: slot.enchants.clone(),
+            ..Default::default()
+        }
     }
 }
 

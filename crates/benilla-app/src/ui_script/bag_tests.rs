@@ -778,7 +778,8 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
 }
 
 /// The drag trio (decision 0216 §3): a real press-drag-release across two slot buttons routes
-/// through the SAME `BenillaBagSlot_OnClick("LeftButton")` path a two-click pickup/place does —
+/// through the SAME `ContainerFrameItemButton_OnClick("LeftButton")` path a two-click pickup/place
+/// does —
 /// unlike every other bag test here, which calls the Lua click handler directly, this one drives
 /// actual `mouse_button`/`mouse_move` so the `RegisterForDrag`/`OnDragStart`/`OnReceiveDrag` XML
 /// wiring itself is under test, not just the handler body.
@@ -1330,7 +1331,7 @@ fn a_plain_click_hides_an_open_split_frame() {
 
 /// Bag-slot item cooldowns through the shipped XML (decision 0263's deferral): a potion mid-
 /// cooldown pushes its triple with the container snapshot; opening the bag runs the ref's
-/// occupied-slot fork (`BenillaBagSlot_UpdateCooldown` → `GetContainerItemCooldown` →
+/// occupied-slot fork (`ContainerFrame_UpdateCooldown` → `GetContainerItemCooldown` →
 /// `CooldownFrame_SetTimer`) and the slot grows a live sweep; a `BAG_UPDATE_COOLDOWN` refresh
 /// with the cooldown gone hides it again.
 #[test]

@@ -378,12 +378,6 @@ const KNOWN: &[Known] = &[
         flag: Flag::Id,
         why: "-2 is KEYRING_CONTAINER, which the reference also arrives at — from Lua, not XML",
     },
-    Known {
-        frame: "BankFrame",
-        flag: Flag::Id,
-        why: "id=\"-1\" is ours: the bank window's own sentinel for \"not a container slot\", \
-              which the reference has no equivalent of",
-    },
     // ── parent ─────────────────────────────────────────────────────────────────────────────────
     //
     // Three, and each is a seat inside the SAME tree the reference seats it in — which is the

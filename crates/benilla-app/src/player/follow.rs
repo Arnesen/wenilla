@@ -259,9 +259,17 @@ pub(super) struct FollowInput<'w, 's> {
     /// which is deliberate and harmless: the cancel then lands on the frame *after* the look
     /// begins, versus the reference's same-frame commit.
     rig: Res<'w, CameraControl>,
-    /// The **mover's** descriptor block, for the one term of the cancel set that is not an input:
-    /// its health. See [`FollowInput::mover_dead`].
+    /// The **mover's** descriptor block, for the terms of the cancel set that are not inputs:
+    /// its health and its stun. See [`FollowInput::input_torn_down`].
     mover: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::Embodied>>,
+    /// What the camera orbits ([`super::view_subject`]) — the resolved half of the shared
+    /// precondition's far-sight conjunct, which takes both predicates down and so reaches the
+    /// teardown leg on its own (decision 1761).
+    ///
+    /// Read possibly one frame behind, like `rig` above and for the same benign reason: the
+    /// publisher and this system are both merely `.before(control)` and are unordered against each
+    /// other, so a follow engaged and far-sighted on the very same frame ends on the next one.
+    view_subject: Res<'w, super::view_subject::ViewSubject>,
 }
 
 impl FollowInput<'_, '_> {
@@ -284,7 +292,7 @@ impl FollowInput<'_, '_> {
     }
 
     /// Has the input tick reached its **teardown leg** — the one that cancels click-to-move and the
-    /// follow and fires `AUTOFOLLOW_END` ([`super::state::input_torn_down`])? Not an input, but the
+    /// follow and fires `AUTOFOLLOW_END` ([`super::state::MoverInput::torn_down`])? Not an input, but the
     /// member of the cancel set that is a *state*, and the one benilla had wrong in both directions.
     ///
     /// `rf86-autofollow-cancel-set.md` §5 named the mechanism as the health test at `0x5144f8`, and
@@ -293,13 +301,20 @@ impl FollowInput<'_, '_> {
     /// so a pure ROOT — which benilla cancelled on — does **not** end a follow in the reference, and
     /// death — which benilla did not cancel on, so a follow taken into death kept steering the
     /// corpse's facing every frame — does. Ice Block, root and stun together, ends it as well.
-    fn input_torn_down(&self, rooted: bool) -> bool {
+    ///
+    /// **Far sight ends it too**, and for the same structural reason death does rather than as a
+    /// case of its own: the far-sight conjunct sits in the precondition the two predicates *share*,
+    /// so engaging it takes both down at once and lands on this leg.
+    fn input_torn_down(&self, rooted: bool, driving_own_body: bool) -> bool {
         self.mover.single().is_ok_and(|s| {
-            super::state::input_torn_down(
-                s.0.unit_is_dead(),
-                rooted,
-                s.0.unit_flags() & super::UNIT_FLAG_STUNNED != 0,
-            )
+            super::state::MoverInput {
+                dead: s.0.unit_is_dead(),
+                view_is_out: super::state::view_is_out(
+                    driving_own_body,
+                    self.view_subject.remote.is_some(),
+                ),
+            }
+            .torn_down(rooted, s.0.unit_flags() & super::UNIT_FLAG_STUNNED != 0)
         })
     }
 }
@@ -341,7 +356,8 @@ pub(super) fn steer_follow(
         // is benilla's own and predates this: it is not one of `0x5144e0`'s conjuncts (conjunct 4 is
         // the Knockdown lockout, not a taxi test — wow-re §6.2), and nothing in this round bears on
         // it either way, so it is left exactly as it stood.
-        input.input_torn_down(player.modes.rooted) || player.server_riding(),
+        input.input_torn_down(player.modes.rooted, player.foreign_mover.is_none())
+            || player.server_riding(),
     ) {
         info!("follow: cancelled by the player's own movement input");
         follow.stop();

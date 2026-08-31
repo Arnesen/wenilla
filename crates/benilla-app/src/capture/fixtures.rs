@@ -341,18 +341,20 @@ pub(super) fn seed_ui_fixture(
                 crate::net::SelfPlayer,
                 crate::net::Guid(PLAYER_GUID),
             ));
-            // Open the session — `feed_bank` fires BANKFRAME_OPENED (title + portrait + the 0561
-            // OpenBackpack contract) on the next frames exactly as a live SMSG_SHOW_BANK would.
+            // Open the session — `feed_bank` fires BANKFRAME_OPENED (title + portrait) on the
+            // next frames exactly as a live SMSG_SHOW_BANK would.
             bank.open(NPC_GUID);
-            // One-shot popout: click bank bag 1 open as soon as its container feed lands (the
-            // click path needs `GetContainerNumSlots(5) > 0`, which arrives over the settle
-            // frames — the window's OnUpdate polls, flag-guarded, exactly once).
+            // One-shot popout: open bank bag 1 as soon as its container feed lands (the click
+            // path needs `GetContainerNumSlots(5) > 0`, which arrives over the settle frames —
+            // the window's OnUpdate polls, flag-guarded, exactly once). `BankFrameBag1`'s own
+            // `GetID()` is 5, the container id, which is what its handler passes to `ToggleBag`.
             if let Some(s) = script.as_mut() {
                 if let Err(e) = s.run(
                     "BankFrame:SetScript(\"OnUpdate\", function()\n\
                          if not benillaBankPopoutDone and GetContainerNumSlots(5) > 0 then\n\
                              benillaBankPopoutDone = 1\n\
-                             BenillaBankBagButton_OnClick(getglobal(\"BankBagButton1\"))\n\
+                             this = getglobal(\"BankFrameBag1\")\n\
+                             BankFrameItemButtonBag_OnClick(\"LeftButton\")\n\
                          end\n\
                      end)",
                 ) {
@@ -742,11 +744,21 @@ pub(super) fn seed_ui_fixture(
                     ..Default::default()
                 },
             );
-            // Force the tooltip open over the top-left bag button (BenillaBagSlot16 ⇒ game slot 1,
-            // the green Small Shield) via the same OnEnter path a hover fires — deterministic, no
-            // synthetic mouse. A top-left seat keeps the ANCHOR_RIGHT tooltip on-screen; the
-            // engine's auto-size pass settles it over the capture window.
-            if let Err(e) = script.run("BenillaBagSlot_OnEnter(getglobal(\"BenillaBagSlot16\"))") {
+            // Force the tooltip open over the top-left bag button (`Item16` ⇒ game slot 1, the
+            // green Small Shield — see `seed_bag_window` on the backwards numbering) via the same
+            // OnEnter path a hover fires — deterministic, no synthetic mouse. A top-left seat keeps
+            // the ANCHOR_RIGHT tooltip on-screen; the engine's auto-size pass settles it over the
+            // capture window.
+            //
+            // **Which window the backpack landed in is ASKED, never assumed**: the reference
+            // recycles twelve `ContainerFrame`s across every container, so the index depends on
+            // what else is open. `IsBagOpen` is its own published scan.
+            if let Err(e) = script.run(
+                "local i = IsBagOpen(0)\n\
+                 if i then\n\
+                     ContainerFrameItemButton_OnEnter(getglobal(\"ContainerFrame\"..i..\"Item16\"))\n\
+                 end",
+            ) {
                 warn!("capture: ui-tooltip seed failed to open the tooltip: {e}");
             }
         }
@@ -1435,9 +1447,11 @@ fn seed_bag_window(
     };
     // ~5 items scattered across the 16 slots, a mix of stacked and unstacked, under their real
     // vanilla template ids (the Tooltip fixture seeds a full template view for the hovered one).
-    // Game slot 1 (rendered top-left, button BenillaBagSlot16) carries the green-quality Small
-    // Shield the Tooltip fixture hovers — a top-left seat keeps its ANCHOR_RIGHT tooltip
-    // on-screen.
+    // Game slot 1 carries the green-quality Small Shield the Tooltip fixture hovers, and it is
+    // rendered TOP-LEFT: `ContainerFrame_GenerateFrame` numbers backwards (`index = size - j + 1`)
+    // and anchors `Item1` at the window's BOTTOMRIGHT, filling leftwards then upwards — so for a
+    // 16-slot bag the top-left button is `Item16` and it carries slot 1. A top-left seat keeps its
+    // ANCHOR_RIGHT tooltip on-screen.
     let mut slots = std::collections::HashMap::new();
     slots.insert(1, slot(DISP_SHIELD, 1, 2362, "Small Shield", 2));
     slots.insert(3, slot(DISP_FOOD, 5, 117, "Tough Jerky", 1));
@@ -1454,8 +1468,11 @@ fn seed_bag_window(
     );
     // Player money nonzero so the purse renders all three denominations (1g 23s 45c).
     script.set_money(12_345);
-    // Open + paint the window (BenillaBagFrame_Update fills the slots + the purse).
-    if let Err(e) = script.run("BenillaBagFrame_Update(); getglobal(\"BenillaBagFrame\"):Show()") {
+    // Open the window with the reference's own verb — it builds and paints one in the same call
+    // (`ToggleBag` → `OpenBag` → `ContainerFrame_GenerateFrame`), which is why nothing has to
+    // repaint it afterwards. `OpenBag(0)` rather than `OpenBackpack()`: only the backpack is fed
+    // here, and 0561 makes the latter open every equipped bag.
+    if let Err(e) = script.run("OpenBag(0)") {
         warn!("capture: bag window seed failed: {e}");
     }
 
@@ -1591,9 +1608,9 @@ fn seed_equipped_bags(
                 slots,
             }),
         );
-        if let Err(e) = script.run(&format!(
-            "local f = getglobal(\"BenillaBagFrame{bag_id}\"); BenillaBagWindow_Update(f); f:Show()"
-        )) {
+        // The reference's own verb, which builds the window as it opens it — and it must run
+        // AFTER `set_container`, since `OpenBag` refuses a container with no slots.
+        if let Err(e) = script.run(&format!("OpenBag({bag_id})")) {
             warn!("capture: equipped bag {bag_id} seed failed: {e}");
         }
     }

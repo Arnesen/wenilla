@@ -1024,7 +1024,7 @@
                 -- reference (PaperDollFrame.xml:20-25 routes OnDragStart/OnReceiveDrag to the same
                 -- OnClick("LeftButton", ignoreModifiers=1) the plain click uses) — see
                 -- BenillaPaperDollSlot_OnClick below for the identical routing, the bag slots' own
-                -- precedent (BagFrame.xml's BenillaBagSlot_OnClick).
+                -- precedent (the reference's ContainerFrameItemButton_OnClick, sourced since 1751).
                 button:RegisterForDrag("LeftButton")
             else
                 button:RegisterForClicks("LeftButtonUp")
@@ -1095,7 +1095,7 @@
             button.broken = textureName and GetInventoryItemBroken("player", button.invSlotId)
             -- A locked slot (its item is up on the cursor, or a send is still pending
             -- server-side, decision 0216 §4/0218 §3) dims — the bag slots' own vertex-dim
-            -- convention (BagFrame.xml's BenillaBagSlot_Update), applied here instead of the
+            -- convention, applied here instead of the
             -- ref's separate SetItemButtonDesaturated call (no engine equivalent — header
             -- comment). The transient drag-dim outranks the broken red on the icon.
             if IsInventoryItemLocked(button.invSlotId) then
@@ -1272,7 +1272,7 @@
         The shared equipment-slot button (ref PaperDollItemSlotButtonTemplate inherits
         ItemButtonTemplate, ref-PaperDollFrame.xml:4-38 — ItemButtonTemplate's own XML isn't part of
         this session's extraction, so its shape is taken from this codebase's own prior
-        reconstruction of it, BagFrame.xml's BenillaBagSlotTemplate: 37x37, a BACKGROUND icon fill,
+        reconstruction of it (BagFrame.xml's since-retired BenillaBagSlotTemplate): 37x37, a BACKGROUND icon fill,
         an OVERLAY count, the 64x64 UI-Quickslot2 ring centered (0,-1), UI-Quickslot-Depress pushed,
         ButtonHilight-Square ADD highlight — duplicated here rather than cross-file inherited so this
         window's slot behavior (UNIT_INVENTORY_CHANGED refresh, tooltip) stays self-contained in one

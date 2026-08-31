@@ -189,7 +189,7 @@ fn surface_report(deep: bool, dump_path: Option<String>) {
     //
     // Split again on the `Benilla` prefix, which is the difference between a name that CAN collide
     // with an addon's expectations and one that cannot. Nothing in the 1.12 corpus feature-tests
-    // `BenillaBagSlot_OnClick`; our own namespace is safe by construction, and leaving 443 of those
+    // `BenillaPaperDollSlot_OnClick`; our own namespace is safe by construction, and leaving 443 of those
     // in the list would bury the ones that are not.
     if let Some(fns) = extra_by_kind.get("function") {
         let (ours_ns, unprefixed): (Vec<&&str>, Vec<&&str>) = fns

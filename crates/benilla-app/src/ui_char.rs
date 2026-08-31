@@ -42,8 +42,8 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_ui::script::{
-    weapon_subclass_skill, InvSlotView, InventorySlots, ScriptValue, SkillEntry, SkillsState,
-    UiScript, UnitCombatStats, EQUIPMENT_BAG, SKILL_DEFENSE, SKILL_UNARMED,
+    weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, ScriptValue, SkillEntry,
+    SkillsState, UiScript, UnitCombatStats, EQUIPMENT_BAG, SKILL_DEFENSE, SKILL_UNARMED,
 };
 
 use crate::entities::ItemDisplays;
@@ -87,6 +87,7 @@ struct CharFeedState {
 struct CharFeedMemo {
     last_stats: Option<UnitCombatStats>,
     last_inv: Option<InventorySlots>,
+    last_bank_bags: Option<BankBagSlots>,
     /// The gate's counter memories (1439) — the stores whose lazy resolves poison `is_changed`
     /// for this feed (the equipment templates' ask-once, the enchant-name creator lookups).
     items_objects: gate::Watch,
@@ -538,21 +539,25 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
 /// equip_slots from the ask-once template (icon `None` while the answer is in flight — the
 /// empty-slot art shows and the landing template flips the view, which fires
 /// `UNIT_INVENTORY_CHANGED`), `locked` from the app's `PendingItemOps` (decision 0208 phase 1b —
-/// the same feed `ui_items::feed_containers` reads for a bag slot's own `.locked`). `slot0` is
-/// the wire `EQUIPMENT_SLOT_*`/`INV_SLOT` index (0..22 — equipment 0..18, the four equipped-bag
-/// icons 19..22); the live-API id `slot_view` reports through is `slot0 + 1` either way.
+/// the same feed `ui_items::feed_containers` reads for a bag slot's own `.locked`).
+///
+/// Takes the item's **guid and its live-API id** rather than a wire slot index, because the two
+/// bands that use it resolve their guid out of two different descriptor arrays: the doll's
+/// `PLAYER_FIELD_INV_SLOT_*` (live id = wire slot + 1, so equipment 1..=19 and the four
+/// equipped-bag icons 20..=23) and the bank bags' own `PLAYER_FIELD_BANK_BAG_SLOT_*` (live ids
+/// 64..=69). Everything past the guid — template, enchants, durability, the pending lock — is
+/// identical for both, which is the whole reason there is one function here and not two.
 #[allow(clippy::too_many_arguments)] // the slot resolve's full read set — the bag feed's twin
 fn slot_view(
-    store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
-    slot0: u8,
+    guid: u64,
+    live_id: u32,
 ) -> Option<InvSlotView> {
-    let guid = store.0.player_inv_slot(slot0)?;
     // The temp-enchant countdowns, read before the object borrow (both live on `Items`) — the bag
     // feed's twin.
     let enchant_ms: [Option<u64>; 7] =
@@ -635,7 +640,6 @@ fn slot_view(
     let icon = icons
         .and_then(|i| i.catalog.get(display))
         .and_then(|d| d.icon.clone());
-    let live_id = u32::from(slot0) + 1;
     Some(InvSlotView {
         item_id: entry,
         icon,
@@ -738,35 +742,59 @@ fn inventory_slots(
             enchants: Vec::new(),
         });
     }
-    for slot in 1..=19u8 {
-        inv[usize::from(slot)] = slot_view(
-            store,
-            items,
-            icons,
-            rolls,
-            commands,
-            pending,
-            names,
-            slot - 1,
-        );
-    }
-    // Bag0Slot..Bag3Slot (ids 20..23, PaperDollItemFrame.dbc-verified) — the bag bar's icon
-    // source: the equipped bag ITEM at INV_SLOT 19..22 (BAG_SLOT_FIRST../SLOT_BAG_FIRST in the
-    // container feed's own numbering), same `slot_view` resolution as any equipment slot.
-    for (i, slot) in (20u8..=23).enumerate() {
-        inv[usize::from(slot)] = slot_view(
-            store,
-            items,
-            icons,
-            rolls,
-            commands,
-            pending,
-            names,
-            19 + i as u8,
-        );
+    // Equipment 1..=19, then Bag0Slot..Bag3Slot (ids 20..23, PaperDollItemFrame.dbc-verified) —
+    // the bag bar's icon source: the equipped bag ITEM at INV_SLOT 19..22 (BAG_SLOT_FIRST../
+    // SLOT_BAG_FIRST in the container feed's own numbering). One band: the doll's live id is its
+    // wire slot plus one across the whole range.
+    for live in 1..=23u32 {
+        let Some(guid) = store.0.player_inv_slot(live as u8 - 1).filter(|g| *g != 0) else {
+            continue;
+        };
+        inv[live as usize] = slot_view(items, icons, rolls, commands, pending, names, guid, live);
     }
     inv
 }
+
+/// The six bank-bag slots' views (live ids 64..=69) — the same [`slot_view`] resolution as any
+/// doll slot, off the descriptor's own `PLAYER_FIELD_BANK_BAG_SLOT_*` guids.
+///
+/// These are inventory slots, not bank-*window* state: the reference's bank paints and picks up a
+/// bank bag through `GetInventoryItemTexture`/`PickupBagFromSlot` at
+/// `BankButtonIDToInvSlotID(i, 1)` (BankFrame.lua:28-35, 194-198), and the guids stream in the
+/// player descriptor whether or not a banker is open. So they ride the inventory feed, beside the
+/// doll snapshot, rather than the `BankState` the bank window pushes.
+#[allow(clippy::too_many_arguments)] // [`slot_view`]'s read set, one band over
+fn bank_bag_slots(
+    store: &ObjectStore,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    rolls: crate::items::RollCatalogs,
+    commands: &NetCommands,
+    pending: &PendingItemOps,
+    names: &mut crate::names::NameCache,
+) -> BankBagSlots {
+    let mut bags: BankBagSlots = Default::default();
+    for (i, bag) in bags.iter_mut().enumerate() {
+        let Some(guid) = store.0.player_bank_bag_slot(i as u8).filter(|g| *g != 0) else {
+            continue;
+        };
+        *bag = slot_view(
+            items,
+            icons,
+            rolls,
+            commands,
+            pending,
+            names,
+            guid,
+            BANK_BAG_LIVE_FIRST + i as u32,
+        );
+    }
+    bags
+}
+
+/// `BankButtonIDToInvSlotID(1, isBag)` — the live-API id of the FIRST bank-bag slot. The band is
+/// six wide (`BANK_BAG_SLOT_COUNT`).
+const BANK_BAG_LIVE_FIRST: u32 = 64;
 
 /// Fire the paper doll's per-group repaint events for one unit's snapshot transition, `arg1 =
 /// token` — the [`crate::ui_unit::fire_transitions`] shape, for the combat-stats surface.
@@ -1002,14 +1030,31 @@ fn feed_char(
         &pending,
         &mut names,
     );
-    if memo.last_inv.as_ref() != Some(&inv) {
+    let bank_bags = bank_bag_slots(
+        store,
+        &mut items,
+        icons.as_deref(),
+        crate::items::RollCatalogs {
+            enchants: enchants.as_deref(),
+            props: props.as_deref(),
+        },
+        &commands,
+        &pending,
+        &mut names,
+    );
+    // One transition for both bands: they are the same descriptor read at two offsets, and
+    // `UNIT_INVENTORY_CHANGED` is the one repaint signal either has. Pushing them separately
+    // would fire it twice for a single wire update.
+    if memo.last_inv.as_ref() != Some(&inv) || memo.last_bank_bags.as_ref() != Some(&bank_bags) {
         gate.audit("feed_char", "the inventory snapshot");
         script.set_inventory_slots(inv.clone());
+        script.set_bank_bag_slots(bank_bags.clone());
         script.fire_event(
             "UNIT_INVENTORY_CHANGED",
             vec![ScriptValue::Str("player".to_string())],
         );
         memo.last_inv = Some(inv);
+        memo.last_bank_bags = Some(bank_bags);
     }
 }
 

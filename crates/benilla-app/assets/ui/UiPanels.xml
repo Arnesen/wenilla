@@ -1624,6 +1624,36 @@
             hideOnEscape = 1,
         }
 
+        -- The bank-slot purchase confirm (ref StaticPopup.lua l.47-60), transcribed verbatim.
+        --
+        -- **It is HERE because its window is the reference's own file now** (1751). Every other
+        -- dialog in this client is declared by the window that shows it; the bank window is
+        -- `Interface\FrameXML\BankFrame.xml`, executed off the player's chain, and the reference
+        -- keeps this entry in `StaticPopup.lua` — the one file benilla replaces with the engine
+        -- above. So the house's StaticPopup home carries it, and `BankFramePurchaseButton`'s
+        -- `StaticPopup_Show("CONFIRM_BUY_BANK_SLOT")` finds it. Left out, the Purchase button
+        -- would be a silent no-op.
+        --
+        -- The coin row is real (1580 made `hasMoneyFrame` live): `BankFrame.nextSlotCost` is set
+        -- by the reference's own `UpdateBagSlotStatus` off `GetBankSlotCost`, and this OnShow is
+        -- the reference's own line for reading it.
+        CONFIRM_BUY_BANK_SLOT = CONFIRM_BUY_BANK_SLOT
+            or "Do you want to purchase a bank slot for:"
+        StaticPopupDialogs["CONFIRM_BUY_BANK_SLOT"] = {
+            text = CONFIRM_BUY_BANK_SLOT,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                PurchaseSlot()
+            end,
+            OnShow = function()
+                MoneyFrame_Update(this:GetName() .. "MoneyFrame", BankFrame.nextSlotCost)
+            end,
+            hasMoneyFrame = 1,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+
         -- ref UIParent.lua l.324-343 + l.356-360, the four arms on one driver. Each equip arm
         -- hides the OTHER dialog first — the two questions are mutually exclusive by construction
         -- (one item, one destination), and the hide is what cancels the record the new question

@@ -22,6 +22,11 @@ use super::{queue_cursor_update, queue_lock_changed, CursorItem, CursorPayload, 
 /// `wire_pos`'s `EQUIPMENT_BAG` arm maps live id 20..23 → the wire's equipped-bag inventory slots
 /// 19..22); ammo (0) stays a named deferral — refused outright, cursor untouched.
 ///
+/// **The bank-bag band (64..=69) rides this too**, and only through one door: `PutItemInBag`'s
+/// empty-slot leg IS this function in the reference (`0x4c7c00` calls `0x4c7300` there), which is
+/// how a held bag reaches a bank bag slot at all. Its fit rule is one band wider than
+/// `equip_slots` alone — see [`super::bag_verbs::fits_slot`].
+///
 /// - empty cursor + an occupied, UNLOCKED doll slot → picks it up (payload `Item { bag:
 ///   EQUIPMENT_BAG, slot: id, … }`), the same lock/event pair as a bag pickup.
 /// - holding + the SAME slot → cancel (mirrors `pickup_container_item`'s own same-slot branch).
@@ -34,8 +39,9 @@ use super::{queue_cursor_update, queue_lock_changed, CursorItem, CursorPayload, 
 ///
 /// Returns whether the caller should repaint (the source lock, or the held payload, changed).
 pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
-    // Equipment slots (1..=19) + the four equipped-bag icons (20..=23); ammo (0) is out of scope.
-    if !(1..=23).contains(&id) {
+    // Equipment slots (1..=19) + the four equipped-bag icons (20..=23) + the six BANK bag slots
+    // (64..=69, reached only through `PutItemInBag`); ammo (0) is out of scope.
+    if !(1..=23).contains(&id) && !super::bag_verbs::BANK_BAG_INV_SLOTS.contains(&id) {
         return false;
     }
     // The targeting cursor's item half, on the doll (decision 0923). The reference's doll pickup
@@ -52,9 +58,7 @@ pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
     match model.cursor.take() {
         None => {
             let picked = model
-                .inventory_slots
-                .get(id as usize)
-                .and_then(|s| s.as_ref())
+                .inv_slot("player", id as usize)
                 .filter(|s| s.item_id != 0 && !s.locked)
                 .map(|s| CursorItem {
                     bag: EQUIPMENT_BAG,
@@ -86,7 +90,7 @@ pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
             // A split carry can't equip a partial stack, and a non-fitting item has nowhere to
             // land on this slot — both refuse, kept exactly as picked up (no event: nothing
             // transitioned).
-            if held.count.is_some() || !held.equip_slots.contains(&(id as u8)) {
+            if held.count.is_some() || !super::bag_verbs::fits_slot(&held, id) {
                 model.cursor = Some(CursorPayload::Item(held));
                 return false;
             }
@@ -139,9 +143,7 @@ pub(super) fn equip_cursor_item(model: &mut Model, id: u32) -> bool {
 /// future pin disagrees with the client's own table.
 pub(super) fn cursor_can_go_in_slot(model: &Model, id: u32) -> bool {
     match &model.cursor {
-        Some(CursorPayload::Item(item)) => {
-            u8::try_from(id).is_ok_and(|id| item.equip_slots.contains(&id))
-        }
+        Some(CursorPayload::Item(item)) => super::bag_verbs::fits_slot(item, id),
         _ => false,
     }
 }
@@ -186,12 +188,16 @@ pub(super) fn use_inventory_item(model: &mut Model, id: u32) {
 /// picked-up slot dims immediately, no server round-trip — the doll twin of
 /// `GetContainerItemInfo`'s `held_here` derivation) OR the app's fed `InvSlotView.locked` says so
 /// (an outstanding pending op the app's `PendingItemOps` tracks, decision 0216 §4/0218 §3).
+///
+/// Reads through [`Model::inv_slot`], not the doll array, so it answers over the WHOLE live-id
+/// space that binding covers — the reference's `BankFrameItemButton_UpdateLock` calls it with
+/// `BankButtonIDToInvSlotID(...)` for every bank slot, and a lock the vault feed reports has to
+/// dim the button the same as an equipped one.
 pub(super) fn is_inventory_item_locked(model: &Model, id: u32) -> bool {
     let held_here = matches!(&model.cursor, Some(CursorPayload::Item(c)) if c.bag == EQUIPMENT_BAG && c.slot == id);
     let fed = usize::try_from(id)
         .ok()
-        .and_then(|i| model.inventory_slots.get(i))
-        .and_then(|s| s.as_ref())
+        .and_then(|i| model.inv_slot("player", i))
         .is_some_and(|s| s.locked);
     held_here || fed
 }

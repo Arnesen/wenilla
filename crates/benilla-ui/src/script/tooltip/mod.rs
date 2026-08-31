@@ -301,7 +301,7 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
             // it here invalidates nothing the key would not — while destroying the one thing that
             // makes the hover re-enter loop affordable. That loop
             // (`ContainerFrameItemButton_OnUpdate`, unthrottled in 1.12 and shipped verbatim as
-            // `BagFrame.xml`'s `BenillaBagSlot_OnUpdate`) clears and rebuilds the SAME content
+            // the reference's `ContainerFrameItemButton_OnUpdate`) clears and rebuilds the SAME content
             // every frame: keeping the cache lets each rebuilt line re-validate against its own
             // key, so nothing re-shapes, the measure list stays empty, its forced second resolve
             // never happens, and the layout gate's fingerprint — which exists precisely to

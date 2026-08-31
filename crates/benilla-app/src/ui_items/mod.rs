@@ -53,8 +53,8 @@ pub(crate) mod feed;
 
 pub(crate) use drain::send_auto_equip;
 use drain::{
-    drain_container_autoequips, drain_container_destroys, drain_container_moves,
-    drain_container_uses, drain_inventory_uses,
+    drain_bag_autostores, drain_container_autoequips, drain_container_destroys,
+    drain_container_moves, drain_container_uses, drain_inventory_uses,
 };
 use feed::{
     feed_containers, feed_item_sets, feed_item_stats, feed_player_req, feed_random_properties,
@@ -1112,6 +1112,7 @@ impl Plugin for UiItemsPlugin {
                     drain_container_destroys.after(UiInput),
                     // AutoEquipCursorItem's queue (decision 0208 phase 1b) → CMSG_AUTOEQUIP_ITEM.
                     drain_container_autoequips.after(UiInput),
+                    drain_bag_autostores.after(UiInput),
                     // UseInventoryItem's queue (decision 0208 phase 1b) → CMSG_USE_ITEM against
                     // the equipped position.
                     drain_inventory_uses.after(UiInput),

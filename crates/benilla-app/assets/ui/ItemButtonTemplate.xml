@@ -70,20 +70,23 @@
     never the behaviour; it was two XML declarations, because the reference ships its templates in
     `ContainerFrame.xml` and that file is not in the sourced set.
 
-    So the chain costs what it actually costs: this Button, and `ContainerFrameItemButtonTemplate`
-    in ContainerFrameAdapters.xml beside the adapter that already wraps one of those very handlers.
-    Our own bag windows keep `BenillaBagSlotTemplate` and are untouched — that is our design (0216),
-    a thousand lines of it, and this template is the reference's PUBLISHED surface for addons that
-    build their own slots. Two things that look alike because they do the same job; only one of them
-    is an API.
+    So the chain cost what it actually cost: this Button, and — at the time — a transcribed
+    `ContainerFrameItemButtonTemplate` beside the adapter that already wrapped one of those very
+    handlers. **Decision 1751 then took the last step and made both moot for the windows
+    themselves**: `Interface\FrameXML\ContainerFrame.xml` is a manifest entry now, so the
+    reference's OWN declaration of that template is the live one and the transcription is deleted.
+    This Button stays, because it is the reference's PUBLISHED surface for addons that build their
+    own slots and it has to exist whether or not any window of ours uses it.
 
-    **The bank arm is NOT here, and this is the omission, not an oversight** (1134 §4).
-    `BankItemButtonGenericTemplate` inherits `BankItemButtonTemplate` (BankFrame.xml l.-), whose
-    handlers — `BankFrameItemButton_OnLoad`, `_OnEvent`, `BankFrameItemButtonGeneric_OnClick` —
-    live in `BankFrame.lua`, which is NOT sourced, and whose OnEnter calls `this:GetInventorySlot()`,
-    a widget method we do not bind. That is the real unit of work the paragraph above thought it was
-    describing. pfUI reaches it only for `bag == -1`, so its bag arm works and its bank arm raises
-    where it raises today.
+    **The bank arm resolves too, since 1751's second window.** `BankItemButtonGenericTemplate`
+    inherits `BankItemButtonTemplate`, whose handlers live in `BankFrame.lua` — and that file
+    arrives through `Interface\FrameXML\BankFrame.xml`'s own `<Script file=>`, off the chain, the
+    same way. This paragraph used to say the arm was a named omission (1134 §4) whose real cost was
+    the unsourced Lua plus `this:GetInventorySlot()`, a widget method we do not bind. Neither is
+    true any more: the Lua is sourced, and `GetInventorySlot` is not a widget method at all — it is
+    a plain field `BankFrameBaseButton_OnLoad` assigns (`this.GetInventorySlot =
+    ButtonInventorySlot`). pfUI reaches the bank arm for `bag == -1`, and it now finds a real
+    template.
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[

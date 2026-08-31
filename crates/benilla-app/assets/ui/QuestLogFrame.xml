@@ -363,7 +363,7 @@
                     end
                     -- pin §2's $parentCheck: the per-row watch checkbox. SetTexture(path)/
                     -- SetTexture(nil) as the show/hide toggle — the icon-slot blanking pattern
-                    -- (`BenillaBagSlot_Update` etc.). (Regions DO have Show/Hide these days —
+                    -- (the icon-clearing every slot repaint does). (Regions DO have Show/Hide these days —
                     -- region.rs; this site just predates it and the pattern is equivalent.)
                     if not isHeader and IsQuestWatched(index) then
                         button.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
@@ -1318,7 +1318,7 @@
                 -- publish, state slots don't).
                 self.foldHighlight = self:GetHighlightTexture()
                 -- Both buttons must reach OnClick (the default set is LeftButtonUp only) — the same
-                -- convention `BagFrame.xml`'s `BenillaBagSlot_OnLoad` uses for its own left/right split.
+                -- convention the reference's own `BankFrameBaseButton_OnLoad` uses for its left/right split.
                 self:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             </OnLoad>
             <OnClick>BenillaQuestLogTitle_OnClick(self, arg1)</OnClick>

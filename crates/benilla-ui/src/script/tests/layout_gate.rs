@@ -168,7 +168,7 @@ fn hiding_a_frame_does_not_reopen_the_gate() {
 ///
 /// `ContainerFrameItemButton_OnUpdate` re-runs `OnEnter` every frame while the tooltip is the
 /// button's own — faithful, and UNTHROTTLED in 1.12 (its `updateTooltip` throttle is commented
-/// out; `BagFrame.xml`'s `BenillaBagSlot_OnUpdate` ships the same loop). So a bag hover clears and
+/// out; the reference's `ContainerFrameItemButton_OnUpdate` ships the same loop). So a bag hover clears and
 /// rebuilds the SAME tooltip 60×/sec, and the engine must absorb that: identical content re-derives
 /// an identical model, so the measure cache re-validates on its content key and the gate stays shut.
 ///

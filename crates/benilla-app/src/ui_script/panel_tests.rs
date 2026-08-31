@@ -3,27 +3,17 @@ use benilla_ui::script::{
     QuadContent, SoundRequest, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error and returning the
-/// frame count it materialized — the panel tests all load `UiPanels.xml` (decision 0084 §2's slot
-/// manager) before the panel frame(s) under test, exactly as `ui_script.rs`'s own shipped-list
-/// order does, so `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent
-/// references them.
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+/// Load one manifest entry into `s`, panicking on any loader error and returning the frame count
+/// it materialized — the panel tests all load `UiPanels.xml` (decision 0084 §2's slot manager)
+/// before the panel frame(s) under test, exactly as `benilla.toc`'s own order does, so
+/// `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent references them.
+///
+/// This was a private disk-only reader until 1751's second window: `BankFrame.xml` is the
+/// reference's own file off the player's chain now, and a reader that only knows `assets/ui`
+/// cannot name it. [`super::test_ui::load_ui`] knows both stores by the manifest's own rule, so a
+/// caller that names a chain entry has to open with `wow_data_or_skip!` (only the bank test below
+/// does).
+use super::test_ui::load_ui as load_xml;
 
 /// Find a bare frame's own rect via its `QuadContent::Frame` entry (every frame emits one, at its
 /// resolved rect, whether or not it paints anything itself — `UiScript::extract`'s doc). Used for
@@ -729,25 +719,30 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
 /// center-parked "left-area" occupant back — UIParent.lua l.777-782).
 #[test]
 fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
-    use benilla_ui::script::{BankState, ScriptValue};
+    use benilla_ui::script::BankState;
+
+    // The bank window is the reference's own file off the player's chain (1751).
+    let _data = benilla_formats::wow_data_or_skip!();
 
     // The bank window's own dependency chain (bank_tests::setup), plus the gossip window.
     let order_first = |bank_first: bool| {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         load_xml(&s, "Fonts.xml");
+        load_xml(&s, "ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
         load_xml(&s, "MoneyFrame.xml");
         load_xml(&s, "UiPanels.xml");
         load_xml(&s, "Cooldown.xml");
         load_xml(&s, "BagFrame.xml");
         load_xml(&s, "GameTooltip.xml");
-        load_xml(&s, "MerchantFrame.xml");
-        load_xml(&s, "BankFrame.xml");
         load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
                                              // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
                                              // optional: a missing template is a loader *warning*, not an error, so an under-loaded
                                              // list passes load_xml and then loses the scrollbar silently.
+                                             // Before BankFrame, not after: its close and purchase buttons inherit UIPanelCloseButton
+                                             // and UIPanelButtonTemplate, and an `inherits=` is resolved at LOAD.
         load_xml(&s, "UIPanelTemplates.xml");
+        load_xml(&s, "Interface\\FrameXML\\BankFrame.xml");
         load_xml(&s, "GossipFrame.xml");
 
         // The gossip menu is open on the banker (its bank option showing).
@@ -772,11 +767,11 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         s.set_bank(Some(BankState::default()));
         s.set_gossip(None);
         if bank_first {
-            s.fire_event("BANKFRAME_OPENED", vec![ScriptValue::Str("Banker".into())]);
+            s.fire_event("BANKFRAME_OPENED", vec![]);
             s.fire_event("GOSSIP_CLOSED", vec![]);
         } else {
             s.fire_event("GOSSIP_CLOSED", vec![]);
-            s.fire_event("BANKFRAME_OPENED", vec![ScriptValue::Str("Banker".into())]);
+            s.fire_event("BANKFRAME_OPENED", vec![]);
         }
         assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 

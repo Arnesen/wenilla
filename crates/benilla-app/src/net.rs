@@ -991,6 +991,16 @@ pub(crate) enum ClientCommand {
         src_bag: u8,
         src_slot: u8,
     },
+    /// Auto-store an item into a bag (`CMSG_AUTOSTORE_BAG_ITEM`): take `(src_bag, src_slot)` and
+    /// put it anywhere inside `dst_bag` — **the client names no destination slot** (wow-re
+    /// `bag-verbs-law.md`: AUTOSTORE carries none). Sent by `PutItemInBag`'s third leg (an
+    /// ordinary item dropped on an occupied bag button) and by all of `PutItemInBackpack`.
+    /// Refusals surface as `InventoryFailure` events.
+    AutoStoreBagItem {
+        src_bag: u8,
+        src_slot: u8,
+        dst_bag: u8,
+    },
     /// Carry a partial stack from one bag position to another (`CMSG_SPLIT_ITEM`, decision 0216
     /// §6) — either endpoint may be an equipped bag, unlike [`ClientCommand::SwapInvItem`]. The
     /// container-move drain sends this instead of a swap when the queued move carries a split

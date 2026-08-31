@@ -849,6 +849,9 @@ pub(crate) struct Model {
     /// `(bag, slot)` sources queued by `AutoEquipCursorItem` (decision 0208 phase 1b, `cursor`'s
     /// `doll` submodule) — drained by the app into `CMSG_AUTOEQUIP_ITEM`.
     pub(crate) container_autoequips: Vec<(i64, u32)>,
+    /// Auto-stores queued by `PutItemInBag`/`PutItemInBackpack` (`cursor`'s `bag_verbs` submodule) —
+    /// drained by the app into `CMSG_AUTOSTORE_BAG_ITEM` (or `CMSG_SPLIT_ITEM` for a split carry).
+    pub(crate) bag_autostores: Vec<container::BagAutoStore>,
 
     /// Per-frame drag-button registrations (`RegisterForDrag`) — kind-independent (any Frame, not
     /// just a Button), so it lives beside [`Model::mouse_down_on`] rather than inside a per-kind
@@ -1253,6 +1256,11 @@ pub(crate) struct Model {
     /// binding's route is a fork between them (the [`Self::pet_book`] precedent).
     pub(crate) pet_combat_stats: Option<char_stats::UnitCombatStats>,
     pub(crate) inventory_slots: char_stats::InventorySlots,
+    /// The six bank-bag slots (live ids 64..=69) — the third band of
+    /// [`char_stats::Model::inv_slot`], and a store rather than a view because a bank bag has no
+    /// container slot to be read out of: it IS the container. Fed beside
+    /// [`Self::inventory_slots`] off the player descriptor's own guids.
+    pub(crate) bank_bag_slots: char_stats::BankBagSlots,
     /// The 12 alert-region statuses (`GetInventoryAlertStatus`, DurabilityFrame's armor-guy
     /// feed) in the client's own `0x806eb8` table order (11 equipment regions + the low-ammo
     /// 12th) — recomputed on every inventory push, which fires `UPDATE_INVENTORY_ALERTS`
@@ -1646,6 +1654,7 @@ impl Model {
             ui_cursor: None,
             ui_cursor_dirty: false,
             container_autoequips: Vec::new(),
+            bag_autostores: Vec::new(),
             drag_registered: HashMap::new(),
             drag: None,
             moving: None,
@@ -1802,6 +1811,7 @@ impl Model {
             player_combat_stats: None,
             pet_combat_stats: None,
             inventory_slots: Default::default(),
+            bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
             paperdoll_yaw: 0.0,
             inventory_uses: Vec::new(),

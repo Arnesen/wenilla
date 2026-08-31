@@ -426,16 +426,33 @@ ItemTextFrame.xml
 # v1 uses plain-text costs, not MerchantFrame's coin helpers) and before the other NPC
 # session windows below.
 TrainerFrame.xml
-# The bank window (decision 0604 phase 4): the vault, purchase ladder, and the 6 bank-bag
-# popouts, over the container feed already carrying container -1/5..10 (ui_items.rs) +
-# the bank Lua surface (benilla-ui/src/script/bank.rs) + crate::ui_bank's feed/drain.
-# Loaded AFTER MerchantFrame.xml (reuses its BenillaMoney_* coin helpers for the purchase
-# row + purse) and AFTER BagFrame.xml, already above (its BenillaBagSlotTemplate/
-# BenillaBagWindowTemplate + the BenillaBagSlot_*/BenillaBagFrame_* function family are
-# reused verbatim — the 24 generic slots and the 6 bank-bag popouts are, respectively, a
-# container-slot grid and ordinary container windows, exactly like the bag arc's own).
-# Kept in the "NPC session windows grouped" cluster beside Trainer/Taxi.
-BankFrame.xml
+# ══ THE BANK WINDOW — the reference's own, off the player's chain (decision 1751, window 2) ══
+# `BankFrame`, `BankFrameItem1..24`, `BankFrameBag1..6`, `BankFramePurchaseInfo` and the
+# `BANK_CONTAINER`/`NUM_BAG_SLOTS`/`NUM_BANKGENERIC_SLOTS`/`NUM_BANKBAGSLOTS` constants — the real
+# 1.12 file, running as the file, with `BankFrame.lua` arriving through its own `<Script file=>`.
+# Our own 890-line BankFrame.xml is gone with it, and so are its six popout windows: a bank bag is
+# an ordinary `ContainerFrame` at container id 5..10, which is what the reference always did.
+#
+# THE POSITION IS THE REQUIREMENT, as it was for ContainerFrame.xml. This file's `inherits=` reach
+# four templates above it — `ItemButtonTemplate`, `UIPanelCloseButton` (UIPanelTemplates.xml),
+# `UIPanelButtonTemplate` (same), `SmallMoneyFrameTemplate` (MoneyFrame.xml) — plus
+# `parent="UIParent"`, and its `OnHide` calls `updateContainerFrameAnchors` out of
+# ContainerFrame.lua. All are loaded above.
+#
+# What it needed from this client, all built for it: `PutItemInBag`/`PickupBagFromSlot` (the two
+# verbs its bag buttons ARE), the bank-bag inventory band at live ids 64..=69 that gives those
+# verbs an item to move, `GetInventorySlotInfo("Bag1".."Bag6")` for the empty-slot art, and
+# `StaticPopupDialogs["CONFIRM_BUY_BANK_SLOT"]` re-homed into UiPanels.xml (the reference keeps it
+# in StaticPopup.lua, which this client replaces).
+#
+# One reference quirk carried rather than fixed: `BankFramePurchaseButton` is declared
+# `virtual="true"` INSIDE `<Frames>`. Only a top-level element is ever a template — nested nodes
+# are materialized regardless (`framexml.rs`) — so the button exists and works, which is what the
+# real client does too. Classic Era's Vanilla BankFrame.xml still carries the same attribute on
+# the same button, and that button works there.
+#
+# Kept in the "NPC session windows grouped" cluster beside Trainer/Taxi, and after MerchantFrame.
+Interface\FrameXML\BankFrame.xml
 # The taxi-map window (decision 0484 phase 2): the flight-master session, driven by the
 # taxi engine seam (`benilla-ui/src/script/taxi.rs`) over `crate::ui_taxi`'s feed/drain.
 # Loaded right after TrainerFrame per the same "NPC session windows grouped" posture — it

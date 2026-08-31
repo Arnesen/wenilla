@@ -99,6 +99,13 @@
 //! that answers term 1. (1) is [`track_instance_state`]'s `CurrentMap` flip; (2) is
 //! [`apply::update_last_instance`]'s queue, drained through the same helper so the two cannot
 //! drift — [`LatchWriter`] is which of them is speaking.
+//!
+//! **(2) is therefore unreachable on our server by construction, and no live probe can cover it**
+//! — not with any rigging, because `PermBindAllPlayers` (vmangos's only path to a permanent bind)
+//! runs under `if (IsRaid())` and no GM command creates a bind. Its cover is
+//! `both_latch_writers_through_the_real_system`, which drives both legs through the real system
+//! against the real `Map.dbc`. That is the whole of the evidence behind (2): treat it as tested,
+//! never as *observed*.
 
 use benilla_protocol::messages::{InstanceResetFailure, RaidInstanceMessage, RaidInstanceWarning};
 use benilla_ui::script::UiScript;
@@ -128,10 +135,10 @@ pub(crate) struct InstanceState {
     /// benilla's own half of the same term: we watched the player walk out of a party dungeon, so
     /// we know they are bound to one without being told (decision 1754).
     ///
-    /// Raised by [`LatchWriter::WorldEntry`], cleared by `SMSG_INSTANCE_RESET`, and deliberately
-    /// **not** cleared by an `owns_saved = false` packet — that packet is the wrong answer this
-    /// field exists to work around, and vmangos sends one on the very teleport that takes us out
-    /// of the dungeon.
+    /// Raised by [`LatchWriter::WorldEntry`], cleared by `SMSG_INSTANCE_RESET` and by a **logout**
+    /// ([`clear_witness_on_logout`]), and deliberately **not** cleared by an `owns_saved = false`
+    /// packet — that packet is the wrong answer this field exists to work around, and vmangos
+    /// sends one on the very teleport that takes us out of the dungeon.
     saw_own_dungeon: bool,
     /// `0xb4e374` — the `Map.dbc` id of the dungeon we were last inside, or `None` for "none
     /// recorded". Only a **party dungeon** ever lands here (`0x495d33`'s `cmp [rec+8],1`).
@@ -226,6 +233,12 @@ impl InstanceState {
         self.last_dungeon_at = 0;
         // A reset landed, so whatever we witnessed ourselves is gone with it. The reference has
         // no equivalent line because its term 1 is the server's to retract.
+        self.forget_witness();
+    }
+
+    /// Drop benilla's own half of term 1 — see [`clear_witness_on_logout`]. Kept a method so the
+    /// one piece of state no server will correct has exactly one place that clears it.
+    pub(crate) fn forget_witness(&mut self) {
         self.saw_own_dungeon = false;
     }
 
@@ -598,6 +611,24 @@ fn drain_instance(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommand
 
 /// The lockout family: the four chat lines, the bookkeeping behind the SELF menu's reset row, and
 /// that row's one send.
+/// Drop the witness at logout — the next login is somebody else's character (`poi_marker`'s own
+/// shape, and the same reason).
+///
+/// Only [`InstanceState::saw_own_dungeon`] is cleared, not the reference's three globals: the
+/// reference does not clear those either (`0x495d00`'s only caller is the `SMSG_INSTANCE_RESET`
+/// handler), and it does not need to — its term 1 is the server's, re-advertised on the next
+/// character's world entry, so a stale latch cannot offer that character a reset on its own. Ours
+/// is the half no server will correct, so it gets the lifetime the packet would have given it
+/// (decision 1754).
+fn clear_witness_on_logout(
+    mut state: ResMut<InstanceState>,
+    mut logged_out: MessageReader<crate::net::LoggedOutMessage>,
+) {
+    if logged_out.read().next().is_some() {
+        state.forget_witness();
+    }
+}
+
 pub(crate) struct UiInstancePlugin;
 
 impl Plugin for UiInstancePlugin {
@@ -607,6 +638,7 @@ impl Plugin for UiInstancePlugin {
             (
                 // The latch first: `feed_instance` publishes `CanShowResetInstances()` off it, and
                 // a map change and its answer should not be a frame apart.
+                clear_witness_on_logout.before(track_instance_state),
                 track_instance_state.before(feed_instance),
                 feed_instance.before(UiInput),
                 drain_instance.after(UiInput),
@@ -921,6 +953,106 @@ mod tests {
         state.clear_last_instance();
         assert!(!state.saw_own_dungeon);
         assert!(!state.can_reset(Some(0), &dungeons, 100));
+    }
+
+    /// The witness does not outlive the character that earned it (`clear_witness_on_logout`).
+    ///
+    /// The reference can leave its stale latch lying about because term 1 is the server's and the
+    /// next character's world entry re-answers it. Ours is the half nothing corrects, so a logout
+    /// has to, or character B is offered a reset that character A walked out of.
+    #[test]
+    fn the_witness_does_not_survive_a_logout() {
+        let dungeons = |m: u32| m == 36;
+        let mut state = InstanceState::default();
+        state.note_last_instance(36, Some(0), true, 100, LatchWriter::WorldEntry);
+        assert!(state.can_reset(Some(0), &dungeons, 100));
+
+        state.forget_witness();
+        assert!(!state.can_reset(Some(0), &dungeons, 100));
+        // The reference's own three globals are untouched — we clear our addition, not its state.
+        assert_eq!(state.last_dungeon, Some(36));
+        assert_eq!(state.last_dungeon_at, 100);
+    }
+
+    /// **Both latch writers, driven through the real system, against the real `Map.dbc`.**
+    ///
+    /// This is the only cover writer 2 — `SMSG_UPDATE_LAST_INSTANCE` — can have. vmangos can
+    /// never exercise it: `SendSavedInstances` names only `perm` binds, `DungeonMap::Add` takes a
+    /// non-perm bind for a 5-man, and `PermBindAllPlayers` (the one path that makes a bind
+    /// permanent) runs under `if (IsRaid())`, so the only map ids that packet can ever carry are
+    /// raids — which `0x495d33`'s `cmp [rec+8],1` throws away. No GM command creates a bind
+    /// either (`.instance` offers listbinds/unbind/groupunbind, nothing that binds). So the packet
+    /// leg is unreachable on our server by construction, and a live probe cannot cover it however
+    /// the character is rigged (decision 1754's open thread).
+    ///
+    /// It runs both legs through `track_instance_state` itself rather than the methods, because
+    /// the thing worth guarding is the wiring: that the queue drains against the map we ended up
+    /// on rather than the one we left, and that the packet writer does **not** raise the witness
+    /// (which would hand 1754's deviation to a server's say-so). Skips without client data.
+    #[test]
+    fn both_latch_writers_through_the_real_system() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let maps = benilla_formats::load_map_catalog(&mut chain).expect("Map.dbc");
+        assert!(maps.is_party_dungeon(36), "Deadmines is InstanceType 1");
+        assert!(
+            !maps.is_party_dungeon(409),
+            "Molten Core is a raid, not a dungeon"
+        );
+
+        // The system carries the last observed map in a `Local`, so it has to be the SAME system
+        // across ticks — `run_system_once` hands out a fresh one each call and would never see a
+        // transition at all.
+        let mut app = App::new();
+        app.init_resource::<InstanceState>()
+            .init_resource::<Time<Real>>()
+            .insert_resource(benilla_assets::MapCatalogRes(maps))
+            .insert_resource(benilla_world::world_map::CurrentMap(36))
+            .add_systems(Update, track_instance_state);
+
+        let state = |app: &App| {
+            let s = app.world().resource::<InstanceState>();
+            (s.last_dungeon, s.saw_own_dungeon)
+        };
+        let queue = |app: &mut App, map: u32| {
+            apply::update_last_instance(&mut app.world_mut().resource_mut::<InstanceState>(), map);
+        };
+
+        // Writer 1 — we walk out of the Deadmines ourselves. The first tick only OBSERVES map 36
+        // (there is no map we left at login), so nothing is recorded until the flip.
+        app.update();
+        assert_eq!(state(&app), (None, false));
+
+        app.insert_resource(benilla_world::world_map::CurrentMap(0));
+        app.update();
+        assert_eq!(
+            state(&app),
+            (Some(36), true),
+            "the flip records the dungeon AND our own eyes (1754's term 1)"
+        );
+
+        // Writer 2 — the packet, on a fresh state. A raid id is dropped (the only thing vmangos
+        // could ever send); a party dungeon lands, and lands WITHOUT the witness.
+        app.insert_resource(InstanceState::default());
+        queue(&mut app, 409);
+        app.update();
+        assert_eq!(state(&app), (None, false), "a raid is not a party dungeon");
+
+        queue(&mut app, 36);
+        app.update();
+        assert_eq!(
+            state(&app),
+            (Some(36), false),
+            "the packet is the server's word, never our own eyes"
+        );
+
+        // …and the packet's own early-out: the instance we are STANDING IN is not one we left.
+        app.insert_resource(InstanceState::default());
+        app.insert_resource(benilla_world::world_map::CurrentMap(36));
+        app.update();
+        queue(&mut app, 36);
+        app.update();
+        assert_eq!(state(&app), (None, false));
     }
 
     /// `CanShowResetInstances()`'s four terms, one at a time.

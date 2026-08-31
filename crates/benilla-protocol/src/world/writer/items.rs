@@ -103,6 +103,18 @@ impl WorldWriter {
         )
     }
 
+    /// Auto-store an item into a bag (`CMSG_AUTOSTORE_BAG_ITEM`, layout in
+    /// [`messages::auto_store_bag_item`]): take `(src_bag, src_slot)` and put it anywhere inside
+    /// `dst_bag` — **the client names no destination slot; the server picks it**. The wire for
+    /// `PutItemInBag`'s auto-store leg and the whole of `PutItemInBackpack` (wow-re
+    /// `bag-verbs-law.md`). Refusal answers `SMSG_INVENTORY_CHANGE_FAILURE`.
+    pub fn auto_store_bag_item(&mut self, src_bag: u8, src_slot: u8, dst_bag: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_AUTOSTORE_BAG_ITEM,
+            &messages::auto_store_bag_item(src_bag, src_slot, dst_bag),
+        )
+    }
+
     /// Split a stack (`CMSG_SPLIT_ITEM`, layout in [`messages::split_item`]): carry `count` off
     /// `(src_bag, src_slot)` onto `(dst_bag, dst_slot)` — either endpoint may be an equipped bag
     /// (unlike [`Self::swap_inv_item`]). Success settles both slots via values deltas; refusal

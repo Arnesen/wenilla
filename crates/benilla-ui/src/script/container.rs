@@ -176,7 +176,30 @@ pub struct ContainerMove {
     pub count: Option<u32>,
 }
 
+/// One queued **auto-store into a bag** — `PutItemInBag`'s third leg and the whole of
+/// `PutItemInBackpack` (`crate::script::cursor::bag_verbs`): take the item at `(src_bag, src_slot)`
+/// and put it anywhere inside container `dst_bag`.
+///
+/// **There is no destination slot, and that is the finding, not an omission**: the reference's
+/// `CMSG_AUTOSTORE_BAG_ITEM 0x10B` carries `(srcbag, srcslot, dstbag)` and nothing else, and its
+/// split sibling `CMSG_SPLIT_ITEM 0x10E` carries the literal `0xFF` where a slot would go. The
+/// server picks. `count`: `None` = the whole stack (AUTOSTORE); `Some(n)` = a split carry, which
+/// the drain sends as SPLIT instead — the same fork the reference makes on `[0xb4b40c]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BagAutoStore {
+    pub src_bag: i64,
+    pub src_slot: u32,
+    /// Live-API container id (0 = backpack, 1..=4 an equipped bag, 5..=10 a bank bag).
+    pub dst_bag: i64,
+    pub count: Option<u32>,
+}
+
 impl super::UiScript {
+    /// Drain the auto-stores `PutItemInBag`/`PutItemInBackpack` queued since the last call.
+    pub fn take_bag_autostores(&mut self) -> Vec<BagAutoStore> {
+        std::mem::take(&mut self.model_mut().bag_autostores)
+    }
+
     /// Push (or remove, with `None`) one bag's snapshot, keyed by live-API bag id (0 = backpack).
     /// Each slot's cooldown arrives with its absolute start already on the `GetTime` clock (ms) —
     /// storing is a pure unit conversion, the same seam shape as

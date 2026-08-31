@@ -473,93 +473,147 @@ impl MoveModes {
 ///    `0x5144fd`. (The field identity is **VERIFIED** three independent ways in §6.1 — the
 ///    descriptor-base arithmetic, the `UnitHealth` registrar pair `.data 0x850510 → 0x5174d0`, and
 ///    the low-health warning's `fild [eax+0x40]; fidiv [eax+0x58]`. `rf79`'s INFERRED label is
-///    retired.)
+///    retired.) — the [`MoverInput::dead`] field;
 /// 3. the CMovement-aux gate `[[mover+0x118]+0xa4]` null-or-`&4` (`0x514516`);
 /// 4. `!0x60f5b0(obj)` — the **KNOCKDOWN animation lockout**, and *not* an on-taxi predicate: it
 ///    returns `AnimationData.dbc` column 3 bit `0x80`, which the shipped table sets on exactly one
 ///    of 208 rows, id 121 `Knockdown` (§6.2's census). It contributes nothing while dead;
-/// 5. `!(IsActivePlayer(mover) && [mover+0x1c70] & 1)` — the **far-sight ENGAGED latch**
-///    (`0x5ee3f6` sets it, `0x5ee4c8` clears it, both inside the far-sight machine `0x5ee290`), and
-///    *not* a charm bit: **while your view is out on a far-sight object you may not drive your own
-///    body** — though you may still drive a *possessed* one, since `IsActivePlayer` is then false.
+/// 5. `!(IsActivePlayer(mover) && [mover+0x1c70] & 1)` — the **far-sight ENGAGED latch**, the
+///    [`MoverInput::view_is_out`] field.
 ///
-/// Conjuncts 4 and 5 are **not modelled here** — named, verified, and unbuilt (decision 1753's tail);
-/// they are their own behaviours with their own retests, not part of the death gate. Conjunct 1 is
-/// structural: [`super::controller::control`] returns before the axes on `control_lost` and on
-/// `reseat`, the frames where the mover would not resolve. Conjunct 3 has no benilla analog yet.
+/// **Conjuncts 1, 3 and 4 have no field here.** Conjunct 1 is structural:
+/// [`super::controller::control`] returns before the axes on `control_lost` and on `reseat`, the
+/// frames where the mover would not resolve. Conjunct 3 has no benilla analog yet. Conjunct 4 is
+/// named, verified and unbuilt — its own behaviour with its own retest — and this struct is where
+/// it lands when it is built.
 ///
-/// **The health term is the one this function exists for.** benilla modelled the server's root on
-/// death (0308) and nothing else, and a root deliberately leaves turning live (0872), so a corpse on
-/// the ground could still be spun with the turn keys or a right-drag. That is decision 1753.
-///
-/// `dead` is health `== 0` off the **mover's** descriptor
-/// ([`benilla_protocol::messages::update_object::ObjectFields::unit_is_dead`]) — the mover's and
-/// not ours, because `0x5144e0` reads `[esi+0x110]` where `esi` is whatever we are driving
-/// (decision 1277's possessed creature). **A ghost is not dead by this test:** the server sets a
-/// released player's health to 1 (0308 §the release), so `0x5144fd`'s `jg` is taken and the ghost
-/// gets every input back. Nothing in the input path, the emitters or the send gates reads the ghost
-/// bit at all — a band census finds **zero** `PLAYER`-block reads in the whole InputControl and
-/// CMovement address ranges (§6.6). The ghost bit *is* read in the collision layer (it adds trace
-/// mask bit `0x8000` at `0x631658`), which is a separate, unbuilt finding.
-fn mover_input_ready(dead: bool) -> bool {
-    !dead
+/// Carried as a **value** rather than as loose booleans threaded through each predicate because
+/// that is the reference's own shape (one precondition, evaluated once for the mover, handed to
+/// both), and because two same-typed terms passed positionally would transpose silently.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MoverInput {
+    /// **Conjunct 2, the health term** — health `== 0` off the **mover's** descriptor
+    /// ([`benilla_protocol::messages::update_object::ObjectFields::unit_is_dead`]). The mover's and
+    /// not ours, because `0x5144e0` reads `[esi+0x110]` where `esi` is whatever we are driving
+    /// (decision 1277's possessed creature).
+    ///
+    /// **This is the term the struct exists for.** benilla modelled the server's root on death
+    /// (0308) and nothing else, and a root deliberately leaves turning live (0872), so a corpse on
+    /// the ground could still be spun with the turn keys or a right-drag — decision 1753.
+    ///
+    /// **A ghost is not dead by this test:** the server puts a released player's health at 1
+    /// (0308 §the release), so `0x5144fd`'s `jg` is taken and the ghost gets every input back.
+    /// Nothing in the input path, the emitters or the send gates reads the ghost bit at all — a
+    /// band census finds **zero** `PLAYER`-block reads across the whole InputControl and CMovement
+    /// ranges (§6.6). The ghost bit *is* read in the collision layer, where it adds trace mask bit
+    /// `0x8000` (`0x631658`) — a separate finding, and not this one.
+    pub(crate) dead: bool,
+    /// **Conjunct 5, the far-sight term** — `!(IsActivePlayer(mover) && [mover+0x1c70] & 1)`, held
+    /// here in the affirmative: *my view is out on a far-sight object, and the body I would be
+    /// driving is my own*. While that holds the reference refuses **both** predicates — you may
+    /// neither walk nor turn your own body while you are looking through Mind Vision. (wow-re
+    /// §6.2. Both of this conjunct's labels were CORRECTED on 2026-08-31: they previously read
+    /// "charmed", and had never been derived.)
+    ///
+    /// **Both halves are load-bearing, and `IsActivePlayer` is the one that would be easy to
+    /// drop.** `0x514537 call 0x5fa6d0` tests the *mover* against the active player and returns the
+    /// conjunct satisfied the moment they differ (`0x51453e je 0x514550`), so the latch is only
+    /// ever read for our own body. Mind Control rides the same `PLAYER_FARSIGHT` field the camera
+    /// does ([`super::view_subject`]), so during a possession the latch is engaged — and without
+    /// this half the victim would freeze solid, which is the one body the whole spell exists to
+    /// walk around. It is also why the latch is never read off a creature's descriptor, where
+    /// `+0x1c70` is not a field at all.
+    ///
+    /// **Engaged means the subject RESOLVED, not merely that the field arrived.** The far-sight
+    /// machine `0x5ee290` sets the latch only on its ENGAGE leg (`0x5ee3f6 or ecx,1`), reached
+    /// after `0x5ee2ef` resolves the guid; the *field non-zero but object unresolved* leg falls
+    /// through to `0x5ee32d` — camera home, pending cast cancelled, `return 0` — and sets nothing
+    /// (wow-re `object-layer/scratch/farsight-and-client-control.md` §2.1). So the benilla analog
+    /// is the **resolved** [`super::view_subject::ViewSubject`] subject, not the raw
+    /// `PLAYER_FARSIGHT` field: through the ~400 ms vmangos defers the set by, the body is still
+    /// ours to drive.
+    pub(crate) view_is_out: bool,
 }
 
-/// **`0x514560` — "may this unit translate?"**, the ROOT predicate. Consumed by the input tick at
-/// `0x5146c1` (`test bl,bl`), the sole gate on the forward/back emitter `0x514da0` and the strafe
-/// emitter `0x514e80`. Its own terms past the shared precondition are `MOVEMENTFLAGS & 0x1200`
-/// (`0x51458c test dh,0x12` — our `rooted`) and stand state `!= 7` (`0x514591`), which vmangos
-/// never writes and which is therefore inert here.
+/// **Conjunct 5's two halves, composed** — `IsActivePlayer(mover) && [mover+0x1c70] & 1`, the
+/// value [`MoverInput::view_is_out`] carries and the field's doc explains in full.
 ///
-/// Note the health term is tested **twice** — once inside `0x5144e0` and again at `0x51457c` on the
-/// predicate's own path. Death is not a corner of this gate; it is its first question.
-pub(crate) fn may_translate(dead: bool, rooted: bool) -> bool {
-    mover_input_ready(dead) && !rooted
+/// A named function and not an inline `&&` at the one call site, because the half that is easy to
+/// lose is `driving_own_body`: drop it and Mind Control freezes its victim, which is a bug nothing
+/// about far sight would lead you to look for.
+///
+/// - `driving_own_body` — the mover is our own character, i.e. no possession is in force
+///   (`0x514537 call 0x5fa6d0`, the active-player test on the *mover*).
+/// - `far_sight_engaged` — our view is out on a far-sight object we have actually **resolved**
+///   (`[mover+0x1c70] & 1`, which the machine `0x5ee290` sets only on its post-resolve ENGAGE leg).
+pub(crate) fn view_is_out(driving_own_body: bool, far_sight_engaged: bool) -> bool {
+    driving_own_body && far_sight_engaged
 }
 
-/// **`0x5145b0` — "is this unit not stunned?"**, the STUN predicate. Consumed at `0x514755`
-/// (`je 0x51479c`), which skips the turn emitter `0x514f50` and the pitch emitter `0x515010`
-/// outright *and* force-stops either already in flight. Each emitter has exactly one caller,
-/// immediately behind that gate, and no data or vtable reference anywhere in the image — so while
-/// this predicate is false **no keyboard or mouse turn can reach `CMovement::StartTurn 0x7c6d90`
-/// by any route** (VERIFIED, wow-re `local-move-input-gate.md` §4).
-///
-/// Its own term past the shared precondition is `UNIT_FIELD_FLAGS & 0x40000` — a descriptor read,
-/// not an aura and not a movement flag (decision 0872). **And because the precondition is shared,
-/// a dead body is "stunned" as far as this predicate is concerned**: that single fact is why the
-/// reference refuses to turn a corpse.
-///
-/// **The MOUSE turn reaches the same answer down a different path** (§6.4, and this corrects what
-/// 1753 first wrote). The right-drag handler is `0x514400`, called from the mouse-MOVE handler
-/// `0x492c00`; its body hand-off `0x51447b call 0x5103e0` is gated at `0x514474` by a *third*
-/// predicate, **`0x5145e0`**, whose first act is to call this one — so the health term arrives
-/// through `0x5145b0` → `0x5144e0` and short-circuits before `0x5145e0` reaches its own remaining
-/// conjuncts (`[input+4] & 1`, and `GetStandState() == 0` via the CGPlayer vtable slot `0x5ed570`).
-/// The refusal is then **triple-redundant**: the two downstream commit gates `0x5151b0` (yaw, at
-/// `0x5151e6`) and `0x515250` (pitch, at `0x515283`) each carry their own health test. A closed
-/// census of all nine call sites of the body-facing setters `0x60de30`/`0x60de70` — neither of which
-/// has any dword reference image-wide — finds every one health-gated.
-///
-/// So one term in one place really does fix the keys and the mouse together, but not because they
-/// share `0x514755`: they share `0x5144e0`.
-pub(crate) fn may_turn(dead: bool, stunned: bool) -> bool {
-    mover_input_ready(dead) && !stunned
-}
+impl MoverInput {
+    /// `0x5144e0` itself — every conjunct we model, and the answer both predicates start from.
+    fn ready(self) -> bool {
+        !self.dead && !self.view_is_out
+    }
 
-/// **The input tick's teardown leg** — `0x5146d6 call 0x60fb60(0, 1)`, which cancels click-to-move
-/// and `/follow` and fires `AUTOFOLLOW_END` (event `0x170`).
-///
-/// It is reached only when **BOTH** predicates are down: `0x5146c3 jne` not taken (`bl == 0`) *and*
-/// `0x5146ce jne` not taken (`[ebp+0xf] == 0`). That is the correction wow-re's §6.3 makes to
-/// `rf86-autofollow-cancel-set.md` §5, which named the health test alone — necessary, but not enough
-/// to name the leg. **A pure ROOT does not cancel a follow** (translate down, turn still up), and
-/// neither does a pure stun; **death does**, because it takes both. Ice Block, which grants root and
-/// stun together, does too.
-///
-/// benilla had the root alone in this position and so cancelled on a Frost Nova, which the reference
-/// does not (decision 1753).
-pub(crate) fn input_torn_down(dead: bool, rooted: bool, stunned: bool) -> bool {
-    !may_translate(dead, rooted) && !may_turn(dead, stunned)
+    /// **`0x514560` — "may this unit translate?"**, the ROOT predicate. Consumed by the input tick
+    /// at `0x5146c1` (`test bl,bl`), the sole gate on the forward/back emitter `0x514da0` and the
+    /// strafe emitter `0x514e80`. Its own terms past the shared precondition are `MOVEMENTFLAGS &
+    /// 0x1200` (`0x51458c test dh,0x12` — our `rooted`) and stand state `!= 7` (`0x514591`), which
+    /// vmangos never writes and which is therefore inert here.
+    ///
+    /// Note the health term is tested **twice** — once inside `0x5144e0` and again at `0x51457c` on
+    /// the predicate's own path. Death is not a corner of this gate; it is its first question.
+    pub(crate) fn may_translate(self, rooted: bool) -> bool {
+        self.ready() && !rooted
+    }
+
+    /// **`0x5145b0` — "is this unit not stunned?"**, the STUN predicate. Consumed at `0x514755`
+    /// (`je 0x51479c`), which skips the turn emitter `0x514f50` and the pitch emitter `0x515010`
+    /// outright *and* force-stops either already in flight. Each emitter has exactly one caller,
+    /// immediately behind that gate, and no data or vtable reference anywhere in the image — so
+    /// while this predicate is false **no keyboard or mouse turn can reach `CMovement::StartTurn
+    /// 0x7c6d90` by any route** (VERIFIED, wow-re `local-move-input-gate.md` §4).
+    ///
+    /// Its own term past the shared precondition is `UNIT_FIELD_FLAGS & 0x40000` — a descriptor
+    /// read, not an aura and not a movement flag (decision 0872). **And because the precondition is
+    /// shared, a dead body is "stunned" as far as this predicate is concerned**: that single fact is
+    /// why the reference refuses to turn a corpse.
+    ///
+    /// **The MOUSE turn reaches the same answer down a different path** (§6.4, and this corrects
+    /// what 1753 first wrote). The right-drag handler is `0x514400`, called from the mouse-MOVE
+    /// handler `0x492c00`; its body hand-off `0x51447b call 0x5103e0` is gated at `0x514474` by a
+    /// *third* predicate, **`0x5145e0`**, whose first act is to call this one — so the health term
+    /// arrives through `0x5145b0` → `0x5144e0` and short-circuits before `0x5145e0` reaches its own
+    /// remaining conjuncts (`[input+4] & 1`, and `GetStandState() == 0` via the CGPlayer vtable slot
+    /// `0x5ed570`). The refusal is then **triple-redundant**: the two downstream commit gates
+    /// `0x5151b0` (yaw, at `0x5151e6`) and `0x515250` (pitch, at `0x515283`) each carry their own
+    /// health test. A closed census of all nine call sites of the body-facing setters
+    /// `0x60de30`/`0x60de70` — neither of which has any dword reference image-wide — finds every one
+    /// health-gated.
+    ///
+    /// So one term in one place really does fix the keys and the mouse together, but not because
+    /// they share `0x514755`: they share `0x5144e0`.
+    pub(crate) fn may_turn(self, stunned: bool) -> bool {
+        self.ready() && !stunned
+    }
+
+    /// **The input tick's teardown leg** — `0x5146d6 call 0x60fb60(0, 1)`, which cancels
+    /// click-to-move and `/follow` and fires `AUTOFOLLOW_END` (event `0x170`).
+    ///
+    /// It is reached only when **BOTH** predicates are down: `0x5146c3 jne` not taken (`bl == 0`)
+    /// *and* `0x5146ce jne` not taken (`[ebp+0xf] == 0`). That is the correction wow-re's §6.3 makes
+    /// to `rf86-autofollow-cancel-set.md` §5, which named the health test alone — necessary, but not
+    /// enough to name the leg. **A pure ROOT does not cancel a follow** (translate down, turn still
+    /// up), and neither does a pure stun; **death does**, because it takes both. Ice Block, which
+    /// grants root and stun together, does too. So does the far-sight term, for the same reason
+    /// death does — it is the other conjunct of the shared precondition.
+    ///
+    /// benilla had the root alone in this position and so cancelled on a Frost Nova, which the
+    /// reference does not (decision 1753).
+    pub(crate) fn torn_down(self, rooted: bool, stunned: bool) -> bool {
+        !self.may_translate(rooted) && !self.may_turn(stunned)
+    }
 }
 
 /// **The two incapacitate suppressions, applied to a freshly built move-flag word** (decision 0880)
@@ -593,7 +647,7 @@ pub(crate) fn input_torn_down(dead: bool, rooted: bool, stunned: bool) -> bool {
 ///
 /// The two arguments are therefore not "rooted" and "stunned" but **the two predicates being down**
 /// ([`may_translate`], [`may_turn`]) — a wider set by exactly one member: **death drops both**,
-/// through the precondition they share ([`mover_input_ready`], decision 1753). A corpse streams
+/// through the precondition they share ([`MoverInput`], decision 1753). A corpse streams
 /// neither a direction bit nor a turn bit.
 pub(crate) fn incapacitated_flags(flags: u32, translate_gated: bool, turn_gated: bool) -> u32 {
     use crate::creature_anim::move_flags as f;
@@ -1498,8 +1552,8 @@ mod autorun_tests {
 #[cfg(test)]
 mod move_mode_tests {
     use super::{
-        incapacitated_flags, input_torn_down, may_translate, may_turn, MoveModes, Player,
-        FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, TERMINAL_VELOCITY,
+        incapacitated_flags, view_is_out, MoveModes, MoverInput, Player, FEATHER_TERMINAL_VELOCITY,
+        GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, TERMINAL_VELOCITY,
     };
     use crate::creature_anim::move_flags as f;
     use benilla_protocol::MoveMode;
@@ -1739,7 +1793,13 @@ mod move_mode_tests {
     #[test]
     fn death_drops_both_movement_input_predicates() {
         // (dead, rooted, stunned) -> (may_translate, may_turn)
-        let gate = |dead, rooted, stunned| (may_translate(dead, rooted), may_turn(dead, stunned));
+        let gate = |dead, rooted, stunned| {
+            let m = MoverInput {
+                dead,
+                view_is_out: false,
+            };
+            (m.may_translate(rooted), m.may_turn(stunned))
+        };
 
         assert_eq!(
             gate(false, false, false),
@@ -1777,20 +1837,74 @@ mod move_mode_tests {
     #[test]
     fn only_both_predicates_down_tears_the_follow_down() {
         assert!(
-            !input_torn_down(false, true, false),
+            !MoverInput::default().torn_down(true, false),
             "a PURE root does NOT end a follow — translate is down, the turn is still up"
         );
         assert!(
-            !input_torn_down(false, false, true),
+            !MoverInput::default().torn_down(false, true),
             "and neither does a pure stun — the emitter never consults `0x5145b0`"
         );
         assert!(
-            input_torn_down(true, false, false),
+            MoverInput {
+                dead: true,
+                ..Default::default()
+            }
+            .torn_down(false, false),
             "DEATH ends it, with nothing granted: it takes both predicates down by itself"
         );
         assert!(
-            input_torn_down(false, true, true),
+            MoverInput::default().torn_down(true, true),
             "and so does Ice Block, which is root and stun at once"
+        );
+    }
+
+    /// **Far sight freezes your own body — and never a possessed one** (conjunct 5 of
+    /// `0x5144e0`). While your view is out on a far-sight object you may neither walk nor turn:
+    /// the term sits in the *shared* precondition, so it takes both predicates exactly the way
+    /// death does.
+    ///
+    /// The second half is the one worth a test of its own. Mind Control rides the same
+    /// `PLAYER_FARSIGHT` field the camera does, so during a possession the latch is engaged — and
+    /// the reference reads it only after `0x514537`'s active-player test on the **mover** has
+    /// already passed. Model the latch without that test and the victim freezes solid, which is the
+    /// one body the whole spell exists to walk around.
+    #[test]
+    fn far_sight_freezes_your_own_body_but_never_a_possessed_one() {
+        let driving = |driving_own_body, far_sight_engaged| {
+            let m = MoverInput {
+                dead: false,
+                view_is_out: view_is_out(driving_own_body, far_sight_engaged),
+            };
+            (m.may_translate(false), m.may_turn(false))
+        };
+
+        assert_eq!(
+            driving(true, false),
+            (true, true),
+            "my own body, no far sight: the ordinary frame, both predicates pass"
+        );
+        assert_eq!(
+            driving(true, true),
+            (false, false),
+            "MIND VISION — my view is out and the body is mine, so `0x5144e0` fails and takes the \
+             walk and the turn together, exactly as death does"
+        );
+        assert_eq!(
+            driving(false, true),
+            (true, true),
+            "MIND CONTROL — the latch is engaged (possession sets the same field), but the mover \
+             is not the active player, so `0x51453e` returns the conjunct satisfied and the victim \
+             stays drivable. Dropping the `IsActivePlayer` half freezes it."
+        );
+        assert!(
+            MoverInput {
+                dead: false,
+                view_is_out: true,
+            }
+            .torn_down(false, false),
+            "and it ends a follow, with neither a root nor a stun anywhere — `0x5146d6` needs both \
+             predicates down, and a term in the precondition they SHARE is both by construction. \
+             Engaging Mind Vision mid-follow stops you following, for the same reason dying does."
         );
     }
 

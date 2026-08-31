@@ -225,9 +225,25 @@ pub(super) fn control(
             })
         })
         .unwrap_or((false, false));
+    // The shared precondition `0x5144e0`, assembled once for this tick the way the reference
+    // evaluates it once for the mover — health above, and the far-sight conjunct here.
+    //
+    // **Conjunct 5** is `!(IsActivePlayer(mover) && [mover+0x1c70] & 1)`: while your view is out on
+    // a far-sight object you may not drive your own body. Both halves matter. The latch half is the
+    // **resolved** subject and not the raw `PLAYER_FARSIGHT` field, because `0x5ee290` sets the
+    // latch only on its post-resolve ENGAGE leg; the active-player half is `foreign_mover.is_none()`,
+    // and it is what keeps Mind Control working — possession sets the very same field, so without
+    // it the victim would be frozen (wow-re §6.2 and `farsight-and-client-control.md` §2.1).
+    let mover = state::MoverInput {
+        dead,
+        view_is_out: state::view_is_out(
+            player.foreign_mover.is_none(),
+            view_subject.remote.is_some(),
+        ),
+    };
     // `0x5145b0`, evaluated here because the first thing it suppresses is the mouse turn below. Its
     // translate sibling waits until after `apply_server_moves`, where the root edge it reads lands.
-    let may_turn = state::may_turn(dead, stunned);
+    let may_turn = mover.may_turn(stunned);
     // Drunkenness (B210): this frame's wobble angle, computed once — the facing veer and the
     // swim-pitch porpoise ([`swim::drive_step`]) both read it. Zero while sober (`wobble` early-outs on a 0.0
     // fraction), and zero whenever the turn predicate is down — the reference's wobble sits behind
@@ -447,7 +463,7 @@ pub(super) fn control(
         // latch with its verified cancel set — all of it decoded once in [`input::move_axes`].
         // `0x514560`, evaluated now — after `apply_server_moves`, so a root edge that landed this
         // frame is already in `player.modes` and not read a frame late.
-        let may_translate = state::may_translate(dead, player.modes.rooted);
+        let may_translate = mover.may_translate(player.modes.rooted);
         let axes = input::move_axes(
             binds,
             &buttons,

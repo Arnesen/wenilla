@@ -758,6 +758,11 @@ fn writer_loop(
                         src_bag,
                         src_slot,
                     } => w.swap_item(dst_bag, dst_slot, src_bag, src_slot),
+                    ClientCommand::AutoStoreBagItem {
+                        src_bag,
+                        src_slot,
+                        dst_bag,
+                    } => w.auto_store_bag_item(src_bag, src_slot, dst_bag),
                     ClientCommand::SplitItem {
                         src_bag,
                         src_slot,
