@@ -1856,7 +1856,7 @@
         the bar. (MainMenuBarArtFrame is defined in ActionBar.xml, which the loader loads before
         this file; the anchor resolves by name.)
     -->
-    <CheckButton name="MainMenuBarBackpackButton" parent="MainMenuBarArtFrame">
+    <CheckButton name="MainMenuBarBackpackButton" id="0" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="37" y="37"/></Size>
         <Anchors>
             <Anchor point="BOTTOMRIGHT" relativeTo="MainMenuBarArtFrame" relativePoint="BOTTOMRIGHT">

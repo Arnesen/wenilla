@@ -792,7 +792,7 @@
         </Layers>
     </CheckButton>
 
-    <Frame name="MailFrame" parent="UIParent" hidden="true">
+    <Frame name="MailFrame" enableMouse="true" toplevel="true" parent="UIParent" hidden="true">
         <!-- ref MailFrame l.242-255: 384×512; ShowUIPanel slots it left. HitRectInsets quoted for
              fidelity (currently inert — the loader ignores it). -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -1270,14 +1270,14 @@
                                 </Frames>
                             </Frame>
                             <!-- ref SendMailSendMoneyButton l.906-919 / SendMailCODButton l.920-933. -->
-                            <CheckButton name="SendMailSendMoneyButton" inherits="BenillaSendMailRadioButtonTemplate">
+                            <CheckButton name="SendMailSendMoneyButton" inherits="BenillaSendMailRadioButtonTemplate" id="1">
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="185" y="-6"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>getglobal(this:GetName().."Text"):SetText("Send Money")</OnLoad>
                                     <OnClick>SendMailRadioButton_OnClick(1)</OnClick>
                                 </Scripts>
                             </CheckButton>
-                            <CheckButton name="SendMailCODButton" inherits="BenillaSendMailRadioButtonTemplate">
+                            <CheckButton name="SendMailCODButton" inherits="BenillaSendMailRadioButtonTemplate" id="2">
                                 <Anchors><Anchor point="TOPLEFT" relativeTo="SendMailSendMoneyButton" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>getglobal(this:GetName().."Text"):SetText("C.O.D.")</OnLoad>
@@ -1414,7 +1414,7 @@
     </Frame>
 
     <!-- ── Open Mail (ref OpenMailFrame l.1306-1915) ──────────────────────────────────────────── -->
-    <Frame name="OpenMailFrame" parent="UIParent" hidden="true" enableMouse="true">
+    <Frame name="OpenMailFrame" toplevel="true" parent="UIParent" hidden="true" enableMouse="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="InboxFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor>

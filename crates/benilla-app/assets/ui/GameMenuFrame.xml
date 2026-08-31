@@ -87,9 +87,11 @@
           by deleting one `GameMenuButton_Pending` call and writing its OnClick.
         - The Options label stays a literal "Options": 1.12 GlobalStrings has no era
           GAMEMENU_OPTIONS (checked; its OPTIONS_MENU is "Options Menu", a different string).
-        - The ref frame is `toplevel="true" movable="true" parent="UIParent"`. Dropped: this engine has
-          no cross-file `parent=` attachment (SkillFrame.xml's header comment), and `movable` is inert
-          in the ref too (GameMenuFrame defines no drag scripts, so it never actually moves).
+        - The ref frame is `toplevel="true" movable="true" parent="UIParent"`. `parent="UIParent"` is
+          ours too, and it attaches for real: the loader does read a cross-file `parent=`, resolving
+          the name by global lookup at load (decision 1734), and the frame below declares it. Only
+          `movable` is dropped, and it is inert in the ref too (GameMenuFrame defines no drag
+          scripts, so it never actually moves).
           `frameStrata="DIALOG"` is what puts it over the world UI, and that is kept.
           **The "no frame-level raise" half of that reason is gone**: the raise law is built
           (`script::object::toplevel`, wow-re `ui/scratch/toplevel-raise.md`) and the loader honours

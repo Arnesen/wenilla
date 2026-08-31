@@ -722,6 +722,38 @@ pub(crate) struct Player {
     /// `StartFalling(0)`). Observers replay the parabola from it, and the FALLINGFAR latch splits
     /// its distance/timer legs on it (decision 0179); held constant while `fall_time` advances.
     pub(super) jump_zspeed: f32,
+    /// **The launch vertical speed, recorded the instant a take-off is decided** — before this
+    /// frame's gravity touches it. [`super::arc`] snapshots [`Self::jump_zspeed`] from *this*, not
+    /// from `vel_y`: the mover now integrates gravity on the take-off frame too (decision 1740), so
+    /// by the time the arc bookkeeping runs `vel_y` is already one step down the parabola and would
+    /// seat a launch speed `g·dt` short. The reference has no such ambiguity — `+0xa0` is written
+    /// once by `StartFalling` and never touched again for the arc.
+    pub(super) launch_vz: f32,
+    /// **The arc's direction nibble — the reference's `[CMovement+0x40] & 0xf`** (decision 1740).
+    /// Air control opens exactly while this is CLEAR: `0x7c5a20`/`0x7c5c20` bail on
+    /// `FALLING && arg == 0`, and the only two openers that pass `arg = 1` sit behind
+    /// `0x7c6afc test al,0xf`. So a jump from a standstill can be steered once, a jump taken with a
+    /// direction already held cannot, and a **knockback never can** — its launch plants FORWARD
+    /// itself (`0x6179c0`'s `0x617a18 or edx,0x8001`), which is the real freeze mechanism and has
+    /// nothing to do with the arc's speed. Seeded at take-off, set by the one nudge that fires,
+    /// cleared when the arc ends.
+    ///
+    /// This replaced a `horiz_vel.length_squared() < 0.01` proxy that agreed with the reference for
+    /// every ordinary jump and disagreed for one input: a knockback with `xy_speed ≈ 0`, which the
+    /// proxy read as "standing still, may steer".
+    pub(super) arc_dirs_set: bool,
+    /// This airborne arc was launched by a **knockback**, so its planted FORWARD bit rides the wire
+    /// for the arc's whole length (decision 1740) — the reference's `0x617a18` sets FORWARD and
+    /// clears BACKWARD, and the send mask `0x618909 and edx,0x75a07dff` keeps bit 0. Distinct from
+    /// [`super::mover::Outcome::knocked`], which is true on the launch frame only.
+    pub(super) knock_arc: bool,
+    /// **Was the body airborne at the end of the previous mover step** — the mover's own record,
+    /// so the arc-start seeding does not have to read [`Self::airborne_since`] (decision 1740).
+    /// That field belongs to the *wire* lifecycle in [`super::arc`] and is written by
+    /// [`super::flags`], which runs AFTER the mover: reading it here made a physics decision
+    /// depend on a system further down the frame, so a step-off's launch state was seeded a frame
+    /// late whenever the mover ran on its own. Separate owners, separate fields.
+    pub(super) airborne_prev: bool,
     /// The translation-direction move-flag bits ([`crate::creature_anim::move_flags::ANY_MOVE`]) the
     /// current airborne arc launched with. Mid-air these are the *actual* motion — momentum is frozen at
     /// takeoff, so held keys move nothing — and the live flags (animation, pose, wire) read them instead

@@ -930,6 +930,11 @@ mod enchant_confirm_tests;
 #[cfg(test)]
 mod framexml_diff;
 
+/// Its FLAG twin (decision 1739): the whole-tree sweep for `toplevel`/mouse/`id` against the
+/// reference, read off the loaded engine rather than off our XML.
+#[cfg(test)]
+mod frame_flag_gate;
+
 #[cfg(test)]
 mod friends_tests;
 

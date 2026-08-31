@@ -558,7 +558,7 @@
         </Scripts>
     </Button>
 
-    <Frame name="LootFrame" parent="UIParent" hidden="true">
+    <Frame name="LootFrame" enableMouse="true" toplevel="true" parent="UIParent" hidden="true">
         <!-- The real 256×256 window (ref l.59-60). No <Anchors> here — ShowUIPanel SetPoints this to
              its slot. -->
         <Size><AbsDimension x="256" y="256"/></Size>

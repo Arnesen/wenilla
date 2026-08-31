@@ -951,7 +951,7 @@
          world map is FULLSCREEN strata — DIALOG would render the list underneath it (the strata
          escalation later reference versions added to ToggleDropDownMenu, applied statically
          here since our customer set is known). -->
-    <Button name="UIDropDownListTemplate" frameStrata="FULLSCREEN_DIALOG" virtual="true" hidden="true">
+    <Button name="UIDropDownListTemplate" enableMouse="true" frameStrata="FULLSCREEN_DIALOG" virtual="true" hidden="true">
         <Size><AbsDimension x="180" y="32"/></Size>
         <Frames>
             <Frame name="$parentBackdrop" setAllPoints="true">

@@ -308,7 +308,18 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// the uploader is exactly the game opinion the wall exists to keep out. The alternative was
 /// mirroring the region into every registered buffer to keep the count flat, which re-opens B49 in
 /// the tint lane (decision 1731).
-const CEILING: usize = 164;
+/// And 164 → 165: `ffx_glow::GlueFfx`, a PUBLISH of the same shape as `rig_anim::AnimParked` and
+/// the two above — a resource the ENGINE reads and the GAME writes, and exactly ONE bit wide.
+/// Running an FFX pass pair is machinery; *which* pair a screen installs is the screen's own, and
+/// the reference says so by building two pairs (WorldFrame `0x481c46`, CGlueMgr `0x46a723`) and
+/// selecting between them at two different sites. The world's selector is already inside the
+/// engine's reach — `PLAYER_FLAGS_GHOST` on the live player — but the glue's is not and cannot be:
+/// it is the ghost bit of the **selected roster row** (`0x472fd9 test dh,0x20`), a character
+/// nobody is standing in, on a screen the engine has no concept of. The alternative was handing the
+/// renderer a roster to read to keep a count flat (decision 1731). Note the direction of travel:
+/// this replaced `FfxGlow::state_scale`, a float that let a bake inherit a player-state lane by
+/// arithmetic — the enum that took its place makes report B49's invariant structural.
+const CEILING: usize = 165;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

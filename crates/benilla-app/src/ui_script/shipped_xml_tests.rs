@@ -1166,8 +1166,95 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
     );
 }
 
+/// **Every `parent=` the shipped tree declares REALLY attaches** — the tripwire for 1734's trap.
+///
+/// A parent name is resolved at LOAD, and a name that names nothing is **not an error**: the loader
+/// warns ("names no frame — falling back to the enclosing one") and silently reparents to whatever
+/// element encloses the declaration. So a typo, a renamed window, or a file that loads earlier in
+/// the manifest than its parent's leaves the frame attached to the wrong thing with a green suite
+/// and one log line nobody greps — which is how 1734's 41 harness failures were the *lucky*
+/// outcome and a silent half-fix was the unlucky one.
+///
+/// Asserted on the LOADED tree, not on the text: `GetParent():GetName()` is what the frame ended up
+/// attached to, which is the only form of this claim worth making. It is also the standing answer
+/// to "does this engine read a cross-file `parent=`?" — several file headers still said it does
+/// not, years after it did, and five pages carry a hand-written substitute for `setAllPoints`
+/// because of it.
+#[test]
+fn every_declared_parent_really_attaches() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    let declared = shipped_frame_parents();
+    assert!(
+        declared.len() > 60,
+        "only {} parent declarations found — the scan broke",
+        declared.len()
+    );
+    let mut wrong: Vec<String> = Vec::new();
+    for (child, parent) in &declared {
+        let got = s
+            .eval::<String>(&format!(
+                "local f = getglobal(\"{child}\") \
+                 if not f or not f.GetParent then return \"<not a frame>\" end \
+                 local p = f:GetParent() \
+                 return p and (p:GetName() or \"<anonymous>\") or \"<none>\""
+            ))
+            .unwrap_or_else(|_| "<error>".to_string());
+        if got != *parent {
+            wrong.push(format!(
+                "  {child}: declared parent={parent}, attached to {got}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} frame(s) did not attach to the parent they declare:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// `(named non-virtual frame, the `parent=` it declares)` for every such declaration in the shipped
+/// tree — the population of [`every_declared_parent_really_attaches`].
+fn shipped_frame_parents() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "xml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        for chunk in text.split('<').skip(1) {
+            let head = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+            if head.contains("virtual=\"true\"") {
+                continue;
+            }
+            let attr = |key: &str| -> Option<String> {
+                let i = head.find(key)?;
+                let rest = &head[i + key.len()..];
+                let j = rest.find('"')?;
+                Some(rest[..j].to_string())
+            };
+            let (Some(name), Some(parent)) = (attr("name=\""), attr("parent=\"")) else {
+                continue;
+            };
+            if !name.contains('$') && !parent.contains('$') {
+                out.push((name, parent));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Every named, non-virtual frame the shipped tree declares — the sweep's population.
-fn shipped_frame_names() -> Vec<String> {
+pub(super) fn shipped_frame_names() -> Vec<String> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
     let mut names: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {

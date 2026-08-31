@@ -292,7 +292,7 @@
         </Scripts>
     </Button>
 
-    <Frame name="GossipFrame" parent="UIParent" hidden="true">
+    <Frame name="GossipFrame" enableMouse="true" toplevel="true" parent="UIParent" hidden="true">
         <!-- The real 384×512 window (ref l.128). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints this
              to the left slot on open. -->
         <Size><AbsDimension x="384" y="512"/></Size>

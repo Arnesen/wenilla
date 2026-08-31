@@ -1179,7 +1179,7 @@
          BELOW the MEDIUM panel windows on purpose, and the player frame shares the top-left corner
          with the left-slot panel. See the note on PartyFrame.xml's template (decision 0597) for why
          the default MEDIUM makes a unit frame's bar children draw through a window's background. -->
-    <Frame name="PlayerFrame" parent="UIParent" frameStrata="BACKGROUND">
+    <Frame name="PlayerFrame" toplevel="true" parent="UIParent" frameStrata="BACKGROUND">
         <Size><AbsDimension x="232" y="100"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-19" y="-4"/></Offset></Anchor>
@@ -1461,7 +1461,7 @@
 
     <!-- The SELF-menu dropdown host (ref $parentDropDown, PlayerFrame.xml): hidden state-holder
          only — the list anchors to the player frame by name, never to this. -->
-    <Frame name="PlayerFrameDropDown" parent="PlayerFrame" inherits="UIDropDownMenuTemplate" hidden="true">
+    <Frame name="PlayerFrameDropDown" parent="PlayerFrame" inherits="UIDropDownMenuTemplate" id="1" hidden="true">
         <Size><AbsDimension x="10" y="10"/></Size>
         <Anchors><Anchor point="TOP"><Offset><AbsDimension x="-20" y="-10"/></Offset></Anchor></Anchors>
         <Scripts>
@@ -1519,7 +1519,7 @@
          every login. Steady-state behavior is identical — Update Shows/Hides on target changes. -->
     <!-- frameStrata LOW is the ref's own (`TargetFrame.xml` l.88) — one above the player frame's
          BACKGROUND, still below the MEDIUM panels. Same reasoning as PlayerFrame above. -->
-    <Frame name="TargetFrame" parent="UIParent" hidden="true" frameStrata="LOW">
+    <Frame name="TargetFrame" toplevel="true" parent="UIParent" hidden="true" frameStrata="LOW">
         <Size><AbsDimension x="232" y="100"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="250" y="-4"/></Offset></Anchor>
@@ -1772,7 +1772,7 @@
 
     <!-- The target-menu dropdown host (ref $parentDropDown, TargetFrame.xml): hidden
          state-holder only, like the player's above. -->
-    <Frame name="TargetFrameDropDown" parent="TargetFrame" inherits="UIDropDownMenuTemplate" hidden="true">
+    <Frame name="TargetFrameDropDown" parent="TargetFrame" inherits="UIDropDownMenuTemplate" id="1" hidden="true">
         <Size><AbsDimension x="10" y="10"/></Size>
         <Anchors><Anchor point="TOP"><Offset><AbsDimension x="-20" y="-10"/></Offset></Anchor></Anchors>
         <Scripts>
@@ -2064,7 +2064,7 @@
     <!-- 93×45 at the target frame's BOTTOMRIGHT (-35,-10) — ref TargetFrame.xml l.515-525. A
          Frame, not the reference's Button: every unit frame in this file is one, and this engine
          dispatches OnClick on a mouse-enabled frame (see TargetFrame/PetFrame above). -->
-    <Frame name="TargetofTargetFrame" parent="TargetFrame" hidden="true" frameStrata="LOW">
+    <Frame name="TargetofTargetFrame" enableMouse="true" toplevel="true" parent="TargetFrame" hidden="true" frameStrata="LOW">
         <Size><AbsDimension x="93" y="45"/></Size>
         <Anchors>
             <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-35" y="-10"/></Offset></Anchor>
@@ -2504,7 +2504,7 @@
 
     <!-- frameStrata LOW matches the party frames' and the target's — above the player frame's
          BACKGROUND (which it overlaps), still below the MEDIUM panels. -->
-    <Frame name="PetFrame" parent="PlayerFrame" hidden="true" frameStrata="LOW">
+    <Frame name="PetFrame" toplevel="true" parent="PlayerFrame" hidden="true" frameStrata="LOW">
         <Size><AbsDimension x="128" y="53"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT"><Offset><AbsDimension x="80" y="-60"/></Offset></Anchor>

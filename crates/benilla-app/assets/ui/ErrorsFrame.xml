@@ -48,7 +48,7 @@
         end
     ]]></Script>
 
-    <MessageFrame name="UIErrorsFrame" parent="UIParent" displayDuration="5" insertMode="TOP" frameStrata="HIGH">
+    <MessageFrame name="UIErrorsFrame" toplevel="true" parent="UIParent" displayDuration="5" insertMode="TOP" frameStrata="HIGH">
         <Size><AbsDimension x="512" y="60"/></Size>
         <Anchors>
             <Anchor point="TOP" relativePoint="TOP">

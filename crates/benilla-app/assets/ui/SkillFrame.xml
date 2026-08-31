@@ -14,12 +14,14 @@
         physically nested `<Frame>` the way PaperDollFrame is: PaperDollFrame is declared INSIDE
         CharacterFrame.xml's own `<Frames>` tree (a real engine parent/child), while this page is a
         SEPARATE file's top-level `<Frame>` (CharacterFrame.xml is shared-tree with another session
-        this pass, so only its tab machinery is touched here — not its frame tree). `parent=` is
-        transcribed for fidelity but is a NO-OP in this engine (grepped `benilla-ui/src/loader`: the
-        XML `parent` attribute is read nowhere — only physical `<Frames>` nesting creates a real
-        parent). Position instead rides `<Anchors relativeTo="CharacterFrame">` (a NAMED
-        lookup, works regardless of tree position, the same mechanism every sibling-anchor in this
-        codebase already uses) — loaded right after `CharacterFrame.xml` in the load list so it
+        this pass, so only its tab machinery is touched here — not its frame tree). `parent=` really attaches
+        (decision 1734; the loader resolves the name globally at load and it wins over the enclosing
+        element — `shipped_xml_tests::every_declared_parent_really_attaches` asserts it on the loaded
+        tree). The line above used to say the attribute was read nowhere, which was true once and had
+        outlived itself. Position still rides `<Anchors relativeTo="CharacterFrame">` — a NAMED
+        lookup that works regardless of tree position, the same mechanism every sibling-anchor in
+        this codebase uses, kept because it is the geometry this page ships with — loaded right after
+        `CharacterFrame.xml` in the load list so it
         paints ON TOP of it (later file = higher z, the established house convention every top-level
         window already relies on implicitly). Because a true engine Hide-cascade doesn't reach a
         non-child, `CharacterFrame.xml`'s own `CharacterFrame_OnHide` was extended (its own
@@ -687,20 +689,20 @@
             <!-- 12 rank-bar slots (ref SkillRankFrame1..12, l.746-853): 271×15, row1 TOPLEFT(38,-79);
                  rows 2-12 chain BOTTOMLEFT→TOPLEFT by (0,-3) — the SAME 18px pitch as the label chain
                  (15 bar height + 3 gap). -->
-            <StatusBar name="SkillRankFrame1" inherits="BenillaSkillRankTemplate">
+            <StatusBar name="SkillRankFrame1" inherits="BenillaSkillRankTemplate" id="1">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="38" y="-79"/></Offset></Anchor></Anchors>
             </StatusBar>
-            <StatusBar name="SkillRankFrame2" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame3" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame4" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame5" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame6" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame7" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame8" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame9" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame10" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame11" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame12" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame2" inherits="BenillaSkillRankTemplate" id="2"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame3" inherits="BenillaSkillRankTemplate" id="3"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame4" inherits="BenillaSkillRankTemplate" id="4"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame5" inherits="BenillaSkillRankTemplate" id="5"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame6" inherits="BenillaSkillRankTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame7" inherits="BenillaSkillRankTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame8" inherits="BenillaSkillRankTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame9" inherits="BenillaSkillRankTemplate" id="9"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame10" inherits="BenillaSkillRankTemplate" id="10"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame11" inherits="BenillaSkillRankTemplate" id="11"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame12" inherits="BenillaSkillRankTemplate" id="12"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
 
             <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
                  container over the 12 rows; only its right-hand Slider scroll bar renders. Sized to the

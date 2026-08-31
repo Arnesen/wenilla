@@ -165,6 +165,16 @@ pub(super) fn this_frame(
             move_flags_now = 0;
         }
     }
+    // **A knockback arc streams FORWARD for its whole length** (decision 1740). The reference's
+    // apply plants it as part of the launch (`0x6179c0`'s `0x617a18 or edx,0x8001` — set bit 0,
+    // clear bit 1) and nothing clears it until the arc ends, and the send mask
+    // (`0x618909 and edx,0x75a07dff`) keeps bit 0, so observers see it. It is also the mechanism
+    // that makes the arc unsteerable, so the bit and the freeze are the same fact, set in one
+    // place. Ours never sent it at all: a knocked-back body streamed a bare FALLING and observers
+    // replayed it as a plain drop.
+    if player.knock_arc {
+        move_flags_now = (move_flags_now & !move_flags::BACKWARD) | move_flags::FORWARD;
+    }
     // The two incapacitate suppressions — rooted drops the direction bits, stunned drops the
     // turn bits — applied to the whole word in one place, whichever branch built it, and with
     // the reference's byte trail in [`state::incapacitated_flags`] (decision 0880).
@@ -192,5 +202,86 @@ pub(super) fn this_frame(
         pose: pose_flags,
         landed,
         fall_time: wire_fall_time,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::input::MoveAxes;
+
+    fn still() -> MoveAxes {
+        MoveAxes {
+            fwd: 0,
+            side: 0,
+            mouselook: false,
+            turning: false,
+            translating: false,
+            autorun_armed: false,
+            strafe_left: false,
+            strafe_right: false,
+            turn_left: false,
+            turn_right: false,
+        }
+    }
+
+    /// **A knockback arc streams FORWARD for its whole length** (decision 1740). The reference's
+    /// apply plants the bit as part of the launch (`0x6179c0`'s `0x617a18 or edx,0x8001` — set bit
+    /// 0, clear bit 1) and only the arc's end clears it; the send mask
+    /// (`0x618909 and edx,0x75a07dff`) keeps bit 0, so observers get it on every packet of the
+    /// flight. We sent a bare FALLING instead, and observers replayed a knockback as a plain drop.
+    ///
+    /// It is the same bit that makes the arc unsteerable, which is why the two are one fact set in
+    /// one place — see [`super::mover`]'s air-control gate.
+    #[test]
+    fn a_knockback_arc_plants_forward_on_the_wire() {
+        let mut player = Player {
+            knock_arc: true,
+            ..Default::default()
+        };
+        // Airborne, no keys held at all — nothing else could produce a direction bit.
+        let f = this_frame(
+            &mut player,
+            &still(),
+            None,
+            true,
+            false,
+            false,
+            false,
+            false,
+            1.0,
+            0.0,
+        );
+        assert!(
+            f.wire & move_flags::FORWARD != 0,
+            "the launch's planted FORWARD rides the wire: {:#x}",
+            f.wire
+        );
+        assert!(
+            f.wire & move_flags::BACKWARD == 0,
+            "and it clears BACKWARD, as the apply does: {:#x}",
+            f.wire
+        );
+        assert!(f.wire & move_flags::FALLING != 0, "still an airborne arc");
+
+        // The same frame without the knockback provenance streams no direction at all.
+        let mut plain = Player::default();
+        let f = this_frame(
+            &mut plain,
+            &still(),
+            None,
+            true,
+            false,
+            false,
+            false,
+            false,
+            1.0,
+            0.0,
+        );
+        assert!(
+            f.wire & move_flags::ANY_MOVE == 0,
+            "an ordinary fall with no keys held streams no direction: {:#x}",
+            f.wire
+        );
     }
 }

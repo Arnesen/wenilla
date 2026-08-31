@@ -440,7 +440,7 @@
         restored that line, and this was the frame it broke. `CinematicFrame` is unparented for
         exactly the same reason — every `full` panel must be.
     -->
-    <Frame name="WorldMapFrame" frameStrata="FULLSCREEN_DIALOG" hidden="true" enableMouse="true">
+    <Frame name="WorldMapFrame" enableKeyboard="true" frameStrata="FULLSCREEN_DIALOG" hidden="true" enableMouse="true">
         <Size><AbsDimension x="1024" y="768"/></Size>
         <Anchors>
             <Anchor point="CENTER"/>
@@ -662,7 +662,7 @@
                 <Size><AbsDimension x="1002" y="668"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailFrame"/></Anchors>
                 <Frames>
-                    <Frame name="WorldMapPlayer">
+                    <Frame name="WorldMapPlayer" id="0">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors><Anchor point="CENTER"/></Anchors>
                         <Layers>

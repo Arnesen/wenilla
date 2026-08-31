@@ -251,16 +251,21 @@ impl NpcSession for QuestGiver {
         self.npc.filter(|g| !benilla_protocol::guid::is_item(*g))
     }
 
-    /// **A party share is not range-guarded** (decision 1733). Its giver is a live player with a
-    /// position, a name and a portrait, so it stays a full session for [`crate::ui_session`]'s
-    /// *other* consumer — but the guard's threshold is the NPC **service** range
-    /// ([`crate::target::SERVICE_RANGE_SQ`], 5.56 yd), a rule about reaching an NPC's counter, and
-    /// a share has no counter to reach. The server's own bound is `QUEST_SHARE_DISTANCE`, 14.0 yd
-    /// (vmangos `Object.h:72`), tested at ACCEPT and answered with `QUEST_PARTY_MSG_TOO_FAR` —
-    /// so a sharer standing six yards off would have had the panel yanked out from under a quest
-    /// the server was perfectly willing to grant.
-    fn range_guarded(&self) -> bool {
-        !self.npc.is_some_and(benilla_protocol::guid::is_player)
+    /// Walking away from a party member's SHARED quest still owes them the decline
+    /// (decision 1741). The distance that triggers it is not this method's business — the guard
+    /// takes the leash from the giver's own type (`crate::ui_session::leash_sq`: 14.0 yd for a
+    /// player, the 5.56 yd service range for an NPC), which is what 1733 got wrong by exempting
+    /// the share panel outright.
+    ///
+    /// **The walk-away sends strictly LESS than the button does**, and that is the reference's,
+    /// not a simplification: its watchdog calls the session end directly (`0x4933da` → `0x501130`)
+    /// rather than going through `DeclineQuest`, so an NPC's panel closes silently here — no
+    /// giver re-open — while the button's path still re-opens it.
+    fn walk_away_send(&self, npc: u64) -> Option<ClientCommand> {
+        benilla_protocol::guid::is_player(npc).then_some(ClientCommand::QuestPushResult {
+            sharer: npc,
+            msg: QuestShareMsg::DECLINE_QUEST,
+        })
     }
 
     fn close(&mut self) {

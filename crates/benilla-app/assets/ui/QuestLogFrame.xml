@@ -1370,7 +1370,7 @@
         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
     </Button>
 
-    <Frame name="QuestLogFrame" parent="UIParent" hidden="true">
+    <Frame name="QuestLogFrame" enableMouse="true" toplevel="true" parent="UIParent" hidden="true">
         <!-- The real 384×512 window (pin §1). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints this
              to the left slot on open, exactly like Gossip/Merchant/Quest. -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -1564,14 +1564,14 @@
             <!-- pin §2, geometry byte-for-byte (ref QuestLogFrame.xml:535-588): 6 title rows,
                  300×16, row1 TOPLEFT of the frame at (19,-75); rows 2-6 chain TOPLEFT→prior BOTTOMLEFT
                  at (0,+1) — a TIGHT 1px OVERLAP, not a gap (the ref's own offset is positive). -->
-            <Button name="QuestLogTitle1" inherits="BenillaQuestLogTitleTemplate">
+            <Button name="QuestLogTitle1" inherits="BenillaQuestLogTitleTemplate" id="1">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="QuestLogTitle2" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle3" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle4" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle5" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle6" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle2" inherits="BenillaQuestLogTitleTemplate" id="2"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle3" inherits="BenillaQuestLogTitleTemplate" id="3"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle4" inherits="BenillaQuestLogTitleTemplate" id="4"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle5" inherits="BenillaQuestLogTitleTemplate" id="5"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle6" inherits="BenillaQuestLogTitleTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
 
             <!-- The detail pane's real ScrollFrame (decision 0112's mechanism): 300×261, TOPLEFT of
                  this window at (19,-175) — the ref's own `QuestLogDetailScrollFrame` position, this
@@ -1940,7 +1940,7 @@
          lines*13) so the left-aligned column hugs the minimap's right edge like the ref; the
          GetWidth reads are extract-measured (one frame stale), so the sizing tail re-runs from
          OnUpdate for two frames after each repaint (`resize_pending`) and converges next frame. -->
-    <Frame name="QuestWatchFrame" parent="UIParent">
+    <Frame name="QuestWatchFrame" toplevel="true" parent="UIParent">
         <Size><AbsDimension x="280" y="20"/></Size>
         <Anchors>
             <Anchor point="TOPRIGHT" relativeTo="MinimapCluster" relativePoint="BOTTOMRIGHT">

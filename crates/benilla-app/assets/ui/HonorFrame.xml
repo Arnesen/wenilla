@@ -15,11 +15,16 @@
         Today, Yesterday, This Week, Last Week, Lifetime.
 
         A CHILD PAGE of `CharacterFrame` (ref l.5: `parent="CharacterFrame"`, `id="5"`), shown and
-        hidden by `CharacterFrame_ShowSubFrame` — but a SEPARATE top-level file, the
-        SkillFrame.xml / PetPaperDollFrame.xml / ReputationFrame.xml shape: this engine reads no XML
-        `parent=` attribute (only physical `<Frames>` nesting creates a real parent), so the page is
-        pinned to `CharacterFrame`'s own TOPLEFT by NAME and loaded right after its siblings so it
-        paints on top (later file = higher z). Joining `BENILLA_CHARACTERFRAME_SUBFRAMES` as entry 5
+        hidden by `CharacterFrame_ShowSubFrame` — a SEPARATE top-level file, the SkillFrame.xml /
+        PetPaperDollFrame.xml / ReputationFrame.xml shape, and it carries the reference's
+        `parent="CharacterFrame"` for real: the loader does read a cross-file `parent=`, resolving
+        the name by global lookup at load (decision 1734). That name has to exist by the time this
+        file loads — an unresolvable one is not an error, it warns and falls back to the enclosing
+        element — which the manifest order gives it. The page is still sized and pinned to
+        `CharacterFrame`'s own TOPLEFT by NAME and still loaded right after its siblings so it paints
+        on top (later file = higher z): that arrangement produces the identical rect and is what the
+        page was built and approved against, not a workaround for something the engine cannot do.
+        Joining `BENILLA_CHARACTERFRAME_SUBFRAMES` as entry 5
         is all it has to do to be closed by `CharacterFrame_OnHide`'s hide-loop.
 
         THE TAB ROW IS NOW WHOLE. Four of the reference's five tabs shipped before this page and
@@ -401,10 +406,12 @@
          page's id against its slot in BENILLA_CHARACTERFRAME_SUBFRAMES, and with this page the two
          cover the real client's whole row. -->
     <Frame name="HonorFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="5">
-        <!-- The real 384x512 page. The reference's `setAllPoints="true"` needs the true parenting
-             this engine's cross-file `parent=` does not give (this file's header comment), so the
-             page is sized and pinned to CharacterFrame's TOPLEFT by name — ReputationFrame.xml,
-             SkillFrame.xml and PetPaperDollFrame.xml all ship the identical substitute. -->
+        <!-- The real 384x512 page. The explicit `<Size>` + TOPLEFT `<Anchor>` below is an exact
+             equivalent of the reference's `setAllPoints="true"` here — CharacterFrame, the parent
+             this frame declares, is itself 384x512 (ref CharacterFrame.xml l.4-7) — and it is kept
+             rather than swapped because it is the geometry the page ships with, not because the
+             attribute would not work. ReputationFrame.xml, SkillFrame.xml and
+             PetPaperDollFrame.xml all carry the identical pair. -->
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterFrame" relativePoint="TOPLEFT"/></Anchors>
         <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="75"/></HitRectInsets>

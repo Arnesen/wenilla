@@ -1412,7 +1412,7 @@
         one script here that is genuinely ChatFrame1's rather than the dock's, so the template
         carries the gate rather than the registration.
     -->
-    <ScrollingMessageFrame name="BenillaChatFrameTemplate" virtual="true" parent="UIParent"
+    <ScrollingMessageFrame name="BenillaChatFrameTemplate" toplevel="true" virtual="true" parent="UIParent"
                            frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128"
                            movable="true" resizable="true">
         <!-- ref FloatingChatFrame.xml l.222-230, verbatim. The only `<ResizeBounds>` in the whole
@@ -2143,7 +2143,7 @@
         <HighlightFont inherits="GameFontHighlight" justifyH="LEFT"/>
         <DisabledFont inherits="GameFontDisable" justifyH="LEFT"/>
     </Button>
-    <Frame name="UIMenuTemplate" frameStrata="DIALOG" virtual="true">
+    <Frame name="UIMenuTemplate" toplevel="true" frameStrata="DIALOG" virtual="true">
         <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
             <BackgroundInsets><AbsInset left="4" right="4" top="4" bottom="4"/></BackgroundInsets>
             <TileSize><AbsValue val="32"/></TileSize>
@@ -2271,7 +2271,7 @@
          arrow-steering working and the keys being dead. -->
     <!-- historyLines: the ref template ships 32; 64 at the director's call ("at least 50",
          2026-07-26) — the recall walk is the modern law already (decision 0301). -->
-    <EditBox name="ChatFrameEditBox" parent="UIParent" frameStrata="DIALOG" hidden="true" historyLines="64" letters="255">
+    <EditBox name="ChatFrameEditBox" toplevel="true" parent="UIParent" frameStrata="DIALOG" hidden="true" historyLines="64" letters="255">
         <Size><AbsDimension x="0" y="32"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="ChatFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="-2"/></Offset></Anchor>

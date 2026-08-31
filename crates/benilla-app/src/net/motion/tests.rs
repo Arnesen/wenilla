@@ -274,9 +274,16 @@ fn remote_motion_jump_is_a_parabola_not_flag_walking() {
         "horizontal coasts at the frozen 7 yd/s: {pos:?}"
     );
     assert!(pos[1].abs() < 1e-3, "no lateral drift: {pos:?}");
+    // **The analytic height, `v₀·t − ½g·t²`** (decision 1740). This asserted `v₀·t` until the
+    // airborne-integrator round — explicit Euler, moving the whole step at the START-of-step speed
+    // with no gravity in the displacement at all, which over this 0.5 s step is 3.98 yd against a
+    // true 1.57. The local mover had the mirror-image error in the other direction. Both now run
+    // the one exact step ([`crate::player::mover::fall_step`]), so this is the closed form and it
+    // holds at any `dt`.
+    let analytic = 7.955_547 * 0.5 - 0.5 * GRAVITY * 0.5 * 0.5;
     assert!(
-        (pos[2] - 7.955_547 * 0.5).abs() < 1e-3,
-        "height integrates v·dt: {pos:?}"
+        (pos[2] - analytic).abs() < 1e-3,
+        "height follows the closed form {analytic}: {pos:?}"
     );
     assert!(
         (vz - (7.955_547 - GRAVITY * 0.5)).abs() < 1e-3,

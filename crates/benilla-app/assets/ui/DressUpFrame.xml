@@ -147,7 +147,7 @@
         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
     </Button>
 
-    <Frame name="DressUpFrame" parent="UIParent" toplevel="true" hidden="true">
+    <Frame name="DressUpFrame" enableMouse="true" parent="UIParent" toplevel="true" hidden="true">
         <!-- The ref's 384×512 window. No <Anchors>: ShowUIPanel seats it in the left slot, this
              house's convention for every panel window (MerchantFrame.xml/CraftFrame.xml). -->
         <Size><AbsDimension x="384" y="512"/></Size>

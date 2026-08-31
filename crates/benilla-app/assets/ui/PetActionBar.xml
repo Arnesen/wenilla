@@ -476,7 +476,7 @@
         </Scripts>
     </CheckButton>
 
-    <Frame name="PetActionBarFrame" parent="MainMenuBar" hidden="true">
+    <Frame name="PetActionBarFrame" enableMouse="true" parent="MainMenuBar" hidden="true">
         <Size><AbsDimension x="509" y="43"/></Size>
         <!-- This anchor is the LOAD-TIME value only: UIParent_ManageFramePositions owns the real
              one and re-seats the frame on every pass (OnShow/OnHide below fire it), because the
@@ -506,44 +506,44 @@
             </Layer>
         </Layers>
         <Frames>
-            <CheckButton name="PetActionButton1" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton1" inherits="BenillaPetActionButtonTemplate" id="1">
                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="36" y="2"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 1)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton2" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton2" inherits="BenillaPetActionButtonTemplate" id="2">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 2)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton3" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton3" inherits="BenillaPetActionButtonTemplate" id="3">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 3)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton4" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton4" inherits="BenillaPetActionButtonTemplate" id="4">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 4)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton5" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton5" inherits="BenillaPetActionButtonTemplate" id="5">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 5)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton6" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton6" inherits="BenillaPetActionButtonTemplate" id="6">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 6)</OnLoad></Scripts>
             </CheckButton>
             <!-- The ref's own +7 here, not +8 (PetActionBarFrame.xml l.158-166). -->
-            <CheckButton name="PetActionButton7" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton7" inherits="BenillaPetActionButtonTemplate" id="7">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 7)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton8" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton8" inherits="BenillaPetActionButtonTemplate" id="8">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 8)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton9" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton9" inherits="BenillaPetActionButtonTemplate" id="9">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 9)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="PetActionButton10" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton10" inherits="BenillaPetActionButtonTemplate" id="10">
                 <Anchors><Anchor point="LEFT" relativeTo="PetActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 10)</OnLoad></Scripts>
             </CheckButton>

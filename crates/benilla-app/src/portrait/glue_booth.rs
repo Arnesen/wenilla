@@ -235,6 +235,11 @@ pub(crate) struct CreateScene {
     /// Whether the current spawn wrote the fog rows enabled (the create law) — a screen hop with
     /// the same scene race still rebuilds when this flips.
     fog: bool,
+    /// Whether the light buffer currently holds the **ghost** rig ([`ghost_rig`]) rather than the
+    /// scene's authored one. Unlike [`Self::fog`] a change here does NOT rebuild the scene: the
+    /// reference's fork is a per-frame fill callback on models that are already standing, so the
+    /// buffer is rewritten in place and the stage's braziers keep burning across the click.
+    ghost: bool,
     /// The scene's own light buffer — the scene's **authored M2 light rig** folded per the world
     /// law (see [`SceneRig`]: directionals → ambient + SH probe slot 0, points → the per-vertex
     /// point table) plus the ref's per-race fog (`CharModelFogInfo`) — **create only**: at select
@@ -321,6 +326,88 @@ fn scene_rig(lights: &[benilla_assets::ModelLight]) -> SceneRig {
         lobes,
         points,
     }
+}
+
+/// **The GHOST select screen's hardcoded sun** — the one directional the reference injects when the
+/// selected roster record carries `CHARSELECT+0xfc & 0x2000`, replacing the authored rig entirely
+/// (wow-re `glue-select-model.md` §C1–C4 + `glue-select-ghost-treatment.md`, VERIFIED).
+///
+/// `0x472150` is a per-model per-frame **fill callback** (`[model+0x3bc]`, registered by `0x7134b0`)
+/// whose *entire body* is gated on that bit (`47218e mov ecx,[record+0xfc]; 472194 test ch,0x20;
+/// 472197 je 0x4722b2`). It is registered on **three** models — the background scene M2
+/// (`0x472144`), the character (`0x472bac`) and the **pet** (`0x472ebd`) — so all three fork
+/// together off one `[0x83856c]`-keyed read. For a living selection the callback is a complete
+/// no-op and the authored rig stands, exactly as at create (decision 0435's law, select-confirmed).
+///
+/// For a ghost it does two things, and this function is both:
+///
+/// - **the collector is WIPED** — `0x71bc30` opens `mov ecx,0x6d; rep stosd`, 436 bytes zeroed, so
+///   the scene-DB gather is discarded: no authored ambient, and **no point lights** (which is why
+///   the ghost stage loses the NightElf/Scourge stage-local lamps that make those two scenes);
+/// - **one hardcoded directional is injected** (built by `0x71b4a0`, forced directional by
+///   `0x71b620(0)`, colours by two `0x6d6ad0()→0x6d62e0()` DN reads, specular left 0).
+///
+/// **The direction, and the trap in it.** `0x472280 mov [ebp-4],0xbf800000` writes the raw literal
+/// `(0,0,-1)` into `CGLight+0x24`, which is a **from-light** vector: `0x71b6a0` stores it verbatim
+/// (normalize only, no `fchs`) and `0x71bce0` negates all three components (`0x71be7c`/`0x71be81`/
+/// `0x71be86`) before accumulating the SH lobe, so the lobe is centred on `-u` = **`(0,0,+1)`, i.e.
+/// lit from directly overhead** (WoW Z up). The fixed-function lane agrees — `0x59c820` negates
+/// too, and GL's directional `GL_POSITION` *is* the to-light vector — so the sign does not depend
+/// on which lane you emulate. The trap: an **authored** M2 light has TWO negations (`0x718960`
+/// already stores `-Bz`, and [`scene_rig`] feeds `+bone_z` as its to-light to match), while this one
+/// has exactly ONE. Carrying the authored convention across double-negates and lights the ghost
+/// from below.
+///
+/// **The colours are DBC data, not a live capture.** `0x4721e2 mov esi,[edx+0xc]` hard-codes
+/// **`LightParams` row 3** — `Light.dbc`'s **death** preset column (id 3 in 59 of 374 rows and in no
+/// other column; the world's ghost arm selects the same slot, `0x5de9df mov ecx,4; call 0x6d4620`)
+/// — and `0x6d6ad0` maps it to `LightIntBand` ids `18·3−17+sub`: **37 diffuse** (colour sub 0),
+/// **38 ambient** (sub 1), sampled at a hardcoded time key of `0` (`xor edx,edx`; half-minutes,
+/// `[0, 2880)`). Both rows are **single-key in the shipped 1.12.1 chain**, hence time-invariant,
+/// hence these literals — 0469 parked this as "pending a live capture" on the earlier reading that
+/// the tables were runtime-only, and that park is withdrawn.
+///
+/// The values are stated rather than read back out of our own `Light.dbc` reader for one reason:
+/// the glue screens run **pre-world**, where no map, no zone and no `LightParams` state exist at
+/// all — the reference reaches them through the DN singleton it keeps alive across the glue, and we
+/// have no such thing to ask. A chain whose bands are keyed (a patched install) would diverge here;
+/// that is the stated bound.
+fn ghost_rig() -> SceneRig {
+    SceneRig {
+        // `LightIntBand` 38 = 0x001A3855 → (26, 56, 85).
+        ambient: [26.0 / 255.0, 56.0 / 255.0, 85.0 / 255.0],
+        // `LightIntBand` 37 = 0x005E99C6 → (94, 153, 198), on the to-light `(0,0,+1)`.
+        lobes: vec![(
+            benilla_assets::coords::wow_to_bevy([0.0, 0.0, 1.0]),
+            [94.0 / 255.0, 153.0 / 255.0, 198.0 / 255.0],
+        )],
+        // Wiped: the gather is discarded whole, so the stage's own lamps do not survive.
+        points: Vec::new(),
+    }
+}
+
+/// Pack a [`SceneRig`] into the glue scene's light buffer contents.
+///
+/// Rig materials read the probe + point table; the core rows still carry the plain ambient (with a
+/// zero sun) so any non-rig lane that ever lands in the booth degrades sanely. The directional fold
+/// lands in probe slot 0 — booth instances carry `MeshTag` 0, the rig lane's read side. The dial is
+/// 1.0: the rig lane ignores it, so byte levels stand.
+///
+/// One function for both rigs, so the authored and the ghost light cannot drift into two packings.
+fn scene_light_blob(
+    rig: &SceneRig,
+    fog_rgb: [f32; 3],
+    fog_far: f32,
+    fog: bool,
+) -> benilla_world::lighting::LightBlob {
+    let mut blob = benilla_world::lighting::LightBlob::model(rig.ambient, [0.0; 3], Vec3::NEG_Y)
+        .probe(rig.ambient, &rig.lobes)
+        .fog(fog_rgb, fog_far, fog)
+        .dial(1.0);
+    for (pos, color) in &rig.points {
+        blob = blob.point(*pos, SCENE_POINT_RANGE, *color);
+    }
+    blob
 }
 
 /// The ref's per-scene fog: the race rows are `CharModelFogInfo` (GlueParent.lua) — color + far,
@@ -561,7 +648,12 @@ pub(super) fn spawn_glue_booth(
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
-        benilla_world::ffx_glow::FfxGlow::BOOTH,
+        // **The glue screens run the reference's own glue pass pair**, not a bake's nothing
+        // (decision 1731): this camera draws the fullscreen `UI_<Race>` diorama the reference
+        // brackets its glue FFX around (`0x46fad3`/`0x46fae0`), and the GlueXML frames composite
+        // over the result afterwards — which is why a ghost selection washes the scene steel-blue
+        // while the character list, the buttons and the logo stay clean.
+        benilla_world::ffx_glow::FfxGlow::GLUE_SCENE,
         // Placeholder — `sync_glue_booth` overwrites transform + projection from the model's bounds
         // on the first bake (the same `body_frame` law as the paper doll).
         Projection::from(bevy::camera::PerspectiveProjection {
@@ -628,10 +720,50 @@ pub(super) fn spawn_glue_booth(
         pet_stage_scale: 1.0,
         pet_baked: None,
         fog: true,
+        ghost: false,
         light: None,
         variants: default(),
         rev: 0,
     });
+}
+
+/// Drive the glue screens' **FFX state** ([`benilla_world::ffx_glow::GlueFfx`]) off the live look —
+/// which pass the glue pair has installed, and what `LightParams.glow` is pinned to.
+///
+/// One writer for all three glue screens, because the reference's three writers are all reached
+/// through the same widget and the same build (wow-re `glue-select-ghost-treatment.md`):
+///
+/// | look | reference | pass | glow |
+/// |---|---|---|---|
+/// | none (login, empty account) | `CSimpleModelFFX::OnShow 0x46fa60` | glow | `*0x8380b4` 0.30 |
+/// | a create look | same — no select build runs | glow | 0.30 |
+/// | a living select record | `0x472ff7`/`0x473002` | glow | `*0x838574` 0.40 |
+/// | a ghost select record | `0x472fde`/`0x472fe9` | **death** | `*0x838570` 0.15 |
+///
+/// An empty account really is the OnShow state and not the living arm: `0x472950` is gated
+/// `-1 ≤ [0x83856c] < [0xb42140]`, so with no roster nothing re-pins anything.
+///
+/// It reads [`GluePreview`] rather than the roster because that is what every glue screen already
+/// writes — the login screen's `None`, the create screen's `Create` look, the select screen's
+/// `Select` record — so no screen can forget to reset it on the way out.
+pub(super) fn sync_glue_ffx(
+    preview: Res<GluePreview>,
+    mut ffx: ResMut<benilla_world::ffx_glow::GlueFfx>,
+) {
+    use benilla_world::ffx_glow::GlueFfx;
+    let want = match preview.look {
+        Some(GlueLook::Select(l)) => {
+            if l.flags & benilla_protocol::CHARACTER_FLAG_GHOST != 0 {
+                GlueFfx::SelectGhost
+            } else {
+                GlueFfx::SelectLiving
+            }
+        }
+        Some(GlueLook::Create(_)) | None => GlueFfx::Shown,
+    };
+    if *ffx != want {
+        *ffx = want;
+    }
 }
 
 /// Drive the background scene (see [`CreateScene`]): load the selected race's `UI_*` model, spawn
@@ -714,6 +846,14 @@ pub(super) fn sync_glue_scene(
         GlueScene::MainMenu => true,
         GlueScene::Race(_) => matches!(preview.look, Some(GlueLook::Create(_))),
     };
+    // The GHOST light fork (wow-re `glue-select-model.md` §C1, and [`ghost_rig`]): the selected
+    // roster record's `CHARSELECT+0xfc & 0x2000`, which reaches the background scene, the character
+    // and the pet through one `[0x83856c]`-keyed read in the reference and through one light buffer
+    // here — all three of ours bind it.
+    let ghost = matches!(
+        preview.look,
+        Some(GlueLook::Select(l)) if l.flags & benilla_protocol::CHARACTER_FLAG_GHOST != 0
+    );
     if scene.token != Some(token) {
         scene.token = Some(token);
         scene.handle = Some(asset_server.load(m2_url(&format!(
@@ -733,6 +873,33 @@ pub(super) fn sync_glue_scene(
         // Same scene, other screen: rebuild in place (the handle is cached — same-frame respawn).
         scene.spawned = false;
         commands.entity(scene.root).despawn_related::<Children>();
+    } else if scene.spawned && scene.ghost != ghost {
+        // Same scene, same screen, the selection crossed the ghost bit: **re-light, don't rebuild**.
+        // The reference's fork is a per-frame fill callback on models that are already standing
+        // (`0x472150` on `[model+0x3bc]`), so nothing is respawned there either — and respawning
+        // here would restart the stage's own emitters, which the click has no business touching.
+        if let (Some(model), Some(light)) = (
+            scene.handle.as_ref().and_then(|h| m2s.get(h)),
+            scene.light.clone(),
+        ) {
+            let rig = if ghost {
+                ghost_rig()
+            } else {
+                scene_rig(&model.lights)
+            };
+            let (fog_rgb, fog_far) = scene_fog(token);
+            scene_light_blob(&rig, fog_rgb, fog_far, fog).write(&queue, &light);
+            scene.ghost = ghost;
+            // The character and the pet re-bake onto the rewritten buffer (`sync_glue_booth` and
+            // `sync_glue_pet` both key on this).
+            scene.rev += 1;
+            info!(
+                "glue scene: {} light — {} directional, {} point light(s)",
+                if ghost { "GHOST" } else { "authored" },
+                rig.lobes.len(),
+                rig.points.len(),
+            );
+        }
     }
     if !scene.spawned {
         let Some(model) = scene.handle.as_ref().and_then(|h| m2s.get(h)) else {
@@ -752,20 +919,15 @@ pub(super) fn sync_glue_scene(
             .iter()
             .find(|a| a.id == 0)
             .map_or((Quat::IDENTITY, 1.0), |a| stage_frame(model, a.bone));
-        let rig = scene_rig(&model.lights);
+        // A GHOST selection replaces the gather outright (see [`ghost_rig`]); a living one keeps
+        // the scene's authored rig, which is the create law select-confirmed.
+        let rig = if ghost {
+            ghost_rig()
+        } else {
+            scene_rig(&model.lights)
+        };
         let (fog_rgb, fog_far) = scene_fog(token);
-        // Rig materials read the probe + point table; the core rows still carry the plain ambient
-        // (with a zero sun) so any non-rig lane that ever lands in the booth degrades sanely. The
-        // directional fold lands in probe slot 0 — booth instances carry MeshTag 0, the rig lane's
-        // read side. The dial is 1.0: the rig lane ignores it, so byte levels stand.
-        let mut blob =
-            benilla_world::lighting::LightBlob::model(rig.ambient, [0.0; 3], Vec3::NEG_Y)
-                .probe(rig.ambient, &rig.lobes)
-                .fog(fog_rgb, fog_far, fog)
-                .dial(1.0);
-        for (pos, color) in &rig.points {
-            blob = blob.point(*pos, SCENE_POINT_RANGE, *color);
-        }
+        let blob = scene_light_blob(&rig, fog_rgb, fog_far, fog);
         let light = scene
             .light
             .get_or_insert_with(|| blob.create(&device, "wow_create_scene_light"))
@@ -780,6 +942,7 @@ pub(super) fn sync_glue_scene(
         tint_mirrors.0.insert("glue_scene", light.clone());
         blob.write(&queue, &light);
         scene.fog = fog;
+        scene.ghost = ghost;
         let dc = blob.probe_dc();
         info!(
             "create scene: UI_{token} rig — ambient {:?}, {} point light(s), probe dc ({:.2},{:.2},{:.2})",
@@ -1737,6 +1900,41 @@ mod tests {
             },
             bone_pivot: [0.0; 3],
         }
+    }
+
+    /// GOLDEN — the ghost select screen's hardcoded sun, every number byte-VERIFIED (wow-re
+    /// `glue-select-ghost-treatment.md`; see [`ghost_rig`] for the citations).
+    ///
+    /// The **sign** is the assertion that matters. wow-re's earlier §C4 was internally
+    /// contradictory about it — it called `CGLight+0x24` a to-light vector with no sign flip in the
+    /// SH chain, then concluded "lit from directly overhead" via the fixed-function commit, which
+    /// negates. Those differ by 180°: a character lit from above versus from below. The round that
+    /// settled it found `0x71bce0` negating all three components (`0x71be7c`/`0x71be81`/`0x71be86`)
+    /// before it accumulates, so both lanes agree on `(0,0,+1)`. The trap it also found is why this
+    /// is pinned rather than trusted to a comment: an AUTHORED M2 light already carries one
+    /// negation (`0x718960` stores `-Bz`, which is why [`scene_rig`] feeds `+bone_z`), so reusing
+    /// the authored convention here double-negates and lights the ghost from underneath.
+    #[test]
+    fn the_ghost_sun_is_one_overhead_directional_over_a_wiped_gather() {
+        let rig = ghost_rig();
+        // The gather is WIPED — `0x71bc30`'s `mov ecx,0x6d; rep stosd`. No stage lamps survive.
+        assert!(
+            rig.points.is_empty(),
+            "a ghost selection discards the scene-DB gather whole"
+        );
+        // Exactly one directional.
+        assert_eq!(rig.lobes.len(), 1);
+        let (to_light, diffuse) = rig.lobes[0];
+        // Bevy +Y is up: `wow_to_bevy([0,0,1])`. Overhead, not underfoot.
+        assert_eq!(to_light, Vec3::Y, "lit from directly overhead (WoW Z up)");
+        // `LightIntBand` 37 = 0x005E99C6 → (94,153,198); 38 = 0x001A3855 → (26,56,85).
+        let byte = |c: f32| (c * 255.0).round() as u32;
+        assert_eq!(
+            diffuse.map(byte),
+            [94, 153, 198],
+            "LightParams row 3, sub 0"
+        );
+        assert_eq!(rig.ambient.map(byte), [26, 56, 85], "…and sub 1");
     }
 
     /// GOLDEN — the rig fold's classification law (wow-re `m2-dynamic-lights.md` +

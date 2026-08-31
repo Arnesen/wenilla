@@ -63,24 +63,22 @@
         while the item template is still in flight. `GetLootRollItemLink` (decision 1059) is the
         click's, not the hover's: the tooltip wants the roll, not the markup.
 
-        `toplevel="true"` (ref l.243) IS STILL OMITTED, but for a NEW reason — the old one ("`SetToplevel`
-        isn't in the v1 object model yet ... trivially re-added the day `SetToplevel` lands") has expired.
-        `SetToplevel` landed: the loader calls the real method and the raise law — occlusion-gated,
-        confined to this frame's own stratum — is `script::object::toplevel` (wow-re
-        `ui/scratch/toplevel-raise.md`).
+        `toplevel="true"` (ref l.243) IS CARRIED, since decision 1739. Two earlier reasons for
+        omitting it have both expired: `SetToplevel` landed (the loader calls the real method, and
+        the raise law — occlusion-gated, confined to this frame's own stratum — is
+        `script::object::toplevel`, wow-re `ui/scratch/toplevel-raise.md`), and the one blocker
+        left after that was a test fixture, not a mechanism.
 
-        What adding it back does, measured rather than guessed: `GroupLootFrame1`'s rect
-        (390.5,60)-(633.5,144) overlaps `ExhaustionTick` — `ActionBar.xml` l.1111, `frameStrata="DIALOG"`
-        transcribed verbatim from ref-MainMenuBar.xml l.415-442 — in a ~2.5 px band, so showing roll
-        frame 1 raises its whole subtree to DIALOG level 3 while frame 2 (which overlaps nothing, the
-        four stack with a 15 px gap) stays at level 0. That is exactly what the reference does, and the
-        only pixels it moves are the sliver where the roll frame meets the tick. It does, however, break
-        `group_loot_tests::start_loot_roll_claims_frames_in_order_and_paints_the_roll`, whose
-        `quad_center("UI-GroupLoot-Dice-Up")` picks the FIRST dice quad in painter order as a stand-in
-        for "frame 1's Need button" — an unstated assumption that declaration order is draw order among
-        the four, which the raise legitimately ends. That is a fixture proxy, not the test's assertion
-        (the BoP-confirm gate it proves is untouched), so re-adding the attribute is one word plus a
-        two-line fix to that helper — a director's call on the look, not a blocked mechanism.
+        What it does, measured rather than guessed: `GroupLootFrame1`'s rect (390.5,60)-(633.5,144)
+        overlaps `ExhaustionTick` — `ActionBar.xml` l.1111, `frameStrata="DIALOG"` transcribed
+        verbatim from ref-MainMenuBar.xml l.415-442 — in a ~2.5 px band, so showing a roll frame
+        raises its whole subtree within DIALOG. The only pixels that move are the sliver where the
+        roll frame meets the tick, and it is exactly what the reference does. It did cost
+        `group_loot_tests::start_loot_roll_claims_frames_in_order_and_paints_the_roll` its
+        `quad_center("UI-GroupLoot-Dice-Up")` stand-in for "frame 1's Need button" — an unstated
+        assumption that declaration order is draw order among the four, which the raise
+        legitimately ends; that test now takes the button by NAME and asserts the hit before
+        clicking.
 
         NAMED FONT OBJECTS ARE SUPPORTED on this branch (the loader's top-level `<Font>` handling,
         `loader/mod.rs`'s `do_font`, plus the full `Fonts.xml` transcription, both landed since
@@ -321,7 +319,7 @@
         `CreateFrame("Frame", "BRollBarFrame"..i, bar, "GroupLootFrameTemplate")`, which resolves on
         the real client and missed here for no reason but our prefix.
     -->
-    <Frame name="GroupLootFrameTemplate" frameStrata="DIALOG" hidden="true" virtual="true">
+    <Frame name="GroupLootFrameTemplate" toplevel="true" frameStrata="DIALOG" hidden="true" virtual="true">
         <Size><AbsDimension x="243" y="84"/></Size>
         <Layers>
             <Layer level="ARTWORK">

@@ -1164,6 +1164,9 @@ impl UiScript {
         }
         let mut model = self.model_mut();
         model.mouse_down_on.clear();
+        // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
+        // behind would aim the next press's raise at whatever the pointer was last holding.
+        model.mouse_capture = None;
         // [`Model::last_click`] is deliberately NOT cleared here. It looks like it belongs in this
         // list, and the binary says otherwise: `[CButton+0x334]` has exactly three writers
         // image-wide (the ctor, the fired-double zero, the fired-single stamp) and none of them is

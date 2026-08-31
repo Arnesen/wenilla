@@ -270,6 +270,14 @@ pub(super) fn breach_step(
     capsule: &Collider,
 ) -> Outcome {
     player.vel_y = SWIM_JUMP_SPEED;
+    // The breach is a take-off like any other, so it records its launch speed for the arc
+    // bookkeeping to snapshot (decision 1740). Without this the jump tail would send `zspeed = 0`
+    // for every water exit and observers would replay the breach as a step-off rather than a hop.
+    player.launch_vz = SWIM_JUMP_SPEED;
+    // Leaving the water starts a fresh arc, and it starts it with the swim keys still down — the
+    // nibble seeds from them exactly as a ledge step-off does.
+    player.arc_dirs_set = player.horiz_vel.length_squared() > 0.0;
+    player.knock_arc = false;
     let half_h = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
     let out = world.slide_body(
         capsule,

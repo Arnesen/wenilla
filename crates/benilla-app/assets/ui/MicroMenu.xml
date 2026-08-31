@@ -23,10 +23,14 @@
         the action bar behind it, and an unguarded call would abort the rest of that OnShow. Same
         posture as UiPanels.xml's `CloseMenus and CloseMenus()` and the `if GameTooltip` guards.
 
-        Structure: the buttons are TOP-LEVEL frames anchored by name into MainMenuBarArtFrame
-        (this engine has no cross-file `parent=` attachment — SkillFrame.xml's header comment), then
-        seated one frame level above the art by BenillaActionBarArt_SeatAbove (ActionBar.xml) so the
-        bar plate doesn't paint over them. Same shape the bag bar next door already uses.
+        Structure: the buttons are declared at this file's top level and carry
+        `parent="MainMenuBarArtFrame"`, which really does attach them to the bar art — the loader
+        reads a cross-file `parent=`, resolving the name by global lookup at load (decision 1734),
+        so the art must already exist when this file loads, which the manifest order gives it. They
+        are anchored into it by name as well, and seated one frame level above it by
+        BenillaActionBarArt_SeatAbove (ActionBar.xml) so the bar plate doesn't paint over them —
+        both kept as they are, because that is the row the bar was built and approved against. Same
+        shape the bag bar next door already uses.
 
         SCOPE / real-client divergences (noted, not bugs):
         - EVERY button now opens something. Help was the last "art only, wired the day the panel

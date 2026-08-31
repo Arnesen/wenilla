@@ -319,6 +319,16 @@ pub(crate) struct Model {
     /// same-frame press+release test in [`UiScript::mouse_button`]. Keyed by button so a `LeftButton`
     /// press is not cleared by a `RightButton` release.
     pub(crate) mouse_down_on: HashMap<String, FrameHandle>,
+    /// The client's single mouse-capture slot **`root+0x80`** — the frame a press captured, held
+    /// until every button is up. The same fact as [`Model::mouse_down_on`] in the one-slot form,
+    /// and the two differ only while more than one button is held; this is the form the
+    /// mouse-down **raise** reads, which is what needs the precedence to be unambiguous.
+    ///
+    /// Written at `0x7663e6` with the resolved target — capture-**else**-hover, so an existing
+    /// capture survives a chorded press over a different frame — and cleared at `0x7664bb` only
+    /// when the post-event button mask is empty, so a chorded release keeps it. A title-region
+    /// press never reaches `0x7663e6` and so captures nothing.
+    pub(crate) mouse_capture: Option<FrameHandle>,
     /// Per **frame**, the [`UiScript::now`] second at which its last single `OnClick` fired — the
     /// double-click detector's entire state, and the faithful stand-in for the client's per-widget
     /// timestamp `[CButton+0x334]` (wow-re `ui/scratch/button-doubleclick-law.md`).
@@ -1472,6 +1482,7 @@ impl Model {
             mouseover: None,
             hover_repick: false,
             mouse_down_on: HashMap::new(),
+            mouse_capture: None,
             last_click: HashMap::new(),
             pending_size_changed: Vec::new(),
             errors: Vec::new(),

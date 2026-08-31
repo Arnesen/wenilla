@@ -766,8 +766,15 @@ impl RemoteMotion {
             let mut pos = self.wow_pos;
             pos[0] += self.jump_xy_vel[0] * dt;
             pos[1] += self.jump_xy_vel[1] * dt;
-            pos[2] += self.vertical_velocity * dt;
-            let vertical = (self.vertical_velocity - GRAVITY * dt).max(-TERMINAL_VELOCITY);
+            // **The same exact fall step the local mover runs** ([`crate::player::mover::fall_step`],
+            // decision 1740) — one shared machine, which is what the reference has. This used to
+            // move at the START-of-step speed and only then apply gravity (explicit Euler), so a
+            // watched player's jump overshot by `½·g·dt²` every frame and floated; the local mover
+            // had the mirror-image bug in the other direction. The mean velocity is the exact
+            // displacement rate under constant acceleration, so neither drifts now.
+            let (vertical, mean_vy) =
+                crate::player::mover::fall_step(self.vertical_velocity, dt, TERMINAL_VELOCITY);
+            pos[2] += mean_vy * dt;
             let speed = self.jump_xy_vel[0].hypot(self.jump_xy_vel[1]);
             return (pos, self.orientation, vertical, speed);
         }

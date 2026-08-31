@@ -272,9 +272,9 @@ PetPaperDollFrame.xml
 # "Show as Experience Bar" box.
 ReputationFrame.xml
 # The Skills tab (decision 0437 phase 4): a CharacterFrame child page, but a separate
-# top-level file (SkillFrame.xml's own header comment — this engine has no cross-file
-# `parent=` attachment, so it's positioned by name via `<Anchors relativeTo=
-# "CharacterFrame">` instead). Loaded after CharacterFrame.xml so it paints ON TOP of
+# top-level file — it declares `parent="CharacterFrame"`, which really attaches (1734), and
+# is positioned by name via `<Anchors relativeTo="CharacterFrame">`, the geometry it ships
+# with. Loaded after CharacterFrame.xml so it paints ON TOP of
 # it (later file = higher z) and so `CharacterFrame` already exists for that anchor to
 # resolve against — seated at the real client's own tab 4, between Reputation above and
 # Honor below.

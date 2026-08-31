@@ -745,6 +745,13 @@ pub(super) fn control(
                 wire_jump,
                 knock_launch,
                 water_floor,
+                // **The air-control nudge speed is `min(MOVE_WALK, MOVE_RUN)`, read live**
+                // (decision 1740) — the walk override inside the reference's `0x7c4c90(1)`
+                // (`0x7c4d19`/`0x7c4d1b`), not a constant. `AIR_NUDGE_SPEED`'s 2.5 is the default
+                // `MOVE_WALK` and stays as the fallback for before the server has sent us speeds;
+                // once it has, a walk aura, a Slow or a daze moves this with them, and the min is
+                // why a *slowed* run still cannot out-steer a walk.
+                mover_speeds.map_or(super::AIR_NUDGE_SPEED, |s| s.walk.min(s.run)),
             )
         };
 

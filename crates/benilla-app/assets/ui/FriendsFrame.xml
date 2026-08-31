@@ -2433,7 +2433,7 @@
                         </Scripts>
                     </Button>
 
-                    <EditBox name="WhoFrameEditBox" autoFocus="false" historyLines="32">
+                    <EditBox name="WhoFrameEditBox" frameStrata="HIGH" autoFocus="false" historyLines="32">
                         <Size><AbsDimension x="296" y="32"/></Size>
                         <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-20" y="100"/></Offset></Anchor></Anchors>
                         <Scripts>

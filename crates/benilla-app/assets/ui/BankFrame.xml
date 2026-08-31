@@ -296,7 +296,7 @@
         </Scripts>
     </CheckButton>
 
-    <Frame name="BankFrame" parent="UIParent" id="-1" hidden="true">
+    <Frame name="BankFrame" enableMouse="true" toplevel="true" parent="UIParent" id="-1" hidden="true">
         <!-- The real 384×512 window (ref l.77-90). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints
              this to the left slot on open, the same NPC-session convention as Merchant/Trainer/Mail.
              id="-1" = BANK_CONTAINER: the 24 item buttons below read it via GetParent():GetID(), the

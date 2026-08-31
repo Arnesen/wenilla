@@ -1165,6 +1165,8 @@ impl Plugin for PortraitPlugin {
                     sync_stable_booth,
                     glue_booth::sync_glue_booth,
                     glue_booth::sync_glue_scene,
+                    // The glue screens' FFX state, off the same look every screen already writes.
+                    glue_booth::sync_glue_ffx,
                     // After the scene's framing: the viewport/clear its law decided (1619).
                     glue_booth::pillarbox_glue_scene,
                     // After the scene: the pet's seat and its light are the scene's to publish.
