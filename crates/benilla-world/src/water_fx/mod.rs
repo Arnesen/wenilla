@@ -579,7 +579,7 @@ fn push_water_foam(
                 fog: EffectFog::Off,
                 // The reference's foam render is its own additive path (`0x68fae0`), not the
                 // M2 batch state producer — no GL_LIGHTING on it.
-                lit: false,
+                lighting: crate::particles::buffer::EffectLighting::None,
                 anchor: centroid / n as f32,
                 bias: FOAM_BIAS,
                 raster_bias: 0,

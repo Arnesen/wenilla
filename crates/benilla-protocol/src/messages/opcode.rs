@@ -280,6 +280,18 @@ pub const SMSG_PERIODICAURALOG: u16 = 0x024E; // 590
 pub const SMSG_SPELLDAMAGESHIELD: u16 = 0x024F; // 591
 pub const SMSG_SPELLNONMELEEDAMAGELOG: u16 = 0x0250; // 592
 
+// The combat log's remaining wire (VERIFIED vmangos `Opcodes_1_12_1.h`; decision 1703 — the
+// families 1571 §5 named as "deliberately out because their wire sources are undecoded"). Bodies
+// in [`super::combat_log`].
+pub const SMSG_ENCHANTMENTLOG: u16 = 0x01D7; // 471
+pub const SMSG_PARTYKILLLOG: u16 = 0x01F5; // 501
+pub const SMSG_SPELLLOGEXECUTE: u16 = 0x024C; // 588
+pub const SMSG_PROCRESIST: u16 = 0x0260; // 608
+pub const SMSG_DISPEL_FAILED: u16 = 0x0262; // 610
+pub const SMSG_SPELLORDAMAGE_IMMUNE: u16 = 0x0263; // 611
+pub const SMSG_SPELLDISPELLOG: u16 = 0x027B; // 635
+pub const SMSG_SPELLINSTAKILLLOG: u16 = 0x032F; // 815
+
 // The heal/energize pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 336/337) — the center combat
 // text's HEAL / power-gain feed (decision 0578). Bodies in [`super::spells`].
 pub const SMSG_SPELLHEALLOG: u16 = 0x0150; // 336
@@ -928,6 +940,43 @@ pub const SMSG_MOVE_SET_HOVER: u16 = 0x00F4; // 244
 pub const SMSG_MOVE_UNSET_HOVER: u16 = 0x00F5; // 245
 pub const CMSG_MOVE_HOVER_ACK: u16 = 0x00F6; // 246
 pub const CMSG_MOVE_FEATHER_FALL_ACK: u16 = 0x02CF; // 719
+
+// **The knockback handshake** — the server aims a launch at our own mover, the mover flies it, and
+// the ack is what the server relays onward (decision 1702). Numbers VERIFIED vmangos
+// `Opcodes_1_11_2.h:242-244` (unchanged into 1.12.1) and cross-checked against the client's own name
+// table ([`super::opcode_names`]).
+//
+// **The shape.** `SMSG_MOVE_KNOCK_BACK` carries `packed guid + u32 counter + f32 vcos + f32 vsin +
+// f32 speedXY + f32 speedZ` (vmangos `MovementPacketSender::SendKnockBackToController`, the
+// `> CLIENT_BUILD_1_9_4` branch that carries the counter). Those last four floats are a
+// [`super::JumpInfo`] in a different field order — the same launch quad, and that is not a
+// coincidence: the ack must echo them back as the `MovementInfo` **jump tail**, which is why
+// `speedZ` rides the jump tail's **down-positive** convention (vmangos negates the caller's
+// upward `verticalSpeed` on the way out, with the source comment "!! notice the - sign in front of
+// speedZ !!").
+//
+// **The ack is mandatory and checked value-by-value.** `CMSG_MOVE_KNOCK_BACK_ACK` is
+// `full u64 guid + u32 counter + MovementInfo` (`Server/Packets/Movement.cpp:61-68` — the same
+// shape as the movement-mode family's ack minus its trailing `apply` dword), and
+// `Unit::FindPendingMovementKnockbackChange` refuses it unless the counter matches **and** all four
+// jump-tail floats are within `0.01` of what was sent — so `MOVEFLAG_JUMPING` must be set and the
+// tail must be the launch quad. A mismatched ack is `OnWrongAckData`; a missing one is
+// `OnFailedToAckChange` (a knockback is the one pending change the server will not re-send,
+// `Unit.cpp:6887`). The ack is also the observers' packet: the server answers it with
+// `MSG_MOVE_KNOCK_BACK` built from the `MovementInfo` we sent.
+pub const SMSG_MOVE_KNOCK_BACK: u16 = 0x00EF; // 239
+pub const CMSG_MOVE_KNOCK_BACK_ACK: u16 = 0x00F0; // 240
+                                                  //
+                                                  // **And the observers hear it — `MSG_MOVE_KNOCK_BACK` is NOT dead** (decision 1702, correcting
+                                                  // decision 0277's "no observer-side knockback signal exists in 1.12 at all"). The reference
+                                                  // registers `0xF1` at its own dispatch entry `0x603bb0`, which reaches `CGUnit_C::OnKnockBack`
+                                                  // `0x6026f0` — it reads the four floats *after* a full `MovementInfo` and re-launches the unit
+                                                  // locally through the very same `0x6179c0` the controller's own knockback uses, acking nothing.
+                                                  // That body (`packed guid + MovementInfo + vcos + vsin + speedXY + speedZ`) is exactly what vmangos
+                                                  // sends (`SendKnockBackToObservers`), and its leading `[packed guid][MovementInfo]` is the ordinary
+                                                  // relay shape — the launch quad also rides that `MovementInfo`'s own jump tail, so a receiver that
+                                                  // replays the relayed arc reproduces the re-launch without reading the trailing four.
+pub const MSG_MOVE_KNOCK_BACK: u16 = 0x00F1; // 241
 
 // The social family — the friend list, the ignore list, and `/who` (VERIFIED vmangos
 // `Opcodes_1_12_1.h` + `Server/Packets/Social.{h,cpp}`, `Handlers/MiscHandler.cpp`,

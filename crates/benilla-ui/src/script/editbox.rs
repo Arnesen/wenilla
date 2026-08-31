@@ -137,13 +137,11 @@ pub(super) fn action(lua: &Lua, a: EditAction) -> bool {
     };
     match a {
         EditAction::Move { unit, back, extend } => match unit {
-            // ignoreArrows: consumed but inert (guard `0x77b18e`) — arrows are the only chord
-            // source of Char moves, and the ref's Ctrl bypass maps to Word, which passes.
-            EditUnit::Char => {
-                if !with_eb(lua, h, |eb| eb.ignore_arrows).unwrap_or(false) {
-                    move_horizontal(lua, h, !back, extend);
-                }
-            }
+            // No alt-arrow test here: the gate is on the KEY and lives in the host, which declines
+            // the four arrow codes before the chord is ever built (`editbox_alt_arrow_mode`).
+            // Anything reaching this arm was Alt-held or was not an arrow, and the reference moves
+            // the caret for both.
+            EditUnit::Char => move_horizontal(lua, h, !back, extend),
             // Ctrl/Option picks the word-granular cursor helper (RF-0082 §4: "char- vs
             // word-granular by the Ctrl check").
             EditUnit::Word => interact::move_word(lua, h, !back, extend),
@@ -159,8 +157,11 @@ pub(super) fn action(lua: &Lua, a: EditAction) -> bool {
         // restored past the newest. Single-line only (benilla's multiLine box has no vertical
         // caret nav — survey gap — a multiLine box consumes the step inert). The recall chords
         // are the host keymap's plain Up/Down (rf82's history controller is untraced; decision
-        // 0301) — `ignoreArrows` does not gate them: the ref chat box ships BOTH ignoreArrows and
-        // historyLines, so arrows-as-history is exactly what that combination leaves.
+        // 0301). The alt-arrow gate DOES cover them, upstream: UP and DOWN are two of the four
+        // codes it declines, so on a flagged box — which the reference's own chat box is —
+        // history recall is **Alt**+Up/Down and a plain Up/Down turns the camera. This file used
+        // to say the opposite ("`ignoreArrows` does not gate them"), which followed from reading
+        // the flag as consume-but-inert; the §5 corrected both halves.
         EditAction::HistoryPrev | EditAction::HistoryNext => {
             if !with_eb(lua, h, |eb| eb.multi_line).unwrap_or(false) {
                 history_step_key(lua, h, a == EditAction::HistoryPrev);

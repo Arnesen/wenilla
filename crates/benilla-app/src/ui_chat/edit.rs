@@ -382,7 +382,7 @@ pub(super) fn chat_edit_live(
     let Some(script) = script else {
         return;
     };
-    if !ui_capture.0 {
+    if !ui_capture.typing {
         return; // box not focused — nothing to live-parse
     }
     let text: String = script

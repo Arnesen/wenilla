@@ -682,7 +682,7 @@ pub(crate) fn simulate_ribbons(
                 // to read the particle path's unlit bit off, and the trail corpus is additive
                 // weapon/spell art authored to burn at its own colour. Revisit only with a
                 // byte law for the ribbon batch state, not by analogy with particles.
-                lit: false,
+                lighting: crate::particles::buffer::EffectLighting::None,
                 anchor,
                 // The owner rung, dropped under the water pass when the MODEL sits on the eye's
                 // far side of its water plane — the model's bound centre with the bound-radius

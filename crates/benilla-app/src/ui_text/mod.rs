@@ -171,7 +171,7 @@ mod cap_tests {
 ///
 /// We had the opposite: the paint pass recomputed the seam every frame for every overflowing
 /// FontString, and the extract gate (decision 0740) is all-or-nothing over the whole render list,
-/// so one flashing frame (`PlayerFrameStatusGlow`, which never stops while you are resting) kept
+/// so one flashing frame (`PlayerStatusGlow`, which never stops while you are resting) kept
 /// it open — measured live at the reported plaque, 0 of 240 frames skipped. That is what turned a
 /// one-time 5.6 ms into +5.4 ms *per frame* and halved the framerate (B240, decision 1332).
 ///

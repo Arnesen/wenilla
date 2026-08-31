@@ -307,6 +307,64 @@ pub(crate) fn down_ray_claim(
     terrain_z: Option<f32>,
     outdoor_mask: u32,
 ) -> Option<DownRayClaim> {
+    ray_claim(
+        tris,
+        bounds,
+        grids,
+        nav,
+        eye,
+        terrain_z,
+        outdoor_mask,
+        false,
+    )
+}
+
+/// The same claim cast **upward** — the containment lane's retry, and only its retry.
+///
+/// `0x6a8ed0` anchors a GameObject's light node at the world bounding-box CENTRE (`[node+0x5c]`,
+/// decision 0776), and that box is the M2's **authored header** box — `0x713640` copies
+/// `MD20+0xB4` into it, where the sibling `0x713700` copies the *collision* box at `+0xD0`. For a
+/// particle-heavy model the authored box is enormous: `ONYZIASLAIRLAVATRAP.M2` authors one
+/// reaching 98.42 yd past its own bind pose (`benilla-extract animboundscan`), putting the anchor
+/// ~40 yd under the floor the object is standing on.
+///
+/// **The reference's own anchor is underground too**, and it recovers with a `+1000`-yd upward
+/// retry on the face ray — `6a908d fld [ebp-0x38]` / `6a9093 fadd ds:0x8022cc`, inside the
+/// containment body `0x6a8ed0` — which finds the floor from beneath it. wow-re
+/// `gobj-light-probe-points.md`.
+///
+/// [`footprint_sample_above`](super::interior::footprint_sample_above) is the SAME retry one stage
+/// later, and benilla had that half and not this one: 104 of Onyxia's lava traps never reached the
+/// footprint at all, because the claim that gates it came back empty and the verdict was
+/// "outdoors" before any colour was sampled.
+///
+/// **No terrain race here.** The downward cast loses its column to strictly-nearer terrain
+/// (standing over open ground); a cast going *up* from under a floor cannot meaningfully lose to
+/// the ground below it.
+pub(crate) fn up_ray_claim(
+    tris: &[Vec<[[f32; 3]; 3]>],
+    bounds: &[Option<([f32; 3], [f32; 3])>],
+    grids: &[Option<ColumnGrid>],
+    nav: &[WmoGroupNav],
+    eye: [f32; 3],
+    outdoor_mask: u32,
+) -> Option<DownRayClaim> {
+    ray_claim(tris, bounds, grids, nav, eye, None, outdoor_mask, true)
+}
+
+/// The shared body: `up` flips which side of the probe a face must lie on and which candidate
+/// wins — the nearest one in the cast's own direction, exactly as `footprint_scan` does it.
+#[allow(clippy::too_many_arguments)]
+fn ray_claim(
+    tris: &[Vec<[[f32; 3]; 3]>],
+    bounds: &[Option<([f32; 3], [f32; 3])>],
+    grids: &[Option<ColumnGrid>],
+    nav: &[WmoGroupNav],
+    eye: [f32; 3],
+    terrain_z: Option<f32>,
+    outdoor_mask: u32,
+    up: bool,
+) -> Option<DownRayClaim> {
     // Candidate selection is per FACE — the client's query is bbox-free (`zonetext-indoor-bit.md`
     // (b): "No bbox, no portals, no camera"; the column containment lives inside `floor_z_at`).
     // An AUTHORED group-box pre-cull once lived here, and it broke exactly where a MOGI box
@@ -325,10 +383,14 @@ pub(crate) fn down_ray_claim(
                 && eye[0] <= max[0]
                 && eye[1] >= min[1]
                 && eye[1] <= max[1]
-                && min[2] <= eye[2]
+                && if up {
+                    max[2] >= eye[2]
+                } else {
+                    min[2] <= eye[2]
+                }
         })
     };
-    let mut best_z = f32::NEG_INFINITY;
+    let mut best_z = if up { f32::INFINITY } else { f32::NEG_INFINITY };
     let mut best: Option<usize> = None;
     for (gi, group_tris) in tris.iter().enumerate() {
         if !column_owned(gi) {
@@ -339,7 +401,9 @@ pub(crate) fn down_ray_claim(
         // an exact `z` match below resolves exactly as the linear scan resolved it.
         let mut consider = |tri: &[[f32; 3]; 3]| {
             if let Some(z) = floor_z_at(tri, eye[0], eye[1]) {
-                if z <= eye[2] && z > best_z {
+                let ahead = if up { z >= eye[2] } else { z <= eye[2] };
+                let nearer = if up { z < best_z } else { z > best_z };
+                if ahead && nearer {
                     best_z = z;
                     best = Some(gi);
                 }
@@ -358,7 +422,7 @@ pub(crate) fn down_ray_claim(
     }
     let in_group = best?;
     // Beyond the ray → no claim at all.
-    let depth = eye[2] - best_z;
+    let depth = if up { best_z - eye[2] } else { eye[2] - best_z };
     if depth > ZONE_RAY_LEN {
         return None;
     }
@@ -902,6 +966,39 @@ mod tests {
             ),
             None,
             "lighting law: outdoors"
+        );
+    }
+
+    #[test]
+    fn the_upward_retry_recovers_a_floor_from_beneath_it() {
+        // The Onyxia lava trap's shape. A GameObject's light node anchors at its AUTHORED-box
+        // centre, and that model's box reaches 98 yd past its own geometry, so the anchor sits
+        // ~40 yd under the chamber floor it stands on. The downward cast finds nothing — every
+        // face is ABOVE the probe — and the reference recovers with the containment lane's
+        // `+1000` upward retry (`6a908d`/`6a9093`). Before it, 104 traps in a WMO-only interior
+        // classified as outdoors and took the day/night sun, meshes and particles alike.
+        let room = nav(0, [-10.0, -10.0, 0.0], [10.0, 10.0, 10.0], 0, 0);
+        let tris = [quad(0.0, 10.0)]; // the chamber floor at z = 0
+        let (bounds, _) = benilla_assets::collision_tri_bounds(&tris);
+        let mask = EXTERIOR | EXTERIOR_LIT;
+        let under = [0.0, 0.0, -40.0];
+        assert_eq!(
+            down_ray_claim(&tris, &bounds, &[], &[room], under, None, mask),
+            None,
+            "nothing is below an anchor that is itself below the floor"
+        );
+        let c = up_ray_claim(&tris, &bounds, &[], &[room], under, mask)
+            .expect("the floor above claims the column on the retry");
+        assert!(!c.outdoor && c.group == 0);
+        assert!(
+            (c.depth - 40.0).abs() < 1e-6,
+            "depth is measured along the cast's own direction, got {}",
+            c.depth
+        );
+        // The retry is still a RAY, not a licence: a face below the probe never claims it.
+        assert_eq!(
+            up_ray_claim(&tris, &bounds, &[], &[room], [0.0, 0.0, 40.0], mask),
+            None
         );
     }
 

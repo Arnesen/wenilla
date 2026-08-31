@@ -1108,3 +1108,197 @@ fn spell_chain_targets_wire() {
         messages::parse_server(messages::opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS, &body).is_err()
     );
 }
+
+/// **The combat-log completeness wire** (decision 1703) — the eight bodies 1571 §5 named as
+/// "deliberately out because their wire sources are undecoded". Byte-exact against vmangos's own
+/// writers, cited per packet, because a wrong field order here is a wrong *sentence* in the chat
+/// log and no gate downstream can see it.
+#[test]
+fn combat_log_completeness_wire() {
+    use benilla_protocol::messages::{
+        DispelFailed, EnchantmentLog, ExecuteLog, PartyKillLog, SpellDispelLog, SpellInstaKillLog,
+        SpellLogExecute, SpellOutcomeLog,
+    };
+
+    // SMSG_PARTYKILLLOG: killer raw guid, victim raw guid
+    // (`WorldPackets::Combat::PartyKillLog::AppendBodyTo`, Combat.cpp:52-56).
+    let body = hx(concat!(
+        "0700000000000000", // killer 7
+        "2a00000000000000", // victim 42
+    ));
+    match messages::parse_server(messages::opcode::SMSG_PARTYKILLLOG, &body).unwrap() {
+        ServerPacket::PartyKillLog(p) => assert_eq!(
+            p,
+            PartyKillLog {
+                killer: 7,
+                victim: 42
+            }
+        ),
+        other => panic!("party kill log, got {}", other.name()),
+    }
+
+    // SMSG_SPELLINSTAKILLLOG: victim raw guid, spellId (`Spell::EffectInstaKill`,
+    // SpellEffects.cpp:274-279).
+    let body = hx(concat!("0900000000000000", "0d270000"));
+    match messages::parse_server(messages::opcode::SMSG_SPELLINSTAKILLLOG, &body).unwrap() {
+        ServerPacket::SpellInstaKillLog(p) => assert_eq!(
+            p,
+            SpellInstaKillLog {
+                victim: 9,
+                spell_id: 9997
+            }
+        ),
+        other => panic!("instakill log, got {}", other.name()),
+    }
+
+    // SMSG_PROCRESIST / SMSG_SPELLORDAMAGE_IMMUNE: one body, two opcodes
+    // (`WorldPackets::Spell::ProcResist`/`SpellOrDamageImmune`, Spell.cpp:88-102).
+    let body = hx(concat!(
+        "0100000000000000", // caster 1
+        "0200000000000000", // target 2
+        "39300000",         // spellId 12345
+        "01",               // logFormat 1 (the reference's "is periodic" flag)
+    ));
+    let expect = SpellOutcomeLog {
+        caster: 1,
+        target: 2,
+        spell_id: 12345,
+        log_format: 1,
+    };
+    match messages::parse_server(messages::opcode::SMSG_PROCRESIST, &body).unwrap() {
+        ServerPacket::ProcResist(p) => assert_eq!(p, expect),
+        other => panic!("proc resist, got {}", other.name()),
+    }
+    match messages::parse_server(messages::opcode::SMSG_SPELLORDAMAGE_IMMUNE, &body).unwrap() {
+        ServerPacket::SpellOrDamageImmune(p) => assert_eq!(p, expect),
+        other => panic!("spell-or-damage immune, got {}", other.name()),
+    }
+
+    // SMSG_SPELLDISPELLOG: victim PACKED guid, caster PACKED guid, count, count x spellId
+    // (`Spell::EffectDispel`, SpellEffects.cpp:2524-2539 — the >= 1.12.1 branch, which is ours).
+    let body = hx(concat!(
+        "0105",     // packed victim: mask 0x01, byte 0x05 -> 5
+        "0206",     // packed caster: mask 0x02, byte 0x06 -> 0x600
+        "02000000", // count 2
+        "0a000000", // 10
+        "14000000", // 20
+    ));
+    match messages::parse_server(messages::opcode::SMSG_SPELLDISPELLOG, &body).unwrap() {
+        ServerPacket::SpellDispelLog(p) => assert_eq!(
+            p,
+            SpellDispelLog {
+                victim: 5,
+                caster: 0x600,
+                spell_ids: vec![10, 20],
+            }
+        ),
+        other => panic!("spell dispel log, got {}", other.name()),
+    }
+
+    // SMSG_DISPEL_FAILED: caster raw guid, victim raw guid, then spell ids TO THE END OF THE BODY —
+    // vmangos writes no count (`Spell::EffectDispel`, SpellEffects.cpp:2549-2555).
+    let body = hx(concat!(
+        "0300000000000000",
+        "0400000000000000",
+        "63000000",
+        "64000000",
+    ));
+    match messages::parse_server(messages::opcode::SMSG_DISPEL_FAILED, &body).unwrap() {
+        ServerPacket::DispelFailed(p) => assert_eq!(
+            p,
+            DispelFailed {
+                caster: 3,
+                victim: 4,
+                spell_ids: vec![99, 100],
+            }
+        ),
+        other => panic!("dispel failed, got {}", other.name()),
+    }
+    // The same packet with no failures at all is a legal two-guid body, not a parse error.
+    let body = hx(concat!("0300000000000000", "0400000000000000"));
+    match messages::parse_server(messages::opcode::SMSG_DISPEL_FAILED, &body).unwrap() {
+        ServerPacket::DispelFailed(p) => assert!(p.spell_ids.is_empty()),
+        other => panic!("dispel failed, got {}", other.name()),
+    }
+
+    // SMSG_ENCHANTMENTLOG: caster raw guid, owner raw guid, itemEntry, spellId, showAffiliation
+    // (`WorldPackets::Item::EnchantmentLog::AppendBodyTo`, Item.cpp:235-242). An EMPTY caster is
+    // how the server says the enchant FADED (`Player::SendEnchantmentLog`'s own comment).
+    let body = hx(concat!(
+        "0000000000000000", // caster 0 -> a fade
+        "0b00000000000000", // owner 11
+        "d2040000",         // itemEntry 1234
+        "39050000",         // spellId 1337
+        "00",               // showAffiliation false
+    ));
+    match messages::parse_server(messages::opcode::SMSG_ENCHANTMENTLOG, &body).unwrap() {
+        ServerPacket::EnchantmentLog(p) => assert_eq!(
+            p,
+            EnchantmentLog {
+                caster: 0,
+                owner: 11,
+                item_entry: 1234,
+                spell_id: 1337,
+                show_affiliation: false,
+            }
+        ),
+        other => panic!("enchantment log, got {}", other.name()),
+    }
+
+    // SMSG_SPELLLOGEXECUTE: caster PACKED guid, spellId, groupCount, then per group
+    // {effect, rowCount, rows} (`Spell::SendLogExecute`, Spell.cpp:4662-4778). Three groups here
+    // cover the three payload shapes that are not a bare guid, including POWER_DRAIN's
+    // (amount, power, multiplier) — the order verified at the client's own bytes, not only at
+    // vmangos's (see `ExecuteLog::PowerDrain`).
+    let body = hx(concat!(
+        "0107",     // packed caster 7
+        "e8030000", // spellId 1000
+        "03000000", // 3 groups
+        // group 1: effect 8 POWER_DRAIN, one row
+        "08000000",
+        "01000000",
+        "1400000000000000", // target 20
+        "2c010000",         // amount 300
+        "00000000",         // power 0 (mana)
+        "0000803f",         // multiplier 1.0
+        // group 2: effect 24 CREATE_ITEM, one row — an item entry and nothing else
+        "18000000",
+        "01000000",
+        "b80b0000", // itemEntry 3000
+        // group 3: effect 102 DISMISS_PET, one row — the guid-only tail of the switch
+        "66000000",
+        "01000000",
+        "1e00000000000000", // target 30
+    ));
+    match messages::parse_server(messages::opcode::SMSG_SPELLLOGEXECUTE, &body).unwrap() {
+        ServerPacket::SpellLogExecute(p) => assert_eq!(
+            p,
+            SpellLogExecute {
+                caster: 7,
+                spell_id: 1000,
+                effects: vec![
+                    (
+                        8,
+                        vec![ExecuteLog::PowerDrain {
+                            target: 20,
+                            amount: 300,
+                            power: 0,
+                            multiplier: 1.0,
+                        }]
+                    ),
+                    (24, vec![ExecuteLog::CreateItem { item_entry: 3000 }]),
+                    (102, vec![ExecuteLog::Target { target: 30 }]),
+                ],
+            }
+        ),
+        other => panic!("spell log execute, got {}", other.name()),
+    }
+
+    // An effect id vmangos has no case for cannot be skipped — its row width is not on the wire —
+    // so the body errors rather than desyncing. vmangos never sends one: its own switch returns
+    // before `SendMessageToSet`, so an unlisted effect means no packet, never a truncated one.
+    let body = hx(concat!(
+        "0107", "e8030000", "01000000", "77000000", "01000000"
+    ));
+    assert!(messages::parse_server(messages::opcode::SMSG_SPELLLOGEXECUTE, &body).is_err());
+}

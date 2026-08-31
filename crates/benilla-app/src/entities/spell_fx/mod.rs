@@ -426,6 +426,10 @@ pub(crate) fn attach_effect_visuals(
                 // This instance IS the model these particles belong to; its chain (set above)
                 // carries the host's fade down to them — decision 0833.
                 alpha: Some(root),
+                // A spell effect has no light node wired: the whole `Spells\` corpus SETS the
+                // emitter unlit bit, so nothing here consumes one today. A lit one would fall
+                // back to the scene's light, which is what it takes now.
+                light_node: None,
             },
             // The emitters' rate/enabled windows ride the played sequence: a `CEffect` ADVANCES
             // (`Stand` → `Hold` → `Decay`), so it reads the live one off its own player like a

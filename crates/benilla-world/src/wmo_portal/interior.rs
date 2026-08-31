@@ -49,7 +49,7 @@ pub(super) fn load_wmo_areas(
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_assets::{AdtTile, WmoModel};
 
-use super::seed::{area_down_ray, down_ray_claim, down_ray_seeds, DownRayClaim};
+use super::seed::{area_down_ray, down_ray_claim, down_ray_seeds, up_ray_claim, DownRayClaim};
 use super::{WmoPortalInstance, WmoRoom, WorldCamera, EXTERIOR, EXTERIOR_LIT};
 use crate::terrain_stream::{terrain_height_under, PropLobeLight, TerrainStreamer};
 
@@ -175,7 +175,7 @@ pub(super) fn track_area_interior(
         }
         let local_from_world = inst.world_from_local.inverse();
         let eye_local = bevy_to_wow(local_from_world.transform_point3(eye_world));
-        if !column_in_collision_bounds(model.collision_bounds, eye_local) {
+        if !column_in_collision_bounds(model.collision_bounds, eye_local, false) {
             continue; // no face of this building can own the probe column
         }
         let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, eye_world, z));
@@ -404,7 +404,7 @@ fn room_cast(
         }
         let local_from_world = inst.world_from_local.inverse();
         let probe_local = bevy_to_wow(local_from_world.transform_point3(probe_world));
-        if !column_in_collision_bounds(model.collision_bounds, probe_local) {
+        if !column_in_collision_bounds(model.collision_bounds, probe_local, false) {
             continue; // no face of this building can own the probe column
         }
         let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, probe_world, z));
@@ -538,29 +538,53 @@ pub fn indoor_verdict_at<'a>(
     let probe_world = anchor_world + Vec3::Y * POSITION_PROBE_LIFT;
     let terrain = terrain_height_under(streamer, adt_tiles, probe_world);
     let mut best: Option<(DownRayClaim, &WmoModel, &WmoPortalInstance, [f32; 3])> = None;
-    for inst in instances {
-        let Some(model) = wmos.get(&inst.handle) else {
-            continue;
-        };
-        let local_from_world = inst.world_from_local.inverse();
-        let probe_local = bevy_to_wow(local_from_world.transform_point3(probe_world));
-        if !column_in_collision_bounds(model.collision_bounds, probe_local) {
-            continue; // no face of this building can own the probe column
+    // The containment lane's UPWARD retry (`0x6a8ed0`'s `6a9093 fadd ds:0x8022cc`): a GameObject's
+    // light node anchors at its authored-box centre, which for a particle-heavy model sits well
+    // BELOW the floor it stands on — 104 of Onyxia's lava traps anchor ~40 yd under the chamber
+    // (their authored box reaches 98 yd past their own geometry). The reference recovers by casting
+    // up; run it only when the whole downward pass came back empty, so a claim is never arbitrated
+    // against one made in the other direction. See [`up_ray_claim`].
+    let instances: Vec<&WmoPortalInstance> = instances.into_iter().collect();
+    for retry_up in [false, true] {
+        if retry_up && (best.is_some() || !matches!(attach, LightAttach::Containment)) {
+            break;
         }
-        let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, probe_world, z));
-        let Some(claim) = down_ray_claim(
-            &model.group_collision_tris,
-            &model.group_collision_bounds,
-            &model.group_collision_grids,
-            &model.group_nav,
-            probe_local,
-            terrain_local,
-            EXTERIOR | EXTERIOR_LIT,
-        ) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(b, ..)| claim.depth < b.depth) {
-            best = Some((claim, model, inst, probe_local));
+        for inst in instances.iter().copied() {
+            let Some(model) = wmos.get(&inst.handle) else {
+                continue;
+            };
+            let local_from_world = inst.world_from_local.inverse();
+            let probe_local = bevy_to_wow(local_from_world.transform_point3(probe_world));
+            if !column_in_collision_bounds(model.collision_bounds, probe_local, retry_up) {
+                continue; // no face of this building can own the probe column
+            }
+            let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, probe_world, z));
+            let claim = if retry_up {
+                up_ray_claim(
+                    &model.group_collision_tris,
+                    &model.group_collision_bounds,
+                    &model.group_collision_grids,
+                    &model.group_nav,
+                    probe_local,
+                    EXTERIOR | EXTERIOR_LIT,
+                )
+            } else {
+                down_ray_claim(
+                    &model.group_collision_tris,
+                    &model.group_collision_bounds,
+                    &model.group_collision_grids,
+                    &model.group_nav,
+                    probe_local,
+                    terrain_local,
+                    EXTERIOR | EXTERIOR_LIT,
+                )
+            };
+            let Some(claim) = claim else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(b, ..)| claim.depth < b.depth) {
+                best = Some((claim, model, inst, probe_local));
+            }
         }
     }
     let Some((claim, model, inst, probe_local)) = best else {
@@ -757,13 +781,22 @@ fn footprint_scan(
 /// inside a triangle's XY projection at z ≥ the set's min — so a skipped instance could never have
 /// answered. This is what keeps a camera in open country at one AABB test per resident building
 /// instead of a full face scan (the 2026-07-12 fps regression).
-fn column_in_collision_bounds(bounds: Option<([f32; 3], [f32; 3])>, probe: [f32; 3]) -> bool {
+fn column_in_collision_bounds(
+    bounds: Option<([f32; 3], [f32; 3])>,
+    probe: [f32; 3],
+    up: bool,
+) -> bool {
     bounds.is_some_and(|(min, max)| {
         probe[0] >= min[0]
             && probe[0] <= max[0]
             && probe[1] >= min[1]
             && probe[1] <= max[1]
-            && min[2] <= probe[2]
+            // The cast's own half-space: a DOWNWARD ray can hit nothing in a building that ends
+            // above the probe, an UPWARD one nothing in a building that ends below it. Keeping the
+            // downward spelling for the upward retry is what silently kept that retry inert — a
+            // probe 40 yd under Onyxia's floor sits below the lair's own collision floor, so the
+            // instance was culled here and the retry never ran on it at all.
+            && if up { max[2] >= probe[2] } else { min[2] <= probe[2] }
     })
 }
 

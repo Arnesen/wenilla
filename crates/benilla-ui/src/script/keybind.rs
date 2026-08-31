@@ -70,10 +70,16 @@ pub struct AddonBindingBody {
 
 /// A host request queued by Lua: persist the live table as set `1`/`2` (`Save`), on which the
 /// app writes `benilla-config/bindings/…` — and, for `Save(1)` issued while the character set was
-/// active, deletes the character file (the reference's confirmed delete-on-switch).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// active, deletes the character file (the reference's confirmed delete-on-switch); or fire a
+/// named binding's action outright (`Run`).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeybindRequest {
     Save(u32),
+    /// `RunBinding("SCREENSHOT")` — run the command's action as if its chord had been pressed.
+    /// It is a *request* rather than something the VM can do itself because a host command's
+    /// action is engine-side by construction (see this module's header): the VM holds the command
+    /// name and its chords, never its body.
+    Run(String),
 }
 
 /// The reference's key-string gate — the whole of `SetBinding`'s refusal (decision 1295), in its
@@ -603,6 +609,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let ok = model.keybinds.set_binding(&key, command.as_deref());
             Ok(if ok { Some(1) } else { None })
+        })?,
+    )?;
+    // `RunBinding(command)` — the reference's own passthrough verb. Its live caller is
+    // `CinematicFrame`'s `OnKeyDown`, which hands the SCREENSHOT chord back to its binding while
+    // swallowing every other key, so a player can still photograph a fly-by. Anything the VM
+    // holds a body for it could run itself; a host command's action is engine-side, so this
+    // queues and the app fires it in the same frame.
+    lua.globals().set(
+        "RunBinding",
+        lua.create_function(|lua, command: String| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let name = command.to_ascii_uppercase();
+            if model.keybinds.by_name.contains_key(&name) {
+                model.keybinds.requests.push(KeybindRequest::Run(name));
+            }
+            Ok(())
         })?,
     )?;
     lua.globals().set(

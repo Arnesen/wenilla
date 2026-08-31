@@ -177,6 +177,15 @@ pub struct ChatWindowLook {
     /// persisted state nothing could change, which is the honest-tree rule (1134 §4) at the
     /// persistence layer, and the reason 1589 §6 left it out.
     pub locked: bool,
+    /// The cache's `DOCKED` — the window's **position in the dock**, 1-based, or `None` for a
+    /// window that is not docked. Not a flag: window 1 answers `1` and window 2 `2`, which is the
+    /// index `FCF_DockFrame(frame, docked)` takes (this module's §3 note), and the order the tabs
+    /// sit in.
+    ///
+    /// It joined this struct with the dock verbs (1714), by the same rule `locked` did: until
+    /// `FCF_DockFrame`/`FCF_UnDockFrame` existed there was nothing that could move it, so it was a
+    /// per-window constant read straight out of [`WINDOW_STATE`]. There is now, so it is state.
+    pub docked: Option<u8>,
 }
 
 impl Default for ChatWindowLook {
@@ -194,7 +203,25 @@ impl ChatWindowLook {
         a: 0,
         font_size: 0,
         locked: true,
+        // The stock row's `DOCKED` differs per window, so the array literal that uses this const
+        // seeds each slot from [`WINDOW_STATE`] afterwards. `None` here is only the value a
+        // slot holds before that seeding, and the value a *hand-built* look starts at.
+        docked: None,
     };
+
+    /// The stock row for window `index` (0-based) — [`Self::DEFAULT`] with that window's own
+    /// `DOCKED` position from [`WINDOW_STATE`]. The seed for the model's array and for the
+    /// settings parser's per-line default, so a file that never mentions `DOCKED` keeps the
+    /// shipped dock rather than silently undocking both windows.
+    pub fn stock(index: usize) -> Self {
+        Self {
+            docked: WINDOW_STATE
+                .get(index)
+                .and_then(|(_, d)| *d)
+                .and_then(|d| u8::try_from(d).ok()),
+            ..Self::DEFAULT
+        }
+    }
 }
 
 /// `x` in the reference's `0..1` float domain → the byte its `__ftol(x · 255.0)` stores, clamped
@@ -282,7 +309,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .app_data_ref::<Model>()
                 .expect("model app_data")
                 .chat_window_looks[i];
-            let (shown, docked) = WINDOW_STATE[i];
+            let (shown, _) = WINDOW_STATE[i];
+            // `docked` is the LIVE position now, not the table's — `FCF_DockFrame`/
+            // `FCF_UnDockFrame` move it through `SetChatWindowDocked` below.
+            let docked = look.docked.map(i64::from);
             let num = |v: Option<i64>| match v {
                 Some(n) => Value::Integer(n),
                 None => Value::Nil,
@@ -381,6 +411,37 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let look = &mut model.chat_window_looks[i];
             if locked != look.locked {
                 look.locked = locked;
+                model.chat_window_changes.insert(i);
+            }
+            Ok(())
+        })?,
+    )?;
+    // SetChatWindowDocked(id, position) — the dock half of the record, written by `FCF_SaveDock`
+    // (FloatingChatFrame.lua l.1276-1285) once per docked window on every dock change, and by
+    // `FCF_UnDockFrame` (l.1182) with `nil` to clear it.
+    //
+    // **The argument is a POSITION, not a flag** — this module's §3 trap, and the reason this
+    // takes a number rather than the `bool` `SetChatWindowLocked` takes: `FCF_SaveDock` passes the
+    // running `count`, so window 1 stores `1` and window 2 stores `2`, and that is what
+    // `GetChatWindowInfo`'s 9th return hands back to `FCF_DockFrame(frame, docked)` as its index.
+    // A `nil` clears it (undocked); anything `<= 0` is treated as a clear too, since a dock
+    // position is 1-based and the reference has no zeroth slot.
+    //
+    // **Not persisted yet, and that is a stated gap.** The `chat-cache` writer
+    // (`benilla_app`'s `ui_chat::settings`) renders `DOCKED` alongside `LOCKED`, but an absent key
+    // must keep the *per-window* stock rather than one flat default — see
+    // [`ChatWindowLook::stock`], which is what the parser seeds from.
+    lua.globals().set(
+        "SetChatWindowDocked",
+        lua.create_function(|lua, (id, position): (i64, Option<i64>)| {
+            let i = window_index(id)?;
+            let position = position
+                .filter(|p| *p > 0)
+                .and_then(|p| u8::try_from(p).ok());
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let look = &mut model.chat_window_looks[i];
+            if position != look.docked {
+                look.docked = position;
                 model.chat_window_changes.insert(i);
             }
             Ok(())
@@ -679,6 +740,7 @@ mod tests {
                 a: 4,
                 font_size: 14,
                 locked: true,
+                docked: Some(1),
             },
         )]);
         assert!(

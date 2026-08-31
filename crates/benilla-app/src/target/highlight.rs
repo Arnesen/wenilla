@@ -38,9 +38,12 @@ pub(super) fn apply_highlight(
     mut tags: Query<&mut MeshTag>,
     mut was_lit: Local<Vec<Entity>>,
 ) {
+    // [`Hovered::any`], not `target`: a hovered **corpse** is a pick too (decision 1723), so it
+    // holds the brighten off a farther GameObject exactly as a unit does. Whether the corpse body
+    // itself brightens is a separate byte question and is not assumed here.
     let go = hovered_go
         .target
-        .filter(|_| hovered.target.is_none() || go_is_nearest(&hovered, &hovered_go));
+        .filter(|_| hovered.any().is_none() || go_is_nearest(&hovered, &hovered_go));
     let unit_hover = hovered.target.filter(|_| go.is_none());
     let mut want: Vec<Entity> = Vec::new();
     for root in [unit_hover, go, selection.target].into_iter().flatten() {

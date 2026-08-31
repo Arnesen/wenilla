@@ -85,6 +85,19 @@ impl Plugin for UiChatPlugin {
                 )
                     .before(feed::feed_chat),
             )
+            // The three combat-log families that are NOT packet-driven (1703): the death reflex,
+            // the aura arrival/departure/stack callbacks, and the pet-loyalty byte. Each is a
+            // descriptor diff, so each runs before the drain that would otherwise show its line a
+            // frame late.
+            .add_systems(
+                Update,
+                (
+                    combat::watch::death_lines,
+                    combat::watch::aura_lines,
+                    combat::watch::pet_loyalty_lines,
+                )
+                    .before(feed::feed_chat),
+            )
             .add_systems(Update, feed::feed_chat.before(UiInput))
             // A fresh VM gets the joined-channel mirror re-pushed once (decision 1291) — before
             // the feed, so the reload frame's first routed line already renders numbered.

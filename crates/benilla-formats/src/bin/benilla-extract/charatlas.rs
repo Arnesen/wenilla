@@ -24,8 +24,8 @@
 
 use anyhow::{Context, Result};
 use benilla_formats::{
-    equip_blits, equip_region_candidates, equip_tile, load_item_display_catalog, Chain,
-    CharSections, CharacterGeosets, EquipGeosets, ItemDisplay,
+    equip_blits, equip_tile, load_item_display_catalog, BlitSource, Chain, CharSections,
+    CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem, ItemDisplay,
 };
 
 /// The ten atlas tiles by group, for the per-tile report — the five head/left-column ones included,
@@ -60,6 +60,10 @@ pub struct Look {
     pub hair_color: u8,
     /// The eight worn display ids in `equipment` order; `0` = the slot is empty.
     pub slots: [u32; 8],
+    /// The wearer's guild tabard, or `None` for "no guild" — the same input the world composite
+    /// takes (decision 1704). It only paints over a tabard whose display asks for it, so passing
+    /// one without a guild-emblem tabard in the tabard slot is a no-op, on purpose.
+    pub emblem: Option<GuildEmblem>,
 }
 
 /// A BLP's header as the composite cares about it: the dimensions it blits at and the alpha depth
@@ -108,11 +112,26 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         }
     }
 
-    // (1) The plan — the composite's own order, with what each name resolved to.
+    // (1) The plan — the composite's own order, with what each name resolved to. Worn garments and
+    // the guild tabard's three layers come through the same list, because they land in the same
+    // rows and the question ("what repainted this cell?") is the same one.
     println!("\nequipment blits (by ascending cell; later covers earlier within a tile):");
-    for step in equip_blits(&equipment) {
-        let (x, y, w, h) = equip_tile(step.layer).expect("layer < 8");
-        let resolved = equip_region_candidates(step.layer, step.texture, look.sex)
+    for step in equip_blits(&equipment, look.emblem) {
+        let (_x, y, w, h) = equip_tile(step.layer).expect("layer < 8");
+        let candidates = step.candidates(look.sex);
+        let basename = |p: &str| p.rsplit('\\').next().unwrap_or(p).to_string();
+        let (who, name) = match step.source {
+            BlitSource::Worn { slot, texture } => (SLOT_NAMES[slot], texture.to_string()),
+            BlitSource::Emblem { part, .. } => (
+                match part {
+                    EmblemLayer::Background => "gBack",
+                    EmblemLayer::Border => "gBrdr",
+                    EmblemLayer::Symbol => "gEmbl",
+                },
+                candidates.first().map_or_else(String::new, |p| basename(p)),
+            ),
+        };
+        let resolved = candidates
             .into_iter()
             .find_map(|p| blp_shape(chain, &p).map(|s| (p, s)));
         match resolved {
@@ -133,13 +152,12 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
                     y,
                     y + h,
                     step.column,
-                    SLOT_NAMES[step.slot],
-                    step.texture,
-                    path.rsplit('\\').next().unwrap_or(&path),
+                    who,
+                    name,
+                    basename(&path),
                     bw,
                     bh,
                 );
-                let _ = x;
             }
             None => println!(
                 "  g{} y{:>3}..{:<3} cell {} {:6} {:34} → MISSING (region left as base skin)",
@@ -147,8 +165,8 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
                 y,
                 y + h,
                 step.column,
-                SLOT_NAMES[step.slot],
-                step.texture,
+                who,
+                name,
             ),
         }
     }
@@ -165,6 +183,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             look.hair_style,
             look.hair_color,
             [None; 8],
+            None,
         )?
         .context("no base skin row for this appearance")?;
     let dressed = sections
@@ -178,6 +197,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
             look.hair_style,
             look.hair_color,
             equipment,
+            look.emblem,
         )?
         .context("no base skin row for this appearance")?;
 

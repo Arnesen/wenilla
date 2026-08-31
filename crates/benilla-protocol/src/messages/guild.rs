@@ -308,20 +308,29 @@ pub struct GuildQueryResponse {
     /// array is normally empty — "how many ranks exist" is the count of leading non-empty entries,
     /// or better, the roster's `rank_rights` length.
     pub rank_names: [String; GUILD_RANKS_MAX_COUNT],
-    /// Tabard emblem symbol index.
-    pub emblem_style: u32,
-    /// Tabard emblem colour index.
-    pub emblem_color: u32,
-    /// Tabard border style index.
-    pub border_style: u32,
-    /// Tabard border colour index.
-    pub border_color: u32,
-    /// Tabard background colour index.
-    pub background_color: u32,
+    /// Tabard emblem symbol index — the file index the body composite formats into
+    /// `Textures\GuildEmblems\Emblem_<style>_<color>_…` (decision 1704).
+    ///
+    /// **Signed, and `-1` is the common case.** These five are `int32` on the wire (vmangos
+    /// `Server/Packets/Guild.h:208`), a guild is *constructed* with all five at `-1`
+    /// (`Guild/Guild.cpp:86`) and reloaded with `GetInt32()` (`:308`), and only the tabard designer
+    /// ever writes a real index. So "this guild has never bought a tabard" arrives as `-1`, not as
+    /// `0` — decoding these unsigned would turn that into 4294967295 and lose the one value that is
+    /// not a file index. What the renderer does with it is 1704's business, not the decoder's.
+    pub emblem_style: i32,
+    /// Tabard emblem colour index. Signed, `-1` = no tabard designed — see [`Self::emblem_style`].
+    pub emblem_color: i32,
+    /// Tabard border style index. Signed, `-1` = no tabard designed.
+    pub border_style: i32,
+    /// Tabard border colour index. Signed, `-1` = no tabard designed.
+    pub border_color: i32,
+    /// Tabard background colour index. Signed, `-1` = no tabard designed.
+    pub background_color: i32,
 }
 
 /// Read `SMSG_GUILD_QUERY_RESPONSE` (VERIFIED **both ends**): `u32 guildId`, the guild name, then
-/// **exactly ten** rank-name cstrings, then the five tabard `u32`s.
+/// **exactly ten** rank-name cstrings, then the five tabard `i32`s (signed — see
+/// [`GuildQueryResponse::emblem_style`] for why the sign is load-bearing).
 ///
 /// Server: vmangos `Server/Packets/Guild.cpp:118-131` `GuildQueryResponse::AppendBodyTo`, filled by
 /// `Guild/Guild.cpp:862-880` `SendQueryResponse`. Client: wow-re
@@ -345,11 +354,11 @@ pub(super) fn read_guild_query_response(r: &mut impl Read) -> io::Result<GuildQu
         guild_id,
         name,
         rank_names,
-        emblem_style: read_u32_le(r)?,
-        emblem_color: read_u32_le(r)?,
-        border_style: read_u32_le(r)?,
-        border_color: read_u32_le(r)?,
-        background_color: read_u32_le(r)?,
+        emblem_style: read_u32_le(r)? as i32,
+        emblem_color: read_u32_le(r)? as i32,
+        border_style: read_u32_le(r)? as i32,
+        border_color: read_u32_le(r)? as i32,
+        background_color: read_u32_le(r)? as i32,
     })
 }
 

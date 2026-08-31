@@ -95,13 +95,15 @@ pub use client::{
     auth_session, channel_announcements, channel_ban, channel_invite, channel_kick, channel_list,
     channel_moderate, channel_moderator, channel_mute, channel_owner, channel_password,
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
-    creature_query, force_speed_ack, full_guid, join_channel, leave_channel, messagechat,
-    messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack, move_spline_done,
-    movement, pet_name_query, ping, played_time, query_time, random_roll, teleport_ack, text_emote,
+    creature_query, force_speed_ack, full_guid, join_channel, knock_back_ack, leave_channel,
+    messagechat, messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack,
+    move_spline_done, movement, pet_name_query, ping, played_time, query_time, random_roll,
+    teleport_ack, text_emote,
 };
 pub use combat_log::{
-    DamageShield, EnvironmentalDamageLog, PeriodicAuraLog, PeriodicTick, SpellDamageLog,
-    SpellEnergizeLog, SpellHealLog, SpellLogMiss,
+    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExecuteLog, PartyKillLog,
+    PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog,
+    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
 };
 pub use death::{
     reclaim_corpse, resurrect_response, spirit_healer_activate, CorpseLocation,
@@ -229,10 +231,10 @@ pub use trade::{
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
 pub use update_object::{
-    quest_slot_state, CreateSpline, MovementBlock, Object, ObjectFields, ObjectType, OwnerFallback,
-    PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK,
-    FIELD_PLAYER_SKILL_INFO_1_1, PLAYER_EXPLORED_ZONES_SLOTS, PLAYER_QUEST_LOG_SLOTS,
-    PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
+    quest_slot_state, CorpseLook, CreateSpline, MovementBlock, Object, ObjectFields, ObjectType,
+    OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE,
+    AURA_FLAG_EFF_INDEX_MASK, FIELD_PLAYER_SKILL_INFO_1_1, PLAYER_EXPLORED_ZONES_SLOTS,
+    PLAYER_QUEST_LOG_SLOTS, PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };
 pub use vendor::{
     buy_item, buy_result, buyback_item, list_inventory, repair_item, sell_item, sell_result,

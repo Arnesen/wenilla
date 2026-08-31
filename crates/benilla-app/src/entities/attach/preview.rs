@@ -104,6 +104,8 @@ pub(in crate::entities) struct PreviewSpec {
     /// Worn **ItemDisplayInfo** ids by equipment slot (`EQUIPMENT_SLOT_*`) — no template hop; the
     /// caller has already resolved entries to displays.
     pub(in crate::entities) equipment: [CharEnumItem; 19],
+    /// The wearer's guild tabard (decision 1704), or `None` for no crest.
+    pub(in crate::entities) emblem: Option<benilla_formats::GuildEmblem>,
     /// `CHARACTER_FLAG_*` bits; only hide-helm / hide-cloak are read here.
     pub(in crate::entities) flags: u32,
     /// **Whose held law this look follows** (decision 1076) — the one place the two previews
@@ -247,6 +249,11 @@ pub(in crate::entities) fn build_glue_preview(
         hair_color,
         facial_hair,
         equipment,
+        // No crest at character select (decision 1704). `SMSG_CHAR_ENUM` carries a `guildId` but
+        // not the five emblem indices, and there is no world session to `CMSG_GUILD_QUERY` with —
+        // so a Guild Tabard on the mannequin wears its own `Tabard_A_05Default` art, which is what
+        // the reference's own empty guild cache leaves it with too.
+        emblem: None,
         flags,
         // The mannequin's own law: the select build skips EQUIPMENT_SLOT_RANGED (0x472bfe).
         ranged_in_hand: false,
@@ -353,6 +360,7 @@ pub(in crate::entities) fn build_dressup_preview(
         hair_color: look.hair_color,
         facial_hair: look.facial_hair,
         equipment: look.equipment,
+        emblem: look.emblem,
         // **No hide flags here, because the hiding already happened upstream** (decision 1472).
         // The dressing room DOES honour show-helm/show-cloak — byte-verified: `SetUnit 0x476cb0`
         // clones the live player's per-bodyslot display pointers, so a suppressed piece is not in
@@ -508,6 +516,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
         &char_look,
         bodyslots,
         cloak,
+        spec.emblem,
         ctx.displays.as_deref(),
         ctx.sections,
         ctx.world_assets,

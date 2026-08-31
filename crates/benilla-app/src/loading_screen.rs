@@ -309,7 +309,13 @@ fn setup_loading_screen(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_loading_screen(
     mut screen: ResMut<LoadingScreen>,
-    progress: Res<WorldLoadProgress>,
+    // The streamer's two published facts, bundled into one param (Bevy's 16-element system-param
+    // ceiling, the same squeeze `player::control` and `feed_ui_input` already pay): what is
+    // resident, and whether that residency is even ABOUT the player's own ground this frame.
+    stream: (
+        Res<WorldLoadProgress>,
+        Res<benilla_world::terrain_stream::ViewFocus>,
+    ),
     current_map: Option<Res<CurrentMap>>,
     maps: Option<Res<MapCatalogRes>>,
     screens: Option<Res<LoadingScreenCatalogRes>>,
@@ -359,6 +365,7 @@ fn drive_loading_screen(
         transfer,
         roster,
     ) = edges;
+    let (progress, focus) = (&stream.0, &stream.1);
     let now = time.elapsed_secs();
     let map_id = current_map.as_ref().map(|m| m.0);
     // The physics hold releases on the same residency signal that clears this screen (decision
@@ -443,8 +450,20 @@ fn drive_loading_screen(
     // an invisible screen up forever against residency that never arrives. The warm-up is not lost,
     // it MOVED: the world now loads under the cover this same function raises on world entry, which
     // is where a warm-up belongs. ---
+    //
+    // **And only while the focus IS the body** ([`ViewFocus::follows_body`]). The trigger's whole
+    // premise is "residency says the ground under the player is missing and no edge announced it,
+    // so a load must be happening". While the eye is deliberately elsewhere — a cinematic fly-by,
+    // a free-fly — residency describes the *camera's* tile, and reading it as a fact about the
+    // player is reading someone else's ground (decision 1336's lesson, one consumer over).
+    // Measured: every cinematic raised this cover the instant it started (`.debug play cinematic
+    // 41` → "loading screen: up (focus not resident, map None)" in the same millisecond as the
+    // shot), covering the opening seconds of the fly-by the deferred-start latch exists to protect
+    // — and, once the body took the settle hold for the same detachment, covering ALL of it,
+    // because this cover's clear waits on that hold and that hold waits on the focus coming home.
     if !screen.active
         && !progress.focus_resident
+        && focus.follows_body()
         && *state.get() == crate::char_select::ClientState::InWorld
     {
         screen.raise("focus not resident", false, None, now);

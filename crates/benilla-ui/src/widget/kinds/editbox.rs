@@ -19,7 +19,7 @@ pub enum EditUnit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditAction {
     /// Move the caret one `unit` back/forward; `extend` drags the selection from its fixed
-    /// anchor (the Shift family). `Char` moves honor `ignoreArrows` (consumed but inert — the
+    /// anchor (the Shift family). (The alt-arrow gate is upstream, on the key — the
     /// ref guard `0x77b18e`; arrows are the only chord source of `Char` moves).
     Move {
         unit: EditUnit,
@@ -92,9 +92,26 @@ pub struct EditBoxState {
     /// `password` (bit3): the display string is one `'*'` per *character* (the mask, `E+0x334`); the
     /// real text is untouched.
     pub password: bool,
-    /// `ignoreArrows` (bit4): LEFT/RIGHT (and UP/DOWN) are consumed but do nothing unless Ctrl is
-    /// held (RF-0082 §4, guard `0x77b18e`).
-    pub ignore_arrows: bool,
+    /// **Alt-arrow mode** (bit4) — the XML attribute spells it `ignoreArrows`, the Lua surface
+    /// spells it `SetAltArrowKeyMode`/`GetAltArrowKeyMode` (`0x7996e0`/`0x799790`), and there is
+    /// exactly one flag behind both names. `SetIgnoreArrows` does **not** exist in 5875: the
+    /// 48-entry EditBox method table `[0x87bb68, 0x87bce8)` carries the Alt pair at 46/47 and no
+    /// entry whose name contains "Ignore" (wow-re `ignorearrows-alt-arrow-gate.md`, §5 VERIFIED).
+    ///
+    /// **What it does, and it is not what "ignore" suggests.** With the flag set, the four arrow
+    /// keys (`0x204` LEFT / `0x205` UP / `0x206` RIGHT / `0x207` DOWN) are **not consumed by the
+    /// box at all** unless ALT is held — the guard `0x77b18e` returns 0, the strata walk carries
+    /// on down to `CGWorldFrame`, and the key reaches its binding (`TURNLEFT`, `MOVEFORWARD`).
+    /// That is the whole point: it is what lets you turn while the chat box has focus. With Alt
+    /// held the guard falls through to ordinary handling and the caret moves.
+    ///
+    /// A focused box otherwise consumes **everything** (the handler's shared tail `0x77b35e`
+    /// returns 1), so these four keys are the only ones it ever lets past.
+    ///
+    /// benilla read this as "consumed but inert, unless Ctrl" for two rounds — the modifier was
+    /// wrong (a wow-re note said `0x41f8f0(2)` was Ctrl; it is ALT, and five other notes already
+    /// said so) and so was the consumption. Both corrected by the §5.
+    pub alt_arrow_key_mode: bool,
     /// `maxLetters` (`E+0x340`, 0 = unlimited): after each insert, trim from the end while the
     /// *letter* (char) count exceeds this (RF-0082 §3).
     pub max_letters: usize,
@@ -254,7 +271,7 @@ impl Default for EditBoxState {
             multi_line: false,
             numeric: false,
             password: false,
-            ignore_arrows: false,
+            alt_arrow_key_mode: false,
             max_letters: 0,
             max_bytes: None,
             text_region: None,
@@ -590,13 +607,12 @@ impl EditBoxState {
         match action {
             EditAction::Move { unit, back, extend } => {
                 match unit {
-                    // `ignoreArrows`: consumed but inert (guard `0x77b18e`). Arrows are the only
-                    // chord source of a Char move, and the ref's Ctrl bypass maps to Word.
-                    EditUnit::Char => {
-                        if !self.ignore_arrows {
-                            self.move_by_char(!back, extend);
-                        }
-                    }
+                    // No flag test here any more. The alt-arrow gate is on the KEY, not on the
+                    // action — with the flag set the box never sees the arrow at all, because the
+                    // host declines it before the chord is dispatched (`UiScript::
+                    // editbox_alt_arrow_fallthrough`). Anything that reaches this far was either
+                    // Alt-held or not an arrow, and both move the caret normally.
+                    EditUnit::Char => self.move_by_char(!back, extend),
                     EditUnit::Word => self.move_by_word(!back, extend),
                     EditUnit::Edge => self.move_to_edge(!back, extend),
                 }

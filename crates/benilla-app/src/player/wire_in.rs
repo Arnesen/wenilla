@@ -21,8 +21,8 @@ use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
 use crate::creature_anim::{move_flags, wrap_pi};
 use crate::net::{
-    ClientCommand, ClientControlMessage, Embodied, Guid, MoveModeMessage, NetCommands,
-    SelfMoveMessage, SpeedChangeMessage, TeleportMessage, WorldportMessage,
+    ClientCommand, ClientControlMessage, Embodied, Guid, KnockBackMessage, MoveModeMessage,
+    NetCommands, SelfMoveMessage, SpeedChangeMessage, TeleportMessage, WorldportMessage,
 };
 use crate::transport::Transport;
 use benilla_world::world_map::CurrentMap;
@@ -117,6 +117,7 @@ pub(super) fn apply_server_moves(
     worldports: &mut MessageReader<WorldportMessage>,
     speed_msgs: &mut MessageReader<SpeedChangeMessage>,
     mode_msgs: &mut MessageReader<MoveModeMessage>,
+    knock_msgs: &mut MessageReader<KnockBackMessage>,
     self_moves: &mut MessageReader<SelfMoveMessage>,
     control_msgs: &mut MessageReader<ClientControlMessage>,
     self_guid: Option<u64>,
@@ -390,6 +391,31 @@ pub(super) fn apply_server_moves(
             m.mode,
             if m.apply { "granted" } else { "revoked" }
         );
+    }
+
+    // **The knockback** (decision 1702) — the one server-authored movement edge here that is neither
+    // a snap nor a granted mode: a ballistic launch we fly ourselves, with the ack owed only if we
+    // actually fly it. Nothing is applied here and nothing is acked here, and both halves are the
+    // reference's own shape: `0x617a30` merely **enqueues** the knockback as a due-timed record, and
+    // the frame update `0x616620` drains it apply-then-send inside one call
+    // (`0x61624d call 0x6179c0` → `0x616261 push 0xf0`), so the `MovementInfo` that goes on the wire
+    // is always the post-launch one. Arming a latch the take-off site consumes is that ordering,
+    // written the way our mover works — and it is the same latch shape the hover launch uses, for
+    // the same reason (decision 1620): our mover re-derives ground contact from probes every frame
+    // and would zero a velocity written from out here on its very next step.
+    //
+    // **Two in one frame collapse to the last, and that is ours, not the reference's.** Its queue
+    // holds both, sorted by due time, and drains them in order; our latch holds one. The *motion* is
+    // the same either way — `0x6179c0` replaces the velocity outright, so flying both in sequence
+    // inside one frame ends exactly where flying only the second does — but the first one's ack is
+    // lost, which the server counts as `OnFailedToAckChange`. It takes two knockbacks inside 17 ms
+    // to reach, and sub-frame launch timing is already the open item in 1702.
+    for k in knock_msgs.read() {
+        player.knockback = Some(super::state::PendingKnockback {
+            guid: k.guid,
+            counter: k.counter,
+            launch: k.launch,
+        });
     }
 
     // Take control once the server first reports our position (the streamed mover entity, whose

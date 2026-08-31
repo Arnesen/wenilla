@@ -33,9 +33,9 @@ pub use install::{candidates, wow_data};
 pub mod web;
 mod characters;
 pub use characters::{
-    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile,
-    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EquipBlit, EquipGeosets,
-    StartOutfitItem,
+    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, BlitSource,
+    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer, EquipBlit,
+    EquipGeosets, GuildEmblem, StartOutfitItem,
 };
 mod camera_shakes;
 mod cinematics;

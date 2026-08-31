@@ -12,16 +12,18 @@
 use crate::messages::{
     ActionButton, AttackerState, AuctionBidderNotification, AuctionCommandTail, AuctionListEntry,
     AuctionOwnerNotification, ChannelNoticeTail, Character, CreateSpline, DamageShield,
-    EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GmTicket, GossipOption,
-    GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
-    GuildQueryResponse, GuildRoster, InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo,
-    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
-    MirrorTimerStart, MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog,
-    PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
-    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestDetails,
-    QuestGiverList, QuestOfferReward, QuestRequestItems, QuestTemplate, SpellDamageLog,
-    SpellEnergizeLog, SpellHealLog, SpellLogMiss, StabledPet, TaxiMask, TradeStatus,
-    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
+    FriendStatusUpdate, GmTicket, GossipOption, GroupLootInfo, GroupMemberEntry,
+    GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
+    InspectHonorStats, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
+    LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MonsterMoveFacing,
+    ObjectFields, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
+    PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
+    PetitionSignResults, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
+    QuestRequestItems, QuestTemplate, SpellDamageLog, SpellDispelLog, SpellEnergizeLog,
+    SpellHealLog, SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, StabledPet,
+    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
+    WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -35,6 +37,11 @@ pub enum EntityKind {
     /// area effect hangs on (Blizzard's storm, Flamestrike's burn). Carries no display id; its
     /// visual resolves through the spell chain (`DYNAMICOBJECT_SPELLID`), not a model field.
     DynamicObject,
+    /// A `TYPEID_CORPSE` (7) create — a dead player's remains: a fresh body while the owner is a
+    /// ghost, or the **bone pile** it converts to once released/looted. It renders as the dead
+    /// player (decision 1706): the character-model chain, dressed from the corpse's own
+    /// `CORPSE_FIELD_BYTES_*` + `CORPSE_FIELD_ITEM` snapshot.
+    Corpse,
     Other,
 }
 
@@ -772,6 +779,23 @@ pub enum SessionEvent {
     EnvironmentalDamageLog(EnvironmentalDamageLog),
     /// A spell cast's per-target miss list (`SMSG_SPELLLOGMISS`) — decision 0137 phase 2.
     SpellLogMiss(SpellLogMiss),
+    /// The killing blow (`SMSG_PARTYKILLLOG`) — the "You have slain %s!" line's only source
+    /// (decision 1703).
+    PartyKillLog(PartyKillLog),
+    /// An instant kill (`SMSG_SPELLINSTAKILLLOG`) — decision 1703.
+    SpellInstaKillLog(SpellInstaKillLog),
+    /// A proc the target resisted (`SMSG_PROCRESIST`) — decision 1703.
+    ProcResist(SpellOutcomeLog),
+    /// A target immune to the spell (`SMSG_SPELLORDAMAGE_IMMUNE`) — decision 1703.
+    SpellOrDamageImmune(SpellOutcomeLog),
+    /// The auras a dispel removed (`SMSG_SPELLDISPELLOG`) — decision 1703.
+    SpellDispelLog(SpellDispelLog),
+    /// The auras a dispel failed to remove (`SMSG_DISPEL_FAILED`) — decision 1703.
+    DispelFailed(DispelFailed),
+    /// An enchant landing on or fading from an item (`SMSG_ENCHANTMENTLOG`) — decision 1703.
+    EnchantmentLog(EnchantmentLog),
+    /// What a cast's effects did (`SMSG_SPELLLOGEXECUTE`) — decision 1703.
+    SpellLogExecute(SpellLogExecute),
     /// An XP award, kill or non-kill (`SMSG_LOG_XPGAIN`) — decision 0137 phase 2.
     XpGain(XpGain),
     /// A first visit to an area (`SMSG_EXPLORATION_EXPERIENCE`) — the discovered area id + its
@@ -1060,6 +1084,20 @@ pub enum SessionEvent {
         counter: u32,
         mode: crate::messages::MoveMode,
         apply: bool,
+    },
+    /// **A knockback aimed at our own mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702) — the server
+    /// hands the controlling client a ballistic launch and lets it fly the arc itself; nothing about
+    /// it is a spline or a teleport. `launch` is the packet's quad as the jump tail it becomes:
+    /// world-XY direction (`cos_angle`, `sin_angle`), horizontal speed (`xy_speed`), and the
+    /// take-off vertical speed (`zspeed`, **down-positive** — negative is upward, decision 0054).
+    ///
+    /// Must be acked with the echoed `counter` and a `MovementInfo` whose jump tail is exactly this
+    /// quad, or the server logs a cheat and observers never see the knockback at all
+    /// ([`crate::messages::opcode::SMSG_MOVE_KNOCK_BACK`]).
+    KnockBack {
+        guid: u64,
+        counter: u32,
+        launch: crate::messages::JumpInfo,
     },
     /// Someone invited us to their group (`SMSG_GROUP_INVITE`) — the invite popup.
     GroupInvite { inviter: String },

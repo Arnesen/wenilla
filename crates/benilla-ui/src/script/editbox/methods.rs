@@ -100,9 +100,51 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     m.set(
+        // `GetMaxLetters 0x79929f` — the read half, which we were missing. Not published off the
+        // `strings` hit alone (that is what put `SetUnit` on the wrong widget earlier today):
+        // wow-re's numeric-arg round identified `0x79929f` as the GETTER of `[widget+0x340]`,
+        // the same field the setter below writes, which is table-level evidence rather than a
+        // name that happens to be in the image.
+        //
+        // Its sibling `GetMaxBytes` is in the image too and is NOT added: we do not model
+        // `maxBytes` at all (a separate field with a `-1` sentinel), and a getter for a field we
+        // do not have would answer confidently with a number that means nothing.
+        "GetMaxLetters",
+        lua.create_function(|lua, this: Table| {
+            with_editbox(lua, &this, |eb| eb.max_letters as i64)
+        })?,
+    )?;
+    m.set(
+        // `SetMaxLetters 0x799110` — one of only FOUR widget bindings in the whole registrar that
+        // calls `lua_gettop` (wow-re `numeric-arg-coercion-law.md` Q3), and its gate is EXACT:
+        // `cmp eax,2`. So the count is checked and the type is not, which is the opposite of the
+        // usual pairing and the reason this needs its own body:
+        //
+        //   SetMaxLetters()           -> RAISES `Usage:` (too few)
+        //   SetMaxLetters(50, 60)     -> RAISES `Usage:` (too MANY — an exact gate, not a minimum)
+        //   SetMaxLetters(nil)        -> completes, stores 0
+        //   SetMaxLetters("12")       -> completes, stores 12 (a numeric string coerces)
+        //   SetMaxLetters({})         -> completes, stores 0
+        //
+        // and **0 is "no limit"**, not "no letters": the insert path's trim block is skipped
+        // whole on zero (`0x77c085 test edi,edi; je`), which is what `max_letters == 0` already
+        // means here. So `SetMaxLetters(nil)` is `SetMaxLetters(0)` is unlimited — aux-addon's
+        // `gui/core.lua:288` writes exactly that, and benilla raised on it and killed the addon at
+        // load. (Its neighbour `SetMaxBytes` uses **-1** for the same idea; two adjacent fields,
+        // two different sentinels.)
         "SetMaxLetters",
-        lua.create_function(|lua, (this, n): (Table, i64)| {
-            with_editbox(lua, &this, |eb| eb.max_letters = n.max(0) as usize)
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            let args: Vec<Value> = args.into_iter().collect();
+            if args.len() != 1 {
+                return Err(mlua::Error::runtime(
+                    "Usage: <unnamed>:SetMaxLetters(maxLetters)",
+                ));
+            }
+            let n = crate::script::binding_abi::coerced_number(lua, args.first().cloned());
+            // `__ftol` truncates toward zero; a negative stores as itself there, but our field is
+            // a `usize` and the trim only ever tests `> 0`, so the two agree on every value that
+            // can change behaviour.
+            with_editbox(lua, &this, |eb| eb.max_letters = (n as i64).max(0) as usize)
         })?,
     )?;
     // The submitted-line history (`historyLines`): FrameXML pushes each sent line
@@ -187,9 +229,47 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The config flags. SetAutoFocus/SetNumeric/SetPassword/SetMultiLine mirror the live API;
-    // SetIgnoreArrows has no client method (the flag is XML-only) — a benilla convenience so the
-    // loader can drive every flag through one method surface.
+    // The config flags. All four mirror the live API. The fifth flag — bit4, the XML's
+    // `ignoreArrows` — is NOT here: its Lua surface is `SetAltArrowKeyMode`/`GetAltArrowKeyMode`
+    // below, which take a different argument coercion and answer a number rather than a boolean,
+    // so it cannot share this loop. benilla used to register a `SetIgnoreArrows` "convenience"
+    // for the loader to drive; 5875 has no such method (the 48-entry table
+    // `[0x87bb68, 0x87bce8)` carries no entry whose name contains "Ignore"), so publishing it was
+    // exactly the error decision 1189 names — and it stood in for the two real names, which were
+    // missing. The loader drives the XML attribute through `SetAltArrowKeyMode` now.
+    // ── SetAltArrowKeyMode / GetAltArrowKeyMode (`0x7996e0` / `0x799790`) ────────────────────
+    //
+    // **The setter's argument is `GetBoolOrDefault(L, 2, default = 1)`** (`0x6f1c10`), not Lua
+    // truthiness and not a plain numeric coercion — `0x7996e0` pushes the default `1` before the
+    // call, so **an absent argument ENABLES** the mode. `nil` disables; a number goes through
+    // `__ftol` so `0` and `0.5` are false and `-1` is true; `""` matches nothing in the
+    // off/disabled/on/enabled chain and falls to the default, so it ENABLES; `"0"` disables.
+    // [`crate::script::binding_abi::bool_or_default`] already models every arm.
+    //
+    // **The getter answers the NUMBER 1 or nil**, never a boolean (`0x799815`: the set arm pushes
+    // the double 1.0 via `0x6f3810`, the clear arm pushes nil via `0x6f37f0`) — the same idiom as
+    // `IsShiftKeyDown`. An addon writing `if box:GetAltArrowKeyMode() then` reads either the same;
+    // one writing `== 1` only reads the number.
+    m.set(
+        "SetAltArrowKeyMode",
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            // `MultiValue`, not `Value`, because the reference DISTINGUISHES absent from nil here
+            // and mlua's `Value` cannot: `0x7996e0` pushes the default `1` before the call, so
+            // `SetAltArrowKeyMode()` enables while `SetAltArrowKeyMode(nil)` disables.
+            let args: Vec<Value> = args.into_iter().collect();
+            let on = crate::script::binding_abi::bool_or_default(args.first(), true);
+            with_editbox(lua, &this, |eb| eb.alt_arrow_key_mode = on)?;
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "GetAltArrowKeyMode",
+        lua.create_function(|lua, this: Table| {
+            let on = with_editbox(lua, &this, |eb| eb.alt_arrow_key_mode)?;
+            Ok(if on { Value::Integer(1) } else { Value::Nil })
+        })?,
+    )?;
+
     for (name, set) in flag_setters() {
         let refresh_justify = name == "SetMultiLine";
         m.set(
@@ -307,12 +387,11 @@ fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
 type FlagSetter = (&'static str, fn(&mut EditBoxState, bool));
 
 /// The config-flag setters, in one place so the loader and the Lua surface share the list.
-fn flag_setters() -> [FlagSetter; 5] {
+fn flag_setters() -> [FlagSetter; 4] {
     [
         ("SetAutoFocus", |eb, on| eb.auto_focus = on),
         ("SetNumeric", |eb, on| eb.numeric = on),
         ("SetPassword", |eb, on| eb.password = on),
         ("SetMultiLine", |eb, on| eb.multi_line = on),
-        ("SetIgnoreArrows", |eb, on| eb.ignore_arrows = on),
     ]
 }

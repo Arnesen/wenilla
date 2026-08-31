@@ -245,14 +245,18 @@ fn an_addon_may_call_gametooltip_onload_the_reference_way_with_no_argument() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // The tint the bare call was there to apply (ref-GameTooltip.lua l.79-82's two colours).
-    // Compared as f32: the colours make a round trip through the arena's f32 storage.
+    // The tint the bare call was there to apply (ref-GameTooltip.lua l.79-82's two colours),
+    // QUANTIZED: the reference's backdrop colour field is a packed `0xAARRGGBB` byte quad and the
+    // setter converts `×255 + 0.5` through `__ftol` (wow-re `numeric-arg-coercion-law.md` Q4), so
+    // `0.09` stores as 23 and reads back as `23/255`. This used to compare against `0.09` exactly,
+    // which was our lossless `[f32; 4]` showing through a store the client cannot make.
+    let q = |x: f32| f32::from((x * 255.0 + 0.5) as u8) / 255.0;
     let (r, g, b) = s
         .eval::<(f32, f32, f32)>("return MyTip:GetBackdropColor()")
         .unwrap();
     assert_eq!(
         (r, g, b),
-        (0.09, 0.09, 0.19),
+        (q(0.09), q(0.09), q(0.19)),
         "GameTooltip_OnLoad tinted the plate — TOOLTIP_DEFAULT_BACKGROUND_COLOR"
     );
 

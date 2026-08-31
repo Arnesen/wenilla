@@ -90,6 +90,15 @@ pub(super) struct Outcome {
     pub grounded: bool,
     /// A jump took off this frame.
     pub jumped: bool,
+    /// This frame's take-off was a **server-aimed knockback**, not a jump (decision 1702). Implies
+    /// [`Self::jumped`] — the arc bookkeeping cannot tell them apart and must not — but the wire can:
+    /// `MSG_MOVE_JUMP` has exactly one emission site in the reference image, the move-command drain's
+    /// jump arm (wow-re, decision 1464), so a knockback's launch announces itself with
+    /// `CMSG_MOVE_KNOCK_BACK_ACK` and nothing else. Sending a JUMP for it would also be an
+    /// instant `CHEAT_TYPE_OVERSPEED_JUMP` — the one jump check vmangos does *not* exempt during a
+    /// knockback (`MovementAnticheat.cpp:650`), and a knockback's horizontal speed is well over run
+    /// speed by design.
+    pub knocked: bool,
     /// The standstill-jump air nudge fired (re-seeds the frozen airborne direction flags).
     pub air_nudged: bool,
     /// The collider entity of the walkable floor supporting us — the end-of-frame snap probe's
@@ -113,6 +122,7 @@ pub(super) fn step(
     speed: f32,
     want_jump: bool,
     wire_jump: bool,
+    knockback: Option<Vec3>,
     water_floor: Option<f32>,
 ) -> Outcome {
     let dt = time.delta_secs();
@@ -235,11 +245,37 @@ pub(super) fn step(
     let grounded = on_floor || player.wedged;
 
     let mut jumped = false;
+    let mut knocked = false;
     if held || anchored {
         // Frozen: the settle's hold (no velocity until the ground loads under us) or the root's
         // anchor. The mover cannot tell them apart — both mean no gravity and no carried momentum.
+        // **A knockback aimed at a frozen body is dropped here**, not deferred: the latch was already
+        // consumed by the caller, and `knocked` stays false so no ack goes out — we did not fly it.
+        // The root case is the reference's own law (`CMovement::Jump` refuses under `0x1000`, and
+        // `SetRoot`'s StopFalling means nothing can enter FALLING while rooted at all — 0880), and
+        // the server will not have sent one anyway (`Unit::KnockBack` returns early on
+        // `UNIT_STATE_STUNNED | UNIT_STATE_ROOT`).
         player.vel_y = 0.0;
         player.horiz_vel = Vec3::ZERO;
+    } else if let Some(launch) = knockback {
+        // **The knockback launch** (decision 1702) — the server aims a jump and we fly it. It is the
+        // one take-off that seeds BOTH axes at once: the vertical is not `JUMP_SPEED` and the
+        // horizontal is not our input, they are the spell's, absolute in world XY and unrelated to
+        // where we are facing or which keys are down. Everything downstream is a jump's: the arc
+        // opens (`jumped`), the horizontal is frozen momentum for its whole flight, gravity carries
+        // it, and it closes with an ordinary `MSG_MOVE_FALL_LAND` — which is also what clears the
+        // server's own knockback grace (`IsFallEndOpcode` -> `m_knockBack = false`).
+        //
+        // It takes no hover refusal and no already-falling refusal. Hover's is
+        // `CMovement::Jump(force = 1)`'s alone (`0x7c623a`, skipped by the wire's `force = 0` door —
+        // 1620), and being knocked back mid-air is exactly what a knockback is for; the server's own
+        // gate (`Unit::KnockBack`) tests stun, root and a live spline, never FALLING.
+        player.vel_y = launch.y;
+        player.horiz_vel = Vec3::new(launch.x, 0.0, launch.z);
+        player.wedged = false;
+        player.steep_support = false;
+        jumped = true;
+        knocked = true;
     } else if grounded {
         player.vel_y = 0.0;
         // **HOVER refuses the jump** — the FIRST test in `CMovement::Jump 0x7c6230`
@@ -282,7 +318,10 @@ pub(super) fn step(
     // frozen takeoff momentum. (Both arms below are already inert under a root — the caller zeroes
     // `dir`, so `moving` is false and `input_horiz` is zero — but the anchor says it itself rather
     // than inheriting it from a gate three functions away.)
-    if grounded && !anchored {
+    if knocked {
+        // The launch owns both axes — a knockback fired from standing ground is still `grounded`
+        // this frame, and the walk arm below would hand our momentum straight back to the keys.
+    } else if grounded && !anchored {
         player.horiz_vel = input_horiz;
     } else if !held && !anchored && moving && player.horiz_vel.length_squared() < 0.01 {
         // Air control: one nudge to steer a jump that took off from a standstill (a moving jump
@@ -467,6 +506,7 @@ pub(super) fn step(
         held,
         grounded,
         jumped,
+        knocked,
         air_nudged,
         ground: if grounded && !held {
             ground_entity
@@ -2079,6 +2119,7 @@ mod tests {
                             7.0,
                             false,
                             false,
+                            None,
                             Some(SURFACE),
                         );
                     }
@@ -2150,6 +2191,7 @@ mod tests {
                             7.0,
                             false,
                             false,
+                            None,
                             Some(SURFACE),
                         );
                     }
@@ -2232,6 +2274,7 @@ mod tests {
                             SPEED,
                             false,
                             false,
+                            None,
                             Some(SURFACE),
                         );
                     }
@@ -2309,6 +2352,7 @@ mod tests {
                         true,
                         false,
                         None,
+                        None,
                     );
                     (out.jumped, player.vel_y)
                 })
@@ -2358,6 +2402,7 @@ mod tests {
                         want_jump,
                         wire_jump,
                         None,
+                        None,
                     );
                     (out.jumped, player.vel_y)
                 };
@@ -2373,6 +2418,120 @@ mod tests {
             wire,
             (true, JUMP_SPEED),
             "`force = 0` skips that test and takes off on the land seed `0xc0fe93d8`"
+        );
+    }
+
+    /// **The knockback launch seeds BOTH axes, overrides the keys, and is refused only by the
+    /// anchor** (decision 1702).
+    ///
+    /// The three things that make it a different take-off from every other one, in one fixture. Its
+    /// vertical is not `JUMP_SPEED`; its horizontal is the server's, not `input_horiz` — the arm
+    /// that would otherwise hand our momentum straight back to whatever key is held, because a
+    /// knockback fired from standing ground is still `grounded` on its launch frame; and the refusal
+    /// is `MOVEFLAG_ROOT`, which is the *only* thing the reference's drain tests before applying one
+    /// (`0x615c71 test ah,0x10` → the kind-28 table byte is 0 → the popped record is discarded, so
+    /// no apply and no ack). The control is the same launch, unrooted, on a body running the other
+    /// way.
+    #[test]
+    fn a_knockback_launch_overrides_the_keys_and_only_a_root_refuses_it() {
+        let flat: [(f32, f32); 2] = [(-3.0, 0.0), (3.0, 0.0)];
+        // Due east at 25 yd/s with 12 yd/s of lift, while the player holds "run west" at 7 yd/s.
+        const PUSH: Vec3 = Vec3::new(25.0, 12.0, 0.0);
+        let (free, rooted) = world_from_profile(&flat)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let knock = |rooted: bool| {
+                    let mut player = Player {
+                        modes: super::super::state::MoveModes {
+                            rooted,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let out = step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        true,        // moving …
+                        Vec3::NEG_X, // … the other way, at a run
+                        7.0,
+                        false,
+                        false,
+                        Some(PUSH),
+                        None,
+                    );
+                    (out.jumped, out.knocked, player.vel_y, player.horiz_vel)
+                };
+                (knock(false), knock(true))
+            })
+            .unwrap();
+
+        let (jumped, knocked, vel_y, horiz) = free;
+        assert!(
+            jumped && knocked,
+            "the launch opens an arc, and says which kind it was: {free:?}"
+        );
+        assert_eq!(
+            vel_y, PUSH.y,
+            "the vertical is the server's take-off speed, not JUMP_SPEED ({JUMP_SPEED})"
+        );
+        assert_eq!(
+            horiz,
+            Vec3::new(PUSH.x, 0.0, PUSH.z),
+            "the horizontal is the server's too — the held key must not claw it back"
+        );
+
+        assert_eq!(
+            rooted,
+            (false, false, 0.0, Vec3::ZERO),
+            "a rooted body is anchored: no launch, and `knocked` false so no ack goes out either"
+        );
+    }
+
+    /// **The wire's down-positive `zspeed` becomes upward lift, and comes back out unchanged.**
+    ///
+    /// The one place a sign error would be silent in both directions at once: the launch quad's
+    /// `zspeed` is negative for a *rising* knockback (`0x7c61f0` stores it verbatim into the same
+    /// `CMovement+0xa0` a jump seeds with `0xc0fe93d8` = −7.955547), our mover works in +up, and the
+    /// ack has to echo the original value. Flip the convention anywhere along that path and the
+    /// body is driven into the ground while the server is told we rose.
+    #[test]
+    fn a_rising_knockback_carries_negative_wire_zspeed_and_positive_lift() {
+        let launch = benilla_protocol::JumpInfo {
+            zspeed: -12.0, // down-positive: negative IS upward
+            cos_angle: 1.0,
+            sin_angle: 0.0,
+            xy_speed: 25.0,
+        };
+        // The controller's resolve, verbatim (`player::control`).
+        let bevy_launch = benilla_assets::coords::wow_to_bevy([
+            launch.cos_angle * launch.xy_speed,
+            launch.sin_angle * launch.xy_speed,
+            -launch.zspeed,
+        ]);
+        assert_eq!(bevy_launch.y, 12.0, "a negative wire zspeed lifts the body");
+
+        // …and the round trip back out, as `stream_self_movement` builds the tail: `jump_zspeed` is
+        // the mover's +up take-off speed, and the wire negates it again.
+        let jump_zspeed = bevy_launch.y;
+        assert_eq!(
+            -jump_zspeed, launch.zspeed,
+            "the echo must be bit-identical — the server matches it within 0.01 before relaying"
+        );
+        // The horizontal survives the basis round trip exactly, which is what lets the ack's tail
+        // and the mover's live state agree without either being re-derived from the other.
+        let back = benilla_assets::coords::bevy_to_wow(bevy_launch.with_y(0.0));
+        assert_eq!(
+            [back[0], back[1]],
+            [
+                launch.cos_angle * launch.xy_speed,
+                launch.sin_angle * launch.xy_speed
+            ],
+            "world XY is absolute and survives WoW → Bevy → WoW"
         );
     }
 
@@ -2413,6 +2572,7 @@ mod tests {
                         0.0,
                         false,
                         false,
+                        None,
                         Some(SURFACE),
                     );
                     (player.pos.y, player.vel_y)
@@ -2489,6 +2649,7 @@ mod tests {
                             7.0,
                             false,
                             false,
+                            None,
                             Some(SURFACE),
                         );
                         low = low.min(player.pos.y);

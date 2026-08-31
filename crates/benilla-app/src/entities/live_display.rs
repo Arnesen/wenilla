@@ -70,12 +70,28 @@ pub(super) struct ScaleEase {
 /// (a real morph never zeroes it; the create block's absent-is-zero fold means `0` also reads
 /// "never sent", so neither tears a visual down to a cube).
 fn live_display_id(kind: EntityKind, store: &ObjectStore) -> Option<u32> {
-    let raw = match kind {
-        EntityKind::Unit | EntityKind::Player => store.0.unit_displayid(),
-        EntityKind::GameObject => store.0.gameobject_displayid(),
+    match kind {
+        EntityKind::Unit | EntityKind::Player => store
+            .0
+            .unit_displayid()
+            .filter(|&d| d > 0)
+            .map(|d| d as u32),
+        EntityKind::GameObject => store
+            .0
+            .gameobject_displayid()
+            .filter(|&d| d > 0)
+            .map(|d| d as u32),
+        // A corpse's body display (decision 1706). It is not expected to move — the field is a
+        // death-time snapshot — but it is the same field the create interpreted, so the same
+        // differ answers for it. **Not** covered here: the flesh→bones flip, which the reference
+        // reacts to with a full model reload (its `CORPSE_FIELD_FLAGS` mirror handler
+        // `0x5d5fa0`→`0x5d6d60`). vmangos cannot produce it — the conversion destroys the corpse
+        // object and creates a *separate* bones object under a new guid (`Map.cpp:3625`,
+        // `RemoveCorpses`) — so the reload path is deliberately unbuilt rather than speculatively
+        // modelled; see decision 1706's named omissions.
+        EntityKind::Corpse => store.0.corpse_display_id(),
         _ => None,
-    }?;
-    (raw > 0).then_some(raw as u32)
+    }
 }
 
 /// Diff each attached entity's live descriptor appearance against what its visual was built with,
@@ -154,7 +170,7 @@ pub(super) fn refresh_live_display(
         // a scale the create deliberately floored to 1.0.
         let scaled_kind = matches!(
             net.kind,
-            EntityKind::Unit | EntityKind::Player | EntityKind::GameObject
+            EntityKind::Unit | EntityKind::Player | EntityKind::GameObject | EntityKind::Corpse
         );
         if let Some(live) = store.0.object_scale_x().filter(|s| *s > 0.0 && scaled_kind) {
             if live != net.scale {

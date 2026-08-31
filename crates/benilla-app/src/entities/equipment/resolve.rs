@@ -203,12 +203,23 @@ pub(in crate::entities) fn resolve_equipment(
     // explicit counters and never resource change ticks: `templates` is `ResMut` in this very
     // system (ask-once misses write it), so a tick gate would read its own writes and never
     // close.
-    mut last_epochs: Local<Option<(u64, u64)>>,
+    mut last_epochs: Local<Option<(u64, u64, u64)>>,
+    // The guild identity cache (decision 1257) — `ResMut` because it is LAZY: the miss below is
+    // what sends the `CMSG_GUILD_QUERY` whose answer paints the tabard. `Option` for the same
+    // reason `creatures` is: a harness without the UI plugins still resolves equipment.
+    mut guilds: Option<ResMut<crate::ui_guild::GuildState>>,
 ) {
     let Some(mut held) = held else {
         return;
     };
-    let epochs = (templates.object_epoch(), templates.template_epoch());
+    // The guild cache's landed counter joins the item epochs for the same reason those are here:
+    // a `CMSG_GUILD_QUERY` answered three frames after a player spawned changes what that player's
+    // tabard paints, and nothing about their descriptor or the item cache moves to say so.
+    let epochs = (
+        templates.object_epoch(),
+        templates.template_epoch(),
+        guilds.as_ref().map_or(0, |g| g.identity_generation()),
+    );
     let caches_moved = last_epochs.replace(epochs) != Some(epochs)
         || creatures.as_ref().is_some_and(|c| c.is_changed())
         || enchants.as_ref().is_some_and(|e| e.is_changed());
@@ -311,6 +322,13 @@ pub(in crate::entities) fn resolve_equipment(
             if hide_helm {
                 eq.helm = 0;
             }
+            // The guild tabard (decision 1704). Resolved for every player, tabard worn or not —
+            // the composite's own gate is the tabard DISPLAY's flag, and asking here keeps the
+            // query on the same lazy-cache idiom as every other read of that cache. A miss answers
+            // `None` for this frame and re-runs when the response bumps the counter above.
+            eq.emblem = guilds
+                .as_deref_mut()
+                .and_then(|g| crate::ui_guild::unit_guild_emblem(s, g, &net));
             if current_equipment != Some(&eq) {
                 commands.entity(entity).insert(eq);
             }
@@ -622,16 +640,221 @@ pub(in crate::entities) fn resolve_equipment(
     }
 }
 
+/// **The corpse's dress** (decision 1706) — [`resolve_equipment`]'s sibling for a `TYPEID_CORPSE`
+/// body, kept apart from it rather than threaded through it because almost nothing it does applies.
+///
+/// A corpse's gear is a *snapshot*, and it is already resolved: the 19 `CORPSE_FIELD_ITEM` slots
+/// carry `DisplayInfoID | (InventoryType << 24)` (vmangos `Player.cpp:4821`), so there is no item
+/// entry, no template round trip, and therefore no `settled` handshake to wait on — the answer is
+/// complete the moment the descriptor lands. There is likewise no sheath state, no draw/stow
+/// ceremony, no nock lane, no quiver, no enchant scan and no glow: the reference's corpse dress
+/// (`0x5d6260`) is one flat loop over the 19 slots into `0x478cb0`, and nothing else.
+///
+/// **Three slots never dress**, and the two shapes are different:
+/// - slot 0 (head) when this corpse's own `CORPSE_FLAG_HIDE_HELM 0x08` is set, and slot 14 (back)
+///   when `HIDE_CLOAK 0x10` is (`0x5d6465`/`0x5d6470` — its own bits on its own field, snapshotted
+///   from `PLAYER_FLAGS` at death; wow-re `helm-cloak-hide.md` §2b). Suppression is a display id of
+///   **zero**, the same shape the player lane uses (decision 1472), so the whole downstream chain —
+///   the helm's attach model, its RF-0083 hide-masks, the cloak's geoset and cape texture — follows
+///   for free.
+/// - slots 15/16/17 (mainhand, offhand, ranged) — **always**. Ranged is skipped outright
+///   (`0x5d644e`); the two weapon slots take a branch that looks up the packed item word as an
+///   *object guid* (`0x5d649b` → `0x468460`, typemask 2) and can therefore never resolve. A corpse
+///   wears armour, not weapons. See this module's sibling `entities::corpse` for why we reproduce
+///   the outcome and not the dead lookup.
+///
+/// A **bone pile** wears nothing at all (`0x5d6291`'s early skip — it builds no character component
+/// in the first place). It still gets an empty [`Equipment`], because that component is also the
+/// attach gate: a corpse whose descriptor has not landed must wait a frame rather than composite a
+/// naked body it would never re-dress (the corpse lane has no re-dress — its gear cannot change).
+#[allow(clippy::type_complexity)] // one query's tuple + its change filter
+pub(in crate::entities) fn resolve_corpse_equipment(
+    mut commands: Commands,
+    corpses: Query<
+        (Entity, &NetEntity, Ref<ObjectStore>, Option<&Equipment>),
+        Or<(Changed<ObjectStore>, Without<Equipment>)>,
+    >,
+    held: Option<ResMut<ItemDisplays>>,
+    asset_server: Res<AssetServer>,
+) {
+    let Some(mut held) = held else {
+        return;
+    };
+    for (entity, net, store, current) in &corpses {
+        if net.kind != EntityKind::Corpse {
+            continue;
+        }
+        let s = &store.0;
+        let bones = s.corpse_is_bones();
+        // The armour composite + the two preference-gated slots. `settled` is unconditionally
+        // true: every id here is final on arrival.
+        let mut eq = Equipment {
+            settled: true,
+            ..default()
+        };
+        if !bones {
+            for (slot, idx) in COMPOSITE_SLOTS {
+                eq.bodyslots[idx] = s.corpse_item(slot).map_or(0, |(display, _)| display);
+            }
+            if !s.corpse_hides_cloak() {
+                eq.cloak = s.corpse_item(14).map_or(0, |(display, _)| display);
+            }
+            if !s.corpse_hides_helm() {
+                eq.helm = s.corpse_item(0).map_or(0, |(display, _)| display);
+            }
+        }
+        if current != Some(&eq) {
+            commands.entity(entity).insert(eq);
+        }
+        // The two attach sub-models a corpse can wear: the helm (equipment slot 0, per-race/sex
+        // file) and the shoulder pair (slot 2, one display row → a left/right model pair). Both are
+        // ordinary `0x478cb0` slots in the reference's loop; they are attachments on our side
+        // because that is how a character body carries them.
+        let mut slots: [Option<HeldSlot>; ATTACH_SLOTS] = [None; ATTACH_SLOTS];
+        if let (false, Some(look)) = (bones, s.corpse_look()) {
+            let (race, sex) = (look.race, look.sex.min(1));
+            if eq.helm != 0 {
+                let kind = ItemModelKind::Helm { race, sex };
+                ensure_item_model(&mut held, eq.helm, kind, &asset_server);
+                slots[3] = Some(HeldSlot {
+                    display: eq.helm,
+                    kind,
+                    attach: attach_id::HELM,
+                    visual: NO_GLOW,
+                });
+            }
+            // Shoulders carry no hide preference — the reference gates only slots 0 and 0xe.
+            if let Some((shoulder, _)) = s.corpse_item(2) {
+                for (kind, attach, idx) in [
+                    (ItemModelKind::ShoulderLeft, attach_id::SHOULDER_LEFT, 4),
+                    (ItemModelKind::ShoulderRight, attach_id::SHOULDER_RIGHT, 5),
+                ] {
+                    ensure_item_model(&mut held, shoulder, kind, &asset_server);
+                    slots[idx] = Some(HeldSlot {
+                        display: shoulder,
+                        kind,
+                        attach,
+                        visual: NO_GLOW,
+                    });
+                }
+            }
+        }
+        commands.entity(entity).insert(HeldItems { slots });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::prelude::*;
 
+    use super::super::HELD_SLOTS;
     use super::super::{Equipment, HeldItems, ItemDisplays};
-    use super::{ammo_attach, attach_id, placement, resolve_equipment};
+    use super::{ammo_attach, attach_id, placement, resolve_corpse_equipment, resolve_equipment};
     use crate::items::Items;
     use crate::net::{ClientCommand, NetCommands, NetEntity, ObjectStore};
     use benilla_protocol::messages::{ItemInfo, ObjectFields};
     use benilla_protocol::EntityKind;
+
+    /// A corpse's dress is the descriptor, packed (decision 1706): armour off the
+    /// `CORPSE_FIELD_ITEM` slots as ItemDisplayInfo ids with no template round trip, the head and
+    /// back slots suppressed by the corpse's OWN `CORPSE_FLAG_HIDE_HELM`/`HIDE_CLOAK` bits, and
+    /// **never** a weapon or a ranged slot.
+    #[test]
+    fn corpse_dresses_from_its_own_snapshot() {
+        use benilla_protocol::messages::ObjectType;
+
+        /// `CORPSE_FIELD_ITEM + slot` = field 13 + slot, packing
+        /// `DisplayInfoID | (InventoryType << 24)`.
+        fn item(slot: u16, display: u32, inv: u32) -> (u16, u32) {
+            (13 + slot, display | (inv << 24))
+        }
+        // Head 900, shoulders 901, chest 902, back 903, mainhand 904, ranged 905 — and race 1 /
+        // sex 0 in CORPSE_FIELD_BYTES_1 bytes 1/2.
+        let dressed = |flags: u32| {
+            let mut pairs = vec![
+                item(0, 900, 1),
+                item(2, 901, 3),
+                item(4, 902, 5),
+                item(14, 903, 16),
+                item(15, 904, 13),
+                item(17, 905, 15),
+                (32, 1 << 8),
+                (33, 0),
+            ];
+            if flags != 0 {
+                pairs.push((35, flags));
+            }
+            ObjectStore(ObjectFields::from_pairs(&pairs).into_created(ObjectType::Corpse))
+        };
+        let run = |store: ObjectStore| {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+            app.insert_resource(ItemDisplays::icons_for_tests(
+                benilla_formats::ItemDisplayCatalog::from_displays(
+                    std::collections::HashMap::new(),
+                ),
+            ));
+            let corpse = app
+                .world_mut()
+                .spawn((
+                    NetEntity {
+                        kind: EntityKind::Corpse,
+                        display_id: Some(49),
+                        scale: 1.0,
+                    },
+                    store,
+                ))
+                .id();
+            app.add_systems(Update, resolve_corpse_equipment);
+            app.update();
+            let w = app.world();
+            (
+                *w.get::<Equipment>(corpse).expect("corpse dressed"),
+                w.get::<HeldItems>(corpse).expect("attach slots").clone(),
+            )
+        };
+
+        let (eq, held) = run(dressed(0));
+        // Chest is composite index 1 (the COMPOSITE_SLOTS table's equipment slot 4).
+        assert_eq!(eq.bodyslots[1], 902, "chest off CORPSE_FIELD_ITEM[4]");
+        assert_eq!(eq.helm, 900);
+        assert_eq!(eq.cloak, 903);
+        assert!(
+            eq.settled,
+            "a corpse's gear is final on arrival — never pending"
+        );
+        assert!(held.slots[3].is_some(), "the helm attaches");
+        assert!(
+            held.slots[4].is_some() && held.slots[5].is_some(),
+            "the shoulder pair attaches off equipment slot 2"
+        );
+        // The three slots the reference never dresses: mainhand, offhand, ranged.
+        assert!(
+            held.slots[..HELD_SLOTS].iter().all(Option::is_none),
+            "a corpse wears armour, never weapons"
+        );
+
+        // HIDE_HELM 0x08 / HIDE_CLOAK 0x10 — this corpse's own bits, suppressing by a ZERO id so
+        // the geoset masks and the attach model fall away together.
+        let (eq, held) = run(dressed(0x08));
+        assert_eq!(eq.helm, 0);
+        assert_eq!(eq.cloak, 903, "the cloak bit is a different bit");
+        assert!(held.slots[3].is_none(), "no helm model either");
+        let (eq, _) = run(dressed(0x10));
+        assert_eq!(eq.cloak, 0);
+        assert_eq!(eq.helm, 900);
+
+        // BONES 0x01 — no character component at all, so nothing is worn however full the slots.
+        let (eq, held) = run(dressed(0x01));
+        assert_eq!(
+            eq,
+            Equipment {
+                settled: true,
+                ..default()
+            }
+        );
+        assert!(held.slots.iter().all(Option::is_none));
+    }
 
     /// The ranged slot's whole placement law: in hand only while ranged-drawn (state 2) — bow
     /// (INVTYPE_RANGED 15) to the left hand, gun/crossbow/wand/thrown (RANGEDRIGHT 26 / THROWN 25)

@@ -70,12 +70,14 @@ impl Default for ChatWindows {
                 // they simply land in no window until a player registers them. A damage meter
                 // reads them either way.
                 //
-                // Five names in that block have no producer yet and so no group here:
-                // COMBAT_MISC_INFO, COMBAT_FRIENDLY_DEATH, COMBAT_HOSTILE_DEATH,
-                // COMBAT_FACTION_CHANGE, SPELL_TRADESKILLS, SPELL_AURA_GONE_SELF,
-                // SPELL_ITEM_ENCHANTMENTS and SPELL_BREAK_AURA — the leaves of the block whose
-                // wire sources are still undecoded.
+                // The block is now registered WHOLE (1703): the eight names 1571 had to leave
+                // out — COMBAT_MISC_INFO, the death pair, SPELL_TRADESKILLS, SPELL_AURA_GONE_SELF,
+                // SPELL_ITEM_ENCHANTMENTS, SPELL_BREAK_AURA and COMBAT_FACTION_CHANGE — all have
+                // producers now and sit in the shipped file's own order. `SPELL_FAILED_LOCALPLAYER`
+                // is deliberately absent: the reference's own chat-cache registers it in NO window,
+                // so a failed cast lands in the log only for a player who adds it.
                 vec![
+                    ChatGroup::Own(ChatEventKind::CombatMiscInfo),
                     ChatGroup::Own(ChatEventKind::CombatSelfHits),
                     ChatGroup::Own(ChatEventKind::CombatSelfMisses),
                     ChatGroup::Own(ChatEventKind::CombatPetHits),
@@ -84,6 +86,8 @@ impl Default for ChatWindows {
                     ChatGroup::Own(ChatEventKind::CombatHostilePlayerMisses),
                     ChatGroup::Own(ChatEventKind::CombatCreatureVsSelfHits),
                     ChatGroup::Own(ChatEventKind::CombatCreatureVsSelfMisses),
+                    ChatGroup::Own(ChatEventKind::CombatFriendlyDeath),
+                    ChatGroup::Own(ChatEventKind::CombatHostileDeath),
                     // XP joined with the ding arc (0304) and honour with the honor arc (1512);
                     // the reference registers the two one line apart (ChatFrame.lua l.2428-2429).
                     ChatGroup::Own(ChatEventKind::CombatXpGain),
@@ -96,13 +100,18 @@ impl Default for ChatWindows {
                     ChatGroup::Own(ChatEventKind::SpellHostilePlayerBuff),
                     ChatGroup::Own(ChatEventKind::SpellCreatureVsSelfDamage),
                     ChatGroup::Own(ChatEventKind::SpellCreatureVsSelfBuff),
+                    ChatGroup::Own(ChatEventKind::SpellTradeskills),
                     ChatGroup::Own(ChatEventKind::SpellDamageShieldsOnSelf),
+                    ChatGroup::Own(ChatEventKind::SpellAuraGoneSelf),
+                    ChatGroup::Own(ChatEventKind::SpellItemEnchantments),
+                    ChatGroup::Own(ChatEventKind::SpellBreakAura),
                     ChatGroup::Own(ChatEventKind::SpellPeriodicSelfDamage),
                     ChatGroup::Own(ChatEventKind::SpellPeriodicSelfBuffs),
                     ChatGroup::Own(ChatEventKind::SpellPeriodicHostilePlayerDamage),
                     ChatGroup::Own(ChatEventKind::SpellPeriodicHostilePlayerBuffs),
                     ChatGroup::Own(ChatEventKind::SpellPeriodicCreatureDamage),
                     ChatGroup::Own(ChatEventKind::SpellPeriodicCreatureBuffs),
+                    ChatGroup::Own(ChatEventKind::CombatFactionChange),
                     ChatGroup::Money,
                 ],
             ],

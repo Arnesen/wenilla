@@ -116,9 +116,14 @@ pub(super) fn apply_net_updates(
         MessageWriter<EnteredWorldMessage>,
         MessageWriter<LoggedOutMessage>,
         MessageWriter<super::SpeedChangeMessage>,
-        // The ack'd movement-mode family (decisions 0308, 0866): a mode the server granted our
-        // mover, which the player controller applies and answers with its live pose.
-        MessageWriter<super::MoveModeMessage>,
+        // The two server-authored mover edges the controller both *applies* and *answers*, paired to
+        // stay inside Bevy's 16-element tuple limit — and they do belong together: a granted mode
+        // (decisions 0308, 0866) and a knockback launch (decision 1702) are the same handshake, an
+        // edge the server may not act on until our own live pose comes back.
+        (
+            MessageWriter<super::MoveModeMessage>,
+            MessageWriter<super::KnockBackMessage>,
+        ),
         // The login screen's dialog + reconnect-policy feed (decision 0539).
         MessageWriter<super::LoginStageMessage>,
         // The login queue's position feed (decision 1681).
@@ -448,7 +453,7 @@ pub(super) fn apply_net_updates(
         mut entered_world,
         mut logged_out,
         mut speed_changes,
-        mut move_modes,
+        (mut move_modes, mut knockbacks),
         mut login_stages,
         mut login_queued,
         mut login_failures,
@@ -750,6 +755,14 @@ pub(super) fn apply_net_updates(
                 session::reputations(standings, &mut reputations)
             }
             SessionEvent::ReputationDelta { standings } => {
+                // The chat line reads the deltas against the store, so it runs BEFORE the
+                // overwrite — after it, every delta is zero.
+                combat_chat::faction_standing(
+                    &standings,
+                    &reputations,
+                    ui_actions.1 .2.as_deref(),
+                    &mut chat_log,
+                );
                 session::reputation_delta(standings, &mut reputations, &mut quest)
             }
             SessionEvent::ReputationVisible { list_id } => {
@@ -1241,9 +1254,7 @@ pub(super) fn apply_net_updates(
             SessionEvent::SpiritHealerConfirm { npc } => {
                 death::spirit_healer_confirm(npc, &mut death_net)
             }
-            SessionEvent::DurabilityDamageDeath => {
-                death::durability_damage_death(&mut ui_actions.14)
-            }
+            SessionEvent::DurabilityDamageDeath => death::durability_damage_death(&mut chat_log),
             SessionEvent::MoveMode {
                 guid,
                 counter,
@@ -1258,6 +1269,11 @@ pub(super) fn apply_net_updates(
                 &mut death_net,
                 &mut move_modes,
             ),
+            SessionEvent::KnockBack {
+                guid,
+                counter,
+                launch,
+            } => session::knock_back(guid, counter, launch, &self_guid, &mut knockbacks),
             SessionEvent::ItemTemplate { entry, info } => {
                 item_template(entry, info.map(|b| *b), &mut items)
             }
@@ -1362,6 +1378,51 @@ pub(super) fn apply_net_updates(
                     &mut audio.15 .1,
                 )
             }
+            // ── the combat log's completeness block (1703) ────────────────────────────────
+            // Every one of these is chat-only: they carry no damage number, so unlike their
+            // neighbours above they have no floating-text twin to call.
+            SessionEvent::PartyKillLog(k) => {
+                combat_chat::party_kill_log(k, &chat_ctx!(), &stores, &transforms, &mut chat_log)
+            }
+            SessionEvent::SpellInstaKillLog(k) => combat_chat::spell_insta_kill_log(
+                k,
+                &chat_ctx!(),
+                &stores,
+                &transforms,
+                &mut chat_log,
+            ),
+            SessionEvent::ProcResist(o) => combat_chat::spell_outcome_log(
+                o,
+                false,
+                &chat_ctx!(),
+                &stores,
+                &transforms,
+                &mut chat_log,
+            ),
+            SessionEvent::SpellOrDamageImmune(o) => combat_chat::spell_outcome_log(
+                o,
+                true,
+                &chat_ctx!(),
+                &stores,
+                &transforms,
+                &mut chat_log,
+            ),
+            SessionEvent::SpellDispelLog(d) => {
+                combat_chat::spell_dispel_log(&d, &chat_ctx!(), &stores, &transforms, &mut chat_log)
+            }
+            SessionEvent::DispelFailed(d) => {
+                combat_chat::dispel_failed(&d, &chat_ctx!(), &stores, &transforms, &mut chat_log)
+            }
+            SessionEvent::EnchantmentLog(e) => {
+                combat_chat::enchantment_log(e, &chat_ctx!(), &stores, &transforms, &mut chat_log)
+            }
+            SessionEvent::SpellLogExecute(x) => combat_chat::spell_log_execute(
+                &x,
+                &chat_ctx!(),
+                &stores,
+                &transforms,
+                &mut chat_log,
+            ),
             SessionEvent::XpGain(x) => {
                 combat_log::xp_gain(x, &index, &self_guid, &mut audio.7, &mut chat_log)
             }
@@ -1544,13 +1605,22 @@ pub(super) fn apply_net_updates(
             SessionEvent::PlaySpellVisual { unit, kit_id } => {
                 anim::play_spell_visual(unit, kit_id, &index, play_seq, &mut audio.12)
             }
-            SessionEvent::EnvironmentalDamageLog(e) => anim::environmental_damage_log(
-                e,
-                &index,
-                aura.5.as_deref(),
-                play_seq,
-                &mut audio.12,
-            ),
+            SessionEvent::EnvironmentalDamageLog(e) => {
+                combat_chat::environmental_damage_log(
+                    e,
+                    &chat_ctx!(),
+                    &stores,
+                    &transforms,
+                    &mut chat_log,
+                );
+                anim::environmental_damage_log(
+                    e,
+                    &index,
+                    aura.5.as_deref(),
+                    play_seq,
+                    &mut audio.12,
+                )
+            }
             // The gossip/vendor/trainer NPC-interaction family — arm bodies in `npc`.
             SessionEvent::GossipMenu {
                 npc,

@@ -105,14 +105,17 @@ fn render(looks: &[ChatWindowLook]) -> String {
     let mut out = String::from(HEADER);
     for (i, l) in looks.iter().enumerate() {
         out.push_str(&format!(
-            "WINDOW {}  SIZE {}  COLOR {} {} {} {}  LOCKED {}\n",
+            "WINDOW {}  SIZE {}  COLOR {} {} {} {}  LOCKED {}  DOCKED {}\n",
             i + 1,
             l.font_size,
             l.r,
             l.g,
             l.b,
             l.a,
-            i32::from(l.locked)
+            i32::from(l.locked),
+            // The reference's own spelling: the dock POSITION, and `0` for a window that is not
+            // docked (the shipped rows for windows 3..10 are `DOCKED 0`).
+            l.docked.unwrap_or(0)
         ));
     }
     out
@@ -144,7 +147,12 @@ fn parse(text: &str) -> Vec<(usize, ChatWindowLook)> {
         if index == 0 {
             continue;
         }
-        let mut look = ChatWindowLook::default();
+        // Seeded from the STOCK row for this window, not one flat default: `DOCKED` is the one
+        // field whose shipped value differs per window (1 and 2 are the dock), so a file written
+        // by a build that knew nothing about the key must leave the dock where it shipped rather
+        // than silently undocking both windows — the same leniency `LOCKED` gets below, applied
+        // where a flat default could not express it.
+        let mut look = ChatWindowLook::stock(index - 1);
         let byte = |s: Option<&str>| -> u8 { s.and_then(|v| v.parse::<u8>().ok()).unwrap_or(0) };
         while let Some(key) = it.next() {
             if key.eq_ignore_ascii_case("SIZE") {
@@ -165,6 +173,12 @@ fn parse(text: &str) -> Vec<(usize, ChatWindowLook)> {
                 // read, and the lenient half of it: a file from a build that wrote nothing here
                 // keeps the stock `LOCKED 1` default rather than silently unlocking the window.
                 look.locked = it.next().is_none_or(|v| v.trim() != "0");
+            } else if key.eq_ignore_ascii_case("DOCKED") {
+                // The dock POSITION, 1-based; `0` (and anything unparseable) is "not docked".
+                look.docked = it
+                    .next()
+                    .and_then(|v| v.trim().parse::<u8>().ok())
+                    .filter(|p| *p > 0);
             }
             // Anything else is a key from a build that knows more than this one — skip it and the
             // value it would have consumed cannot be told from the next key, so skip only the key.
@@ -298,7 +312,10 @@ pub(super) fn plugin(app: &mut App) {
 mod tests {
     use super::*;
 
-    fn look(r: u8, g: u8, b: u8, a: u8, font_size: i32) -> ChatWindowLook {
+    /// A look for WINDOW `n` (1-based). The window number is a parameter because `DOCKED` is the
+    /// one field whose stock value differs per window — the dock is windows 1 and 2 — so an
+    /// expectation that does not say which window it is cannot be right for all of them.
+    fn look(n: usize, r: u8, g: u8, b: u8, a: u8, font_size: i32) -> ChatWindowLook {
         ChatWindowLook {
             r,
             g,
@@ -306,6 +323,7 @@ mod tests {
             a,
             font_size,
             locked: true,
+            docked: ChatWindowLook::stock(n - 1).docked,
         }
     }
 
@@ -314,8 +332,8 @@ mod tests {
     #[test]
     fn the_file_round_trips() {
         let looks = vec![
-            look(0, 0, 0, 64, 14),
-            look(255, 128, 0, 255, 0),
+            look(1, 0, 0, 0, 64, 14),
+            look(2, 255, 128, 0, 255, 0),
             ChatWindowLook::default(),
         ];
         let parsed = parse(&render(&looks));
@@ -346,9 +364,9 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (0, look(10, 20, 30, 40, 16)),
-                (1, look(1, 2, 3, 4, 0)),
-                (2, look(0, 0, 0, 0, 12)),
+                (0, look(1, 10, 20, 30, 40, 16)),
+                (1, look(2, 1, 2, 3, 4, 0)),
+                (2, look(3, 0, 0, 0, 0, 12)),
             ]
         );
     }
@@ -360,21 +378,55 @@ mod tests {
     fn the_lock_round_trips_and_an_absent_key_stays_locked() {
         let unlocked = ChatWindowLook {
             locked: false,
-            ..look(0, 0, 0, 64, 14)
+            ..look(1, 0, 0, 0, 64, 14)
         };
         assert!(render(&[unlocked]).contains("LOCKED 0"));
         assert_eq!(parse(&render(&[unlocked])), vec![(0, unlocked)]);
         assert_eq!(
             parse("WINDOW 1  SIZE 14  COLOR 0 0 0 64\n"),
-            vec![(0, look(0, 0, 0, 64, 14))],
+            vec![(0, look(1, 0, 0, 0, 64, 14))],
             "no LOCKED key = the stock LOCKED 1"
         );
+    }
+
+    /// **`DOCKED` round-trips, and an absent key keeps the window's own stock position** — the
+    /// leniency `LOCKED` gets, in the one field where a single flat default could not express it.
+    /// A file written by a build that knew nothing about the key must leave the dock where it
+    /// shipped; seeding every window from one default would have undocked ChatFrame1 and
+    /// ChatFrame2 on the next login of every existing player (1714).
+    #[test]
+    fn dock_positions_round_trip_and_an_absent_key_keeps_the_stock() {
+        let undocked = ChatWindowLook {
+            docked: None,
+            ..look(1, 0, 0, 0, 64, 14)
+        };
+        assert!(render(&[undocked]).contains("DOCKED 0"));
+        assert_eq!(parse(&render(&[undocked])), vec![(0, undocked)]);
+
+        // No DOCKED key at all: window 1 keeps position 1, window 2 keeps 2, window 3 stays out.
+        let got = parse(
+            "WINDOW 1  SIZE 0
+WINDOW 2  SIZE 0
+WINDOW 3  SIZE 0
+",
+        );
+        assert_eq!(
+            got.iter().map(|(_, l)| l.docked).collect::<Vec<_>>(),
+            vec![Some(1), Some(2), None]
+        );
+
+        // And a moved window round-trips at its new position.
+        let moved = ChatWindowLook {
+            docked: Some(3),
+            ..look(1, 0, 0, 0, 0, 0)
+        };
+        assert_eq!(parse(&render(&[moved]))[0].1.docked, Some(3));
     }
 
     /// Junk costs the line it is on and nothing more.
     #[test]
     fn junk_costs_only_its_own_line() {
         let got = parse("WINDOW\nnot a window line\nWINDOW 0 SIZE 1\nWINDOW 2 SIZE 18\n");
-        assert_eq!(got, vec![(1, look(0, 0, 0, 0, 18))]);
+        assert_eq!(got, vec![(1, look(2, 0, 0, 0, 0, 18))]);
     }
 }

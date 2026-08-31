@@ -358,6 +358,11 @@ pub(super) fn spawn_wmo_gameobject_props(
                             on_owner_loss: particles::OwnerLoss::Free,
                             // A placed prop carries no fade component of its own; its emitters
                             // take the doodad distance fade in the sim instead (0827).
+                            // A WMO prop is lit by the CMapDoodadDef provider (`0x6a8050`), not the
+                            // WENTITY one this edge feeds — its interior words come from its own MODD
+                            // colour and are folded at spawn (`PropLight::Interior`). Wiring that twin
+                            // into the emitter lane is a named residual, not this lane's node.
+                            light_node: None,
                             alpha: None,
                         },
                         // A placed prop: the doodad law — which is NOT one arm for life. It re-rolls

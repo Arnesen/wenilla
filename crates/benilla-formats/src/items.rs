@@ -5,7 +5,9 @@
 //! `record_count=29604`; wow-re's `charactermodel` disasm; wow-re's independent dbc-node schema
 //! catalog): 23 fields / 92-byte records. Columns: `0` id (key) · `1`/`2` model name L/R (string) ·
 //! `3`/`4` model texture L/R (string) · `5` icon (string, unread — no consumer yet) · `6`-`8`
-//! geosetGroup[0..2] (u32) · `9` unpinned int (unread) · `10` the ranged-weapon `SpellVisual.dbc`
+//! geosetGroup[0..2] (u32) · `9` **flags** (u32 — the client's `ItemDisplayInfo_inmem[+0x24]`, of
+//! which only **bit 0** is read: the guild-emblem tabard, [`ItemDisplay::takes_guild_emblem`]) ·
+//! `10` the ranged-weapon `SpellVisual.dbc`
 //! id (u32 — the substitute visual a RANGED-attribute spell with no own visual borrows for its
 //! fire animation; byte-verified `0x60d493: mov eax,[eax+0x28]`, wow-re
 //! `throw-ranged-attack-anim.md`) · `11` the `ItemGroupSounds.dbc` id
@@ -76,6 +78,11 @@ pub struct ItemDisplay {
     /// `0` on every non-ranged display; only three distinct nonzero ids exist across the real
     /// table (thrown 98 · bow 5 · gun/rifle 224).
     pub spell_visual: u32,
+    /// The flags word (col 9) — the client's `ItemDisplayInfo_inmem[+0x24]`. Only **bit 0** has a
+    /// reader in the image, and it means *this garment takes the wearer's guild emblem*
+    /// ([`Self::takes_guild_emblem`]); bit 1 appears on four chest/robe rows with no reader found.
+    /// Carried whole rather than as a bool so the unread bits stay visible.
+    pub flags: u32,
     /// The `ItemVisuals.dbc` id (col 22) — the display's **intrinsic glow**: the permanent weapon
     /// glows, resolved to up to five `Spells\Enchantments\*.mdx` models by
     /// [`crate::ItemVisualCatalog`] (decision 0805). **Signed**, because the client reads it that
@@ -110,7 +117,26 @@ impl ItemDisplay {
     pub fn worn_helm_vis(&self) -> Option<[u32; 2]> {
         self.model[0].is_some().then_some(self.helmet_vis)
     }
+
+    /// Whether this display is a **guild-emblem tabard** — the garment whose torso art the wearer's
+    /// guild tabard replaces (`flags & 1`, the client's `0x472ca4 test byte ptr [rec+0x24],1` on the
+    /// tabard equip slot). A tabard that clears the bit keeps its own `TorsoUpper`/`TorsoLower`
+    /// columns; one that sets it has those columns overwritten by the three
+    /// `Textures\GuildEmblems\` layers ([`crate::GuildEmblem`]) whenever the wearer's guild
+    /// identity is known.
+    ///
+    /// **Eleven** of the 29604 shipped rows carry a nonzero `flags`; **seven** set bit 0, and they
+    /// are exactly the tabard-shaped ones (Crusader ×2, Default ×2, Stromgard, Hillsbrad, and
+    /// **20621** — the row item 5976 *Guild Tabard* wears, the only one any 1.12.1 item template
+    /// points at). The other four set bit **1** on chest/robe rows (Samurai plate, the Horde robe
+    /// family) and nothing reads it.
+    pub fn takes_guild_emblem(&self) -> bool {
+        self.flags & FLAG_GUILD_EMBLEM_TABARD != 0
+    }
 }
+
+/// [`ItemDisplay::flags`] bit 0 — see [`ItemDisplay::takes_guild_emblem`].
+const FLAG_GUILD_EMBLEM_TABARD: u32 = 0x1;
 
 /// `ItemDisplayInfo.dbc`, keyed by `displayId` (the id `ItemDisplayInfoID`/`UNIT_VIRTUAL_ITEM_SLOT_DISPLAY`
 /// resolve into — decision 0072).
@@ -163,10 +189,10 @@ pub(crate) fn item_display_info_schema() -> Schema {
     ] {
         s.add_field(SchemaField::new(name, ty));
     }
-    // fields 9..14 (positional): 9 unpinned, 10 the ranged-weapon SpellVisual id, 11 the
+    // fields 9..14 (positional): 9 the flags word, 10 the ranged-weapon SpellVisual id, 11 the
     // ItemGroupSounds id, 12/13 helm-vis.
     for name in [
-        "Unk9",
+        "Flags",
         "SpellVisualID",
         "ItemGroupSoundsID",
         "HelmVisMale",
@@ -211,6 +237,7 @@ fn catalog_from_records(rs: RecordSet) -> ItemDisplayCatalog {
         let icon = str_at(&rs, r, 5).map(|i| format!("Interface\\Icons\\{i}"));
         let group_sounds = u32_at(r, 11).unwrap_or(0);
         let spell_visual = u32_at(r, 10).unwrap_or(0);
+        let flags = u32_at(r, 9).unwrap_or(0);
         let item_visual = u32_at(r, 22).unwrap_or(0) as i32;
         displays.insert(
             id,
@@ -223,6 +250,7 @@ fn catalog_from_records(rs: RecordSet) -> ItemDisplayCatalog {
                 icon,
                 group_sounds,
                 spell_visual,
+                flags,
                 item_visual,
             },
         );

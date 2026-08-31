@@ -184,7 +184,21 @@ pub(crate) struct PlayerUiHover(pub(crate) Option<u32>);
 /// §1). One mechanism, written once here; every reader is ordered after `UiInput` so it sees this
 /// frame's value, not last frame's.
 #[derive(Resource, Default)]
-pub(crate) struct UiKeyboardCapture(pub(crate) bool);
+pub(crate) struct UiKeyboardCapture {
+    /// True while a focused EditBox is eating every key.
+    pub(crate) typing: bool,
+    /// **The four arrow keys are exempt this frame** — the focused box is in alt-arrow mode
+    /// (`ignoreArrows` / `SetAltArrowKeyMode`) and ALT is not held, so the reference's own key
+    /// handler declines LEFT/UP/RIGHT/DOWN at `0x77b1c4` and the strata walk carries them down to
+    /// `CGWorldFrame`, which runs their bindings. That is what lets you turn while the chat box
+    /// has focus (wow-re `ignorearrows-alt-arrow-gate.md`, §5 VERIFIED).
+    ///
+    /// It is a whole-frame flag rather than a per-key one because both of its terms are:
+    /// there is at most one focused box, and ALT is read off the same modifier mirror. Only the
+    /// four arrows may use it — every other key a focused box still swallows, since the
+    /// reference's handler returns 1 on every other path (`0x77b35e`).
+    pub(crate) arrows_fall_through: bool,
+}
 
 /// Set each frame by [`feed_ui_input`]: true for a LEFT press this frame that hit no frame but was
 /// consumed by the UI — the world-drop of a held cursor payload over EMPTY world (0216 §3,
@@ -441,9 +455,26 @@ fn capture_ui_active(capture: Option<Res<crate::run_mode::CaptureMode>>) -> bool
 fn arbitrate_pointer_over_ui(
     egui: Option<Res<EguiPointerOver>>,
     hover: Res<PlayerUiHover>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
     mut over: ResMut<PointerOverUi>,
 ) {
-    over.0 = egui.is_some_and(|e| e.0) || hover.0.is_some();
+    // **A cinematic covers the screen with a frame, so the pointer is over the UI wherever it
+    // is.** That is a fact about the reference's own layout, not a special case: `CinematicFrame`
+    // is `setAllPoints` + `enableMouse="true"`, and while it is up it is the only mouse target the
+    // hit test can reach — because `UIParent:Hide()` has taken every other frame out of it.
+    //
+    // benilla cannot yet reach that answer through the hit test. `crate::cinematic` substitutes
+    // `UiHidden` for the reference's `UIParent:Hide()` (decision 1699, for want of a HUD parented
+    // to `UIParent`), and `UiHidden` also switches the whole mouse feed off — ALT-Z's meaning,
+    // where the world *should* take the mouse. So `feed_ui_input` never hit-tested
+    // `CinematicFrame` at all and the world took every click of a fly-by: right-drag turned the
+    // character, left-click picked targets through the flying camera, the wheel zoomed a rig
+    // nobody could see. **This line states the layout fact directly, and it is the interim, not
+    // the fix** — restoring the 32 dropped `parent="UIParent"` declarations lets the hit test
+    // reach the same answer on its own, and this argument (and this parameter) is then dead code
+    // to delete.
+    let in_cinematic = cinematic.is_some_and(|c| c.is_playing());
+    over.0 = in_cinematic || egui.is_some_and(|e| e.0) || hover.0.is_some();
 }
 
 /// The session lifecycle — the VM's birth, identity, death, and the reload. Every edge function
@@ -749,6 +780,9 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
         }
     }
 }
+
+#[cfg(test)]
+mod cinematic_tests;
 
 #[cfg(test)]
 mod cast_tests;

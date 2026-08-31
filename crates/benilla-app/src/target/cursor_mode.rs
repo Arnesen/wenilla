@@ -186,6 +186,17 @@ const ATTACK_RANGE_SQ: f32 = 109.2025;
 const MELEE_OFFSET: f32 = 1.333_33;
 const MELEE_FLOOR: f32 = 5.0;
 
+/// A **corpse object**'s interact reach, squared — `25.0`, i.e. a flat **5.0 yd**.
+///
+/// The same `max(rA + rB + 1.333, 5.0)` shape as [`MELEE_FLOOR`] above, evaluated for a corpse:
+/// a corpse descriptor carries no `UNIT_FIELD_COMBATREACH` at all, so the sum can never clear the
+/// floor and the gate is the floor. Two independent byte facts agree on the number — the cursor
+/// leg's `CanLootNow 0x5ec110`, and the `CMSG_LOOT` sender `0x5df130`, whose owned bit-exact
+/// difftest (`loot_range_5df130_difftest`) compares `dist²` against a literal `25.0`. Written as
+/// the constant rather than the formula because the formula's other term does not exist here.
+/// Boundary-inclusive, center-to-center, like every other reach gate in this file.
+const CORPSE_INTERACT_RANGE_SQ: f32 = 25.0;
+
 /// `GAMEOBJECT_TYPE_GENERIC` (vmangos `SharedDefines.h`) — world decoration whose highlightable
 /// predicate is constant-false, so it never shows an interact cursor (wow-re cursor-system §4a).
 pub(crate) const GO_TYPE_GENERIC: i32 = 5;
@@ -698,6 +709,58 @@ fn loot_cursor(auto_loot: bool, shift_held: bool) -> CursorKind {
     }
 }
 
+/// What a hovered **corpse object** classifies to — the reference's corpse classifier `0x482740`
+/// (wow-re `cursor-system.md` §3, VERIFIED), as a pure decision so it can be tested the way the
+/// service ladder is. `esi` = player, `edi` = corpse, `d2` = centre-to-centre distance².
+///
+/// Two legs, and there is **no third** — in particular no own-corpse leg. Your own body carries
+/// neither flag, fails both tests, and falls out to the reference's "else clear": the plain
+/// pointer. (Recovering it is decision 0308's `RECOVER_CORPSE` route, not a world cursor.)
+/// What the corpse classifier reads — one struct rather than seven positional bools, so the call
+/// sites (and the test) name each byte fact instead of counting commas.
+#[derive(Debug, Clone, Copy, Default)]
+struct CorpseFacts {
+    /// `0x5d6e20` — `CORPSE_FIELD_DYNAMIC_FLAGS` bit 0.
+    lootable: bool,
+    /// `CORPSE_FIELD_FLAGS` bit 5 — `CORPSE_FLAG_LOOTABLE`, the PvP insignia.
+    insignia: bool,
+    /// `[0xb700e8]` — the `SPELL_EFFECT_SKIN_PLAYER_CORPSE` learn-time latch.
+    skin_latch: bool,
+    /// `d2`, centre to centre.
+    dist_sq: f32,
+    /// The already-looting override: `[player+0x1d28/2c] == corpse GUID`.
+    looting_this: bool,
+    /// The effective auto-loot's two terms (0961): the knob…
+    auto_loot: bool,
+    /// …and the live key-0.
+    shift_held: bool,
+}
+
+fn corpse_cursor(f: CorpseFacts) -> Option<(CursorKind, bool)> {
+    // Leg 1 — lootable by me. Able-vs-Unable is `CanLootNow 0x5ec110(player, corpse)` — the same
+    // range+state gate as the unit loot leg — OR the already-looting override, which keeps the lit
+    // pouch on the object whose loot window is open even as you drift out of reach. The mode is
+    // Pickup(8)/LootAll(16) by the held key-0 (`0x41f8f0`, `0x4827f8`); both fail →
+    // UnablePickup(28)/UnableLootAll(36) at `0x482818`. Distance grays exactly as on units.
+    if f.lootable {
+        let able = f.dist_sq <= CORPSE_INTERACT_RANGE_SQ || f.looting_this;
+        return Some((loot_cursor(f.auto_loot, f.shift_held), !able));
+    }
+    // Leg 2 — the PvP-insignia / skin-player-corpse leg (`0x482875..0x4828a2`): the flag **and**
+    // the learn latch **and** `!0x6067d0(player, corpse)`, then the reach gate picks
+    // SkinAlliance(20)/SkinHorde(19) or their Unable twins.
+    //
+    // Modelled with its real precondition rather than omitted, so it stays inert for the
+    // reference's own reason: `[0xb700e8]` is latched only by learning a spell whose `Effect[0]`
+    // is `SPELL_EFFECT_SKIN_PLAYER_CORPSE`, and no 1.12.1 player holds one. Benilla ships one Skin
+    // cursor rather than the faction pair (`[0x80439c + 4×0x5efe00(player)]`) — a distinction with
+    // no consequence while the leg is unreachable.
+    if f.insignia && f.skin_latch {
+        return Some((CursorKind::Skin, f.dist_sq > CORPSE_INTERACT_RANGE_SQ));
+    }
+    None // "Else clear" — a plain body under the cursor is Point.
+}
+
 /// Resolve this frame's [`WorldCursor`] from the hovered unit — the reference's classifier order:
 /// interactable-NPC service ladder, else loot/skin/attack by state, each grayed by its own range
 /// gate. No hover (or anything unresolvable) → Point.
@@ -729,6 +792,10 @@ pub(super) fn classify_cursor(
     // The loot leg's Pickup/LootAll split (0965): the auto-loot knob (0961) + the live shift.
     loot_cfg: Res<crate::ui_loot::LootConfig>,
     keys: Res<ButtonInput<KeyCode>>,
+    // `[player+0x1d28/2c]` — the open loot session's object. The corpse leg's already-looting
+    // override reads it (the reference keeps the lit pouch on the corpse you are looting even
+    // once you have drifted past the range gate).
+    loot_latch: Res<crate::ui_loot::LootLatch>,
 ) {
     // A **highlightable** GameObject shows its **data-driven** cursor (wow-re cursor-system §4): a
     // mailbox's Mail, a plaque's Inspect, a vein's Mine / herb's GatherHerbs / picked lock's PickLock
@@ -859,8 +926,27 @@ pub(super) fn classify_cursor(
         }
         None // nothing matched → the reference's `0x4826cb` cursor-clear: Point
     };
+    // The **corpse classifier** `0x482740`, whose whole decision is [`corpse_cursor`] — the store
+    // reads and the distance are all that happens here.
+    let resolve_corpse = || {
+        let (corpse_tf, store, _) = units.get(hovered.corpse?).ok()?;
+        let store = store?;
+        let (self_tf, _) = self_q.single().ok()?;
+        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        corpse_cursor(CorpseFacts {
+            lootable: store.0.corpse_lootable(),
+            insignia: store.0.corpse_pvp_insignia(),
+            skin_latch: learned.skin_player_corpse.is_some(),
+            dist_sq: corpse_tf.translation.distance_squared(self_tf.translation),
+            looting_this: loot_latch.0.is_some() && loot_latch.0 == hovered.corpse_guid,
+            auto_loot: loot_cfg.auto_loot,
+            shift_held: shift,
+        })
+    };
     let resolved = if go_is_nearest(&hovered, &hovered_object) {
         resolve_go()
+    } else if hovered.corpse.is_some() {
+        resolve_corpse()
     } else {
         resolve_unit()
     };
@@ -875,6 +961,84 @@ pub(super) fn classify_cursor(
 mod tests {
     use super::*;
     use benilla_protocol::messages::dialog_status;
+
+    /// The corpse classifier `0x482740` has two legs and no more — and neither of them is your
+    /// own body, which is what makes a corpse read as the plain pointer until something *else*
+    /// offers to recover it.
+    #[test]
+    fn the_corpse_classifier_has_two_legs_and_no_own_corpse_leg() {
+        let near = 25.0; // exactly the gate — boundary-inclusive, like every reach in this file
+        let far = 25.01;
+        let bones = |dist_sq| CorpseFacts {
+            lootable: true,
+            dist_sq,
+            ..CorpseFacts::default()
+        };
+        // Leg 1: lootable bones. Pickup vs LootAll by the effective auto-loot, grayed by range.
+        assert_eq!(
+            corpse_cursor(bones(near)),
+            Some((CursorKind::Pickup, false))
+        );
+        assert_eq!(
+            corpse_cursor(CorpseFacts {
+                auto_loot: true,
+                ..bones(near)
+            }),
+            Some((CursorKind::LootAll, false))
+        );
+        assert_eq!(corpse_cursor(bones(far)), Some((CursorKind::Pickup, true)));
+        // …and the already-looting override keeps it lit past the gate.
+        assert_eq!(
+            corpse_cursor(CorpseFacts {
+                looting_this: true,
+                ..bones(far)
+            }),
+            Some((CursorKind::Pickup, false))
+        );
+        // Leg 2 needs BOTH the insignia flag and the learn-time latch. The flag alone is nothing —
+        // which is why a battleground body shows no knife to a player who cannot skin one, and why
+        // this leg is inert in 1.12.1: nothing latches `[0xb700e8]`.
+        let insignia = |skin_latch, dist_sq| CorpseFacts {
+            insignia: true,
+            skin_latch,
+            dist_sq,
+            ..CorpseFacts::default()
+        };
+        assert_eq!(corpse_cursor(insignia(false, near)), None);
+        assert_eq!(
+            corpse_cursor(insignia(true, near)),
+            Some((CursorKind::Skin, false))
+        );
+        assert_eq!(
+            corpse_cursor(insignia(true, far)),
+            Some((CursorKind::Skin, true))
+        );
+        // Leg 1 wins outright when both flags are up — the binary tests lootable FIRST and returns.
+        assert_eq!(
+            corpse_cursor(CorpseFacts {
+                insignia: true,
+                skin_latch: true,
+                ..bones(near)
+            }),
+            Some((CursorKind::Pickup, false))
+        );
+        // **Your own corpse**: neither bit is set. Both legs miss, the classifier clears, and the
+        // cursor is the plain pointer at any range and with anything held.
+        let mine = |dist_sq| CorpseFacts {
+            skin_latch: true,
+            dist_sq,
+            ..CorpseFacts::default()
+        };
+        assert_eq!(corpse_cursor(mine(near)), None);
+        assert_eq!(
+            corpse_cursor(CorpseFacts {
+                auto_loot: true,
+                shift_held: true,
+                ..mine(far)
+            }),
+            None
+        );
+    }
 
     /// The loot pouch follows the EFFECTIVE auto-loot (0961: setting XOR shift) — the cursor
     /// and the click can never disagree about what a pick will do.

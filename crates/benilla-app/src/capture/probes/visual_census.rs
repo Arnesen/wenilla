@@ -111,6 +111,11 @@ type VisualQuery = (
     Option<&'static HeldAttached>,
     // …and its mount, the third chained-model root the pick offers (decision 0441).
     Option<&'static crate::entities::mount::MountChild>,
+    // The descriptor, read for exactly one thing here: which half of the corpse fork a
+    // `TYPEID_CORPSE` row is on (decision 1706). A corpse has no name-cache entry, so without this
+    // every corpse row reads `Corpse … ?` and cannot say whether `meshes=0` means "the bone-pile
+    // model is missing" or "the dressed body is missing" — opposite findings.
+    Option<&'static crate::net::ObjectStore>,
 );
 
 /// One line per streamed entity within [`UnitVisuals::radius`] of the body — cubes first, then
@@ -150,7 +155,7 @@ fn fire_unit_visuals(
     let mut rows: Vec<(bool, i64, String)> = Vec::new();
     let (mut cube_n, mut blank_n, mut pending_n) = (0u32, 0u32, 0u32);
     let mut cube_displays: Vec<u32> = Vec::new();
-    for (entity, guid, net, t, children, attached, held, mount) in &entities {
+    for (entity, guid, net, t, children, attached, held, mount, store) in &entities {
         if matches!(net.kind, EntityKind::DynamicObject | EntityKind::Other)
             || t.translation.distance_squared(body.translation) > radius2
         {
@@ -214,7 +219,12 @@ fn fire_unit_visuals(
                 u8::from(cube),
                 held.join(","),
                 if attached { "attached" } else { "PENDING" },
-                names.peek(guid.0).unwrap_or("?"),
+                // The name, or — for a corpse, which never has one — which fork it took.
+                match (net.kind, store) {
+                    (EntityKind::Corpse, Some(s)) if s.0.corpse_is_bones() => "<bones>",
+                    (EntityKind::Corpse, Some(_)) => "<corpse body>",
+                    _ => names.peek(guid.0).unwrap_or("?"),
+                },
             ),
         ));
     }

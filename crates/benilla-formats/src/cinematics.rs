@@ -18,13 +18,23 @@
 //! shipped values include `3.14159` and `4.71239` (π and 3π/2) to five decimals, which no degree
 //! table would.
 //!
-//! **The world transform** — `world = origin + Rz(facing)·local`, `z` straight through — is the
-//! one non-obvious step, and it is checked against an independent oracle rather than assumed:
-//! vmangos walks its own server-side copy of these paths (`Player::UpdateCinematic`) off a
-//! hand-built `cinematic_waypoints` table of sampled world positions, and our evaluated path lands
-//! on those samples (tens of yards over ~600-yard offsets, on a table whose z column is
-//! ground-level, not camera-level). The three sign/axis alternatives miss by 700–1800 yards. See
+//! **The world transform** — `world = origin + Rz(+facing)·local`, `z` straight through — is the
+//! one non-obvious step, and it is now settled twice over.
+//!
+//! It was first checked against an independent oracle rather than assumed: vmangos walks its own
+//! server-side copy of these paths (`Player::UpdateCinematic`) off a hand-built
+//! `cinematic_waypoints` table of sampled world positions, and our evaluated path lands on those
+//! samples (tens of yards over ~600-yard offsets, on a table whose z column is ground-level, not
+//! camera-level). The three sign/axis alternatives miss by 700–1800 yards. See
 //! [`CinematicPath::sample`].
+//!
+//! It is now **byte-verified too** (wow-re `ui/scratch/cinematic-camera-law.md`, a §5 with a
+//! Unicorn run of the binary's own bytes as arbiter), and the earlier round's contradicting
+//! answer is explained rather than left hanging. The client applies affines as a **row vector on
+//! the left** (`out = in·M`), and the stored 3×3 is `[[cos,sin,0],[−sin,cos,0],[0,0,1]]`. Read as
+//! a diagram acting on a *column* vector that is `Rz(−facing)` — which is what a matrix picture
+//! invites, and what the earlier worker reported. The client never applies it that way. The bytes
+//! and the oracle never actually disagreed.
 //!
 //! **The shipped corpus, read out of the ten `Cameras\*.m2` files** (`fov` radians, `d₀` = how far
 //! the shot's first eye position sits from its own origin, horizontally):
@@ -33,7 +43,7 @@
 //! |---|---|---|---|---|---|---|
 //! | 1 | PalantirOfAzora | 0.7854 | 14.9 s | 10 | const 0 | 205 yd |
 //! | 2 | FlybyUndead | **1.5708** | 102.0 s | 22 | 18 keys | 523 yd |
-//! | 122 | FlybyNightElf | 0.7854 | 102.3 s | 32 | 19 keys | 813 yd |
+//! | 122 | FlybyNightElf | 0.7854 | 102.0 s | 32 | 19 keys | 813 yd |
 //! | 142 | FlyByHuman | 0.7854 | 87.5 s | 20 | const 2π | 663 yd |
 //! | 162 | FlyByGnome | 0.7854 | 76.7 s | 27 | const 0 | 705 yd |
 //! | 182 | FlyByTroll | 0.7854 | 57.8 s | 21 | 12 keys | 39 yd |
@@ -52,12 +62,18 @@
 //! while one runs (decision 0196), and why the client has to stream the world from the *camera*
 //! and not the avatar for the duration.
 //!
-//! **What this module deliberately does not decide.** The authored `near`/`far` clip (`0.22222` /
-//! `27.7778` = 8/36 and 1000/36, identical on all ten) are carried, not applied: a 27.8-yard far
-//! plane would render the dwarf intro's mountains as empty sky, so whatever the reference does
-//! with those two floats, it is not "install them as the world clips". Which camera of a
-//! multi-camera row plays, what ends a shot, and how `fov` reaches the world projection are the
-//! reference's to state (the wow-re cinematic dispatch, 2026-08-29).
+//! **The optics in this table are data, not the shot's framing** (decision 1711, off wow-re
+//! `ui/scratch/cinematic-camera-law.md`, VERIFIED). A 24-site census settles it: the M2 camera
+//! record's `fov`, `nearClip` and `farClip` are written at model load and read only by `0x7ac640`,
+//! which is reachable solely from the portrait and `<Model>` frame paths. **On the cinematic path
+//! nothing reads any of the three.** A fly-by is rendered through the *world camera's own* optics,
+//! re-stamped every frame.
+//!
+//! That dissolves the puzzle this note used to record: the authored clips are `0.22222` / `27.7778`
+//! (8/36 and 1000/36, identical on every shipped shot), and a 27.8-yard far plane would render the
+//! dwarf intro's mountains as empty sky. They are not world clips because they are not clips at
+//! all here — which is what two floats nobody consumes look like. They stay parsed because they
+//! are genuinely in the record and the portrait path does read them.
 
 use std::collections::HashMap;
 
@@ -245,17 +261,33 @@ pub struct CinematicPath {
     /// The row's `SoundEntries.dbc` narration id, `0` for a silent shot — carried here so a
     /// consumer that has the shot has everything the shot plays.
     pub sound_id: u32,
-    /// The authored **diagonal** field of view, radians — `0.7854` (45°) on nine of the ten shots
-    /// and `1.5708` (90°) on the Undead intro, so it is read per shot and never assumed. The
-    /// reference's perspective builder takes the half-angle as `θ = (fov/2)/√(aspect²+1)`, so a
-    /// vertical FOV for a modern projection is `fov / √(aspect²+1)` — see [`Self::vertical_fov`].
+    /// The authored field of view, radians — `0.7854` (45°) on fifteen of the sixteen shipped
+    /// shots and `1.5708` (90°) on the Undead intro.
+    ///
+    /// **The reference reads this from nothing on the cinematic path** (wow-re
+    /// `ui/scratch/cinematic-camera-law.md`, VERIFIED by a 24-site census: the M2 camera's fov and
+    /// the two clips are written at model load and read only by `0x7ac640`, which is reachable
+    /// solely from the portrait and `<Model>` frame paths). A fly-by is rendered through the
+    /// **world camera's own** optics, re-stamped every frame. So this is a real field of the
+    /// record, and it is not what a fly-by is framed with — see decision 1711 for what benilla did
+    /// with it before that was known.
     pub fov: f32,
-    /// The authored near clip, carried unapplied — see the module doc.
+    /// The authored near clip, radians-free yards — read by nothing on this path, like [`Self::fov`].
+    ///
+    /// It is carried because it is *there*, and because its value is the tell: every shipped shot
+    /// authors `8/36` or `1000/36` — `0.2222` and `27.7778` yards. As world clips those are
+    /// nonsense (a 27.8-yard far plane renders the dwarf intro's mountains as empty sky), which is
+    /// exactly what you would expect of two floats nothing consumes.
     pub near_clip: f32,
-    /// The authored far clip, carried unapplied — see the module doc.
+    /// The authored far clip — see [`Self::near_clip`].
     pub far_clip: f32,
-    /// How long the shot runs, milliseconds: the sequence band the tracks are keyed inside.
+    /// How long the shot runs, milliseconds — the *width* of the sequence band the tracks are
+    /// keyed inside (`end − start`), not its end. See [`Self::sample`] for why the two differ.
     pub duration_ms: u32,
+    /// Where that band begins on the model's global timeline; added to the sample time so a shot
+    /// whose first key is not at zero (`FlybyNightElf`, `Scry_cam`) starts on its first key
+    /// instead of holding it.
+    band_start: u32,
     origin: [f32; 3],
     facing_sin_cos: (f32, f32),
     camera: M2Camera,
@@ -282,11 +314,15 @@ impl CinematicPath {
             .ok_or_else(|| anyhow::anyhow!("model carries no camera record"))?;
         // The shot's length is the model's own sequence band (stride 0x44 records at header
         // 0x1c/0x20, band `[start, end]` at +0x04/+0x08 — the same walk the emitter-timing bake
-        // uses). Every shipped fly-by carries exactly one sequence, `[0, end]`, whose end equals
-        // the last key timestamp on its position and target tracks alike; the band is what the
-        // file *says*, so that is what we read, with the last key as the fallback for a file that
-        // authors no sequence at all.
-        let duration_ms = sequence_band_end(bytes)
+        // uses). The reference arms this as an ordinary M2 animation on sequence 0, so the shot
+        // runs the band: it *plays* for `end − start` and its tracks are keyed at absolute
+        // global-timeline stamps inside `[start, end]`. Eight of the ten shipped cameras band at
+        // `[0, end]` and the distinction is invisible on them — but `FlybyNightElf` bands at
+        // `[333, 102333]` and `Scry_cam` at `[33, 3333]`, and reading `end` as the duration
+        // played those two 333 ms / 33 ms too long with the opening frames frozen on the first
+        // key (which is what sampling `t = 0` against a track that starts at 333 returns).
+        // The fallback, for a file that authors no sequence at all, is the last key.
+        let (band_start, band_end) = sequence_band(bytes)
             .or_else(|| {
                 [
                     camera.positions.keys.last().map(|k| k.0),
@@ -295,8 +331,10 @@ impl CinematicPath {
                 .into_iter()
                 .flatten()
                 .max()
+                .map(|end| (0, end))
             })
-            .unwrap_or(0);
+            .unwrap_or((0, 0));
+        let duration_ms = band_end.saturating_sub(band_start);
         Ok(Self {
             camera_id: row.id,
             sound_id: row.sound_id,
@@ -304,6 +342,7 @@ impl CinematicPath {
             near_clip: camera.near_clip,
             far_clip: camera.far_clip,
             duration_ms,
+            band_start,
             origin: row.origin,
             facing_sin_cos: row.origin_facing.sin_cos(),
             camera,
@@ -311,6 +350,12 @@ impl CinematicPath {
     }
 
     /// Sample the shot at `ms` from its start, **end-clamped** at both ends.
+    ///
+    /// `ms` is measured from the *shot's* start; the tracks are keyed on the model's global
+    /// timeline, so it is offset by [`Self::band_start`] before it reaches them. On eight of the
+    /// ten shipped cameras that offset is zero and the two are the same number; on
+    /// `FlybyNightElf` (band `[333, 102333]`) and `Scry_cam` (`[33, 3333]`) it is the difference
+    /// between opening on the authored first key and holding it for a third of a second first.
     ///
     /// Two steps, in this order. The reference's publish pass composes each track against its base
     /// (`eye = position_base + positions(t)`, `target = target_position_base + target(t)`); then
@@ -327,6 +372,7 @@ impl CinematicPath {
     /// the dwarf (41) and human (81) intros; the sign-flipped and axis-swapped alternatives are
     /// off by an order of magnitude (module doc).
     pub fn sample(&self, ms: u32) -> CinematicView {
+        let ms = self.band_start.saturating_add(ms);
         let eye = self.to_world(sample_against(
             &self.camera.positions,
             self.camera.position_base,
@@ -342,13 +388,6 @@ impl CinematicPath {
             target,
             roll: self.camera.roll.sample_ms(ms).unwrap_or(0.0),
         }
-    }
-
-    /// The vertical FOV a modern projection wants, for a viewport of aspect `width/height`:
-    /// `fov / √(aspect² + 1)`, inverting the reference's diagonal-FOV perspective builder
-    /// (`m11 = 1/tan(θ)`, `θ = (fov/2)/√(aspect²+1)`, wow-re `portrait-projection-aspect.md`).
-    pub fn vertical_fov(&self, aspect: f32) -> f32 {
-        self.fov / (aspect * aspect + 1.0).sqrt()
     }
 
     fn to_world(&self, local: [f32; 3]) -> [f32; 3] {
@@ -367,9 +406,17 @@ fn sample_against(track: &M2Track<M2SplineKey<[f32; 3]>>, base: [f32; 3], ms: u3
     std::array::from_fn(|i| base[i] + d[i])
 }
 
-/// The end of the model's **first** sequence band (header `0x1c` count / `0x20` offset, entry
-/// stride `0x44`, band `[start, end]` at `+0x04`/`+0x08`). `None` for a model with no sequences.
-fn sequence_band_end(b: &[u8]) -> Option<u32> {
+/// The model's **first** sequence band, `(start, end)` in global-timeline milliseconds (header
+/// `0x1c` count / `0x20` offset, entry stride `0x44`, band at `+0x04`/`+0x08`). `None` for a model
+/// with no sequences.
+///
+/// **`start` is not always zero, and the shipped corpus is its own proof of these offsets.** Eight
+/// of the ten cameras band at `[0, end]`, but `FlybyNightElf` bands at `[333, 102333]` and
+/// `Scry_cam` at `[33, 3333]` — and in both files the band's `start` is *exactly* the first
+/// timestamp on the position and target tracks, while `end` is exactly the last. Two fields that
+/// land on the first and last key of every file in the corpus are the first and last key, which
+/// is why this is read rather than assumed to be a duration.
+fn sequence_band(b: &[u8]) -> Option<(u32, u32)> {
     let le_u32 = |o: usize| -> Option<u32> {
         b.get(o..o + 4)
             .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -378,7 +425,7 @@ fn sequence_band_end(b: &[u8]) -> Option<u32> {
     if n == 0 {
         return None;
     }
-    le_u32(o + 0x08)
+    Some((le_u32(o + 0x04)?, le_u32(o + 0x08)?))
 }
 
 #[cfg(test)]
@@ -451,21 +498,35 @@ mod tests {
             // for, and the one a step/linear-only sampler would silently mangle.
             assert_eq!(path.camera.positions.interp, 2, "sequence {id} position");
             assert_eq!(path.camera.target.interp, 2, "sequence {id} target");
-            // **The end condition**: the authored sequence band ends exactly on the last key of
-            // both vector tracks, on every shipped fly-by — so "the band" and "the last key" are
-            // the same number, and reading either gives the same playback length.
+            // **The end condition, and the proof of the band offsets.** The authored sequence
+            // band brackets both vector tracks exactly: its `start` is the first key's timestamp
+            // and its `end` is the last one's, on every shipped fly-by. Two header fields that
+            // land on the first and last key of all eight files are the first and last key — and
+            // that is what licenses reading the playback length as `end − start` rather than as
+            // `end`, which is the bug this assertion now pins (`FlybyNightElf` bands at
+            // `[333, 102333]`, so the two readings differ by a third of a second and by whether
+            // the shot opens on its first key or holds it).
             for (what, track) in [
                 ("position", &path.camera.positions),
                 ("target", &path.camera.target),
             ] {
                 assert_eq!(
+                    track.keys.first().map(|k| k.0),
+                    Some(path.band_start),
+                    "sequence {id} {what} track starts on the band"
+                );
+                assert_eq!(
                     track.keys.last().map(|k| k.0),
-                    Some(path.duration_ms),
+                    Some(path.band_start + path.duration_ms),
                     "sequence {id} {what} track ends on the band"
                 );
             }
             // The clips are uniform across the corpus; the FOV is NOT — the Undead intro is 90°
-            // where the rest are 45°, which is exactly why it is read per shot.
+            // where the rest are 45°. Kept as a **data** assertion, and no longer as a reason to
+            // read it per shot: decision 1711 established that the reference's cinematic path
+            // reads none of these three, so the split is a fact about the files and not about how
+            // any shot is framed. It stays because a parser that silently started returning zeros
+            // for all three would otherwise pass every other test in this file.
             assert!((path.near_clip - 8.0 / 36.0).abs() < 1e-6);
             assert!((path.far_clip - 1000.0 / 36.0).abs() < 1e-4);
             let want_fov = if id == 2 {

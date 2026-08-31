@@ -58,7 +58,7 @@ pub use window::StreamWindow;
 // The WMO prop-light machinery lives spawn-side (0830's named carve, executed in 0832); the two
 // outside consumers — `crate::interior` and `crate::entities`' `wmo_props` — keep their
 // `terrain_stream::X` paths, same as the `queries` items below.
-pub use spawn::prop_light::{fold_interior_probe, PropLobeLight};
+pub use spawn::prop_light::{fold_interior_probe, interior_light_up, PropLobeLight};
 // The shared placed-model assembler + the off-thread collider build — also the WMO-gameobject
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
@@ -341,6 +341,17 @@ impl ViewFocus {
             entry: None,
             paced,
         }
+    }
+
+    /// **Is the stream following the body's own ground?** True only for an attached live avatar.
+    ///
+    /// The question anyone asking "is the world under the *player* loaded?" actually means. While
+    /// the eye is detached — free-fly, a cinematic fly-by — residency describes wherever the
+    /// camera went, so a consumer that reads it as a fact about the body is reading someone else's
+    /// tile. `release_post_snap_hold` already learned that the hard way (decision 1336) and tests
+    /// the tile itself; this is the cheap form for a consumer that only needs the yes/no.
+    pub fn follows_body(&self) -> bool {
+        self.attached && self.body.is_some()
     }
 
     /// A live avatar whose eye has been **detached** (free-fly): the stream follows the camera,

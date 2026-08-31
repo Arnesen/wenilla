@@ -189,6 +189,7 @@ fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
         "SLIDER" => FrameKind::Slider,
         "SCROLLFRAME" => FrameKind::ScrollFrame,
         "MODEL" => FrameKind::Model,
+        "PLAYERMODEL" => FrameKind::PlayerModel,
         "MESSAGEFRAME" => FrameKind::MessageFrame,
         "SCROLLINGMESSAGEFRAME" => FrameKind::ScrollingMessageFrame,
         "COLORSELECT" => FrameKind::ColorSelect,
@@ -336,6 +337,17 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
         Some(FrameKind::CheckButton) => &[
             super::button::REG_CHECKBUTTON_METHODS,
             super::button::REG_BUTTON_METHODS,
+        ],
+        // The Model pane's own surface. Its absence is what stopped pfUI — and, through pfUI's
+        // embedded copies, pfQuest, pfQuest-turtle and ShaguDPS — on `SetModel` after the whole
+        // rest of their UI had already built (`super::modelframe`'s header).
+        Some(FrameKind::Model) => &[super::modelframe::REG_MODEL_METHODS],
+        // The chain, not a repetition: `CGCharacterModelBase`'s lookup `0x506260` probes its own
+        // 3-entry map and on a miss tail-calls `CSimpleModel`'s `0x76f870`. Order is the miss
+        // order — three names of its own, then all 23 of `Model`'s.
+        Some(FrameKind::PlayerModel) => &[
+            super::modelframe::REG_PLAYERMODEL_METHODS,
+            super::modelframe::REG_MODEL_METHODS,
         ],
         Some(FrameKind::Minimap) => &[super::minimap::REG_MINIMAP_METHODS],
         Some(FrameKind::Cooldown) => &[super::cooldown::REG_COOLDOWN_METHODS],

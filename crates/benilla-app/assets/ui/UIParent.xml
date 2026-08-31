@@ -16,8 +16,18 @@
         transcription of the whole routing table would be a list of no-ops that reads as coverage.
 
         Known seam, stated: the real client PARENTS every FrameXML frame under UIParent (scale/
-        visibility cascade); benilla's top-level frames still attach to the screen root. Same
-        rect, so anchors agree - re-parenting is a separate arc if a cascade consumer appears.
+        visibility cascade). benilla is PART WAY there - 41 of our top-level frames declare
+        parent="UIParent" where the reference declares 104, and 32 frames the reference parents
+        (MainMenuBar, PlayerFrame, TargetFrame, the four MultiBars, UIErrorsFrame, the panels)
+        still attach to the screen root because the transcription dropped the attribute. Same
+        rect, so anchors agree.
+
+        The cascade consumer this note was waiting for HAS appeared (decision 1724): a cinematic
+        hides the HUD by doing `UIParent:Hide()` in the reference, and benilla substitutes an
+        engine-side draw-kill that also switches the mouse feed off - which is how the world came
+        to take every click of a race intro. Restoring the dropped parents is the fix; it is a
+        whole-UI arc (draw order, strata, ALT-Z, the world map's own full-screen row) and so is
+        proposed rather than taken.
     -->
     <Frame name="UIParent" setAllPoints="true" frameStrata="MEDIUM">
         <Scripts>

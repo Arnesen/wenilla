@@ -5,6 +5,7 @@
 //! dispatcher, one call per arm.
 
 use benilla_protocol::messages::Character;
+use benilla_protocol::JumpInfo;
 use bevy::prelude::*;
 
 use crate::items::Items;
@@ -21,9 +22,9 @@ use crate::ui_trainer::TrainerOpen;
 
 use super::super::{
     CharActionResultMessage, CharListMessage, CinematicTriggeredMessage, DisconnectedMessage,
-    DroppedOpcodes, EnteredWorldMessage, GameTime, GuidIndex, LoggedOutMessage, LoginFailedMessage,
-    LoginStageMessage, NetStatus, PendingTransfer, PingShared, Reputations, SelfGuid, ServerTime,
-    ServerWallClock, TeleportMessage, WorldportMessage,
+    DroppedOpcodes, EnteredWorldMessage, GameTime, GuidIndex, KnockBackMessage, LoggedOutMessage,
+    LoginFailedMessage, LoginStageMessage, NetStatus, PendingTransfer, PingShared, Reputations,
+    SelfGuid, ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
 };
 
 /// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
@@ -281,6 +282,31 @@ pub(super) fn teleport(
             counter,
             position,
             orientation,
+        });
+    }
+}
+
+/// **A knockback the server aimed at our mover** (`SMSG_MOVE_KNOCK_BACK`, decision 1702) — a
+/// ballistic launch the controlling client flies itself, not a spline and not a teleport. Forwarded
+/// to the controller, which owns the take-off, the arc, and the ack the launch owes.
+///
+/// The guid guard is the same one every self-addressed movement edge here carries. The reference
+/// registers this opcode for the **controller** only; the observer's knockback arrives on a
+/// different opcode with a different handler (`MSG_MOVE_KNOCK_BACK`, wow-re
+/// `system/collision/scratch/knockback-law.md`), so a knockback naming somebody else is not ours to
+/// fly.
+pub(super) fn knock_back(
+    guid: u64,
+    counter: u32,
+    launch: JumpInfo,
+    self_guid: &SelfGuid,
+    knockbacks: &mut MessageWriter<KnockBackMessage>,
+) {
+    if self_guid.0 == Some(guid) {
+        knockbacks.write(KnockBackMessage {
+            guid,
+            counter,
+            launch,
         });
     }
 }

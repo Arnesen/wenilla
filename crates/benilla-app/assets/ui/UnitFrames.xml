@@ -14,7 +14,7 @@
         The ref gets this with a child `TargetFrameTextureFrame` (ring art) and `SetFrameLevel(bar,
         textureFrame-1)` to push the bars beneath it, and we do the same, in BenillaUnitFrame_OnLoad:
         the parent holds trough + portrait (+ target's name plate) in BACKGROUND; the
-        `$parentHealthBar`/`$parentPowerBar` StatusBars sit at the PARENT's frame level; and
+        `$parentHealthBar`/`$parentManaBar` StatusBars sit at the PARENT's frame level; and
         `$parentTextureFrame` (232×100, filling the parent) holds the ring art (BACKGROUND) + name/level/dead text
         (OVERLAY) one level ABOVE them, so it draws over the bar edges and the portrait.
 
@@ -29,7 +29,8 @@
         band with transparent corners (not an opaque surround), so the square is hidden by the portrait
         itself — set via SetPortraitToTexture, masked to its inscribed circle (the client's portraits are
         always round: a model render or a circular-cropped icon), so no corner reaches the ring's gap. The
-        text lives under the TextureFrame, so its globals carry the `…TextureFrame…` name prefix (OnLoad).
+        text lives under the TextureFrame, but its GLOBAL names are the reference's flat ones
+        (`PlayerName`, `TargetDeadText`, …), not `$parent`-derived — see OnLoad's `short` prefix.
         The shared black `…Background` trough sits behind the unfilled bar portion.
 
         DATA FLOW UNCHANGED (pin: re-anchor + re-skin, don't rewrite the eventing): BenillaUnitFrame_*
@@ -138,13 +139,31 @@
         NEWBIE_TOOLTIP_PARTYOPTIONS = NEWBIE_TOOLTIP_PARTYOPTIONS or "If you belong to a party, you can right-click your portrait to bring up the Party Options menu. This menu will allow you to quit the party or see what looting rules the party is using. A party leader can add or remove party members, as well as change the party's looting rules."
         NEWBIE_TOOLTIP_PLAYEROPTIONS = NEWBIE_TOOLTIP_PLAYEROPTIONS or "Right-click to bring up special commands for interacting with another player. You can inspect their equipment, issue a party invite, initiate a trade, or challenge a player to a duel. A group leader can promote or remove that player from the group."
 
-        -- The client's PowerBarColor values, keyed by the UnitPowerType token.
+        -- ── ManaBarColor (ref UnitFrame.lua l.1-6, verbatim) ────────────────────────────────
+        -- The reference's own table: keyed by the NUMERIC power type `UnitPowerType` returns, each
+        -- row carrying the `prefix` its bar's text is labelled with. **8 addons in the top-20 root
+        -- read `ManaBarColor` by name**, which is why it is the published one rather than a
+        -- benilla-private table — we used to keep the same five colours under
+        -- `BENILLA_POWER_COLORS`, keyed by token string and carrying no prefix, so every one of
+        -- those reads found nil.
+        --
+        -- One table, not two: the token map below is DERIVED from it rather than restated, so a
+        -- colour can never differ between what an addon reads and what our own bars paint.
+        ManaBarColor = {}
+        ManaBarColor[0] = { r = 0.00, g = 0.00, b = 1.00, prefix = MANA or "Mana" }
+        ManaBarColor[1] = { r = 1.00, g = 0.00, b = 0.00, prefix = RAGE_POINTS or "Rage" }
+        ManaBarColor[2] = { r = 1.00, g = 0.50, b = 0.25, prefix = FOCUS_POINTS or "Focus" }
+        ManaBarColor[3] = { r = 1.00, g = 1.00, b = 0.00, prefix = ENERGY_POINTS or "Energy" }
+        ManaBarColor[4] = { r = 0.00, g = 1.00, b = 1.00, prefix = HAPPINESS_POINTS or "Happiness" }
+
+        -- Our own bars look colours up by the TOKEN `UnitPowerType` also returns (its 2nd value),
+        -- so this maps token → the row above. Same objects, so `ManaBarColor` is the only source.
         BENILLA_POWER_COLORS = {
-            MANA      = { r = 0.0, g = 0.0, b = 1.0 },
-            RAGE      = { r = 1.0, g = 0.0, b = 0.0 },
-            FOCUS     = { r = 1.0, g = 0.5, b = 0.25 },
-            ENERGY    = { r = 1.0, g = 1.0, b = 0.0 },
-            HAPPINESS = { r = 0.0, g = 1.0, b = 1.0 },
+            MANA      = ManaBarColor[0],
+            RAGE      = ManaBarColor[1],
+            FOCUS     = ManaBarColor[2],
+            ENERGY    = ManaBarColor[3],
+            HAPPINESS = ManaBarColor[4],
         }
 
         -- ── The raid-target mark atlas (ref TargetFrame.lua l.460-463 + l.475-484) ──────────────
@@ -202,18 +221,25 @@
         function BenillaUnitFrame_OnLoad(frame, unit)
             frame.unit = unit
             local name = frame:GetName()
-            frame.healthBar = getglobal(name .. "HealthBar")
-            frame.powerBar  = getglobal(name .. "PowerBar")
-            -- The name/level/dead text live inside $parentTextureFrame (so they draw over the ring art
-            -- that draws over the bars), so their global names carry the TextureFrame prefix.
+            frame.healthbar = getglobal(name .. "HealthBar")
+            frame.manabar  = getglobal(name .. "ManaBar")
+            -- TWO prefixes, both the reference's own. The bars are named off the FRAME
+            -- (`PlayerFrameHealthBar`, ref-PlayerFrame.xml l.288) but the art, text and icons are
+            -- named off the UNIT (`PlayerName` l.58, `PlayerPortrait` l.35, `TargetDeadText`
+            -- ref-TargetFrame.xml l.173) — flat globals, which is what an addon reaches for.
+            -- `short` is the frame name minus its trailing "Frame".
+            local short = string.sub(name, 1, string.len(name) - 5)
+            -- Our ring art rides a $parentTextureFrame child (the reference nests two ANONYMOUS
+            -- frames there instead, ref-PlayerFrame.xml l.49-51), so the frame whose level the bars
+            -- are pushed under is still named off the frame.
             local tf = name .. "TextureFrame"
             -- The recessed-bar look, the reference's own mechanism (ref-TargetFrame.lua l.32-34):
             -- push the bars one frame level BELOW the ring art's TextureFrame. Frame level is the
             -- only key term above the draw layer (decision 0884), so this is the only thing that can
             -- hold a BACKGROUND ring texture over an ARTWORK bar fill. See the LAYERING note up top.
             local textureFrameLevel = getglobal(tf):GetFrameLevel()
-            frame.healthBar:SetFrameLevel(textureFrameLevel - 1)
-            frame.powerBar:SetFrameLevel(textureFrameLevel - 1)
+            frame.healthbar:SetFrameLevel(textureFrameLevel - 1)
+            frame.manabar:SetFrameLevel(textureFrameLevel - 1)
             -- The on-bar numerals (TextStatusBar.xml, decision 1082; the switch that shows them
             -- is 1140's Status Bar Text). Wiring is unconditional — a frame with no text regions
             -- gets a no-op, since SetTextStatusBarText drops a nil text and UpdateTextString skips
@@ -223,13 +249,13 @@
             -- and the XP bar, and on nothing else, which is exactly why Status Bar Text pins your
             -- own numbers and your pet's but never the target's (decision 1143).
             if TextStatusBar_Initialize then -- engine tests load file subsets
-                TextStatusBar_Initialize(frame.healthBar)
-                TextStatusBar_Initialize(frame.powerBar)
-                SetTextStatusBarText(frame.healthBar, getglobal(tf .. "HealthBarText"))
-                SetTextStatusBarText(frame.powerBar, getglobal(tf .. "PowerBarText"))
+                TextStatusBar_Initialize(frame.healthbar)
+                TextStatusBar_Initialize(frame.manabar)
+                SetTextStatusBarText(frame.healthbar, getglobal(name .. "HealthBarText"))
+                SetTextStatusBarText(frame.manabar, getglobal(name .. "ManaBarText"))
                 if unit == "player" then
-                    frame.healthBar.textLockable = 1
-                    frame.powerBar.textLockable = 1
+                    frame.healthbar.textLockable = 1
+                    frame.manabar.textLockable = 1
                 end
             end
             -- The hover seam (1146): who this bar belongs to, and what its click means.
@@ -237,16 +263,16 @@
             if unit == "player" then
                 click = PlayerFrame_OnClick
             end
-            frame.healthBar.owner = frame
-            frame.powerBar.owner = frame
-            frame.healthBar.ownerClick = click
-            frame.powerBar.ownerClick = click
-            frame.nameText  = getglobal(tf .. "NameText")
-            frame.levelText = getglobal(tf .. "LevelText")
-            frame.deadText  = getglobal(tf .. "DeadText")
+            frame.healthbar.owner = frame
+            frame.manabar.owner = frame
+            frame.healthbar.ownerClick = click
+            frame.manabar.ownerClick = click
+            frame.nameText  = getglobal(short .. "Name")
+            frame.levelText = getglobal(short .. "LevelText")
+            frame.deadText  = getglobal(short .. "DeadText")
             -- Target-only (the "??" skull on the level slot); getglobal returns nil for the
             -- player, guarded at use.
-            frame.highLevel = getglobal(tf .. "HighLevelTexture")
+            frame.highLevel = getglobal(short .. "HighLevelTexture")
             -- Target-only (the level/name plate); getglobal returns nil for the player, guarded at use.
             frame.nameBackground = getglobal(name .. "NameBackground")
             -- The live model portrait (the real API's global, ref-UnitFrame.lua): bind the portrait
@@ -256,11 +282,11 @@
             -- model change), which is why the ref's UNIT_PORTRAIT_UPDATE re-call isn't needed here (the
             -- event joins the surface when addon parity wants it). Until a bake lands (no unit / model
             -- still loading) the circle is simply empty.
-            frame.portrait = getglobal(name .. "Portrait")
+            frame.portrait = getglobal(short .. "Portrait")
             SetPortraitTexture(frame.portrait, unit)
             -- The PvP flag icon (decision 0646), under the TextureFrame like the ring art it
             -- draws over — see BenillaUnitFrame_UpdatePvP.
-            frame.pvpIcon = getglobal(tf .. "PVPIcon")
+            frame.pvpIcon = getglobal(short .. "PVPIcon")
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
             frame:RegisterEvent("UNIT_HEALTH")
             frame:RegisterEvent("UNIT_MAXHEALTH")
@@ -283,26 +309,26 @@
             if unit == "target" then
                 frame:RegisterEvent("UNIT_AURA")
                 frame:RegisterEvent("UNIT_CLASSIFICATION_CHANGED")
-                frame.frameTexture = getglobal(tf .. "Texture")
+                frame.frameTexture = getglobal(name .. "Texture")
             end
             -- The portrait hit indicator (decision 0576): only the player frame registers
             -- UNIT_COMBAT in 1.12 (ref PlayerFrame_OnLoad — the target frame has no feedback
             -- text). Ref: CombatFeedback_Initialize(PlayerHitIndicator, 30).
             if unit == "player" then
-                frame.feedbackText = getglobal(tf .. "HitIndicator")
+                frame.feedbackText = getglobal(short .. "HitIndicator")
                 frame.feedbackFontHeight = 30
                 frame:RegisterEvent("UNIT_COMBAT")
                 -- The status flash (ref PlayerFrame_OnLoad, decision 1082): the resting zzz /
                 -- auto-attack swords under the portrait, the gold/red ring, and the pulse
                 -- counters. Handles cached like pvpIcon above; their presence is what gates
                 -- PlayerFrame_UpdateStatus in the shared Update.
-                frame.statusTexture = getglobal(tf .. "StatusTexture")
-                frame.attackBackground = getglobal(tf .. "AttackBackground")
-                frame.restIcon = getglobal(tf .. "RestIcon")
-                frame.attackIcon = getglobal(tf .. "AttackIcon")
-                frame.statusGlow = getglobal(name .. "StatusGlow")
-                frame.restGlow = getglobal(name .. "StatusGlowRestGlow")
-                frame.attackGlow = getglobal(name .. "StatusGlowAttackGlow")
+                frame.statusTexture = getglobal(short .. "StatusTexture")
+                frame.attackBackground = getglobal(short .. "AttackBackground")
+                frame.restIcon = getglobal(short .. "RestIcon")
+                frame.attackIcon = getglobal(short .. "AttackIcon")
+                frame.statusGlow = getglobal(short .. "StatusGlow")
+                frame.restGlow = getglobal(short .. "RestGlow")
+                frame.attackGlow = getglobal(short .. "AttackGlow")
                 frame.statusCounter = 0
                 frame.statusSign = -1
                 frame.attackBackground:SetVertexColor(0.8, 0.1, 0.1)
@@ -320,8 +346,8 @@
                 -- shared Update exactly like statusTexture above — the target frame declares
                 -- neither texture, so it never runs the law, and the party member frames run
                 -- their own (PartyFrame.xml, a different predicate: an INDEX comparison).
-                frame.leaderIcon = getglobal(tf .. "LeaderIcon")
-                frame.masterIcon = getglobal(tf .. "MasterIcon")
+                frame.leaderIcon = getglobal(short .. "LeaderIcon")
+                frame.masterIcon = getglobal(short .. "MasterIcon")
                 frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
                 frame:RegisterEvent("PARTY_LEADER_CHANGED")
                 frame:RegisterEvent("PARTY_LOOT_METHOD_CHANGED")
@@ -694,7 +720,7 @@
         -- plate on (the reference has no such art for the others and leaves an empty rail drawn).
         --
         -- The bars are ARGUMENTS rather than fields: the player and target frames call theirs
-        -- `powerBar` and the pet frame calls its `manaBar`, following the reference's own two names
+        -- `manabar` and the pet frame calls its `manabar`, following the reference's own two names
         -- for one rail, and a helper that reached for a field would have to pick a side.
         --
         -- NO label on the power bar. 1.12 names the resource there (ref UnitFrame_UpdateManaType
@@ -703,20 +729,20 @@
         -- day: bare numbers read better on these bars (decision 1147). The mechanism stays —
         -- SetTextStatusBarTextPrefix is live and one call brings any label back — only the calls
         -- are gone.
-        function BenillaUnitFrame_PaintBars(healthBar, powerBar, unit)
-            healthBar:SetMinMaxValues(0, UnitHealthMax(unit))
-            healthBar:SetValue(UnitHealth(unit))
+        function BenillaUnitFrame_PaintBars(healthbar, manabar, unit)
+            healthbar:SetMinMaxValues(0, UnitHealthMax(unit))
+            healthbar:SetValue(UnitHealth(unit))
             local maxPower = UnitManaMax(unit)
             if maxPower <= 0 then
-                powerBar:Hide()
+                manabar:Hide()
                 return false
             end
-            powerBar:Show()
+            manabar:Show()
             local _, powerToken = UnitPowerType(unit)
             local swatch = BENILLA_POWER_COLORS[powerToken] or BENILLA_POWER_COLORS.MANA
-            powerBar:SetStatusBarColor(swatch.r, swatch.g, swatch.b)
-            powerBar:SetMinMaxValues(0, maxPower)
-            powerBar:SetValue(UnitMana(unit))
+            manabar:SetStatusBarColor(swatch.r, swatch.g, swatch.b)
+            manabar:SetMinMaxValues(0, maxPower)
+            manabar:SetValue(UnitMana(unit))
             return true
         end
 
@@ -729,7 +755,7 @@
             end
             frame:Show()
 
-            BenillaUnitFrame_PaintBars(frame.healthBar, frame.powerBar, unit)
+            BenillaUnitFrame_PaintBars(frame.healthbar, frame.manabar, unit)
 
             frame.nameText:SetText(UnitName(unit) or "Unknown")
 
@@ -1173,7 +1199,7 @@
                      frame LEVEL, and nothing else in this layer overlaps the portrait's square, so the
                      two are indistinguishable here — left alone rather than churned inside a bug fix).
                      Texture set in OnLoad via SetPortraitToTexture (circle-masked). -->
-                <Texture name="$parentPortrait">
+                <Texture name="PlayerPortrait">
                     <Size><AbsDimension x="64" y="64"/></Size>
                     <Anchors>
                         <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="42" y="-12"/></Offset></Anchor>
@@ -1202,7 +1228,7 @@
                 </Scripts>
             </StatusBar>
             <!-- Power bar 119×12 TOPLEFT (106,-52), UI-StatusBar; color set at runtime (ref l.316-341). -->
-            <StatusBar name="$parentPowerBar" enableMouse="true">
+            <StatusBar name="$parentManaBar" enableMouse="true">
                 <Size><AbsDimension x="119" y="12"/></Size>
                 <Anchors>
                     <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="106" y="-52"/></Offset></Anchor>
@@ -1229,7 +1255,7 @@
                 <Layers>
                     <Layer level="BACKGROUND">
                         <!-- Ring art, MIRRORED: TexCoords left=1.0 right=0.09375 top=0 bottom=0.78125 (ref l.55-57). -->
-                        <Texture name="$parentTexture" file="Interface\TargetingFrame\UI-TargetingFrame">
+                        <Texture name="PlayerFrameTexture" file="Interface\TargetingFrame\UI-TargetingFrame">
                             <Size><AbsDimension x="232" y="100"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
@@ -1247,35 +1273,43 @@
                              number rode ON the badge (director report, 2026-08-07); decision 1093. -->
                         <!-- Name 100×10 CENTER (50,19) (ref l.58-69).
 
-                             A DIVERGENCE, measured and deliberately kept. The reference names the
-                             three unit-frame name FontStrings LITERALLY — `PlayerName`
-                             (PlayerFrame.xml:58), `TargetName` (TargetFrame.xml:152), `PetName`
-                             (PetFrame.xml:69) — where ours derive from `$parent`. That is 1222's
-                             shadowed-global class on a region, and it was tried: the rename is
-                             NOT free and it buys nothing.
-                               · Not free — `UnitFrame_OnLoad` binds the region by COMPOSING the
-                                 name (`getglobal(tf .. "NameText")`, l.174), so a text search for
-                                 the derived global finds zero hits and the rename still breaks
-                                 every unit frame. It broke 40 tests. A name built inside
-                                 `getglobal` is invisible to a grep — the same trap that once left
-                                 CleanMinimap in the tail for three rounds.
-                               · Buys nothing — the survey's "why" read-back matches ZERO
-                                 error rows for `TargetName` across
-                                 the 218-addon corpus. The one syntactic caller,
-                                 `CT_UnitFrames/CT_TargetFrame.xml:181`'s
-                                 `<Anchor relativeTo="TargetName">`, is not what stops that addon:
-                                 it dies at its own `CT_PlayerFrame.lua:206`.
-                             So: 1222's rejected clause applies (a shadowed name with no observable
-                             caller is building against a guess), and the cost lands on the frames
-                             the director looks at every session. Revisit if a row ever names it. -->
-                        <FontString name="$parentNameText" inherits="GameFontNormalSmall" text="Unknown">
+                             The NAME is the reference's own, literally — and so is every other
+                             art/text/icon region in the three unit frames. They used to derive
+                             from `$parent`, which published `PlayerFrameTextureFrameNameText` and
+                             left `PlayerName` (PlayerFrame.xml:58), `TargetName`
+                             (TargetFrame.xml:152) and `PetName` (PetFrame.xml:69) — the names an
+                             addon actually reaches for — nil. See BenillaUnitFrame_OnLoad's
+                             `short` prefix for how the shared binder composes them now.
+
+                             **This was tried once and REJECTED, and the rejection was right on
+                             its evidence** — the block that stood here argued: (i) not free, since
+                             `UnitFrame_OnLoad` composes these names inside `getglobal`, so a text
+                             search finds nothing and the rename breaks every unit frame (it broke
+                             40 tests); and (ii) buys nothing, since a "why" read-back over the
+                             218-addon corpus matched ZERO error rows for `TargetName`, its one
+                             syntactic caller being a `<Anchor relativeTo=>` in an addon that dies
+                             earlier anyway. It closed "revisit if a row ever names it" (1222's
+                             clause: a shadowed name with no observable caller is building against
+                             a guess).
+
+                             What changed (1719): the condition it named was met, and its cost
+                             premise expired. A grep of the top-20 root gives `ManaBarColor` 8
+                             readers, `PlayerFrameManaBar` 3, `PlayerFrameTexture`/
+                             `TargetFrameTexture`/`PlayerStatusTexture`/`TargetFrameManaBar` 2
+                             each, and `PlayerName`/`TargetName`/`PetName` 1 each. ShaguTweaks
+                             dies on `TargetFrameManaBar` at `health-numbers.lua:22`. **Fifteen of
+                             the twenty-two renames still have zero measured readers** and were
+                             kept for consistency with the reference and because the cost was
+                             already paid, NOT because demand was shown — say the word and they go
+                             back. -->
+                        <FontString name="PlayerName" inherits="GameFontNormalSmall" text="Unknown">
                             <Size><AbsDimension x="100" y="10"/></Size>
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="50" y="19"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
                         <!-- Level number CENTER (-63,-16) (ref l.70-78). -->
-                        <FontString name="$parentLevelText" inherits="GameFontNormalSmall">
+                        <FontString name="PlayerLevelText" inherits="GameFontNormalSmall">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-63" y="-16"/></Offset></Anchor>
                             </Anchors>
@@ -1295,12 +1329,12 @@
                              They draw over the bar FILL because the whole TextureFrame outranks the
                              bars by a frame level. Empty until Status Bar Text is on or (later) the
                              bar is hovered — TextStatusBar.xml owns that decision, not this file. -->
-                        <FontString name="$parentHealthBarText" inherits="TextStatusBarText">
+                        <FontString name="PlayerFrameHealthBarText" inherits="TextStatusBarText">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="50" y="3"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
-                        <FontString name="$parentPowerBarText" inherits="TextStatusBarText">
+                        <FontString name="PlayerFrameManaBarText" inherits="TextStatusBarText">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="50" y="-9"/></Offset></Anchor>
                             </Anchors>
@@ -1311,7 +1345,7 @@
                              ref-PlayerFrame.xml l.124-135) — ARTWORK over the BACKGROUND ring art,
                              like the ref's. Texture chosen at runtime (decision 0646 §4); the ref's
                              PlayerPVPIconHitArea is deliberately OUT (see the header). -->
-                        <Texture name="$parentPVPIcon" hidden="true">
+                        <Texture name="PlayerPVPIcon" hidden="true">
                             <Size><AbsDimension x="64" y="64"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="18" y="-20"/></Offset></Anchor>
@@ -1321,7 +1355,7 @@
                              the ADD-blend glow ring around the whole frame, tinted gold while
                              resting / red while auto-attacking, pulsed by the OnUpdate flash
                              (decision 1082). 190×66 TOPLEFT (35,-8), the ring art's own recess. -->
-                        <Texture name="$parentStatusTexture" file="Interface\CharacterFrame\UI-Player-Status" alphaMode="ADD" hidden="true">
+                        <Texture name="PlayerStatusTexture" file="Interface\CharacterFrame\UI-Player-Status" alphaMode="ADD" hidden="true">
                             <Size><AbsDimension x="190" y="66"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="35" y="-8"/></Offset></Anchor>
@@ -1330,7 +1364,7 @@
                         </Texture>
                         <!-- ref PlayerAttackBackground (l.112-123): the dark red disc behind the
                              attack state icon; OnLoad tints it (0.8,0.1,0.1) at alpha 0.4. -->
-                        <Texture name="$parentAttackBackground" file="Interface\TargetingFrame\UI-TargetingFrame-AttackBackground" hidden="true">
+                        <Texture name="PlayerAttackBackground" file="Interface\TargetingFrame\UI-TargetingFrame-AttackBackground" hidden="true">
                             <Size><AbsDimension x="32" y="32"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="37" y="-50"/></Offset></Anchor>
@@ -1342,7 +1376,7 @@
                              CENTER at (73,-42) from the frame's TOPLEFT — the portrait circle's
                              center. Hidden until a UNIT_COMBAT event lands; CombatFeedback drives
                              text/size/color and the fade. -->
-                        <FontString name="$parentHitIndicator" hidden="true" inherits="NumberFontNormalHuge">
+                        <FontString name="PlayerHitIndicator" hidden="true" inherits="NumberFontNormalHuge">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="73" y="-42"/></Offset></Anchor>
                             </Anchors>
@@ -1355,13 +1389,13 @@
                              $parentRestIcon's below. Shown by BenillaPlayerFrame_UpdatePartyLeader.
                              Report B317: the member frames have carried these since 0434 phase 2;
                              the player frame was built before the party wire and listed them OUT. -->
-                        <Texture name="$parentLeaderIcon" file="Interface\GroupFrame\UI-Group-LeaderIcon" hidden="true">
+                        <Texture name="PlayerLeaderIcon" file="Interface\GroupFrame\UI-Group-LeaderIcon" hidden="true">
                             <Size><AbsDimension x="16" y="16"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="44" y="-10"/></Offset></Anchor>
                             </Anchors>
                         </Texture>
-                        <Texture name="$parentMasterIcon" file="Interface\GroupFrame\UI-Group-MasterLooter" hidden="true">
+                        <Texture name="PlayerMasterIcon" file="Interface\GroupFrame\UI-Group-MasterLooter" hidden="true">
                             <Size><AbsDimension x="16" y="16"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="80" y="-10"/></Offset></Anchor>
@@ -1370,17 +1404,17 @@
                         <!-- The state icon pair under the portrait (ref PlayerRestIcon /
                              PlayerAttackIcon, ref-PlayerFrame.xml l.171-201): the two halves of
                              UI-StateIcon — zzz left, crossed swords right (decision 1082). -->
-                        <Texture name="$parentRestIcon" file="Interface\CharacterFrame\UI-StateIcon" hidden="true">
+                        <Texture name="PlayerRestIcon" file="Interface\CharacterFrame\UI-StateIcon" hidden="true">
                             <Size><AbsDimension x="31" y="33"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="37" y="-49"/></Offset></Anchor>
                             </Anchors>
                             <TexCoords left="0" right="0.5" top="0" bottom="0.421875"/>
                         </Texture>
-                        <Texture name="$parentAttackIcon" file="Interface\CharacterFrame\UI-StateIcon" hidden="true">
+                        <Texture name="PlayerAttackIcon" file="Interface\CharacterFrame\UI-StateIcon" hidden="true">
                             <Size><AbsDimension x="32" y="32"/></Size>
                             <Anchors>
-                                <Anchor point="TOPLEFT" relativeTo="$parentRestIcon"><Offset><AbsDimension x="1" y="1"/></Offset></Anchor>
+                                <Anchor point="TOPLEFT" relativeTo="PlayerRestIcon"><Offset><AbsDimension x="1" y="1"/></Offset></Anchor>
                             </Anchors>
                             <TexCoords left="0.5" right="1.0" top="0" bottom="0.5"/>
                         </Texture>
@@ -1390,21 +1424,21 @@
             <!-- The state icon's own ADD-blend glow (ref PlayerStatusGlow, ref-PlayerFrame.xml
                  l.216-248): a sibling FRAME over the icon so the whole thing can pulse as one
                  SetAlpha group with the status ring (the OnUpdate flash, decision 1082). -->
-            <Frame name="$parentStatusGlow" hidden="true">
+            <Frame name="PlayerStatusGlow" hidden="true">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="$parentTextureFrameRestIcon"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="PlayerRestIcon"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Layers>
                     <Layer level="OVERLAY">
-                        <Texture name="$parentRestGlow" file="Interface\CharacterFrame\UI-StateIcon" alphaMode="ADD">
+                        <Texture name="PlayerRestGlow" file="Interface\CharacterFrame\UI-StateIcon" alphaMode="ADD">
                             <Size><AbsDimension x="32" y="32"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
                             </Anchors>
                             <TexCoords left="0" right="0.5" top="0.5" bottom="1.0"/>
                         </Texture>
-                        <Texture name="$parentAttackGlow" file="Interface\CharacterFrame\UI-StateIcon" alphaMode="ADD">
+                        <Texture name="PlayerAttackGlow" file="Interface\CharacterFrame\UI-StateIcon" alphaMode="ADD">
                             <Size><AbsDimension x="32" y="32"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
@@ -1510,7 +1544,7 @@
                 </Texture>
                 <!-- Portrait 64×64 TOPRIGHT (-42,-12) (ref l.131-142, BORDER→BACKGROUND for the same
                      ring-over-portrait layering as the player). -->
-                <Texture name="$parentPortrait">
+                <Texture name="TargetPortrait">
                     <Size><AbsDimension x="64" y="64"/></Size>
                     <Anchors>
                         <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-42" y="-12"/></Offset></Anchor>
@@ -1538,7 +1572,7 @@
                 </Scripts>
             </StatusBar>
             <!-- Power bar 119×12 TOPRIGHT (-106,-52), UI-StatusBar; color set at runtime (ref l.274-292). -->
-            <StatusBar name="$parentPowerBar" enableMouse="true">
+            <StatusBar name="$parentManaBar" enableMouse="true">
                 <Size><AbsDimension x="119" y="12"/></Size>
                 <Anchors>
                     <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-106" y="-52"/></Offset></Anchor>
@@ -1565,7 +1599,7 @@
                 <Layers>
                     <Layer level="BACKGROUND">
                         <!-- Ring art, UN-mirrored: TexCoords left=0.09375 right=1.0 (ref l.146-151). -->
-                        <Texture name="$parentTexture" file="Interface\TargetingFrame\UI-TargetingFrame">
+                        <Texture name="TargetFrameTexture" file="Interface\TargetingFrame\UI-TargetingFrame">
                             <Size><AbsDimension x="232" y="100"/></Size>
                             <Anchors>
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
@@ -1577,7 +1611,7 @@
                         <!-- The PvP flag icon, 64×64 TOPRIGHT (3,-20) (ref TargetPVPIcon,
                              ref-TargetFrame.xml l.208-219) — the player's icon mirrored to the
                              frame's other edge, same law (decision 0646 §4). -->
-                        <Texture name="$parentPVPIcon" hidden="true">
+                        <Texture name="TargetPVPIcon" hidden="true">
                             <Size><AbsDimension x="64" y="64"/></Size>
                             <Anchors>
                                 <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="3" y="-20"/></Offset></Anchor>
@@ -1586,14 +1620,14 @@
                     </Layer>
                     <Layer level="OVERLAY">
                         <!-- Name 100×10 CENTER (-50,19) (ref l.152-163). -->
-                        <FontString name="$parentNameText" inherits="GameFontNormalSmall" text="Unknown">
+                        <FontString name="TargetName" inherits="GameFontNormalSmall" text="Unknown">
                             <Size><AbsDimension x="100" y="10"/></Size>
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="19"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
                         <!-- Level number CENTER (63,-16) (ref l.164-172). -->
-                        <FontString name="$parentLevelText" inherits="GameFontNormalSmall">
+                        <FontString name="TargetLevelText" inherits="GameFontNormalSmall">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="63" y="-16"/></Offset></Anchor>
                             </Anchors>
@@ -1601,7 +1635,7 @@
                         <!-- The "too high to tell" skull, 16×16 on the level slot (ref
                              TargetHighLevelTexture, l.184-195): shown for a corpse target or
                              UnitLevel ≤ 0, replacing the number (TargetFrame_CheckLevel). -->
-                        <Texture name="$parentHighLevelTexture" file="Interface\TargetingFrame\UI-TargetingFrame-Skull">
+                        <Texture name="TargetHighLevelTexture" file="Interface\TargetingFrame\UI-TargetingFrame-Skull">
                             <Size><AbsDimension x="16" y="16"/></Size>
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="63" y="-16"/></Offset></Anchor>
@@ -1613,7 +1647,7 @@
                              key never reaches the screen. `hidden` like the ToT twin below, a
                              deliberate divergence: the reference leaves the region shown and
                              relies on CheckDead landing before the frame does. -->
-                        <FontString name="$parentDeadText" inherits="GameFontNormalSmall" text="DEAD" hidden="true">
+                        <FontString name="TargetDeadText" inherits="GameFontNormalSmall" text="DEAD" hidden="true">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="3"/></Offset></Anchor>
                             </Anchors>
@@ -1625,12 +1659,12 @@
                              bars textLockable, so Status Bar Text does not pin them. The HOVER is
                              what they were waiting for, and it is the reference's behaviour whole:
                              on the target, the numbers are something you go and look at. -->
-                        <FontString name="$parentHealthBarText" inherits="TextStatusBarText">
+                        <FontString name="TargetFrameHealthBarText" inherits="TextStatusBarText">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="3"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
-                        <FontString name="$parentPowerBarText" inherits="TextStatusBarText">
+                        <FontString name="TargetFrameManaBarText" inherits="TextStatusBarText">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="-9"/></Offset></Anchor>
                             </Anchors>
@@ -1855,7 +1889,7 @@
                 and TargetofTarget_ModeAllows()
             if show then
                 frame:Show()
-                BenillaUnitFrame_PaintBars(frame.healthBar, frame.manaBar, "targettarget")
+                BenillaUnitFrame_PaintBars(frame.healthbar, frame.manabar, "targettarget")
                 TargetofTargetName:SetText(UnitName("targettarget") or "")
                 TargetofTarget_CheckDead()
                 -- The reference's own line (l.536), and it is not redundant with the health
@@ -1946,16 +1980,16 @@
         function TargetofTarget_OnLoad()
             local frame = this
             frame.unit = "targettarget"
-            frame.healthBar = TargetofTargetHealthBar
-            frame.manaBar = TargetofTargetManaBar
+            frame.healthbar = TargetofTargetHealthBar
+            frame.manabar = TargetofTargetManaBar
             -- The recessed-bar look, the same mechanism every frame in this file uses (decision
             -- 0884): the bars one frame level BELOW the art's TextureFrame, because the draw layer
             -- is bucket-wide and the frame level is the one key term above it. The reference
             -- spends its level the other way round (RaiseFrameLevel on the TextureFrame); same
             -- ordering, and ours matches its siblings here.
             local level = TargetofTargetTextureFrame:GetFrameLevel()
-            frame.healthBar:SetFrameLevel(level - 1)
-            frame.manaBar:SetFrameLevel(level - 1)
+            frame.healthbar:SetFrameLevel(level - 1)
+            frame.manabar:SetFrameLevel(level - 1)
             -- The live model portrait, bound once by token (see BenillaUnitFrame_OnLoad's note):
             -- the app keeps this slot's bake current, and it only bakes at all while this frame is
             -- on screen (portrait/mod.rs's `"targettarget"` arm).
@@ -2175,29 +2209,29 @@
     <Script><![CDATA[
         function PetFrame_OnLoad()
             local frame = this
-            frame.portrait  = PetFrameTextureFramePortrait
-            frame.healthBar = PetFrameHealthBar
-            frame.manaBar   = PetFrameManaBar
-            frame.nameText  = PetFrameTextureFrameName
+            frame.portrait  = PetPortrait
+            frame.healthbar = PetFrameHealthBar
+            frame.manabar   = PetFrameManaBar
+            frame.nameText  = PetName
             -- The recessed-bar look, the same mechanism the player/target/party frames use
             -- (decision 0884): push the bars one frame level BELOW the art's TextureFrame, because
             -- the draw layer is bucket-wide and the frame level is the one key term above it.
             local level = PetFrameTextureFrame:GetFrameLevel()
-            frame.healthBar:SetFrameLevel(level - 1)
-            frame.manaBar:SetFrameLevel(level - 1)
+            frame.healthbar:SetFrameLevel(level - 1)
+            frame.manabar:SetFrameLevel(level - 1)
             -- The pet's numerals, textLockable like the ref's (PetFrame.xml l.139/164; 1143).
             if TextStatusBar_Initialize then -- engine tests load file subsets
-                TextStatusBar_Initialize(frame.healthBar)
-                TextStatusBar_Initialize(frame.manaBar)
-                SetTextStatusBarText(frame.healthBar, PetFrameTextureFrameHealthBarText)
-                SetTextStatusBarText(frame.manaBar, PetFrameTextureFrameManaBarText)
-                frame.healthBar.textLockable = 1
-                frame.manaBar.textLockable = 1
+                TextStatusBar_Initialize(frame.healthbar)
+                TextStatusBar_Initialize(frame.manabar)
+                SetTextStatusBarText(frame.healthbar, PetFrameHealthBarText)
+                SetTextStatusBarText(frame.manabar, PetFrameManaBarText)
+                frame.healthbar.textLockable = 1
+                frame.manabar.textLockable = 1
             end
             -- The pet's bars hover for their numbers, but hand nothing on: the pet frame has no
             -- OnEnter of its own, and its click is its own handler (1146).
-            frame.healthBar.ownerClick = PetFrame_OnClick
-            frame.manaBar.ownerClick = PetFrame_OnClick
+            frame.healthbar.ownerClick = PetFrame_OnClick
+            frame.manabar.ownerClick = PetFrame_OnClick
             frame.attackModeCounter = 0
             frame.attackModeSign = -1
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -2222,11 +2256,11 @@
         function PetFrame_OnEvent(event)
             local frame = this
             if event == "PET_ATTACK_START" then
-                PetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, 1.0)
-                PetFrameAttackMode:Show()
+                PetAttackModeTexture:SetVertexColor(1.0, 1.0, 1.0, 1.0)
+                PetAttackModeTexture:Show()
                 return
             elseif event == "PET_ATTACK_STOP" then
-                PetFrameAttackMode:Hide()
+                PetAttackModeTexture:Hide()
                 return
             elseif event == "UNIT_HAPPINESS" then
                 -- The ref's own last arm: repaint the icon alone, not the whole frame.
@@ -2253,7 +2287,7 @@
             -- The ref's art swap (PetFrame.lua's Update): a powerless pet wears the -NoMana plate,
             -- which has no mana rail to leave empty. Which plate is exactly the shared paint's
             -- return — the pet is the only frame here whose art carries that distinction.
-            if BenillaUnitFrame_PaintBars(frame.healthBar, frame.manaBar, "pet") then
+            if BenillaUnitFrame_PaintBars(frame.healthbar, frame.manabar, "pet") then
                 PetFrameTexture:SetTexture("Interface\\TargetingFrame\\UI-SmallTargetingFrame")
             else
                 PetFrameTexture:SetTexture("Interface\\TargetingFrame\\UI-SmallTargetingFrame-NoMana")
@@ -2360,7 +2394,7 @@
         -- 55/255 and 1, sign-flipped at each end (the ref's own counter shape, transcribed).
         function PetFrame_OnUpdate(elapsed)
             local frame = this
-            if not PetFrameAttackMode:IsVisible() then return end
+            if not PetAttackModeTexture:IsVisible() then return end
             local counter = frame.attackModeCounter + elapsed
             local sign = frame.attackModeSign
             if counter > 0.5 then
@@ -2375,7 +2409,7 @@
             else
                 alpha = (255 - (counter * 400)) / 255
             end
-            PetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, alpha)
+            PetAttackModeTexture:SetVertexColor(1.0, 1.0, 1.0, alpha)
         end
 
         -- Clicking the pet frame (decision 1066 built the right-hand half). The LEFT button hands
@@ -2522,7 +2556,7 @@
                     <Layer level="BACKGROUND">
                         <!-- Portrait 37×37 TOPLEFT (7,-6), under the art's round window (ref
                              PetPortrait, PetFrame.xml l.16-27). -->
-                        <Texture name="$parentPortrait">
+                        <Texture name="PetPortrait">
                             <Size><AbsDimension x="37" y="37"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
                         </Texture>
@@ -2538,14 +2572,14 @@
                     <Layer level="ARTWORK">
                         <!-- The attacking overlay (ref PetAttackModeTexture, l.104-118): the right
                              29.7% of UI-Player-AttackStatus, ADD-blended, pulsed by OnUpdate. -->
-                        <Texture name="PetFrameAttackMode" file="Interface\TargetingFrame\UI-Player-AttackStatus" alphaMode="ADD" hidden="true">
+                        <Texture name="PetAttackModeTexture" file="Interface\TargetingFrame\UI-Player-AttackStatus" alphaMode="ADD" hidden="true">
                             <Size><AbsDimension x="76" y="64"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="-9"/></Offset></Anchor></Anchors>
                             <TexCoords left="0.703125" right="1.0" top="0" bottom="1.0"/>
                         </Texture>
                     </Layer>
                     <Layer level="OVERLAY">
-                        <FontString name="$parentName" inherits="GameFontNormalSmall" justifyH="LEFT">
+                        <FontString name="PetName" inherits="GameFontNormalSmall" justifyH="LEFT">
                             <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="50" y="33"/></Offset></Anchor></Anchors>
                         </FontString>
                         <!-- The pet's numerals: the reference's LITERAL seats, CENTER-from-TOPLEFT
@@ -2561,10 +2595,10 @@
                              under it) rather than centring it. Centring both is what collided.
                              No 1145 nudge here: that pixel was for a string centred in a bar, and
                              the reference has already placed these deliberately off-centre. -->
-                        <FontString name="$parentHealthBarText" inherits="TextStatusBarText">
+                        <FontString name="PetFrameHealthBarText" inherits="TextStatusBarText">
                             <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="82" y="-27"/></Offset></Anchor></Anchors>
                         </FontString>
-                        <FontString name="$parentManaBarText" inherits="TextStatusBarText">
+                        <FontString name="PetFrameManaBarText" inherits="TextStatusBarText">
                             <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="82" y="-38"/></Offset></Anchor></Anchors>
                         </FontString>
                     </Layer>

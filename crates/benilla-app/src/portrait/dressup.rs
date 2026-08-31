@@ -62,6 +62,10 @@ pub(crate) struct DressUpLook {
     /// Worn **ItemDisplayInfo** ids by equipment slot, the `SMSG_CHAR_ENUM` shape the shared
     /// assembly reads (helm 0 · shoulder 2 · … · main hand 15 · off hand 16 · ranged 17 · tabard 18).
     pub(crate) equipment: [CharEnumItem; 19],
+    /// The player's own guild tabard (decision 1704) — so a tried-on Guild Tabard previews *their*
+    /// crest, not the blank default. Part of the look's `PartialEq`, so an identity that lands
+    /// while the window is open re-assembles the booth exactly as a try-on does.
+    pub(crate) emblem: Option<benilla_formats::GuildEmblem>,
 }
 
 /// The dressing room's live input: who is standing in it (`None` = the window is closed / has

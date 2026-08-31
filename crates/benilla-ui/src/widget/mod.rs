@@ -175,10 +175,11 @@ mod kinds;
 pub use kinds::{
     slider_fraction, slider_grab, ButtonFont, ButtonState, ColorSelectState, CooldownState,
     EditAction, EditBoxState, EditOutcome, EditUnit, FrameKind, InsertMode, KindState,
-    MessageFrameState, MessageLine, MinimapState, RegionKind, ScrollFrameState,
+    MessageFrameState, MessageLine, MinimapState, ModelState, RegionKind, ScrollFrameState,
     ScrollingMessageState, SliderState, StatusBarState, TooltipState, COOLDOWN_FLASH_SECS,
-    MINIMAP_DEFAULT_ZOOM, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS,
-    TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
+    MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK, MINIMAP_DEFAULT_PLAYER_MODEL,
+    MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP,
+    TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -418,6 +419,13 @@ pub struct WidgetArena {
     /// corpus UI, to reach the two or three that exist. Appended at creation (kinds never change);
     /// `destroy` removes its own handle, so the list never carries dead entries.
     tooltip_kinds: Vec<FrameHandle>,
+    /// Every live **Minimap**, same registry shape as [`Self::ticked_kinds`] and for the same
+    /// reason: three state feeds (containment, the two zoom indices, and the player-arrow facing)
+    /// all begin "find the Minimaps", and the facing is *per frame*. The ping's own lesson
+    /// (decision 1596) was that a per-widget push must not walk the ~3–4k-frame arena every frame
+    /// to reach the one widget that exists. Appended at creation (kinds never change); `destroy`
+    /// removes its own handle.
+    minimap_kinds: Vec<FrameHandle>,
 }
 
 impl Default for WidgetArena {
@@ -437,6 +445,7 @@ impl WidgetArena {
             minimap_created: 0,
             ticked_kinds: Vec::new(),
             tooltip_kinds: Vec::new(),
+            minimap_kinds: Vec::new(),
         }
     }
 
@@ -453,6 +462,11 @@ impl WidgetArena {
     /// The live GameTooltip frames (see the field note).
     pub fn tooltip_kinds(&self) -> &[FrameHandle] {
         &self.tooltip_kinds
+    }
+
+    /// The live Minimap frames (see the field note).
+    pub fn minimap_kinds(&self) -> &[FrameHandle] {
+        &self.minimap_kinds
     }
 
     // ── Read access ────────────────────────────────────────────────────────────────────────────
@@ -645,6 +659,12 @@ impl WidgetArena {
                 FrameKind::ColorSelect => {
                     KindState::ColorSelect(kinds::ColorSelectState::default())
                 }
+                // Both model panes share one state: `CGCharacterModelBase` EXTENDS `CSimpleModel`,
+                // so a `<PlayerModel>` carries every `CSimpleModel` member and adds only the
+                // turn-animation pair we do not model (`ModelState`'s doc).
+                FrameKind::Model | FrameKind::PlayerModel => {
+                    KindState::Model(kinds::ModelState::default())
+                }
                 FrameKind::Minimap => KindState::Minimap(kinds::MinimapState::default()),
                 FrameKind::Cooldown => KindState::Cooldown(kinds::CooldownState::default()),
                 FrameKind::GameTooltip => KindState::Tooltip(kinds::TooltipState::default()),
@@ -668,7 +688,6 @@ impl WidgetArena {
         if matches!(kind, FrameKind::GameTooltip) {
             self.tooltip_kinds.push(handle);
         }
-
         if let Some(p) = parent {
             self.frame_mut(p)
                 .expect("live parent")
@@ -679,7 +698,30 @@ impl WidgetArena {
             // Non-overwriting: first writer wins.
             self.names.entry(n).or_insert(handle);
         }
+        if matches!(kind, FrameKind::Minimap) {
+            self.minimap_kinds.push(handle);
+            // The `CMinimap` ctor's own last act, so no observer ever sees a Minimap without its
+            // nine (see [`MINIMAP_ENGINE_CHILDREN`]). It sits here rather than in the loader
+            // because the client builds them in the *element factory* — `CreateFrame("Minimap")`
+            // from Lua gets them too, and gets them before its OnLoad runs.
+            self.build_minimap_engine_children(handle);
+        }
         handle
+    }
+
+    /// Build the nine engine-owned `Model` children of a fresh Minimap and remember the ninth as
+    /// its player arrow. They are created **anonymous and file-less**: the ctor only constructs
+    /// them, and the model paths are `CMinimap::LoadXML 0x4ee2b0`'s to assign from the two
+    /// attributes (the loader's minimap pass) — which is why a `CreateFrame("Minimap")` with no XML
+    /// behind it has nine blank Models here, exactly as the reference does.
+    fn build_minimap_engine_children(&mut self, minimap: FrameHandle) {
+        let mut ninth = None;
+        for _ in 0..kinds::MINIMAP_ENGINE_CHILDREN {
+            ninth = Some(self.create(FrameKind::Model, None, Some(minimap)));
+        }
+        if let Some(KindState::Minimap(m)) = self.frame_mut(minimap).map(|f| &mut f.kind_state) {
+            m.player_arrow = ninth;
+        }
     }
 
     /// Destroy a frame and its whole subtree (child frames and all regions), unpublishing any names
@@ -695,6 +737,7 @@ impl WidgetArena {
         // Each (recursive) destroy removes its own handle — the tick registry stays dead-free.
         self.ticked_kinds.retain(|&t| t != h);
         self.tooltip_kinds.retain(|&t| t != h);
+        self.minimap_kinds.retain(|&t| t != h);
 
         for c in children {
             self.destroy(c);

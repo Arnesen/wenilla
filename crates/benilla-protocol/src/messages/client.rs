@@ -360,6 +360,22 @@ pub fn move_flag_ack(guid: u64, counter: u32, info: &MovementInfo, apply: Option
     body
 }
 
+/// Body of `CMSG_MOVE_KNOCK_BACK_ACK` (decision 1702) — **the same shape as a movement-mode ack
+/// without its trailing `apply`**: a full `u64` guid, the echoed `u32` counter, and our
+/// `MovementInfo`. Not a coincidence of layout: both land on a `WorldSession::HandleMove*Ack` that
+/// reads exactly `guid >> counter >> movementInfo` (vmangos `Server/Packets/Movement.cpp:38-68`),
+/// so they are one wire shape with two meanings, and delegating says so.
+///
+/// **`info` must carry `MOVEFLAG_JUMPING` and the launch quad in its jump tail.**
+/// `Unit::FindPendingMovementKnockbackChange` walks the pending changes and matches on the counter
+/// *plus* all four floats within `0.01`; miss, and the ack is discarded as `OnWrongAckData` and the
+/// knockback never reaches observers (the server builds their `MSG_MOVE_KNOCK_BACK` from this very
+/// `MovementInfo`). Send nothing at all and it is `OnFailedToAckChange` — a knockback is the one
+/// pending change vmangos refuses to re-send (`Unit.cpp:6887`).
+pub fn knock_back_ack(guid: u64, counter: u32, info: &MovementInfo) -> Vec<u8> {
+    move_flag_ack(guid, counter, info, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

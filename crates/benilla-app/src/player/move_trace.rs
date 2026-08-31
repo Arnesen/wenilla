@@ -18,6 +18,10 @@
 //!   a granted sit and a refused one look identical on screen, and the granted-underwater bug and a
 //!   gate that refuses everything are the same picture. Covers the `X` key and the `/sit` family
 //!   alike, because both land on the one commit it is emitted from.
+//! - **`knb`** — one line per **knockback** ([`knockback`]): the launch quad the server aimed and
+//!   whether the mover flew it. The one mover edge with no observable of its own — its ack is not a
+//!   `MSG_MOVE_*` so `snd` misses it, its refusal is silent by design, and a wrong ack's whole
+//!   symptom is *other players seeing nothing* (decision 1702).
 //! - **`snd`** — one line per outbound `MSG_MOVE_*` ([`sent`]), the send-side twin of `net::motion`'s
 //!   `rly`: it makes **our own wire cadence measurable** (decision 0617), which is the only way to
 //!   compare it against the reference's — the 1.12.1 sniff's client stream is a list of exactly these
@@ -98,6 +102,37 @@ pub(super) fn posture(what: &str, state: u8, from: u8, flags: u32) {
             "{what} state={state} from={from} flags={flags:#x} swim={} moving={}",
             u8::from(flags & f::SWIMMING != 0),
             u8::from(flags & f::ANY_MOVE != 0),
+        ),
+    );
+}
+
+/// One `knb` line per **knockback**, whether we flew it or refused it (decision 1702).
+///
+/// The tag exists because a knockback is the one mover edge with **no observable of its own on
+/// either side of the failure**. Its ack is not a `MSG_MOVE_*`, so `snd` never shows it; its refusal
+/// is silent by design (the reference discards the record under a root, and vmangos logs
+/// `OnFailedToAckChange` server-side where we cannot see it); and if the ack's four floats are ever
+/// wrong the server drops it as `OnWrongAckData` and simply never relays the knockback — a bug whose
+/// entire symptom is *other people not seeing something*, which no local capture can show.
+///
+/// So the line carries the quad as it arrived, next to the verdict. `up` is the derived +Z take-off
+/// speed, printed beside the wire's own down-positive `zspeed` precisely because the sign flip
+/// between them is where a knockback that drives you into the ground would come from — the two must
+/// always read as negatives of each other.
+pub(super) fn knockback(flown: bool, launch: benilla_protocol::JumpInfo) {
+    if !trace::enabled() {
+        return;
+    }
+    trace::line(
+        "knb",
+        &format!(
+            "{} cos={:.4} sin={:.4} xy={:.3} zspeed={:.3} up={:.3}",
+            if flown { "flown" } else { "REFUSED" },
+            launch.cos_angle,
+            launch.sin_angle,
+            launch.xy_speed,
+            launch.zspeed,
+            -launch.zspeed,
         ),
     );
 }

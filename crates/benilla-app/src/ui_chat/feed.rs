@@ -636,6 +636,10 @@ pub(super) fn feed_chat(
     states: Res<crate::world_state::WorldStates>,
     // The language gate (B262): the word pool + this character's fluency + the GM bit.
     langs: Res<super::language::ChatLanguages>,
+    // The combat log's item-name seam (1703): the four families whose sentence names an ITEM
+    // (`TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`) resolve it
+    // here, through the same ask-once cache the reference's own deferred queue re-runs against.
+    mut items: ResMut<crate::items::Items>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1051,6 +1055,27 @@ pub(super) fn feed_chat(
                         Some(name) if slot == 0 => line.fills.attacker = name,
                         Some(name) => line.fills.victim = name,
                         None => wait = true,
+                    }
+                }
+                // The `Named` slot, on the same terms as the endpoints. A cached NEGATIVE on an
+                // item (the server does not know the entry) is not something to wait on — it would
+                // pin the line for the whole `tries` budget and then drop it — so it composes with
+                // whatever the arm left in `named`, one level down the reference's own
+                // `"UKNOWNOBJECT"` degrade.
+                match line.named {
+                    super::combat::Named::Ready => {}
+                    super::combat::Named::Item(entry) => {
+                        match items.template(entry, 0, &commands).map(|t| t.name.clone()) {
+                            Some(name) => line.fills.named = name,
+                            None if !items.template_answered_unknown(entry) => wait = true,
+                            None => {}
+                        }
+                    }
+                    super::combat::Named::Unit(guid) => {
+                        match super::combat::object_name(guid, &mut names, &commands) {
+                            Some(name) => line.fills.named = name,
+                            None => wait = true,
+                        }
                     }
                 }
                 if wait {

@@ -293,9 +293,17 @@
 
         -- SetFullScreenFrame(frame) — UIParent.lua l.852-866. ONE line dropped: the reference also
         -- does `UIParent:Hide()`/`:Show()` around the swap, hiding the whole game UI behind the
-        -- fullscreen frame. benilla has no UIParent frame (the note on `slots` above), and the only
-        -- full frame we ship — the world map — already paints its own full-screen blackout
-        -- (WorldMapFrame.xml), which is what that Hide buys the reference.
+        -- fullscreen frame.
+        --
+        -- BOTH of the reasons this note used to give are now FALSE (decision 1724). A real
+        -- `UIParent` frame exists (UIParent.xml), and the world map is no longer the only `full`
+        -- row: `CinematicFrame` is a second one, and it paints nothing by design. So this dropped
+        -- line is exactly what makes a cinematic hide the HUD through `crate::ui_hide::UiHidden`
+        -- instead of through here — and `UiHidden` also means "the UI takes no mouse", which is
+        -- ALT-Z's meaning and the reason the world took every click of a fly-by.
+        --
+        -- Restoring it needs the HUD parented to UIParent first (the 32 dropped `parent="UIParent"`
+        -- declarations 1724 measured); hiding UIParent today would reach almost nothing.
         function SetFullScreenFrame(frame)
             local oldFrame = slots.fullscreen
             slots.fullscreen = frame
@@ -761,9 +769,10 @@
             end
             -- The colour picker next (ColorPickerFrame.xml). The reference hooks ESC on the frame
             -- itself (`<OnKeyDown>` l.177-184, whose ESCAPE arm is `HideUIPanel(this)` +
-            -- `cancelFunc(previousValues)`); this engine gives plain frames no raw key events, so
-            -- it routes through this shared chain like the stack-split spinner and the world map
-            -- do. **Cancel-CLICK, not hide** — the ref's own arm restores the previous colour, and
+            -- `cancelFunc(previousValues)`); that frame does not transcribe its OnKeyDown (see its
+            -- own header — the engine can deliver one since 1319; the deferral is now about the
+            -- existence gate, not the engine), so it routes through this shared chain like the
+            -- world map does. **Cancel-CLICK, not hide** — the ref's own arm restores the previous colour, and
             -- clicking the real button is how the options rung below already spells this (the ref's
             -- `OptionsFrameCancel:Click()`), so there is one cancel path, not two.
             local picker = getglobal("ColorPickerFrame")
@@ -805,7 +814,8 @@
                 return
             end
             -- The fullscreen world map next (the ref's OnKeyDown ESCAPE arm — WorldMapFrame.xml
-            -- l.628; ours routes through this chain since frames get no raw key events).
+            -- l.628; ours routes through this chain rather than transcribing that frame's own
+            -- OnKeyDown, which the engine could deliver since 1319).
             local worldmap = getglobal("WorldMapFrame")
             if worldmap and worldmap:IsVisible() then
                 -- HideUIPanel, not a bare Hide: the map holds the full-screen slot (decision 0203's

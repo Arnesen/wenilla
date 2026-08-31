@@ -675,7 +675,8 @@ pub(crate) fn end_ui_session(world: &mut World) {
         hover.0 = None;
     }
     if let Some(mut keys) = world.get_resource_mut::<UiKeyboardCapture>() {
-        keys.0 = false;
+        keys.typing = false;
+        keys.arrows_fall_through = false;
     }
     if let Some(mut held) = world.get_resource_mut::<CursorPayloadHeld>() {
         *held = CursorPayloadHeld::default();

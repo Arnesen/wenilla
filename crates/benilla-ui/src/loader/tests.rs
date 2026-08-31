@@ -15,6 +15,80 @@ mod loader_tests {
         framexml::parse(text).expect("valid FrameXML")
     }
 
+    /// **`<Minimap>`'s two model attributes name the nine engine children** — the model half of
+    /// `CMinimap::LoadXML 0x4ee2b0`. `minimapArrowModel` goes to children 1–8 through `0x4ee170`'s
+    /// two loops (the five at `[+0x320]`, the three POI arrows at `[+0x314]`);
+    /// `minimapPlayerModel` goes to `[Minimap+0x338]` — child **9** — alone, through `0x4ee260`.
+    /// Without the split all nine read back `GetModel() == ""` and nothing in the tuple says which
+    /// one is the player arrow.
+    ///
+    /// Both halves in one document: the shipped spelling (`Minimap.xml:97` sets both explicitly)
+    /// and an attribute-less `<Minimap>`, which takes the engine defaults `0x84c768` / `0x8453c0`
+    /// rather than staying file-less.
+    #[test]
+    fn the_minimap_model_attributes_name_the_nine_engine_children() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Minimap name="Minimap"
+                         minimapArrowModel="Interface\Minimap\Rotating-MinimapArrow.mdl"
+                         minimapPlayerModel="Interface\Minimap\MinimapArrow.mdl">
+                    <Size><AbsDimension x="140" y="140"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                    <Frames>
+                        <Frame name="MiniMapPingHost"/>
+                    </Frames>
+                </Minimap>
+                <Minimap name="BareMinimap">
+                    <Size><AbsDimension x="140" y="140"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Minimap>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        // 1–8 wear the arrow, 9 wears the player model — the authored spelling, unchanged.
+        for i in 1..=8 {
+            assert_eq!(
+                s.eval::<String>(&format!(
+                    "return ({{Minimap:GetChildren()}})[{i}]:GetModel()"
+                ))
+                .unwrap(),
+                "Interface\\Minimap\\Rotating-MinimapArrow.mdl",
+                "engine child {i} takes minimapArrowModel"
+            );
+        }
+        assert_eq!(
+            s.eval::<String>("return ({Minimap:GetChildren()})[9]:GetModel()")
+                .unwrap(),
+            "Interface\\Minimap\\MinimapArrow.mdl",
+            "child 9 — [Minimap+0x338] — takes minimapPlayerModel alone"
+        );
+
+        // The `<Frames>` child lands PAST the nine, because the factory runs before the descent
+        // (`0x6ee408` before `0x6ee4ea`) and both linkers append at the tail. This is the whole
+        // reason `[9]` is a stable address for an addon.
+        assert_eq!(
+            s.eval::<String>("return ({Minimap:GetChildren()})[10]:GetName()")
+                .unwrap(),
+            "MiniMapPingHost"
+        );
+
+        // No attributes: the engine defaults, not nothing.
+        assert_eq!(
+            s.eval::<String>("return ({BareMinimap:GetChildren()})[1]:GetModel()")
+                .unwrap(),
+            crate::widget::MINIMAP_DEFAULT_ARROW_MODEL
+        );
+        assert_eq!(
+            s.eval::<String>("return ({BareMinimap:GetChildren()})[9]:GetModel()")
+                .unwrap(),
+            crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL
+        );
+    }
+
     /// **`parent="Name"` attaches a top-level element** — the reference's own way of doing it,
     /// because its FrameXML is flat (decision 1211). 79 corpus addons, 708 sites.
     ///
@@ -1250,6 +1324,110 @@ mod loader_tests {
         assert!(
             !s.eval::<bool>("return Rt:IsMouseEnabled()").unwrap(),
             "a runtime-created frame still needs an explicit EnableMouse"
+        );
+    }
+
+    /// **`<NormalText>` is the Button's label under its second name** — the spelling the reference
+    /// FrameXML never writes and a third-party template reaches for constantly.
+    ///
+    /// `CSimpleButton::LoadXML 0x7788c0` gives this tag strictly more than `<ButtonText>` does: it
+    /// constructs the label `CSimpleFontString` (`0x778b6c call 0x770d30`), clears its
+    /// `ownsFontAttrs` (`0x778b7b`, the one site image-wide that clears it) so its own `LoadXML`
+    /// skips the whole font-attribute surface, and feeds the SAME node to the button's persistent
+    /// Normal-state `CSimpleFont` at `+0x33c` (`0x778ba9`/`0x778baf call 0x783c30`). One owner per
+    /// attribute: the label pass reads the element's name and geometry, the state-font pass reads
+    /// its `inherits=`, and neither reads the other's. (wow-re
+    /// `scratch/fontstring-loadxml-font-attrs.md` §3/§7 and
+    /// `scratch/resize-bounds-and-button-fontstring.md` §5.3 — VERIFIED off the bytes.)
+    ///
+    /// **Why this could sit broken indefinitely.** The reference writes `<ButtonText>` 31 times and
+    /// `<NormalText>` never, so our own FrameXML could not notice the tag was unhandled — and an
+    /// unhandled child element is silent: the button loads, paints, and simply has no label and no
+    /// global. KLHThreatMeter's column-header template is exactly this shape, and the addon died at
+    /// `PLAYER_LOGIN` indexing the `nil` global, six frames deep, naming nothing about XML.
+    ///
+    /// The document is that template, reduced: a virtual `Button` carrying a named `<NormalText>`,
+    /// reached through `inherits=` (never directly), so this covers the template path the addon
+    /// actually takes.
+    #[test]
+    fn a_button_normal_text_is_the_label_names_it_and_fonts_it() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Font name="KtmYellow" font="Fonts\FRIZQT__.TTF" virtual="true">
+                    <FontHeight><AbsValue val="10"/></FontHeight>
+                    <Color r="0.9" g="0.8" b="0.1" a="1"/>
+                </Font>
+                <Button name="KtmHeaderTemplate" virtual="true">
+                    <NormalText name="$parentText" inherits="KtmYellow" text="Threat">
+                        <Size><AbsDimension x="70" y="14"/></Size>
+                        <Anchors><Anchor point="LEFT"/></Anchors>
+                    </NormalText>
+                </Button>
+                <Frame name="KtmSelf">
+                    <Size><AbsDimension x="300" y="100"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                    <Frames>
+                        <Button name="$parentHeaderName" inherits="KtmHeaderTemplate">
+                            <Size><AbsDimension x="70" y="14"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Button>
+                    </Frames>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        // 1 · THE GLOBAL. `$parent` resolved against the instantiated button and published in `_G`
+        // — this single read is the one KLHThreatMeter died on.
+        assert!(
+            s.eval::<bool>("return KtmSelfHeaderNameText ~= nil")
+                .unwrap(),
+            "a named <NormalText> must publish its global"
+        );
+        // 2 · ...and it is the BUTTON'S label, not a loose FontString that merely shares the name.
+        // Naming a region and publishing a global are two different things (the `<ButtonText>` path
+        // learned that the expensive way), so both directions are asserted.
+        assert_eq!(
+            s.eval::<String>("return KtmSelfHeaderNameText:GetName()")
+                .unwrap(),
+            "KtmSelfHeaderNameText"
+        );
+        assert_eq!(
+            s.eval::<String>("return KtmSelfHeaderName:GetFontString():GetName()")
+                .unwrap(),
+            "KtmSelfHeaderNameText",
+            "the <NormalText> region must BE the button's label"
+        );
+        // 3 · The element's own geometry landed on the label — the label pass's half.
+        assert_eq!(
+            s.eval::<f64>("return KtmSelfHeaderNameText:GetWidth()")
+                .unwrap(),
+            70.0
+        );
+        // 4 · ...and its `inherits=` landed on the button's NORMAL-STATE font, which is the half a
+        // plain `<ButtonText>` alias would have missed. Read off the painted quad rather than a
+        // getter: the state font is applied at extract, so what is on screen is the only reading
+        // that proves the link is live.
+        s.resolve();
+        let label = s
+            .extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Text {
+                    text: Some(t),
+                    color,
+                    ..
+                } if t == "Threat" => Some(color),
+                _ => None,
+            })
+            .expect("the <NormalText> label must paint");
+        assert_eq!(
+            label,
+            Some([0.9, 0.8, 0.1, 1.0]),
+            "<NormalText inherits=> must reach the button's Normal-state font"
         );
     }
 
