@@ -731,6 +731,16 @@ impl ObjectFields {
         (display != 0).then_some((display, (raw >> 24) as u8))
     }
 
+    /// `CORPSE_FIELD_GUILD` (field 34, `OBJECT_END + 0x1C`) — the dead player's guild id,
+    /// snapshotted at death (vmangos `Player::CreateCorpse` writes `GetGuildId()`). The reference
+    /// reads exactly this word at `0x5d6edf` (`[[corpse+0x110]+0x70]`) and hands it, with
+    /// `CORPSE_FIELD_OWNER`, to the guild-name-cache lookup `0x6d6d20` that feeds the corpse's
+    /// **tabard emblem** install `0x5d6ec0` (wow-re `corpse-decal-and-loot-sparkle.md` §6b). A
+    /// corpse therefore wears its owner's crest exactly as the living body did. `0` = guildless.
+    pub fn corpse_guild(&self) -> u32 {
+        self.get_u32(34).unwrap_or(0)
+    }
+
     /// `CORPSE_FIELD_BYTES_1` (field 32, `OBJECT_END + 0x1A`) — byte 1 **race**, byte 2 **gender**,
     /// byte 3 **skinColor** (byte 0 is unused; vmangos writes `(0) | (race<<8) | (gender<<16) |
     /// (skin<<24)`, `Corpse.cpp:228`). The reference reads them one byte at a time off the same

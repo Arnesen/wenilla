@@ -278,7 +278,7 @@
          them (its HorizontalMultiBar1/2 templates carry it too, l.36/l.151), and the shipped state
          a character with a zero toggle byte lands in. MultiActionBar_Update is the only thing that
          opens one. -->
-    <Frame name="MultiBarBottomLeft" frameStrata="HIGH" hidden="true">
+    <Frame name="MultiBarBottomLeft" parent="UIParent" frameStrata="HIGH" hidden="true">
         <Size><AbsDimension x="500" y="38"/></Size>
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="ActionButton1" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="17"/></Offset></Anchor>
@@ -336,7 +336,7 @@
     </Frame>
 
     <!-- HIGH and hidden, same as BottomLeft above (ref `MultiActionBars.xml` l.151). -->
-    <Frame name="MultiBarBottomRight" frameStrata="HIGH" hidden="true">
+    <Frame name="MultiBarBottomRight" parent="UIParent" frameStrata="HIGH" hidden="true">
         <Size><AbsDimension x="500" y="38"/></Size>
         <Anchors>
             <Anchor point="LEFT" relativeTo="MultiBarBottomLeft" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor>
@@ -416,7 +416,7 @@
          RIGHT_ACTIONBAR_PAGE = 3 (actions 25..36). Geometry from ref-MultiActionBars.xml: a 38x500
          frame, button 1 at TOPRIGHT, each next TOP-to-BOTTOM of the previous at -6. -->
 
-    <Frame name="MultiBarRight" frameStrata="HIGH" hidden="true">
+    <Frame name="MultiBarRight" parent="UIParent" frameStrata="HIGH" hidden="true">
         <Size><AbsDimension x="38" y="500"/></Size>
         <Anchors>
             <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-7" y="98"/></Offset></Anchor>
@@ -473,7 +473,7 @@
         </Frames>
     </Frame>
 
-    <Frame name="MultiBarLeft" frameStrata="HIGH" hidden="true">
+    <Frame name="MultiBarLeft" parent="UIParent" frameStrata="HIGH" hidden="true">
         <Size><AbsDimension x="38" y="500"/></Size>
         <Anchors>
             <Anchor point="TOPRIGHT" relativeTo="MultiBarRight" relativePoint="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor>

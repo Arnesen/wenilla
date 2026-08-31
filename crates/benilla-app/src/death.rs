@@ -173,7 +173,19 @@ fn feed_death(
     index: Res<GuidIndex>,
     transforms: Query<&Transform>,
     map: Option<Res<benilla_world::world_map::CurrentMap>>,
+    status: Res<crate::net::NetStatus>,
 ) {
+    // **Only a LIVE session's descriptor is a snapshot** (decision 1732). A reconnect-able
+    // disconnect keeps the self avatar as the local puppet (0065) — descriptor and all — so
+    // without this gate the frames between the socket dying and the reconnect landing would
+    // re-arm `mirror` from a frozen relic, and the reconnect would then find no edge to fire.
+    // That is the same hole from the other side as [`end_session_death_feed`]: the body's state
+    // machine may only be driven by the wire, and while there is no wire there is nothing to
+    // mirror. (The `/logout` path needs no gate — the avatar is despawned, so the `self_q` below
+    // already ends the feed.)
+    if !status.connected {
+        return;
+    }
     let Some(mut script) = script else {
         return;
     };
@@ -428,6 +440,34 @@ fn drain_death(
     }
 }
 
+/// **The world scope of [`DeathFeedState`] dies with the world session** (decision 1732) — the
+/// teardown [`DeathNet`]'s own has had since 0065, which this half never got.
+///
+/// `mirror` is the body's state machine and `died_at` its release-window anchor; both are
+/// deliberately not per-VM, so a `/reload` cannot restart the six minutes. But "not per-VM" was
+/// implemented as "never cleared", and the two scopes then disagreed across a relog: the session
+/// teardown resets `DeathNet` (corpse marker included) while `mirror` still read
+/// `(same guid, dead, ghost)` from before the socket died. Re-entering the world as a ghost
+/// therefore matched **no** arm of the world-edge machine — `(None, _, true)`, the "logging in
+/// already a ghost" arm, needs `prev == None` — so `MSG_CORPSE_QUERY` was never re-sent, the
+/// corpse cache stayed empty, the range gate could not fire `CORPSE_IN_RANGE`, and the
+/// **RECOVER_CORPSE ("Resurrect Now") popup never came up again after a relog**
+/// (director-reported, 2026-08-30).
+///
+/// The guid filter on `mirror` looked like it covered this and does not: it distinguishes a
+/// *different* character, not the *same* one re-entering the world. `DisconnectedMessage` is the
+/// one total edge — a socket death, a kick, and a `/logout` all reach it (the IO thread emits a
+/// `Disconnected` behind `SessionEnd::LoggedOut`) — and it is the very edge `DeathNet` is reset
+/// on, which is what keeps the two scopes in lockstep by construction rather than by memory.
+fn end_session_death_feed(
+    mut msgs: MessageReader<crate::net::DisconnectedMessage>,
+    mut feed: ResMut<DeathFeedState>,
+) {
+    if msgs.read().next().is_some() {
+        *feed = DeathFeedState::default();
+    }
+}
+
 /// The death arc's app plugin (decision 0308): the net-fed stores, the state-machine feed + the
 /// intent drain, and the controller-facing root/water-walk messages.
 pub(crate) struct DeathPlugin;
@@ -442,7 +482,64 @@ impl Plugin for DeathPlugin {
                     feed_death.before(UiInput),
                     drain_death.after(UiInput),
                     drive_death_look,
+                    // Before the feed, so the frame a session ends is already a frame the feed
+                    // sees no memory of the last one.
+                    end_session_death_feed.before(feed_death),
                 ),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// **The world scope dies with the session, and only with the session** (decision 1732).
+    ///
+    /// Both halves matter and they pull opposite ways: a `/reload` must NOT restart the six
+    /// minutes (which is why `mirror`/`died_at` are not per-VM in the first place), and a relog
+    /// MUST clear them (or the "logging in already a ghost" arm never fires, no
+    /// `MSG_CORPSE_QUERY` goes out, and the RECOVER_CORPSE popup stays down — the reported bug).
+    /// A test that only asserted the clear would pass on a resource wiped every frame.
+    #[test]
+    fn the_session_edge_clears_the_world_scoped_death_memory_and_nothing_else_does() {
+        let mut app = App::new();
+        app.add_message::<crate::net::DisconnectedMessage>()
+            .insert_resource(DeathFeedState {
+                mirror: Some((0x1234, true, true)),
+                died_at: Some(12.0),
+                vm: crate::ui_script::VmMemo::default(),
+            });
+
+        // No session edge — the memory stands (the `/reload` half).
+        app.world_mut()
+            .run_system_once(end_session_death_feed)
+            .expect("the teardown runs");
+        assert_eq!(
+            app.world().resource::<DeathFeedState>().mirror,
+            Some((0x1234, true, true)),
+            "nothing but the session edge may clear the body's own state machine"
+        );
+
+        // A `/logout` is a session edge too — `session_over` is false for it, and the clear may
+        // not depend on that (a relog is exactly the `false` case).
+        app.world_mut()
+            .write_message(crate::net::DisconnectedMessage::new(
+                "logged out".into(),
+                benilla_protocol::SessionEnd::LoggedOut,
+            ));
+        app.world_mut()
+            .run_system_once(end_session_death_feed)
+            .expect("the teardown runs");
+        let feed = app.world().resource::<DeathFeedState>();
+        assert!(
+            feed.mirror.is_none(),
+            "a relog must find no mirror, or the login-while-ghost arm cannot fire"
+        );
+        assert!(
+            feed.died_at.is_none(),
+            "the release window is the dead session's, and re-arms at the next login"
+        );
     }
 }

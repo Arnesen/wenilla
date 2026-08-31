@@ -1715,7 +1715,7 @@
     <CheckButton name="BenillaActionButtonTemplate" inherits="ActionBarButtonTemplate" virtual="true"/>
 
     <!-- The bar: 1024x53 anchored BOTTOM of the screen (ref-MainMenuBar.xml l.4-10). -->
-    <Frame name="MainMenuBar">
+    <Frame name="MainMenuBar" parent="UIParent">
         <Size><AbsDimension x="1024" y="53"/></Size>
         <Anchors>
             <Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
@@ -1825,7 +1825,7 @@
                 the rest state. Starts at the bar's CENTER exactly like the ref (its own first
                 Update re-seats or hides it before anything is seen).
             -->
-            <Button name="ExhaustionTick" frameStrata="DIALOG">
+            <Button name="ExhaustionTick" parent="MainMenuBar" frameStrata="DIALOG">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
                     <Anchor point="CENTER" relativeTo="MainMenuExpBar"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
@@ -1956,51 +1956,51 @@
                     <!-- The 12 buttons: Button1 at the art frame BOTTOMLEFT (8,4); 2..12 chain LEFT of
                          the previous's RIGHT +6,0 (ref-ActionBarFrame.xml l.51-158). Replaces our old
                          fixed 38px stride with the real 42px chain (36 wide + 6 gap). -->
-                    <CheckButton name="ActionButton1" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton1" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="8" y="4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 1)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton2" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton2" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 2)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton3" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton3" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 3)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton4" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton4" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 4)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton5" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton5" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 5)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton6" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton6" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 6)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton7" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton7" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 7)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton8" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton8" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 8)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton9" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton9" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 9)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton10" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton10" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 10)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton11" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton11" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton10" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 11)</OnLoad></Scripts>
                     </CheckButton>
-                    <CheckButton name="ActionButton12" inherits="BenillaActionButtonTemplate">
+                    <CheckButton name="ActionButton12" inherits="BenillaActionButtonTemplate" parent="MainMenuBarArtFrame">
                         <Anchors><Anchor point="LEFT" relativeTo="ActionButton11" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12)</OnLoad></Scripts>
                     </CheckButton>
@@ -2015,7 +2015,7 @@
                          the visible up arrow — to the DOWN button. The ref's ±6/±7 insets shrink
                          each to the 20x18 arrow it actually draws, which separates them and stops
                          the down arrow's rect hanging below the screen edge and over the XP bar. -->
-                    <Button name="ActionBarUpButton">
+                    <Button name="ActionBarUpButton" parent="MainMenuBarArtFrame">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors>
                             <Anchor point="CENTER" relativeTo="MainMenuBarArtFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="522" y="-22"/></Offset></Anchor>
@@ -2026,7 +2026,7 @@
                         <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Highlight" alphaMode="ADD"/>
                         <Scripts><OnClick>ActionBar_PageUp() PlaySound("UChatScrollButton")</OnClick></Scripts>
                     </Button>
-                    <Button name="ActionBarDownButton">
+                    <Button name="ActionBarDownButton" parent="MainMenuBarArtFrame">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors>
                             <Anchor point="CENTER" relativeTo="MainMenuBarArtFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="522" y="-42"/></Offset></Anchor>
@@ -2074,7 +2074,7 @@
                     </Layer>
                 </Layers>
                 <Frames>
-                    <Button name="MainMenuBarPerformanceBarFrameButton" setAllPoints="true" frameStrata="HIGH">
+                    <Button name="MainMenuBarPerformanceBarFrameButton" parent="MainMenuBarPerformanceBarFrame" setAllPoints="true" frameStrata="HIGH">
                         <Scripts>
                             <OnEnter>BenillaPerformanceBar_OnEnter(self)</OnEnter>
                             <OnLeave>BenillaPerformanceBar_OnLeave()</OnLeave>

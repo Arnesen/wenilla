@@ -670,18 +670,28 @@ pub(in crate::entities) fn resolve_equipment(
 #[allow(clippy::type_complexity)] // one query's tuple + its change filter
 pub(in crate::entities) fn resolve_corpse_equipment(
     mut commands: Commands,
-    corpses: Query<
-        (Entity, &NetEntity, Ref<ObjectStore>, Option<&Equipment>),
-        Or<(Changed<ObjectStore>, Without<Equipment>)>,
-    >,
+    corpses: Query<(Entity, &NetEntity, Ref<ObjectStore>, Option<&Equipment>)>,
     held: Option<ResMut<ItemDisplays>>,
     asset_server: Res<AssetServer>,
+    net: Res<NetCommands>,
+    // The guild identity cache, `ResMut` for the same reason the player lane's is: the miss is
+    // what SENDS the `CMSG_GUILD_QUERY` whose answer paints the crest.
+    mut guilds: Option<ResMut<crate::ui_guild::GuildState>>,
+    mut last_guild_epoch: Local<Option<u64>>,
 ) {
     let Some(mut held) = held else {
         return;
     };
-    for (entity, net, store, current) in &corpses {
-        if net.kind != EntityKind::Corpse {
+    // The change gate moved off the query filter and in here to make room for the guild counter
+    // (the player lane's own shape): an answer landing three frames after the corpse streamed in
+    // changes what its tabard paints, and nothing about the corpse's descriptor moves to say so.
+    let epoch = guilds.as_ref().map_or(0, |g| g.identity_generation());
+    let guilds_moved = last_guild_epoch.replace(epoch) != Some(epoch);
+    for (entity, net_entity, store, current) in &corpses {
+        if net_entity.kind != EntityKind::Corpse {
+            continue;
+        }
+        if !(store.is_changed() || current.is_none() || guilds_moved) {
             continue;
         }
         let s = &store.0;
@@ -702,6 +712,15 @@ pub(in crate::entities) fn resolve_corpse_equipment(
             if !s.corpse_hides_helm() {
                 eq.helm = s.corpse_item(0).map_or(0, |(display, _)| display);
             }
+            // The guild tabard crest, from the corpse's OWN `CORPSE_FIELD_GUILD` snapshot — the
+            // reference's `0x5d6ec0`, reached from the dress loop at the tabard slot (`ebx == 0x12`
+            // with that display's `ItemDisplayInfo` flag bit 0) and resolved through the same
+            // name cache a living body's is (wow-re `corpse-decal-and-loot-sparkle.md` §6b). A
+            // bone pile builds no character component, so it never reaches this leg — which is
+            // exactly where this sits.
+            eq.emblem = guilds
+                .as_deref_mut()
+                .and_then(|g| crate::ui_guild::corpse_guild_emblem(s, g, &net));
         }
         if current != Some(&eq) {
             commands.entity(entity).insert(eq);
@@ -789,6 +808,11 @@ mod tests {
         let run = |store: ObjectStore| {
             let mut app = App::new();
             app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+            // The guild-crest leg's channel (the emblem resolve is lazy and would send a
+            // `CMSG_GUILD_QUERY` on a miss); no `GuildState` here, so the crest reads `None` —
+            // which is the guildless case and exactly what this test's corpse is.
+            let (tx, _rx) = crossbeam_channel::unbounded::<ClientCommand>();
+            app.insert_resource(NetCommands(tx));
             app.insert_resource(ItemDisplays::icons_for_tests(
                 benilla_formats::ItemDisplayCatalog::from_displays(
                     std::collections::HashMap::new(),

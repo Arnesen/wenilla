@@ -776,7 +776,7 @@
         </Scripts>
     </Button>
 
-    <Frame name="MerchantFrame" hidden="true">
+    <Frame name="MerchantFrame" parent="UIParent" hidden="true">
         <!-- The real 384×512 window (ref l.117-119). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints
              this to the left slot on open. -->
         <Size><AbsDimension x="384" y="512"/></Size>

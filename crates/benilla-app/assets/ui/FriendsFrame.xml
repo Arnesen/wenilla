@@ -2043,7 +2043,7 @@
     </CheckButton>
 
     <!-- ── The window (ref l.506-607) ───────────────────────────────────────────────────────── -->
-    <Frame name="FriendsFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+    <Frame name="FriendsFrame" parent="UIParent" toplevel="true" movable="true" enableMouse="true" hidden="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-104"/></Offset></Anchor></Anchors>
         <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>

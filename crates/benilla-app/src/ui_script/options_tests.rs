@@ -38,6 +38,9 @@ fn harness_on(mut s: UiScript) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        // Every panel window declares `parent="UIParent"`, resolved at LOAD — so UIParent has to
+        // exist by the time they are read, exactly as it does in the manifest (decision 1734).
+        "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",

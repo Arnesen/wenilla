@@ -1371,7 +1371,7 @@
         </Scripts>
     </Frame>
 
-    <Frame name="CharacterFrame" hidden="true">
+    <Frame name="CharacterFrame" parent="UIParent" hidden="true">
         <!-- The real 384x512 window (ref-CharacterFrame.xml:5-7). No <Anchors> — ShowUIPanel/
              SetLeftFrame SetPoints this to the left slot on open (UiPanels.xml's own convention). -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -1474,7 +1474,7 @@
                  exactly fill the parent instead of the ref's setAllPoints="true" — the same effect
                  (see this file's header: frame-level setAllPoints was a no-op when this was written
                  and is wired now; the explicit size is equivalent, so it stays). -->
-            <Frame name="PaperDollFrame" id="1">
+            <Frame name="PaperDollFrame" parent="CharacterFrame" id="1">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                 <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>

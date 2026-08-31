@@ -549,7 +549,28 @@ pub(crate) fn unit_guild_emblem(
     guild: &mut GuildState,
     commands: &NetCommands,
 ) -> Option<GuildEmblem> {
-    let guild_id = fields.player_guild_id();
+    guild_emblem(fields.player_guild_id(), guild, commands)
+}
+
+/// The same crest for a **corpse**, whose guild id is its own snapshot
+/// ([`ObjectFields::corpse_guild`]) rather than the living `PLAYER_GUILDID` — the reference reads
+/// `CORPSE_FIELD_GUILD` at `0x5d6edf` and runs the identical name-cache lookup before installing
+/// the emblem (`0x5d6ec0`; wow-re `corpse-decal-and-loot-sparkle.md` §6b). All four `None` cases
+/// above hold unchanged: a guildless owner, a query still in flight, an undesigned crest.
+pub(crate) fn corpse_guild_emblem(
+    fields: &ObjectFields,
+    guild: &mut GuildState,
+    commands: &NetCommands,
+) -> Option<GuildEmblem> {
+    guild_emblem(fields.corpse_guild(), guild, commands)
+}
+
+/// The shared body of the two above — one lazy `CMSG_GUILD_QUERY` idiom, one `is_designed` gate.
+fn guild_emblem(
+    guild_id: u32,
+    guild: &mut GuildState,
+    commands: &NetCommands,
+) -> Option<GuildEmblem> {
     let emblem = guild.resolve_identity(guild_id, commands)?.emblem;
     emblem.is_designed().then_some(emblem)
 }

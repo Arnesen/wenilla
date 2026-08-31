@@ -31,8 +31,8 @@ use super::framing::{
 };
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
-    BoothBillboardSpec, BoothCam, BoothEffects, BoothLight, BoothMotion, BoothPart, BoothRider,
-    Booths, PortraitImages, PortraitSource, GLUE_LAYER,
+    BoothBillboardSpec, BoothCam, BoothEffects, BoothInstance, BoothLight, BoothMotion, BoothPart,
+    BoothRider, BoothTwins, Booths, PortraitImages, PortraitSource, GLUE_LAYER,
 };
 
 /// The glue booth slot token (its key in [`super::PortraitImages`] / [`Booths`]).
@@ -351,6 +351,11 @@ pub(crate) struct PreviewPart {
     /// has the field in hand (it reads the display's `EntityPart`s straight, with no compositor in
     /// between), so it fills it.
     pub(crate) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
+    /// The batch's translucency twins ([`BoothTwins`]) — carried so a bake whose INSTANCE alpha is
+    /// below 1 (the ghost select, [`GhostKit`]) can draw through the blend twin and arm the depth
+    /// prime. Empty for a look that cannot feather; the booth relights whatever is here beside the
+    /// steady material.
+    pub(crate) twins: BoothTwins,
 }
 
 /// One equipment rider on the assembled preview (helm / shoulder / sheathed weapon — decision
@@ -363,6 +368,8 @@ pub(crate) struct PreviewRider {
     pub(crate) material: Handle<WowModelMaterial>,
     pub(crate) bone: u16,
     pub(crate) offset: Vec3,
+    /// See [`PreviewPart::twins`] — an attached model composes onto its wearer's instance alpha.
+    pub(crate) twins: BoothTwins,
 }
 
 /// One **camera-facing batch** on the assembled preview — the world path's billboard card
@@ -390,6 +397,8 @@ pub(crate) struct PreviewBillboard {
     /// the rigged body itself — its joint already bakes the pivot.
     pub(crate) offset: Vec3,
     pub(crate) kind: benilla_formats::BillboardKind,
+    /// See [`PreviewPart::twins`] — a card is a batch of the model like any other.
+    pub(crate) twins: BoothTwins,
 }
 
 /// One **effect-bearing model** on the assembled preview, carried as its particle emitters plus the
@@ -414,6 +423,38 @@ pub(crate) struct PreviewEffects {
     pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
 }
 
+/// The select screen's **ghost** treatment on the character body — what the reference's
+/// `0x4727f0` applies when the selected roster record carries `CHARSELECT+0xfc & 0x2000`
+/// (wow-re `glue-select-model.md` §A2, VERIFIED; the row text is the same bit, `refresh.rs`).
+///
+/// **It is one hard-coded `SpellVisualKit` row, and we read it from the DBC exactly as the
+/// reference does.** `0x47280f` loads `idmap[989]` behind the guard `0x4727f6 cmp ds:0xc0d750,0x3dd`
+/// — the *id* is the constant, the values are data — and 989 is the state kit of `SpellVisual` 886,
+/// which is the visual of spell 8326 "Ghost", the very aura the WORLD ghost rides
+/// (`crate::aura_visual`, wow-re `ghost-death-visuals.md` §2/§5a). So the select mannequin and a
+/// released ghost in the world are the same kit reaching the same three render properties by two
+/// different code paths, and benilla resolves both through the one dispatch point
+/// ([`crate::aura_visual::node_for`]) rather than transcribing constants twice.
+///
+/// The shipped 5875 values, for orientation only — nothing here hardcodes them:
+/// `charProc = {1, 14, -1, -1}`, `charParamZero = {9222653.0, 0.5, …}` → tint `0x8CB9FD`
+/// = RGB (140, 185, 253), alpha 0.5, one attached effect — `Spells\Ghost_state.mdx` at
+/// attachment `0x13` (Base). That model is emitter-only (0 vertices, 5 bones, one
+/// `PARTICLES\FLAME02.BLP`), so it reaches the booth as [`PreviewEffects`] and nothing else —
+/// but the resolution below carries geometry and cards too, because what the row names is data.
+///
+/// **No ramp.** The world's proc-14 alpha eases in over 1000 ms (`StartAlphaFade 0x614f80`); the
+/// select path never reaches that block — `0x4727f0` writes `cc+0x180`/`+0x184..0x18c` straight
+/// through `0x710cb0`/`0x710cf0`. A selection is instantly ghosted, and re-selecting is instant too.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct GhostKit {
+    /// The whole-model modulate colour (CharProc 1 — `cc+0x184..0x18c`), as the packed byte triple
+    /// [`benilla_world::instance_tint::pack`] wants.
+    pub(crate) tint: [u8; 3],
+    /// The whole-model alpha factor (CharProc 14 — `cc+0x180`), applied instantly.
+    pub(crate) alpha: f32,
+}
+
 /// The entities-side builder's output (decisions 0423 + 0465): the geoset-filtered, composited
 /// parts for the current look (+ its equipment riders for a Select look), plus the body displayId
 /// (for the booth's framing/rig) and a revision that bumps on every real change — a new successful
@@ -436,6 +477,11 @@ pub(crate) struct GluePreviewBake {
     /// `HandsClosed` finger pose (wow-re `hand-grip-mechanism.md`). The builder knows the held items'
     /// attach ids (which the flat rider list drops), so it resolves the grip here for the booth spawn.
     pub(crate) grip: [bool; 2],
+    /// The selected character's **ghost** kit, or `None` for a living selection — see [`GhostKit`].
+    /// Its attached effect models are already folded into the lists above (they are ordinary
+    /// riders/cards/emitters at a body attach point); what stays here is what the *body itself*
+    /// renders with.
+    pub(crate) ghost: Option<GhostKit>,
     pub(crate) revision: u64,
 }
 
@@ -617,9 +663,10 @@ pub(super) fn sync_glue_scene(
         ResMut<benilla_world::rig_palette::RigPaletteMirrors>,
         ResMut<benilla_world::model_forms::ModelForms>,
         ResMut<Assets<Mesh>>,
+        ResMut<benilla_world::instance_tint::InstanceTintMirrors>,
     ),
 ) {
-    let (mut palettes, mut mirrors, mut forms, mut mesh_assets) = particle_assets;
+    let (mut palettes, mut mirrors, mut forms, mut mesh_assets, mut tint_mirrors) = particle_assets;
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
         return;
     };
@@ -726,6 +773,11 @@ pub(super) fn sync_glue_scene(
         // The scene's rigs skin from THIS buffer's palette region (decision 0720): register it
         // as a mirror (re-registration replaces — a rebuilt scene's old buffer drops).
         mirrors.0.insert("glue_scene", light.clone());
+        // …and the per-instance TINT region beside the palette rows (decision 0812's channel):
+        // the glue character's own modulate colour is read out of THIS buffer, and the glue scene
+        // is the one off-world buffer that carries it — see
+        // [`benilla_world::instance_tint::InstanceTintMirrors`] for why the portrait booths do not.
+        tint_mirrors.0.insert("glue_scene", light.clone());
         blob.write(&queue, &light);
         scene.fog = fog;
         let dc = blob.probe_dc();
@@ -772,6 +824,7 @@ pub(super) fn sync_glue_scene(
                     // `CLOUDS`, a 0.73 gradient. Drawn at 1.0 the vignette blacked out the frame
                     // corners — B121.
                     alpha_anim: s.alpha_anim.clone(),
+                    twins: BoothTwins::default(),
                 }
             })
             .collect();
@@ -791,6 +844,7 @@ pub(super) fn sync_glue_scene(
             BoothMotion::Loop, // sequence 0 loops — flags wave, clouds drift
             [false, false],    // the backdrop scene has no hands to grip
             &[],               // …nor a character's eye-glow
+            BoothInstance::default(),
         );
         // The scene's authored particle emitters (decision 0539 §5) — the braziers/embers every
         // UI_* scene carries (MainMenu 28, Orc 11, NightElf 12…). Lit/fogged by the SCENE's own
@@ -985,6 +1039,9 @@ pub(super) fn sync_glue_booth(
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+    // The per-instance modulate colour (decision 0812): a ghost selection paints the whole bake
+    // through it, keyed on the rig slot this bake allocates — the reference's `cc+0x184..0x18c`.
+    mut tints: ResMut<benilla_world::instance_tint::InstanceTints>,
     mut last: Local<Option<(u64, f32, u64)>>,
 ) {
     let Some(booth) = booths.0.get_mut(GLUE_SLOT) else {
@@ -1058,12 +1115,40 @@ pub(super) fn sync_glue_booth(
                 _ => booth_light.studio.variant(material, materials),
             }
         };
+        // The bake's instance-level render properties — the ghost kit's alpha, or opaque
+        // (`GhostKit`, wow-re `glue-select-model.md` §A2). It reaches every batch of the bake, the
+        // riders and cards included: the reference has ONE instance alpha per CM2 and every model
+        // attached to it composes onto that (`0x714000`).
+        let instance = BoothInstance {
+            alpha: bake.ghost.map_or(1.0, |g| g.alpha),
+        };
+        // Each twin is relit onto the same buffer as its steady sibling — a blend twin bound to the
+        // world's light buffer would draw the ghost body at world-sun intensity mid-feather.
+        let relight_twins = |t: &BoothTwins,
+                             scene: &mut Option<ResMut<CreateScene>>,
+                             booth_light: &mut BoothLight,
+                             materials: &mut Assets<WowModelMaterial>| {
+            if !instance.feathering() {
+                return BoothTwins::default(); // an opaque bake never reads them
+            }
+            BoothTwins {
+                blend: t
+                    .blend
+                    .as_ref()
+                    .map(|m| relight(m, scene, booth_light, materials)),
+                zfill: t
+                    .zfill
+                    .as_ref()
+                    .map(|m| relight(m, scene, booth_light, materials)),
+            }
+        };
         let mut booth_parts = Vec::with_capacity(bake.parts.len());
         for p in &bake.parts {
             booth_parts.push(BoothPart {
                 skinned: p.skinned_mesh.clone(),
                 static_mesh: p.static_mesh.clone(),
                 material: relight(&p.material, &mut scene, &mut booth_light, &mut materials),
+                twins: relight_twins(&p.twins, &mut scene, &mut booth_light, &mut materials),
                 // `None`, and a KNOWN GAP (decision 0807): a mirrored `PreviewPart` doesn't carry
                 // the batch's alpha loops, so a character batch with an authored dimming constant
                 // previews at 1.0 here. Closing it means threading `alpha_anim` through the
@@ -1081,6 +1166,7 @@ pub(super) fn sync_glue_booth(
                 material: relight(&r.material, &mut scene, &mut booth_light, &mut materials),
                 bone: r.bone,
                 offset: r.offset,
+                twins: relight_twins(&r.twins, &mut scene, &mut booth_light, &mut materials),
             })
             .collect();
         // The camera-facing batches (the eye-glow, a wand's gem, a glow model's quad), relit onto the
@@ -1095,6 +1181,7 @@ pub(super) fn sync_glue_booth(
                 bone: b.bone,
                 offset: b.offset,
                 kind: b.kind,
+                twins: relight_twins(&b.twins, &mut scene, &mut booth_light, &mut materials),
             })
             .collect();
         commands.entity(booth.root).despawn_related::<Children>();
@@ -1112,6 +1199,20 @@ pub(super) fn sync_glue_booth(
             BoothMotion::Loop, // the glue preview is a live scene, not a still
             bake.grip,         // close each hand that draws a weapon (the ref's paperdoll rule)
             &booth_billboards,
+            instance,
+        );
+        // The whole-model TINT (`GhostKit::tint` — the reference's `cc+0x184..0x18c`, written by the
+        // select ghost proc `0x472939 -> 0x710cf0`): the bake's own rig slot indexes the per-instance
+        // table, and every batch that carries that slot in its `MeshTag` — body, riders, cards —
+        // reads it. Written every re-bake, cleared for a living selection, so a ghost's colour can
+        // never survive into the next character you click. (Slot `0` = a boneless bake or a full
+        // palette; `set` refuses it, which is the world's own no-rig sentinel rule.)
+        tints.set(
+            booth_rig.slot(),
+            match bake.ghost {
+                Some(g) => benilla_world::instance_tint::pack(g.tint),
+                None => benilla_world::instance_tint::IDENTITY,
+            },
         );
         // The worn items' effects: an equipped item model's OWN emitters (decision 0813 — the R14
         // pauldron's sparkle, the torch's flame; `#bugs` B118) and the held weapons' `ItemVisuals`
@@ -1263,6 +1364,7 @@ pub(super) fn sync_glue_pet(
             static_mesh: p.static_mesh.clone(),
             material: relight(&p.material, &mut scene.variants),
             alpha_anim: p.alpha_anim.clone(),
+            twins: BoothTwins::default(),
         })
         .collect();
     let booth_billboards: Vec<BoothBillboardSpec> = pet
@@ -1274,6 +1376,7 @@ pub(super) fn sync_glue_pet(
             bone: b.bone,
             offset: b.offset,
             kind: b.kind,
+            twins: BoothTwins::default(),
         })
         .collect();
     commands
@@ -1294,6 +1397,7 @@ pub(super) fn sync_glue_pet(
         BoothMotion::Loop, // Stand, looping — the same live scene the character is
         [false, false],    // …and no hands to grip with
         &booth_billboards,
+        BoothInstance::default(),
     );
     // The pet's OWN emitters — the imp's flames (decision 1539). Authored on the pet's own bones,
     // so this is the model's-own recipe, NOT the worn-item one (`spawn_booth_effects`, which seats

@@ -1179,7 +1179,7 @@
          BELOW the MEDIUM panel windows on purpose, and the player frame shares the top-left corner
          with the left-slot panel. See the note on PartyFrame.xml's template (decision 0597) for why
          the default MEDIUM makes a unit frame's bar children draw through a window's background. -->
-    <Frame name="PlayerFrame" frameStrata="BACKGROUND">
+    <Frame name="PlayerFrame" parent="UIParent" frameStrata="BACKGROUND">
         <Size><AbsDimension x="232" y="100"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-19" y="-4"/></Offset></Anchor>
@@ -1519,7 +1519,7 @@
          every login. Steady-state behavior is identical — Update Shows/Hides on target changes. -->
     <!-- frameStrata LOW is the ref's own (`TargetFrame.xml` l.88) — one above the player frame's
          BACKGROUND, still below the MEDIUM panels. Same reasoning as PlayerFrame above. -->
-    <Frame name="TargetFrame" hidden="true" frameStrata="LOW">
+    <Frame name="TargetFrame" parent="UIParent" hidden="true" frameStrata="LOW">
         <Size><AbsDimension x="232" y="100"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="250" y="-4"/></Offset></Anchor>

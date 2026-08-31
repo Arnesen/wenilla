@@ -44,9 +44,16 @@
 //!
 //! `[corpse+0x2b0]` is **not** a render scale (its old ledger gloss); it is `0.5 ×` the MD20 render
 //! bounding-sphere radius, read by exactly one site — `0x5d6fe0`, which sizes the corpse's
-//! `UnitSelectTexture` ground decal by it × `OBJECT_FIELD_SCALE_X`. That decal is the corpse's twin
-//! of a unit's selection ring, so it belongs with the right-click loot/reclaim route this arc still
-//! defers (0308 §7), not here.
+//! `UnitSelectTexture` ground decal by it × `OBJECT_FIELD_SCALE_X`.
+//!
+//! **That decal is dead code, and we owe it nothing** (1727, closed by 1732). Its one dispatcher
+//! image-wide gates on the object being the **Locked Target** (`[0xb4e2d8]`/`[0xb4e2dc]`), and
+//! `SetSelection 0x493540` refuses any object whose `[vt+0x58]` selectability slot returns 0 —
+//! CGCorpse's is `0x469fe0`, literally `33 c0 c3`. No corpse, bones or fresh, can ever be the
+//! locked target, so `0x5d6fe0` never runs. (The same refusal is independently why a click on a
+//! body leaves your current target alone: `0x4935f3` bails *before* the clear-the-old-selection
+//! call.) Mouseover is a different slot — `+0x54` = `0x5d76d0`, which a corpse *does* pass — and
+//! that is the highlight/cursor/tooltip route we ship, not a ring.
 //!
 //! **The divergence to know about** (flagged open by wow-re's §5, not settled at the bytes): the
 //! reference computes the drowned verdict *inside* the create, from the scene node's cached liquid

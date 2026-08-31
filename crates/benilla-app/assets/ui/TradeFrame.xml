@@ -320,7 +320,7 @@
         </Frames>
     </Frame>
 
-    <Frame name="TradeFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+    <Frame name="TradeFrame" parent="UIParent" toplevel="true" movable="true" enableMouse="true" hidden="true">
         <!-- ref TradeFrame l.164: 384×512; ShowUIPanel slots it left. -->
         <Size><AbsDimension x="384" y="512"/></Size>
         <HitRectInsets><AbsInset left="0" right="35" top="0" bottom="72"/></HitRectInsets>

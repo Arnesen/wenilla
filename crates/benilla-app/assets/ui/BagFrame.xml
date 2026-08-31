@@ -1856,7 +1856,7 @@
         the bar. (MainMenuBarArtFrame is defined in ActionBar.xml, which the loader loads before
         this file; the anchor resolves by name.)
     -->
-    <CheckButton name="MainMenuBarBackpackButton">
+    <CheckButton name="MainMenuBarBackpackButton" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="37" y="37"/></Size>
         <Anchors>
             <Anchor point="BOTTOMRIGHT" relativeTo="MainMenuBarArtFrame" relativePoint="BOTTOMRIGHT">
@@ -1934,7 +1934,7 @@
         66×66 UI-Quickslot2 ring, 6px chain gap = the 42px stride), so the bag icons fill their slots
         exactly like the spell icons instead of floating undersized (the earlier 30×30 guess).
     -->
-    <CheckButton name="CharacterBag0Slot">
+    <CheckButton name="CharacterBag0Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="MainMenuBarBackpackButton" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -1989,7 +1989,7 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="CharacterBag1Slot">
+    <CheckButton name="CharacterBag1Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag0Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -2043,7 +2043,7 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="CharacterBag2Slot">
+    <CheckButton name="CharacterBag2Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag1Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -2097,7 +2097,7 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="CharacterBag3Slot">
+    <CheckButton name="CharacterBag3Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag2Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -2168,7 +2168,7 @@
         an $parentIcon layer, so Disable_BagButtons' SetDesaturation(b.icon) has nothing to grey —
         and the ref leaves it out of its own Disable_BagButtons for the same reason.
     -->
-    <CheckButton name="KeyRingButton" hidden="true">
+    <CheckButton name="KeyRingButton" parent="MainMenuBarArtFrame" hidden="true">
         <Size><AbsDimension x="18" y="39"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag3Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>

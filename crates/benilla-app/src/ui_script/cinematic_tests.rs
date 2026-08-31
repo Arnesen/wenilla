@@ -171,3 +171,58 @@ fn the_screenshot_key_is_handed_back_to_its_binding() {
     assert!(s.frame_key_input("ESCAPE"));
     assert!(s.take_keybind_requests().is_empty());
 }
+
+/// **The HUD hide, end to end — and the frame that must survive it.**
+///
+/// This is the chain decision 1734 restored, and every link was broken until it did:
+/// `CINEMATIC_START` → `CinematicFrame`'s arm calls `ShowUIPanel` → its `area = "full"` row routes
+/// to `SetFullScreenFrame` → which hides `UIParent` → which cascades to every frame declaring
+/// `parent="UIParent"`. Before, `SetFullScreenFrame` had that line dropped, and there was almost
+/// nothing parented to cascade to; the engine hid the HUD with `UiHidden` instead, and paid for it
+/// with a mouse that could not find the cinematic frame.
+///
+/// It replaces a log line. 1699 verified the takeover by watching `cinematic: HUD hidden for
+/// playback` go past, because `UiHidden` hides at the *draw* and leaves every widget answering
+/// `IsVisible() == true` — the predicate was useless. Hiding through the real cascade makes
+/// `IsVisible` the honest question again, so the check is an assertion instead of a log.
+#[test]
+fn a_cinematic_hides_the_hud_through_uiparent_and_spares_the_cinematic_frame() {
+    let mut s = ui_with_the_cinematic_frame();
+    let visible = |s: &UiScript, f: &str| {
+        s.eval::<i64>(&format!("return {f}:IsVisible() and 1 or 0"))
+            .unwrap()
+            == 1
+    };
+
+    // A shown child of UIParent stands in for the HUD: `UiPanels.xml` gives us one without
+    // dragging the whole action bar in, and what is under test is the cascade, not which frame.
+    s.eval::<i64>("StaticPopup1:Show() return 0").unwrap();
+    s.resolve();
+    assert!(visible(&s, "UIParent"), "the HUD's parent starts visible");
+    assert!(visible(&s, "StaticPopup1"), "and so does its child");
+
+    start_cinematic(&mut s);
+    assert!(!visible(&s, "UIParent"), "SetFullScreenFrame hid UIParent");
+    assert!(
+        !visible(&s, "StaticPopup1"),
+        "and the hide cascaded to its children — this is the whole point of the 72 restored \
+         parent= declarations, and the assertion that fails if one is dropped again"
+    );
+    assert_eq!(
+        s.eval::<i64>("return StaticPopup1:IsShown() and 1 or 0")
+            .unwrap(),
+        1,
+        "cascaded, not shown=false: the frame keeps its own state and gets it back untouched"
+    );
+    assert!(
+        visible(&s, "CinematicFrame"),
+        "**and the fly-by itself survives** — the reference declares CinematicFrame with no \
+         parent precisely so the frame being shown escapes the hide that showing it performs"
+    );
+
+    s.set_in_cinematic(false);
+    s.fire_event("CINEMATIC_STOP", vec![]);
+    s.resolve();
+    assert!(visible(&s, "UIParent"), "and the world's UI comes back");
+    assert!(visible(&s, "StaticPopup1"), "with the child that was up");
+}

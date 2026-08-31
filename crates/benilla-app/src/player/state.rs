@@ -113,7 +113,7 @@ pub(super) const JUMP_SPEED: f32 = 7.955_547;
 /// Shared with [`crate::net`]'s ballistic integration (caps a long fall's vertical speed).
 pub(crate) const TERMINAL_VELOCITY: f32 = 60.148_003;
 /// **Terminal fall speed under feather fall** (yd/s) — the *whole* of what Slow Fall does. The
-/// reference's gravity integrate `0x7c5d20` picks its clamp from one flag test
+/// reference's fall-velocity query `0x7c5d20` picks its clamp from one flag test
 /// (`0x7c5d23 test [ecx+0x40], 0x20000000`): the ordinary cap `[0x87d894]` = 60.148, or this one
 /// `[0x87d898]` when `MOVEFLAG_SAFE_FALL` is set. VERIFIED — wow-re `system/collision/ledger.tsv`
 /// (`0x7c5d20`, sweep2 §5) and `scratch/spec-ground.md`'s terminal-vel select.
@@ -254,6 +254,11 @@ pub(super) const WEDGE_STALL_RATIO: f32 = 0.15;
 pub(super) const WEDGE_MIN_FALL: f32 = 1.0;
 /// One-shot air-control nudge (yd/s): a jump from a standstill can be steered this much in the pressed
 /// direction; a jump taken with momentum keeps it locked (vanilla feel). Less than a walking jump.
+///
+/// **VERIFIED as behaviour, but this constant is data, not a binary constant** (decision 1736): the
+/// reference's nudge speed is `min(MOVE_WALK, MOVE_RUN)`, the walk override inside `0x7c4c90(1)`
+/// (`0x7c4d19`/`0x7c4d1b`), read from the unit's live speeds. `2.5` is the *default* `MOVE_WALK`, so
+/// this agrees with the reference right up until a walk aura, a Slow or a daze moves either speed.
 pub(super) const AIR_NUDGE_SPEED: f32 = 2.5;
 /// The FALLINGFAR **distance leg** (yd): a *jump* arc (launch vz ≠ 0) latches MOVEFLAG_FALLINGFAR
 /// once it descends this far below its launch height — the fall resolver's `0x633240`, constant

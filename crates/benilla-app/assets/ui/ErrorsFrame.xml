@@ -48,7 +48,7 @@
         end
     ]]></Script>
 
-    <MessageFrame name="UIErrorsFrame" displayDuration="5" insertMode="TOP" frameStrata="HIGH">
+    <MessageFrame name="UIErrorsFrame" parent="UIParent" displayDuration="5" insertMode="TOP" frameStrata="HIGH">
         <Size><AbsDimension x="512" y="60"/></Size>
         <Anchors>
             <Anchor point="TOP" relativePoint="TOP">
@@ -91,7 +91,7 @@
 
          RaidBossEmoteFrame, its sibling in the same file, is NOT declared: zero corpus addons name
          it, and a shadowed name with no caller is building against a guess (1222's rejected clause). -->
-    <MessageFrame name="RaidWarningFrame" insertMode="TOP" frameStrata="HIGH" toplevel="true">
+    <MessageFrame name="RaidWarningFrame" parent="UIParent" insertMode="TOP" frameStrata="HIGH" toplevel="true">
         <Size><AbsDimension x="512" y="40"/></Size>
         <Anchors>
             <Anchor point="TOP" relativeTo="UIErrorsFrame" relativePoint="BOTTOM">

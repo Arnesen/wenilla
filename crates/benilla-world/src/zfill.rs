@@ -29,6 +29,7 @@
 //!   transparent scene content sorting within that window behind a fading body draws after the
 //!   prime and is depth-clipped where the body covers it, for the seconds the episode lasts.
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
@@ -64,6 +65,11 @@ type ZfillParts<'w, 's> = Query<
         &'static MeshTag,
         &'static Mesh3d,
         Option<&'static ZfillTwin>,
+        // The part's render layer, when it is not on the default one. A world part carries none
+        // and the twin needs none; a BOOTH part is on its booth's own layer, and a twin that did
+        // not copy it would prime depth in the WORLD view (where it is invisible and useless)
+        // while the booth body it exists for stayed multi-layered.
+        Option<&'static RenderLayers>,
     ),
     Without<ZfillTwinOf>,
 >;
@@ -73,23 +79,25 @@ pub(crate) fn sync_zfill_twins(
     parts: ZfillParts,
     mut twins: Query<(&ZfillTwinOf, &mut MeshTag, &mut Mesh3d), Without<FadeMaterials>>,
 ) {
-    for (part, fm, tag, mesh, twin) in &parts {
+    for (part, fm, tag, mesh, twin, layers) in &parts {
         let Some(mat) = fm.zfill.as_ref() else {
             continue; // no-z-write / Mod / Mod2x batch — the reference's own twin gate
         };
         let active = crate::mesh_tag::translucent(tag.0);
         match twin {
             None if active => {
-                let t = commands
-                    .spawn((
-                        Mesh3d(mesh.0.clone()),
-                        MeshMaterial3d(mat.clone()),
-                        MeshTag(tag.0),
-                        Transform::IDENTITY,
-                        ZfillTwinOf(part),
-                        ChildOf(part),
-                    ))
-                    .id();
+                let mut twin = commands.spawn((
+                    Mesh3d(mesh.0.clone()),
+                    MeshMaterial3d(mat.clone()),
+                    MeshTag(tag.0),
+                    Transform::IDENTITY,
+                    ZfillTwinOf(part),
+                    ChildOf(part),
+                ));
+                if let Some(layers) = layers {
+                    twin.insert(layers.clone());
+                }
+                let t = twin.id();
                 commands.entity(part).insert(ZfillTwin(t));
                 trace("arm", part, tag.0);
             }
@@ -105,7 +113,7 @@ pub(crate) fn sync_zfill_twins(
         // The part's tag moves every fade frame (its alpha bits); mirroring it keeps the rig slot
         // — the half the twin's vertex stage actually reads — correct across a redress or a slot
         // reassignment without a dedicated edge.
-        let Ok((_, _, ptag, pmesh, _)) = parts.get(of.0) else {
+        let Ok((_, _, ptag, pmesh, _, _)) = parts.get(of.0) else {
             continue; // part going away this frame — the child despawns with it
         };
         if tag.0 != ptag.0 {

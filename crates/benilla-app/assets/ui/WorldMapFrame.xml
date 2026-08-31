@@ -429,7 +429,18 @@
             </OnLeave>
         </Scripts>
     </Button>
-    <Frame name="WorldMapFrame" frameStrata="FULLSCREEN_DIALOG" hidden="true" enableMouse="true" parent="UIParent">
+    <!--
+        **No `parent=`, deliberately, and the reference is the same.** `WorldMapFrame` is an
+        `area = "full"` panel, so showing it runs `SetFullScreenFrame` — which hides `UIParent`.
+        A world map parented to `UIParent` is therefore hidden by the very call that shows it:
+        `Show()` sets its own shown flag and the cascade keeps `IsVisible()` false.
+
+        benilla carried `parent="UIParent"` here (the reference does not) and got away with it for
+        as long as `SetFullScreenFrame` had its `UIParent:Hide()` line dropped. Decision 1734
+        restored that line, and this was the frame it broke. `CinematicFrame` is unparented for
+        exactly the same reason — every `full` panel must be.
+    -->
+    <Frame name="WorldMapFrame" frameStrata="FULLSCREEN_DIALOG" hidden="true" enableMouse="true">
         <Size><AbsDimension x="1024" y="768"/></Size>
         <Anchors>
             <Anchor point="CENTER"/>

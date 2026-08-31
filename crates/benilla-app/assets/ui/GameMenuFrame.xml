@@ -210,7 +210,7 @@
     <!-- `toplevel` is the ref's own (GameMenuFrame.xml l.3) and was dropped here: without the bit
          a DIALOG-strata window opened over another one stays behind it (the B180/Bagnon class,
          decision 1318). Restored alone; the ref's `movable`/`parent` stay off deliberately. -->
-    <Frame name="GameMenuFrame" frameStrata="DIALOG" toplevel="true" enableMouse="true" hidden="true">
+    <Frame name="GameMenuFrame" parent="UIParent" frameStrata="DIALOG" toplevel="true" enableMouse="true" hidden="true">
         <!-- The era layout engine's own numbers (header SCOPE note): 28+144+28 wide, 32-top /
              28-bottom padding around our seven 21-unit rungs with three 20-unit section gaps. -->
         <Size><AbsDimension x="200" y="267"/></Size>

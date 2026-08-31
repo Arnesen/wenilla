@@ -443,7 +443,7 @@
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
     </CheckButton>
 
-    <Frame name="PetStableFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+    <Frame name="PetStableFrame" parent="UIParent" toplevel="true" movable="true" enableMouse="true" hidden="true">
         <!-- xml l.72-85: the standard 384x512 panel window. The HitRectInsets pull the mouse rect
              in from the art's transparent right edge and bottom skirt. -->
         <Size><AbsDimension x="384" y="512"/></Size>

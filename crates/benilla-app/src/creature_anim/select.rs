@@ -163,7 +163,7 @@ pub(crate) mod move_flags {
     /// opcode-0x22 apply `0x61a430`.
     pub const WATER_WALKING: u32 = 0x1000_0000;
     /// MOVEFLAG_SAFE_FALL — **feather fall** (Slow Fall, Levitate; decision 0866). It has exactly
-    /// one effect: the gravity integrate `0x7c5d20` picks its terminal clamp on this bit
+    /// one effect: the fall-velocity query `0x7c5d20` picks its terminal clamp on this bit
     /// (`0x7c5d23 test [ecx+0x40],0x20000000`) — 7.0 yd/s `[0x87d898]` instead of the ordinary
     /// 60.148 `[0x87d894]`. wow-re's ledger labels it "in-water; selects swim gravity", which is the
     /// bit's *shape* read without the server-side name: vmangos sets it only from

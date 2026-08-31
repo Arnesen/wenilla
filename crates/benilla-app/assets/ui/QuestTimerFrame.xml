@@ -151,7 +151,7 @@
         </Scripts>
     </Button>
 
-    <Frame name="QuestTimerFrame" enableMouse="true" frameStrata="BACKGROUND" hidden="true">
+    <Frame name="QuestTimerFrame" parent="UIParent" enableMouse="true" frameStrata="BACKGROUND" hidden="true">
         <Size>
             <AbsDimension x="160" y="72"/>
         </Size>

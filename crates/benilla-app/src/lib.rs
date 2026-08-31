@@ -93,6 +93,7 @@ mod quest_markers;
 mod raid_marks;
 mod realmlist;
 mod run_mode;
+mod screen_fade;
 mod screenshot;
 mod shaders;
 
@@ -520,6 +521,7 @@ pub fn run(build: BuildId) -> AppExit {
     // Cinematic fly-bys (`SMSG_TRIGGER_CINEMATIC`): the race intro a first login plays, and the
     // GameObject cameras. Takes the world camera for the duration — hence after PlayerPlugin,
     // whose `control` it overrides within the same stage (decision 0196's deferred arc).
+    .add_plugins(crate::screen_fade::ScreenFadePlugin)
     .add_plugins(CinematicPlugin)
     // The real client's hardware mouse cursor (native NSCursor on macOS).
     .add_plugins(CursorPlugin)

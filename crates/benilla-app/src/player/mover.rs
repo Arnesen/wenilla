@@ -301,11 +301,21 @@ pub(super) fn step(
         }
     } else {
         // **Feather fall is a terminal-velocity substitution, and nothing else** (decision 0866).
-        // The reference's gravity integrate `0x7c5d20` picks its clamp from one flag test
+        // The reference's fall-velocity query `0x7c5d20` picks its clamp from one flag test
         // (`0x7c5d23 test [ecx+0x40], 0x20000000`) — the ordinary 60.148 or 7.0 under
         // `MOVEFLAG_SAFE_FALL`. Gravity itself is unchanged, so a Slow Fall still *accelerates*
         // normally for the first ~0.36 s and only then rides the cap: the drop starts like any
         // other and settles into a drift, which is what Slow Fall looks like.
+        //
+        // **This is semi-implicit Euler; the reference is not** (decision 1736). It evaluates a
+        // CLOSED FORM every substep — `+0x7c − D(+0x78)` via `0x7c5e70`, anchored at the launch —
+        // so its arc is frame-rate independent and cannot drift, while ours accumulates and lands
+        // low by `½·g·dt·t`: **0.066 yd at the jump apex at 60 fps (4.0% of the 1.640 yd apex),
+        // 0.133 at 30 fps**, saturating near 0.50/1.00 yd at terminal. Our jump is exactly one
+        // frame short, and the error is frame-rate dependent, which a jump arc must not be.
+        // (`0x7c5d20`, cited above, is the velocity *query* that serves the clamp select — it
+        // writes nothing. Both wow-re's ledger and this file had it as the integrator until the
+        // 1736 round; the constants it yields are still bit-exact.)
         let terminal = if player.modes.feather_fall {
             FEATHER_TERMINAL_VELOCITY
         } else {
@@ -328,6 +338,23 @@ pub(super) fn step(
         // Air control: one nudge to steer a jump that took off from a standstill (a moving jump
         // keeps its momentum locked, since horiz_vel is already non-zero). The pressed direction
         // *really* moves us, so it re-seeds the frozen airborne direction flags.
+        //
+        // **The guard is a velocity proxy for a flag test, and the reference's is the flag**
+        // (decision 1736, wow-re `airborne-steerability.md`). `0x7c5a20`/`0x7c5c20` do not bail on
+        // FALLING — they bail on `FALLING && arg == 0`, and the two openers that pass `arg = 1`
+        // sit behind `0x7c6afc test al,0xf`: the door opens exactly while the **direction nibble
+        // `+0x40 & 0xf` is clear**. That is why a moving jump is locked, and it is a different
+        // question from "is my horizontal velocity ~zero". The two answers diverge on one input:
+        // a knockback launch plants FORWARD itself (`0x6179c0`'s `0x617a18 or edx,0x8001`), so on
+        // the reference an `xy_speed ≈ 0` knockback is STILL unsteerable, while here `knocked` is
+        // launch-frame-only and this guard sees a zero velocity and grants the nudge from frame 2.
+        // Fixing it means carrying the nibble as arc state and seeding it at the launch — 1736
+        // §Plan, deliberately not done in the round that found it.
+        //
+        // [`AIR_NUDGE_SPEED`] is likewise the right number for the wrong reason: the reference
+        // takes `min(MOVE_WALK, MOVE_RUN)` from the unit's live speeds (`0x7c4c90(1)`'s walk
+        // override), and 2.5 is merely the DEFAULT `MOVE_WALK`. Under a walk aura, a Slow or a
+        // daze it is wrong.
         player.horiz_vel = dir.normalize_or_zero() * AIR_NUDGE_SPEED;
         air_nudged = true;
     }

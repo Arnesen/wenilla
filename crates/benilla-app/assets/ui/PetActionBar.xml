@@ -476,7 +476,7 @@
         </Scripts>
     </CheckButton>
 
-    <Frame name="PetActionBarFrame" hidden="true">
+    <Frame name="PetActionBarFrame" parent="MainMenuBar" hidden="true">
         <Size><AbsDimension x="509" y="43"/></Size>
         <!-- This anchor is the LOAD-TIME value only: UIParent_ManageFramePositions owns the real
              one and re-seats the frame on every pass (OnShow/OnHide below fire it), because the

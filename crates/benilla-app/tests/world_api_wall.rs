@@ -295,7 +295,20 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// decides where a weapon is drawn versus stowed. There is no engine-side way to know it: the
 /// engine sees a scene-graph child, and a child is not an attachment. The alternative was passing
 /// the game's attach-slot table down into the renderer to keep a count flat (decision 1609).
-const CEILING: usize = 163;
+/// And 163 → 164: `instance_tint::InstanceTintMirrors`, the twin of `rig_palette::RigPaletteMirrors`
+/// already through this door and registered at exactly the same site — an off-world `wow_light`
+/// buffer the engine must also fill with the per-instance tint region, because the shader reads
+/// that region out of whichever buffer the draw binds. Uploading a region to the buffers that
+/// carry it is machinery. *Which* off-world buffers carry it is policy, and it has to be: a
+/// portrait bake must NOT (the reference builds a fresh CM2 with colour `(1,1,1)`, so a ghost's
+/// portrait shows the living face — wow-re `ghost-death-visuals.md` §6, report B49, decision 1481)
+/// while the glue scene MUST (it is the screen itself, and its character component is the very
+/// instance the reference tints). The engine cannot tell those two render targets apart — both are
+/// a camera writing to an image — and encoding "a bake standing in for a UI model widget" inside
+/// the uploader is exactly the game opinion the wall exists to keep out. The alternative was
+/// mirroring the region into every registered buffer to keep the count flat, which re-opens B49 in
+/// the tint lane (decision 1731).
+const CEILING: usize = 164;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

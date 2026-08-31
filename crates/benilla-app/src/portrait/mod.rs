@@ -81,15 +81,19 @@ mod framing;
 pub(crate) use framing::{attachment_point, head_anchor, PortraitAnchors};
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
+/// The translucency twins ride the *preview* shapes as well as the booth ones — one type for both
+/// halves of the same batch, so the entities-side assembly and the bake cannot disagree about what
+/// a batch can feather through.
+pub(crate) use booth::BoothTwins;
 use booth::{
     clear_booth_rig, spawn_booth_effects, spawn_booth_model, spawn_booth_own_emitters,
-    BoothBillboardSpec, BoothEffects, BoothMotion, BoothPart, BoothRider,
+    BoothBillboardSpec, BoothEffects, BoothInstance, BoothMotion, BoothPart, BoothRider,
 };
 mod dressup;
 pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
 pub(crate) use glue_booth::{
-    CreateLook, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
+    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
     PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
@@ -2018,6 +2022,7 @@ fn sync_portraits(
                     // `None` — the same known gap as the glue preview's (decision 0807): a
                     // mirrored `PortraitPart` doesn't carry the batch's alpha loops.
                     alpha_anim: None,
+                    twins: BoothTwins::default(),
                 })
                 .collect();
             let booth_riders: Vec<BoothRider> = riders
@@ -2027,6 +2032,7 @@ fn sync_portraits(
                     material: booth_light.studio.variant(&r.material, &mut wow_mats),
                     bone: r.bone,
                     offset: r.offset,
+                    twins: BoothTwins::default(),
                 })
                 .collect();
             // The camera-facing batches — the eye-glow on its eye bone, an item's gem/halo at its
@@ -2040,6 +2046,7 @@ fn sync_portraits(
                     bone: b.bone,
                     offset: b.seat.offset(),
                     kind: b.kind,
+                    twins: BoothTwins::default(),
                 })
                 .collect();
             // A source material was not resident, so at least one "twin" above is the WORLD
@@ -2075,6 +2082,7 @@ fn sync_portraits(
                 // an open hand — rarely in frame on a bust, and its rule all the same.
                 [false, false],
                 &booth_billboards,
+                BoothInstance::default(),
             );
             // Even a Frozen still re-evaluates its paused pose every frame — the park matters
             // MOST here, since a portrait's camera sleeps for the whole session outside its
@@ -2532,6 +2540,7 @@ fn sync_body_booth(
                 material: booth_light.pane.variant(&p.material, wow_mats),
                 // `None` — the same known gap as the glue preview's (decision 0807).
                 alpha_anim: None,
+                twins: BoothTwins::default(),
             })
             .collect();
         let booth_riders: Vec<BoothRider> = riders
@@ -2541,6 +2550,7 @@ fn sync_body_booth(
                 material: booth_light.pane.variant(&r.material, wow_mats),
                 bone: r.bone,
                 offset: r.offset,
+                twins: BoothTwins::default(),
             })
             .collect();
         // The camera-facing batches — the eye-glow on its eye bone, a wand's gem or the held torch's
@@ -2554,6 +2564,7 @@ fn sync_body_booth(
                 bone: b.bone,
                 offset: b.seat.offset(),
                 kind: b.kind,
+                twins: BoothTwins::default(),
             })
             .collect();
         // The worn items' effects (decision 0822) — an equipped item's own emitters (0813, `#bugs`
@@ -2598,6 +2609,7 @@ fn sync_body_booth(
             // whatever the body is holding, so a drawn weapon arrived in an open hand.
             hand_grip(&riders, &billboards, &effects),
             &booth_billboards,
+            BoothInstance::default(),
         );
         // The item effects go up on the posed skeleton's anchors — the body pane is the lane that
         // gets them (the reference's `<PlayerModel>` widget renders live; the round portraits are

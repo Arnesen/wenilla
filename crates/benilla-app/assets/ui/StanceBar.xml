@@ -267,7 +267,7 @@
         </Scripts>
     </CheckButton>
 
-    <Frame name="ShapeshiftBarFrame" hidden="true">
+    <Frame name="ShapeshiftBarFrame" parent="MainMenuBar" hidden="true">
         <Size><AbsDimension x="29" y="32"/></Size>
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="MainMenuBar" relativePoint="TOPLEFT"><Offset><AbsDimension x="30" y="45"/></Offset></Anchor>

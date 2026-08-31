@@ -25,6 +25,9 @@ fn harness_with(extra: &[&str]) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     let files: Vec<&str> = [
         "Fonts.xml",
+        // `GameMenuFrame` and the panels it opens declare `parent="UIParent"`, resolved at LOAD
+        // (decision 1734) — UIParent must already be there, as it is in the manifest.
+        "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "UIPanelTemplates.xml",

@@ -291,19 +291,17 @@
             return slots.center
         end
 
-        -- SetFullScreenFrame(frame) — UIParent.lua l.852-866. ONE line dropped: the reference also
-        -- does `UIParent:Hide()`/`:Show()` around the swap, hiding the whole game UI behind the
-        -- fullscreen frame.
+        -- SetFullScreenFrame(frame) — UIParent.lua l.852-866, now complete. The reference hides
+        -- the whole game UI behind the fullscreen frame by hiding `UIParent` itself, and shows it
+        -- again when the slot empties. That line was dropped for years because hiding `UIParent`
+        -- reached almost nothing: 72 `parent=` declarations were missing from the transcription,
+        -- so the HUD was a forest of top-level frames with no edge to cascade along (decision
+        -- 1734, which restored them).
         --
-        -- BOTH of the reasons this note used to give are now FALSE (decision 1724). A real
-        -- `UIParent` frame exists (UIParent.xml), and the world map is no longer the only `full`
-        -- row: `CinematicFrame` is a second one, and it paints nothing by design. So this dropped
-        -- line is exactly what makes a cinematic hide the HUD through `crate::ui_hide::UiHidden`
-        -- instead of through here — and `UiHidden` also means "the UI takes no mouse", which is
-        -- ALT-Z's meaning and the reason the world took every click of a fly-by.
-        --
-        -- Restoring it needs the HUD parented to UIParent first (the 32 dropped `parent="UIParent"`
-        -- declarations 1724 measured); hiding UIParent today would reach almost nothing.
+        -- **`CinematicFrame` survives this on purpose.** The reference declares it with no parent
+        -- at all — `<Frame name="CinematicFrame" setAllPoints="true" hidden="true" ...>` — which
+        -- is exactly how the frame this function is *showing* escapes the hide it performs. Ours
+        -- matches; do not give it one.
         function SetFullScreenFrame(frame)
             local oldFrame = slots.fullscreen
             slots.fullscreen = frame
@@ -311,7 +309,10 @@
                 oldFrame:Hide()
             end
             if frame then
+                UIParent:Hide()
                 frame:Show()
+            else
+                UIParent:Show()
             end
         end
 
@@ -2076,10 +2077,10 @@
             <OnUpdate>StaticPopup_OnUpdate(this, arg1)</OnUpdate>
         </Scripts>
     </Frame>
-    <Frame name="StaticPopup1" inherits="StaticPopupTemplate">
+    <Frame name="StaticPopup1" inherits="StaticPopupTemplate" parent="UIParent">
         <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-128"/></Offset></Anchor></Anchors>
     </Frame>
-    <Frame name="StaticPopup2" inherits="StaticPopupTemplate">
+    <Frame name="StaticPopup2" inherits="StaticPopupTemplate" parent="UIParent">
         <Anchors><Anchor point="TOP" relativeTo="StaticPopup1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
     </Frame>
 

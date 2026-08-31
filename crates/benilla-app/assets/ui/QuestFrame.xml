@@ -865,7 +865,7 @@
         </Layers>
     </Frame>
 
-    <Frame name="QuestFrame" hidden="true">
+    <Frame name="QuestFrame" parent="UIParent" hidden="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Layers>
             <!-- NPC portrait 60×60 TOPLEFT (7,-6) (ref QuestFramePortrait l.20-33). Drawn on the OUTER

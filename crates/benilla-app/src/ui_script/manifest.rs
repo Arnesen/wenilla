@@ -172,4 +172,34 @@ mod tests {
         shipped.sort();
         assert_eq!(listed, shipped);
     }
+
+    /// **Nothing may declare `parent="UIParent"` before `UIParent.xml` has loaded.**
+    ///
+    /// A parent name is resolved at LOAD, and a name that does not exist yet is not an error: the
+    /// loader warns and silently falls back to the enclosing frame. So this ordering mistake does
+    /// not fail, it *half-works* — the frame keeps drawing, keeps answering `IsShown`, and simply
+    /// never joins the cascade `UIParent:Hide()` walks. That is precisely how it would be missed.
+    ///
+    /// It nearly was: `UIParent.xml` sat below `UiPanels.xml` until decision 1734, so restoring
+    /// `StaticPopup1`/`StaticPopup2`'s parents there would have written two declarations that did
+    /// nothing at all. The reference's own order is the fix (FrameXML.toc: BasicControls.xml l.6,
+    /// UIParent.xml l.8), and this keeps it.
+    #[test]
+    fn nothing_declares_a_uiparent_child_before_uiparent_itself_loads() {
+        let files = manifest_files();
+        let at = files
+            .iter()
+            .position(|f| f == "UIParent.xml")
+            .expect("the manifest lists UIParent.xml");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+        for early in &files[..at] {
+            let text = std::fs::read_to_string(dir.join(early)).unwrap();
+            assert!(
+                !text.contains(r#"parent="UIParent""#),
+                "{early} loads before UIParent.xml (position {at}) but declares a \
+                 UIParent child — the loader would warn and silently drop it. Move \
+                 UIParent.xml up, or the declaration down."
+            );
+        }
+    }
 }

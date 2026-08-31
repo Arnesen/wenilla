@@ -25,6 +25,19 @@ Fonts.xml
 # Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
 # DialogButtonNormalText/HighlightText) and everything above it in FrameXML.toc is engine.
 BasicControls.xml
+# **UIParent itself, and it must come before every frame that declares `parent="UIParent"`** —
+# a parent name is resolved at LOAD, and a name that does not exist yet does not error: the loader
+# warns and silently falls back to the enclosing frame (`loader/mod.rs`, "names no frame"). With
+# this file at its old position below UiPanels.xml, `StaticPopup1`/`StaticPopup2` would have taken
+# that fallback and the reparent would have been a silent half-fix.
+#
+# This is the reference's own slot: FrameXML.toc has BasicControls.xml at l.6 and UIParent.xml at
+# l.8, above MoneyFrame.xml (l.10) and StaticPopup.xml (l.23). It needs nothing from the files it
+# now precedes — it declares only UIParent and WorldFrame, inherits no template, and its scripts
+# (UIPARENT_MANAGED_FRAME_POSITIONS + UIParent_ManageFramePositions, decision 0272, the ref
+# mechanism that re-anchors the cast bar / chat over the bottom bars) are called later, applied by
+# the loader's post-load bootstrap (ui_script/manifest.rs).
+UIParent.xml
 # The `SetItemButton*` family (ref ItemButtonTemplate.lua) — script-only, no frames and no
 # dependencies of its own, so it sits as early as it can be read. Every window that paints an item
 # slot calls these, ours and third-party alike: their absence is what left the director's Bagnon
@@ -45,12 +58,6 @@ MoneyFrame.xml
 # before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
 # when those frames' OnLoad/OnEvent reference them.
 UiPanels.xml
-# The managed bottom-stack positions (decision 0272): script-only —
-# UIPARENT_MANAGED_FRAME_POSITIONS + UIParent_ManageFramePositions, the ref
-# UIParent.lua mechanism that re-anchors the cast bar / chat over the bottom bars.
-# Loaded early so the stance bar's OnShow/OnHide can call it; applied once by the
-# loader's post-load bootstrap (ui_script/manifest.rs).
-UIParent.xml
 # The tooltip: a hover window the bag/merchant/loot/unit frames drive. Loaded before them so
 # `GameTooltip` + its verbs exist when their OnEnter handlers fire (runtime, so order
 # is not strictly required — but it keeps the dependency legible). It also declares the two
