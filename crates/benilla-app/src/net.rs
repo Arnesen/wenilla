@@ -1214,6 +1214,13 @@ pub(crate) enum ClientCommand {
     BinderActivate {
         binder: u64,
     },
+    /// Accept a summon (`CMSG_SUMMON_RESPONSE`, decision 1747): the `CONFIRM_SUMMON` dialog's
+    /// Accept, carrying the guid the question arrived with. The **only** packet in the summon
+    /// flow — there is no decline opcode, so a refused summon expires on the server's own timer
+    /// and this client says nothing.
+    SummonResponse {
+        summoner: u64,
+    },
     /// Unlearn every talent (`MSG_TALENT_WIPE_CONFIRM` outbound, decision 1580): the
     /// `CONFIRM_TALENT_WIPE` dialog's Accept, carrying the guid the trainer's question asked with.
     /// This is the ONLY packet in the flow that resets anything — selecting the gossip line just
@@ -1773,6 +1780,10 @@ pub(crate) enum ClientCommand {
     ReclaimCorpse {
         corpse: u64,
     },
+    /// Self-resurrect (`CMSG_SELF_RES`, empty body — the DEATH popup's soulstone/Reincarnation
+    /// button, decision 1746). The server casts whatever `PLAYER_SELF_RES_SPELL` holds; success
+    /// returns as ordinary descriptor deltas, no answer packet.
+    SelfRes,
     /// Take the spirit healer's resurrection (`CMSG_SPIRIT_HEALER_ACTIVATE` — the XP_LOSS
     /// confirm's final Accept): 50% res, 25% durability, sickness at level ≥ 11.
     SpiritHealerActivate {

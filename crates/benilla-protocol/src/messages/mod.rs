@@ -57,6 +57,7 @@ mod social;
 mod spellbook;
 mod spells;
 mod stable;
+mod summon;
 mod taxi;
 mod trade;
 mod trainer;
@@ -221,6 +222,7 @@ pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
     StabledPet,
 };
+pub use summon::{summon_response, SummonRequest};
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,
     taxi_reply, TaxiMask,

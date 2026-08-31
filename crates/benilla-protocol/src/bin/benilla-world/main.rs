@@ -23,8 +23,8 @@ use clap::Parser;
 
 use probes::{
     Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, MountTele,
-    OpenItem, Probe, QueryNames, Quest, QuestItem, QuestLog, QuestTimer, Speed, Spells, Spirit,
-    SwapPackSlots, UsePackSlot, Vendor, WorldState,
+    OpenItem, Probe, QueryNames, Quest, QuestItem, QuestLog, QuestTimer, SelfRes, Speed, Spells,
+    Spirit, SwapPackSlots, UsePackSlot, Vendor, WorldState,
 };
 use world::{DeathArc, Tracked, World};
 
@@ -247,6 +247,16 @@ struct Cli {
     #[arg(long)]
     death: bool,
 
+    /// Live-verify the self-resurrect wire (decision 1746): arm a shaman's Reincarnation with GM
+    /// commands (`.cooldown`, `.learn 20608`, `.additem 17030` — vmangos's gate asks no class
+    /// question), die and **stay dead-unreleased** (the DEATH dialog's state, where the soulstone
+    /// button lives), require `PLAYER_SELF_RES_SPELL` to arrive carrying the effect spell 21169,
+    /// send `CMSG_SELF_RES`, and require both that the field clears and that we stand back up
+    /// without ever having been a ghost. Recommend `--seconds 30`. Needs a GM account; leaves the
+    /// character alive. Mutually exclusive with `--death`/`--spirit`, which release the spirit.
+    #[arg(long)]
+    self_res: bool,
+
     /// Live-verify the spirit-healer res + the 25% durability loss's wire (director-reported:
     /// "durability still 100% after spirit-healer rez"): GM-repair to a full baseline, die and
     /// release (the --death staging), teleport onto the graveyard's Spirit Healer, send
@@ -348,8 +358,12 @@ fn main() -> Result<()> {
     // The shared world state every probe reads (identity, entity tracker, item/vendor stores, the
     // session-keeping acks); the DeathArc scenario machinery is staged when --death/--spirit is set.
     let mut world = World::new(character);
-    if cli.death || cli.spirit {
-        world.death_arc = Some(DeathArc::default());
+    if cli.death || cli.spirit || cli.self_res {
+        world.death_arc = Some(DeathArc {
+            // --self-res tests the dead-UNRELEASED state, so the arc must not repop on its own.
+            hold_release: cli.self_res,
+            ..DeathArc::default()
+        });
     }
 
     // The probe registry: one entry per flag, in today's stream-loop/verify block order (so poll,
@@ -419,6 +433,9 @@ fn main() -> Result<()> {
     }
     if cli.spirit {
         probes.push(Box::new(Spirit::default()));
+    }
+    if cli.self_res {
+        probes.push(Box::new(SelfRes::default()));
     }
     if cli.worldstate {
         probes.push(Box::new(WorldState::default()));

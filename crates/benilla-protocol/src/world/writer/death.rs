@@ -1,8 +1,9 @@
 //! The death/corpse-run family's `WorldWriter` sends — release the spirit, find the corpse,
-//! reclaim it, or take the spirit healer's res; plus the answer to someone else's res offer.
+//! reclaim it, self-resurrect off a soulstone, or take the spirit healer's res; plus the answer
+//! to someone else's res offer.
 //! Bodies in [`crate::messages`]'s `reclaim_corpse`/`spirit_healer_activate`/`resurrect_response`
-//! builders (the first two verbs are bodyless). Split out of `writer/mod.rs` (decision 0636),
-//! mirroring [`crate::messages::death`].
+//! builders (`repop_request`, `corpse_query` and `self_res` are bodyless). Split out of
+//! `writer/mod.rs` (decision 0636), mirroring [`crate::messages::death`].
 //!
 //! Every one of these is server-gated on a death state the client only *believes* it is in
 //! (ghost/unreleased/delay-elapsed/in-range), so a refusal is normal and is not always a packet —
@@ -28,6 +29,14 @@ impl WorldWriter {
     /// markers + the corpse-run range gate).
     pub fn corpse_query(&mut self) -> Result<()> {
         self.send(opcode::MSG_CORPSE_QUERY, &[])
+    }
+
+    /// Self-resurrect (`CMSG_SELF_RES`, empty body — decision 1746): the DEATH popup's second
+    /// button, offered only while `PLAYER_SELF_RES_SPELL` is non-zero. The server casts that
+    /// spell on us and zeroes the field; like the reclaim, the success is ordinary descriptor
+    /// deltas (alive, health/mana per the spell) with no answer packet of its own.
+    pub fn self_res(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_SELF_RES, &[])
     }
 
     /// Reclaim our corpse (`CMSG_RECLAIM_CORPSE` — the RECOVER_CORPSE popup's Accept): the corpse's

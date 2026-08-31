@@ -412,6 +412,17 @@ pub enum SessionEvent {
     /// question the `CONFIRM_BINDER` dialog puts on screen. `binder` is the innkeeper's guid, and
     /// it must be echoed in `CMSG_BINDER_ACTIVATE` for the bind to happen at all (decision 1331).
     BinderConfirm { binder: u64 },
+    /// Someone is asking to summon us (`SMSG_SUMMON_REQUEST`) — the question the `CONFIRM_SUMMON`
+    /// dialog puts on screen (decision 1747). `summoner` is the guid to echo in
+    /// `CMSG_SUMMON_RESPONSE` and the one the dialog names; `zone` is the **summoner's**
+    /// `AreaTable` id, the place the dialog says you would be pulled to; `delay_ms` is how long
+    /// the server will hold the offer before auto-declining it. Accepting is the only packet in
+    /// the flow — declining sends nothing (there is no decline opcode).
+    SummonRequest {
+        summoner: u64,
+        zone: u32,
+        delay_ms: u32,
+    },
     /// A class trainer is asking whether to unlearn every talent (`MSG_TALENT_WIPE_CONFIRM`,
     /// inbound) — the question the `CONFIRM_TALENT_WIPE` dialog puts on screen, carrying the
     /// `trainer` to answer with and the `cost` in copper its money frame shows. Answering means

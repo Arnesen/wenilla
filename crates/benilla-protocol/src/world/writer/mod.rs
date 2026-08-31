@@ -89,6 +89,7 @@ mod skills;
 mod social;
 mod spells;
 mod stable;
+mod summon;
 mod taxi;
 mod trade;
 mod trainer;

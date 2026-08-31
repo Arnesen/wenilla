@@ -270,6 +270,15 @@ pub enum ServerPacket {
         trainer: u64,
         cost: u32,
     },
+    /// `SMSG_SUMMON_REQUEST` — someone is *asking* to pull us to them (decision 1747): a
+    /// warlock's ritual, a meeting stone, a GM. The twin of [`Self::BinderConfirm`] in shape —
+    /// nothing moves until `CMSG_SUMMON_RESPONSE` goes back — and its opposite in teardown:
+    /// there is no decline opcode, so the question expires rather than being answered no.
+    SummonRequest {
+        summoner: u64,
+        zone: u32,
+        delay_ms: u32,
+    },
     /// `SMSG_PLAYERBOUND` — the bind took: who bound us and the AreaTable id we are now bound in.
     /// Arrives beside [`Self::BindPoint`], which carries the same area id plus the position; this
     /// one exists for the "X is now your home" acknowledgement.
@@ -1436,6 +1445,7 @@ impl ServerPacket {
             ServerPacket::GmTicketStatusUpdate { .. } => "SMSG_GM_TICKET_STATUS_UPDATE".into(),
             ServerPacket::BinderConfirm { .. } => "SMSG_BINDER_CONFIRM".into(),
             ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
+            ServerPacket::SummonRequest { .. } => "SMSG_SUMMON_REQUEST".into(),
             ServerPacket::TalentWipeConfirm { .. } => "MSG_TALENT_WIPE_CONFIRM".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),

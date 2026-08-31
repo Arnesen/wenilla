@@ -123,6 +123,7 @@ mod spellbook;
 mod stable;
 mod statusbar;
 mod stdlib;
+mod summon;
 mod talent;
 mod taxi;
 mod tick;
@@ -216,6 +217,7 @@ pub use spellbook::{
     resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
+pub use summon::SummonConfirmUiState;
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_spell::SpellTooltipView;
@@ -558,6 +560,7 @@ impl UiScript {
         guild::install(&lua)?;
         petition::install(&lua)?;
         binder::install(&lua)?;
+        summon::install(&lua)?;
         gm_ticket::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;

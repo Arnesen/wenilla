@@ -846,6 +846,18 @@ pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 /// leg puts the *latched* trainer guid on the wire. Bodies in [`super::progression`].
 pub const MSG_TALENT_WIPE_CONFIRM: u16 = 0x02AA; // 682
 
+/// The player-summon pair — the question and the accept (VERIFIED vmangos `Opcodes_1_12_1.h`:
+/// 683/684 + `Opcodes.cpp`'s `HandleSummonResponseOpcode` registration; decision 1747). A
+/// warlock's Ritual of Summoning, a meeting stone and a GM `.summon` all arrive as the same
+/// inbound question, and the client answers only to say **yes**: there is no decline opcode and no
+/// accept flag in the body, so a declined summon is silence and the server's own two-minute timer.
+///
+/// Byte-verified client-side as well as against vmangos (wow-re: the `0x5ab650` registration site
+/// maps `0x2ab` to handler `0x5e6140`, and the `ConfirmSummon` binding `0x48b770` writes `0x2ac`).
+/// Bodies in [`super::summon`].
+pub const SMSG_SUMMON_REQUEST: u16 = 0x02AB; // 683
+pub const CMSG_SUMMON_RESPONSE: u16 = 0x02AC; // 684
+
 /// Unlearn (abandon) a whole skill line — the skills pane's red circle-slash (VERIFIED vmangos
 /// `Opcodes.cpp` handler registration + `Opcodes_1_9_4.h`: 514). Body in
 /// [`super::skills::unlearn_skill`]; no ack — the removal returns as a `PLAYER_SKILL_INFO`
@@ -916,6 +928,12 @@ pub const MSG_CORPSE_QUERY: u16 = 0x0216; // 534
 pub const CMSG_SPIRIT_HEALER_ACTIVATE: u16 = 0x021C; // 540
 pub const SMSG_SPIRIT_HEALER_CONFIRM: u16 = 0x0222; // 546
 pub const SMSG_CORPSE_RECLAIM_DELAY: u16 = 0x0269; // 617
+/// Self-resurrect — the DEATH popup's soulstone/Reincarnation button (`UseSoulstone()`, decision
+/// 1746). **EMPTY body** (VERIFIED vmangos `Opcodes_1_12_1.h:692` = 691, handler
+/// `WorldSession::HandleSelfResOpcode(NullClientPacket const&)`, `SpellHandler.cpp:461`): the
+/// server casts whatever `PLAYER_SELF_RES_SPELL` holds on us and zeroes the field. There is no
+/// answer packet — the resurrection arrives as ordinary descriptor deltas, exactly like a reclaim.
+pub const CMSG_SELF_RES: u16 = 0x02B3; // 691
 /// Sent with the 10% durability loss a natural (non-PvP) death applies (VERIFIED vmangos
 /// `Opcodes_1_12_1.h` 701 + `Unit.cpp:1170-1182` — an EMPTY body; the client's cue for the red
 /// "Your equipped items suffer a 10%% durability loss." error line).

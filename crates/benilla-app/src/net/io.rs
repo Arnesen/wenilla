@@ -840,6 +840,7 @@ fn writer_loop(
                     ClientCommand::GmTicketDelete => w.gm_ticket_delete(),
                     ClientCommand::GmTicketSystemStatus => w.gm_ticket_system_status(),
                     ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
+                    ClientCommand::SummonResponse { summoner } => w.summon_response(summoner),
                     ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
                     ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
                     ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
@@ -1059,6 +1060,7 @@ fn writer_loop(
                     ClientCommand::RepopRequest => w.repop_request(),
                     ClientCommand::CorpseQuery => w.corpse_query(),
                     ClientCommand::ReclaimCorpse { corpse } => w.reclaim_corpse(corpse),
+                    ClientCommand::SelfRes => w.self_res(),
                     ClientCommand::SpiritHealerActivate { npc } => w.spirit_healer_activate(npc),
                     ClientCommand::ResurrectResponse { caster, accept } => {
                         w.resurrect_response(caster, accept)

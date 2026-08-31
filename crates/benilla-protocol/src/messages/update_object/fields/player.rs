@@ -395,6 +395,29 @@ impl ObjectFields {
     pub fn player_ammo_id(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_AMMO_ID)
     }
+    /// `PLAYER_SELF_RES_SPELL` — the spell the server will cast on `CMSG_SELF_RES`, i.e. **the
+    /// self-resurrect this corpse is owed**: a warlock's Soulstone ("Use Soulstone" 3026 /
+    /// 20758-20761), a shaman's Reincarnation (21169), or Twisting Nether (23700). `None` when
+    /// there is none — the field absent *or* zero are the same fact, so both collapse here
+    /// (decision 1746).
+    ///
+    /// The server writes it at the death itself (`Player::SetDeathState(JUST_DIED)` keeps a
+    /// standing soulstone id across the aura wipe, else falls back to
+    /// `Player::SelectResurrectionSpellId()` for the passive cases) and **zeroes it on any
+    /// resurrection by another means** — so this field alone is the whole client-side condition;
+    /// there is no second gate and no cooldown/reagent test on our side. It is flushed
+    /// *immediately*, in its own `SMSG_UPDATE_OBJECT`, one line **before** the health→0 flush
+    /// (`Unit::DealDamage`, `Unit.cpp:1136-1143`) — which is why the field is already in the
+    /// descriptor by the time the death edge fires, and why the DEATH popup can read it in
+    /// `OnShow`.
+    ///
+    /// `PLAYER_FLAGS_CAN_SELF_RESURRECT (0x1000)` is the pre-1.6 carrier of the same fact and is
+    /// dead on this build — vmangos sets it only under `SUPPORTED_CLIENT_BUILD < CLIENT_BUILD_1_6_1`
+    /// (`Player.cpp:1537-1569`).
+    pub fn player_self_res_spell(&self) -> Option<u32> {
+        self.get_u32(FIELD_PLAYER_SELF_RES_SPELL)
+            .filter(|&s| s != 0)
+    }
     /// `PLAYER_BYTES` — packed skinColor (byte 0) / faceType (byte 1) / hairStyle (byte 2) / hairColor
     /// (byte 3). The character compositor's customization input (RF-0056).
     pub fn player_bytes(&self) -> Option<u32> {

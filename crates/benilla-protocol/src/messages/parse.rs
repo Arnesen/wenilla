@@ -14,8 +14,8 @@ use super::{
     action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
     duel, gameobject, gm_ticket, gossip, group, guild, items, loot, mail, mirror_timer,
     monster_move, movement, opcode, page_text, pet, petition, progression, pvp, quest, social,
-    spellbook, spells, stable, taxi, trade, trainer, update_object, vendor, world_state, Character,
-    CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
+    spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor, world_state,
+    Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -348,6 +348,16 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_BINDER_CONFIRM => ServerPacket::BinderConfirm {
             binder: binder::read_binder_confirm(&mut r)?,
         },
+        // The summon question (decision 1747). Three fields, and the client's whole answer is
+        // the guid back — see `super::summon` for the byte pin on both bodies.
+        opcode::SMSG_SUMMON_REQUEST => {
+            let ask = summon::read_summon_request(&mut r)?;
+            ServerPacket::SummonRequest {
+                summoner: ask.summoner,
+                zone: ask.zone,
+                delay_ms: ask.delay_ms,
+            }
+        }
         // The talent twin of the confirm above, on a two-way `MSG_` opcode: this direction is the
         // question (guid + cost); the answer we send back carries the guid alone (decision 1580).
         opcode::MSG_TALENT_WIPE_CONFIRM => {

@@ -114,6 +114,12 @@ EnchantConfirm.xml
 # Not GossipFrame's, and the wire is why — the server closes the gossip menu BEFORE it asks, so
 # this dialog is free-standing by the time it shows. Needs only UiPanels.xml, far above.
 BinderConfirm.xml
+# The summon confirm + its event driver (decision 1747): the same StaticPopup registry once more.
+# Free-standing like the two around it, and for a stronger reason — a warlock's ritual, a meeting
+# stone and a GM `.summon` all raise it with nothing whatever on screen. The only entry here whose
+# event carries no arguments: the dialog reads the summoner, the destination and the clock back out
+# of the engine every tick, so it needs UiPanels.xml's countdown branch as well as its registry.
+ConfirmSummon.xml
 # The class trainer's respec confirm + its event driver (decision 1580): the binder confirm's twin
 # one line up, free-standing for the identical reason — the server closes the gossip menu before it
 # asks. The only entry in the registry that raises a money frame, so it needs MoneyFrame.xml (far

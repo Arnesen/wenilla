@@ -723,6 +723,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::GmTicketStatusUpdate { status }]
         }
         ServerPacket::BinderConfirm { binder } => vec![SessionEvent::BinderConfirm { binder }],
+        ServerPacket::SummonRequest {
+            summoner,
+            zone,
+            delay_ms,
+        } => vec![SessionEvent::SummonRequest {
+            summoner,
+            zone,
+            delay_ms,
+        }],
         ServerPacket::TalentWipeConfirm { trainer, cost } => {
             vec![SessionEvent::TalentWipeConfirm { trainer, cost }]
         }

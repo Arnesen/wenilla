@@ -266,6 +266,10 @@ pub(super) fn apply_net_updates(
                 // survive walking away from the registrar.
                 ResMut<crate::ui_petition::GuildRegistrarState>,
                 ResMut<crate::ui_petition::PetitionState>,
+                // The pending summon question (decision 1747) — `SMSG_SUMMON_REQUEST` parks the
+                // summoner's guid, zone and expiry here and `crate::ui_summon` turns it into the
+                // CONFIRM_SUMMON dialog, whose Accept is the only packet in the flow.
+                ResMut<crate::ui_summon::SummonState>,
             ),
         ),
     ),
@@ -450,6 +454,7 @@ pub(super) fn apply_net_updates(
                 mut gm_ticket,
                 mut registrar,
                 mut petition,
+                mut summon,
             ),
         ),
     ) = caches;
@@ -806,6 +811,32 @@ pub(super) fn apply_net_updates(
                 });
             }
             SessionEvent::BinderConfirm { binder: npc } => binder.ask(npc),
+            // Someone is asking to pull us to them (decision 1747). The reference gates this in
+            // the HANDLER, not the dialog: a dead or ghost player's request is dropped before the
+            // latch, so it cannot disturb a live question either (`0x5e6194`). The predicate is
+            // `0x605f30` — **health ≤ 0 OR (is-player AND `PLAYER_FLAGS` ghost bit)**, which is
+            // both of these accessors and not the one `unit_is_dead` alone would give (a ghost's
+            // wire health is 1). A self object we have not streamed yet reads as alive: the
+            // reference's own default (`0x5e6189` sends a NULL object through to the latch).
+            SessionEvent::SummonRequest {
+                summoner,
+                zone,
+                delay_ms,
+            } => {
+                let dead_or_ghost = self_guid
+                    .0
+                    .and_then(|g| index.0.get(&g))
+                    .and_then(|e| stores.get(*e).ok())
+                    .is_some_and(|s| s.0.unit_is_dead() || s.0.player_is_ghost());
+                crate::ui_summon::apply::request(
+                    summoner,
+                    zone,
+                    delay_ms,
+                    dead_or_ghost,
+                    aura.1.elapsed_secs_f64(),
+                    &mut summon,
+                );
+            }
             // The GM ticket answers (decision 1673). The GETTICKET arm takes EVERY answer,
             // including `None` ("you have no ticket") and including an unsolicited one pushed by a
             // GM's `.ticket view`/`escalate`/`complete` — they are indistinguishable on the wire

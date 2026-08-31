@@ -1322,8 +1322,9 @@
         -- Ref l.1712-1808: the timeout countdown (expiry → OnCancel "timeout" + hide), the
         -- per-tick countdown text for the timer dialogs, the StartDelay gate (button1 disabled,
         -- delayText counts down, then the real text swaps in and the button enables), then the
-        -- entry's own OnUpdate. The INSTANCE_BOOT/CONFIRM_SUMMON special text formats join with
-        -- their dialogs; their which-list slots stay so the gate is the ref's.
+        -- entry's own OnUpdate. CONFIRM_SUMMON's special text format landed with its dialog
+        -- (decision 1747); INSTANCE_BOOT's joins when that dialog does, and its which-list slot
+        -- stays meanwhile so the gate is the ref's.
         function StaticPopup_OnUpdate(dialog, elapsed)
             local info = StaticPopupDialogs[dialog.which]
             if not info then
@@ -1347,11 +1348,23 @@
                     or (which == "CONFIRM_SUMMON") or (which == "AREA_SPIRIT_HEAL") then
                     local text = getglobal(dialog:GetName() .. "Text")
                     timeleft = ceil(timeleft)
-                    if timeleft < 60 then
-                        text:SetText(format(info.text, timeleft, StaticPopupTimeUnit(timeleft, false)))
+                    local n, unit = timeleft, StaticPopupTimeUnit(timeleft, false)
+                    if timeleft >= 60 then
+                        n = ceil(timeleft / 60)
+                        unit = StaticPopupTimeUnit(n, true)
+                    end
+                    -- The ref's own if/elseif over `which` (l.1746-1758), which exists because two
+                    -- of these dialogs take MORE than the count and its unit word. CONFIRM_SUMMON
+                    -- prefixes the summoner and the destination, both read live from the engine
+                    -- every tick — which is what lets a name still resolving through the name cache
+                    -- paint blank once and then fill itself in (decision 1747). INSTANCE_BOOT's arm
+                    -- (GetBindLocation() first) joins when that dialog does; until then it falls
+                    -- through here, which is wrong for it and harmless, since it cannot be shown.
+                    if which == "CONFIRM_SUMMON" then
+                        text:SetText(format(info.text, GetSummonConfirmSummoner(),
+                            GetSummonConfirmAreaName(), n, unit))
                     else
-                        local m = ceil(timeleft / 60)
-                        text:SetText(format(info.text, m, StaticPopupTimeUnit(m, true)))
+                        text:SetText(format(info.text, n, unit))
                     end
                 end
             end

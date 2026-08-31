@@ -793,6 +793,13 @@ impl WorldSession {
         self.send(opcode::MSG_CORPSE_QUERY, &[])
     }
 
+    /// Self-resurrect (`CMSG_SELF_RES`, empty body) — the unsplit twin of
+    /// [`WorldWriter::self_res`], for the `--self-res` probe. The server casts whatever
+    /// `PLAYER_SELF_RES_SPELL` holds and zeroes the field.
+    pub fn self_res(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_SELF_RES, &[])
+    }
+
     /// Ask the graveyard's Spirit Healer for the immediate res (`CMSG_SPIRIT_HEALER_ACTIVATE`,
     /// full guid) — the unsplit twin of [`WorldWriter::spirit_healer_activate`], for the
     /// `--spirit` probe's live durability-loss verification. The server resurrects at 50% health

@@ -154,6 +154,7 @@ mod ui_shapeshift;
 mod ui_social;
 mod ui_spellbook;
 mod ui_stable;
+mod ui_summon;
 mod ui_talent;
 mod ui_talent_wipe;
 mod ui_taxi;
@@ -230,6 +231,7 @@ use ui_shapeshift::UiShapeshiftPlugin;
 use ui_social::UiSocialPlugin;
 use ui_spellbook::UiSpellbookPlugin;
 use ui_stable::UiStablePlugin;
+use ui_summon::UiSummonPlugin;
 use ui_talent::UiTalentPlugin;
 use ui_talent_wipe::UiTalentWipePlugin;
 use ui_taxi::UiTaxiPlugin;
@@ -615,6 +617,10 @@ pub fn run(build: BuildId) -> AppExit {
     // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
     // packet in the flow that actually binds anything.
     .add_plugins(UiBinderPlugin)
+    // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
+    // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
+    // server-asked question whose only wire answer is yes — and here for that reason.
+    .add_plugins(UiSummonPlugin)
     // The GM trouble-ticket flow (decision 1673): the Help window's five sends, the UPDATE_TICKET
     // answer ticket behind its 10-minute poll, and the GMTicketCategory.dbc list its "page a GM"
     // rows are built from. Beside the binder because it is the same feed/drain shape, and after it

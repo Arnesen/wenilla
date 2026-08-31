@@ -15,6 +15,7 @@ use benilla_assets::coords::wow_to_bevy;
 use benilla_ui::script::{DeathAction, DeathUiState, ScriptValue, UiScript};
 
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
+use crate::ui_action::Spells;
 use crate::ui_script::UiInput;
 
 /// Where our corpse is — the `MSG_CORPSE_QUERY` answer (decision 0308 §5). Raw WoW coords.
@@ -174,6 +175,8 @@ fn feed_death(
     transforms: Query<&Transform>,
     map: Option<Res<benilla_world::world_map::CurrentMap>>,
     status: Res<crate::net::NetStatus>,
+    spells: Option<Res<Spells>>,
+    mut items: ResMut<crate::items::Items>,
 ) {
     // **Only a LIVE session's descriptor is a snapshot** (decision 1732). A reconnect-able
     // disconnect keeps the self avatar as the local puppet (0065) — descriptor and all — so
@@ -225,6 +228,11 @@ fn feed_death(
         resurrect_has_timer: death_net.resurrect.as_ref().is_some_and(|o| o.has_timer),
         spirit_healer_in_range,
         sickness_duration: sickness_duration(store.0.unit_level().unwrap_or(0)),
+        // `HasSoulstone()` — see [`resolve_self_res`] for the three gates and their order. Not a
+        // per-frame inventory walk in general: the dead gate is first, so while alive this is one
+        // health read, and while dead-unreleased the walk only runs on a zero field.
+        self_res_label: resolve_self_res(&store.0, &mut items, spells.as_deref(), &net)
+            .map(|r| r.label().to_owned()),
     });
 
     // ── The WORLD edges (the body's own state machine): the release-window anchor and the
@@ -354,6 +362,102 @@ fn feed_death(
     }
 }
 
+/// `SPELL_EFFECT_SELF_RESURRECT` — `Spell.dbc`'s effect-slot value the client's item leg scans for
+/// (`0x5ed650`, `cmp … 0x5e`). Exactly eleven 1.12 spells carry it.
+const SPELL_EFFECT_SELF_RESURRECT: u32 = 94;
+
+/// What a `UseSoulstone()` would spend right now — the client's own two-legged fork
+/// (`Script::UseSoulstone 0x48ad70`, wow-re death-ui.md §10.4), resolved app-side because neither
+/// leg's inputs (the spell catalog, the item cache) are bound in the script VM.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SelfRes {
+    /// `PLAYER_SELF_RES_SPELL` is non-zero — send `CMSG_SELF_RES` and let the server cast it.
+    Spell {
+        #[allow(dead_code)] // the wire needs no id: the server reads its own field
+        spell: u32,
+        label: String,
+    },
+    /// The field is zero, but a carried item's ON-USE spell self-resurrects — the client **uses
+    /// the item** instead, and labels the button with the ITEM's name.
+    Item {
+        bag_index: u8,
+        slot: u8,
+        guid: u64,
+        entry: u32,
+        label: String,
+    },
+}
+
+impl SelfRes {
+    /// The button text — what `HasSoulstone()` returns.
+    fn label(&self) -> &str {
+        match self {
+            Self::Spell { label, .. } | Self::Item { label, .. } => label,
+        }
+    }
+}
+
+/// **`HasSoulstone()`'s whole answer**, and `UseSoulstone()`'s routing — one resolver, because the
+/// binary is one predicate the two bindings share (wow-re death-ui.md §10.1/§10.4).
+///
+/// Three gates in the client's own order, and the order is the performance story as much as the
+/// fidelity one:
+///
+/// 1. **Dead.** `HasSoulstone` reads `UNIT_FIELD_HEALTH` (signed) and answers nil while it is
+///    positive — so it speaks only inside the pre-release dead window, which is exactly where the
+///    DEATH dialog lives. A released ghost has health **1** (vmangos `BuildPlayerRepop`), so it
+///    stops answering the moment you release, and the walk below never runs while alive.
+/// 2. **The field.** Non-zero → the spell leg, named through `Spell.dbc`. An id the catalog cannot
+///    resolve is **`"UNKNOWN"`**, not nil — the client pushes that literal rather than hiding the
+///    button, and hiding it would silently strip a self-res the server is holding for us.
+/// 3. **The carried item.** Only on a zero field: the reference's own inventory walker at its
+///    default section mask (gear + bags + backpack + keyring, no bank, no buyback — which is
+///    [`InventoryScope::DEFAULT`], the same `0x47` the walker rewrites to) for an item with an
+///    ON-USE (`trigger == 0`) spell carrying [`SPELL_EFFECT_SELF_RESURRECT`] in any effect slot.
+///    The label is the **item's** name.
+///
+/// A template still in flight can't be judged and reads as "not a self-res"; the ask-once query
+/// the lookup fires answers within a frame or two and the next resolve sees it.
+fn resolve_self_res(
+    store: &benilla_protocol::ObjectFields,
+    items: &mut crate::items::Items,
+    spells: Option<&Spells>,
+    commands: &NetCommands,
+) -> Option<SelfRes> {
+    if !store.unit_is_dead() {
+        return None;
+    }
+    if let Some(spell) = store.player_self_res_spell() {
+        let label = spells
+            .and_then(|s| s.catalog.get(spell))
+            .map_or_else(|| "UNKNOWN".to_owned(), |d| d.name.clone());
+        return Some(SelfRes::Spell { spell, label });
+    }
+    // Collected first, then judged: the template lookup needs `items` mutably (it is ask-once,
+    // so a miss fires the query) while the walk holds it immutably — `has_key`'s own idiom.
+    let slots =
+        crate::ui_items::collect_inventory(store, items, crate::ui_items::InventoryScope::DEFAULT);
+    slots.into_iter().find_map(|(bag_index, slot, guid)| {
+        let entry = items.object(guid)?.object_entry()?;
+        let t = items.template(entry, guid, commands)?;
+        let self_res = t.spells.iter().any(|sp| {
+            sp.trigger == 0
+                && spells.is_some_and(|c| {
+                    c.catalog
+                        .get(sp.spell_id)
+                        .is_some_and(|d| d.effects.contains(&SPELL_EFFECT_SELF_RESURRECT))
+                })
+        });
+        self_res.then(|| SelfRes::Item {
+            bag_index,
+            slot,
+            guid,
+            entry,
+            label: t.name.clone(),
+        })
+    })
+}
+
 /// The sickness-duration string a spirit-healer res would apply at `level` — the verified server
 /// table (vmangos `Player::ResurrectPlayer` + `Death.SicknessLevel` 11, 0308 §6): nil below 11,
 /// `(level − 10)` minutes through 19, the aura's full 10 minutes from 20.
@@ -408,6 +512,8 @@ fn drain_death(
     script: Option<NonSendMut<UiScript>>,
     mut death_net: ResMut<DeathNet>,
     net: Res<NetCommands>,
+    targeting: crate::ui_action::cast_target::CastTargeting,
+    mut ladder: crate::ui_action::CastLadder,
 ) {
     let Some(mut script) = script else {
         return;
@@ -436,6 +542,58 @@ fn drain_death(
                 Some(npc) => net.0.send(ClientCommand::SpiritHealerActivate { npc }),
                 None => Ok(()),
             },
+            // The self-resurrect button — the client's own two-legged fork, **re-resolved
+            // here at click time** rather than remembered from the frame the dialog opened. That
+            // is the reference's posture too: its `OnCancel` calls `HasSoulstone()` again before
+            // branching, because the field belongs to the server and can have been spent since.
+            //
+            // Nothing is taken or cleared on our side on either leg: the server owns
+            // `PLAYER_SELF_RES_SPELL` and zeroes it as it casts, so the button's disappearance is
+            // a descriptor delta like every other death-arc confirmation.
+            DeathAction::UseSoulstone => {
+                let store = targeting.self_store.single().ok().map(|s| s.0.clone());
+                match store.as_ref().and_then(|store| {
+                    resolve_self_res(
+                        store,
+                        &mut ladder.items,
+                        ladder.spells.as_deref(),
+                        &ladder.commands,
+                    )
+                }) {
+                    Some(SelfRes::Spell { .. }) => net.0.send(ClientCommand::SelfRes),
+                    // The item leg is an ordinary item use — the same `CGItem_C::Use 0x5d8d00`
+                    // every bag click and action button ends at, which is why it goes through the
+                    // one send rather than growing a second path (decision 0914).
+                    Some(SelfRes::Item {
+                        bag_index,
+                        slot,
+                        guid,
+                        entry,
+                        ..
+                    }) => {
+                        let t = ladder
+                            .items
+                            .template(entry, guid, &ladder.commands)
+                            .cloned();
+                        let it = crate::ui_items::ItemUse {
+                            guid: Some(guid),
+                            start_quest: t.as_ref().map_or(0, |t| t.start_quest),
+                            bag_index,
+                            slot,
+                            entry,
+                            spell_index: t.as_ref().and_then(|t| t.use_spell_index()).unwrap_or(0),
+                            use_spell: t.as_ref().and_then(|t| t.use_spell).map(|u| u.spell_id),
+                            on_object: None,
+                            is_charter: false,
+                        };
+                        crate::ui_items::send_item_use(it, &targeting.context(), &mut ladder);
+                        Ok(())
+                    }
+                    // Nothing to spend — the reference's silent return (it pushes nothing and
+                    // sends nothing on this path either).
+                    None => Ok(()),
+                }
+            }
         };
     }
 }
@@ -540,6 +698,191 @@ mod tests {
         assert!(
             feed.died_at.is_none(),
             "the release window is the dead session's, and re-arms at the next login"
+        );
+    }
+}
+
+#[cfg(test)]
+mod self_res_tests {
+    use std::collections::HashMap;
+
+    use benilla_formats::{SpellCatalog, SpellDisplay};
+    use benilla_protocol::messages::{ItemInfo, ItemSpellEntry};
+    use benilla_protocol::ObjectFields;
+
+    use super::{resolve_self_res, SelfRes, SPELL_EFFECT_SELF_RESURRECT};
+    use crate::items::Items;
+    use crate::net::{ClientCommand, NetCommands};
+    use crate::ui_action::Spells;
+
+    /// Reincarnation's effect spell — what the server writes into the field, named in `Spell.dbc`
+    /// as the button text (decision 1746).
+    const REINCARNATION: u32 = 21169;
+    /// `PLAYER_SELF_RES_SPELL`.
+    const F_SELF_RES: u16 = 1224;
+    /// `UNIT_FIELD_HEALTH` / `UNIT_FIELD_MAXHEALTH`. Both, because benilla's `unit_is_dead()`
+    /// guards on a non-zero max — an all-empty store must not read as a corpse (its own doc). The
+    /// binary's gate is the bare signed `health <= 0`; for the self player the two never differ.
+    const F_HEALTH: u16 = 22;
+    const F_MAXHEALTH: u16 = 28;
+    /// `PLAYER_FIELD_PACK_SLOT_1` — the backpack's 16 slots, two dwords per guid.
+    const F_PACK_1: u16 = 532;
+
+    fn commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        (NetCommands(tx), rx)
+    }
+
+    fn catalog(pairs: impl IntoIterator<Item = (u32, SpellDisplay)>) -> Spells {
+        Spells {
+            catalog: SpellCatalog::from_displays(pairs.into_iter().collect::<HashMap<_, _>>()),
+            ..Spells::empty_for_tests()
+        }
+    }
+
+    fn named(name: &str, effects: [u32; 3]) -> SpellDisplay {
+        SpellDisplay {
+            name: name.to_string(),
+            effects,
+            ..Default::default()
+        }
+    }
+
+    /// **The dead gate comes first** (wow-re death-ui.md §10.1): `HasSoulstone` reads
+    /// `UNIT_FIELD_HEALTH` and answers nil while it is positive. A living player holding a
+    /// standing self-res spell gets nothing — and neither does a released **ghost**, whose health
+    /// the server sets to exactly 1 (`BuildPlayerRepop`). That is what confines the answer to the
+    /// pre-release window the DEATH dialog lives in.
+    #[test]
+    fn the_dead_gate_precedes_the_field() {
+        let (net, _rx) = commands();
+        let mut items = Items::default();
+        let spells = catalog([(REINCARNATION, named("Reincarnation", [94, 0, 0]))]);
+
+        let alive = ObjectFields::from_pairs(&[
+            (F_MAXHEALTH, 4000),
+            (F_HEALTH, 4000),
+            (F_SELF_RES, REINCARNATION),
+        ]);
+        assert_eq!(
+            resolve_self_res(&alive, &mut items, Some(&spells), &net),
+            None,
+            "alive with a self-res owed: nil"
+        );
+
+        // A ghost's health is 1, not 0 — the same positive-health path, which is why releasing
+        // takes the button away rather than the dialog merely hiding it.
+        let ghost = ObjectFields::from_pairs(&[
+            (F_MAXHEALTH, 4000),
+            (F_HEALTH, 1),
+            (F_SELF_RES, REINCARNATION),
+        ]);
+        assert_eq!(
+            resolve_self_res(&ghost, &mut items, Some(&spells), &net),
+            None,
+            "a released ghost still holds the field, and still answers nil"
+        );
+
+        let dead = ObjectFields::from_pairs(&[
+            (F_MAXHEALTH, 4000),
+            (F_HEALTH, 0),
+            (F_SELF_RES, REINCARNATION),
+        ]);
+        assert_eq!(
+            resolve_self_res(&dead, &mut items, Some(&spells), &net),
+            Some(SelfRes::Spell {
+                spell: REINCARNATION,
+                label: "Reincarnation".into(),
+            })
+        );
+    }
+
+    /// An id the catalog cannot resolve is **"UNKNOWN"**, not nil (§10.1's fourth exit). Hiding
+    /// the button instead would silently strip a self-res the server is holding for us.
+    #[test]
+    fn an_unresolvable_spell_id_reads_unknown_not_nil() {
+        let (net, _rx) = commands();
+        let mut items = Items::default();
+        let dead =
+            ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0), (F_SELF_RES, 999_999)]);
+        for spells in [None, Some(catalog([]))] {
+            assert_eq!(
+                resolve_self_res(&dead, &mut items, spells.as_ref(), &net),
+                Some(SelfRes::Spell {
+                    spell: 999_999,
+                    label: "UNKNOWN".into(),
+                }),
+                "no catalog and an empty catalog are the same miss"
+            );
+        }
+    }
+
+    /// **A zero field is not the nil path** (§10.3): the client falls through to the carried
+    /// inventory and looks for an item whose ON-USE (`trigger == 0`) spell carries
+    /// `SPELL_EFFECT_SELF_RESURRECT`, labelling the button with the ITEM's name. Three items
+    /// stand in the backpack — one whose self-res spell is on an EQUIP trigger (must not count),
+    /// one whose on-use spell is something else (must not count), and the real one.
+    #[test]
+    fn a_zero_field_falls_through_to_a_carried_item() {
+        let (net, _rx) = commands();
+        let mut items = Items::default();
+
+        let item = |name: &str, spells: Vec<ItemSpellEntry>| ItemInfo {
+            spells,
+            ..crate::items::test_template(name)
+        };
+        let block = |spell_id: u32, trigger: u32| ItemSpellEntry {
+            index: 0,
+            spell_id,
+            trigger,
+            charges: 0,
+            cooldown_ms: -1,
+            category: 0,
+            category_cooldown_ms: -1,
+        };
+        // 3026 "Use Soulstone" is the real effect-94 spell; 439 "Healing Potion" is not.
+        items.insert_template(10, Some(item("Healthstone", vec![block(439, 0)])));
+        items.insert_template(11, Some(item("Worn Trinket", vec![block(3026, 1)])));
+        items.insert_template(
+            12,
+            Some(item("Ankh of Reincarnation", vec![block(3026, 0)])),
+        );
+        for (guid, entry) in [(0xA0_u64, 10_u32), (0xA1, 11), (0xA2, 12)] {
+            items.insert_object(guid, ObjectFields::from_pairs(&[(3, entry)]));
+        }
+        let spells = catalog([
+            (
+                3026,
+                named("Use Soulstone", [SPELL_EFFECT_SELF_RESURRECT, 0, 0]),
+            ),
+            (439, named("Healing Potion", [6, 0, 0])),
+        ]);
+
+        // Backpack slots 23/24/25 hold the three, in that order.
+        let mut pairs = vec![(F_MAXHEALTH, 4000), (F_HEALTH, 0)];
+        for (i, guid) in [0xA0_u64, 0xA1, 0xA2].iter().enumerate() {
+            let f = F_PACK_1 + 2 * i as u16;
+            pairs.push((f, (*guid & 0xffff_ffff) as u32));
+            pairs.push((f + 1, (*guid >> 32) as u32));
+        }
+        let dead = ObjectFields::from_pairs(&pairs);
+
+        match resolve_self_res(&dead, &mut items, Some(&spells), &net) {
+            Some(SelfRes::Item { entry, label, .. }) => {
+                assert_eq!(
+                    entry, 12,
+                    "the EQUIP-trigger copy and the potion are skipped"
+                );
+                assert_eq!(label, "Ankh of Reincarnation", "the ITEM names the button");
+            }
+            other => panic!("expected the item leg, got {other:?}"),
+        }
+
+        // Take it away and the answer is nil again — not "UNKNOWN", which is the spell leg's.
+        let bare = ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0)]);
+        assert_eq!(
+            resolve_self_res(&bare, &mut items, Some(&spells), &net),
+            None
         );
     }
 }

@@ -519,6 +519,27 @@ pub(crate) fn find_item(
     })
 }
 
+/// Every occupied slot `scope` reaches, **in the walker's own order** — [`walk_inventory`]'s visit
+/// sequence collected rather than searched.
+///
+/// It exists because some predicates need the item's TEMPLATE, and the template lookup wants
+/// [`Items`] mutably (it is ask-once: a miss fires the query) while the walk holds it immutably.
+/// `has_key` solved that by hand-listing the slots it wanted; this keeps the one real walker and
+/// its load-bearing order (decisions 0666/1158) and just defers the judging by one step.
+pub(crate) fn collect_inventory(
+    store: &ObjectFields,
+    items: &Items,
+    scope: InventoryScope,
+) -> Vec<(u8, u8, u64)> {
+    let mut out = Vec::new();
+    // `None` throughout — the walk is never stopped, so every slot in scope lands in `out`.
+    walk_inventory(store, items, scope, |bag, slot, guid| {
+        out.push((bag, slot, guid));
+        None::<()>
+    });
+    out
+}
+
 /// The reference's **`HasKey()`** (`0x48ae90`) — "does this player own a key at all?", the one
 /// gate that decides whether the keyring exists in the UI (decision 0765). Byte-read: it fetches
 /// the active player, then runs the same inventory walker `find_item` transcribes

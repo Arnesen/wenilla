@@ -1388,6 +1388,16 @@ pub(crate) struct Model {
     /// CONFIRM_BINDER dialog polls it from OnUpdate and hides itself when it goes false, which is
     /// how walking away from the innkeeper takes the question off screen (decision 1331).
     pub(crate) binder_pending: bool,
+    /// The summon question's three resolved reads, pushed by the app each frame
+    /// ([`super::UiScript::set_summon_confirm`]) — what `GetSummonConfirmSummoner`,
+    /// `GetSummonConfirmAreaName` and `GetSummonConfirmTimeLeft` answer ([`super::summon`]).
+    /// Default (two empty strings and a zero) is exactly what the reference's getters answer with
+    /// nothing pending, so the pre-push window behaves like the post-expiry one (decision 1747).
+    pub(crate) summon_confirm: super::summon::SummonConfirmUiState,
+    /// `ConfirmSummon()` calls queued since the app's last drain — each is one outbound
+    /// `CMSG_SUMMON_RESPONSE`. A COUNT for [`Self::binder_confirms`]'s reason: the app holds the
+    /// summoner's guid, so the intent carries no payload of its own.
+    pub(crate) summon_confirms: u32,
     /// Frames per second, behind `GetFramerate()`. Pushed per tick by the app, which owns the
     /// clock this crate does not have.
     pub(crate) framerate: f64,
@@ -1731,6 +1741,8 @@ impl Model {
             stuck_casts: 0,
             binder_confirms: 0,
             binder_pending: false,
+            summon_confirm: super::summon::SummonConfirmUiState::default(),
+            summon_confirms: 0,
             framerate: 0.0,
             modifiers: (false, false, false),
             money: 0,

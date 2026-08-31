@@ -461,9 +461,17 @@ const FIELD_PLAYER_TRACK_CREATURES: u16 = 1104;
 const FIELD_PLAYER_TRACK_RESOURCES: u16 = 1105;
 const FIELD_PLAYER_AMMO_ID: u16 = 1223; // UNIT_END+0x40B, INT — the equipped ammo item id
                                         // (`Player.cpp:7656` etc., `Player::SetUInt32Value`).
-                                        // PLAYER_FLAGS = UNIT_END(188) + 0x2 (VERIFIED vmangos `UpdateFields_1_12_1.h:120`; the duel
-                                        // arbiter guid takes +0x0/+0x1). Bit 0x10 = PLAYER_FLAGS_GHOST (`Player.h:319`), set/cleared by
-                                        // the ghost aura 8326's HandleAuraGhost at release/resurrect (decision 0308 §1).
+                                        // PLAYER_SELF_RES_SPELL = UNIT_END(188) + 0x40C (INT, **PRIVATE** — self only), the spell id the
+                                        // server will cast if we ask to self-resurrect: the whole soulstone/Reincarnation mechanism, on
+                                        // the wire as one dword (decision 1746). Contiguous past the ammo id (1223 + 1 = 1224 ✓), and
+                                        // cross-checked two ways in vmangos because its two tables disagree: the enum
+                                        // `UpdateFields_1_12_1.h:284` gives `UNIT_END + 0x40C` (= 1224) while its trailing *comment* says
+                                        // `// 0x4C2` — the comment is stale; the parallel descriptor table `UpdateFields_1_12_1.cpp:277`
+                                        // carries the absolute index `0x4C8` = **1224**, agreeing with the arithmetic.
+const FIELD_PLAYER_SELF_RES_SPELL: u16 = 1224;
+// PLAYER_FLAGS = UNIT_END(188) + 0x2 (VERIFIED vmangos `UpdateFields_1_12_1.h:120`; the duel
+// arbiter guid takes +0x0/+0x1). Bit 0x10 = PLAYER_FLAGS_GHOST (`Player.h:319`), set/cleared by
+// the ghost aura 8326's HandleAuraGhost at release/resurrect (decision 0308 §1).
 const FIELD_PLAYER_FLAGS: u16 = 190;
 // PLAYER_DUEL_ARBITER = UNIT_END(188) + 0x0 (GUID, PUBLIC), PLAYER_DUEL_TEAM = UNIT_END + 0x8
 // (INT, PUBLIC) — VERIFIED vmangos `UpdateFields_1_12_1.h:119,126`. The arbiter opens the player

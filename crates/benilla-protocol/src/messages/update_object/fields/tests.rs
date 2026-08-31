@@ -283,6 +283,27 @@ fn player_ammo_id_reads_the_field() {
 }
 
 #[test]
+fn player_self_res_spell_collapses_absent_and_zero() {
+    // 1224 sits one past PLAYER_AMMO_ID(1223), which is one past PLAYER_FIELD_BYTES(1222) — the
+    // run this test pins by neighbour so a mis-derived index shows up as a wrong reading, not a
+    // silent None. A rank-1 soulstone's effect spell is 3026 (decision 1746).
+    let f = ObjectFields::from_pairs(&[(1222, 0), (1223, 0), (1224, 3026)]);
+    assert_eq!(f.player_self_res_spell(), Some(3026));
+    assert_eq!(
+        f.player_ammo_id(),
+        Some(0),
+        "the neighbour is not disturbed"
+    );
+    // "No self-res" reaches us two ways — the field never streamed, or the server zeroed it on a
+    // resurrection by another means — and they are the same fact, so both read None.
+    assert_eq!(ObjectFields::default().player_self_res_spell(), None);
+    assert_eq!(
+        ObjectFields::from_pairs(&[(1224, 0)]).player_self_res_spell(),
+        None
+    );
+}
+
+#[test]
 fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     // flags=0x01 / combo=0x02 / actionBars=0x03 / highestHonorRank=5 packed little-endian: the
     // dword's three live readers take bytes 1, 2 and 3 without bleeding into each other. The
