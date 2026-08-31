@@ -287,7 +287,7 @@ pub(super) fn control(
     // a body that does not turn — which is what a stunned character looks like, and what the
     // reference produces by never running the turn emitter at all. Restoring rather than gating
     // inside the session keeps the approved camera path (0050/0366's right-drag coupling) untouched.
-    // `mouse_turned` then reads false by construction, so the seated-turn stand-up cannot fire either.
+    // (Nothing downstream can tell: the mouse turn no longer stands a seated player either — 1766.)
     // Losing the reins has the same shape, and the binary says so explicitly: with the mover global
     // zeroed, `0x514640` skips the whole tick at `51466c` — input is still *sampled*, the body turn
     // is skipped at `514474` — while the camera rotate at `514444` happens BEFORE the mover lookup
@@ -319,7 +319,6 @@ pub(super) fn control(
     if !may_turn || player.control_lost || player.reseat {
         player.face_yaw = yaw_before_look;
     }
-    let mouse_turned = player.face_yaw != yaw_before_look;
     {
         let cur = cursor_opts.bypass_change_detection();
         if cur.visible != opts_shadow.visible
@@ -561,10 +560,21 @@ pub(super) fn control(
             dir = Vec3::ZERO;
         }
         let moving = dir != Vec3::ZERO;
-        // The character's own turn this frame — a keyboard turn (or the drunk veer, which rides
-        // `turn_delta` the same way) or a real mouse TURN of the body. One of the movement inputs
-        // that stands a seated avatar back up, and the camera's rigid carry below.
-        let turned = turn_delta != 0.0 || mouse_turned;
+        // The character's own KEYBOARD turn this frame (or the drunk veer, which rides `turn_delta`
+        // the same way) — one of the movement inputs that stands a seated avatar back up.
+        //
+        // **A mouse turn is deliberately not in this set** (decision 1766). It was, on the strength
+        // of a director observation that a right-drag stands you, which wow-re could not reproduce
+        // statically and carried as an open anomaly for weeks. The round that closed it found the
+        // observation right and the attribution wrong: the body-facing commit is refused for a
+        // seated player by two independent gates (`0x5145e0` @`0x51460c` on the prediction cache,
+        // `0x5151b0` @`0x51520a` on the raw descriptor byte), and `0x514f50` skips its stand arm
+        // outright while the RMB bit is held (`0x514f6d test al,1; jne`). What stands you is the
+        // **release**: a press-to-release under 200 ms with under 2.25° of yaw is dispatched as a
+        // right-CLICK (`0x514ae0`, which is [`camera::PressGesture::is_click`] here), and the
+        // click's INTERACT reaches `SetStandState(0)`. So the stand belongs to the click, and it
+        // lives in [`crate::target::click`] now — a deliberate turn-drag leaves you seated.
+        let turned = turn_delta != 0.0;
         // The gait toggle (`TOGGLERUN`) — the walk/run latch, run here so the speed select
         // below reads the bit this frame's press left, which is the reference's own order
         // (`ToggleRun` is an input-phase command; the mover reads `CMovement+0x40` after it).

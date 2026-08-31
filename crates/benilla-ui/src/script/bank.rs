@@ -131,29 +131,52 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // BankButtonIDToInvSlotID(id, isBag) — the pure button→live-slot map (module doc).
     //
-    // **The bag arm takes the CONTAINER id 5..=10, not a bag number 1..=6**, and getting that
-    // wrong reads six slots off the end of the band. The reference's own file is the oracle
-    // (0675) and says so four times over: `BankFrame.xml` gives `BankFrameBag1..BankFrameBag6`
-    // the ids **5..10** (the generic buttons `BankFrameItem1..24` take 1..24);
-    // `ButtonInventorySlot` hands `this:GetID()` straight in; and both
-    // `UpdateBagButtonHighlight(id)` (`"BankFrameBag"..(id - NUM_BAG_SLOTS)`) and
-    // `BankFrameItemButton_UpdateLock` (`(this:GetID() - 4) > GetNumBankSlots()`) subtract 4 from
-    // that same id to get back to 1..6. So the bag arm is `id + 59` — byte-identical to
-    // `ContainerIDToInventoryID`'s carved second arm (`t = id - 1; t >= 4 → t + 60`,
-    // `crate::script::container`), which is the same map under the other name.
+    // CARVED (`0x4f8530`, 118 bytes; wow-re `system/ui/scratch/bank-button-invslot-law.md`, §5
+    // trio + orchestrator byte arbitration 2026-08-31). Three findings, and two of them corrected
+    // this binding:
     //
-    // Out-of-range answers 0 (the reference binding is total over its buttons; our XML never asks
-    // outside them — 0 is the visible "wired wrong" tell rather than a silent misroute).
+    // 1 · **The arithmetic is `+59` / `+39`, and the bag arm takes the CONTAINER id 5..10** — not
+    //   a bag number 1..6, which is what this used to compute. `0x4f8575 dec esi` runs BEFORE the
+    //   branch and `0x4f8587 inc esi` AFTER it, so the pair cancels and the constants stand as
+    //   written (`0x4f857f add esi,0x3b` / `0x4f8584 add esi,0x27`). The bag arm is numerically
+    //   identical to `ContainerIDToInventoryID 0x4f94e0`'s own `id >= 5` arm — two functions, two
+    //   instruction sequences, one constant. The reference's file pins the same numbering four
+    //   times over: `BankFrame.xml` gives `BankFrameBag1` `id="5"`, `ButtonInventorySlot` hands
+    //   `this:GetID()` straight in, and `UpdateBagButtonHighlight`/`BankFrameItemButton_UpdateLock`
+    //   both subtract 4 from it to get back to 1..6.
+    //
+    // 2 · **`isBag` is a TYPE test, not a truthiness test.** `0x4f8576 call 0x6f34d0` is
+    //   `lua_isnumber(L, 2)`, which accepts tag 3 or a tag-4 string `luaO_str2d` fully consumes,
+    //   and refuses every other tag at `0x6f7c35` without ever loading the value. So **`true`
+    //   takes the same arm as `nil`, `false` and a missing argument**, while `0` and `"1"` take
+    //   the BAG arm. `BankFrame.lua:24` writes `this.isBag = 1` — a NUMBER — so the stock UI is
+    //   correct either way; a client that models the flag as a boolean diverges the moment an
+    //   addon passes `true`, and would then resolve the six bank bags to 44..49, colliding with
+    //   `BankFrameItem5..10`.
+    //
+    // 3 · **Total, with no range check of any kind.** The only `test`/`cmp` in all 118 bytes are
+    //   on `lua_isnumber`'s return value: no clamp, no mask, no `nil`. This used to answer 0
+    //   outside 1..24 / 5..10 as a "wired wrong" tell; that was our invention, and the reference
+    //   simply returns the arithmetic. Its immediate neighbour `GetNumBankSlots 0x4f85b0` carries
+    //   a real `cmp esi,6; jl`, so a bound would have been visible here if one existed.
+    //
+    // Argument 1 is shape A ([`binding_abi::number_arg`]): `lua_isnumber` gated, truncated toward
+    // zero by the `0x40a2b0` ftol, low dword only, and raising the `.data` usage string verbatim
+    // — which names only `buttonID`, the reference's own omission of the second parameter.
     g.set(
         "BankButtonIDToInvSlotID",
-        lua.create_function(|_, (id, is_bag): (u32, Option<Value>)| {
-            let is_bag = is_bag.is_some_and(|v| v.as_boolean().unwrap_or(true));
-            let live = match (is_bag, id) {
-                (false, 1..=24) => 39 + id,
-                (true, 5..=10) => 59 + id,
-                _ => 0,
-            };
-            Ok(i64::from(live))
+        lua.create_function(|lua, (id, is_bag): (Value, Option<Value>)| {
+            let n = super::binding_abi::number_arg(
+                lua,
+                id,
+                "Usage: BankButtonIDToInvSlotID(buttonID)",
+            )?;
+            // Finding 2: `lua_isnumber(L, 2)`, asked of the VALUE's type — never its truthiness.
+            let is_bag = is_bag
+                .and_then(|v| lua.coerce_number(v).ok().flatten())
+                .is_some();
+            let step = if is_bag { 59 } else { 39 };
+            Ok(i64::from(n.wrapping_add(step)))
         })?,
     )?;
 
@@ -326,12 +349,11 @@ mod tests {
 
     /// The button→live-slot map: item buttons 1..24 → 40..63; bag buttons — **whose ids are the
     /// container ids 5..10, not bag numbers** — → 64..69 (live id − 1 = the wire slot: bank items
-    /// 39..62, bank bags 63..68). The reference calls it with `this.isBag` = 1 or nil, so
-    /// nil/false both mean "item button".
+    /// 39..62, bank bags 63..68).
     ///
-    /// The bag arm's numbering is the reference file's, checked here because getting it wrong
-    /// reads six slots off the end of the band and draws an empty bag row: `BankFrame.xml` gives
-    /// `BankFrameBag1` `id="5"`, and `ButtonInventorySlot` hands that id straight in.
+    /// The bag arm's numbering is checked here because getting it wrong reads six slots off the
+    /// end of the band and draws an empty bag row — which is what this binding did until the
+    /// `0x4f8530` carve.
     #[test]
     fn bank_button_to_inv_slot() {
         let s = UiScript::new().unwrap();
@@ -366,21 +388,69 @@ mod tests {
                     .unwrap()
             );
         }
-        // false is "not a bag" (nil-or-false truthiness), out of range answers 0.
-        assert_eq!(
-            s.eval::<i64>("return BankButtonIDToInvSlotID(2, false)")
-                .unwrap(),
-            41
-        );
+    }
+
+    /// The three things the `0x4f8530` carve corrected, each of which this binding had wrong or
+    /// invented (wow-re `scratch/bank-button-invslot-law.md`).
+    #[test]
+    fn bank_button_to_inv_slot_follows_the_carved_abi() {
+        let s = UiScript::new().unwrap();
+
+        // **`isBag` is a TYPE test** (`lua_isnumber(L,2)`), not a truthiness test. `true` is not a
+        // number, so it takes the ITEM arm exactly as nil and false do; `0` and `"1"` are numbers
+        // and take the BAG arm. The stock UI is safe either way — `BankFrame.lua:24` writes
+        // `this.isBag = 1` — but an addon passing `true` would otherwise land the six bank bags on
+        // 44..49, on top of `BankFrameItem5..10`.
+        for (call, want) in [
+            ("BankButtonIDToInvSlotID(5, true)", 44),
+            ("BankButtonIDToInvSlotID(5, false)", 44),
+            ("BankButtonIDToInvSlotID(5, nil)", 44),
+            ("BankButtonIDToInvSlotID(5, {})", 44),
+            ("BankButtonIDToInvSlotID(5)", 44),
+            ("BankButtonIDToInvSlotID(5, 0)", 64),
+            ("BankButtonIDToInvSlotID(5, \"1\")", 64),
+        ] {
+            assert_eq!(
+                s.eval::<i64>(&format!("return {call}")).unwrap(),
+                want,
+                "{call}"
+            );
+        }
+
+        // **Total — no range check of any kind.** Answering 0 outside the button ranges was ours,
+        // not the reference's; the only compares in the body are on `lua_isnumber`'s result.
         assert_eq!(
             s.eval::<i64>("return BankButtonIDToInvSlotID(25)").unwrap(),
-            0
+            64
         );
         assert_eq!(
-            s.eval::<i64>("return BankButtonIDToInvSlotID(4, 1)")
+            s.eval::<i64>("return BankButtonIDToInvSlotID(-100)")
                 .unwrap(),
-            0,
-            "4 is an EQUIPPED bag, not a bank one"
+            -61
+        );
+
+        // Argument 1 is shape A: `lua_isnumber` gated, truncated toward ZERO by the `0x40a2b0`
+        // ftol (not floored), and raising the `.data` usage string — which names only `buttonID`,
+        // the reference's own omission of the second parameter.
+        assert_eq!(
+            s.eval::<i64>("return BankButtonIDToInvSlotID(-2.9)")
+                .unwrap(),
+            37,
+            "trunc toward zero gives -2, not -3"
+        );
+        assert_eq!(
+            s.eval::<i64>("return BankButtonIDToInvSlotID(\"7\")")
+                .unwrap(),
+            46,
+            "a numeric string passes the gate"
+        );
+        let err = s
+            .eval::<i64>("return BankButtonIDToInvSlotID({})")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Usage: BankButtonIDToInvSlotID(buttonID)"),
+            "the reference's own usage string, verbatim: {err}"
         );
     }
 }

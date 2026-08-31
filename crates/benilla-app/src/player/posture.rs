@@ -67,10 +67,15 @@ pub(super) fn update(
     // set is byte-pinned (wow-re `standstate-movement-trigger.md`, §5 2026-07-14): the net
     // input axes (translation), keyboard turn, and jump all reach the guarded stand wrapper
     // `0x60be30(0)`; a left-drag camera orbit provably does not; sit(1)/chair(2)/sleep(3)
-    // all stand identically (the value-agnostic `GetStandState() != 0` gate). The one open
-    // corner: no static path was found for a pure right-drag MOUSE turn while seated — the
-    // director's ref observation (it stands you up) is the ground truth this keeps; the
-    // byte trigger is flagged LIVE-CAPTURE in the wow-re note.
+    // all stand identically (the value-agnostic `GetStandState() != 0` gate).
+    //
+    // **The MOUSE turn is not in this set, and that corner is now closed** (decision 1766; the
+    // note's B3, which stood open for weeks). A deliberate right-drag turn cannot stand a seated
+    // player — two independent gates refuse the body-facing commit for a seated body, and
+    // `0x514f50` skips its stand arm outright while the RMB bit is held. The director's
+    // observation was right and this file's attribution was wrong: what stands you is the
+    // sub-200 ms RELEASE being dispatched as a right-CLICK, so the stand belongs to the click's
+    // action and not here.
     // **A knockback stands you up too** (decision 1702) — the one entry here that is nobody's
     // input. The reference's knockback apply carries it as a side effect of the launch (the
     // `0x60e139` block, whose indirect `call [edx+0xa4]` resolves to `GetStandState 0x60be50`),

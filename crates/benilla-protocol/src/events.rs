@@ -641,6 +641,19 @@ pub enum SessionEvent {
     /// cannot enter … while in ghost form."). The reference sends it to the same system-message
     /// sink as [`Self::Notification`].
     AreaTriggerMessage { text: String },
+    /// A shutdown/restart countdown or an operator broadcast (`SMSG_SERVER_MESSAGE`): the
+    /// `ServerMessages.dbc` row id and the text that fills its `%s`. The reference resolves the row
+    /// itself and shows the formatted line as `CHAT_MSG_SYSTEM`.
+    ServerMessage { message_type: u32, text: String },
+    /// An area is under attack by enemy players (`SMSG_ZONE_UNDER_ATTACK`): one `AreaTable.dbc`
+    /// id. Becomes a `CHAT_MSG_CHANNEL` line on the joined **defense** channels, not a system line.
+    ZoneUnderAttack { area_id: u32 },
+    /// A world-defense broadcast (`SMSG_DEFENSE_MESSAGE` — the EPL tower captures): the zone it is
+    /// about, and the server-composed text. [`Self::ZoneUnderAttack`]'s destination exactly.
+    DefenseMessage { zone_id: u32, text: String },
+    /// A trial account hit its whisper cap (`SMSG_CHAT_RESTRICTED`); empty body. The reference
+    /// answers it with `DisplayError(0x1c3)` and reads nothing off the wire.
+    ChatRestricted,
     /// Answers `/played` (`SMSG_PLAYED_TIME`, our `CMSG_PLAYED_TIME`): total played time + time
     /// since the last level-up, both in seconds.
     PlayedTime { total: u32, level: u32 },

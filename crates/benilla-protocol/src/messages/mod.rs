@@ -22,6 +22,7 @@ mod attack;
 mod auction;
 mod bank;
 mod binder;
+mod broadcast;
 mod channel;
 mod chat;
 mod client;

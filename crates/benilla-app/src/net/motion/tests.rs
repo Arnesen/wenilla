@@ -959,6 +959,9 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
     use bevy::transform::TransformPlugin;
 
     let mut app = App::new();
+    // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767); the
+    // real one is initialised by the world plugins, which a headless harness does not run.
+    app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
     app.add_plugins((
         MinimalPlugins,
         TransformPlugin,

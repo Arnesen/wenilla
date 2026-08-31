@@ -1047,6 +1047,23 @@ pub(super) fn apply_net_updates(
                 chat::chat_player_not_found(&name, &mut chat_log)
             }
             SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut chat_log),
+            // The four world broadcasts — parked for `ui_chat::broadcast`'s resolve pass, which
+            // owns the AreaTable/ServerMessages lookups and the joined-defense-channel walk.
+            SessionEvent::ZoneUnderAttack { area_id } => chat::broadcast(
+                crate::ui_chat::Broadcast::ZoneUnderAttack { area_id },
+                &mut chat_log,
+            ),
+            SessionEvent::DefenseMessage { zone_id, text } => chat::broadcast(
+                crate::ui_chat::Broadcast::Defense { zone_id, text },
+                &mut chat_log,
+            ),
+            SessionEvent::ServerMessage { message_type, text } => chat::broadcast(
+                crate::ui_chat::Broadcast::Server { message_type, text },
+                &mut chat_log,
+            ),
+            SessionEvent::ChatRestricted => {
+                chat::broadcast(crate::ui_chat::Broadcast::ChatRestricted, &mut chat_log)
+            }
             SessionEvent::Notification { text } => chat::notification(text, &mut ui_actions.14),
             SessionEvent::AreaTriggerMessage { text } => {
                 chat::area_trigger_message(text, &mut ui_actions.14)

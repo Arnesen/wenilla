@@ -11,7 +11,7 @@ use benilla_protocol::messages::{ChatMessage, CHAT_MSG_WHISPER};
 use bevy::prelude::*;
 
 use crate::ui_action::UiErrorTexts;
-use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_chat::{Broadcast, ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_social::SocialState;
 
 use super::super::{ClientCommand, NetCommands, ServerSaidMessage};
@@ -210,6 +210,23 @@ pub(super) fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
     // refused and a trigger the client never noticed look identical from outside.
     info!("net: area-trigger message — {text}");
     errors.info(text);
+}
+
+/// The four **world broadcasts** — parked on [`ChatLog`]'s broadcast queue for
+/// [`crate::ui_chat`]'s resolve pass, which holds the AreaTable/ServerMessages catalogs and the
+/// joined-channel walk this site does not (`ui_chat::broadcast` carries the whole mechanism).
+///
+/// Only the parking happens here, deliberately: half-resolving at the packet — naming the area
+/// here and picking the channels there — would put one mechanism in two files.
+///
+/// They are logged at `info!` for the same reason [`notification`] is, and more so: three of the
+/// four are things the *world* did, so "the server is restarting in 15 minutes" and "nothing
+/// arrived" have to be distinguishable in a log afterwards. A defense broadcast that reaches a
+/// character in neither defense channel prints nothing on screen and is faithful in doing so — the
+/// log line is the only trace it happened at all.
+pub(super) fn broadcast(b: Broadcast, chat_log: &mut ChatLog) {
+    info!("net: world broadcast — {b:?}");
+    chat_log.push_broadcast(b);
 }
 
 /// The `/played` answer (`SMSG_PLAYED_TIME`) — TIME_PLAYED_TOTAL/LEVEL over

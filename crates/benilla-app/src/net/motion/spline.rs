@@ -940,6 +940,9 @@ mod under_floor {
     /// standing at the Z the server sent for it.
     fn half_arrived_world() -> (App, Entity) {
         let mut app = App::new();
+        // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767); the
+        // real one is initialised by the world plugins, which a headless harness does not run.
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,

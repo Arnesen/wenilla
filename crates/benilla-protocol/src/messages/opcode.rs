@@ -447,6 +447,32 @@ pub const SMSG_FISH_ESCAPED: u16 = 0x01C9; // 457
 /// `Opcodes_1_12_1.h`: 459): one cstring (`WorldSession::SendNotification`,
 /// `Server/WorldSession.cpp:900-915`) — "You do not know that language", trade refusals, and kin.
 pub const SMSG_NOTIFICATION: u16 = 0x01CB; // 459
+
+// The **world broadcasts** — sent to everyone, or to everyone in a zone, rather than to one player
+// about their own doing. Bodies and the client's own handlers: [`super::broadcast`].
+/// An area is under attack by enemy players (VERIFIED vmangos `Opcodes_1_12_1.h`: 596): one `u32`
+/// `AreaTable.dbc` id (`WorldPackets::Misc::ZoneUnderAttack::AppendBodyTo`,
+/// `Server/Packets/Misc.cpp:451-454`). The client (`0x49dcc0`) formats FrameXML's
+/// `ZONE_UNDER_ATTACK` global string with the area's name and delivers it as `CHAT_MSG_CHANNEL` on
+/// the joined defense channels — **not** as a system line.
+pub const SMSG_ZONE_UNDER_ATTACK: u16 = 0x0254; // 596
+/// A shutdown/restart countdown or an operator's broadcast (VERIFIED vmangos `Opcodes_1_12_1.h`:
+/// 657): `u32 messageType` + one cstring (`WorldPackets::Misc::ServerMessage::AppendBodyTo`,
+/// `Server/Packets/Misc.cpp:341-345`; layout in [`super::broadcast::read_server_message`]). The
+/// type indexes `ServerMessages.dbc`, whose text is the format string the packet's text fills; the
+/// client (`0x49df80`) shows the result as `CHAT_MSG_SYSTEM`.
+pub const SMSG_SERVER_MESSAGE: u16 = 0x0291; // 657
+/// A trial account hit its whisper cap (VERIFIED vmangos `Opcodes_1_12_1.h`: 765); **empty body**
+/// (`WorldPackets::Chat::ChatRestricted::AppendBodyTo`, `Server/Packets/Chat.cpp:21-23`), and the
+/// client's arm (`0x5e4a09`) reads none — it is three instructions, `DisplayError(0x1c3)`.
+pub const SMSG_CHAT_RESTRICTED: u16 = 0x02FD; // 765
+/// A world-defense broadcast — the Eastern Plaguelands tower captures (VERIFIED vmangos
+/// `Opcodes_1_12_1.h`: 827): `u32 zoneId`, `u32 length`, then the text (`Map::SendDefenseMessage`,
+/// `src/game/Maps/Map.cpp:1868-1884`, built raw rather than through a packet class and
+/// **1.12-only**). Same destination as [`SMSG_ZONE_UNDER_ATTACK`] and the same handler shape
+/// (`0x49de30`), but the text rides the wire instead of a global string.
+pub const SMSG_DEFENSE_MESSAGE: u16 = 0x033B; // 827
+
 /// `/played` (VERIFIED vmangos `Opcodes_1_12_1.h`: 460/461): empty CMSG body
 /// (`NullClientPacket`), SMSG body `u32 total + u32 level` seconds
 /// (`WorldPackets::Misc::PlayedTime::AppendBodyTo`, `Server/Packets/Misc.cpp:278-282`; layout in

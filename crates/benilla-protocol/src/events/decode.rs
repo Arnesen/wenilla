@@ -162,6 +162,16 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::AreaTriggerMessage { text } => {
             vec![SessionEvent::AreaTriggerMessage { text }]
         }
+        ServerPacket::ServerMessage { message_type, text } => {
+            vec![SessionEvent::ServerMessage { message_type, text }]
+        }
+        ServerPacket::ZoneUnderAttack { area_id } => {
+            vec![SessionEvent::ZoneUnderAttack { area_id }]
+        }
+        ServerPacket::DefenseMessage { zone_id, text } => {
+            vec![SessionEvent::DefenseMessage { zone_id, text }]
+        }
+        ServerPacket::ChatRestricted => vec![SessionEvent::ChatRestricted],
         ServerPacket::PlayedTime { total, level } => {
             vec![SessionEvent::PlayedTime { total, level }]
         }

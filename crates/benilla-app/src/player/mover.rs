@@ -136,7 +136,7 @@ pub(super) fn step(
     let mut center = player.pos + half_h;
     // Player body collides with terrain/doodads/GameObjects + the WMO *walking* faces (not the
     // camera-only ones); the camera sweep uses its own filter (see `benilla_world::collision`).
-    let cast = |from: Vec3, disp: Vec3| world.cast_body(capsule, from, disp, SKIN_WIDTH);
+    let cast = |from: Vec3, disp: Vec3| world.cast_mover(capsule, from, disp, SKIN_WIDTH);
     let probe_down = |c: Vec3, dist: f32| cast(c, Vec3::NEG_Y * dist);
 
     // While airborne, "on the ground" means where the slide actually contacts the floor
@@ -660,7 +660,7 @@ pub(crate) fn grounded_step(
     support: Support,
 ) -> GroundedStep {
     let surface_offset = support.offset;
-    let cast = |from: Vec3, disp: Vec3| world.cast_body(capsule, from, disp, SKIN_WIDTH);
+    let cast = |from: Vec3, disp: Vec3| world.cast_mover(capsule, from, disp, SKIN_WIDTH);
     let speed = horiz_vel.length();
     // The step-up (decision 0209): ATOMIC — a steep face in the way triggers rise →
     // advance-this-frame's-travel-at-the-raised-height → settle onto a walkable floor, all
@@ -774,7 +774,7 @@ pub(crate) fn grounded_step(
     };
     let start = center + Vec3::Y * popped.unwrap_or(0.0);
     let mut rode = false;
-    let out = world.slide_body(
+    let out = world.slide_mover(
         capsule,
         start,
         horiz_vel,
@@ -1031,7 +1031,7 @@ pub(crate) fn airborne_step(
     dt: std::time::Duration,
 ) -> Vec3 {
     world
-        .slide_body(
+        .slide_mover(
             capsule,
             center,
             velocity,
@@ -1373,6 +1373,9 @@ mod tests {
     fn world_from_profile(profile: &[(f32, f32)]) -> App {
         const W: f32 = 3.0;
         let mut app = App::new();
+        // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767); the
+        // real one is initialised by the world plugins, which a headless harness does not run.
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
         // avian's collider backend reads `Assets<Mesh>` and `SceneSpawner` even in a meshless
         // world, so the headless asset/scene plugins ride along.
         app.add_plugins((
@@ -1419,7 +1422,7 @@ mod tests {
             .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
                 let cast =
-                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
+                    |from: Vec3, disp: Vec3| world.cast_mover(&capsule, from, disp, SKIN_WIDTH);
                 // Approach from 1 yd back along +X at street level and stop where the kerb stops us.
                 let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5, 0.0);
                 let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
@@ -1458,7 +1461,7 @@ mod tests {
             .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
                 let cast =
-                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
+                    |from: Vec3, disp: Vec3| world.cast_mover(&capsule, from, disp, SKIN_WIDTH);
                 let start = start + Vec3::Y * (CAPSULE_HEIGHT * 0.5);
                 let run = cast(start, dir).map_or(1.0, |h| h.distance);
                 let mut center = start + dir * run;
@@ -1987,7 +1990,7 @@ mod tests {
             .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
                 let cast =
-                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
+                    |from: Vec3, disp: Vec3| world.cast_mover(&capsule, from, disp, SKIN_WIDTH);
                 // Stand the body a full kerb below the tread — the same geometry read as a 2.3 yd
                 // wall by dropping the approach to y = −2.0, where the tread is far overhead.
                 let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5 - 2.0, 0.0);

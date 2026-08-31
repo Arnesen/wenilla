@@ -508,6 +508,9 @@ mod tests {
         // one without.
         let run_east = |walls: bool, z: f32| -> Option<f32> {
             let mut app = App::new();
+            // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767), which the
+            // world plugins own and a bare harness does not run.
+            app.init_resource::<crate::collision::MoverTraceExclusions>();
             app.add_plugins((
                 MinimalPlugins,
                 bevy::transform::TransformPlugin,

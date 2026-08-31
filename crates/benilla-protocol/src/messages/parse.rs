@@ -11,11 +11,11 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
-    duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot, mail, mirror_timer,
-    monster_move, movement, opcode, page_text, pet, petition, progression, pvp, quest, social,
-    spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor, world_state,
-    Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
+    action_bar, area_trigger, attack, auction, bank, binder, broadcast, channel, chat, combat_log,
+    death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot, mail,
+    mirror_timer, monster_move, movement, opcode, page_text, pet, petition, progression, pvp,
+    quest, social, spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor,
+    world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -456,6 +456,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_AREA_TRIGGER_MESSAGE => ServerPacket::AreaTriggerMessage {
             text: area_trigger::read_area_trigger_message(&mut r)?,
         },
+        opcode::SMSG_SERVER_MESSAGE => {
+            let (message_type, text) = broadcast::read_server_message(&mut r)?;
+            ServerPacket::ServerMessage { message_type, text }
+        }
+        opcode::SMSG_ZONE_UNDER_ATTACK => ServerPacket::ZoneUnderAttack {
+            area_id: broadcast::read_zone_under_attack(&mut r)?,
+        },
+        opcode::SMSG_DEFENSE_MESSAGE => {
+            let (zone_id, text) = broadcast::read_defense_message(&mut r)?;
+            ServerPacket::DefenseMessage { zone_id, text }
+        }
+        opcode::SMSG_CHAT_RESTRICTED => ServerPacket::ChatRestricted,
         opcode::SMSG_PLAYED_TIME => {
             let (total, level) = chat::read_played_time(&mut r)?;
             ServerPacket::PlayedTime { total, level }

@@ -265,6 +265,7 @@ impl Plugin for WorldFoundation {
             // (`collision::ColliderEpoch`). Tracked in `First` so a removal is stamped before any
             // consumer runs; the attach half is stamped by the streamer's own attach loop.
             .init_resource::<crate::collision::ColliderEpoch>()
+            .init_resource::<crate::collision::MoverTraceExclusions>()
             .add_systems(First, crate::collision::track_collider_removals);
         // Avian's pre-step copy of Bevy's transform propagation is OFF by default (the 1370
         // bracket surfaced the lane; the 3-round SW split then measured the skip at −0.40

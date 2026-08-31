@@ -482,6 +482,27 @@ pub enum ServerPacket {
     AreaTriggerMessage {
         text: String,
     },
+    /// `SMSG_SERVER_MESSAGE` — a shutdown/restart countdown or an operator broadcast: the
+    /// `ServerMessages.dbc` row id and the text that fills its `%s` (layout in
+    /// [`super::broadcast::read_server_message`]).
+    ServerMessage {
+        message_type: u32,
+        text: String,
+    },
+    /// `SMSG_ZONE_UNDER_ATTACK` — an area is under attack by enemy players; one `AreaTable.dbc` id
+    /// (layout in [`super::broadcast::read_zone_under_attack`]).
+    ZoneUnderAttack {
+        area_id: u32,
+    },
+    /// `SMSG_DEFENSE_MESSAGE` — a world-defense broadcast (the EPL tower captures): the zone it is
+    /// about and the server-composed text (layout in [`super::broadcast::read_defense_message`]).
+    DefenseMessage {
+        zone_id: u32,
+        text: String,
+    },
+    /// `SMSG_CHAT_RESTRICTED` — a trial account hit its whisper cap; empty body (vmangos
+    /// `Server/Packets/Chat.cpp:21-23`). The [`Self::ChatWrongFaction`] shape exactly.
+    ChatRestricted,
     /// `SMSG_PLAYED_TIME` — answers our `CMSG_PLAYED_TIME` (`/played`): total played time + time
     /// since the last level-up, both in seconds (layout in [`super::chat::read_played_time`]).
     PlayedTime {
@@ -1504,6 +1525,10 @@ impl ServerPacket {
             ServerPacket::ChatWrongFaction => "SMSG_CHAT_WRONG_FACTION".into(),
             ServerPacket::Notification { .. } => "SMSG_NOTIFICATION".into(),
             ServerPacket::AreaTriggerMessage { .. } => "SMSG_AREA_TRIGGER_MESSAGE".into(),
+            ServerPacket::ServerMessage { .. } => "SMSG_SERVER_MESSAGE".into(),
+            ServerPacket::ZoneUnderAttack { .. } => "SMSG_ZONE_UNDER_ATTACK".into(),
+            ServerPacket::DefenseMessage { .. } => "SMSG_DEFENSE_MESSAGE".into(),
+            ServerPacket::ChatRestricted => "SMSG_CHAT_RESTRICTED".into(),
             ServerPacket::PlayedTime { .. } => "SMSG_PLAYED_TIME".into(),
             ServerPacket::RandomRoll { .. } => "MSG_RANDOM_ROLL".into(),
             ServerPacket::InitialSpells { .. } => "SMSG_INITIAL_SPELLS".into(),

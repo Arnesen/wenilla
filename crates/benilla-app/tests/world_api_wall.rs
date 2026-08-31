@@ -319,7 +319,20 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// renderer a roster to read to keep a count flat (decision 1731). Note the direction of travel:
 /// this replaced `FfxGlow::state_scale`, a float that let a bake inherit a player-state lane by
 /// arithmetic — the enum that took its place makes report B49's invariant structural.
-const CEILING: usize = 165;
+/// And 165 → 166: `collision::MoverTraceExclusions`, a PUBLISH in the same class as the two
+/// one-bit resources above — a resource the ENGINE reads and the GAME writes. The reference's
+/// world trace carries a per-trace mask, and the local mover's gains bit `0x8000` when the body it
+/// drives is a player in ghost form; the GameObject collision-candidacy virtual `0x5f85f0` reads
+/// it and drops every `GAMEOBJECT_TYPE_ID == 0` object, so a ghost walks through closed doors
+/// (decision 1767). The engine cannot compute that set — "a DOOR GameObject, while the player is a
+/// ghost" names two gameplay concepts, which is precisely what the wall pointing the other way
+/// forbids an engine file from knowing. The alternatives were both worse: dropping or re-laning
+/// the door's collider makes it stop existing for the particle snap, the precipitation probe, the
+/// mouse pick and the creature conform, none of which the binary touches; and threading a filter
+/// through `step`/`grounded_step`/`airborne_step` puts a gameplay argument into the movement
+/// core's signature. An `EntityHashSet` that is empty on every living frame is the smallest honest
+/// expression, and it makes the living player's query provably the one it always was.
+const CEILING: usize = 166;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it
