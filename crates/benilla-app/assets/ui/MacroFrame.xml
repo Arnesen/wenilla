@@ -885,10 +885,10 @@
                     </OnTextChanged>
                     <OnEscapePressed>getglobal("BenillaMacroPopupFrame"):Hide()</OnEscapePressed>
                     <OnEnterPressed>
-                        -- The ref writes `IsEnabled() ~= 0`; this engine's IsEnabled returns
-                        -- a BOOLEAN (button.rs), for which `~= 0` is always true — plain
-                        -- truthiness is the correct read here.
-                        if getglobal("BenillaMacroPopupOkayButton"):IsEnabled() then
+                        -- The ref's own spelling, and now literally ours: IsEnabled answers the
+                        -- NUMBER 1 or 0 (button.rs, wow-re button-enabled-state.md). Plain
+                        -- truthiness would be WRONG here — 0 is truthy in Lua.
+                        if getglobal("BenillaMacroPopupOkayButton"):IsEnabled() ~= 0 then
                             BenillaMacroPopupOkayButton_OnClick()
                         end
                     </OnEnterPressed>

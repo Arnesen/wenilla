@@ -618,6 +618,42 @@ fn rotate_cluster(ui: &mut ChildSpawnerCommands, art: &GlueArt, font: &Handle<Fo
         });
 }
 
+/// **A world loading cover outranks the glue screen.**
+///
+/// The glue screens sit at [`SCREEN_Z`] = 1100 and the loading screen at 1000, so the glue draws
+/// *over* the cover. That is right for the logout direction — the world→glue swap must show the
+/// glue — and wrong for the entry one: the cover is raised in `WorldStage::Present` while we are
+/// still `CharSelect`, so the raise frame renders the character screen on top of it and the FIRST
+/// frame that can show the cover is the **state-flip** frame, which is also the frame the whole
+/// world arrives on. Measured this round: click → cover on the glass was ~100 ms, of which the
+/// flip frame alone was 60 — the character screen held, frozen, for every millisecond of it. That
+/// is the director's *"the char freezes briefly before the loading screen appears"*; 1345 fixed
+/// the same shape for the FrameXML burst and left this half standing, because nothing had ever
+/// asked which frame the cover first *drew* on.
+///
+/// Hiding the root moves the cover onto the raise frame's own render, a whole frame earlier and —
+/// far more importantly — **off** the flip frame's critical path: the cover is already drawn and
+/// presenting while that frame churns. Registered after `WorldStage::Present` so it reads *this*
+/// frame's raise; visibility propagates in `PostUpdate` and renders the same frame, exactly like
+/// the loading screen's own show/hide. Read from [`LoadingScreen::covering`] and not from
+/// [`crate::loading_screen::EntryCover`]: this is the one consumer that must react while still
+/// `CharSelect`, which is precisely the frame `EntryCover` cannot count.
+pub(super) fn hide_under_world_cover(
+    loading: Res<crate::loading_screen::LoadingScreen>,
+    mut roots: Query<&mut Visibility, With<CharSelectUi>>,
+) {
+    let want = if loading.covering() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut vis in &mut roots {
+        if *vis != want {
+            *vis = want;
+        }
+    }
+}
+
 pub(super) fn exit_select(
     mut commands: Commands,
     roots: Query<Entity, With<CharSelectUi>>,

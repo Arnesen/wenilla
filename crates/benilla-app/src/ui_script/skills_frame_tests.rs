@@ -64,12 +64,17 @@ fn skill(
 fn shown_skills_page() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // UIPanelTemplates.xml is NOT optional even though this list ran without it for a year: a
+    // MISSING template is a loader *warning*, not an error, so an under-loaded list passes the
+    // assert in load_xml and then fails later on geometry that silently never got built.
+    // SkillDetailScrollFrame inherits UIPanelScrollFrameTemplate from that file.
     for f in [
         "Fonts.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
         "ScrollTemplates.xml",
+        "UIPanelTemplates.xml",
         "CharacterFrame.xml",
         "SkillFrame.xml",
     ] {
@@ -182,13 +187,13 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
     s.run("SetSelectedSkill(2) BenillaSkillFrame_Update()")
         .unwrap();
     assert_eq!(
-        s.eval::<String>("return SkillDetailBarSkillRank:GetText() or \"\"")
+        s.eval::<String>("return SkillDetailStatusBarSkillRank:GetText() or \"\"")
             .unwrap(),
         "",
         "the detail pane's own bar is a proficiency too"
     );
     assert_eq!(
-        s.eval::<(f32, f32, f32, f32)>("return SkillDetailBarBackground:GetVertexColor()")
+        s.eval::<(f32, f32, f32, f32)>("return SkillDetailStatusBarBackground:GetVertexColor()")
             .unwrap(),
         (1.0, 1.0, 1.0, 0.5),
         "including its trough (the shared PaintBar; ref SkillFrame.lua:376)"
@@ -401,11 +406,13 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
     );
 
     let (tab_top, tab_bottom) = s
-        .eval::<(f64, f64)>("return SkillExpandTabLeft:GetTop(), SkillExpandTabLeft:GetBottom()")
+        .eval::<(f64, f64)>(
+            "return SkillFrameExpandTabLeft:GetTop(), SkillFrameExpandTabLeft:GetBottom()",
+        )
         .unwrap();
     let (btn_top, btn_bottom, btn_left) = s
         .eval::<(f64, f64, f64)>(
-            "local b = SkillCollapseAllButton \
+            "local b = SkillFrameCollapseAllButton \
              return b:GetTop(), b:GetBottom(), b:GetLeft()",
         )
         .unwrap();
@@ -415,7 +422,7 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
         "the fold sits 3px BELOW the cap's centre (ref's -3); +3 above was the bug"
     );
     let cap_right = s
-        .eval::<f64>("return SkillExpandTabLeft:GetRight()")
+        .eval::<f64>("return SkillFrameExpandTabLeft:GetRight()")
         .unwrap();
     assert_eq!(
         btn_left - cap_right,
@@ -434,7 +441,7 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
 fn the_expand_tab_fits_its_label_once_a_measure_answers() {
     let mut s = shown_skills_page();
     assert_eq!(
-        s.eval::<f64>("return SkillExpandButtonFrame:GetWidth()")
+        s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
             .unwrap(),
         54.0,
         "unmeasured, the declared width stands — a 0 measure must not squash the tab to 45"
@@ -444,7 +451,7 @@ fn the_expand_tab_fits_its_label_once_a_measure_answers() {
     s.run("BenillaSkillFrame_Update()").unwrap();
     s.resolve();
     assert_eq!(
-        s.eval::<f64>("return SkillExpandButtonFrame:GetWidth()")
+        s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
             .unwrap(),
         7.0 * 3.0 + 45.0,
         "then the ref's own law: the label's width + 45"
@@ -452,8 +459,8 @@ fn the_expand_tab_fits_its_label_once_a_measure_answers() {
     // The middle slab is the span between the two caps, so the fit reaches the art for free.
     let (mid_l, mid_r, cap_r_l) = s
         .eval::<(f64, f64, f64)>(
-            "return SkillExpandTabMiddle:GetLeft(), SkillExpandTabMiddle:GetRight(), \
-             SkillExpandTabRight:GetLeft()",
+            "return SkillFrameExpandTabMiddle:GetLeft(), SkillFrameExpandTabMiddle:GetRight(), \
+             SkillFrameExpandTabRight:GetLeft()",
         )
         .unwrap();
     assert_eq!(mid_r, cap_r_l, "the middle stretches to the right cap");

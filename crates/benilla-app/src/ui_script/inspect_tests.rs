@@ -479,7 +479,7 @@ fn the_active_tab_is_inert_and_toggle_inspect_closes() {
 
     // NB this engine's `IsEnabled` returns a plain bool, not the live API's 1/nil.
     assert!(
-        !s.eval::<bool>("return BenillaInspectFrameTab1:IsEnabled()")
+        !s.eval::<bool>("return BenillaInspectFrameTab1:IsEnabled() ~= 0")
             .unwrap(),
         "the selected tab is disabled (PanelTemplates_SelectTab), so its click is inert"
     );

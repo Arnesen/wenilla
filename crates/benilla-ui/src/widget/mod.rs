@@ -198,6 +198,19 @@ pub use kinds::{
 pub struct Frame {
     /// The widget subtype.
     pub kind: FrameKind,
+    /// Draw layers switched OFF on this frame — bit `n` = [`DrawLayer::index`] `n`.
+    ///
+    /// `Frame:EnableDrawLayer(layer)` / `DisableDrawLayer(layer)`, VERIFIED present on the Frame
+    /// method table `0x878ec0` at `0x7755b0` / `0x775680`, sitting between `IsToplevel` and `Show`.
+    /// (Read off the `{const char*, void*}` pair bytes; the same walk reproduces wow-re's recorded
+    /// Button table at `0x879d00` exactly.)
+    ///
+    /// A disabled layer hides every region the frame owns in it, and the region's own `Show`/`Hide`
+    /// is untouched underneath — re-enabling the layer brings back exactly what was showing before,
+    /// which is why this is a frame-level mask rather than a sweep over the regions. Both corpus
+    /// consumers (pfUI, MoveAnything) use it to strip Blizzard artwork off a frame they are
+    /// reskinning without disturbing what the owner does to its own regions.
+    pub disabled_layers: u8,
     /// The frame's name (its global identifier), if any. See [`WidgetArena::lookup`] for the
     /// non-overwriting publish rule.
     pub name: Option<String>,
@@ -576,6 +589,7 @@ impl WidgetArena {
         let effective_alpha = alpha;
 
         let frame = Frame {
+            disabled_layers: 0,
             kind,
             name: name.clone(),
             parent,
@@ -698,6 +712,9 @@ impl WidgetArena {
             // Non-overwriting: first writer wins.
             self.names.entry(n).or_insert(handle);
         }
+        if matches!(kind, FrameKind::EditBox) {
+            self.build_editbox_engine_regions(handle);
+        }
         if matches!(kind, FrameKind::Minimap) {
             self.minimap_kinds.push(handle);
             // The `CMinimap` ctor's own last act, so no observer ever sees a Minimap without its
@@ -707,6 +724,50 @@ impl WidgetArena {
             self.build_minimap_engine_children(handle);
         }
         handle
+    }
+
+    /// Build the **five engine-owned regions of a fresh EditBox**, in the ctor's own order — the
+    /// same posture as [`Self::build_minimap_engine_children`] below, and for the same reason: the
+    /// client builds them in `CSimpleEditBox`'s ctor, so a `CreateFrame("EditBox")` with no XML
+    /// behind it has them too, before its OnLoad runs.
+    ///
+    /// wow-re `system/ui/scratch/rf85-editbox-caret.md` §1, all VERIFIED off bytes:
+    ///
+    /// | # | region | ctor site | built by |
+    /// |---|---|---|---|
+    /// | 1 | text FontString `E+0x328` | `0x779bee` | `0x770d30(E, 2, 1)` |
+    /// | 2-4 | selection-highlight quads `E+0x350/0x354/0x358` | `0x779c41`–`0x779c72` | `0x76fc40(E, 2, 0)` |
+    /// | 5 | caret `E+0x368` | `0x779c86`–`0x779cac` | `0x76fc40(E, 3, 1)` |
+    ///
+    /// **Why the ORDER is the whole point.** `GetRegions 0x773f60` walks `[frame+0x1b8]` — one flat
+    /// creation-ordered list, oldest first, with **no filter** (hidden regions are returned and
+    /// counted), and insertion is at the TAIL (`scratch/widget-list-bindings.md`). All five reach
+    /// that list through `0x77fd10`, the single linker. So on a real client the authored `<Layers>`
+    /// regions start at index **6**, and an addon may index them there.
+    ///
+    /// pfUI's `skins/blizzard/friends.lua` l.379 is the report:
+    /// `local _,_,_,_,_,left,right = GuildControlPopupFrameEditBox:GetRegions()` — it skips five and
+    /// takes the box's two `UI-ChatInputBorder` textures. Before this, benilla returned only the
+    /// authored regions, so `left` was nil and the whole guild-control skin died on it.
+    ///
+    /// The four quads are created blank — no texture, no fill — so they emit nothing; benilla's
+    /// caret and selection highlight are still painted host-side. That gap is named on the
+    /// [`EditBoxState`](kinds::EditBoxState) fields rather than papered over.
+    fn build_editbox_engine_regions(&mut self, eb: FrameHandle) {
+        // The text region keeps the OVERLAY/0 layer it has always shipped with; the ctor's own
+        // 2/1 is recorded on the field and deferred there (a draw-order change to every EditBox
+        // is not a rider on a region-list fix).
+        let text = self.create_region(eb, RegionKind::FontString, DrawLayer::Overlay, 0);
+        let mut selection = [None; 3];
+        for slot in &mut selection {
+            *slot = self.create_region(eb, RegionKind::Texture, DrawLayer::Artwork, 0);
+        }
+        let caret = self.create_region(eb, RegionKind::Texture, DrawLayer::Overlay, 1);
+        if let Some(KindState::EditBox(s)) = self.frame_mut(eb).map(|f| &mut f.kind_state) {
+            s.text_region = text;
+            s.selection_regions = selection;
+            s.caret_region = caret;
+        }
     }
 
     /// Build the nine engine-owned `Model` children of a fresh Minimap and remember the ninth as

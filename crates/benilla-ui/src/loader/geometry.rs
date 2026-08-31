@@ -35,7 +35,7 @@ impl Loader<'_> {
             self.call(wrapper, "SetClampedToScreen", true, dbg);
         }
         // `enableMouse` lands as the real EnableMouse call (the hit test gates on it —
-        // pointer.rs): a ref frame authored mouse-blocking (StaticPopup, WorldMapBlackout, the
+        // pointer.rs): a ref frame authored mouse-blocking (StaticPopup, BlackoutWorld, the
         // minimap cluster) must actually capture. The loader ignored it for a while after the
         // native landed — the stale "v1 gap" note here — which left those frames click-through
         // and the minimap deaf to its ping click (0434 phase 6c's root cause).

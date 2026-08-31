@@ -8,6 +8,28 @@ use crate::widget::FrameHandle;
 use super::{editbox, event, tooltip, ScriptValue, UiScript};
 
 impl UiScript {
+    /// Queue an event to fire at the **start of the next tick**, into the same
+    /// [`super::Model::pending_events`] list the engine's own bindings use — so it lands *after*
+    /// everything queued earlier in the frame and before that tick's `OnUpdate` pass.
+    ///
+    /// **Ordering, not laziness, is the whole reason this is public** (decision 1750). A benilla
+    /// drain runs a step behind the input pass that fed it, so an event it fires *immediately*
+    /// arrives BEFORE events the same input already queued — the reverse of the reference, where
+    /// the deferral happens inside the very call that queued them. That inversion is not
+    /// hypothetical: the soulbind confirm raised by placing an item into a worn slot was cancelled
+    /// one tick later by that same place's own `CURSOR_UPDATE`, whose `StaticPopup_Hide` is
+    /// `UIParent.lua:356-360` transcribed correctly. Queueing restores the reference's relative
+    /// order — cursor-change first, question second — while a *later* cursor change still retires
+    /// the question, which is exactly what that arm is for.
+    ///
+    /// Use [`Self::fire_event`] for anything whose ordering against in-flight queued events does
+    /// not matter, which is nearly everything.
+    pub fn queue_event(&mut self, event: &str, args: Vec<ScriptValue>) {
+        self.model_mut()
+            .pending_events
+            .push((event.to_string(), args));
+    }
+
     /// Fire an event to every frame registered for it, invoking their `OnEvent` handlers (RF-0025):
     /// both the legacy `this`/`event`/`arg1..argN` globals *and* the modern `(self, event, ...)`
     /// arguments. Events reach registered frames regardless of visibility, **in registration

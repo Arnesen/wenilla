@@ -247,7 +247,15 @@ fn seed_bindings(
         script.seed_binding_set(1, Some(store::resolve(&[])));
     }
     script.load_binding_set(1);
-    info!("bindings: {} commands registered", SPECS.len());
+    // The pair, not just the first half: `SPECS` ∪ `ABSENT` is the client's whole 1.12 command
+    // surface, and a log line that says only how many landed cannot say how much is left
+    // (decision 1745).
+    info!(
+        "bindings: {} of {} 1.12 commands registered ({} recorded absent)",
+        SPECS.len(),
+        SPECS.len() + commands::ABSENT.len(),
+        commands::ABSENT.len()
+    );
 }
 
 /// Read + parse one diff file; `None` when absent/unreadable (defaults).
@@ -384,6 +392,19 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
     }
     for (name, keys) in script.keybind_snapshot() {
         let Some(&bound) = by_name.get(name.as_str()) else {
+            // A name with no home: either an uninstalled addon's row (1201 keeps those on
+            // purpose) or a 1.12 command this client does not implement. The second case is the
+            // one that used to mystify — a player carrying their own bindings over presses the
+            // key they have always pressed and nothing happens, with nothing anywhere saying
+            // why. `ABSENT` knows why, so say it (decision 1745).
+            if let Some(absent) = commands::ABSENT.iter().find(|a| a.name == name) {
+                if !keys.is_empty() {
+                    warn!(
+                        "bindings: {name} is bound to {keys:?} but benilla does not implement it \u{2014} {}",
+                        absent.why
+                    );
+                }
+            }
             continue;
         };
         for key in keys {
@@ -1528,32 +1549,33 @@ mod tests {
     /// globals directly, so they could not see that BOTH chords were registered on one command;
     /// the registry tests read the table, so they could not see what the bodies do. Only pressing
     /// the key joins the two.
+    ///
+    /// **The windows on the far end are the reference's own now** (1751). `BenillaBagFrame`/
+    /// `BenillaBagFrame2` were five static frames our `BagFrame.xml` declared, so this test could
+    /// name them and load six files by hand; the live windows are `ContainerFrame1..12`, generated
+    /// on demand off the player's chain and RECYCLED across containers, so the question is
+    /// `IsBagOpen(id)` and never a frame name. Two consequences, both deliberate:
+    ///   * the interface is loaded with the app's own [`crate::ui_script::load_default_ui`] rather
+    ///     than a hand-listed six, because the chain half of the manifest is what makes the bag
+    ///     windows exist at all and a private six-file reader cannot express it — which also makes
+    ///     this test the load order the player gets;
+    ///   * it needs client data, like every test that touches a chain entry.
     #[test]
     fn b_opens_the_backpack_and_shift_b_opens_every_bag() {
+        let _data = benilla_formats::wow_data_or_skip!();
         let mut script = UiScript::new().expect("VM");
         script.register_bindings(&registry_commands());
         script.set_screen_size(1024.0, 768.0);
-        for file in [
-            "Fonts.xml",
-            "MoneyFrame.xml",
-            "UiPanels.xml",
-            "MerchantFrame.xml",
-            "Cooldown.xml",
-            "BagFrame.xml",
-        ] {
-            let text = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("assets/ui")
-                    .join(file),
-            )
-            .expect("shipped asset");
-            let doc = benilla_ui::framexml::parse(&text).expect("parse");
-            let report = benilla_ui::loader::load(&script, &doc, &|_| None);
-            assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-        }
+        let failures = crate::ui_script::load_default_ui(&script);
+        assert!(
+            failures.is_empty(),
+            "default UI failed to load: {failures:?}"
+        );
         script.set_money(0);
         // The backpack, plus one equipped bag in slot 2 — so "all bags" is two windows and
-        // "the backpack alone" is visibly different from it.
+        // "the backpack alone" is visibly different from it. Fed BEFORE any key: the reference
+        // builds a window only for a container that exists (`OpenBag`'s `size > 0` gate), where
+        // our own `BenillaBagFrame*` were static frames that showed regardless.
         script.set_container(
             0,
             Some(benilla_ui::script::ContainerState {
@@ -1571,10 +1593,12 @@ mod tests {
             }),
         );
         let mut app = vm_harness(script);
-        let shown = |app: &App, name: &str| {
+        // `IsBagOpen(id)` — the reference's own scan over `ContainerFrame1..12`, and the only
+        // honest way to ask: which window a bag lands in depends on what else is open.
+        let open = |app: &App, id: i64| {
             app.world()
                 .non_send_resource::<UiScript>()
-                .eval::<bool>(&format!("return {name}:IsShown()"))
+                .eval::<bool>(&format!("return IsBagOpen({id}) ~= nil"))
                 .expect("eval")
         };
 
@@ -1583,9 +1607,9 @@ mod tests {
         app.update();
         release_key(&mut app, KeyCode::KeyB);
         app.update();
-        assert!(shown(&app, "BenillaBagFrame"), "B opens the backpack");
+        assert!(open(&app, 0), "B opens the backpack");
         assert!(
-            !shown(&app, "BenillaBagFrame2"),
+            !open(&app, 2),
             "B does NOT open the equipped bag — this is the bug 1494 fixes"
         );
 
@@ -1594,7 +1618,7 @@ mod tests {
         app.update();
         release_key(&mut app, KeyCode::KeyB);
         app.update();
-        assert!(!shown(&app, "BenillaBagFrame"), "B again shuts it");
+        assert!(!open(&app, 0), "B again shuts it");
 
         // SHIFT-B — OPENALLBAGS' shipped default, a DIFFERENT command with a different body.
         press_key(&mut app, KeyCode::ShiftLeft);
@@ -1602,10 +1626,7 @@ mod tests {
         app.update();
         release_key(&mut app, KeyCode::KeyB);
         app.update();
-        assert!(
-            shown(&app, "BenillaBagFrame") && shown(&app, "BenillaBagFrame2"),
-            "SHIFT-B opens every bag"
-        );
+        assert!(open(&app, 0) && open(&app, 2), "SHIFT-B opens every bag");
 
         // …and closes them again, the count now reading all-open.
         press_key(&mut app, KeyCode::KeyB);
@@ -1614,7 +1635,7 @@ mod tests {
         release_key(&mut app, KeyCode::ShiftLeft);
         app.update();
         assert!(
-            !shown(&app, "BenillaBagFrame") && !shown(&app, "BenillaBagFrame2"),
+            !open(&app, 0) && !open(&app, 2),
             "SHIFT-B again shuts them all"
         );
     }

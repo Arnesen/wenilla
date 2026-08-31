@@ -31,12 +31,13 @@ pub(crate) fn smoke_character(spec: &str) -> Option<String> {
 /// log + exit failure on a refusal — the wrong-password path is provable headlessly.
 ///
 /// **Naming a character keeps the run going into the world instead of exiting** (decision 1262).
-/// This is the only headless way to reach the world down the *player's* path: `WOW_CHAR` also
-/// enters the world, but setting it makes the run **unattended**
-/// ([`crate::run_mode::unattended_login`]), and an unattended run takes the other branch at every
-/// session decision — so the attended half was untestable without a person at the keyboard. The
-/// pick itself stays `char_select`'s (`apply_roster_policy` reads the third field the same way it
-/// reads `WOW_CHAR`); this only declines to exit. Pair with `WOW_PROBE_EXIT_AT` to bound the run.
+/// It was the only headless way to reach the world down the *player's* path, back when setting
+/// `WOW_CHAR` also made the run unattended and so switched the very branch a session test wanted
+/// to exercise; decision 1769 severed that, and `WOW_CHAR` now says nothing about who is in the
+/// room. The seat stays because it is the smoke's own way in, and because a run that declares
+/// `WOW_UNATTENDED=1` still needs a way to name a character without taking it. The pick itself
+/// stays `char_select`'s (`apply_roster_policy` reads the third field the same way it reads
+/// `WOW_CHAR`); this only declines to exit. Pair with `WOW_PROBE_EXIT_AT` to bound the run.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn debug_login_smoke(
     state: Res<State<ClientState>>,

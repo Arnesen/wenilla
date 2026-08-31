@@ -167,6 +167,42 @@ fn remote_motion_backpedal_uses_run_back_speed() {
     assert_eq!(speed, 4.5);
 }
 
+/// **A walking remote is a walking remote in every direction** (decision 1752). This block used to
+/// test the backpedal ahead of the walk bit, so an observed player who toggled walk and pressed S
+/// extrapolated at run-back speed (4.5) — fast enough to clear the `> 2× walkSpeed` boundary and
+/// play the *run* clip while its owner walked. The bytes take the walk arm (`0x7c4d11` →
+/// `0x7c4d4d`) before the run arm's backward min (`0x7c4d1d`), so both directions are
+/// `min(walk, run)` = 2.5.
+#[test]
+fn a_walking_remote_backpedals_at_walk_speed_not_run_back() {
+    let s = speeds();
+    let (pos, _o, _vz, speed) =
+        motion(move_flags::FORWARD | move_flags::WALK_MODE, 0.0).advance(s, 1.0);
+    assert!(
+        (pos[0] - 2.5).abs() < 1e-3,
+        "a walk advances +X by 2.5: {pos:?}"
+    );
+    assert_eq!(speed, 2.5);
+
+    let (pos, _o, _vz, speed) =
+        motion(move_flags::BACKWARD | move_flags::WALK_MODE, 0.0).advance(s, 1.0);
+    assert!(
+        (pos[0] + 2.5).abs() < 1e-3,
+        "…and a WALKING backpedal is still 2.5, not run_back's 4.5: {pos:?}"
+    );
+    assert_eq!(speed, 2.5);
+    // The control: without the walk bit the same press is the run-back min, unchanged.
+    let (_pos, _o, _vz, speed) = motion(move_flags::BACKWARD, 0.0).advance(s, 1.0);
+    assert_eq!(speed, 4.5);
+    // …and swimming still pre-empts the walk bit entirely — there is no swim-walk.
+    let (_pos, _o, _vz, speed) = motion(
+        move_flags::FORWARD | move_flags::SWIMMING | move_flags::WALK_MODE,
+        0.0,
+    )
+    .advance(s, 1.0);
+    assert_eq!(speed, 4.0, "a walker who wades strokes at full swim speed");
+}
+
 #[test]
 fn remote_motion_swim_backpedal_takes_min_of_the_swim_pair() {
     // The byte law (`0x7c4c90`'s backward arms, swim-feel §5 TU-H): backward speed is
@@ -275,9 +311,16 @@ fn remote_motion_jump_is_a_parabola_not_flag_walking() {
         "horizontal coasts at the frozen 7 yd/s: {pos:?}"
     );
     assert!(pos[1].abs() < 1e-3, "no lateral drift: {pos:?}");
+    // **The analytic height, `v₀·t − ½g·t²`** (decision 1740). This asserted `v₀·t` until the
+    // airborne-integrator round — explicit Euler, moving the whole step at the START-of-step speed
+    // with no gravity in the displacement at all, which over this 0.5 s step is 3.98 yd against a
+    // true 1.57. The local mover had the mirror-image error in the other direction. Both now run
+    // the one exact step ([`crate::player::mover::fall_step`]), so this is the closed form and it
+    // holds at any `dt`.
+    let analytic = 7.955_547 * 0.5 - 0.5 * GRAVITY * 0.5 * 0.5;
     assert!(
-        (pos[2] - 7.955_547 * 0.5).abs() < 1e-3,
-        "height integrates v·dt: {pos:?}"
+        (pos[2] - analytic).abs() < 1e-3,
+        "height follows the closed form {analytic}: {pos:?}"
     );
     assert!(
         (vz - (7.955_547 - GRAVITY * 0.5)).abs() < 1e-3,
@@ -300,6 +343,7 @@ fn spline_interpolates_constant_speed_and_faces_travel() {
         duration: Duration::from_secs(4),
         id: 0,
         grounded: true,
+        run_mode: true,
     };
     let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 0.05);
 
@@ -339,6 +383,7 @@ fn spline_travel_pitch_is_the_segment_climb_angle() {
         duration: Duration::from_secs(4),
         id: 0,
         grounded: true,
+        run_mode: true,
     };
     let (_, f, pitch) = s.sample(start + Duration::from_secs(1));
     assert!(f.unwrap().abs() < 1e-3, "facing is the horizontal heading");
@@ -358,7 +403,7 @@ fn monster_move_carries_every_waypoint() {
         [10.0, 10.0, 0.0],
         [10.0, 10.0, 5.0],
     ];
-    let s = monster_move_spline(path.clone(), 42, false, 2000, false)
+    let s = monster_move_spline(path.clone(), 42, false, 2000, false, true)
         .expect("a moving monster-move yields a spline");
     assert_eq!(
         s.points, path,
@@ -384,6 +429,7 @@ fn monster_move_flying_spline_is_not_grounded() {
         false,
         2000,
         true,
+        true,
     )
     .expect("a flying monster-move still yields a spline");
     assert!(
@@ -395,7 +441,15 @@ fn monster_move_flying_spline_is_not_grounded() {
 #[test]
 fn monster_move_stop_clears_the_spline() {
     assert!(
-        monster_move_spline(vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], 0, true, 2000, false).is_none(),
+        monster_move_spline(
+            vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            0,
+            true,
+            2000,
+            false,
+            true
+        )
+        .is_none(),
         "a Stop move snaps and clears, never builds a path"
     );
 }
@@ -403,7 +457,15 @@ fn monster_move_stop_clears_the_spline() {
 #[test]
 fn monster_move_zero_duration_clears_the_spline() {
     assert!(
-        monster_move_spline(vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], 0, false, 0, false).is_none(),
+        monster_move_spline(
+            vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            0,
+            false,
+            0,
+            false,
+            true
+        )
+        .is_none(),
         "a zero-duration move would divide by ~0 when sampled; treat as stationary"
     );
 }
@@ -411,7 +473,7 @@ fn monster_move_zero_duration_clears_the_spline() {
 #[test]
 fn monster_move_without_a_travelable_path_clears_the_spline() {
     assert!(
-        monster_move_spline(vec![[1.0, 2.0, 3.0]], 0, false, 2000, false).is_none(),
+        monster_move_spline(vec![[1.0, 2.0, 3.0]], 0, false, 2000, false, true).is_none(),
         "a single point is nowhere to travel — no spline"
     );
 }
@@ -898,6 +960,9 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
     use bevy::transform::TransformPlugin;
 
     let mut app = App::new();
+    // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767); the
+    // real one is initialised by the world plugins, which a headless harness does not run.
+    app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
     app.add_plugins((
         MinimalPlugins,
         TransformPlugin,

@@ -137,7 +137,18 @@ pub enum QuestAction {
     /// Reward panel Complete → `CMSG_QUESTGIVER_CHOOSE_REWARD` with the chosen choice index (0 when
     /// the quest has no choice rewards).
     Reward(u32),
-    /// Decline / Cancel / window close → a local clear (vanilla's client-side close sends no packet).
+    /// **The quest session's end**, however it was reached: `DeclineQuest()` (the detail panel's
+    /// Decline, the progress/reward panels' Cancel, the greeting's Goodbye) and `CloseQuest()`
+    /// (the window's own OnHide — ESC, a UIPanel eviction) alike.
+    ///
+    /// **One action, because the reference has one routine.** 1733 briefly split this into
+    /// `Decline` and `Close` on the assumption that only the first was an answer on the wire; the
+    /// §5 that landed after it found both Lua verbs calling `0x501130`, along with the walk-away
+    /// watchdog and the leave-world teardown, and that routine both answers a share
+    /// (`MSG_QUEST_PUSH_RESULT{DECLINE_QUEST}`) and re-opens an NPC's list
+    /// (`CMSG_QUESTGIVER_HELLO`/`CMSG_GOSSIP_HELLO`). Which of the two it does is decided by the
+    /// GIVER, never by the button — so the app owns that fork and the engine reports one intent
+    /// (decision 1738).
     Close,
 }
 
@@ -337,12 +348,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })?,
         )
     }
-    // AcceptQuest → Accept; DeclineQuest / CloseQuest → Close (no packet, vanilla); CompleteQuest
-    // (the progress panel's Continue) → Continue (request-reward).
+    // AcceptQuest → Accept; DeclineQuest / CloseQuest → Close (the ONE session-end routine, see
+    // `QuestAction::Close`); CompleteQuest (the progress panel's Continue) → Continue.
     install_action(lua, "AcceptQuest", super::QuestAction::Accept)?;
     install_action(lua, "DeclineQuest", super::QuestAction::Close)?;
     install_action(lua, "CloseQuest", super::QuestAction::Close)?;
     install_action(lua, "CompleteQuest", super::QuestAction::Continue)?;
+
+    // ConfirmAcceptQuest() — the escort confirm's Yes (ref StaticPopup.lua:731-733, raised by
+    // QUEST_ACCEPT_CONFIRM). No argument and no quest id: the client answers whichever confirm it
+    // is holding, so the engine counts the calls and the app supplies the id (decision 1733).
+    g.set(
+        "ConfirmAcceptQuest",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.quest_confirms += 1;
+            Ok(())
+        })?,
+    )?;
 
     // GetQuestReward(choice) — the reward panel's Complete button: queue the chosen choice index
     // (Era passes the 1-based item id; the app maps it to the 0-based wire index). A quest with no
@@ -570,5 +593,32 @@ mod tests {
         assert_eq!(s.eval::<String>("return GetTitleText()").unwrap(), "");
         assert_eq!(s.eval::<i64>("return GetNumQuestRewards()").unwrap(), 0);
         assert!(s.eval::<bool>("return GetRewardSpell() == nil").unwrap());
+    }
+
+    /// `DeclineQuest` and `CloseQuest` are the SAME intent — one reference routine, `0x501130`
+    /// (decision 1738, correcting 1733's split). What differs between a decline and a close is
+    /// nothing; what differs between an NPC's quest and a shared one is everything, and that fork
+    /// belongs to the app, which knows the giver.
+    #[test]
+    fn decline_and_close_are_one_intent() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest(Some(detail()));
+        s.run("DeclineQuest()").unwrap();
+        s.run("CloseQuest()").unwrap();
+        assert_eq!(
+            s.take_quest_actions(),
+            vec![QuestAction::Close, QuestAction::Close]
+        );
+    }
+
+    /// `ConfirmAcceptQuest` counts rather than carrying a quest id — the reference's verb takes no
+    /// argument and answers whichever confirm the client holds (decision 1733).
+    #[test]
+    fn confirm_accept_quest_counts_and_drains() {
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(s.take_quest_confirms(), 0);
+        s.run("ConfirmAcceptQuest() ConfirmAcceptQuest()").unwrap();
+        assert_eq!(s.take_quest_confirms(), 2);
+        assert_eq!(s.take_quest_confirms(), 0, "drained");
     }
 }

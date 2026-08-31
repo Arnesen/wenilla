@@ -24,7 +24,7 @@ fn load_xml(s: &UiScript, file: &str) {
 }
 
 fn enabled(s: &UiScript, button: &str) -> bool {
-    s.eval::<bool>(&format!("return {button}:IsEnabled()"))
+    s.eval::<bool>(&format!("return {button}:IsEnabled() ~= 0"))
         .unwrap()
 }
 

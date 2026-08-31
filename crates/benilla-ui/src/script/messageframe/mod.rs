@@ -36,6 +36,114 @@ pub(super) use plain::REG_MESSAGEFRAME_METHODS;
 pub(super) use scrolling::REG_SCROLLINGMESSAGEFRAME_METHODS;
 
 /// Install both classes' method tables (and the chat input globals the scrolling one carries).
+/// Install `SetJustifyH`/`GetJustifyH`/`SetJustifyV`/`GetJustifyV` on a message-frame method
+/// table. Both classes carry all four (see [`crate::widget::ScrollingMessageState::justify`] for
+/// the method-table bytes that settled it), and the law they obey is
+/// [`crate::justify`]'s — shared with FontString, `<Font>` and EditBox since 1237, so the two
+/// verified traps cannot drift apart per widget:
+///
+///  · an **unrecognised token RAISES** `Usage: %s:SetJustifyH("justify")` rather than defaulting;
+///  · a token from the **other axis** parses and then masks to nothing — `SetJustifyH("TOP")`
+///    CLEARS the horizontal axis, and `GetJustifyH()` answers `"UNKNOWN"` while the glyphs keep
+///    drawing at the paint fallback.
+///
+/// `GetJustify*` reports the EFFECTIVE value — the frame's own once set, else the font object's —
+/// so an untouched frame answers what it actually draws with rather than a ctor constant its
+/// `<FontString>` may have overridden.
+use crate::script::object::frame_handle_of;
+
+pub(super) fn install_justify(
+    lua: &mlua::Lua,
+    m: &mlua::Table,
+    widget: &'static str,
+) -> mlua::Result<()> {
+    use crate::justify::{self, Justify};
+
+    fn slot(ks: &mut KindState) -> Option<&mut Option<Justify>> {
+        match ks {
+            KindState::ScrollingMessage(s) => Some(&mut s.justify),
+            KindState::Message(s) => Some(&mut s.justify),
+            _ => None,
+        }
+    }
+    fn own(ks: &KindState) -> Option<Justify> {
+        match ks {
+            KindState::ScrollingMessage(s) => s.justify,
+            KindState::Message(s) => s.justify,
+            _ => None,
+        }
+    }
+
+    for (name, mask, horizontal) in [
+        ("SetJustifyH", justify::H_MASK, true),
+        ("SetJustifyV", justify::V_MASK, false),
+    ] {
+        m.set(
+            name,
+            lua.create_function(move |lua, (this, token): (mlua::Table, mlua::Value)| {
+                let parsed = token
+                    .as_string()
+                    .and_then(|t| t.to_str().ok().and_then(|t| justify::parse_bits(&t)))
+                    .ok_or_else(|| {
+                        if horizontal {
+                            justify::usage_h(widget)
+                        } else {
+                            justify::usage_v(widget)
+                        }
+                    })?;
+                let h = frame_handle_of(lua, &this)?;
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let frame = model
+                    .arena
+                    .frame_mut(h)
+                    .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+                let cur = own(&frame.kind_state).unwrap_or_default();
+                let next = Justify(justify::set_axis(cur.0, mask, parsed));
+                *slot(&mut frame.kind_state)
+                    .ok_or_else(|| mlua::Error::runtime("not a message frame"))? = Some(next);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    // The two getters differ ONLY in what an untouched frame falls back to, and the asymmetry is
+    // real rather than an oversight: horizontally there IS another source — the font object the
+    // lines actually draw with — so reporting anything else would have `GetJustifyH` disagree with
+    // the glyphs on our own chat window, which declares `justifyH="LEFT"` on its `<FontString>`.
+    // Vertically there is no such source: `emit_message_lines` pins each line to the top of its own
+    // band deliberately (the band, not a FontString rect, owns the vertical rhythm), so an untouched
+    // frame reports the ctor default rather than a value invented from our band math.
+    m.set(
+        "GetJustifyH",
+        lua.create_function(move |lua, this: mlua::Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let bits = match model.arena.frame(h).and_then(|f| own(&f.kind_state)) {
+                Some(j) => j.0,
+                None => {
+                    let font = UiScript::message_frame_font(&model, h);
+                    justify::parse_bits(justify::name_h(font.justify_h)).unwrap_or(0)
+                }
+            };
+            Ok(justify::name_of(bits, justify::H_MASK).to_string())
+        })?,
+    )?;
+    m.set(
+        "GetJustifyV",
+        lua.create_function(move |lua, this: mlua::Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let j = model
+                .arena
+                .frame(h)
+                .and_then(|f| own(&f.kind_state))
+                .unwrap_or_default();
+            Ok(justify::name_of(j.0, justify::V_MASK).to_string())
+        })?,
+    )?;
+    Ok(())
+}
+
 pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
     scrolling::install(lua)?;
     plain::install(lua)
@@ -330,6 +438,11 @@ impl UiScript {
             return;
         }
         let font = Self::message_frame_font(model, fh);
+        let own_justify = match &frame.kind_state {
+            KindState::ScrollingMessage(s) => s.justify,
+            KindState::Message(s) => s.justify,
+            _ => None,
+        };
         // The band grid lives in the frame's RESOLVED (scale-multiplied) rect, so the row pitch
         // rides the frame scale exactly like the glyphs it must coincide with (the font height
         // itself is frame-local).
@@ -373,7 +486,13 @@ impl UiScript {
                         f32::from(line.color[2]) / 255.0,
                         line.alpha,
                     ]),
-                    justify_h: font.justify_h,
+                    // The frame's own justify wins once SetJustifyH has been called; until then
+                    // the font object's governs, which is what `justifyH=` on the frame's
+                    // `<FontString>` set and what this drew with before the verbs existed.
+                    justify_h: match own_justify {
+                        Some(j) => j.paint_h(),
+                        None => font.justify_h,
+                    },
                     // The band is our own per-message construct (rows × pitch tall, not a
                     // FontString rect) — keep the block at its top so the band math, not MIDDLE
                     // centering, owns the vertical rhythm; the band height equals the wrapped

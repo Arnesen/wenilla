@@ -395,6 +395,29 @@ impl ObjectFields {
     pub fn player_ammo_id(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_AMMO_ID)
     }
+    /// `PLAYER_SELF_RES_SPELL` — the spell the server will cast on `CMSG_SELF_RES`, i.e. **the
+    /// self-resurrect this corpse is owed**: a warlock's Soulstone ("Use Soulstone" 3026 /
+    /// 20758-20761), a shaman's Reincarnation (21169), or Twisting Nether (23700). `None` when
+    /// there is none — the field absent *or* zero are the same fact, so both collapse here
+    /// (decision 1746).
+    ///
+    /// The server writes it at the death itself (`Player::SetDeathState(JUST_DIED)` keeps a
+    /// standing soulstone id across the aura wipe, else falls back to
+    /// `Player::SelectResurrectionSpellId()` for the passive cases) and **zeroes it on any
+    /// resurrection by another means** — so this field alone is the whole client-side condition;
+    /// there is no second gate and no cooldown/reagent test on our side. It is flushed
+    /// *immediately*, in its own `SMSG_UPDATE_OBJECT`, one line **before** the health→0 flush
+    /// (`Unit::DealDamage`, `Unit.cpp:1136-1143`) — which is why the field is already in the
+    /// descriptor by the time the death edge fires, and why the DEATH popup can read it in
+    /// `OnShow`.
+    ///
+    /// `PLAYER_FLAGS_CAN_SELF_RESURRECT (0x1000)` is the pre-1.6 carrier of the same fact and is
+    /// dead on this build — vmangos sets it only under `SUPPORTED_CLIENT_BUILD < CLIENT_BUILD_1_6_1`
+    /// (`Player.cpp:1537-1569`).
+    pub fn player_self_res_spell(&self) -> Option<u32> {
+        self.get_u32(FIELD_PLAYER_SELF_RES_SPELL)
+            .filter(|&s| s != 0)
+    }
     /// `PLAYER_BYTES` — packed skinColor (byte 0) / faceType (byte 1) / hairStyle (byte 2) / hairColor
     /// (byte 3). The character compositor's customization input (RF-0056).
     pub fn player_bytes(&self) -> Option<u32> {
@@ -446,6 +469,21 @@ impl ObjectFields {
     /// zero default — a create block skips zero fields).
     pub fn player_flags(&self) -> u32 {
         self.get_u32(FIELD_PLAYER_FLAGS).unwrap_or(0)
+    }
+    /// **`PLAYER_FLAGS` bit `0x1` — this player leads their group.** The sole consumer image-wide
+    /// is `UnitIsPartyLeader 0x516210`'s first leg (`0x51624a`), out of 55 sites reading this
+    /// field, and it is the only test of the bit anywhere (wow-re
+    /// `ui/scratch/party-leader-and-nameplate-verbs.md`).
+    ///
+    /// The bit's POSITION is verified; the name `PLAYER_FLAGS_GROUP_LEADER` is inferred, earned
+    /// from two disjoint in-binary controls that pin its neighbours — `0x5eca0c` → `"CHAT_FLAG_AFK"`
+    /// and `0x5eca49` → `"CHAT_FLAG_DND"` fix bits 1 and 2, so this is the one before them.
+    ///
+    /// **Server-sourced, and that is the point.** It answers for any held player, including a
+    /// stranger who leads their *own* party — something a comparison against our group's leader
+    /// GUID cannot express. It is one of the predicate's two legs, never the whole of it.
+    pub fn player_is_group_leader(&self) -> bool {
+        self.player_flags() & 0x1 != 0
     }
     /// Whether the player is a released **ghost** — `PLAYER_FLAGS_GHOST (0x10)`, set/cleared by
     /// the ghost aura 8326 at release/resurrect (decision 0308 §1). NB a ghost's health is **1**
@@ -869,6 +907,18 @@ impl ObjectFields {
     /// `0` when absent (the create-block zero default).
     pub fn gameobject_level(&self) -> u32 {
         self.get_u32(FIELD_GAMEOBJECT_LEVEL).unwrap_or(0)
+    }
+
+    /// `OBJECT_FIELD_TYPE & TYPEMASK_CONTAINER` — whether this object is a **bag**, not merely an
+    /// item. The reference's own test, byte for byte: `mov ecx,[eax+8]` / `shr ecx,2` /
+    /// `test cl,1` (`0x4c879d`–`0x4c87a6` in `GetInventoryItemCount`, repeated verbatim at
+    /// `0x4c7dbb`–`0x4c7dc4` in `PutItemInBag`). A container's mask carries the ITEM bit too, so
+    /// this is a widening test and not an alternative to it.
+    ///
+    /// `false` when the field is absent — an item whose create block has not landed is not yet
+    /// known to be a bag, and every caller's fallback is the ordinary-item answer.
+    pub fn is_container(&self) -> bool {
+        self.get_u32(FIELD_OBJECT_TYPE).unwrap_or(0) & 0x4 != 0
     }
 
     /// The object's class from the type field (`OBJECT_FIELD_TYPE`), used for `Values`/`Movement`

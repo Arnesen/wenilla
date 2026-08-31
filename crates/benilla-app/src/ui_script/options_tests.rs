@@ -38,6 +38,9 @@ fn harness_on(mut s: UiScript) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
+        // Every panel window declares `parent="UIParent"`, resolved at LOAD — so UIParent has to
+        // exist by the time they are read, exactly as it does in the manifest (decision 1734).
+        "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "GameTooltip.xml",
@@ -805,7 +808,7 @@ fn the_audio_page_reads_the_cvar_table_on_select() {
         .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // The music slider holds the stored 0.7 (f32 wobble tolerated), readout "70%".
     assert!(s
@@ -891,10 +894,12 @@ fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
         vec![("MasterSoundEffects".to_string(), "0".to_string())]
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled()")
+        .eval::<bool>(
+            "return OptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled() ~= 0"
+        )
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableMusicCheck:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableMusicCheck:IsEnabled() ~= 0")
         .unwrap());
     assert!(s
         .take_sounds()
@@ -908,7 +913,9 @@ fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
         vec![("MasterSoundEffects".to_string(), "1".to_string())]
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled()")
+        .eval::<bool>(
+            "return OptionsFrameContainerBodyAudioRowEnableAmbienceCheck:IsEnabled() ~= 0"
+        )
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -966,7 +973,7 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
         .eval::<bool>("return OptionsFrameContainerBodyGraphics:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     assert!(s
         .eval::<bool>(
@@ -1213,7 +1220,7 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
         .eval::<bool>("return OptionsFrameContainerBodyNameplates:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // The plate pair leads the page and rides `VPlateMode::default()`: enemy on (the 0167 boot
     // divergence), friendly off (faithful, 0599).
@@ -1318,7 +1325,7 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
         .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameApplyButton:IsEnabled()")
+        .eval::<bool>("return OptionsFrameApplyButton:IsEnabled() ~= 0")
         .unwrap());
 
     // A second move re-stages the pending value — still nothing queues (0989: the steppers
@@ -1597,7 +1604,7 @@ fn the_controls_page_reads_flags_with_the_sticky_inversion() {
         .eval::<bool>("return OptionsFrameContainerBodyControls:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     assert!(
         s.eval::<bool>("return OptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()")
@@ -2144,9 +2151,11 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // bar as the other two. Camera Following Style is counted on the key it wears at rest (Smart's
     // OPTION_TOOLTIP_CAMERA1) and Show When on its own (Always's OPTION_TOOLTIP_TARGETOFTARGET5);
     // their other entries ride the same census as the selection moves.
-    // 53 of the 55 are 1.12's own; the other two are Render Scale (1639) and Display Mode
+    // 54 of the 56 are 1.12's own; the other two are Render Scale (1639) and Display Mode
     // (1650), whose descriptions are benilla's and whose carve-out is above.
-    assert_eq!(checked, 55, "every tipped row carries a live key");
+    // The 28th CVar row is Block Trades (1764), on the Controls page — its key
+    // OPTION_TOOLTIP_BLOCK_TRADES is the reference's, so it is counted here like the rest.
+    assert_eq!(checked, 56, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2253,7 +2262,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // Cloak / Show Helm, 1472; the four multibar switches, 1500).
     // …plus the Graphics page's Render Scale (1639) and Display Mode (1650), the two rows whose
     // descriptions are benilla's own rather than 1.12 GlobalStrings — see the guard above.
-    assert_eq!(raised, 55, "every row but Auto Loot raises a description");
+    // …and Block Trades (1764), the Controls page's 28th CVar row.
+    assert_eq!(raised, 56, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2271,7 +2281,7 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
         .eval::<bool>("return OptionsFrameContainerBodyCombat:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
 
     // Read: each box shows its global, at CombatText.xml's own file-scope value.
@@ -2348,7 +2358,7 @@ fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
 
     let enabled = |s: &mut UiScript, row: &str, control: &str| -> bool {
         s.eval::<bool>(&format!(
-            "return OptionsFrameContainerBodyCombat{row}{control}:IsEnabled() and true or false"
+            "return OptionsFrameContainerBodyCombat{row}{control}:IsEnabled() ~= 0"
         ))
         .unwrap()
     };
@@ -2572,7 +2582,7 @@ fn the_interface_page_writes_the_three_stock_globals() {
         .eval::<bool>("return OptionsFrameContainerBodyInterface:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
 
     // Read: all three ship on — QuestFrame.xml's "1" (the director's pin), QuestLogFrame.xml's "1"
@@ -2654,7 +2664,7 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     assert!(
         !s.eval::<bool>(
             "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
-             :IsEnabled() and true or false"
+             :IsEnabled() ~= 0"
         )
         .unwrap(),
         "the picker is dead while the switch is off"
@@ -2675,7 +2685,7 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     assert!(
         s.eval::<bool>(
             "return OptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton \
-             :IsEnabled() and true or false"
+             :IsEnabled() ~= 0"
         )
         .unwrap(),
         "and the picker wakes with it"
@@ -3052,7 +3062,7 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
         s.run(&format!("OptionsFrameCategoryListRow{key}:Click()"))
             .unwrap();
         assert!(
-            s.eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+            s.eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
                 .unwrap(),
             "{key}: Defaults is live on a page that has something to reset"
         );
@@ -3062,7 +3072,7 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
     s.run("OptionsFrame_SelectCategory(\"NotACategory\")")
         .unwrap();
     assert!(
-        !s.eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        !s.eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
             .unwrap(),
         "Defaults is dead when the selected page has no rows"
     );
@@ -3090,7 +3100,7 @@ fn the_chat_page_toggles_the_chat_bubble_cvars() {
         .eval::<bool>("return OptionsFrameContainerBodyChat:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // Read from the table, not from a restated default: bubbles on, party bubbles off.
     assert!(s
@@ -3576,8 +3586,11 @@ fn the_action_bars_page_toggles_the_real_bars() {
     // Bar 4's row is DEAD while bar 3's is unticked — MultiBarLeft cannot stand without
     // MultiBarRight (the reference's own rule for this pair, UIOptionsFrame.lua l.722-726).
     assert!(
-        !s.eval::<bool>(&format!("return {}:IsEnabled()", box_of("RowMultiBar4")))
-            .unwrap(),
+        !s.eval::<bool>(&format!(
+            "return {}:IsEnabled() ~= 0",
+            box_of("RowMultiBar4")
+        ))
+        .unwrap(),
         "Show Right ActionBar 2 is disabled until Show Right ActionBar is on"
     );
 
@@ -3604,8 +3617,11 @@ fn the_action_bars_page_toggles_the_real_bars() {
     s.run(&format!("{}:Click()", box_of("RowMultiBar3")))
         .unwrap();
     assert!(
-        s.eval::<bool>(&format!("return {}:IsEnabled()", box_of("RowMultiBar4")))
-            .unwrap(),
+        s.eval::<bool>(&format!(
+            "return {}:IsEnabled() ~= 0",
+            box_of("RowMultiBar4")
+        ))
+        .unwrap(),
         "bar 3 on wakes bar 4's row"
     );
     assert!(shown(&s, "MultiBarRight"));
@@ -3627,8 +3643,11 @@ fn the_action_bars_page_toggles_the_real_bars() {
     assert!(!shown(&s, "MultiBarLeft"), "MultiBarLeft rides on bar 3");
     assert_eq!(s.eval::<i64>("return SHOW_MULTI_ACTIONBAR_4").unwrap(), 1);
     assert!(
-        !s.eval::<bool>(&format!("return {}:IsEnabled()", box_of("RowMultiBar4")))
-            .unwrap(),
+        !s.eval::<bool>(&format!(
+            "return {}:IsEnabled() ~= 0",
+            box_of("RowMultiBar4")
+        ))
+        .unwrap(),
         "…and its row goes back to sleep"
     );
 

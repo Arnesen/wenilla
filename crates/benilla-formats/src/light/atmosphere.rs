@@ -51,6 +51,18 @@ pub(super) const LP_GLOW: usize = 4;
 /// Stored as 0.0/1.0.
 pub(super) const LP_HIGHLIGHT: usize = 1;
 
+/// `LightParams.dbc` field index of **lightSkyboxID** (record byte +0x08 = field index 2) — the
+/// `LightSkybox.dbc` row whose model replaces the whole celestial pass while it is active.
+///
+/// **In 5875 this field is the ghost sky and nothing else.** Byte-VERIFIED (wow-re
+/// `lighting/scratch/wmo-skybox.md` §3): the DBC skybox slot `[0xce9bb4]` is filled inside
+/// `dn_color_table_build 0x6d2260` at `0x6d26cb` **gated on `[0xce9bb0] != -1`** — the ghost
+/// override cell, written only by `0x6d4620` off the `PLAYER_FLAGS` ghost bit (`death-light.md`).
+/// The shipped data agrees exactly: of 426 `LightParams` rows only **5** carry a non-zero id, all
+/// of them **3 = `DeathClouds.mdx`**, and all 374 `Light.dbc` rows reach one through param slot
+/// **4** alone (slots 0–3 are uniformly 0). So there is no live non-ghost skybox to miss here.
+pub(super) const LP_SKYBOX: usize = 2;
+
 /// `LightParams.dbc` field indices of the **water-blend alphas** — the from-above swatch's depth-alpha
 /// ramp endpoints (`swatch.a = lerp(shallow, deep, V)`; the runtime reads these into `gWorldLight+0x114..`
 /// via `FUN_006b6b60`). Layout follows the glow shift: glow is field 4 (+0x10), so these are fields 5–8

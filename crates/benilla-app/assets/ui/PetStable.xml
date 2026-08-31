@@ -42,8 +42,9 @@
             and l.161-162 and it is transcribed verbatim rather than guarded: the window's current
             pet slot cannot paint without it, and a guard here would hide a missing binding instead
             of reporting it.
-          - `parent="UIParent"` (xml l.72) is dropped: this engine reads no XML `parent=` attribute
-            (`PetPaperDollFrame.xml`'s header). The frame's own `<Anchors>` are kept verbatim even
+          - `parent="UIParent"` (xml l.72) is ours too, and it attaches for real: the loader does
+            read a cross-file `parent=`, resolving the name by global lookup at load (decision
+            1734), and the frame below declares it. The frame's own `<Anchors>` are kept verbatim even
             though `ShowUIPanel` re-`SetPoint`s it into the left slot — they name the same
             TOPLEFT (0,-104) the slot manager writes, so the two agree (ItemTextFrame.xml keeps its
             reference anchor for the same reason).
@@ -443,7 +444,7 @@
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
     </CheckButton>
 
-    <Frame name="PetStableFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+    <Frame name="PetStableFrame" parent="UIParent" toplevel="true" movable="true" enableMouse="true" hidden="true">
         <!-- xml l.72-85: the standard 384x512 panel window. The HitRectInsets pull the mouse rect
              in from the art's transparent right edge and bottom skirt. -->
         <Size><AbsDimension x="384" y="512"/></Size>

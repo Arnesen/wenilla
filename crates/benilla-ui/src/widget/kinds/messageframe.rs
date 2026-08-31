@@ -43,6 +43,28 @@ pub struct MessageLine {
 /// the frame-level fade config the per-line snapshots copy at insert.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScrollingMessageState {
+    /// The frame's OWN justification, set by `SetJustifyH`/`SetJustifyV` — `None` until one of
+    /// them is called.
+    ///
+    /// VERIFIED present on both classes: the ScrollingMessageFrame method table `0x87b5c0`
+    /// (the one whose `AddMessage` is `0x792900`, msgframe-runtime.md's scrolling family) carries
+    /// `SetJustifyH 0x792600`/`GetJustifyH`/`SetJustifyV`/`GetJustifyV`, and the MessageFrame table
+    /// `0x87b960` (`AddMessage 0x795590`, the `SetInsertMode` sibling) carries the same four. Read
+    /// off the `{const char*, void*}` pair bytes; the same walk reproduces the Button table at
+    /// `0x879d00` exactly as wow-re records it, and confirms Button has no `SetJustifyH` — which is
+    /// why the family cannot be inferred and had to be read.
+    ///
+    /// **`Option`, and the reason is ours not the client's.** The real object keeps ONE justify
+    /// dword: its font instance's. Ours reads a message frame's font instance off its first
+    /// `<FontString>` region (`message_frame_font`), which is where XML's
+    /// `<FontString … justifyH="LEFT"/>` lands — but a frame built by `CreateFrame` has no such
+    /// child and would have nowhere to store. So `None` means "never told, defer to the font
+    /// object" and keeps the shipped chat rendering byte-for-byte what it was; `Some` is an
+    /// explicit call and wins. The divergence that buys: on a frame that HAS a FontString, setting
+    /// the frame's justify does not change what that FontString's own `GetJustifyH` reports, where
+    /// the client would have them be one field.
+    pub justify: Option<crate::justify::Justify>,
+
     /// The line ring, newest at the back. Capacity is enforced by drop-oldest in [`Self::add`].
     pub lines: VecDeque<MessageLine>,
     /// The ring capacity (`maxLines`; ctor default 8, ChatFrame.xml sets 128). `SetMaxLines` is
@@ -75,6 +97,7 @@ impl Default for ScrollingMessageState {
         // The shared CSimpleMessageScrollFrame ctor defaults (msgframe-runtime.md §"Shared ctor
         // defaults": fadingEnabled=1, timeVisible=10.0, fadeDuration=3.0; SMF maxLines=8).
         ScrollingMessageState {
+            justify: None,
             lines: VecDeque::new(),
             max_lines: 8,
             time_visible: 10.0,
@@ -375,6 +398,28 @@ pub enum InsertMode {
 /// that a message added to a zero-height frame vanishes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MessageFrameState {
+    /// The frame's OWN justification, set by `SetJustifyH`/`SetJustifyV` — `None` until one of
+    /// them is called.
+    ///
+    /// VERIFIED present on both classes: the ScrollingMessageFrame method table `0x87b5c0`
+    /// (the one whose `AddMessage` is `0x792900`, msgframe-runtime.md's scrolling family) carries
+    /// `SetJustifyH 0x792600`/`GetJustifyH`/`SetJustifyV`/`GetJustifyV`, and the MessageFrame table
+    /// `0x87b960` (`AddMessage 0x795590`, the `SetInsertMode` sibling) carries the same four. Read
+    /// off the `{const char*, void*}` pair bytes; the same walk reproduces the Button table at
+    /// `0x879d00` exactly as wow-re records it, and confirms Button has no `SetJustifyH` — which is
+    /// why the family cannot be inferred and had to be read.
+    ///
+    /// **`Option`, and the reason is ours not the client's.** The real object keeps ONE justify
+    /// dword: its font instance's. Ours reads a message frame's font instance off its first
+    /// `<FontString>` region (`message_frame_font`), which is where XML's
+    /// `<FontString … justifyH="LEFT"/>` lands — but a frame built by `CreateFrame` has no such
+    /// child and would have nowhere to store. So `None` means "never told, defer to the font
+    /// object" and keeps the shipped chat rendering byte-for-byte what it was; `Some` is an
+    /// explicit call and wins. The divergence that buys: on a frame that HAS a FontString, setting
+    /// the frame's justify does not change what that FontString's own `GetJustifyH` reports, where
+    /// the client would have them be one field.
+    pub justify: Option<crate::justify::Justify>,
+
     /// See [`ScrollingMessageState::lines_gen`] — the same sweep-skip token.
     pub lines_gen: u64,
     /// The display lines, **newest at the back always** — [`InsertMode`] is a *display direction*
@@ -401,6 +446,7 @@ impl Default for MessageFrameState {
         // fadingEnabled=1, timeVisible=10.0, fadeDuration=3.0; insertMode 1 = BOTTOM). Note the
         // fade pair is shared with the scrolling class but `maxLines` has no counterpart here.
         MessageFrameState {
+            justify: None,
             lines: VecDeque::new(),
             insert_mode: InsertMode::default(),
             time_visible: 10.0,

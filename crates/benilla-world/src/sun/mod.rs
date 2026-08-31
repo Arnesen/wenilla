@@ -132,13 +132,13 @@ impl Plugin for SunPlugin {
             .add_systems(
                 Update,
                 apply_celestial_visibility
-                    .after(crate::wmo_sky::WmoSkyResolve)
+                    .after(crate::skybox::SkyboxResolve)
                     .after(crate::liquid::SubmersionVerdict),
             );
     }
 }
 
-/// Hide the sky pass's own elements while a WMO skybox owns the sky ([`crate::wmo_sky`]) — or while
+/// Hide the sky pass's own elements while a WMO skybox owns the sky ([`crate::skybox`]) — or while
 /// the eye is **submerged**.
 ///
 /// `CSky::Render` gates its six draws on **one shared boolean** — `0x6d49cd` sets it, a filled skybox
@@ -163,13 +163,13 @@ impl Plugin for SunPlugin {
 /// own authority (decision 0025) reading these same resources.
 #[allow(clippy::type_complexity)]
 fn apply_celestial_visibility(
-    wmo_skybox: Res<crate::wmo_sky::CameraWmoSkybox>,
+    skybox: Res<crate::skybox::CameraSkybox>,
     underwater: Res<crate::liquid::Underwater>,
     mut suns: Query<(&SunSprite, &mut Visibility), Without<MoonSprite>>,
     mut moons: Query<(&MoonSprite, &mut Visibility), Without<SunSprite>>,
     mut stars: Query<&mut Visibility, (With<StarDome>, Without<SunSprite>, Without<MoonSprite>)>,
 ) {
-    let suppressed = wmo_skybox.0.is_some() || underwater.0.any();
+    let suppressed = skybox.0.is_some() || underwater.0.any();
     // `Inherited`, not `Visible`: these sprites hang off the celestial rig and must keep deferring to
     // it when the skybox stands down, exactly as the cloud dome's gate does.
     let want = |in_sky_pass: bool| {

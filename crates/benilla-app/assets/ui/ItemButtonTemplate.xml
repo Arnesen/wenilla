@@ -43,12 +43,50 @@
     anyway because the family is one contract and, once the tint verb below is shared, they are one
     line each; that is stated rather than dressed up as demand (1210).
 
-    **The virtual `ItemButtonTemplate` Button is deliberately NOT here.** The harness's template
-    demand ranks it at zero on both axes — no corpus addon names it in a `CreateFrame` fourth
-    argument or an XML `inherits=` (they name their own `*ItemButtonTemplate`s, or
-    `ContainerFrameItemButtonTemplate`) — and our own bag windows already have
-    `BenillaBagSlotTemplate`. Building an unwanted template is exactly the unmeasured work 1210
-    was written about.
+    **The virtual `ItemButtonTemplate` Button IS here now — 1719: a prior measured decision is
+    revisited when the measurement changes, and it changed.** The paragraph below is kept because
+    it records how the number was wrong before it was also incomplete. It used to say
+    "the harness's template demand ranks it at zero on both axes", full stop. The zero was real;
+    the demand was not. pfUI asks for `ContainerFrameItemButtonTemplate` — which the reference
+    declares as `inherits="ItemButtonTemplate"` (ContainerFrame.xml l.4), so it wants this one
+    transitively — through a shape the census could not see:
+
+        local tpl = "ContainerFrameItemButtonTemplate"
+        if bag == -1 then tpl = "BankItemButtonGenericTemplate" end
+        CreateFrame("Button", "pfBag" .. bag .. "item" .. slot, pfUI.bags[bag], tpl)
+
+    The instrument said so at itself the whole time (`missing_templates`' doc named the literal-only
+    bound), which is the difference between an honest under-report and a wrong number — but a bound
+    stated at the function and forgotten at the call site is only half a guard. The census now
+    resolves a local bound to a literal, and a test asserts both what it sees and what it still
+    cannot (concatenation, table fields, parameters).
+
+    That paragraph then weighed the chain as "a real unit of work" and left it. **The weighing was
+    wrong, and wrong for a reason worth recording: it priced the SCRIPTS, which we already have.**
+    `ContainerFrameItemButtonTemplate`'s handlers are `ContainerFrameItemButton_OnLoad/_OnClick/
+    _OnEnter/_OnUpdate` and `KeyRingItemButton_OnClick` — and this client does not transcribe those,
+    it EXECUTES the reference's own `ContainerFrame.lua` off the player's patch chain
+    (`ui_script::reference_ui`, SOURCED). They have been live the whole time. What was missing was
+    never the behaviour; it was two XML declarations, because the reference ships its templates in
+    `ContainerFrame.xml` and that file is not in the sourced set.
+
+    So the chain cost what it actually cost: this Button, and — at the time — a transcribed
+    `ContainerFrameItemButtonTemplate` beside the adapter that already wrapped one of those very
+    handlers. **Decision 1751 then took the last step and made both moot for the windows
+    themselves**: `Interface\FrameXML\ContainerFrame.xml` is a manifest entry now, so the
+    reference's OWN declaration of that template is the live one and the transcription is deleted.
+    This Button stays, because it is the reference's PUBLISHED surface for addons that build their
+    own slots and it has to exist whether or not any window of ours uses it.
+
+    **The bank arm resolves too, since 1751's second window.** `BankItemButtonGenericTemplate`
+    inherits `BankItemButtonTemplate`, whose handlers live in `BankFrame.lua` — and that file
+    arrives through `Interface\FrameXML\BankFrame.xml`'s own `<Script file=>`, off the chain, the
+    same way. This paragraph used to say the arm was a named omission (1134 §4) whose real cost was
+    the unsourced Lua plus `this:GetInventorySlot()`, a widget method we do not bind. Neither is
+    true any more: the Lua is sourced, and `GetInventorySlot` is not a widget method at all — it is
+    a plain field `BankFrameBaseButton_OnLoad` assigns (`this.GetInventorySlot =
+    ButtonInventorySlot`). pfUI reaches the bank arm for `bag == -1`, and it now finds a real
+    template.
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
@@ -180,4 +218,39 @@
             icon:SetVertexColor(r, g, b)
         end
     ]]></Script>
+
+    <!-- Ref `Interface\FrameXML\ItemButtonTemplate.xml` l.4-46, structure verbatim: the region
+         NAMES are the whole point of the file, because they are the contract the eight verbs above
+         and every addon both address. `$parentIconTexture`, `$parentCount`, `$parentStock`,
+         `$parentNormalTexture` — pfUI reads three of those four off a button it built itself
+         (modules/bags.lua l.418-431) and never asks who built it.
+
+         The reference declares NO scripts on this Button, and neither do we; it is a shape, and
+         whoever inherits it brings the behaviour. -->
+    <Button name="ItemButtonTemplate" virtual="true">
+        <Size><AbsDimension x="37" y="37"/></Size>
+        <Layers>
+            <Layer level="BORDER">
+                <Texture name="$parentIconTexture"/>
+                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT" hidden="true">
+                    <Anchors>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="$parentStock" inherits="NumberFontNormalYellow" justifyH="LEFT" hidden="true">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <NormalTexture name="$parentNormalTexture" file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="64" y="64"/></Size>
+            <Anchors>
+                <Anchor point="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+            </Anchors>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+    </Button>
 </Ui>

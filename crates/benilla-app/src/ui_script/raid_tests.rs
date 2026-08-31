@@ -12,7 +12,8 @@
 //! sweep. Each test below fails on exactly one of those.
 
 use benilla_ui::script::{
-    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo, UiScript,
+    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo, SelectionRequest,
+    UiScript,
 };
 
 /// Load one shipped `assets/ui/<file>`, panicking on any loader error **or unknown-template
@@ -118,6 +119,7 @@ fn push_raid(s: &mut UiScript, raid: Vec<RaidMemberInfo>) {
     s.set_party(PartyState {
         members,
         leader_index: 0,
+        leader_guid: 0, // the player leads; their guid is unset in this fixture
         raid,
         loot_method: "group".into(),
         master_looter: None,
@@ -218,7 +220,7 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
     assert!(visible(&s, "RaidFrameRaidDescription"), "solo: the blurb");
     assert!(visible(&s, "RaidFrameConvertToRaidButton"));
     assert_eq!(
-        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled()")
             .unwrap(),
         0,
         "solo there is no party to convert"
@@ -240,7 +242,7 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
     });
     s.fire_event("PARTY_MEMBERS_CHANGED", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled()")
             .unwrap(),
         1,
         "a party leader can convert"
@@ -263,7 +265,7 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
     });
     s.fire_event("PARTY_LEADER_CHANGED", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameConvertToRaidButton:IsEnabled()")
             .unwrap(),
         0,
         "a party member cannot"
@@ -599,7 +601,10 @@ fn left_clicking_a_row_targets_its_raid_token() {
     open_raid_tab(&mut s);
     push_raid(&mut s, twelve());
     s.run("RaidGroupButton7:Click(\"LeftButton\")").unwrap();
-    assert_eq!(s.take_target_requests(), vec!["raid7".to_string()]);
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![SelectionRequest::Unit("raid7".into())]
+    );
 }
 
 /// Right-clicking a row opens the RAID menu, and each of its four rows appears for exactly the
@@ -714,7 +719,7 @@ fn the_raid_info_panel_lists_the_saved_lockouts() {
     ]);
     s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled()")
             .unwrap(),
         1
     );
@@ -743,7 +748,7 @@ fn the_raid_info_panel_lists_the_saved_lockouts() {
     s.set_saved_instances(Vec::new());
     s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled()")
             .unwrap(),
         0
     );
@@ -781,7 +786,7 @@ fn a_player_with_no_lockouts_loses_the_raid_info_button_on_the_second_answer() {
     // Answer two, saying the same nothing.
     s.fire_event("UPDATE_INSTANCE_INFO", Vec::new());
     assert_eq!(
-        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled() and 1 or 0")
+        s.eval::<i64>("return RaidFrameRaidInfoButton:IsEnabled()")
             .unwrap(),
         0,
         "an empty lockout list is a dead button"

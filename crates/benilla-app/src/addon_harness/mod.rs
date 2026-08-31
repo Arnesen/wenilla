@@ -1116,16 +1116,85 @@ fn load_dependencies(
 /// Template names the addon passes to `CreateFrame` that the VM cannot resolve.
 ///
 /// Scanned rather than traced, for `missing_globals`' reason: the calls overwhelmingly happen in
-/// handlers a load-time survey never fires. The pattern is narrow — a **string literal** in the
-/// fourth argument position — so `CreateFrame(t, n, p, someVariable)` is invisible here, which is
-/// the honest under-report to make. It is also not comment-stripped: a `CreateFrame` inside a
+/// handlers a load-time survey never fires. It is not comment-stripped: a `CreateFrame` inside a
 /// comment counts, and that over-report is the cheaper error of the two.
+///
+/// **A string literal in the fourth argument, OR a local bound to one in the same file.** The
+/// literal-only form was the honest under-report this doc used to name — and then a decision was
+/// made on the number it produced. `assets/ui/ItemButtonTemplate.xml` declined to build
+/// `ItemButtonTemplate` citing "the harness's template demand ranks it at zero on both axes"; the
+/// zero was real, and pfUI wanted `ContainerFrameItemButtonTemplate` (which inherits it) the whole
+/// time, through
+///
+/// ```lua
+/// local tpl = "ContainerFrameItemButtonTemplate"
+/// if bag == -1 then tpl = "BankItemButtonGenericTemplate" end
+/// CreateFrame("Button", "pfBag" .. bag .. "item" .. slot, pfUI.bags[bag], tpl)
+/// ```
+///
+/// The instrument was not lying — it said what it could not see, right here. But a bound that is
+/// stated at the function and forgotten at the call site is only half a guard, so the cheap half
+/// of the gap is closed: one pass collects `x = "literal"` bindings per file, and a bare
+/// identifier in the fourth argument resolves through it.
+///
+/// Still invisible, and still stated: a name built by concatenation, one passed in as a function
+/// argument, one read from a table, and one bound in another file. Those are real and this does
+/// not pretend otherwise — what it fixes is the single commonest shape, measured.
 fn missing_templates(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Vec<String> {
     let mut wanted: BTreeSet<String> = BTreeSet::new();
     for path in source_files(root, name, toc) {
         let Some(text) = read_text(root, &path) else {
             continue;
         };
+        // `ident = "literal"` bindings in this file, for the fourth-argument lookup below. A name
+        // rebound to several literals keeps ALL of them (pfUI's `tpl` is two), because the census
+        // asks "could this call want that template", and both branches genuinely can.
+        let mut bound: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (i, _) in text.match_indices('=') {
+            // Not `==`, `~=`, `<=`, `>=`.
+            if text[i + 1..].starts_with('=')
+                || text[..i].ends_with(['=', '~', '<', '>'])
+                || text[i + 1..].trim_start().is_empty()
+            {
+                continue;
+            }
+            let lhs = text[..i].trim_end();
+            let lhs = lhs.rsplit(['\n', ';', ' ', '\t']).next().unwrap_or("");
+            if !is_ident(lhs) {
+                continue;
+            }
+            let rhs = text[i + 1..].trim_start();
+            let Some(q) = rhs.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let Some(end) = rhs[1..].find(q) else {
+                continue;
+            };
+            let lit = &rhs[1..end + 1];
+            // **Disqualify on an OPERATOR, not on a terminator.** The defect this closes is a
+            // fragment: `local built = "A" .. "B"` binding `built` to `"A"` — a name nobody asked
+            // for entering the demand ranking, which is not an under-report but the fiction this
+            // table has opened with three times (1210/1218/1227).
+            //
+            // Written first as "the tail must be a statement end", which is the wrong shape: Lua's
+            // terminators are open-ended (`end`, `then`, `else`, `until`, …) and chasing that list
+            // is endless — `tpl = "X" end` was missed for exactly that reason. What actually makes
+            // a literal part of a larger expression is a binary operator after it, and on a STRING
+            // in Lua that is `..` almost exclusively. So the test names the operators and lets
+            // everything else through, which also keeps this scanner's standing posture: over-
+            // report rather than under-report, the cheaper error of the two.
+            let tail = rhs[end + 2..].trim_start_matches([' ', '\t']);
+            let part_of_expression = tail.starts_with("..")
+                || tail.starts_with(['+', '-', '*', '/', '%', '^', '<', '>'])
+                || tail.starts_with("==")
+                || tail.starts_with("~=")
+                || tail.starts_with("and ")
+                || tail.starts_with("or ");
+            let whole = !part_of_expression;
+            if !lit.is_empty() && whole {
+                bound.entry(lhs).or_default().push(lit);
+            }
+        }
         for (i, _) in text.match_indices("CreateFrame") {
             let rest = &text[i + "CreateFrame".len()..];
             let Some(open) = rest.find('(') else { continue };
@@ -1174,6 +1243,9 @@ fn missing_templates(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> V
                 .or_else(|| f.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
             if let Some(lit) = lit.filter(|s| !s.is_empty()) {
                 wanted.insert(lit.to_string());
+            } else if let Some(lits) = bound.get(f) {
+                // A bare identifier bound to a literal in this file — pfUI's `tpl`.
+                wanted.extend(lits.iter().map(|s| (*s).to_string()));
             }
         }
     }
@@ -3501,6 +3573,79 @@ mod dependency_tests {
     ///
     /// The assertion that matters is that the two never merge: a single "files not found" count
     /// would average a broken package with a real client gap and read as one number.
+    /// **A template named through a local resolves; the shapes that still cannot are asserted too.**
+    ///
+    /// The literal-only scan was an honest under-report — stated at `missing_templates` — and a
+    /// decision was then made on the number it produced: `assets/ui/ItemButtonTemplate.xml`
+    /// declined to build `ItemButtonTemplate` citing a demand of zero "on both axes". The zero was
+    /// real and the demand was not: pfUI binds `local tpl = "ContainerFrameItemButtonTemplate"`
+    /// and passes the variable, so the one addon that wanted it was invisible to the ranking.
+    ///
+    /// Both halves are asserted, because a scanner that quietly widened would be the worse fix:
+    /// the shape it now sees, AND the shapes it still does not, so the next decision quoting this
+    /// number can read its bound from a test rather than from a comment.
+    ///
+    /// **The exact-set form earned itself immediately.** Written first as a few absence checks it
+    /// PASSED, while the collector was binding `built` to `"Unseen"` out of
+    /// `local built = "Unseen" .. "ByConcat"` — a fragment entering the demand ranking as a
+    /// template name nobody asked for. That is not an under-report, it is the fiction this table
+    /// has opened with three times before (1210/1218/1227). Hence the whole-right-hand-side rule
+    /// in `missing_templates`, and hence asserting the set rather than sampling it.
+    #[test]
+    fn the_template_census_resolves_a_local_and_says_what_it_still_cannot_see() {
+        let tmp = std::env::temp_dir().join(format!("benilla-harness-tpl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("TplUser");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("TplUser.toc"), "## Interface: 11200\nuse.lua\n").unwrap();
+        // Every shape in one file. Only the first three are meant to be seen.
+        std::fs::write(
+            dir.join("use.lua"),
+            r#"
+            local tpl = "SeenViaLocal"
+            if bag == -1 then tpl = "SeenViaRebind" end
+            CreateFrame("Button", "a", nil, tpl)
+            CreateFrame("Button", "b", nil, "SeenAsLiteral")
+
+            -- Still invisible, deliberately: built by concatenation, read from a table, and
+            -- passed in as a parameter. Naming them here is the bound.
+            local built = "Unseen" .. "ByConcat"
+            CreateFrame("Button", "c", nil, built)
+            CreateFrame("Button", "d", nil, cfg.template)
+            function f(passed) CreateFrame("Button", "e", nil, passed) end
+            "#,
+        )
+        .unwrap();
+
+        let reports = survey(&tmp);
+        let r = reports.iter().find(|r| r.name == "TplUser").unwrap();
+        let got: BTreeSet<&str> = r.missing_templates.iter().map(String::as_str).collect();
+
+        for want in ["SeenViaLocal", "SeenViaRebind", "SeenAsLiteral"] {
+            assert!(got.contains(want), "{want} must be seen — got {got:?}");
+        }
+        // A name rebound to two literals keeps BOTH: the census asks "could this call want that
+        // template", and each branch genuinely can.
+        assert!(
+            got.contains("SeenViaLocal") && got.contains("SeenViaRebind"),
+            "a rebound local keeps every literal it was bound to"
+        );
+        // **The stated bound, asserted as an EXACT set** so it cannot rot into a claim of
+        // completeness. The file also asks for a concatenated name, a table field
+        // (`cfg.template`) and a parameter (`passed`); none may appear, and pinning the whole set
+        // rather than a few absences is what makes a future widening announce itself here.
+        let want: BTreeSet<&str> = ["SeenViaLocal", "SeenViaRebind", "SeenAsLiteral"]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, want,
+            "the census sees exactly these three shapes — concatenation, a table field and a \
+             parameter stay invisible, and that bound lives here rather than only in a doc comment"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn an_absent_manifest_entry_is_attributed_to_whose_package_is_short() {
         let tmp =
@@ -4341,12 +4486,50 @@ mod dependency_tests {
     /// Without this, a probe arm that is simply broken would charge its own failure to all 218
     /// addons — the mis-attribution 1209 exists about, arriving through the instrument instead of
     /// through a claim.
+    ///
+    /// **"Silent" has to mean "ran and said nothing", never "had nothing to run"** — the same
+    /// distinction the hover-arm test above is built around ("found nothing" vs "ran nothing"),
+    /// and decision 1751 put this test one step from the wrong side of it: `ToggleBackpack`, the
+    /// probe's first and most-hooked entry point, is defined in the reference's own
+    /// `ContainerFrame.lua` now, which `load_default_ui` reads off the PLAYER'S INSTALL. On a
+    /// machine without one the global is simply absent, `drive_ui_probe`'s `try` guard skips it,
+    /// and an empty error list would mean the probe drove nothing at all. So the entry points are
+    /// asserted to EXIST before the silence is asserted, and the test gates on client data like
+    /// every other reader of the chain.
+    ///
+    /// What is deliberately NOT asserted here is `load_default_ui`'s own failure list. It is not
+    /// empty on a seated session today — `TargetFrame`'s OnLoad reaches
+    /// `BenillaTargetAuras_Update` (UnitFrames.xml:956), which indexes `TargetofTargetFrame`
+    /// ~1150 lines before that frame is declared (UnitFrames.xml:2103), so a seated TARGET raises
+    /// there at load. That is a real bug in that file and a separate one from anything this test
+    /// measures; pinning it here would make the probe's gate hostage to it. Recorded rather than
+    /// worked around.
     #[test]
     fn the_ui_probe_is_silent_on_a_clean_vm() {
+        let _data = benilla_formats::wow_data_or_skip!();
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
         seat_a_session(&mut script);
         let _ = crate::ui_script::load_default_ui(&script);
+        // The probe's entry points are here to be driven. Each is `try`-guarded inside
+        // `drive_ui_probe`, so a missing one is silent — which would make the assertion below
+        // pass by having done nothing.
+        for entry in [
+            "ToggleBackpack",
+            "UnitFrame_OnEnter",
+            "UnitFrame_OnLeave",
+            "ActionButton_Update",
+            "GameTooltip_SetDefaultAnchor",
+        ] {
+            assert_eq!(
+                script
+                    .eval::<String>(&format!("return type({entry})"))
+                    .unwrap(),
+                "function",
+                "{entry} is not in the VM, so the probe would skip it and this test would pass \
+                 without driving anything"
+            );
+        }
 
         let errs = drive_ui_probe(&mut script);
         assert!(

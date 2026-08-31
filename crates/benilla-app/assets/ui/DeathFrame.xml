@@ -1,7 +1,8 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <!--
-        The death arc's UI (decision 0308 slices 1/3): our death dialogs, registered on the shared
-        StaticPopup engine (UiPanels.xml), plus the event driver that raises and clears them.
+        The death arc's UI (decision 0308 slices 1/3, plus 1746's self-resurrect): our death
+        dialogs, registered on the shared StaticPopup engine (UiPanels.xml), plus the event driver
+        that raises and clears them.
 
         The patch-chain FrameXML (mpqx extraction, decision 0246) is the SPECIFICATION for what
         each dialog says, offers and answers — StaticPopup.lua l.375-505 (DEATH + RESURRECT×3),
@@ -17,14 +18,20 @@
         RESURRECT_REQUEST + CONFIRM_XP_LOSS fire from `death.rs`'s state machine;
         CORPSE_IN_RANGE/OUT_OF_RANGE/IN_INSTANCE join with the slice-2 corpse-run range gate
         (registered now — they simply don't fire yet). Deferred with 0308 §8: the SKINNED/
-        SKINNED_REPOP pair (battleground insignia) and UseSoulstone (HasSoulstone() is nil).
+        SKINNED_REPOP pair (battleground insignia).
     -->
     <Script><![CDATA[
         -- ── Strings (GlobalStrings.lua, verbatim; %% escapes as shipped) ─────────────────────────
         local DEATH_RELEASE_TIMER = "%d %s until release"
         local DEATH_RELEASE_NOTIMER = "You have died. Release to the nearest graveyard?"
         local DEATH_RELEASE = "Release Spirit"
-        local USE_SOULSTONE = "Reincarnate" -- the shaman default; OnShow overrides with HasSoulstone()'s text
+        -- Vestigial on this build, and kept anyway because it is what the reference registers:
+        -- HasSoulstone() returns a Spell.dbc NAME whenever it returns anything, and OnShow stamps
+        -- that over button2 — so the only case this default could render is one that cannot
+        -- happen (DisplayButton2 shows the button on exactly the same call). It is the pre-1.6
+        -- wording, from before "Self-resurrection spells show their name on the button" (decision
+        -- 1746); GlobalStrings still ships it with the comment "Use your soulstone if you have one".
+        local USE_SOULSTONE = "Reincarnate"
         local RECOVER_CORPSE_TEXT = "Resurrect now?"
         local RECOVER_CORPSE_TIMER = "%d %s until resurrection"
         local RECOVER_CORPSE_INSTANCE_TEXT = "You must enter the instance to recover your corpse"
@@ -63,8 +70,9 @@
         -- its per-tick DEATH text; −1 means this map has no forced release (an instance), so the
         -- static wording goes in and nothing counts down. `timeout = 0` because the countdown is
         -- the SERVER's to enforce — it force-releases at 6:00 (0308 §1) — and there is deliberately
-        -- no hideOnEscape: you cannot dismiss dying. Button2 appears only with a soulstone on you,
-        -- which is never in v1 (HasSoulstone() is nil), so a cancel falls through to the release.
+        -- no hideOnEscape: you cannot dismiss dying. Button2 appears only when the server owes us
+        -- a self-resurrect (PLAYER_SELF_RES_SPELL non-zero); without one a cancel falls through
+        -- to the release.
         register_corpse_dialog("DEATH", {
             text = DEATH_RELEASE_TIMER,
             button1 = DEATH_RELEASE,
@@ -78,7 +86,8 @@
                 if this.timeleft == -1 then
                     getglobal(name .. "Text"):SetText(DEATH_RELEASE_NOTIMER)
                 end
-                -- The soulstone names its own button ("Reincarnate", "Use Soulstone", …).
+                -- The self-res names its own button, out of Spell.dbc: "Use Soulstone" (3026,
+                -- 20758-20761), "Reincarnation" (21169), "Twisting Nether" (23700).
                 local soulstone = HasSoulstone()
                 if soulstone then
                     getglobal(name .. "Button2"):SetText(soulstone)
@@ -93,6 +102,10 @@
                 if reason ~= "clicked" then
                     return
                 end
+                -- Button2 is the self-resurrect (decision 1746): CMSG_SELF_RES, and the server
+                -- casts whatever PLAYER_SELF_RES_SPELL holds. Re-asked rather than remembered
+                -- from OnShow, exactly as the reference does — the field is the server's and can
+                -- have been spent since the dialog opened.
                 if HasSoulstone() then
                     UseSoulstone()
                 else

@@ -50,6 +50,56 @@ fn walk_run_boundary_is_twice_walk_speed() {
     assert_eq!(gait_candidates(&moving_forward(5.1), 2.5, None, None)[0], 5);
 }
 
+/// **The walk gait, composed end to end** (decision 1752) — the one assertion that says the
+/// feature actually works rather than that each half does.
+///
+/// The selector never reads `MOVEFLAG_WALK_MODE`; it reads the *speed*. So the walk gait is real
+/// only if the speed cascade and the gait cascade agree, and they agree only because the reference
+/// chose `2 × walkSpeed` as the boundary and `min(walk, run)` as the walk speed — at any vanilla
+/// speed set the walk lands strictly under its own boundary. Feed one into the other, with no
+/// hand-picked number in between, and see which clip comes out.
+#[test]
+fn the_walk_bit_reaches_the_clip_through_the_speed_and_nothing_else() {
+    use crate::creature_anim::move_flags as f;
+    let speeds = benilla_protocol::MoveSpeeds {
+        walk: 2.5,
+        run: 7.0,
+        run_back: 4.5,
+        swim: 4.722,
+        swim_back: 2.5,
+        turn_rate: std::f32::consts::PI,
+    };
+    let gait = |flags: u32| {
+        let mv = MovementState {
+            speed: crate::net::current_speed(&speeds, flags),
+            flags,
+            ..Default::default()
+        };
+        gait_candidates(&mv, speeds.walk, None, None)[0]
+    };
+    assert_eq!(gait(f::FORWARD), 5, "no walk bit: Run");
+    assert_eq!(gait(f::FORWARD | f::WALK_MODE), 4, "walk bit: Walk");
+    // Backwards is WalkBackwards(13) either way — the *speed* is what the walk bit changes there,
+    // and the clip's rate scaling is what makes it read as a walk rather than a fast reverse.
+    assert_eq!(gait(f::BACKWARD), 13);
+    assert_eq!(gait(f::BACKWARD | f::WALK_MODE), 13);
+    // …and a mount at 11.2 yd/s is not dragged under the boundary by anything above.
+    let mounted = benilla_protocol::MoveSpeeds {
+        run: 11.2,
+        ..speeds
+    };
+    let mv = MovementState {
+        speed: crate::net::current_speed(&mounted, f::FORWARD),
+        flags: f::FORWARD,
+        ..Default::default()
+    };
+    assert_eq!(
+        gait_candidates(&mv, mounted.walk, None, None)[0],
+        143,
+        "Sprint above 11"
+    );
+}
+
 #[test]
 fn boundary_scales_with_the_units_own_walk_speed() {
     assert_eq!(gait_candidates(&moving_forward(7.0), 4.0, None, None)[0], 4);
@@ -873,6 +923,7 @@ use bevy::platform::time::Instant;
         duration: Duration::from_secs(10),
         id: 1,
         grounded,
+        run_mode: true,
     };
     // Self leg: the controller's stored component says nothing about the ride — the live
     // Spline does (the client reads the active CMovement's spline flags at select time).

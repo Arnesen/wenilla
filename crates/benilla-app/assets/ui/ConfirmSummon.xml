@@ -1,0 +1,93 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!--
+        The "someone wants to summon you" dialog (decision 1747): a registry entry on the shared
+        StaticPopup engine (UiPanels.xml) plus its UIParent event arm, written against the
+        patch-chain FrameXML (mpqx extraction, decision 0246) — StaticPopup.lua l.1336-1357 (the
+        entry) and UIParent.lua l.126 / l.551-552 (the registration and the show arm). The string is
+        GlobalStrings.lua l.852, verbatim.
+
+        It belongs to no window, like the duel and binder confirms beside it: a warlock's Ritual of
+        Summoning, a meeting stone and a GM's `.summon` all arrive as the same SMSG_SUMMON_REQUEST
+        with nothing on screen.
+
+        **The event carries NO arguments** — unlike every other confirm here. The engine keeps the
+        request in four globals and the dialog reads them back through GetSummonConfirmSummoner(),
+        GetSummonConfirmAreaName() and GetSummonConfirmTimeLeft() (`crate::ui_summon`'s header
+        carries the byte pin). That is also why this entry's text starts BLANK: it is one of the
+        engine's countdown dialogs, so StaticPopup_Show writes " " and the OnUpdate tick composes
+        the real line every frame from those getters plus the remaining time.
+
+        **Accepting is the only packet in the flow.** There is no decline opcode in 1.12 and no
+        CancelSummon binding, so Cancel and ESC send nothing and the offer simply expires on the
+        server's own two-minute timer — which is also what the countdown running out means. That is
+        why this entry, like CONFIRM_BINDER, has no OnCancel.
+    -->
+    <Script><![CDATA[
+        -- ── Strings (GlobalStrings.lua, verbatim) ───────────────────────────────────────────────
+        -- %s summoner · %s area · %d count · %s the count's unit word (StaticPopupTimeUnit).
+        local CONFIRM_SUMMON =
+            "%s wants to summon you to %s.  The spell will be cancelled in %d %s." -- l.852
+        local ACCEPT = "Accept"  -- l.11
+        local CANCEL = "Cancel"  -- l.465
+
+        -- ── The confirm — answering to StaticPopup.lua l.1336-1357 ─────────────────────────────
+        -- OnShow seeds `timeleft` from the engine, which is what arms the popup engine's countdown
+        -- branch; from there the dialog ticks it down locally and hides itself at zero, sending
+        -- nothing. GetSummonConfirmTimeLeft() returns whole seconds, already truncated by the
+        -- binding (`0x48b660`), so this is the reference's own resolution and not a rounding of ours.
+        --
+        -- The OnUpdate is a COMBAT LOCK, not a teardown: you may not accept a summon while
+        -- fighting, so Button1 disables and re-enables while the dialog stays up. Every other
+        -- confirm in this folder polls to decide whether to *hide*; this one polls to decide
+        -- whether the answer is available. Cancel stays live throughout.
+        local function lockAcceptWhileInCombat(_, dialog)
+            local button = getglobal(dialog:GetName() .. "Button1")
+            if UnitAffectingCombat("player") then
+                button:Disable()
+            else
+                button:Enable()
+            end
+        end
+
+        StaticPopupDialogs["CONFIRM_SUMMON"] = {
+            text = CONFIRM_SUMMON,
+            button1 = ACCEPT,
+            button2 = CANCEL,
+            OnShow = function()
+                this.timeleft = GetSummonConfirmTimeLeft()
+            end,
+            OnAccept = function()
+                ConfirmSummon()
+            end,
+            OnUpdate = lockAcceptWhileInCombat,
+            timeout = 0,
+            -- A summon is worth interrupting a fly-by for: without this the whole question would be
+            -- cancelled unseen by StaticPopup_Show's cinematic gate, and the offer would expire
+            -- while the player watched a cutscene.
+            interruptCinematic = 1,
+            -- v1-inert in our engine (UiPanels.xml's header lists it) — transcribed because it is
+            -- part of the entry an addon may read.
+            notClosableByLogout = 1,
+            hideOnEscape = 1,
+        }
+
+        -- ── The UIParent event arm (UIParent.lua l.551-552) ────────────────────────────────────
+        -- No arguments: the getters above are the payload.
+        function BenillaConfirmSummonDriver_OnEvent()
+            if event == "CONFIRM_SUMMON" then
+                StaticPopup_Show("CONFIRM_SUMMON")
+            end
+        end
+    ]]></Script>
+
+    <Frame name="BenillaConfirmSummonDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                self:RegisterEvent("CONFIRM_SUMMON")
+            </OnLoad>
+            <OnEvent>BenillaConfirmSummonDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

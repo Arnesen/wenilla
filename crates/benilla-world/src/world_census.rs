@@ -53,8 +53,8 @@ pub struct WorldCensus<'w, 's> {
     /// The visibility authority's own pose (see [`CensusReport::pvs_eye`]).
     cull_probe: Option<Res<'w, crate::wmo_portal::WmoCullProbe>>,
     /// Which backdrop is drawing — the gradient dome, or a building's own MOSB sky
-    /// ([`crate::wmo_sky`]). Optional for the same reason as the portal terms above.
-    skybox: Option<Res<'w, crate::wmo_sky::CameraWmoSkybox>>,
+    /// ([`crate::skybox`]). Optional for the same reason as the portal terms above.
+    skybox: Option<Res<'w, crate::skybox::CameraSkybox>>,
     /// The ribbon lane's own verdict — the third effect population, counted nowhere else.
     ribbons: Option<Res<'w, crate::ribbons::RibbonVerdict>>,
     mats: Res<'w, Assets<WowModelMaterial>>,

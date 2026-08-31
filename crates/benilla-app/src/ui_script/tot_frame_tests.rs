@@ -14,8 +14,8 @@
 //!   `TargetFrame_OnUpdate`'s one-compare reconcile is for, and it has a test.
 
 use benilla_ui::script::{
-    AuraState, PartyMemberInfo, PartyState, QuadContent, RaidMemberInfo, ScriptValue, UiScript,
-    UnitState,
+    AuraState, PartyMemberInfo, PartyState, QuadContent, RaidMemberInfo, ScriptValue,
+    SelectionRequest, UiScript, UnitState,
 };
 
 /// Load one shipped `assets/ui/<file>`, panicking on any loader error (the unit-frame tests').
@@ -378,11 +378,14 @@ fn the_left_click_targets_the_unit() {
     let mut s = load_tot();
     switch_on(&mut s);
     s.run(r#"TargetofTarget_OnClick("LeftButton")"#).unwrap();
-    assert_eq!(s.take_target_requests(), vec!["targettarget".to_string()]);
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![SelectionRequest::Unit("targettarget".into())]
+    );
 
     // A right click is not a menu here: the reference gives this frame none.
     s.run(r#"TargetofTarget_OnClick("RightButton")"#).unwrap();
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

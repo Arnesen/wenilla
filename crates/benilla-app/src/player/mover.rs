@@ -1,5 +1,6 @@
 //! The kinematic mover step — the walk/fall physics and the step-down snap, split out of the
-//! `control` system ([`super`] keeps the input/camera/wire glue and the knob table this reads).
+//! `control` system ([`super::controller`] keeps the frame order; [`super`] the knob table this
+//! reads).
 //! One call per frame: [`step`].
 //!
 //! Thin kinematic controller (decision 0009) over the **one-sided** mirror of avian's
@@ -36,11 +37,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use super::{
-    move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY,
-    FOOT_CONE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT,
-    JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE,
-    STEP_UP_HEIGHT, TERMINAL_VELOCITY, WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL, WEDGE_STALL_RATIO,
-    WEDGE_STILL_FRAMES,
+    move_trace, Player, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY, FOOT_CONE_HEIGHT, GRAVITY,
+    GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT, JUMP_SPEED, LAND_PROBE, SKIN_WIDTH,
+    STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
+    WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 
 /// **The trace-mask arm `0x6315f0`, as a predicate** — the liquid surface [`step`] may stand on
@@ -124,6 +124,7 @@ pub(super) fn step(
     wire_jump: bool,
     knockback: Option<Vec3>,
     water_floor: Option<f32>,
+    nudge_speed: f32,
 ) -> Outcome {
     let dt = time.delta_secs();
     let input_horiz = if moving {
@@ -135,7 +136,7 @@ pub(super) fn step(
     let mut center = player.pos + half_h;
     // Player body collides with terrain/doodads/GameObjects + the WMO *walking* faces (not the
     // camera-only ones); the camera sweep uses its own filter (see `benilla_world::collision`).
-    let cast = |from: Vec3, disp: Vec3| world.cast_body(capsule, from, disp, SKIN_WIDTH);
+    let cast = |from: Vec3, disp: Vec3| world.cast_mover(capsule, from, disp, SKIN_WIDTH);
     let probe_down = |c: Vec3, dist: f32| cast(c, Vec3::NEG_Y * dist);
 
     // While airborne, "on the ground" means where the slide actually contacts the floor
@@ -271,11 +272,20 @@ pub(super) fn step(
         // 1620), and being knocked back mid-air is exactly what a knockback is for; the server's own
         // gate (`Unit::KnockBack`) tests stun, root and a live spline, never FALLING.
         player.vel_y = launch.y;
+        player.launch_vz = launch.y;
         player.horiz_vel = Vec3::new(launch.x, 0.0, launch.z);
         player.wedged = false;
         player.steep_support = false;
         jumped = true;
         knocked = true;
+        // **The launch plants the direction nibble, and that is what freezes the arc** — the
+        // reference's `0x617a18 or edx,0x8001` sets FORWARD and clears BACKWARD as part of the
+        // apply (decision 1740). It is set regardless of `xy_speed`, so a purely vertical knockback
+        // is just as unsteerable as a 25 yd/s one; reading the freeze off the *velocity* instead
+        // (what we did until 1740) let that case steer from the second frame. `knock_arc` also
+        // rides the wire for the arc's length, which is the half we were not sending at all.
+        player.arc_dirs_set = true;
+        player.knock_arc = true;
     } else if grounded {
         player.vel_y = 0.0;
         // **HOVER refuses the jump** — the FIRST test in `CMovement::Jump 0x7c6230`
@@ -294,23 +304,49 @@ pub(super) fn step(
         // it is the *same* jump, entered through the door the wire is given.
         if (want_jump && !player.modes.hover) || wire_jump {
             player.vel_y = JUMP_SPEED;
+            player.launch_vz = JUMP_SPEED;
             player.wedged = false;
             player.steep_support = false;
             jumped = true;
+            // The arc's nibble starts as the keys are: a jump taken with a direction held is
+            // locked to its momentum, a jump from a standstill has one steer in hand (1740).
+            player.arc_dirs_set = moving;
         }
-    } else {
-        // **Feather fall is a terminal-velocity substitution, and nothing else** (decision 0866).
-        // The reference's gravity integrate `0x7c5d20` picks its clamp from one flag test
-        // (`0x7c5d23 test [ecx+0x40], 0x20000000`) — the ordinary 60.148 or 7.0 under
-        // `MOVEFLAG_SAFE_FALL`. Gravity itself is unchanged, so a Slow Fall still *accelerates*
-        // normally for the first ~0.36 s and only then rides the cap: the drop starts like any
-        // other and settles into a drift, which is what Slow Fall looks like.
+    } else if !player.airborne_prev {
+        // **A step-off — the arc nobody launched.** The walk election calls `StartFalling(0)`, so
+        // the launch speed is exactly 0 (not the gravity-polluted first tick), which is what the
+        // wire tail sends and what splits the FALLINGFAR legs (0179). The nibble seeds from the
+        // keys like any other take-off: you walked off this ledge, so you keep your momentum.
+        player.launch_vz = 0.0;
+        player.arc_dirs_set = moving;
+    }
+
+    // **The fall step, for every airborne frame INCLUDING the take-off's** (decision 1740). It used
+    // to sit inside the `else` above, which meant a launch frame moved a whole `v₀·dt` with no
+    // gravity at all while every later frame moved at its END-of-step speed — one overshoot
+    // followed by a systematic undershoot. The reference has no such seam: `StartFalling` anchors
+    // the arc and the closed form is evaluated from `t = 0`, the launch frame included.
+    //
+    // **Feather fall is a terminal-velocity substitution, and nothing else** (decision 0866). The
+    // reference's fall-velocity query `0x7c5d20` picks the clamp from one flag test
+    // (`0x7c5d23 test [ecx+0x40], 0x20000000`) — the ordinary 60.148 or 7.0 under
+    // `MOVEFLAG_SAFE_FALL`. Gravity itself is unchanged, so a Slow Fall still *accelerates*
+    // normally for the first ~0.36 s and only then rides the cap: the drop starts like any other
+    // and settles into a drift, which is what Slow Fall looks like.
+    //
+    // `player.vel_y` keeps the END-of-step speed (the state the next frame and the wire read);
+    // `fall_mean_vy` is what this frame actually MOVES at, and for constant acceleration the mean
+    // is exact — see [`fall_step`].
+    let mut fall_mean_vy = player.vel_y;
+    if !held && !anchored && (jumped || !grounded) {
         let terminal = if player.modes.feather_fall {
             FEATHER_TERMINAL_VELOCITY
         } else {
             TERMINAL_VELOCITY
         };
-        player.vel_y = (player.vel_y - GRAVITY * dt).max(-terminal);
+        let (end_vy, mean_vy) = fall_step(player.vel_y, dt, terminal);
+        player.vel_y = end_vy;
+        fall_mean_vy = mean_vy;
     }
     let mut air_nudged = false;
     // The anchor owns the horizontal too — the wipe leaves the basis recompute nothing to build a
@@ -323,12 +359,33 @@ pub(super) fn step(
         // this frame, and the walk arm below would hand our momentum straight back to the keys.
     } else if grounded && !anchored {
         player.horiz_vel = input_horiz;
-    } else if !held && !anchored && moving && player.horiz_vel.length_squared() < 0.01 {
+    } else if !held && !anchored && moving && !player.arc_dirs_set {
         // Air control: one nudge to steer a jump that took off from a standstill (a moving jump
-        // keeps its momentum locked, since horiz_vel is already non-zero). The pressed direction
-        // *really* moves us, so it re-seeds the frozen airborne direction flags.
-        player.horiz_vel = dir.normalize_or_zero() * AIR_NUDGE_SPEED;
+        // keeps its momentum locked, because its nibble was already set at take-off). The pressed
+        // direction *really* moves us, so it re-seeds the frozen airborne direction flags.
+        //
+        // **The guard is a velocity proxy for a flag test, and the reference's is the flag**
+        // (decision 1736, wow-re `airborne-steerability.md`). `0x7c5a20`/`0x7c5c20` do not bail on
+        // FALLING — they bail on `FALLING && arg == 0`, and the two openers that pass `arg = 1`
+        // sit behind `0x7c6afc test al,0xf`: the door opens exactly while the **direction nibble
+        // `+0x40 & 0xf` is clear**. That is why a moving jump is locked, and it is a different
+        // question from "is my horizontal velocity ~zero". The two answers diverge on one input:
+        // a knockback launch plants FORWARD itself (`0x6179c0`'s `0x617a18 or edx,0x8001`), so on
+        // the reference an `xy_speed ≈ 0` knockback is STILL unsteerable, while here `knocked` is
+        // launch-frame-only and this guard sees a zero velocity and grants the nudge from frame 2.
+        // Fixing it means carrying the nibble as arc state and seeding it at the launch — 1736
+        // §Plan, deliberately not done in the round that found it.
+        //
+        // [`super::AIR_NUDGE_SPEED`] is likewise the right number for the wrong reason: the
+        // reference takes `min(MOVE_WALK, MOVE_RUN)` from the unit's live speeds (`0x7c4c90(1)`'s
+        // walk override), and 2.5 is merely the DEFAULT `MOVE_WALK` — so it is now the fallback
+        // `nudge_speed` the caller passes when the server has told us no speeds yet, not the law.
+        player.horiz_vel = dir.normalize_or_zero() * nudge_speed;
         air_nudged = true;
+        // The press sets the nibble, which is what makes this one-shot on the reference: the next
+        // press finds `+0x40 & 0xf` non-zero, `arg = 0` goes to the basis rebuild, and the bail
+        // fires. No second steer, and no drifting back toward the keys.
+        player.arc_dirs_set = true;
     }
 
     let pre_move = center;
@@ -374,7 +431,8 @@ pub(super) fn step(
         let velocity = if held || anchored {
             Vec3::ZERO
         } else {
-            player.horiz_vel + Vec3::Y * player.vel_y
+            // `fall_mean_vy`, not `player.vel_y` — the exact displacement rate for this step.
+            player.horiz_vel + Vec3::Y * fall_mean_vy
         };
         // The airborne slide is the OTHER shared resolve ([`airborne_step`]) — the same code a
         // remote mover's arc runs, so a jump meets our walls whoever is jumping (decision 0627).
@@ -502,6 +560,14 @@ pub(super) fn step(
         anchored,
     });
 
+    // The mover's own airborne record for the next step's arc-start test — see
+    // [`Player::airborne_prev`]. Held and anchored bodies are not airborne: the anchor ends the arc
+    // (0880) and the settle hold has no arc at all.
+    // `jumped ||`, not just `!grounded`: a launch frame IS the arc's first airborne frame even
+    // though the body is still standing on the floor it pushed off. Without that, the frame after a
+    // jump looks like a fresh step-off and re-seeds the arc state the launch just set — which is
+    // exactly how a standstill jump lost the one steer it is owed.
+    player.airborne_prev = !held && !anchored && (jumped || !grounded);
     Outcome {
         held,
         grounded,
@@ -594,7 +660,7 @@ pub(crate) fn grounded_step(
     support: Support,
 ) -> GroundedStep {
     let surface_offset = support.offset;
-    let cast = |from: Vec3, disp: Vec3| world.cast_body(capsule, from, disp, SKIN_WIDTH);
+    let cast = |from: Vec3, disp: Vec3| world.cast_mover(capsule, from, disp, SKIN_WIDTH);
     let speed = horiz_vel.length();
     // The step-up (decision 0209): ATOMIC — a steep face in the way triggers rise →
     // advance-this-frame's-travel-at-the-raised-height → settle onto a walkable floor, all
@@ -708,7 +774,7 @@ pub(crate) fn grounded_step(
     };
     let start = center + Vec3::Y * popped.unwrap_or(0.0);
     let mut rode = false;
-    let out = world.slide_body(
+    let out = world.slide_mover(
         capsule,
         start,
         horiz_vel,
@@ -920,6 +986,43 @@ pub(crate) fn grounded_step(
 /// ([`crate::net::motion::remote`]). Without that, a watched player who jumps into a building is
 /// drawn *inside* it for the length of the jump and pops back out on the landing packet — the
 /// airborne half of the very defect 0626 fixed on the ground (decision 0627).
+/// **One frame of the fall, integrated exactly** — the end-of-step vertical speed and the *mean*
+/// speed to move at, given the speed at the step's start.
+///
+/// Under constant acceleration the mean velocity over a step IS the exact displacement rate, so
+/// `mean · dt` is the closed form `v₀·dt − ½g·dt²`, not an approximation of it. That matters
+/// because the reference does not integrate at all: it evaluates a closed form anchored at the
+/// launch every substep (`+0x7c − D(+0x78)` via `0x7c5e70`), so its arc is frame-rate independent
+/// and cannot drift (decision 1740, wow-re `airborne-steerability.md`). Stepping at either
+/// endpoint's velocity instead of the mean loses `½·g·dt²` per frame — and both of ours did, in
+/// opposite directions:
+///
+/// - the local mover applied gravity *before* moving (semi-implicit), so it moved at the END-of-step
+///   speed and fell **low**: `½·g·dt·t` by elapsed time, = 0.066 yd at the 1.640 yd jump apex at
+///   60 fps (4.0%), 0.133 at 30 fps. The jump was exactly one frame short, and short by *more* the
+///   worse the frame rate — which a jump arc must never be;
+/// - the remote dead-reckon moved *before* applying gravity (explicit Euler), so it moved at the
+///   START-of-step speed and overshot by the same amount, floating every other player's jump.
+///
+/// The terminal clamp is handled piecewise rather than by clamping the mean, because a step that
+/// *reaches* terminal partway is two regimes: accelerating to `−terminal` at `t_c`, then coasting.
+/// Clamping the mean would under-move that one step by up to `½·g·dt²`.
+pub(crate) fn fall_step(v0: f32, dt: f32, terminal: f32) -> (f32, f32) {
+    let unclamped = v0 - GRAVITY * dt;
+    if unclamped >= -terminal {
+        // Wholly inside the clamp: mean of the endpoints, exact.
+        return (unclamped, 0.5 * (v0 + unclamped));
+    }
+    if v0 <= -terminal {
+        // Already at (or past) terminal for the whole step — constant velocity.
+        return (-terminal, -terminal);
+    }
+    // The clamp engages partway: accelerate for `t_c`, then coast the remainder.
+    let t_c = (v0 + terminal) / GRAVITY;
+    let displacement = 0.5 * (v0 - terminal) * t_c - terminal * (dt - t_c);
+    (-terminal, displacement / dt)
+}
+
 pub(crate) fn airborne_step(
     world: &benilla_world::collision::WorldCollision<'_, '_>,
     capsule: &Collider,
@@ -928,7 +1031,7 @@ pub(crate) fn airborne_step(
     dt: std::time::Duration,
 ) -> Vec3 {
     world
-        .slide_body(
+        .slide_mover(
             capsule,
             center,
             velocity,
@@ -1247,6 +1350,7 @@ pub(crate) fn step_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::player::AIR_NUDGE_SPEED;
     use crate::player::CAPSULE_RADIUS;
     use bevy::ecs::system::RunSystemOnce;
 
@@ -1269,6 +1373,9 @@ mod tests {
     fn world_from_profile(profile: &[(f32, f32)]) -> App {
         const W: f32 = 3.0;
         let mut app = App::new();
+        // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767); the
+        // real one is initialised by the world plugins, which a headless harness does not run.
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
         // avian's collider backend reads `Assets<Mesh>` and `SceneSpawner` even in a meshless
         // world, so the headless asset/scene plugins ride along.
         app.add_plugins((
@@ -1315,7 +1422,7 @@ mod tests {
             .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
                 let cast =
-                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
+                    |from: Vec3, disp: Vec3| world.cast_mover(&capsule, from, disp, SKIN_WIDTH);
                 // Approach from 1 yd back along +X at street level and stop where the kerb stops us.
                 let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5, 0.0);
                 let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
@@ -1354,7 +1461,7 @@ mod tests {
             .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
                 let cast =
-                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
+                    |from: Vec3, disp: Vec3| world.cast_mover(&capsule, from, disp, SKIN_WIDTH);
                 let start = start + Vec3::Y * (CAPSULE_HEIGHT * 0.5);
                 let run = cast(start, dir).map_or(1.0, |h| h.distance);
                 let mut center = start + dir * run;
@@ -1883,7 +1990,7 @@ mod tests {
             .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
                 let cast =
-                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
+                    |from: Vec3, disp: Vec3| world.cast_mover(&capsule, from, disp, SKIN_WIDTH);
                 // Stand the body a full kerb below the tread — the same geometry read as a 2.3 yd
                 // wall by dropping the approach to y = −2.0, where the tread is far overhead.
                 let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5 - 2.0, 0.0);
@@ -2121,6 +2228,7 @@ mod tests {
                             false,
                             None,
                             Some(SURFACE),
+                            AIR_NUDGE_SPEED,
                         );
                     }
                     player.pos.y
@@ -2193,6 +2301,7 @@ mod tests {
                             false,
                             None,
                             Some(SURFACE),
+                            AIR_NUDGE_SPEED,
                         );
                     }
                     player.pos.y
@@ -2276,6 +2385,7 @@ mod tests {
                             false,
                             None,
                             Some(SURFACE),
+                            AIR_NUDGE_SPEED,
                         );
                     }
                     player.pos
@@ -2353,8 +2463,9 @@ mod tests {
                         false,
                         None,
                         None,
+                        AIR_NUDGE_SPEED,
                     );
-                    (out.jumped, player.vel_y)
+                    (out.jumped, player.launch_vz)
                 })
             })
             .unwrap();
@@ -2403,8 +2514,9 @@ mod tests {
                         wire_jump,
                         None,
                         None,
+                        AIR_NUDGE_SPEED,
                     );
-                    (out.jumped, player.vel_y)
+                    (out.jumped, player.launch_vz)
                 };
                 (press(true, false), press(false, true))
             })
@@ -2417,7 +2529,245 @@ mod tests {
         assert_eq!(
             wire,
             (true, JUMP_SPEED),
-            "`force = 0` skips that test and takes off on the land seed `0xc0fe93d8`"
+            "`force = 0` skips that test and takes off on the land seed `0xc0fe93d8` (the launch \
+             speed, not the post-gravity `vel_y` — 1740)"
+        );
+    }
+
+    /// **The fall step is EXACT, not merely close** (decision 1740). Under constant acceleration
+    /// the mean of the endpoint velocities is the true displacement rate, so one step of `dt` and
+    /// `n` steps of `dt/n` must land on the same height — that is the whole property the reference
+    /// gets for free by evaluating a closed form, and the one both of our integrators lacked.
+    ///
+    /// The old semi-implicit form fails this: it lost `½·g·dt²` per step, so a coarser step landed
+    /// lower, which is a jump arc that changes shape with the frame rate.
+    #[test]
+    fn the_fall_step_is_frame_rate_independent() {
+        let total = 0.5_f32;
+        let drop = |steps: u32| {
+            let dt = total / steps as f32;
+            let (mut v, mut y) = (JUMP_SPEED, 0.0_f32);
+            for _ in 0..steps {
+                let (end, mean) = fall_step(v, dt, TERMINAL_VELOCITY);
+                y += mean * dt;
+                v = end;
+            }
+            y
+        };
+        // The analytic height after `total`: v₀·t − ½g·t².
+        let analytic = JUMP_SPEED * total - 0.5 * GRAVITY * total * total;
+        for steps in [1_u32, 2, 8, 30, 120] {
+            let got = drop(steps);
+            assert!(
+                (got - analytic).abs() < 1.0e-4,
+                "{steps} steps must reproduce the closed form {analytic}, got {got}"
+            );
+        }
+    }
+
+    /// The jump apex is the reference's, to the millimetre: `v₀²/2g` = 1.640 yd. The old
+    /// integrator undershot it by 4.0% at 60 fps and 8% at 30 — visible as a jump that could not
+    /// quite clear what it should (decision 1740).
+    #[test]
+    fn the_jump_apex_is_the_analytic_one_at_any_frame_rate() {
+        let apex = JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY);
+        for fps in [30.0_f32, 60.0, 144.0] {
+            let dt = 1.0 / fps;
+            let (mut v, mut y, mut high) = (JUMP_SPEED, 0.0_f32, 0.0_f32);
+            while v > -1.0 {
+                let (end, mean) = fall_step(v, dt, TERMINAL_VELOCITY);
+                y += mean * dt;
+                high = high.max(y);
+                v = end;
+            }
+            // Within one step's worth of sampling — the apex falls between frames, and that is
+            // sampling, not drift.
+            assert!(
+                (high - apex).abs() < 0.5 * GRAVITY * dt * dt + 1.0e-4,
+                "at {fps} fps the apex should be ~{apex}, got {high}"
+            );
+        }
+    }
+
+    /// **Terminal is a piecewise clamp, not a clamped mean** (decision 1740). A step that reaches
+    /// terminal partway is two regimes, and clamping the mean instead would under-move it by up to
+    /// `½·g·dt²`. Below terminal the clamp must not perturb the exact answer at all.
+    #[test]
+    fn the_terminal_clamp_is_exact_on_the_step_that_reaches_it() {
+        let dt = 1.0 / 60.0;
+        // Well below terminal: untouched by the clamp.
+        let (end, mean) = fall_step(0.0, dt, TERMINAL_VELOCITY);
+        assert!((end - -GRAVITY * dt).abs() < 1.0e-6);
+        assert!((mean - -0.5 * GRAVITY * dt).abs() < 1.0e-6);
+        // Straddling terminal: reach it at `t_c`, coast the rest.
+        let v0 = -TERMINAL_VELOCITY + 0.5 * GRAVITY * dt;
+        let (end, mean) = fall_step(v0, dt, TERMINAL_VELOCITY);
+        assert_eq!(end, -TERMINAL_VELOCITY, "the step ends at terminal");
+        let t_c = (v0 + TERMINAL_VELOCITY) / GRAVITY;
+        let want = (0.5 * (v0 - TERMINAL_VELOCITY) * t_c - TERMINAL_VELOCITY * (dt - t_c)) / dt;
+        assert!(
+            (mean - want).abs() < 1.0e-6,
+            "piecewise, not a clamped mean"
+        );
+        // Already at terminal: constant velocity, no acceleration at all.
+        let (end, mean) = fall_step(-TERMINAL_VELOCITY, dt, TERMINAL_VELOCITY);
+        assert_eq!((end, mean), (-TERMINAL_VELOCITY, -TERMINAL_VELOCITY));
+    }
+
+    /// **A knockback is unsteerable because its launch plants a direction bit — not because it is
+    /// fast** (decision 1740, wow-re `airborne-steerability.md`).
+    ///
+    /// This is the case the old gate got wrong, and it is the reason the gate changed. Air control
+    /// opens on the reference exactly while the direction nibble `[CMovement+0x40] & 0xf` is clear
+    /// (`0x7c6afc test al,0xf` guarding the only two `arg = 1` openers), and `0x6179c0`'s
+    /// `0x617a18 or edx,0x8001` plants FORWARD as part of every knockback apply — *regardless of
+    /// `speedXY`*. We tested `horiz_vel.length_squared() < 0.01` instead, a velocity proxy that
+    /// agrees for every ordinary jump and disagrees for exactly this input: a knockback with no
+    /// horizontal component at all, which the proxy reads as "standing still, may steer". Since
+    /// `Outcome::knocked` is true on the launch frame only, nothing else covered it either — the
+    /// player got 2.5 yd/s of free steering from the second frame of a purely vertical toss.
+    #[test]
+    fn a_vertical_knockback_is_no_more_steerable_than_a_fast_one() {
+        let flat: [(f32, f32); 2] = [(-3.0, 0.0), (3.0, 0.0)];
+        // Straight up, no horizontal at all — the input the old velocity proxy could not see.
+        const STRAIGHT_UP: Vec3 = Vec3::new(0.0, 12.0, 0.0);
+        let horiz = world_from_profile(&flat)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let mut player = Player::default();
+                // Frame 1: the launch.
+                let out = step(
+                    &mut player,
+                    &time,
+                    &world,
+                    &capsule,
+                    false,
+                    Vec3::ZERO,
+                    0.0,
+                    false,
+                    false,
+                    Some(STRAIGHT_UP),
+                    None,
+                    AIR_NUDGE_SPEED,
+                );
+                assert!(out.knocked && out.jumped, "the toss opened an arc");
+                assert_eq!(player.horiz_vel, Vec3::ZERO, "and it is purely vertical");
+                // Frames 2..6: airborne, and now the player leans on a movement key.
+                let mut nudged = false;
+                for _ in 0..5 {
+                    let out = step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        true,
+                        Vec3::NEG_X,
+                        7.0,
+                        false,
+                        false,
+                        None,
+                        None,
+                        AIR_NUDGE_SPEED,
+                    );
+                    nudged |= out.air_nudged;
+                }
+                (player.horiz_vel, nudged)
+            })
+            .unwrap();
+        assert_eq!(
+            horiz,
+            (Vec3::ZERO, false),
+            "the planted nibble locks the arc: no nudge fires and the body does not drift, however \
+             hard the key is held"
+        );
+    }
+
+    /// **The air-control nudge is `min(MOVE_WALK, MOVE_RUN)` off the unit's live speeds, not a
+    /// constant** (decision 1740). `0x7c5c20(1)` → `0x7c4c90(1)`, whose non-zero argument is a walk
+    /// override returning `min(+0x88, +0x8c)`. `AIR_NUDGE_SPEED`'s 2.5 is merely the *default*
+    /// `MOVE_WALK`, so the constant is right until a walk aura, a Slow or a daze moves either
+    /// speed — and the `min` is why a slowed run still cannot out-steer a walk.
+    #[test]
+    fn the_standstill_nudge_takes_the_speed_it_is_given() {
+        let flat: [(f32, f32); 2] = [(-3.0, 0.0), (3.0, 0.0)];
+        let steer = |nudge: f32| {
+            world_from_profile(&flat)
+                .world_mut()
+                .run_system_once(move |world: benilla_world::collision::WorldCollision| {
+                    let capsule = player_capsule();
+                    let mut time = Time::default();
+                    time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                    let mut player = Player::default();
+                    // Jump from a dead standstill: the nibble is clear, so one steer is in hand.
+                    step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        false,
+                        Vec3::ZERO,
+                        0.0,
+                        true,
+                        false,
+                        None,
+                        None,
+                        nudge,
+                    );
+                    // Airborne, and now a key goes down.
+                    let out = step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        true,
+                        Vec3::NEG_X,
+                        7.0,
+                        false,
+                        false,
+                        None,
+                        None,
+                        nudge,
+                    );
+                    // …and a second press must change nothing: the nibble is set now.
+                    step(
+                        &mut player,
+                        &time,
+                        &world,
+                        &capsule,
+                        true,
+                        Vec3::NEG_Z,
+                        7.0,
+                        false,
+                        false,
+                        None,
+                        None,
+                        nudge,
+                    );
+                    (out.air_nudged, player.horiz_vel)
+                })
+                .unwrap()
+        };
+        let (fired, v) = steer(2.5);
+        assert!(fired, "a standstill jump has one steer in hand");
+        assert!(
+            (v.length() - 2.5).abs() < 1.0e-4,
+            "at the speed given: {v:?}"
+        );
+        assert!(v.x < 0.0, "and in the pressed direction: {v:?}");
+        // A walk aura: the same jump steers slower, because the law reads the live speeds.
+        let (fired, v) = steer(1.0);
+        assert!(fired);
+        assert!(
+            (v.length() - 1.0).abs() < 1.0e-4,
+            "a slowed body steers slower — the constant is not the law: {v:?}"
+        );
+        // One-shot in both cases: the second press found the nibble set and did nothing.
+        assert!(
+            v.z.abs() < 1.0e-4,
+            "the second press must not steer again: {v:?}"
         );
     }
 
@@ -2463,8 +2813,9 @@ mod tests {
                         false,
                         Some(PUSH),
                         None,
+                        AIR_NUDGE_SPEED,
                     );
-                    (out.jumped, out.knocked, player.vel_y, player.horiz_vel)
+                    (out.jumped, out.knocked, player.launch_vz, player.horiz_vel)
                 };
                 (knock(false), knock(true))
             })
@@ -2477,7 +2828,8 @@ mod tests {
         );
         assert_eq!(
             vel_y, PUSH.y,
-            "the vertical is the server's take-off speed, not JUMP_SPEED ({JUMP_SPEED})"
+            "the vertical is the server's take-off speed, not JUMP_SPEED ({JUMP_SPEED}) — read off \
+             `launch_vz`, because `vel_y` has already taken this frame's gravity step (1740)"
         );
         assert_eq!(
             horiz,
@@ -2574,6 +2926,7 @@ mod tests {
                         false,
                         None,
                         Some(SURFACE),
+                        AIR_NUDGE_SPEED,
                     );
                     (player.pos.y, player.vel_y)
                 };
@@ -2651,6 +3004,7 @@ mod tests {
                             false,
                             None,
                             Some(SURFACE),
+                            AIR_NUDGE_SPEED,
                         );
                         low = low.min(player.pos.y);
                     }

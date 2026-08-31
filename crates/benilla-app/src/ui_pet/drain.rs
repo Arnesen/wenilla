@@ -62,7 +62,7 @@ pub(super) fn drain_pet_actions(
     pet: PetUnit,
     spells: Option<Res<Spells>>,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
-    scan: crate::target::EnemyScan,
+    scan: crate::target::TargetScan,
     mut seam: crate::creature_anim::AttackSeam,
 ) {
     let Some(mut script) = script else {

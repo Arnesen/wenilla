@@ -40,6 +40,7 @@
 //! | [`gameobject`] | the one USE verb + the template ask |
 //! | [`group`] | party/raid: invite, kick, leader, loot method, icons, ready checks |
 //! | [`guild`] | the guild: the two cache asks, invitations, member verbs, rank administration |
+//! | [`instance`] | the one lockout verb: reset all instances |
 //! | [`trade`] | the player-trade dance |
 //! | [`duel`] | accept and cancel |
 //! | [`mail`] | the mailbox |
@@ -70,6 +71,7 @@ mod gm_ticket;
 mod gossip;
 mod group;
 mod guild;
+mod instance;
 mod items;
 mod lifecycle;
 mod loot;
@@ -89,6 +91,7 @@ mod skills;
 mod social;
 mod spells;
 mod stable;
+mod summon;
 mod taxi;
 mod trade;
 mod trainer;

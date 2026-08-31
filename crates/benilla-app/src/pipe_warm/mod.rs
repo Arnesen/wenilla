@@ -311,8 +311,6 @@ pub(crate) struct WarmPass {
     /// The 1×1 stand-in texture [`warm_effect_lane`]'s draws bind while the pass runs (a strong
     /// handle so the asset lives exactly as long as the pass; `None` = the lane isn't warming).
     effect_tex: Option<Handle<Image>>,
-    /// Consecutive covered+in-world frames seen while idle (see [`WARM_COVER_PRESENT_FRAMES`]).
-    covered_frames: u32,
     /// **The menagerie has drained cleanly once in this process.** The warm set is a fixed
     /// variant cross built from `Startup`-populated stores (see `menagerie`) — not the resident
     /// map's art — and `PipelineCache` is process-global and never evicts, so a second pass
@@ -397,22 +395,12 @@ type WarmRigVis<'w, 's> = Query<
 /// 0737's rule: never hold a cover unbounded. A timeout fires the tripwire-adjacent warn and
 /// releases; the remaining compiles land live (the pre-0837 world, once, with a named cause).
 const WARM_TIMEOUT_SECS: f32 = 10.0;
-/// Covered frames the pass waits before spawning the menagerie, so the compile burst lands
-/// behind a cover that is ON THE GLASS. On world entry the raise frame still renders the glue
-/// (the state flips a frame later), so the FIRST covered+in-world frame is also the first frame
-/// the cover can draw — and what stays on screen while the pass runs is otherwise the previous
-/// present: the frozen character screen (the director's report). Two extra frames ≈ 33 ms of
-/// cover; the burst is seconds cold. Since 1116 the burst is paced rather than paid in one
-/// frame, so this guards the pass's first slices rather than one monolithic stall.
-const WARM_COVER_PRESENT_FRAMES: u32 = 3;
-
 #[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 fn run_warm_pass(
     mut commands: Commands,
     mut warm: ResMut<WarmPass>,
     watch: Res<PipeWatch>,
-    loading: Res<LoadingScreen>,
-    state: Res<State<ClientState>>,
+    cover: Res<crate::loading_screen::EntryCover>,
     time: Res<Time<Real>>,
     camera: Query<Entity, With<benilla_world::view::WorldCamera>>,
     rigs: Query<(Entity, Option<&ChildOf>), With<WarmRig>>,
@@ -425,14 +413,14 @@ fn run_warm_pass(
     mut cache: Local<MaterialCache>,
     shared_light: Option<Res<benilla_world::lighting::SharedLightBuffer>>,
 ) {
-    let covering = loading.covering() && *state.get() == ClientState::InWorld;
-    if !covering {
+    // `EntryCover` already IS "a loading cover is up and we are in world", counted once for the
+    // whole client (see its doc); this used to spell the pair out for itself.
+    if !cover.covering() {
         // No world cover → nothing to hold; a leftover menagerie (timeout, teleport race)
         // despawns. `done` stays true so the gate never blocks an uncovered frame.
         warm.done = true;
         warm.spawned_at = None;
         warm.effect_tex = None;
-        warm.covered_frames = 0;
         warm.showing.clear();
         despawn_rigs(&mut commands, &rigs);
         return;
@@ -452,15 +440,14 @@ fn run_warm_pass(
         // The cover just rose (or the world just became live under one): raise the gate and
         // spawn the menagerie once the camera + shared light exist (both are entry-frame-early;
         // until they do, the gate holds the cover, which is exactly right) — and once the cover
-        // has had [`WARM_COVER_PRESENT_FRAMES`] frames to reach the glass, so the burst is
-        // actually hidden (the char-screen freeze, 0962).
+        // has actually reached the glass ([`EntryCover`]), so the burst is hidden rather than
+        // holding the frozen character screen (0962).
         warm.done = false;
         let Ok(cam) = camera.single() else { return };
         let Some(light) = shared_light.as_ref() else {
             return;
         };
-        warm.covered_frames += 1;
-        if warm.covered_frames < WARM_COVER_PRESENT_FRAMES {
+        if !cover.presented() {
             return;
         }
         warm.spawned_at = Some(now);

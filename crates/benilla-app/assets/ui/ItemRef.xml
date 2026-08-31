@@ -93,7 +93,7 @@
 
     <!-- `toplevel` is the ref's (ItemRef.xml l.3) — a linked-item tooltip is a window that must
          land above the HIGH-strata frames it is opened over (decision 1318). -->
-    <GameTooltip name="ItemRefTooltip" inherits="GameTooltipTemplate" frameStrata="HIGH" toplevel="true" hidden="true">
+    <GameTooltip name="ItemRefTooltip" inherits="GameTooltipTemplate" enableMouse="true" parent="UIParent" frameStrata="HIGH" toplevel="true" hidden="true">
         <Size><AbsDimension x="128" y="64"/></Size>
         <Anchors>
             <Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="80"/></Offset></Anchor>

@@ -14,12 +14,14 @@
         physically nested `<Frame>` the way PaperDollFrame is: PaperDollFrame is declared INSIDE
         CharacterFrame.xml's own `<Frames>` tree (a real engine parent/child), while this page is a
         SEPARATE file's top-level `<Frame>` (CharacterFrame.xml is shared-tree with another session
-        this pass, so only its tab machinery is touched here — not its frame tree). `parent=` is
-        transcribed for fidelity but is a NO-OP in this engine (grepped `benilla-ui/src/loader`: the
-        XML `parent` attribute is read nowhere — only physical `<Frames>` nesting creates a real
-        parent). Position instead rides `<Anchors relativeTo="CharacterFrame">` (a NAMED
-        lookup, works regardless of tree position, the same mechanism every sibling-anchor in this
-        codebase already uses) — loaded right after `CharacterFrame.xml` in the load list so it
+        this pass, so only its tab machinery is touched here — not its frame tree). `parent=` really attaches
+        (decision 1734; the loader resolves the name globally at load and it wins over the enclosing
+        element — `shipped_xml_tests::every_declared_parent_really_attaches` asserts it on the loaded
+        tree). The line above used to say the attribute was read nowhere, which was true once and had
+        outlived itself. Position still rides `<Anchors relativeTo="CharacterFrame">` — a NAMED
+        lookup that works regardless of tree position, the same mechanism every sibling-anchor in
+        this codebase uses, kept because it is the geometry this page ships with — loaded right after
+        `CharacterFrame.xml` in the load list so it
         paints ON TOP of it (later file = higher z, the established house convention every top-level
         window already relies on implicitly). Because a true engine Hide-cascade doesn't reach a
         non-child, `CharacterFrame.xml`'s own `CharacterFrame_OnHide` was extended (its own
@@ -35,24 +37,49 @@
         ref's own real-client compositing (SkillFrame is a nested child there too, relying on the
         same cutout rather than redrawing the portrait itself).
 
-        FLAT layout (TrainerFrame.xml/TradeSkillFrame.xml's own house constraint): this window has no
-        DETAIL FontStrings needing a nested child Frame in the first place — the minimal detail pane
-        (below) is a single StatusBar instance whose own name/rank FontStrings live on ITS OWN Layers
-        (a StatusBar, like a Button, renders its own Layers fine — only a plain child `<Frame>` loses
-        them), the exact `BenillaTradeSkillRankFrame` shape TradeSkillFrame.xml already proved.
+        THE DETAIL PANE NESTS, as the ref's does. This file used to carry the FLAT-layout claim —
+        "only a plain child `<Frame>` loses [its Layers]" — quoted from TrainerFrame.xml. That claim
+        is FALSE and was retracted in decision 1517, which corrected TrainerFrame/TradeSkillFrame/
+        CraftFrame and missed this file: a fourth restatement, still asserting the constraint five
+        weeks after it was disproved. A runtime-shown child `<Frame>` renders its own `<Layers>`
+        FontStrings in this engine, and the ref's `SkillDetailScrollFrame` +
+        `SkillDetailScrollChildFrame` are therefore built here verbatim (below).
+        1517 §2 says a retracted reason is not by itself cause to move approved geometry — so the
+        mover here is not the retraction, it is DEMAND: pfUI's `skins/blizzard/character.lua` l.299-320
+        indexes `SkillDetailScrollFrameScrollBar`, `SkillDetailScrollChildFrame`, `SkillDetailCostText`
+        and `SkillDetailStatusBarUnlearnButton` by name, and its own skin then hides the scroll child
+        and reparents the three detail regions onto the scroll frame — i.e. it flattens the pane
+        ITSELF, which it can only do if the pane is nested to begin with. The pane also could not
+        keep its old size inside the ref's 296-wide viewport: the old detail bar reused the 271-wide
+        LIST-ROW template, whose 281-wide Border put the abandon button at x 312..344 against a
+        viewport ending at 318 — 26 of its 32 px clipped. So the detail bar is now the ref's OWN
+        declaration (211×15, Border 220×32, centred under the list) rather than a borrowed list row,
+        which is both what fits and what the real client draws. LOOK CHANGE, called out for the
+        director: the detail bar narrows and centres, and the ref's two `UI-ClassTrainer-ScrollBar`
+        trough textures now flank the pane's right edge (the ref draws them unconditionally, bar or
+        no bar). Reverting is one anchor + one Size.
 
         v1 DEVIATIONS (each re-cited at its own site below):
-          1. THE DETAIL PANE IS MINIMAL-PLUS-DESCRIPTION-PLUS-ABANDON: the selected skill's rank
-             StatusBar + name + the DESCRIPTION BODY (`SkillDetailDescriptionText` — ref
-             `SkillDetailDescriptionText`/`SKILL_DESCRIPTION`, real since `GetSkillLineInfo`'s 13th
-             return carries `SkillLine.dbc` col 12) + the ABANDON BUTTON
-             (`SkillDetailUnlearnButton` → the `UNLEARN_SKILL` confirm → `AbandonSkill` →
+          1. THE DETAIL PANE OMITS THE TRAINING-POINT SPEND ROW, and nothing else. Its structure
+             (`SkillDetailScrollFrame` → `SkillDetailScrollChildFrame` → `SkillDetailCostText` +
+             `SkillDetailDescriptionText` + `SkillDetailStatusBar` → `$parentUnlearnButton`) is the
+             ref's, verbatim. What stays OUT is the ref's `$parentLeftArrow`/`$parentRightArrow`/
+             `$parentLearnSkillButton` trio and the `AddSkillUp`/`RemoveSkillUp`/`BuySkillTier`
+             calls behind them — driven by `stepCost`/`rankCost`/`numTempPoints`, which
+             `GetSkillLineInfo` always reports nil/0 (0437's own named out-of-scope: 1.12 training
+             points are dead data).
+             `SkillDetailCostText` IS built, because the ref's own no-cost path is a real path, not
+             a stub: ref `SkillFrame.lua` l.361 `SkillDetailCostText:Hide()` is the branch a live
+             1.12 server always lands on, and `BenillaSkillFrame_UpdateDetail` takes exactly that
+             branch every time. An empty hidden FontString here is the reference's own behaviour,
+             not a name published to satisfy a lookup (1189/1203).
+             The ABANDON BUTTON is real: `SkillDetailStatusBarUnlearnButton` (the ref's
+             `$parentUnlearnButton`) → the `UNLEARN_SKILL` confirm → `AbandonSkill` →
              `CMSG_UNLEARN_SKILL`; the isAbandonable predicate is `SkillRaceClassInfo.flags & 0x20`
-             — the server's own gate, real 5875 data: primary professions only). STILL OMITTED:
-             the training-point spend row (the ref's `LeftArrow`/`RightArrow`/`LearnSkillButton`/
-             `SkillDetailCostText`, all driven by `stepCost`/`rankCost`, which `GetSkillLineInfo`
-             always reports nil/0 — 0437's own named out-of-scope: 1.12 training points are dead
-             data).
+             — the server's own gate, real 5875 data: primary professions only. It used to be
+             published as `SkillDetailUnlearnButton`, a name the reference does not have, while the
+             comment directly above it cited `$parentUnlearnButton` correctly — the fifth instance
+             this session of right-behaviour-under-a-private-name (1189).
           2. NO SORT CHECKBOX (ref l.215-241's own XML-commented-out "Replace once code is ready..."
              `SkillSortButton`): the ref itself ships this dead/commented, so there is nothing to
              transcribe (TradeSkillFrame.xml's own "ref's own dead code is dropped" precedent).
@@ -94,7 +121,14 @@
     -->
     <Script><![CDATA[
         -- ── Constants (ref SkillFrame.lua:1-2) ──────────────────────────────────────────────────────
-        local SKILLFRAME_SKILLS_DISPLAYED = 12 -- SKILLS_TO_DISPLAY
+        -- SKILLS_TO_DISPLAY is the reference's own GLOBAL and is published as one. It was a chunk
+        -- local named SKILLS_TO_DISPLAY with the real name in a trailing comment — the
+        -- value transcribed, the NAME kept private, which is the same shape that cost us
+        -- BlackoutWorld and the five SkillFrame* children. Addons read it: pfUI's character skin
+        -- loops `for i = 1, SKILLS_TO_DISPLAY` over the row labels
+        -- (skins/blizzard/character.lua:277) and died on "'for' limit must be a number".
+        -- 12 is honest here rather than copied — this file declares exactly 12 SkillTypeLabel rows.
+        SKILLS_TO_DISPLAY = 12
         local SKILLFRAME_SKILL_HEIGHT = 15     -- SKILLFRAME_SKILL_HEIGHT
 
         -- GlobalStrings (ref GlobalStrings.lua:3478), chunk-local per the codebase idiom — safe
@@ -186,9 +220,14 @@
         -- same fill (ref l.220-226): shown only for an abandonable line, carrying the name the
         -- confirm popup formats and the index its accept abandons.
         function BenillaSkillFrame_UpdateDetail()
-            local bar = getglobal("SkillDetailBar")
+            local bar = getglobal("SkillDetailStatusBar")
             local desc = getglobal("SkillDetailDescriptionText")
-            local unlearn = getglobal("SkillDetailUnlearnButton")
+            local unlearn = getglobal("SkillDetailStatusBarUnlearnButton")
+            -- The ref's own no-cost branch (ref SkillFrame.lua l.361), taken unconditionally:
+            -- stepCost/rankCost are always nil on a 1.12 server (deviation 1). Hidden here rather
+            -- than left `hidden="true"` from XML so the branch is visible as a branch — the ref
+            -- shows this string on the paths we don't have, and this is where it would be re-shown.
+            getglobal("SkillDetailCostText"):Hide()
             local index = GetSelectedSkill()
             if index == 0 then
                 bar:Hide()
@@ -297,14 +336,14 @@
         function BenillaSkillFrame_Update()
             local numRows = GetNumSkillLines()
             local scrollFrame = getglobal("SkillListScrollFrame")
-            FauxScrollFrame_Update(scrollFrame, numRows, SKILLFRAME_SKILLS_DISPLAYED, SKILLFRAME_SKILL_HEIGHT)
+            FauxScrollFrame_Update(scrollFrame, numRows, SKILLS_TO_DISPLAY, SKILLFRAME_SKILL_HEIGHT)
             local offset = FauxScrollFrame_GetOffset(scrollFrame)
 
             local highlight = getglobal("SkillHighlight")
             highlight:Hide()
             local selected = GetSelectedSkill()
 
-            for i = 1, SKILLFRAME_SKILLS_DISPLAYED do
+            for i = 1, SKILLS_TO_DISPLAY do
                 local index = i + offset
                 BenillaSkillFrame_SetRow(i, index, numRows)
                 if selected == index and index <= numRows then
@@ -321,7 +360,7 @@
                     allExpanded = false
                 end
             end
-            local collapseAll = getglobal("SkillCollapseAllButton")
+            local collapseAll = getglobal("SkillFrameCollapseAllButton")
             if numRows == 0 then
                 collapseAll:Disable()
             else
@@ -336,7 +375,7 @@
             end
 
             BenillaSkillFrame_UpdateDetail()
-            BenillaSkillExpandButtonFrame_Fit()
+            BenillaSkillFrameExpandButtonFrame_Fit()
         end
 
         -- A rank-bar click selects it (ref SkillBar_OnClick, l.450-455).
@@ -374,8 +413,8 @@
         -- The collapse-all tab (ref SkillFrameCollapseAllButton's own isExpanded flag, l.303-309,
         -- driven the TrainerFrame.xml BenillaTrainerCollapseAllButton way since this engine's
         -- CollapseSkillHeader(0)/ExpandSkillHeader(0) already fold/unfold every group at once).
-        function BenillaSkillCollapseAllButton_OnClick()
-            local b = getglobal("SkillCollapseAllButton")
+        function BenillaSkillFrameCollapseAllButton_OnClick()
+            local b = getglobal("SkillFrameCollapseAllButton")
             if b.collapsed then
                 ExpandSkillHeader(0)
             else
@@ -399,11 +438,11 @@
         -- two opposing anchors and no Lua width — UiPanels.xml's tab-highlight note — but a span
         -- can only be resolved from two anchors when both edges are frames; a text width has to be
         -- asked for.)
-        function BenillaSkillExpandButtonFrame_Fit()
-            local label = getglobal("SkillCollapseAllButton")
+        function BenillaSkillFrameExpandButtonFrame_Fit()
+            local label = getglobal("SkillFrameCollapseAllButton")
             local w = label:GetTextWidth()
             if w and w > 0 then
-                getglobal("SkillExpandButtonFrame"):SetWidth(w + 45)
+                getglobal("SkillFrameExpandButtonFrame"):SetWidth(w + 45)
             end
         end
 
@@ -430,16 +469,6 @@
             local frame = this
             frame:RegisterEvent("SKILL_LINES_CHANGED")
             getglobal("SkillListScrollFrame").updateFunc = BenillaSkillFrame_Update
-            -- The description body hangs under the detail bar — anchored here, not in XML,
-            -- because the bar is a child frame declared after the page's layers and anchors
-            -- resolve at SetPoint time (an XML forward reference silently lands on the page;
-            -- the MailFrame error-text OnLoad precedent, ref MailFrame.xml l.1040). Cleared
-            -- first: the load-time implicit anchor (decision 1310) seated this justifyH="LEFT"
-            -- string at the page's LEFT, and SetPoint replaces only its own point -- without the
-            -- clear both anchors stand and the left/center edges resolve off the page, not the
-            -- bar. (The ref needs no clear on ITS file only because its XML anchors the string.)
-            SkillDetailDescriptionText:ClearAllPoints()
-            SkillDetailDescriptionText:SetPoint("TOPLEFT", "SkillDetailBar", "BOTTOMLEFT", -2, -10)
         end
 
         function SkillFrame_OnShow()
@@ -561,16 +590,6 @@
                     <Anchors><Anchor point="LEFT" relativeTo="SkillHorizontalBarLeft" relativePoint="RIGHT"/></Anchors>
                     <TexCoords left="0" right="0.29296875" top="0.25" bottom="0.5"/>
                 </Texture>
-                <!-- The detail pane's description body (ref SkillDetailDescriptionText, l.579-591:
-                     GameFontHighlightSmall, 275 wide, justified LEFT/TOP). The ref hangs it inside
-                     its SkillDetailScrollChildFrame; this page's flat layout (header comment) has
-                     no such child, so it hangs under the detail bar instead — the same pane
-                     position, minus the (never-needed for one sentence) scroll machinery. The
-                     anchor is set in SkillFrame_OnLoad, NOT here: the bar is a child frame
-                     declared below and an XML forward reference silently lands on the page. -->
-                <FontString name="SkillDetailDescriptionText" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP" hidden="true">
-                    <Size><AbsDimension x="275" y="0"/></Size>
-                </FontString>
             </Layer>
         </Layers>
         <Frames>
@@ -595,13 +614,13 @@
                  label's seat. Was a fixed 54 with a fixed 38 middle, copied off
                  TrainerFrame.xml rather than read off THIS ref; the label's own font fix below
                  (12px, not 10) would have run under the right cap at that width. -->
-            <Frame name="SkillExpandButtonFrame">
+            <Frame name="SkillFrameExpandButtonFrame">
                 <Size><AbsDimension x="54" y="32"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-49"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="BACKGROUND">
-                    <Texture name="SkillExpandTabLeft" file="Interface\QuestFrame\UI-QuestLogSortTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
-                    <Texture name="SkillExpandTabRight" file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
-                    <Texture name="SkillExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="0" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="SkillExpandTabRight" relativePoint="LEFT"/></Anchors></Texture>
+                    <Texture name="SkillFrameExpandTabLeft" file="Interface\QuestFrame\UI-QuestLogSortTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture name="SkillFrameExpandTabRight" file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture name="SkillFrameExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="0" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="SkillFrameExpandTabLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="SkillFrameExpandTabRight" relativePoint="LEFT"/></Anchors></Texture>
                 </Layer></Layers>
                 <Frames>
                     <!-- The ALL fold (ref SkillFrameCollapseAllButton, l.292-310). Its face is the
@@ -618,17 +637,17 @@
                          texture's geometric middle, so the label rides 3px low, not 3px high — the
                          +3 copied from TrainerFrame.xml put the whole "- All" 6px above where the
                          reference seats it. -->
-                    <Button name="SkillCollapseAllButton" text="ALL">
+                    <Button name="SkillFrameCollapseAllButton" text="ALL">
                         <Size><AbsDimension x="40" y="22"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="SkillExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="-3" y="-3"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="LEFT" relativeTo="SkillFrameExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="-3" y="-3"/></Offset></Anchor></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors></NormalTexture>
                         <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors></HighlightTexture>
                         <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="25" y="0"/></Offset></Anchor></Anchors></ButtonText>
                         <NormalFont inherits="GameFontHighlight" justifyH="LEFT"/>
-                        <Scripts><OnClick>BenillaSkillCollapseAllButton_OnClick()</OnClick></Scripts>
+                        <Scripts><OnClick>BenillaSkillFrameCollapseAllButton_OnClick()</OnClick></Scripts>
                     </Button>
                 </Frames>
-                <Scripts><OnLoad>BenillaSkillExpandButtonFrame_Fit()</OnLoad></Scripts>
+                <Scripts><OnLoad>BenillaSkillFrameExpandButtonFrame_Fit()</OnLoad></Scripts>
             </Frame>
 
             <!-- The page's own CLOSE button (ref SkillFrameCancelButton, l.339-357: 80x22,
@@ -687,62 +706,159 @@
             <!-- 12 rank-bar slots (ref SkillRankFrame1..12, l.746-853): 271×15, row1 TOPLEFT(38,-79);
                  rows 2-12 chain BOTTOMLEFT→TOPLEFT by (0,-3) — the SAME 18px pitch as the label chain
                  (15 bar height + 3 gap). -->
-            <StatusBar name="SkillRankFrame1" inherits="BenillaSkillRankTemplate">
+            <StatusBar name="SkillRankFrame1" inherits="BenillaSkillRankTemplate" id="1">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="38" y="-79"/></Offset></Anchor></Anchors>
             </StatusBar>
-            <StatusBar name="SkillRankFrame2" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame3" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame4" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame5" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame6" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame7" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame8" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame9" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame10" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame11" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
-            <StatusBar name="SkillRankFrame12" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame2" inherits="BenillaSkillRankTemplate" id="2"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame3" inherits="BenillaSkillRankTemplate" id="3"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame4" inherits="BenillaSkillRankTemplate" id="4"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame5" inherits="BenillaSkillRankTemplate" id="5"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame6" inherits="BenillaSkillRankTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame7" inherits="BenillaSkillRankTemplate" id="7"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame8" inherits="BenillaSkillRankTemplate" id="8"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame9" inherits="BenillaSkillRankTemplate" id="9"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame10" inherits="BenillaSkillRankTemplate" id="10"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame11" inherits="BenillaSkillRankTemplate" id="11"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="SkillRankFrame12" inherits="BenillaSkillRankTemplate" id="12"><Anchors><Anchor point="TOPLEFT" relativeTo="SkillRankFrame11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
 
             <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
                  container over the 12 rows; only its right-hand Slider scroll bar renders. Sized to the
-                 12-row span (SKILLFRAME_SKILLS_DISPLAYED × 18px pitch), TrainerFrame.xml's own
+                 12-row span (SKILLS_TO_DISPLAY × 18px pitch), TrainerFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in SkillFrame_OnLoad. -->
             <Frame name="SkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="216"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-79"/></Offset></Anchor></Anchors>
             </Frame>
 
-            <!-- The minimal detail pane (this file's header comment, deviation 1): the selected
-                 skill's own rank StatusBar + name — no description/abandon/spend row. Reuses the SAME
-                 rank template the list rows use (its Border click is harmless here: no .skillIndex is
-                 ever set on this instance, so BenillaSkillRankFrame_OnClick's guard no-ops it). -->
-            <StatusBar name="SkillDetailBar" inherits="BenillaSkillRankTemplate" hidden="true">
-                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="38" y="-325"/></Offset></Anchor></Anchors>
-                <Frames>
-                    <!-- The unlearn (abandon) button (ref $parentUnlearnButton, ref SkillFrame.xml
-                         l.705-737, verbatim art/geometry): the red circle-slash right of the bar's
-                         Border, shown by UpdateDetail only for an abandonable line. HitRectInsets
-                         transcribed-inert (no loader wiring — CharacterFrame.xml's engine-gap note).
-                         Handlers are chunk functions (the chunk-boundary rule — OnEnter reads the
-                         chunk-local UNLEARN_SKILL_TOOLTIP). -->
-                    <Button name="SkillDetailUnlearnButton" hidden="true">
-                        <Size><AbsDimension x="32" y="32"/></Size>
-                        <Anchors>
-                            <Anchor point="LEFT" relativeTo="SkillDetailBarBorder" relativePoint="RIGHT">
-                                <Offset><AbsDimension x="-2" y="-1"/></Offset>
-                            </Anchor>
-                        </Anchors>
-                        <HitRectInsets><AbsInset left="9" right="7" top="-7" bottom="10"/></HitRectInsets>
-                        <Scripts>
-                            <OnClick>BenillaSkillUnlearnButton_OnClick(self)</OnClick>
-                            <OnEnter>BenillaSkillUnlearnButton_OnEnter(self)</OnEnter>
-                            <OnLeave>GameTooltip:Hide()</OnLeave>
-                        </Scripts>
-                        <NormalTexture file="Interface\Buttons\CancelButton-Up"/>
-                        <PushedTexture file="Interface\Buttons\CancelButton-Down"/>
-                        <HighlightTexture file="Interface\Buttons\CancelButton-Highlight" alphaMode="ADD"/>
-                    </Button>
-                </Frames>
-            </StatusBar>
+            <!-- ═══ THE DETAIL PANE ═══ ref SkillFrame.xml l.513-747, transcribed as the ref
+                 declares it (header: the FLAT-layout claim this file used to carry is retracted,
+                 decision 1517). A real ScrollFrame over a real scroll child; `scrollBarHideable`
+                 keeps the bar off, which for a one-paragraph description is every time. The two
+                 flanking textures are the ref's own trough art on the SCROLL FRAME's own Layers
+                 (ItemTextFrame.xml's ItemTextScrollFrame is this file's precedent for both) — the
+                 ref draws them unconditionally, so they stand whether or not the bar does.
+                 The scroll range is the child's whole SUBTREE box (decision 1338), which is why
+                 the ref's 320x50 child is not the undersized thing it looks like. -->
+            <ScrollFrame name="SkillDetailScrollFrame" inherits="UIPanelScrollFrameTemplate">
+                <Size><AbsDimension x="296" y="107"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="SkillListScrollFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-ScrollBar">
+                            <Size><AbsDimension x="30" y="100"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-3" y="5"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="0.46875" top="0" bottom="0.78125"/>
+                        </Texture>
+                        <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-ScrollBar">
+                            <Size><AbsDimension x="30" y="100"/></Size>
+                            <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="-2"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0.53125" right="1.0" top="0.21875" bottom="1.0"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <!-- A handler declared on an instance REPLACES the template's, it does not
+                         chain (ItemTextFrame.xml's own note), so the template's OnLoad is re-called
+                         by hand before this instance's own line. -->
+                    <OnLoad>
+                        ScrollFrame_OnLoad()
+                        self.scrollBarHideable = 1
+                    </OnLoad>
+                </Scripts>
+                <ScrollChild>
+                    <Frame name="SkillDetailScrollChildFrame">
+                        <Size><AbsDimension x="320" y="50"/></Size>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <!-- The training-point price tag (ref l.567-577). Built, never
+                                     filled: `GetSkillLineInfo` reports no stepCost/rankCost on a
+                                     1.12 server, so BenillaSkillFrame_UpdateDetail takes the ref's
+                                     OWN no-cost branch (ref SkillFrame.lua l.361) and hides it —
+                                     deviation 1. It still earns its place as the DESCRIPTION's
+                                     anchor target, which is the ref's own arrangement. -->
+                                <FontString name="SkillDetailCostText" inherits="GameFontNormalSmall" justifyH="CENTER" hidden="true">
+                                    <Size><AbsDimension x="200" y="0"/></Size>
+                                    <Anchors><Anchor point="CENTER" relativeTo="$parent" relativePoint="TOP"><Offset><AbsDimension x="-10" y="-40"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <!-- The description body (ref l.579-591). Its anchor is XML now:
+                                     the flat layout had to set it in SkillFrame_OnLoad because the
+                                     bar was a forward reference on the page, and inside the child
+                                     the ref's own static TOP anchor resolves. -->
+                                <FontString name="SkillDetailDescriptionText" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP" hidden="true">
+                                    <Size><AbsDimension x="275" y="0"/></Size>
+                                    <Anchors><Anchor point="TOP" relativeTo="$parent" relativePoint="TOP"><Offset><AbsDimension x="-5" y="-35"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <!-- The selected skill's rank bar (ref l.594-747), the ref's OWN
+                                 declaration rather than the borrowed 271-wide list row it used to
+                                 be: 211x15 under a 220x32 Border, centred on the child's TOP. The
+                                 Border is a TEXTURE here, as the ref has it — the list row's
+                                 Border is a Button because a row is clickable, and the detail bar
+                                 is not, so the old "its Border click is harmless here" hedge is
+                                 gone with the borrowing. Names match the list template's
+                                 ($parentSkillName/$parentSkillRank/$parentBackground), so
+                                 BenillaSkillFrame_PaintBar drives both unchanged. -->
+                            <StatusBar name="SkillDetailStatusBar" drawLayer="BACKGROUND" minValue="0" maxValue="1" defaultValue="0" hidden="true">
+                                <Size><AbsDimension x="211" y="15"/></Size>
+                                <Anchors>
+                                    <Anchor point="CENTER" relativeTo="SkillDetailScrollChildFrame" relativePoint="TOP"><Offset><AbsDimension x="-10" y="-20"/></Offset></Anchor>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <Texture name="$parentBorder" file="Interface\PaperDollInfoFrame\UI-Character-Skills-BarBorder">
+                                            <Size><AbsDimension x="220" y="32"/></Size>
+                                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                                        </Texture>
+                                        <FontString name="$parentSkillName" inherits="GameFontNormalSmall">
+                                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="6" y="1"/></Offset></Anchor></Anchors>
+                                        </FontString>
+                                        <FontString name="$parentSkillRank" inherits="GameFontHighlightSmall">
+                                            <Size><AbsDimension x="128" y="0"/></Size>
+                                        </FontString>
+                                    </Layer>
+                                    <Layer level="BACKGROUND">
+                                        <Texture name="$parentBackground">
+                                            <Color r="1.0" g="1.0" b="1.0" a="0.2"/>
+                                        </Texture>
+                                    </Layer>
+                                </Layers>
+                                <Frames>
+                                    <!-- The abandon button (ref $parentUnlearnButton, l.705-737,
+                                         verbatim art/geometry): the red circle-slash right of the
+                                         Border, shown by UpdateDetail only for an abandonable line.
+                                         HitRectInsets transcribed-inert (no loader wiring —
+                                         CharacterFrame.xml's engine-gap note). Handlers are chunk
+                                         functions (the chunk-boundary rule — OnEnter reads the
+                                         chunk-local UNLEARN_SKILL_TOOLTIP). -->
+                                    <Button name="$parentUnlearnButton" hidden="true">
+                                        <Size><AbsDimension x="32" y="32"/></Size>
+                                        <Anchors>
+                                            <Anchor point="LEFT" relativeTo="$parentBorder" relativePoint="RIGHT">
+                                                <Offset><AbsDimension x="-2" y="-1"/></Offset>
+                                            </Anchor>
+                                        </Anchors>
+                                        <HitRectInsets><AbsInset left="9" right="7" top="-7" bottom="10"/></HitRectInsets>
+                                        <Scripts>
+                                            <OnClick>BenillaSkillUnlearnButton_OnClick(self)</OnClick>
+                                            <OnEnter>BenillaSkillUnlearnButton_OnEnter(self)</OnEnter>
+                                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                                        </Scripts>
+                                        <NormalTexture file="Interface\Buttons\CancelButton-Up"/>
+                                        <PushedTexture file="Interface\Buttons\CancelButton-Down"/>
+                                        <HighlightTexture file="Interface\Buttons\CancelButton-Highlight" alphaMode="ADD"/>
+                                    </Button>
+                                </Frames>
+                                <BarTexture name="$parentBar" file="Interface\PaperDollInfoFrame\UI-Character-Skills-Bar"/>
+                                <BarColor r="0.25" g="0.25" b="0.75"/>
+                            </StatusBar>
+                        </Frames>
+                    </Frame>
+                </ScrollChild>
+            </ScrollFrame>
         </Frames>
         <Scripts>
             <OnLoad>SkillFrame_OnLoad()</OnLoad>

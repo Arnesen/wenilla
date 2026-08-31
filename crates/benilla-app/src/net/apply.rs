@@ -45,9 +45,10 @@ use loot::{
     loot_response, loot_roll, loot_roll_won, loot_start_roll,
 };
 use quests::{
-    quest_complete, quest_detail, quest_failed, quest_giver_failed, quest_giver_invalid,
-    quest_giver_status, quest_greeting, quest_log_full, quest_objective_item, quest_objective_kill,
-    quest_objectives_complete, quest_offer, quest_progress, quest_template,
+    quest_complete, quest_confirm_accept, quest_detail, quest_failed, quest_giver_failed,
+    quest_giver_invalid, quest_giver_status, quest_greeting, quest_log_full, quest_objective_item,
+    quest_objective_kill, quest_objectives_complete, quest_offer, quest_progress,
+    quest_push_result, quest_template,
 };
 use spells::{
     action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
@@ -166,7 +167,14 @@ pub(super) fn apply_net_updates(
         ),
         ResMut<crate::ui_chat::ChatLog>,
         ResMut<crate::ui_quest::QuestGiver>,
-        ResMut<crate::ui_quest_log::QuestLog>,
+        // Nested pair (the tuple is at the 16-param ceiling): the quest-log template cache, and
+        // the party quest-share state (decision 1733) — the verdicts on a quest we pushed and the
+        // escort confirm. Same family, one slot; unlike most nestings here these two genuinely
+        // belong together, since a share is a quest-log verb.
+        (
+            ResMut<crate::ui_quest_log::QuestLog>,
+            ResMut<crate::ui_quest_share::QuestShare>,
+        ),
         ResMut<crate::go_templates::GameObjectTemplates>,
         ResMut<crate::net::HomeBind>,
         ResMut<crate::net::Proficiencies>,
@@ -258,13 +266,22 @@ pub(super) fn apply_net_updates(
                 // survive walking away from the registrar.
                 ResMut<crate::ui_petition::GuildRegistrarState>,
                 ResMut<crate::ui_petition::PetitionState>,
+                // The pending summon question (decision 1747) — `SMSG_SUMMON_REQUEST` parks the
+                // summoner's guid, zone and expiry here and `crate::ui_summon` turns it into the
+                // CONFIRM_SUMMON dialog, whose Accept is the only packet in the flow.
+                ResMut<crate::ui_summon::SummonState>,
+                // The instance-lockout bookkeeping (decision 1748) — four of its six packets
+                // queue a GlobalStrings-templated chat line here for `crate::ui_instance` to
+                // resolve against the VM, and two write the latch behind
+                // `CanShowResetInstances()`.
+                ResMut<crate::ui_instance::InstanceState>,
             ),
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
     // and the cast-bar feed (decision 0137), plus the item-lock bookkeeping the inventory-failure
     // arm also drains (decision 0216 §4 / 0218 §3 — this apply site has no `UiScript` to fire
-    // `ITEM_LOCK_CHANGED` through, so the transitioned slots queue in `LockClearedByFailure` for
+    // `ITEM_LOCK_CHANGED` through, so the transitioned slots queue in `LockTransitions` for
     // the container feed to pick up).
     mut ui_actions: (
         ResMut<crate::ui_action::PlayerActions>,
@@ -288,7 +305,7 @@ pub(super) fn apply_net_updates(
         ResMut<crate::ui_loot::LootErrors>,
         ResMut<crate::ui_cast::CastBarFeed>,
         ResMut<crate::pending_item_ops::PendingItemOps>,
-        ResMut<crate::pending_item_ops::LockClearedByFailure>,
+        ResMut<crate::pending_item_ops::LockTransitions>,
         // Nested pair (the tuple is at the ceiling): the two NPC-service windows' error queues,
         // each drained onto its window's red line by its own feed.
         (
@@ -404,7 +421,7 @@ pub(super) fn apply_net_updates(
         (mut loot, mut loot_latch, mut loot_rolls),
         mut chat_log,
         mut quest,
-        mut quest_log,
+        (mut quest_log, mut quest_share),
         mut go_templates,
         mut home_bind,
         mut proficiencies,
@@ -442,6 +459,8 @@ pub(super) fn apply_net_updates(
                 mut gm_ticket,
                 mut registrar,
                 mut petition,
+                mut summon,
+                mut instances,
             ),
         ),
     ) = caches;
@@ -549,6 +568,7 @@ pub(super) fn apply_net_updates(
                     &mut chat_log,
                     &mut quest,
                     &mut quest_log,
+                    &mut quest_share,
                     &mut death_net,
                     &mut group,
                     &mut taxi,
@@ -659,6 +679,10 @@ pub(super) fn apply_net_updates(
                 );
             }
             SessionEvent::ObjectValues { guid, fields } => {
+                // Our corpse's own `CORPSE_FIELD_FLAGS` can flip to BONES under a live guid; the
+                // reclaim latch is re-asked on that edge, as the reference's `FLAGS` mirror
+                // handler `0x5d6d60` does (1729).
+                death::recheck_corpse(guid, &fields, &self_guid, &mut death_net);
                 objects::object_values(guid, fields, &index, &mut stores, &mut pending, &mut items)
             }
             SessionEvent::ObjectDestroyed(guid) => {
@@ -688,6 +712,7 @@ pub(super) fn apply_net_updates(
                 stop,
                 duration_ms,
                 flying,
+                run_mode,
             } => objects::monster_move(
                 guid,
                 start,
@@ -697,6 +722,7 @@ pub(super) fn apply_net_updates(
                 stop,
                 duration_ms,
                 flying,
+                run_mode,
                 &mut commands,
                 &index,
                 &mut transforms,
@@ -793,6 +819,32 @@ pub(super) fn apply_net_updates(
                 });
             }
             SessionEvent::BinderConfirm { binder: npc } => binder.ask(npc),
+            // Someone is asking to pull us to them (decision 1747). The reference gates this in
+            // the HANDLER, not the dialog: a dead or ghost player's request is dropped before the
+            // latch, so it cannot disturb a live question either (`0x5e6194`). The predicate is
+            // `0x605f30` — **health ≤ 0 OR (is-player AND `PLAYER_FLAGS` ghost bit)**, which is
+            // both of these accessors and not the one `unit_is_dead` alone would give (a ghost's
+            // wire health is 1). A self object we have not streamed yet reads as alive: the
+            // reference's own default (`0x5e6189` sends a NULL object through to the latch).
+            SessionEvent::SummonRequest {
+                summoner,
+                zone,
+                delay_ms,
+            } => {
+                let dead_or_ghost = self_guid
+                    .0
+                    .and_then(|g| index.0.get(&g))
+                    .and_then(|e| stores.get(*e).ok())
+                    .is_some_and(|s| s.0.unit_is_dead() || s.0.player_is_ghost());
+                crate::ui_summon::apply::request(
+                    summoner,
+                    zone,
+                    delay_ms,
+                    dead_or_ghost,
+                    aura.1.elapsed_secs_f64(),
+                    &mut summon,
+                );
+            }
             // The GM ticket answers (decision 1673). The GETTICKET arm takes EVERY answer,
             // including `None` ("you have no ticket") and including an unsolicited one pushed by a
             // GM's `.ticket view`/`escalate`/`complete` — they are indistinguishable on the wire
@@ -995,6 +1047,23 @@ pub(super) fn apply_net_updates(
                 chat::chat_player_not_found(&name, &mut chat_log)
             }
             SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut chat_log),
+            // The four world broadcasts — parked for `ui_chat::broadcast`'s resolve pass, which
+            // owns the AreaTable/ServerMessages lookups and the joined-defense-channel walk.
+            SessionEvent::ZoneUnderAttack { area_id } => chat::broadcast(
+                crate::ui_chat::Broadcast::ZoneUnderAttack { area_id },
+                &mut chat_log,
+            ),
+            SessionEvent::DefenseMessage { zone_id, text } => chat::broadcast(
+                crate::ui_chat::Broadcast::Defense { zone_id, text },
+                &mut chat_log,
+            ),
+            SessionEvent::ServerMessage { message_type, text } => chat::broadcast(
+                crate::ui_chat::Broadcast::Server { message_type, text },
+                &mut chat_log,
+            ),
+            SessionEvent::ChatRestricted => {
+                chat::broadcast(crate::ui_chat::Broadcast::ChatRestricted, &mut chat_log)
+            }
             SessionEvent::Notification { text } => chat::notification(text, &mut ui_actions.14),
             SessionEvent::AreaTriggerMessage { text } => {
                 chat::area_trigger_message(text, &mut ui_actions.14)
@@ -1090,6 +1159,28 @@ pub(super) fn apply_net_updates(
                 self_guid.0,
                 social.is_ignored(challenger),
             ),
+            // ── The instance/raid lockout family (decision 1748): four lines the client
+            // composes itself out of GlobalStrings, and the two-packet latch behind the SELF
+            // menu's reset row. The lines are QUEUED — resolving them needs the VM, which this
+            // drain has no access to (decision 0669's split) ──
+            SessionEvent::RaidInstanceMessage { message } => {
+                crate::ui_instance::apply::raid_instance_message(&mut instances, message);
+            }
+            SessionEvent::InstanceSaveCreated { flag } => {
+                crate::ui_instance::apply::instance_save_created(&mut instances, flag);
+            }
+            SessionEvent::InstanceReset { map } => {
+                crate::ui_instance::apply::instance_reset(&mut instances, map);
+            }
+            SessionEvent::InstanceResetFailed { failure } => {
+                crate::ui_instance::apply::instance_reset_failed(&mut instances, failure);
+            }
+            SessionEvent::UpdateLastInstance { map } => {
+                crate::ui_instance::apply::update_last_instance(&mut instances, map);
+            }
+            SessionEvent::UpdateInstanceOwnership { owns } => {
+                crate::ui_instance::apply::update_instance_ownership(&mut instances, owns);
+            }
             SessionEvent::DuelOutOfBounds => crate::ui_duel::apply::bounds(&mut duel, true),
             SessionEvent::DuelInBounds => crate::ui_duel::apply::bounds(&mut duel, false),
             SessionEvent::DuelComplete { started } => {
@@ -1654,7 +1745,7 @@ pub(super) fn apply_net_updates(
                 quest_giver_status(npc, status, &mut quest)
             }
             SessionEvent::QuestGreeting(list) => quest_greeting(list, &mut quest),
-            SessionEvent::QuestDetail(d) => quest_detail(d, &mut quest),
+            SessionEvent::QuestDetail(d) => quest_detail(d, &mut quest, &net_commands),
             SessionEvent::QuestProgress(p) => quest_progress(p, &mut quest),
             SessionEvent::QuestOffer(o) => quest_offer(o, &mut quest),
             SessionEvent::QuestComplete(c) => quest_complete(c, &mut quest),
@@ -1686,6 +1777,13 @@ pub(super) fn apply_net_updates(
                 &mut quest,
             ),
             SessionEvent::QuestLogFull => quest_log_full(&mut quest),
+            // The party quest-share (decision 1733): one member's verdict on a quest we pushed,
+            // and the escort-quest confirm. Both park in `QuestShare` for `crate::ui_quest_share`
+            // to name and raise — the guid needs a name query the apply pass has no VM to await.
+            SessionEvent::QuestPushResult { member, msg } => {
+                quest_push_result(member, msg, &mut quest_share)
+            }
+            SessionEvent::QuestConfirmAccept(c) => quest_confirm_accept(c, &mut quest_share),
             SessionEvent::QuestGiverInvalid { reason } => quest_giver_invalid(reason, &mut quest),
             SessionEvent::QuestGiverFailed { quest_id, reason } => {
                 quest_giver_failed(quest_id, reason, &mut quest, &mut quest_log, &net_commands)
@@ -1858,9 +1956,7 @@ pub(super) fn apply_net_updates(
             // The player-trade arc (decision 0592 P1): the status packet drives the open/accept/close
             // state machine, the extended snapshot replaces one side's item/gold — both into the
             // `TradeSession` the trade feed (`crate::ui_trade`) reads.
-            SessionEvent::TradeStatus { status } => {
-                trade::trade_status(status, &mut trade_session, &net_commands)
-            }
+            SessionEvent::TradeStatus { status } => trade::trade_status(status, &mut trade_session),
             SessionEvent::TradeStatusExtended { state } => {
                 trade::trade_status_extended(&state, &mut trade_session)
             }

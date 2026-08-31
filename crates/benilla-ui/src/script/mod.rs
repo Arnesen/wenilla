@@ -43,9 +43,12 @@ mod auction;
 mod aura;
 mod backdrop;
 mod bank;
+mod bind_confirm;
 mod binder;
 mod binding_abi;
+// The five camera views + FlipCameraYaw — the reference's `UIUtil\Camera.cpp` Lua surface.
 mod button;
+mod camera_view;
 mod channel;
 mod char_stats;
 mod chat_send;
@@ -59,7 +62,8 @@ mod cursor;
 mod death;
 pub mod diagnostics;
 mod editbox;
-pub(crate) use editbox::adopt_text_region;
+pub mod instance;
+pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
 pub(crate) mod addon;
 pub mod addon_gate;
 mod client;
@@ -123,6 +127,7 @@ mod spellbook;
 mod stable;
 mod statusbar;
 mod stdlib;
+mod summon;
 mod talent;
 mod taxi;
 mod tick;
@@ -142,7 +147,7 @@ mod worldmap;
 mod worldstate;
 mod worn_display;
 
-pub use action::{ActionSlot, ActionState};
+pub use action::{ActionSlot, ActionState, ActionUse};
 pub use addon::AddOnInfo;
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
@@ -152,14 +157,16 @@ pub use auction::{
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
+pub use bind_confirm::PendingEquipAnswer;
+pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use char_stats::{
-    weapon_subclass_skill, InvSlotView, InventorySlots, UnitCombatStats, INVENTORY_SLOT_COUNT,
-    SKILL_DEFENSE, SKILL_UNARMED,
+    weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
+    BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_send::ChatSend;
 pub use chat_window::ChatWindowLook;
 pub use container::{
-    ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
+    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
     RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
@@ -167,7 +174,7 @@ pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
     CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
-pub use cvars::MultisampleFormat;
+pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
@@ -216,6 +223,7 @@ pub use spellbook::{
     resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
+pub use summon::SummonConfirmUiState;
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_spell::SpellTooltipView;
@@ -231,7 +239,9 @@ pub use types::{
     ScriptValue, TexCoords,
 };
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
-pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
+pub use unit::{
+    grey_band, level_reads_unknown, power_token, unit_is_grey, SelectionRequest, UnitState,
+};
 pub use weapon_enchant::WeaponEnchant;
 pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
@@ -277,9 +287,12 @@ const REG_DEFAULT_ERRORHANDLER: &str = "__benilla_default_errorhandler";
 /// Names on **both** region leaves — and each leaf registers its own copy, so these are NOT on the
 /// Region map and must not be hoisted into it (wow-re
 /// `system/ui/scratch/texture-fontstring-method-split.md`, stated there as a trap in as many words).
-/// `GetDrawLayer` is in the client's pair and absent here; absent is absent.
-pub(crate) const REGION_LEAF_SHARED: [&str; 8] = [
+/// `GetDrawLayer` is the setter's pair on both leaves (Texture `0x79a6c0`, FontString `0x79c660`)
+/// and is here now — it was carved as absent, which was true and was a gap, not a decision; pfUI's
+/// `GetNoNameObject` reads it off every child of a frame it reskins.
+pub(crate) const REGION_LEAF_SHARED: [&str; 9] = [
     "SetDrawLayer",
+    "GetDrawLayer",
     "SetVertexColor",
     "SetAlpha",
     "GetAlpha",
@@ -555,9 +568,13 @@ impl UiScript {
         guild::install(&lua)?;
         petition::install(&lua)?;
         binder::install(&lua)?;
+        summon::install(&lua)?;
+        bind_confirm::install(&lua)?;
+        instance::install(&lua)?;
         gm_ticket::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;
+        camera_view::install(&lua)?;
         session::install(&lua)?;
         pvp::install(&lua)?;
         worn_display::install(&lua)?;
@@ -1164,6 +1181,9 @@ impl UiScript {
         }
         let mut model = self.model_mut();
         model.mouse_down_on.clear();
+        // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
+        // behind would aim the next press's raise at whatever the pointer was last holding.
+        model.mouse_capture = None;
         // [`Model::last_click`] is deliberately NOT cleared here. It looks like it belongs in this
         // list, and the binary says otherwise: `[CButton+0x334]` has exactly three writers
         // image-wide (the ctor, the fired-double zero, the fired-single stamp) and none of them is

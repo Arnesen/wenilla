@@ -306,6 +306,57 @@ pub(crate) struct NetEntity {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct UnitSpeeds(pub(crate) MoveSpeeds);
 
+/// **`CMovement::GetCurrentSpeed 0x7c4c90`** — the one place a mover's move-flags become a
+/// yards/second, for our own body and for every remote one. It is a *cascade*, and its ORDER is
+/// the whole of it (VERIFIED bytes, wow-re `collision/scratch/airborne-steerability.md` §2.4 +
+/// `object-layer/scratch/swim-mechanism.md` TU-H):
+///
+/// 1. `0x7c4c99 test dl,0xf` — **no direction bit at all → 0.0** (`[0x7ffd74]`), never a stale
+///    speed. A standing mover is standing however its speed fields read.
+/// 2. `0x7c4cd9 test edx,0x200000` — **SWIMMING first**, and its arm returns from inside: there
+///    is no "swim-walk", so the walk bit below cannot reach a swimmer. Backward → the `min`.
+/// 3. `0x7c4d11 test dh,0x1` — **WALK mode (`0x100`) next**, and this is the ordering that is easy
+///    to get backwards: the walk arm `0x7c4d4d fld [ecx+0x88]; fld [ecx+0x8c]; fcompp` is taken
+///    **before** the run arm's backward `min`, so a **walking backpedal is walk speed, not
+///    run-back speed**. The arm is `min(MOVE_WALK, MOVE_RUN)` — not a plain select — so a
+///    walk-speed buff above run speed is clamped exactly as the reference clamps it.
+/// 4. `0x7c4d1d` — the run arm: backward → `min(MOVE_RUN_BACK, MOVE_RUN)`, else `MOVE_RUN`.
+///
+/// Both backward arms are a **min**, not a select: x87 `fcompp` + `test ah,0x41` + `jp` returns
+/// the smaller (ties/NaN → the forward field). At vanilla values the min is always the back field,
+/// so the clamp is only visible under a server that force-sets a back speed above its forward one.
+///
+/// **There is no zero-`walk` fallback here, and that is a settled question rather than an
+/// oversight** (decision 1759). The ctor does zero all six speed fields (`0x7c48e8`–`0x7c4906`),
+/// and 1752 guarded against a mover reaching this with `walk == 0` by falling back to the run arm.
+/// The wow-re §5 then reported that the local player's create skips the speed-block apply, so the
+/// zero was live after every world port — and then **retracted it**: the guard it found
+/// (`0x5ff070`) has two callers, and the post-create `0x5fad50` passes 0, so the block is applied
+/// for our own unit exactly as for a remote one (`0x5fad98 xor edi,edi`, unwritten to the push at
+/// `0x5fb131`). The self-skip belongs to the *redundant*-create path `0x466350`, reached only when
+/// the object-manager lookup HIT. The ctor's zero is a transient inside one call and is never
+/// observable, so this is the plain minimum the bytes are.
+pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
+    use crate::creature_anim::move_flags as f;
+    if flags & f::ANY_MOVE == 0 {
+        return 0.0;
+    }
+    if flags & f::SWIMMING != 0 {
+        return if flags & f::BACKWARD != 0 {
+            s.swim_back.min(s.swim)
+        } else {
+            s.swim
+        };
+    }
+    if flags & f::WALK_MODE != 0 {
+        return s.walk.min(s.run);
+    }
+    if flags & f::BACKWARD != 0 {
+        return s.run_back.min(s.run);
+    }
+    s.run
+}
+
 /// A streamed object's descriptor field set (`UpdateFields`) — the ECS's mirror of the object's
 /// server-side values array (decision 0061). Seeded from the create mask and [`ObjectFields::merge`]d
 /// with each `Values` delta, so it accumulates the object's full descriptor state over its life.
@@ -747,6 +798,13 @@ pub(crate) enum MoveKind {
     FallLand,
     StartSwim,
     StopSwim,
+    /// The walk/run gait flipped — the `TOGGLERUN` keybind's own packet. The reference sends it
+    /// from the toggle handler itself (`ToggleRun 0x513d50` → `0x60e080` → `0x617de0`, which
+    /// picks move-event kind `0xf`/`0xe` off the CURRENT walk bit and enqueues it), not from the
+    /// move-state broadcaster — so it goes out **standing still**, where the broadcaster's
+    /// locomotion-nibble gate (`0x61a99d test al,0xf`) would have swallowed it.
+    SetWalkMode,
+    SetRunMode,
     SetFacing,
     Heartbeat,
 }
@@ -769,6 +827,8 @@ impl MoveKind {
             MoveKind::FallLand => op::MSG_MOVE_FALL_LAND,
             MoveKind::StartSwim => op::MSG_MOVE_START_SWIM,
             MoveKind::StopSwim => op::MSG_MOVE_STOP_SWIM,
+            MoveKind::SetWalkMode => op::MSG_MOVE_SET_WALK_MODE,
+            MoveKind::SetRunMode => op::MSG_MOVE_SET_RUN_MODE,
             MoveKind::SetFacing => op::MSG_MOVE_SET_FACING,
             MoveKind::Heartbeat => op::MSG_MOVE_HEARTBEAT,
         }
@@ -1023,6 +1083,16 @@ pub(crate) enum ClientCommand {
         dst_slot: u8,
         src_bag: u8,
         src_slot: u8,
+    },
+    /// Auto-store an item into a bag (`CMSG_AUTOSTORE_BAG_ITEM`): take `(src_bag, src_slot)` and
+    /// put it anywhere inside `dst_bag` — **the client names no destination slot** (wow-re
+    /// `bag-verbs-law.md`: AUTOSTORE carries none). Sent by `PutItemInBag`'s third leg (an
+    /// ordinary item dropped on an occupied bag button) and by all of `PutItemInBackpack`.
+    /// Refusals surface as `InventoryFailure` events.
+    AutoStoreBagItem {
+        src_bag: u8,
+        src_slot: u8,
+        dst_bag: u8,
     },
     /// Carry a partial stack from one bag position to another (`CMSG_SPLIT_ITEM`, decision 0216
     /// §6) — either endpoint may be an equipped bag, unlike [`ClientCommand::SwapInvItem`]. The
@@ -1307,6 +1377,13 @@ pub(crate) enum ClientCommand {
     BinderActivate {
         binder: u64,
     },
+    /// Accept a summon (`CMSG_SUMMON_RESPONSE`, decision 1747): the `CONFIRM_SUMMON` dialog's
+    /// Accept, carrying the guid the question arrived with. The **only** packet in the summon
+    /// flow — there is no decline opcode, so a refused summon expires on the server's own timer
+    /// and this client says nothing.
+    SummonResponse {
+        summoner: u64,
+    },
     /// Unlearn every talent (`MSG_TALENT_WIPE_CONFIRM` outbound, decision 1580): the
     /// `CONFIRM_TALENT_WIPE` dialog's Accept, carrying the guid the trainer's question asked with.
     /// This is the ONLY packet in the flow that resets anything — selecting the gossip line just
@@ -1557,11 +1634,37 @@ pub(crate) enum ClientCommand {
     QuestgiverStatusQuery {
         npc: u64,
     },
+    /// Greet a questgiver (`CMSG_QUESTGIVER_HELLO`) — the quest session's END on a non-gossip
+    /// NPC, which is what re-opens its quest list after a decline (decision 1738). The gossip
+    /// twin of this send is [`Self::GossipHello`].
+    QuestgiverHello {
+        npc: u64,
+    },
     /// Abandon a quest-log slot (`CMSG_QUESTLOG_REMOVE_QUEST`): the log window's confirmed abandon
     /// (`AbandonQuest()`'s two-step). No ack SMSG — the server clears the `PLAYER_QUEST_LOG` slot
     /// fields directly, which the next feed pass reads as the slot going empty.
     QuestlogRemove {
         slot: u8,
+    },
+    // ── The party quest-share (decision 1733; bodies in benilla-protocol `messages/quest/share.rs`). ──
+    /// Share the selected quest with the party (`CMSG_PUSHQUESTTOPARTY`) — the quest log's *Share
+    /// Quest* button. The server walks the group itself; the answers come back as one
+    /// `MSG_QUEST_PUSH_RESULT` per member (usually two: the opener, then the outcome).
+    PushQuestToParty {
+        quest: u32,
+    },
+    /// Answer the escort confirm with Yes (`CMSG_QUEST_CONFIRM_ACCEPT`) — a
+    /// `QUEST_FLAGS_PARTY_ACCEPT` quest a party member started. There is no No command: the
+    /// reference sends nothing at all when the popup is dismissed.
+    QuestConfirmAccept {
+        quest: u32,
+    },
+    /// Report our verdict on a quest a party member shared with us (`MSG_QUEST_PUSH_RESULT`) —
+    /// today only the decline; every other verdict on the share is the server's own. `sharer` is
+    /// the giver guid the shared `SMSG_QUESTGIVER_QUEST_DETAILS` arrived under.
+    QuestPushResult {
+        sharer: u64,
+        msg: benilla_protocol::messages::QuestShareMsg,
     },
     // ── The mail arc (decision 0544; writer bodies in benilla-protocol `world/writer/mail.rs`). ──
     /// Ask the mailbox's inbox page (`CMSG_GET_MAIL_LIST`) — the window's open verb and its
@@ -1723,10 +1826,22 @@ pub(crate) enum ClientCommand {
     InitiateTrade {
         target: u64,
     },
-    /// The target's auto-reply to `BEGIN_TRADE` (`CMSG_BEGIN_TRADE`, empty) — makes the server emit
-    /// `OPEN_WINDOW` to both sides. Sent by the net bridge the frame it decodes a `BEGIN_TRADE`
-    /// status (decision 0592 P1; the reference client auto-answers, `TradeHandler.cpp`).
+    /// **Accept** an incoming trade request (`CMSG_BEGIN_TRADE`, empty) — makes the server emit
+    /// `OPEN_WINDOW` to both sides. Sent by [`crate::ui_trade::answer_trade_request`], never by the
+    /// net drain: *whether* to accept is a policy with five inputs and (decision 1764) the player's
+    /// own answer, so the arm that decodes `BEGIN_TRADE` only records the request.
     BeginTrade,
+    /// Decline an incoming trade request as **ignored** (`CMSG_IGNORE_TRADE`, `0x119`, empty) —
+    /// leg 2 of the reference's ladder (`0x4bf759` → `0x5d41c0`, its one call site image-wide),
+    /// and the only leg that answers on a different opcode. vmangos turns it into
+    /// `TRADE_STATUS_IGNORE_YOU`, so the initiator reads "… is ignoring you" rather than "busy".
+    IgnoreTrade,
+    /// **Decline** an incoming trade request as busy (`CMSG_BUSY_TRADE`, `0x118`, empty) — the
+    /// reference's own refusal sender (`0x5d4150`), which vmangos turns into `TRADE_STATUS_BUSY`
+    /// to *both* sides. Five of the ladder's eight refusal legs go out on this opcode (decision
+    /// 1764); the ignore leg uses [`Self::IgnoreTrade`], two legs send nothing at all, and the
+    /// **player's** own No is [`Self::CancelTrade`], not this.
+    BusyTrade,
     /// Press the Trade button (`CMSG_ACCEPT_TRADE`) — the accept half of the two-sided confirm.
     AcceptTrade,
     /// Drop your own accept but stay in the trade (`CMSG_UNACCEPT_TRADE`).
@@ -1840,6 +1955,10 @@ pub(crate) enum ClientCommand {
     ReclaimCorpse {
         corpse: u64,
     },
+    /// Self-resurrect (`CMSG_SELF_RES`, empty body — the DEATH popup's soulstone/Reincarnation
+    /// button, decision 1746). The server casts whatever `PLAYER_SELF_RES_SPELL` holds; success
+    /// returns as ordinary descriptor deltas, no answer packet.
+    SelfRes,
     /// Take the spirit healer's resurrection (`CMSG_SPIRIT_HEALER_ACTIVATE` — the XP_LOSS
     /// confirm's final Accept): 50% res, 25% durability, sickness at level ≥ 11.
     SpiritHealerActivate {
@@ -1932,6 +2051,10 @@ pub(crate) enum ClientCommand {
     },
     /// Ask for our saved raid lockouts (`CMSG_REQUEST_RAID_INFO`) — the Raid Info panel.
     RequestRaidInfo,
+    /// Reset every dungeon we own (`CMSG_RESET_INSTANCES`, empty body) — the SELF menu's "Reset
+    /// all instances" (decision 1748). Answered per instance: an `SMSG_INSTANCE_RESET` for each
+    /// map that reset, an `SMSG_INSTANCE_RESET_FAILED` for each that would not.
+    ResetInstances,
     // ── The duel family (decision 0633; writer bodies in benilla-protocol
     //    `world/writer/duel.rs`). Challenging is a `CastSpell` of the duel spell, not a verb here.
     /// Accept a duel challenge (`CMSG_DUEL_ACCEPTED`) — the popup's Accept, and the challenger's
@@ -2276,11 +2399,19 @@ impl DisconnectedMessage {
     ///
     /// It is `false` twice over. A [`SessionEnd::LoggedOut`](benilla_protocol::SessionEnd::LoggedOut)
     /// teardown is the relist *inside* one session — the roster that follows IS the character
-    /// select the player asked for. And an unattended run ([`crate::run_mode::unattended_login`])
-    /// keeps 0065's seamless reconnect: a probe has nobody to press Okay.
+    /// select the player asked for. And a run that has **declared itself unattended**
+    /// ([`crate::run_mode::unattended`]) keeps 0065's seamless reconnect: a probe has nobody to
+    /// press Okay.
+    ///
+    /// That second clause used to read the *environment* instead
+    /// ([`crate::run_mode::env_login`] — "any of `$WOW_USER`/`$WOW_PASS`/`$WOW_CHAR`"), which is
+    /// true of the director's own launch line, so 1262's fix was inert in every session a person
+    /// was actually in: the kick came, and the client reconnected and took the account back off
+    /// whoever had displaced it. Decision 1769 — the doubt now falls the other way, and only a run
+    /// that says it is driverless gets to act instead of a person.
     pub(crate) fn new(reason: String, end: benilla_protocol::SessionEnd) -> Self {
         let session_over =
-            end == benilla_protocol::SessionEnd::Lost && !crate::run_mode::unattended_login();
+            end == benilla_protocol::SessionEnd::Lost && !crate::run_mode::unattended();
         Self {
             reason,
             end,
@@ -2479,6 +2610,174 @@ pub(crate) struct AiReactionMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The kick sends the player back to the login screen** — decision 1262's whole promise,
+    /// pinned at the one place that decides it, in the environment the director actually plays in.
+    ///
+    /// 1262 was built and verified in August and then quietly stopped working, with none of its
+    /// code touched: the verdict asked the *environment* whether anybody was here, and on
+    /// 2026-08-29 the director's launch line became `WOW_USER=one WOW_PASS=pone cargo play` — the
+    /// example line in our own `.cargo/config.toml`. From that moment every session they played
+    /// was "a probe", so a kick meant reconnect, and the account ping-ponged exactly as B252
+    /// reported. Nothing about the fix was wrong; the fact under it was. 1769 made the claim a
+    /// declaration, and this test is the tripwire: a run may only act instead of a person if it
+    /// said so.
+    #[test]
+    fn a_kick_ends_the_session_unless_the_run_declared_itself_driverless() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lost = || {
+            DisconnectedMessage::new("kicked".into(), benilla_protocol::SessionEnd::Lost)
+                .session_over
+        };
+
+        // The director's launch line, verbatim. Credentials in the environment, nobody declared
+        // absent — this is a person playing, and a lost session is over.
+        let _user = EnvGuard::set("WOW_USER", "one");
+        let _pass = EnvGuard::set("WOW_PASS", "pone");
+        let _char = EnvGuard::set("WOW_CHAR", "One");
+        let _decl = EnvGuard::unset("WOW_UNATTENDED");
+        let _cap = EnvGuard::unset("WOW_CAPTURE");
+        let _rig = EnvGuard::unset("WOW_RIG");
+        assert!(lost(), "the reported regression: this must be `true`");
+
+        // A clean `/logout` is never "over" — the roster that follows IS the screen they asked for.
+        assert!(
+            !DisconnectedMessage::new("bye".into(), benilla_protocol::SessionEnd::LoggedOut)
+                .session_over
+        );
+
+        // 0065's seamless reconnect survives exactly where the run says nobody is there to press
+        // Okay — a declaration, or the two runs that cannot be a person.
+        {
+            let _d = EnvGuard::set("WOW_UNATTENDED", "1");
+            assert!(!lost(), "a declared probe still reconnects");
+        }
+        {
+            let _r = EnvGuard::set("WOW_RIG", "at:229,0,0,0");
+            assert!(!lost(), "a rig drives the body; it cannot be a person");
+        }
+        {
+            let _c = EnvGuard::set("WOW_CAPTURE", "some-scenario");
+            assert!(
+                !lost(),
+                "a capture authors the camera; it cannot be a person"
+            );
+        }
+        assert!(lost(), "and the guards put every one of those back");
+    }
+
+    /// The vanilla player set, and the one every number below is read against:
+    /// walk 2.5 · run 7.0 · runBack 4.5 · swim 4.722 · swimBack 2.5 (vmangos `baseMoveSpeed`).
+    fn vanilla() -> MoveSpeeds {
+        MoveSpeeds {
+            walk: 2.5,
+            run: 7.0,
+            run_back: 4.5,
+            swim: 4.722,
+            swim_back: 2.5,
+            turn_rate: std::f32::consts::PI,
+        }
+    }
+
+    /// **The cascade's ORDER is the whole feature, and one rung of it is counter-intuitive.**
+    /// `0x7c4c90` takes the walk arm at `0x7c4d11` *before* the run arm's backward min at
+    /// `0x7c4d1d`, so a walking backpedal is walk speed — not run-back. Our remote extrapolator
+    /// tested the backpedal first and got 4.5 here for five hundred commits (decision 1752); this
+    /// is the assertion that pins the fix, in the one place both callers now go through.
+    #[test]
+    fn the_walk_arm_outranks_the_backward_min() {
+        use crate::creature_anim::move_flags as f;
+        let s = vanilla();
+        assert_eq!(current_speed(&s, f::FORWARD), 7.0, "plain run");
+        assert_eq!(current_speed(&s, f::BACKWARD), 4.5, "the backward min");
+        assert_eq!(current_speed(&s, f::FORWARD | f::WALK_MODE), 2.5, "walk");
+        assert_eq!(
+            current_speed(&s, f::BACKWARD | f::WALK_MODE),
+            2.5,
+            "walking backwards is a WALK, not a run-back: the walk arm is taken first"
+        );
+        // …and a strafing walker likewise — the walk arm is ahead of everything on land.
+        assert_eq!(current_speed(&s, f::STRAFE_LEFT | f::WALK_MODE), 2.5);
+    }
+
+    /// SWIMMING pre-empts the walk bit entirely (`0x7c4cd9` precedes `0x7c4d11`): there is no
+    /// "swim-walk" in this client, so a walker who wades in strokes at full swim speed.
+    #[test]
+    fn swimming_is_tested_first_so_there_is_no_swim_walk() {
+        use crate::creature_anim::move_flags as f;
+        let s = vanilla();
+        assert_eq!(
+            current_speed(&s, f::FORWARD | f::SWIMMING | f::WALK_MODE),
+            s.swim
+        );
+        assert_eq!(
+            current_speed(&s, f::BACKWARD | f::SWIMMING | f::WALK_MODE),
+            2.5,
+            "the swim arm's own backward min — reached, and unaffected by the walk bit"
+        );
+    }
+
+    /// Both backward arms are a **min**, not a select (x87 `fcompp` + `test ah,0x41` + `jp`), and
+    /// so is the walk arm. Only visible under a server that force-sets a slower field above its
+    /// faster one — which is exactly why it is a test and not a comment.
+    #[test]
+    fn every_arm_that_looks_like_a_select_is_really_a_min() {
+        use crate::creature_anim::move_flags as f;
+        let s = MoveSpeeds {
+            walk: 12.0, // a walk-speed buff above run
+            run: 7.0,
+            run_back: 9.0, // a run-back above run
+            swim: 4.0,
+            swim_back: 9.0, // a swim-back above swim
+            turn_rate: std::f32::consts::PI,
+        };
+        assert_eq!(current_speed(&s, f::FORWARD | f::WALK_MODE), 7.0);
+        assert_eq!(current_speed(&s, f::BACKWARD), 7.0);
+        assert_eq!(current_speed(&s, f::FORWARD | f::SWIMMING), 4.0);
+        assert_eq!(current_speed(&s, f::BACKWARD | f::SWIMMING), 4.0);
+    }
+
+    /// The guard at the TOP of the cascade: no direction bit → 0.0 (`0x7c4c99 test dl,0xf`), never
+    /// a stale speed. A mover standing still is standing however its fields read, and the
+    /// turn/pitch/mode bits are not translation — walk mode least of all, being precisely a mode
+    /// and not a motion.
+    ///
+    /// The bottom of the cascade has **no** guard, and decision 1759 is why: 1752 shipped a
+    /// zero-`walk` fallback to the run arm, on the reading that a mover could reach here before
+    /// its speed block landed. The wow-re §5 retracted the basis for it — the local player's
+    /// create applies the speed block like anyone else's — so the fallback is gone. The zero is
+    /// asserted rather than merely no longer asserted against, so that re-adding the guard is a
+    /// deliberate act with a record to argue against, not a plausible-looking tidy-up.
+    #[test]
+    fn a_mode_is_not_a_motion_and_a_zero_walk_speed_is_a_zero() {
+        use crate::creature_anim::move_flags as f;
+        let s = vanilla();
+        assert_eq!(current_speed(&s, 0), 0.0);
+        assert_eq!(
+            current_speed(&s, f::WALK_MODE),
+            0.0,
+            "a mode is not a motion"
+        );
+        assert_eq!(current_speed(&s, f::TURN_LEFT | f::ROOT | f::SWIMMING), 0.0);
+
+        let unfilled = MoveSpeeds {
+            run: 7.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            current_speed(&unfilled, f::FORWARD | f::WALK_MODE),
+            0.0,
+            "no fallback: `min(walk, run)` with walk 0 is 0 (decision 1759)"
+        );
+        assert_eq!(
+            current_speed(&unfilled, f::FORWARD),
+            7.0,
+            "…and the run arm is untouched by it"
+        );
+    }
 
     /// **The addon lane's four wire bytes** (decision 1235) — the client's own whitelist at
     /// `0x49fa3f`-`0x49fa4e`, and the last link in the chain between an addon's Lua call and the

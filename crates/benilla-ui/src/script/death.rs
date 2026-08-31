@@ -1,5 +1,6 @@
-//! The death-arc Lua surface (decision 0308): the release/reclaim/resurrect verbs and the state
-//! getters the reference's DEATH / RECOVER_CORPSE / RESURRECT* / XP_LOSS dialogs call.
+//! The death-arc Lua surface (decisions 0308, 1746): the release/reclaim/resurrect/self-res verbs
+//! and the state getters the reference's DEATH / RECOVER_CORPSE / RESURRECT* / XP_LOSS dialogs
+//! call.
 //!
 //! Engine-free seam like [`super::unit`]: the app pushes a [`DeathUiState`] snapshot per frame
 //! (the countdowns + offer bits it computes from the wire) and drains the queued
@@ -36,6 +37,21 @@ pub struct DeathUiState {
     /// `None` below the sickness level (`GetResSicknessDuration` → nil — picks XP_LOSS vs
     /// XP_LOSS_NO_SICKNESS, ref UIParent.lua's CONFIRM_XP_LOSS arm).
     pub sickness_duration: Option<String>,
+    /// What `HasSoulstone()` answers: the **label** of the self-resurrect available right now, or
+    /// `None` for nil (decision 1746, whose Context carries the wow-re decode this shape comes from).
+    ///
+    /// A string, not an id, because that is the whole of what the API returns: the DEATH dialog
+    /// stamps it straight onto its second button (`Button2:SetText(HasSoulstone())`) and uses the
+    /// same call as `DisplayButton2`. The app resolves it, because the script VM has no
+    /// spell-catalog or item-cache binding (the `ui_cast`/`ui_mirror` idiom, decision 0107).
+    ///
+    /// Two sources, and the client's own fork picks between them
+    /// ([`crate::script::death`]'s app-side resolver): `PLAYER_SELF_RES_SPELL` named through
+    /// `Spell.dbc` (3026/20758-20761 are all literally **"Use Soulstone"**, 21169
+    /// **"Reincarnation"**, 23700 **"Twisting Nether"** — Blizzard named those effect spells *as
+    /// button labels*), else a carried item whose on-use spell self-resurrects, named by the
+    /// **item**.
+    pub self_res_label: Option<String>,
 }
 
 /// One drained death intent (the app's [`super::UiScript::take_death_actions`] maps each to its
@@ -52,6 +68,11 @@ pub enum DeathAction {
     DeclineResurrect,
     /// `AcceptXPLoss()` — take the spirit healer's res (`CMSG_SPIRIT_HEALER_ACTIVATE`).
     AcceptXpLoss,
+    /// `UseSoulstone()` — spend the self-resurrect. **Which wire that is, is the app's to decide
+    /// at drain time**, exactly as the binding decides it at call time: a non-zero
+    /// `PLAYER_SELF_RES_SPELL` sends `CMSG_SELF_RES`, and a zero one falls through to using the
+    /// carried item instead (decision 1746).
+    UseSoulstone,
 }
 
 impl super::UiScript {
@@ -84,6 +105,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_action(lua, "AcceptResurrect", DeathAction::AcceptResurrect)?;
     install_action(lua, "DeclineResurrect", DeathAction::DeclineResurrect)?;
     install_action(lua, "AcceptXPLoss", DeathAction::AcceptXpLoss)?;
+    install_action(lua, "UseSoulstone", DeathAction::UseSoulstone)?;
 
     // GetReleaseTimeRemaining() → seconds until the forced release, or −1 = no timer (the DEATH
     // dialog's no-timer text pick, ref StaticPopup.lua:380-387).
@@ -142,10 +164,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // HasSoulstone() → nil: soulstones are a named 0308 deferral, and nil is exactly the real
-    // return for a player with no active soulstone — the DEATH dialog's button2 stays hidden and
-    // its OnCancel falls through to RepopMe(), both ref-faithful.
-    g.set("HasSoulstone", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
+    // HasSoulstone() → the self-resurrect's label, or nil (decision 1746). The DEATH dialog
+    // uses the one call three ways — `DisplayButton2` (show the button at all), `OnShow`
+    // (`Button2:SetText(text)`) and `OnCancel`'s clicked arm (soulstone vs release) — so the
+    // falsey return has to be **nil** and not `0`: Lua's `0` is truthy, and a `0` here would both
+    // show the button forever and stamp "0" on it. The whole answer is computed app-side; this is
+    // a pure read of the pushed snapshot.
+    g.set(
+        "HasSoulstone",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match &model.death.self_res_label {
+                Some(s) => Value::String(lua.create_string(s)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
 
     Ok(())
 }

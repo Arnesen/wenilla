@@ -44,6 +44,7 @@ mod clock;
 mod gpu;
 mod hud;
 mod journal;
+mod phases;
 #[cfg(target_os = "macos")]
 mod stall;
 mod stats;
@@ -157,6 +158,8 @@ impl Plugin for PerfPlugin {
         }
         #[cfg(target_os = "macos")]
         stall::plugin(app);
+        // `WOW_FRAME_PHASES=<ms>` — which PHASE of a slow frame spent it (see the module doc).
+        phases::plugin(app);
         // `WOW_GPU_MS=1` — the whole-frame GPU meter (its module doc owns the design and the
         // 1389 resolve-on-a-later-submission trap). Registers nothing when off, so campaign
         // anchors never carry its ~0.03 ms sentinel cost uninvited.

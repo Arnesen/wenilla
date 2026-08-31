@@ -582,6 +582,14 @@ fn apply_self_move(
     // runs `0x61a1af → 0x61a230 → SetSwim` (wow-re `swim-transition.md`, "the local unit's server
     // echo"). This pair is GM flight: `.cheat fly` sends SWIMMING + LEVITATING together.
     player.swimming = player.move_flags & move_flags::SWIMMING != 0;
+    // …and the walk gait rides out on the same lift (decision 1752). `0x100` is inside the
+    // `SERVER_AUTHORED` mask like the modes above, so a move the server authors for our mover
+    // carries whatever walk bit *it* last saw — normally our own, echoed back from the
+    // `m_movementInfo` our last packet refreshed, which makes this idempotent. Dropping the lift
+    // instead would let one server-authored move silently clear the bit out of the word while the
+    // latch stayed set, and the next frame would rebuild the word and re-announce it: a
+    // SET_RUN_MODE / SET_WALK_MODE pair per teleport.
+    player.walking = player.move_flags & move_flags::WALK_MODE != 0;
     player.modes.merge_from_wire(player.move_flags);
     // Neither mode touches `settling`: the settle release is the terrain streamer's, keyed on the
     // destination's residency in every mover mode alike (decision 0737). The pre-0737 special case

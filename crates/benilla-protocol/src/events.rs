@@ -19,11 +19,11 @@ use crate::messages::{
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MonsterMoveFacing,
     ObjectFields, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
     PetitionQueryResponse, PetitionRename, PetitionShowList, PetitionShowSignatures,
-    PetitionSignResults, PvpCredit, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
-    QuestRequestItems, QuestTemplate, SpellDamageLog, SpellDispelLog, SpellEnergizeLog,
-    SpellHealLog, SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, StabledPet,
-    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
-    WhoResults, XpGain,
+    PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept, QuestDetails,
+    QuestGiverList, QuestOfferReward, QuestRequestItems, QuestShareMsg, QuestTemplate,
+    SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog, SpellInstaKillLog,
+    SpellLogExecute, SpellLogMiss, SpellOutcomeLog, StabledPet, TaxiMask, TradeStatus,
+    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -343,6 +343,9 @@ pub enum SessionEvent {
         /// `true` ⇒ a 3-D flight path (keep the spline's Z); `false` ⇒ a ground walk whose Z the app
         /// re-derives from the terrain under the unit (see the renderer's creature ground-clamp).
         flying: bool,
+        /// `SPLINEFLAG_RUNMODE` — the path is travelled at run speed. Its **absence** forces
+        /// `MOVEFLAG_WALK_MODE` on for the unit the spline moves (decision 1758).
+        run_mode: bool,
     },
     /// Same-map teleport (`MSG_MOVE_TELEPORT_ACK`): the app snaps our player + echoes the ack.
     Teleport {
@@ -412,6 +415,17 @@ pub enum SessionEvent {
     /// question the `CONFIRM_BINDER` dialog puts on screen. `binder` is the innkeeper's guid, and
     /// it must be echoed in `CMSG_BINDER_ACTIVATE` for the bind to happen at all (decision 1331).
     BinderConfirm { binder: u64 },
+    /// Someone is asking to summon us (`SMSG_SUMMON_REQUEST`) — the question the `CONFIRM_SUMMON`
+    /// dialog puts on screen (decision 1747). `summoner` is the guid to echo in
+    /// `CMSG_SUMMON_RESPONSE` and the one the dialog names; `zone` is the **summoner's**
+    /// `AreaTable` id, the place the dialog says you would be pulled to; `delay_ms` is how long
+    /// the server will hold the offer before auto-declining it. Accepting is the only packet in
+    /// the flow — declining sends nothing (there is no decline opcode).
+    SummonRequest {
+        summoner: u64,
+        zone: u32,
+        delay_ms: u32,
+    },
     /// A class trainer is asking whether to unlearn every talent (`MSG_TALENT_WIPE_CONFIRM`,
     /// inbound) — the question the `CONFIRM_TALENT_WIPE` dialog puts on screen, carrying the
     /// `trainer` to answer with and the `cost` in copper its money frame shows. Answering means
@@ -627,6 +641,19 @@ pub enum SessionEvent {
     /// cannot enter … while in ghost form."). The reference sends it to the same system-message
     /// sink as [`Self::Notification`].
     AreaTriggerMessage { text: String },
+    /// A shutdown/restart countdown or an operator broadcast (`SMSG_SERVER_MESSAGE`): the
+    /// `ServerMessages.dbc` row id and the text that fills its `%s`. The reference resolves the row
+    /// itself and shows the formatted line as `CHAT_MSG_SYSTEM`.
+    ServerMessage { message_type: u32, text: String },
+    /// An area is under attack by enemy players (`SMSG_ZONE_UNDER_ATTACK`): one `AreaTable.dbc`
+    /// id. Becomes a `CHAT_MSG_CHANNEL` line on the joined **defense** channels, not a system line.
+    ZoneUnderAttack { area_id: u32 },
+    /// A world-defense broadcast (`SMSG_DEFENSE_MESSAGE` — the EPL tower captures): the zone it is
+    /// about, and the server-composed text. [`Self::ZoneUnderAttack`]'s destination exactly.
+    DefenseMessage { zone_id: u32, text: String },
+    /// A trial account hit its whisper cap (`SMSG_CHAT_RESTRICTED`); empty body. The reference
+    /// answers it with `DisplayError(0x1c3)` and reads nothing off the wire.
+    ChatRestricted,
     /// Answers `/played` (`SMSG_PLAYED_TIME`, our `CMSG_PLAYED_TIME`): total played time + time
     /// since the last level-up, both in seconds.
     PlayedTime { total: u32, level: u32 },
@@ -850,6 +877,13 @@ pub enum SessionEvent {
     QuestFailed { quest_id: u32, timed: bool },
     /// The log refused a new quest — no free slot (`SMSG_QUESTLOG_FULL`).
     QuestLogFull,
+    /// One party member's verdict on a quest WE shared (`MSG_QUEST_PUSH_RESULT`) — decision 1733.
+    /// `member` is the member the verdict is about (never the sharer; see the direction trap on
+    /// [`crate::messages::QuestPushResult`]), and fills the `%s` of the `ERR_QUEST_PUSH_*` line.
+    QuestPushResult { member: u64, msg: QuestShareMsg },
+    /// A party member started a `QUEST_FLAGS_PARTY_ACCEPT` (escort) quest and the server is asking
+    /// whether we want it too (`SMSG_QUEST_CONFIRM_ACCEPT`) — the `QUEST_ACCEPT` confirm box.
+    QuestConfirmAccept(QuestConfirmAccept),
     /// The giver won't OFFER the quest (`SMSG_QUESTGIVER_QUEST_INVALID`): one `QuestFailedReason`
     /// msg code and no quest id — vmangos' `SendCanTakeQuestResponse`, the answer to a query or an
     /// accept that fails `CanTakeQuest` ("already on that quest", "not high enough level").
@@ -1152,6 +1186,28 @@ pub enum SessionEvent {
     RaidInstanceInfo {
         entries: Vec<crate::messages::RaidInstanceEntry>,
     },
+    // ── The instance/raid lockout family (decision 1748) ────────────────────────────────────
+    //
+    // Four of these become a `CHAT_MSG_SYSTEM` line the client composes itself out of
+    // GlobalStrings; two are pure bookkeeping behind `CanShowResetInstances()`. The map NAME is
+    // never on the wire — the app resolves the id through `Map.dbc`.
+    /// A raid lockout's welcome/countdown line (`SMSG_RAID_INSTANCE_MESSAGE`).
+    RaidInstanceMessage {
+        message: crate::messages::RaidInstanceMessage,
+    },
+    /// We just became permanently saved to the instance we are in (`SMSG_INSTANCE_SAVE_CREATED`).
+    /// `flag` is the wire value: vmangos always sends 0, and 1 is the reference's debug wrapper.
+    InstanceSaveCreated { flag: u32 },
+    /// An instance reset took (`SMSG_INSTANCE_RESET`) — `map` is the `Map.dbc` id.
+    InstanceReset { map: u32 },
+    /// An instance reset was refused (`SMSG_INSTANCE_RESET_FAILED`).
+    InstanceResetFailed {
+        failure: crate::messages::InstanceResetFailed,
+    },
+    /// The `Map.dbc` id of the dungeon we were last inside (`SMSG_UPDATE_LAST_INSTANCE`).
+    UpdateLastInstance { map: u32 },
+    /// Whether we hold any permanent bind (`SMSG_UPDATE_INSTANCE_OWNERSHIP`).
+    UpdateInstanceOwnership { owns: bool },
     /// A duel challenge (`SMSG_DUEL_REQUESTED`, decision 0633) — delivered to challenger and
     /// challenged alike. `arbiter` is the duel-flag GameObject that identifies the duel and is
     /// echoed on accept/cancel; `challenger` equal to our own guid means we are the one asking.

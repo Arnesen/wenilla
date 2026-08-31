@@ -111,6 +111,18 @@ pub(super) struct InspectStores<'w, 's> {
             &'static benilla_assets::ModelAnimations,
         ),
     >,
+    /// The **picked submesh's own `MeshTag`** — the per-instance shading payload, decoded by its
+    /// owning module ([`benilla_world::mesh_tag::describe`]).
+    ///
+    /// The `light` line above names which *law* an object is on; this names what its parts are
+    /// actually carrying under that law, and the two together are what settle a "why is this body
+    /// lit wrong?" report. The payload's meaning switches on material state, which a tag alone
+    /// cannot know, so the decode prints BOTH readings of bits 6..=18 side by side — a shade byte
+    /// of 255 (the MCSH-shadowed half-intensity) sits inside a probe slot of 2047, and a writer
+    /// using the wrong law for its material is invisible in either reading alone and obvious in
+    /// the pair. Read off the picked entity itself, not the parent: `WorldObject` and `MeshTag`
+    /// both ride the submesh.
+    tags: Query<'w, 's, &'static bevy::mesh::MeshTag>,
 }
 
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
@@ -186,6 +198,11 @@ pub(super) fn inspect_ui(
     let (reputations, plates, plate_mode) =
         (&*stores.reputations, &stores.plates.0, &*stores.plate_mode);
     let go_templates = &*stores.go_templates;
+    // The picked submesh's shading payload — off the hit entity itself (see the field's doc).
+    let tag_line = mouseover
+        .entity
+        .and_then(|e| stores.tags.get(e).ok())
+        .map(|t| format!("tag {}", benilla_world::mesh_tag::describe(t.0)));
     let (stores, kinds, collision, lit, motion, go_anims) = (
         &stores.stores,
         &stores.kinds,
@@ -535,6 +552,9 @@ pub(super) fn inspect_ui(
         lines.push(line.clone());
     }
     if let Some(line) = &light_line {
+        lines.push(line.clone());
+    }
+    if let Some(line) = &tag_line {
         lines.push(line.clone());
     }
     lines.push(format!("{:.1} yd away", mouseover.distance));

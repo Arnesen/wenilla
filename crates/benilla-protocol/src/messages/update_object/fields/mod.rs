@@ -461,9 +461,17 @@ const FIELD_PLAYER_TRACK_CREATURES: u16 = 1104;
 const FIELD_PLAYER_TRACK_RESOURCES: u16 = 1105;
 const FIELD_PLAYER_AMMO_ID: u16 = 1223; // UNIT_END+0x40B, INT — the equipped ammo item id
                                         // (`Player.cpp:7656` etc., `Player::SetUInt32Value`).
-                                        // PLAYER_FLAGS = UNIT_END(188) + 0x2 (VERIFIED vmangos `UpdateFields_1_12_1.h:120`; the duel
-                                        // arbiter guid takes +0x0/+0x1). Bit 0x10 = PLAYER_FLAGS_GHOST (`Player.h:319`), set/cleared by
-                                        // the ghost aura 8326's HandleAuraGhost at release/resurrect (decision 0308 §1).
+                                        // PLAYER_SELF_RES_SPELL = UNIT_END(188) + 0x40C (INT, **PRIVATE** — self only), the spell id the
+                                        // server will cast if we ask to self-resurrect: the whole soulstone/Reincarnation mechanism, on
+                                        // the wire as one dword (decision 1746). Contiguous past the ammo id (1223 + 1 = 1224 ✓), and
+                                        // cross-checked two ways in vmangos because its two tables disagree: the enum
+                                        // `UpdateFields_1_12_1.h:284` gives `UNIT_END + 0x40C` (= 1224) while its trailing *comment* says
+                                        // `// 0x4C2` — the comment is stale; the parallel descriptor table `UpdateFields_1_12_1.cpp:277`
+                                        // carries the absolute index `0x4C8` = **1224**, agreeing with the arithmetic.
+const FIELD_PLAYER_SELF_RES_SPELL: u16 = 1224;
+// PLAYER_FLAGS = UNIT_END(188) + 0x2 (VERIFIED vmangos `UpdateFields_1_12_1.h:120`; the duel
+// arbiter guid takes +0x0/+0x1). Bit 0x10 = PLAYER_FLAGS_GHOST (`Player.h:319`), set/cleared by
+// the ghost aura 8326's HandleAuraGhost at release/resurrect (decision 0308 §1).
 const FIELD_PLAYER_FLAGS: u16 = 190;
 // PLAYER_DUEL_ARBITER = UNIT_END(188) + 0x0 (GUID, PUBLIC), PLAYER_DUEL_TEAM = UNIT_END + 0x8
 // (INT, PUBLIC) — VERIFIED vmangos `UpdateFields_1_12_1.h:119,126`. The arbiter opens the player
@@ -731,6 +739,16 @@ impl ObjectFields {
         (display != 0).then_some((display, (raw >> 24) as u8))
     }
 
+    /// `CORPSE_FIELD_GUILD` (field 34, `OBJECT_END + 0x1C`) — the dead player's guild id,
+    /// snapshotted at death (vmangos `Player::CreateCorpse` writes `GetGuildId()`). The reference
+    /// reads exactly this word at `0x5d6edf` (`[[corpse+0x110]+0x70]`) and hands it, with
+    /// `CORPSE_FIELD_OWNER`, to the guild-name-cache lookup `0x6d6d20` that feeds the corpse's
+    /// **tabard emblem** install `0x5d6ec0` (wow-re `corpse-decal-and-loot-sparkle.md` §6b). A
+    /// corpse therefore wears its owner's crest exactly as the living body did. `0` = guildless.
+    pub fn corpse_guild(&self) -> u32 {
+        self.get_u32(34).unwrap_or(0)
+    }
+
     /// `CORPSE_FIELD_BYTES_1` (field 32, `OBJECT_END + 0x1A`) — byte 1 **race**, byte 2 **gender**,
     /// byte 3 **skinColor** (byte 0 is unused; vmangos writes `(0) | (race<<8) | (gender<<16) |
     /// (skin<<24)`, `Corpse.cpp:228`). The reference reads them one byte at a time off the same
@@ -765,6 +783,16 @@ impl ObjectFields {
     pub fn corpse_flags(&self) -> u32 {
         self.get_u32(35).unwrap_or(0)
     }
+    /// [`Self::corpse_flags`] **preserving absence** — `None` when this snapshot does not carry
+    /// field 35 at all.
+    ///
+    /// The two are not interchangeable, and the difference is the create-vs-delta seam: a values
+    /// delta carries only what changed, so an untouched `FLAGS` reads absent, and `unwrap_or(0)`
+    /// would report every bit *clear* — turning "nothing was said about the flags" into a positive
+    /// claim that the corpse is not bones. Readers acting on a **change** must use this one.
+    pub fn corpse_flags_present(&self) -> Option<u32> {
+        self.get_u32(35)
+    }
     /// `CORPSE_FLAG_BONES` (`0x01`) — this object is a **bone pile**, not a fresh body. It is the
     /// first thing `0x5d6260` tests (`0x5d6287 test byte [eax+0x74],0x1; jne`): a bone pile builds
     /// **no** character component at all, wears nothing, and takes its model from race/sex rather
@@ -796,16 +824,23 @@ impl ObjectFields {
         self.get_u32(36).unwrap_or(0) & 0x01 != 0
     }
 
-    /// `CORPSE_FLAG_LOOTABLE` (`0x20`, [`Self::corpse_flags`] bit 5) — the **PvP insignia** flag,
-    /// the one the reference's corpse cursor classifier `0x482740` reads at
-    /// `[[corpse+0x110]+0x74] >> 5 & 1` for its second leg, and the corpse right-click `0x5d6bf0`
-    /// reads again at `0x5d6c9c` for the matching send.
+    /// `CORPSE_FLAG_LOOTABLE` (`0x20`, [`Self::corpse_flags`] bit 5) — the flag that makes a body's
+    /// **battleground insignia** takeable. It gates the second leg of the corpse cursor classifier
+    /// `0x482740` (`[[corpse+0x110]+0x74] >> 5 & 1`), and the corpse right-click `0x5d6bf0` reads
+    /// it again at `0x5d6c9c` for the matching send.
     ///
-    /// **It is not "reclaimable"** — `object-layer/scratch/w2a.md` calls it both things in one
-    /// file (line 264 "reclaimable", line 618 "PvP flag") and only the second survives the byte
-    /// read: both readers pair it with the `SPELL_EFFECT_SKIN_PLAYER_CORPSE` learn-time latch
-    /// `[0xb700e8]`, which is a skinning precondition and has nothing to do with recovering your
-    /// own body. Nothing in the reclaim path consults this bit.
+    /// **Neither of `w2a.md`'s two labels for this bit was right**, and it took a §5 round to say
+    /// so (wow-re `corpse-click-and-reclaim.md`; decision 1729). "Reclaimable" (its line 264) is
+    /// wrong outright — nothing in the reclaim path consults it, and `RetrieveCorpse` reads no
+    /// corpse flag at all. "PvP flag" (its line 618) names the wrong bit: the corpse's actual PvP
+    /// flag is **bit 2**, read by `UnitIsPVP 0x516460` at `0x5164e6` (`shr eax,2; and al,1`), and
+    /// it is the only corpse flag this client exposes to Lua.
+    ///
+    /// What bit 5 actually unlocks is spell **22027 "Remove Insignia"** — the sole row in the
+    /// shipped `Spell.dbc` with `Effect[0] == 116`, targeting `TARGET_FLAG_PVP_CORPSE`, absent
+    /// from the base `dbc.MPQ` and added with Battlegrounds. The "skin a player" reading came from
+    /// the cursor **art** names (`SkinAlliance`/`SkinHorde`) and from nowhere else; there is no
+    /// skinning of players in 1.12.1.
     pub fn corpse_pvp_insignia(&self) -> bool {
         self.corpse_flags() & 0x20 != 0
     }

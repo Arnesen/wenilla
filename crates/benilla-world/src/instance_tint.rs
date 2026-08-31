@@ -82,6 +82,30 @@ pub fn pack(rgb: [u8; 3]) -> u32 {
     0xff00_0000 | (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2])
 }
 
+/// Off-world `wow_light`-layout buffers that also carry the tint region — registered by key, the
+/// same shape as [`crate::rig_palette::RigPaletteMirrors`] and deliberately NOT the same list.
+///
+/// **Why this is opt-in, and why the portrait booths are not on it.** The reference's per-instance
+/// tint lives on ONE CM2 instance (`[inst+0x184..0x18c]`, setter `0x710cf0`). A unit-frame portrait
+/// does not render that instance: the bake `0x524f60` builds a **fresh** CM2 from it whose ctor sets
+/// colour `(1,1,1)` and alpha `1.0` (`0x70ea60`-`0x70ea89`/`0x70eaca`), and `0x525261 call 0x47a230`
+/// then sets those very two fields *again* — so a ghost's portrait shows the pre-death, untinted,
+/// fully-opaque face, and "a client that tints the portrait when the ghost flags are set diverges
+/// from 1.12.1" (wow-re `ghost-death-visuals.md` §6, VERIFIED; benilla report B49, decision 1481).
+/// Our round portraits mirror the world entity's own children, so they carry the WORLD unit's rig
+/// slot — pushing this region into their buffer would tint them with it. Their buffer keeps the
+/// zero-initialised (identity) region instead, which is the reference's fresh-instance behaviour
+/// reproduced by construction.
+///
+/// The **glue scene** is the opposite case and is why the list exists: it is not a bake standing in
+/// for a UI model widget, it is the screen itself, and its character component is exactly the
+/// instance the reference writes (`0x472939 -> 0x710cf0`, the char-select ghost proc). It carries its
+/// OWN rig slot, allocated by the booth spawn, so nothing a world unit does can reach it.
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct InstanceTintMirrors(
+    pub std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
+);
+
 /// The live per-slot tint table, indexed by the instance's `MeshTag` rig slot. `Arc`-shared so the
 /// render-world extract is a pointer bump, and generation-stamped so a world with nothing tinted
 /// uploads nothing at all.
@@ -137,26 +161,33 @@ impl InstanceTints {
 fn upload_instance_tints(
     queue: Res<RenderQueue>,
     shared: Option<Res<crate::lighting::SharedLightBuffer>>,
+    mirrors: Option<Res<InstanceTintMirrors>>,
     tints: Option<Res<InstanceTints>>,
     mut last: Local<Option<u64>>,
 ) {
-    let (Some(shared), Some(tints)) = (shared, tints) else {
-        return;
-    };
-    if *last == Some(tints.generation) {
+    let Some(tints) = tints else { return };
+    // The generation gate covers the mirror list too: a mirror registered after the last write
+    // would otherwise never be filled. Mirrors are registered once per booth/scene buffer, so
+    // folding their count into the gate costs one comparison and closes that hole.
+    let mirrors = mirrors
+        .map(|m| m.0.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let gate = tints.generation ^ ((mirrors.len() as u64) << 40);
+    if *last == Some(gate) {
         return;
     }
-    *last = Some(tints.generation);
-    queue.write_buffer(
-        &shared.0,
-        region_offset(),
-        bytemuck::cast_slice(tints.slots.as_slice()),
-    );
+    *last = Some(gate);
+    let words = bytemuck::cast_slice(tints.slots.as_slice());
+    for buffer in shared.iter().map(|s| &s.0).chain(mirrors.iter()) {
+        queue.write_buffer(buffer, region_offset(), words);
+    }
 }
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<InstanceTints>()
-        .add_plugins(ExtractResourcePlugin::<InstanceTints>::default());
+        .init_resource::<InstanceTintMirrors>()
+        .add_plugins(ExtractResourcePlugin::<InstanceTints>::default())
+        .add_plugins(ExtractResourcePlugin::<InstanceTintMirrors>::default());
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render.add_systems(
             Render,

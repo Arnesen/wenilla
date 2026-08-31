@@ -171,3 +171,105 @@ fn the_screenshot_key_is_handed_back_to_its_binding() {
     assert!(s.frame_key_input("ESCAPE"));
     assert!(s.take_keybind_requests().is_empty());
 }
+
+/// **The HUD hide, end to end — and the frame that must survive it.**
+///
+/// This is the chain decision 1734 restored, and every link was broken until it did:
+/// `CINEMATIC_START` → `CinematicFrame`'s arm calls `ShowUIPanel` → its `area = "full"` row routes
+/// to `SetFullScreenFrame` → which hides `UIParent` → which cascades to every frame declaring
+/// `parent="UIParent"`. Before, `SetFullScreenFrame` had that line dropped, and there was almost
+/// nothing parented to cascade to; the engine hid the HUD with `UiHidden` instead, and paid for it
+/// with a mouse that could not find the cinematic frame.
+///
+/// It replaces a log line. 1699 verified the takeover by watching `cinematic: HUD hidden for
+/// playback` go past, because `UiHidden` hides at the *draw* and leaves every widget answering
+/// `IsVisible() == true` — the predicate was useless. Hiding through the real cascade makes
+/// `IsVisible` the honest question again, so the check is an assertion instead of a log.
+#[test]
+fn a_cinematic_hides_the_hud_through_uiparent_and_spares_the_cinematic_frame() {
+    let mut s = ui_with_the_cinematic_frame();
+    let visible = |s: &UiScript, f: &str| {
+        s.eval::<i64>(&format!("return {f}:IsVisible() and 1 or 0"))
+            .unwrap()
+            == 1
+    };
+
+    // A shown child of UIParent stands in for the HUD: `UiPanels.xml` gives us one without
+    // dragging the whole action bar in, and what is under test is the cascade, not which frame.
+    s.eval::<i64>("StaticPopup1:Show() return 0").unwrap();
+    s.resolve();
+    assert!(visible(&s, "UIParent"), "the HUD's parent starts visible");
+    assert!(visible(&s, "StaticPopup1"), "and so does its child");
+
+    start_cinematic(&mut s);
+    assert!(!visible(&s, "UIParent"), "SetFullScreenFrame hid UIParent");
+    assert!(
+        !visible(&s, "StaticPopup1"),
+        "and the hide cascaded to its children — this is the whole point of the 72 restored \
+         parent= declarations, and the assertion that fails if one is dropped again"
+    );
+    assert_eq!(
+        s.eval::<i64>("return StaticPopup1:IsShown() and 1 or 0")
+            .unwrap(),
+        1,
+        "cascaded, not shown=false: the frame keeps its own state and gets it back untouched"
+    );
+    assert!(
+        visible(&s, "CinematicFrame"),
+        "**and the fly-by itself survives** — the reference declares CinematicFrame with no \
+         parent precisely so the frame being shown escapes the hide that showing it performs"
+    );
+
+    s.set_in_cinematic(false);
+    s.fire_event("CINEMATIC_STOP", vec![]);
+    s.resolve();
+    assert!(visible(&s, "UIParent"), "and the world's UI comes back");
+    assert!(visible(&s, "StaticPopup1"), "with the child that was up");
+}
+
+/// **The screenshot confirmation survives the HUD hide — because the reference seats it outside
+/// the HUD.** `WorldFrame.xml`'s own header states the law in one line: *"Children of the world
+/// frame are visible even when the UI is turned off."* `ScreenshotStatus` is declared inside that
+/// frame, and the case that needs it is this file's: `CinematicFrame`'s `OnKeyDown` hands the
+/// SCREENSHOT key back to its binding by hand (1701) precisely so a fly-by can be captured, so the
+/// one moment the confirmation is most certainly wanted is the one where `UIParent` is hidden.
+///
+/// Ours sat on `UIParent` until decision 1757, on a note that read the two seats as equivalent
+/// because both frames are full-screen and their CENTERs coincide — true of the geometry, and
+/// silent about the hide.
+#[test]
+fn the_screenshot_confirmation_shows_during_a_cinematic() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    let visible = |s: &UiScript, f: &str| {
+        s.eval::<i64>(&format!(
+            "local x = getglobal('{f}') if not x then return -1 end return x:IsVisible() and 1 or 0"
+        ))
+        .unwrap()
+    };
+
+    start_cinematic(&mut s);
+    assert_eq!(visible(&s, "UIParent"), 0, "the fly-by hid the HUD");
+
+    // The engine's own report of a finished capture (`crate::screenshot` → SCREENSHOT_SUCCEEDED).
+    s.fire_event("SCREENSHOT_SUCCEEDED", vec![]);
+    s.resolve();
+    assert_eq!(
+        visible(&s, "ScreenshotStatus"),
+        1,
+        "\"Screen Captured\" is readable over the fly-by — a confirmation that cannot appear \
+         while the UI is hidden is no confirmation, and the cinematic is the case the reference \
+         hands the key back for"
+    );
+    assert_eq!(
+        s.eval::<String>("return ScreenshotStatusText:GetText()")
+            .unwrap(),
+        "Screen Captured",
+        "with the reference's own string"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

@@ -40,7 +40,8 @@ use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
-    quest_slot_state, QuestLogSlot, QuestObjective, QuestTemplate, PLAYER_QUEST_LOG_SLOTS,
+    quest_flags, quest_slot_state, QuestLogSlot, QuestObjective, QuestTemplate,
+    PLAYER_QUEST_LOG_SLOTS,
 };
 use benilla_protocol::ObjectFields;
 use benilla_ui::script::{
@@ -147,6 +148,7 @@ impl Plugin for UiQuestLogPlugin {
                     // frame's clock (the `minimap::feed_game_time` shape).
                     feed_server_clock.before(UiInput),
                     drain_quest_log_abandons.after(UiInput),
+                    drain_quest_log_pushes.after(UiInput),
                     drain_quest_log_collapses.after(UiInput),
                 ),
             );
@@ -503,7 +505,8 @@ fn feed_quest_log(
             is_header: true,
             collapsed,
             complete: 0,
-            timer: 0, // a header row is not a quest and never carries a timer
+            timer: 0,        // a header row is not a quest and never carries a timer
+            pushable: false, // nor is it shareable — there is no quest under the row
             objectives: Vec::new(),
         });
         entry_slots.push(None);
@@ -513,15 +516,26 @@ fn feed_quest_log(
             if collapsed {
                 continue; // folded: the quest stays in the log, just not in the visible list
             }
-            let (title, level, objectives) = match quest_log.template(r.quest_id, &commands) {
+            let (title, level, pushable, objectives) = match quest_log
+                .template(r.quest_id, &commands)
+            {
                 Some(t) => (
                     t.title.clone(),
                     t.level,
+                    // `QUEST_FLAGS_SHARABLE` (vmangos `QuestDef.h:153`) — the whole of the
+                    // shareable test, and it is the CLIENT's alone: vmangos's
+                    // `HandlePushQuestToParty` never checks the bit, it only re-tests it on the
+                    // receiver's accept (`Player::CanShareQuest`). So an unshareable quest whose
+                    // button we wrongly enabled would push, and the party would get a detail panel
+                    // for a quest the server then refuses (decision 1733).
+                    t.flags & quest_flags::SHARABLE != 0,
                     build_objectives(t, &r.log_slot, &store.0, &mut items, &mut names, &commands),
                 ),
                 // Title/level/objectives placeholder while the template is in flight — the
-                // QUEST_LOG_UPDATE refresh on landing fills the row in.
-                None => ("...".to_string(), 0, Vec::new()),
+                // QUEST_LOG_UPDATE refresh on landing fills the row in. `pushable` false with it:
+                // the reference reads the same cache, so its button is dark until the answer lands
+                // too.
+                None => ("...".to_string(), 0, false, Vec::new()),
             };
             let complete = if r.log_slot.state & quest_slot_state::COMPLETE != 0 {
                 1
@@ -538,6 +552,7 @@ fn feed_quest_log(
                 is_header: false,
                 collapsed: false,
                 complete,
+                pushable,
                 // The slot's raw deadline (absolute unix seconds; 0 = untimed) — carried, never
                 // converted here. The countdown is subtracted per Lua call against the server
                 // clock, so this snapshot stays stable while the number on screen ticks
@@ -781,6 +796,19 @@ fn drain_quest_log_collapses(
     }
 }
 
+/// `QuestLogPushQuest()` — the *Share Quest* button (decision 1733). The engine already resolved
+/// the selection to a quest id at click time, so this is a straight relay; the server addresses the
+/// party itself.
+fn drain_quest_log_pushes(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for quest in script.take_quest_log_pushes() {
+        debug!("ui_quest_log: sharing quest {quest} with the party");
+        let _ = commands.0.send(ClientCommand::PushQuestToParty { quest });
+    }
+}
+
 fn drain_quest_log_abandons(
     script: Option<NonSendMut<UiScript>>,
     quest_log: Res<QuestLog>,
@@ -816,6 +844,7 @@ mod tests {
             collapsed: false,
             complete: 0,
             timer: 0,
+            pushable: false,
             objectives: Vec::new(),
         }
     }
@@ -830,6 +859,7 @@ mod tests {
             collapsed: false,
             complete: 0,
             timer: 0,
+            pushable: false,
             objectives: Vec::new(),
         }
     }

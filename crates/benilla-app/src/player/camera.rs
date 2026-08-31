@@ -1021,6 +1021,65 @@ pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl, m
     rig.distance += (rig.target_distance - rig.distance).clamp(-max_step, max_step);
 }
 
+/// Seat the camera on **whatever the rig is orbiting this frame** — our own body, or a far-sight
+/// subject (B151: Mind Vision, Sentry Totem, and Mind Control's camera half in B211) while
+/// `PLAYER_FARSIGHT` names one. Three substitutions and then [`seat_camera`]: the orbit centre,
+/// the collision sweep's origin, and the pivot height's target.
+///
+/// It exists because the controller seats the camera from **two** places — the ordinary driving
+/// path, and the stand-down path where a spline, a possession or a reseat window owns the body —
+/// and far sight outlives all of those (Sentry Totem carries no interrupt flags at all, so you can
+/// board a taxi with your view still on the totem). Two copies of the substitution is how one of
+/// them silently stops honouring it.
+///
+/// `feet`/`head` are the caller's, because the head offset is the avatar capsule's and those
+/// constants are a movement concern; `body_pivot` is the target height read off the driven body
+/// this frame, used only when nothing else is being watched.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn seat_on_subject(
+    dt: f32,
+    turn_delta: f32,
+    feet: Vec3,
+    head: Vec3,
+    body_pivot: Option<f32>,
+    view: &super::view_subject::ViewSubject,
+    rig: &mut CameraControl,
+    cam: &mut FlyCam,
+    cam_t: &mut Mut<Transform>,
+    collide: &benilla_world::collision::WorldCollision<'_, '_>,
+    cam_probe: &Collider,
+    follow: &FollowInput,
+) {
+    // The sweep origin moves with the subject too; rooting it at our own head would cast the boom
+    // across the world and jam it on the first wall in between
+    // ([`super::view_subject::RemoteView::sweep_origin`]).
+    let (orbit_pos, sweep_from) = match view.remote {
+        Some(v) => (v.feet, v.sweep_origin()),
+        None => (feet, head),
+    };
+    // The framing height is the **channel's**, not this frame's target: it eases there over
+    // `|Δh| / 1.2` s with a cosine profile, so a shapeshift, a mount, a growth aura or a far-sight
+    // switch move the camera smoothly instead of teleporting it ([`PivotGlide`]; wow-re
+    // `pivot-height-glide.md`). A far-sight subject supplies the target the same way the body
+    // does — one channel, whatever it is looking at.
+    let orbit_pivot = rig
+        .pivot
+        .advance(view.remote.map(|v| v.pivot_height).or(body_pivot), dt);
+    seat_camera(
+        dt,
+        turn_delta,
+        orbit_pos,
+        sweep_from,
+        orbit_pivot,
+        rig,
+        cam,
+        cam_t,
+        collide,
+        cam_probe,
+        follow,
+    );
+}
+
 /// Seat the third-person camera: orient it, orbit it behind the avatar's torso with a collision
 /// sweep from the head to the ideal seat (snap-in instantly, ease back out), write the resulting
 /// transform, and compute the self-avatar zoom-in fade from the realized camera-to-pivot distance.

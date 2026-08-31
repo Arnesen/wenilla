@@ -1369,3 +1369,84 @@ fn set_max_letters_gates_the_argument_count_and_coerces_the_value() {
         "too many raises too"
     );
 }
+
+/// **A `CSimpleEditBox` is born with FIVE regions, and `GetRegions` hands them to Lua before any
+/// authored one.** wow-re `scratch/rf85-editbox-caret.md` §1: the ctor builds the text FontString
+/// (`E+0x328`, `0x779bee`), three selection-highlight `CSimpleTexture`s (`E+0x350/0x354/0x358`,
+/// loop `0x779c41`–`0x779c72`) and the caret (`E+0x368`, `0x779c86`) — in that order. `GetRegions
+/// 0x773f60` walks `[frame+0x1b8]`, one flat creation-ordered list, oldest first, no filter
+/// (`scratch/widget-list-bindings.md`), and insertion is at the TAIL. So the authored `<Layers>`
+/// regions start at index 6.
+///
+/// The report is pfUI's `skins/blizzard/friends.lua` l.379 —
+/// `local _,_,_,_,_,left,right = GuildControlPopupFrameEditBox:GetRegions()` — which skips exactly
+/// those five and takes the box's two border textures. It died on a nil `left` for as long as
+/// benilla returned only the authored regions.
+#[test]
+fn an_editbox_is_born_with_the_ctors_five_regions_ahead_of_its_authored_ones() {
+    let s = script();
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+            <EditBox name="Box">
+                <Size><AbsDimension x="120" y="20"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="BoxLeft" file="Interface\Left"/>
+                        <Texture name="BoxRight" file="Interface\Right"/>
+                    </Layer>
+                </Layers>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+    // Five engine regions, then the two authored textures — and NOT a sixth from the embedded
+    // `<FontString>`, which declares the ctor's object rather than adding one (RF-0028).
+    assert_eq!(
+        s.eval::<i64>("return Box:GetNumRegions()").unwrap(),
+        7,
+        "5 ctor regions + 2 authored textures, and the <FontString> adds none"
+    );
+    assert_eq!(
+        s.eval::<i64>("return select('#', Box:GetRegions())")
+            .unwrap(),
+        7,
+        "GetNumRegions is exactly the length GetRegions enumerates"
+    );
+
+    // pfUI's own read, verbatim in shape: skip five, take the authored pair.
+    let (left, right) = s
+        .eval::<(String, String)>(
+            "local _,_,_,_,_,l,r = Box:GetRegions() return l:GetTexture(), r:GetTexture()",
+        )
+        .unwrap();
+    assert_eq!(
+        left, r"Interface\Left",
+        "region 6 is the first authored one"
+    );
+    assert_eq!(right, r"Interface\Right", "region 7 is the second");
+
+    // The first is the text FontString the box actually types into.
+    s.run(r#"Box:SetText("typed")"#).unwrap();
+    assert_eq!(
+        s.eval::<String>("local t = Box:GetRegions() return t:GetText()")
+            .unwrap(),
+        "typed",
+        "region 1 is the ctor's embedded text FontString"
+    );
+    // 2..5 are the three selection quads and the caret: real regions, carrying no art of their own
+    // (benilla paints both host-side — the gap named on EditBoxState).
+    assert!(
+        s.eval::<bool>(
+            "local a,b,c,d,e = Box:GetRegions() \
+             return b:GetTexture() == nil and c:GetTexture() == nil \
+                and d:GetTexture() == nil and e:GetTexture() == nil"
+        )
+        .unwrap(),
+        "the selection trio and the caret are blank quads"
+    );
+}

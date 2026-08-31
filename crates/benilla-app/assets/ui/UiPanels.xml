@@ -291,19 +291,17 @@
             return slots.center
         end
 
-        -- SetFullScreenFrame(frame) — UIParent.lua l.852-866. ONE line dropped: the reference also
-        -- does `UIParent:Hide()`/`:Show()` around the swap, hiding the whole game UI behind the
-        -- fullscreen frame.
+        -- SetFullScreenFrame(frame) — UIParent.lua l.852-866, now complete. The reference hides
+        -- the whole game UI behind the fullscreen frame by hiding `UIParent` itself, and shows it
+        -- again when the slot empties. That line was dropped for years because hiding `UIParent`
+        -- reached almost nothing: 72 `parent=` declarations were missing from the transcription,
+        -- so the HUD was a forest of top-level frames with no edge to cascade along (decision
+        -- 1734, which restored them).
         --
-        -- BOTH of the reasons this note used to give are now FALSE (decision 1724). A real
-        -- `UIParent` frame exists (UIParent.xml), and the world map is no longer the only `full`
-        -- row: `CinematicFrame` is a second one, and it paints nothing by design. So this dropped
-        -- line is exactly what makes a cinematic hide the HUD through `crate::ui_hide::UiHidden`
-        -- instead of through here — and `UiHidden` also means "the UI takes no mouse", which is
-        -- ALT-Z's meaning and the reason the world took every click of a fly-by.
-        --
-        -- Restoring it needs the HUD parented to UIParent first (the 32 dropped `parent="UIParent"`
-        -- declarations 1724 measured); hiding UIParent today would reach almost nothing.
+        -- **`CinematicFrame` survives this on purpose.** The reference declares it with no parent
+        -- at all — `<Frame name="CinematicFrame" setAllPoints="true" hidden="true" ...>` — which
+        -- is exactly how the frame this function is *showing* escapes the hide it performs. Ours
+        -- matches; do not give it one.
         function SetFullScreenFrame(frame)
             local oldFrame = slots.fullscreen
             slots.fullscreen = frame
@@ -311,7 +309,10 @@
                 oldFrame:Hide()
             end
             if frame then
+                UIParent:Hide()
                 frame:Show()
+            else
+                UIParent:Show()
             end
         end
 
@@ -375,6 +376,39 @@
                 return nil
             end
             return 1
+        end
+
+        -- IsOptionFrameOpen() — UIParent.lua l.996-1002, and the reference's own bag guard: it is
+        -- the first line of `ToggleBag`, `ToggleBackpack` and `ToggleKeyRing`, so with an options
+        -- window up a bag keybind does nothing at all. Distinct from CanOpenPanels above, which
+        -- asks about the panel MANAGER's centre slot; this asks a fixed list of five frames by
+        -- name, none of which is a managed panel.
+        --
+        -- The reference checks GameMenuFrame, OptionsFrame, UIOptionsFrame, SoundOptionsFrame and
+        -- KeyBindingFrame, and EVERY member is read through a nil guard here. That is the
+        -- reference's own idiom, not a softening of it — it already writes
+        -- `(KeyBindingFrame and KeyBindingFrame:IsVisible())` because that frame is created on
+        -- demand — extended to the whole list, because "is an options screen up" has a correct
+        -- answer, *no*, whenever the screen does not exist.
+        --
+        -- Two of the five genuinely do not exist in this client: benilla folds the reference's
+        -- three separate options windows into one `OptionsFrame` (its Video/Sound/Interface pages
+        -- are tabs of it) and its key-bindings page is a page of that same window
+        -- (KeyBindingsPage.xml), so `OptionsFrame` + `GameMenuFrame` cover every screen the other
+        -- three name. Those two the manifest does guarantee — but a PARTIAL interface is a real
+        -- surface (a focused test VM, and the reference's own `ADDON_LOADED` ordering), and this
+        -- runs on the first line of every `ToggleBag`/`ToggleBackpack`/`ToggleKeyRing`, so it is
+        -- the last place that should be the thing to raise.
+        function IsOptionFrameOpen()
+            if (GameMenuFrame and GameMenuFrame:IsVisible())
+                or (OptionsFrame and OptionsFrame:IsVisible())
+                or (UIOptionsFrame and UIOptionsFrame:IsVisible())
+                or (SoundOptionsFrame and SoundOptionsFrame:IsVisible())
+                or (KeyBindingFrame and KeyBindingFrame:IsVisible()) then
+                return 1
+            else
+                return nil
+            end
         end
 
         -- Everything that can REFUSE an open, asked in the reference's own order (UIParent.lua
@@ -605,36 +639,25 @@
             return found
         end
 
-        -- CloseAllWindows(ignoreCenter) — UIParent.lua l.970-982. The real fn first loops
-        -- ContainerFrame1..NUM_CONTAINER_FRAMES to hide any open bags, then calls CloseWindows() for
-        -- the panel slots, returning whether anything closed. benilla ships a single backpack window
-        -- (BenillaBagFrame, decision 0068 T2), so that loop collapses to hiding it. The bag is NOT a
-        -- UIPanel (no slot registration) — it must be closed here explicitly, exactly as the real
-        -- client closes its ContainerFrames outside the slot system. Naming BenillaBagFrame here
-        -- mirrors UIParent.lua naming ContainerFrame in the very same function.
-        -- The five bag windows (the real fn's ContainerFrame1..NUM_CONTAINER_FRAMES): the backpack
-        -- plus the four equipped-bag windows. Chunk-LOCAL rather than BagFrame.xml's own
-        -- BENILLA_BAG_WINDOWS global, so every user below stays nil-safe on a surface without the
-        -- bag file (a headless panel test) — each still resolves per window through `getglobal`.
-        -- (It was three identical inline copies until the game menu needed a fourth.)
-        local BAG_WINDOWS = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2",
-                              "BenillaBagFrame3", "BenillaBagFrame4" }
-        -- ESC closes the KEYRING too, but nothing else here does. The ref's split, exactly: its
-        -- CloseAllWindows loops every ContainerFrame and hides whatever is shown (the keyring
-        -- included), while CloseAllBags/OpenBackpack/CloseBackpack are id-driven over the real bags
-        -- and never see container -2 (decision 0765). So the keyring is appended for the ESC path
-        -- alone — a vendor opening your bags must not open your keyring with them.
-        local ESC_CLOSES = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2",
-                             "BenillaBagFrame3", "BenillaBagFrame4", "BenillaKeyRingFrame" }
-
+        -- CloseAllWindows(ignoreCenter) — UIParent.lua l.970-982, and VERBATIM now: the real fn
+        -- loops ContainerFrame1..NUM_CONTAINER_FRAMES hiding any open bag, then calls
+        -- CloseWindows() for the panel slots and returns whether anything closed. Until decision
+        -- 1751's bag swap this file had to spell that loop out over five benilla-named windows plus
+        -- the keyring; those windows ARE ContainerFrames now, and the reference's own loop covers
+        -- every one of them — the keyring included, which is why the bespoke ESC_CLOSES list (bags
+        -- + keyring, distinct from the bag-only list the vendor path used) is gone rather than
+        -- retargeted. A bag window is NOT a UIPanel (no slot registration), so it must be closed
+        -- here explicitly, exactly as the real client closes its ContainerFrames outside the slot
+        -- system.
+        -- `NUM_CONTAINER_FRAMES or 0` here and `NUM_BAG_FRAMES or 0` below are not defensive
+        -- padding: both constants come from the sourced `ContainerFrame.lua`, and a machine with no
+        -- client data does not get that file (`reference_ui`'s stated degradation, warned once at
+        -- boot). On that surface there are no bag windows AT ALL, so "close every open bag" really
+        -- is a no-op — the guard says exactly that, rather than hiding an absence.
         function CloseAllWindows(ignoreCenter)
             local bagsVisible = nil
-            -- Hide every open bag window. Now that 'B' opens all bags at once (BagFrame.xml
-            -- BenillaBagToggle_OnClick), ESC must close all of them, not just the backpack. The bag
-            -- windows are NOT UIPanels (no slot registration) — they must be closed here explicitly,
-            -- exactly as the real client closes its ContainerFrames outside the slot system.
-            for _, name in ipairs(ESC_CLOSES) do
-                local bag = getglobal(name)
+            for i = 1, (NUM_CONTAINER_FRAMES or 0) do
+                local bag = getglobal("ContainerFrame" .. i)
                 if bag and bag:IsShown() then
                     bag:Hide()
                     bagsVisible = 1
@@ -644,62 +667,76 @@
             return bagsVisible or windowsVisible
         end
 
-        -- CloseAllBags() — the ref ContainerFrame.lua l.702-707 (`CloseBackpack()` + `CloseBag(1..N)`),
-        -- called by ShowUIPanel's native-center branch above. Distinct from CloseBackpack below on
-        -- purpose: this is the UNCONDITIONAL close (the ref's CloseBag ignores the was-open memory),
-        -- because a center frame takes the whole screen — nothing is being "restored afterwards"
-        -- the way a vendor window restores the bags it opened.
-        function CloseAllBags()
-            for _, name in ipairs(BAG_WINDOWS) do
-                local bag = getglobal(name)
-                if bag and bag:IsShown() then
-                    bag:Hide()
-                end
+        -- ══ The three bag verbs benilla answers differently (decisions 0561 + 1751) ═════════
+        --
+        -- `CloseAllBags`, `OpenBackpack` and `CloseBackpack` all exist in the sourced
+        -- `ContainerFrame.lua` too, and benilla's differ for one reason, not three: **0561, the
+        -- director's call that a window which opens your bags opens EVERY equipped bag**, not just
+        -- the backpack. The vendor/bank/mail/trade windows call `OpenBackpack` from their OnShow so
+        -- your bags come up with them and you can sell or deposit from one; the reference's own
+        -- body touches bag 0 alone. `CloseBackpack` is its inverse and has to match it, and
+        -- `CloseAllBags` is the same family's unconditional form.
+        --
+        -- **The `Benilla*` names, and the publish under them, are load ORDER** (1751). Order
+        -- decides every collision and the manifest is the order: this file is entry 7 and the
+        -- reference's container file is entry 46, so a plain `function OpenBackpack()` here is
+        -- overwritten before the player ever sees a vendor. The bodies stay here because every
+        -- window that calls them is loaded by harnesses with no bag stack at all, and a nil
+        -- `OpenBackpack` in a merchant test is a nil for no reason; `ContainerFrameAdapters.xml`
+        -- (entry 49, after the reference's) is what puts these three back on the reference's names.
+        --
+        -- What CHANGED with the swap is only the plumbing: these used to walk five benilla windows
+        -- by name and stash `wasOpen` on each frame. The windows are the reference's recycled
+        -- `ContainerFrame1..12` now — frame N is a different bag every time it opens — so the
+        -- was-open memory is keyed by BAG ID, and every open and close goes through the
+        -- reference's own `OpenBag`/`CloseBag`/`IsBagOpen` rather than a raw Show/Hide. That buys
+        -- the reference's own guards for free (OpenBag's CanOpenPanels + NotWhileDeadError,
+        -- ToggleBag's `size > 0`) and means an addon replacing those verbs is honoured here too.
+        BENILLA_BAG_WAS_OPEN = {}
+
+        -- The UNCONDITIONAL close, called by ShowUIPanel's native-center branch above: a centre
+        -- frame takes the whole screen, so nothing is being "restored afterwards" the way a vendor
+        -- window restores the bags it opened, and the was-open memory is deliberately ignored.
+        -- Range 0..NUM_CONTAINER_FRAMES rather than the old five names — the reference's own
+        -- CloseAllBags covers the bank bags too (l.702-707), and now so does this.
+        function BenillaCloseAllBags()
+            for bagId = 0, (NUM_CONTAINER_FRAMES or -1) do
+                CloseBag(bagId)
             end
         end
 
-        -- OpenBackpack / CloseBackpack — the real ContainerFrame.lua globals (l.187-217) the
-        -- vendor/bank/mail/trade windows call from their OnShow/OnHide so your bags open with them
-        -- (playing igBackPackOpen/Close alongside the window's own panel sound — the two "go
-        -- together"), and you can sell/deposit from the open bag. Homed here in benilla's panel-glue
-        -- file (rather than the bag's own, as in the real client) so every window that opens can call
-        -- them regardless of FrameXML load order — the windows are looked up by name. The real fn
-        -- tracks `backpackWasOpen` so a bag you already had open is LEFT open on the window's close;
-        -- benilla stores that on each frame (`wasOpen`). benilla DIVERGES from the ref here on
-        -- purpose: the real OpenBackpack touches only the backpack, but ours opens EVERY equipped
-        -- bag with the window (director's call — decision 0561; its stated reason was matching the
-        -- 'B' all-bags toggle, which 1494 split apart — the call itself stands on its own),
-        -- so the names keep the ref's caller contract while the body loops the five windows. Every
-        -- step is guarded, so a surface without the bag file — a headless panel test — no-ops
-        -- rather than erroring.
-        function OpenBackpack()
-            for bagId = 0, 4 do
-                -- The backpack (bag 0) always exists; an equipped-bag window only when a bag is in
-                -- the slot (the same existence test as BagFrame.xml's OpenAllBags).
-                local exists = bagId == 0
-                    or (GetContainerNumSlots and GetContainerNumSlots(bagId) > 0)
-                local bag = exists and getglobal(BAG_WINDOWS[bagId + 1])
-                if bag then
-                    if bag:IsShown() then
-                        bag.wasOpen = 1  -- already open: leave it, and don't close it on window hide
+        -- OpenBackpack — 0561's all-bags form. A bag already open is REMEMBERED and left alone, so
+        -- the paired CloseBackpack does not close a window the player opened themselves; that
+        -- memory is the reference's own `backpackWasOpen`, one entry per bag instead of one flag.
+        function BenillaOpenBackpack()
+            for bagId = 0, (NUM_BAG_FRAMES or -1) do
+                -- The backpack always exists; an equipped-bag window only when a bag is in the
+                -- slot — `OpenBag` makes the same test itself, but the memory has to agree with it.
+                if bagId == 0 or GetContainerNumSlots(bagId) > 0 then
+                    if IsBagOpen(bagId) then
+                        BENILLA_BAG_WAS_OPEN[bagId] = 1
                     else
-                        bag.wasOpen = nil
-                        BenillaBagWindow_Repaint(bag)
-                        bag:Show()       -- OnShow → igBackPackOpen
+                        BENILLA_BAG_WAS_OPEN[bagId] = nil
+                        OpenBag(bagId)
                     end
                 end
             end
         end
 
-        function CloseBackpack()
-            for _, name in ipairs(BAG_WINDOWS) do
-                local bag = getglobal(name)
-                if bag and bag:IsShown() and not bag.wasOpen then
-                    bag:Hide()           -- OnHide → igBackPackClose
+        function BenillaCloseBackpack()
+            for bagId = 0, (NUM_BAG_FRAMES or -1) do
+                if not BENILLA_BAG_WAS_OPEN[bagId] then
+                    CloseBag(bagId)
                 end
             end
         end
 
+        -- The publish, for every surface that never loads the reference's container file — a
+        -- harness, and a machine with no client data. Where it IS loaded, these three lose to it
+        -- and `ContainerFrameAdapters.xml` wins them back.
+        OpenBackpack = BenillaOpenBackpack
+        CloseBackpack = BenillaCloseBackpack
+        CloseAllBags = BenillaCloseAllBags
         -- ToggleGameMenu(clicked) — UIParent.lua l.1465-1497, the ESCAPE binding's action
         -- (TOGGLEGAMEMENU), run by the host (crates/benilla ui_script/input.rs) when no EditBox
         -- consumed the key, and by the Main Menu micro button with `clicked = 1`. It was
@@ -944,8 +981,10 @@
         --     (reason ∈ "clicked"|"timeout"|"override"), OnUpdate(elapsed, dialog), timeout,
         --     StartDelay, delayText, sound, whileDead, hideOnEscape, cancels, showAlert (the
         --     420 widen + DialogAlertIcon, decision 1068).
-        --   · hasEditBox + maxLetters + EditBoxOnEnterPressed are live (decision 0668's
-        --     ADD_FRIEND/ADD_IGNORE are the first customers): the box shows, caps its length,
+        --   · hasEditBox + maxLetters + all three box hooks — EditBoxOnEnterPressed,
+        --     EditBoxOnTextChanged, EditBoxOnEscapePressed — are live (decision 0668's
+        --     ADD_FRIEND/ADD_IGNORE are the first customers; 1743's DELETE_GOOD_ITEM is the
+        --     first to gate button1 on what is typed): the box shows, caps its length,
         --     opens empty, and re-anchors the buttons under itself.
         --   · hasWideEditBox is live too (the guild arc's SET_GUILDMOTD / SET_GUILDPLAYERNOTE /
         --     SET_GUILDOFFICERNOTE, registered in FriendsFrame.xml): the 350x64 centred box
@@ -1254,10 +1293,12 @@
             end
         end
 
-        -- The edit box's two keys (ref StaticPopup.xml's template scripts). Enter runs the
-        -- entry's EditBoxOnEnterPressed hook, which by convention does the accept work and hides
-        -- the dialog itself; Escape dismisses the dialog through the ordinary cancel path so a
-        -- half-typed name never acts.
+        -- The edit box's three script hooks (ref StaticPopup.xml's template scripts, ref
+        -- l.1810-1829). All three are pure delegation to the entry's own hook of the same name;
+        -- `this` is the EDIT BOX while they run, which is what lets an entry body say
+        -- `this:GetParent()`. Enter runs the entry's EditBoxOnEnterPressed, which by convention
+        -- does the accept work and hides the dialog itself; text-changed drives a live gate on
+        -- button1 (DELETE_GOOD_ITEM's typed "DELETE" is the only 1.12 customer).
         function StaticPopup_EditBoxOnEnterPressed(editBox)
             local dialog = editBox:GetParent()
             local info = StaticPopupDialogs[dialog.which]
@@ -1266,10 +1307,35 @@
             end
         end
 
+        function StaticPopup_EditBoxOnTextChanged(editBox)
+            local dialog = editBox:GetParent()
+            local info = StaticPopupDialogs[dialog.which]
+            if info and info.EditBoxOnTextChanged then
+                info.EditBoxOnTextChanged(dialog.data)
+            end
+        end
+
+        -- Escape delegates like its two siblings — and where the entry names no hook, falls back
+        -- to what ESC would have done had the focused box not swallowed the key, i.e. the ordinary
+        -- StaticPopup_EscapePressed leg: the entry's OnCancel, then hide, and only for a
+        -- hideOnEscape entry. NAMED DIVERGENCE (1743): the reference has no fallback at all, so a
+        -- 1.12 dialog whose entry omits the hook simply eats the key — which is what its own
+        -- DELETE_GOOD_ITEM does, leaving a destroy confirm that ESC cannot dismiss. Every other
+        -- benilla popup closes on ESC and this one now does too; without the OnCancel leg it would
+        -- also have hidden while still holding the item, which is the half that made the old
+        -- unconditional `dialog:Hide()` wrong rather than merely lenient.
         function StaticPopup_EditBoxOnEscapePressed(editBox)
             local dialog = editBox:GetParent()
+            local info = StaticPopupDialogs[dialog.which]
             editBox:ClearFocus()
-            dialog:Hide()
+            if info and info.EditBoxOnEscapePressed then
+                info.EditBoxOnEscapePressed(dialog.data)
+            elseif dialog.hideOnEscape then
+                if info and info.OnCancel then
+                    info.OnCancel(dialog.data, "clicked")
+                end
+                dialog:Hide()
+            end
         end
 
         -- Ref l.1832-1848: the open/close pair sounds on EVERY path, then the entry's own hook.
@@ -1292,8 +1358,9 @@
         -- Ref l.1712-1808: the timeout countdown (expiry → OnCancel "timeout" + hide), the
         -- per-tick countdown text for the timer dialogs, the StartDelay gate (button1 disabled,
         -- delayText counts down, then the real text swaps in and the button enables), then the
-        -- entry's own OnUpdate. The INSTANCE_BOOT/CONFIRM_SUMMON special text formats join with
-        -- their dialogs; their which-list slots stay so the gate is the ref's.
+        -- entry's own OnUpdate. CONFIRM_SUMMON's special text format landed with its dialog
+        -- (decision 1747); INSTANCE_BOOT's joins when that dialog does, and its which-list slot
+        -- stays meanwhile so the gate is the ref's.
         function StaticPopup_OnUpdate(dialog, elapsed)
             local info = StaticPopupDialogs[dialog.which]
             if not info then
@@ -1317,11 +1384,23 @@
                     or (which == "CONFIRM_SUMMON") or (which == "AREA_SPIRIT_HEAL") then
                     local text = getglobal(dialog:GetName() .. "Text")
                     timeleft = ceil(timeleft)
-                    if timeleft < 60 then
-                        text:SetText(format(info.text, timeleft, StaticPopupTimeUnit(timeleft, false)))
+                    local n, unit = timeleft, StaticPopupTimeUnit(timeleft, false)
+                    if timeleft >= 60 then
+                        n = ceil(timeleft / 60)
+                        unit = StaticPopupTimeUnit(n, true)
+                    end
+                    -- The ref's own if/elseif over `which` (l.1746-1758), which exists because two
+                    -- of these dialogs take MORE than the count and its unit word. CONFIRM_SUMMON
+                    -- prefixes the summoner and the destination, both read live from the engine
+                    -- every tick — which is what lets a name still resolving through the name cache
+                    -- paint blank once and then fill itself in (decision 1747). INSTANCE_BOOT's arm
+                    -- (GetBindLocation() first) joins when that dialog does; until then it falls
+                    -- through here, which is wrong for it and harmless, since it cannot be shown.
+                    if which == "CONFIRM_SUMMON" then
+                        text:SetText(format(info.text, GetSummonConfirmSummoner(),
+                            GetSummonConfirmAreaName(), n, unit))
                     else
-                        local m = ceil(timeleft / 60)
-                        text:SetText(format(info.text, m, StaticPopupTimeUnit(m, true)))
+                        text:SetText(format(info.text, n, unit))
                     end
                 end
             end
@@ -1386,20 +1465,29 @@
             return closed
         end
 
-        -- Delete-item confirm strings — the real 1.12 GlobalStrings.lua (patch-2.MPQ,
-        -- Interface\FrameXML\GlobalStrings.lua), quoted verbatim (extracted via benilla-extract).
-        local DELETE_ITEM_TEXT = "Do you want to destroy %s?" -- DELETE_ITEM; %s = the item name
-        local YES_TEXT = "Yes" -- YES
-        local NO_TEXT = "No"   -- No
+        -- Destroy-confirm strings — the real 1.12 GlobalStrings.lua (patch-2.MPQ,
+        -- Interface\FrameXML\GlobalStrings.lua l.921-923; YES/NO are l.5463/l.2794, the same pair
+        -- LootFrame.xml declares), quoted verbatim in the FALLBACK form:
+        -- the player's own localized GlobalStrings.lua runs off the patch chain BEFORE this file
+        -- (ui_script/mod.rs), so these only fill in for the harnesses that load no chain. They
+        -- were plain locals until 1743; a local could never be the localized text, and
+        -- DELETE_ITEM_CONFIRM_STRING in particular MUST be the player's own word — it is what the
+        -- good-item dialog below makes them type.
+        DELETE_ITEM = DELETE_ITEM or "Do you want to destroy %s?"
+        DELETE_GOOD_ITEM = DELETE_GOOD_ITEM
+            or "Do you want to destroy %s?\n\nType \"DELETE\" into the field to confirm."
+        DELETE_ITEM_CONFIRM_STRING = DELETE_ITEM_CONFIRM_STRING or "DELETE"
+        YES = YES or "Yes"
+        NO = NO or "No"
 
         -- Ref StaticPopup.lua l.659-679, verbatim — its own OnUpdate poll (cursor emptied by any
         -- other path → hide) replaces the old bespoke `deleteItemFlow` CURSOR_UPDATE driver.
         -- exclusive is v1-inert (engine header note); showAlert is live since 1068 — the ref's
         -- own "display the error image" case is this very dialog.
         StaticPopupDialogs["DELETE_ITEM"] = {
-            text = DELETE_ITEM_TEXT,
-            button1 = YES_TEXT,
-            button2 = NO_TEXT,
+            text = DELETE_ITEM,
+            button1 = YES,
+            button2 = NO,
             OnAccept = function()
                 DeleteCursorItem()
             end,
@@ -1418,14 +1506,193 @@
             hideOnEscape = 1,
         }
 
+        -- Ref StaticPopup.lua l.680-724, verbatim — the RARE-or-better destroy. Same accept,
+        -- cancel and auto-hide poll as DELETE_ITEM above; what it adds is the typed confirmation:
+        -- the edit box takes focus on open, button1 starts DISABLED, and only the exact
+        -- DELETE_ITEM_CONFIRM_STRING (case-insensitively, via the ref's own strupper) enables it.
+        --
+        -- `this` is the dialog inside OnShow/OnHide and the EDIT BOX inside the two EditBox hooks —
+        -- the reference's own convention, which is why those two reach the dialog through
+        -- `this:GetParent()`. Our engine sets the same `this` on both paths (StaticPopup_OnShow /
+        -- the template's <OnEnterPressed>/<OnTextChanged>), so the bodies transcribe unchanged.
+        --
+        -- The one guard added: the ref's OnHide reads ChatFrameEditBox unguarded, which raises in a
+        -- harness that loads no ChatFrame.xml. Same `and` the bag's shift-link arm carries.
+        StaticPopupDialogs["DELETE_GOOD_ITEM"] = {
+            text = DELETE_GOOD_ITEM,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                DeleteCursorItem()
+            end,
+            OnCancel = function()
+                ClearCursor()
+            end,
+            OnUpdate = function()
+                if not CursorHasItem() then
+                    StaticPopup_Hide("DELETE_GOOD_ITEM")
+                end
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            showAlert = 1,
+            hideOnEscape = 1,
+            hasEditBox = 1,
+            maxLetters = 32,
+            OnShow = function()
+                getglobal(this:GetName() .. "Button1"):Disable()
+                getglobal(this:GetName() .. "EditBox"):SetFocus()
+            end,
+            OnHide = function()
+                if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                    ChatFrameEditBox:SetFocus()
+                end
+                getglobal(this:GetName() .. "EditBox"):SetText("")
+            end,
+            EditBoxOnEnterPressed = function()
+                if getglobal(this:GetParent():GetName() .. "Button1"):IsEnabled() == 1 then
+                    DeleteCursorItem()
+                    this:GetParent():Hide()
+                end
+            end,
+            EditBoxOnTextChanged = function()
+                local editBox = getglobal(this:GetParent():GetName() .. "EditBox")
+                if strupper(editBox:GetText()) == DELETE_ITEM_CONFIRM_STRING then
+                    getglobal(this:GetParent():GetName() .. "Button1"):Enable()
+                else
+                    getglobal(this:GetParent():GetName() .. "Button1"):Disable()
+                end
+            end,
+        }
+
+        -- ── The equip / auto-equip / use soulbind confirms (decision 1750) ────────────────────
+        -- ref GlobalStrings.lua l.1459 / l.4453 / l.2818 / l.465, fallback form.
+        EQUIP_NO_DROP = EQUIP_NO_DROP or "Equipping this item will bind it to you."
+        USE_NO_DROP = USE_NO_DROP or "Using this item will bind it to you."
+        OKAY = OKAY or "Okay"
+        CANCEL = CANCEL or "Cancel"
+
+        -- ref StaticPopup.lua l.612-647, verbatim, twice: EQUIP_BIND and AUTOEQUIP_BIND are the
+        -- SAME entry down to the last field — same text, same three hooks — and differ only in
+        -- which event raises them. Built from one factory rather than transcribed twice, because
+        -- two copies of a nine-field table is exactly how the two drift apart.
+        --
+        -- `data` is a 0-based index into the client's pending-equip array, NOT a slot (the RE
+        -- corrected benilla's assumption here). It is opaque: the event hands it out and these
+        -- hooks hand it straight back.
+        --
+        -- **OnCancel AND OnHide both cancel, and that is deliberate, not redundant.** OnHide is
+        -- what retires a record when `exclusive = 1` makes a second bind question hide this one;
+        -- without it the superseded item's pending record leaks. The doubling it causes on the
+        -- ordinary paths is harmless by construction — an Accept runs OnAccept then OnHide, so the
+        -- app sees [accept, cancel] for one index and the cancel finds the record already taken.
+        local function equip_bind_entry()
+            return {
+                text = EQUIP_NO_DROP,
+                button1 = OKAY,
+                button2 = CANCEL,
+                OnAccept = function(index)
+                    EquipPendingItem(index)
+                end,
+                OnCancel = function(index)
+                    CancelPendingEquip(index)
+                end,
+                OnHide = function(index)
+                    CancelPendingEquip(index)
+                end,
+                timeout = 0,
+                exclusive = 1,
+                whileDead = 1,
+                hideOnEscape = 1,
+            }
+        end
+        StaticPopupDialogs["EQUIP_BIND"] = equip_bind_entry()
+        StaticPopupDialogs["AUTOEQUIP_BIND"] = equip_bind_entry()
+
+        -- ref StaticPopup.lua l.648-658. No index, no cancel hook: the use arm's pending state is
+        -- a single cell in the client rather than an array element, and declining just drops it.
+        StaticPopupDialogs["USE_BIND"] = {
+            text = USE_NO_DROP,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function()
+                ConfirmBindOnUse()
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        -- The bank-slot purchase confirm (ref StaticPopup.lua l.47-60), transcribed verbatim.
+        --
+        -- **It is HERE because its window is the reference's own file now** (1751). Every other
+        -- dialog in this client is declared by the window that shows it; the bank window is
+        -- `Interface\FrameXML\BankFrame.xml`, executed off the player's chain, and the reference
+        -- keeps this entry in `StaticPopup.lua` — the one file benilla replaces with the engine
+        -- above. So the house's StaticPopup home carries it, and `BankFramePurchaseButton`'s
+        -- `StaticPopup_Show("CONFIRM_BUY_BANK_SLOT")` finds it. Left out, the Purchase button
+        -- would be a silent no-op.
+        --
+        -- The coin row is real (1580 made `hasMoneyFrame` live): `BankFrame.nextSlotCost` is set
+        -- by the reference's own `UpdateBagSlotStatus` off `GetBankSlotCost`, and this OnShow is
+        -- the reference's own line for reading it.
+        CONFIRM_BUY_BANK_SLOT = CONFIRM_BUY_BANK_SLOT
+            or "Do you want to purchase a bank slot for:"
+        StaticPopupDialogs["CONFIRM_BUY_BANK_SLOT"] = {
+            text = CONFIRM_BUY_BANK_SLOT,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                PurchaseSlot()
+            end,
+            OnShow = function()
+                MoneyFrame_Update(this:GetName() .. "MoneyFrame", BankFrame.nextSlotCost)
+            end,
+            hasMoneyFrame = 1,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+
+        -- ref UIParent.lua l.324-343 + l.356-360, the four arms on one driver. Each equip arm
+        -- hides the OTHER dialog first — the two questions are mutually exclusive by construction
+        -- (one item, one destination), and the hide is what cancels the record the new question
+        -- replaces.
+        function BenillaBindConfirmDriver_OnEvent(frame)
+            if event == "EQUIP_BIND_CONFIRM" then
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+                local dialog = StaticPopup_Show("EQUIP_BIND")
+                if dialog then
+                    dialog.data = arg1
+                end
+            elseif event == "AUTOEQUIP_BIND_CONFIRM" then
+                StaticPopup_Hide("EQUIP_BIND")
+                local dialog = StaticPopup_Show("AUTOEQUIP_BIND")
+                if dialog then
+                    dialog.data = arg1
+                end
+            elseif event == "USE_BIND_CONFIRM" then
+                StaticPopup_Show("USE_BIND")
+            elseif event == "CURSOR_UPDATE" then
+                -- ref l.356-360: the player picked something else up, so the standing question is
+                -- stale. Both hides run their OnHide, which cancels the record.
+                StaticPopup_Hide("EQUIP_BIND")
+                StaticPopup_Hide("AUTOEQUIP_BIND")
+            end
+        end
+
         -- BenillaDeleteItemConfirmDriver's OnEvent — DELETE_ITEM_CONFIRM(name, quality) is the
         -- engine's world-drop of an item payload (decision 0216 §3, cursor.rs::world_drop) →
-        -- ref UIParent.lua:344-352. DEFERRED (0216 §3): the ref splits quality >= 3 to
-        -- DELETE_GOOD_ITEM (the typed-confirmation editbox variant) — no editbox variant yet, so
-        -- every quality (arg2) shows DELETE_ITEM for now.
+        -- ref UIParent.lua:344-352, now whole: the ref's `arg2 >= 3` fork routes RARE-or-better
+        -- (quality 3..6 — blue, epic, legendary, artifact) to the typed-confirmation variant and
+        -- everything below it to the plain one. 0216 §3's deferral is closed (1743).
         function BenillaDeleteItemConfirmDriver_OnEvent(frame)
             if event == "DELETE_ITEM_CONFIRM" then
-                StaticPopup_Show("DELETE_ITEM", arg1)
+                if arg2 >= 3 then
+                    StaticPopup_Show("DELETE_GOOD_ITEM", arg1)
+                else
+                    StaticPopup_Show("DELETE_ITEM", arg1)
+                end
             end
         end
 
@@ -1550,6 +1817,92 @@
                 return 1
             end
             return nil
+        end
+
+        -- tDeleteItem(table, item) — ref UIParent.lua l.1376-1390, the reference's own array
+        -- delete: it removes EVERY occurrence, closing the hole each time, and it is published
+        -- surface (the pulse kit below is one caller; addons written against 1.12 are the rest).
+        function tDeleteItem(t, item)
+            local index = 1
+            while t[index] do
+                if item == t[index] then
+                    table.remove(t, index)
+                else
+                    index = index + 1
+                end
+            end
+        end
+
+        -- ── The button-pulse kit — ref UIParent.lua l.9 + l.1334-1373, transcribed ──────────────
+        -- A button flashes its highlight on and off for a while: the reference uses it for the
+        -- keyring button when the player picks up their first key (MainMenuBar.xml l.335), for the
+        -- micro buttons on a new talent point (MainMenuBarMicroButtons.lua l.124) and for the
+        -- tutorial frame's advance button (TutorialFrame.lua l.72).
+        --
+        -- **Why it is here now.** Decision 0304 scoped pulses out while nothing called them.
+        -- benilla now runs the reference's own `ContainerFrame.lua` off the player's chain (1751),
+        -- and `ToggleKeyRing` closes with `SetButtonPulse(KeyRingButton, 0, 1)` — a *stop*, the
+        -- duration-0 form — on every keyring open. A nil global there is a raise on a window the
+        -- player is opening, and the honest fix is the reference's mechanism, not a guard at the
+        -- call site: it is thirty lines and it makes the other three call sites work the day they
+        -- arrive.
+        --
+        -- Verbatim but for the tick source: the reference hangs ButtonPulse_OnUpdate on UIParent's
+        -- OnUpdate (UIParent.xml l.16-22), which walks an empty list every frame forever. Ours is
+        -- BenillaPulseDriver below — the same shape the fade kit already uses (and the same reason:
+        -- the engine dispatches OnUpdate to visible frames only, so a driver that hides itself on
+        -- an empty list costs nothing while idle, and SetButtonPulse, the single inserter, shows it
+        -- again).
+        PULSEBUTTONS = {}
+
+        function SetButtonPulse(button, duration, pulseRate)
+            -- The reference really does write pulseDuration twice, the first time from pulseRate —
+            -- its own comment on the next line ("pulseRate is actually seconds per pulse state")
+            -- is why: pulseDuration counts down one HALF-cycle and is reloaded from pulseRate.
+            button.pulseDuration = pulseRate
+            button.pulseTimeLeft = duration
+            button.pulseRate = pulseRate
+            button.pulseOn = 0
+            tinsert(PULSEBUTTONS, button)
+            BenillaPulseDriver:Show()
+        end
+
+        function ButtonPulse_OnUpdate(elapsed)
+            local index = 1
+            while PULSEBUTTONS[index] do
+                local button = PULSEBUTTONS[index]
+                if button.pulseTimeLeft > 0 then
+                    if button.pulseDuration < 0 then
+                        if button.pulseOn == 1 then
+                            button:UnlockHighlight()
+                            button.pulseOn = 0
+                        else
+                            button:LockHighlight()
+                            button.pulseOn = 1
+                        end
+                        button.pulseDuration = button.pulseRate
+                    end
+                    button.pulseDuration = button.pulseDuration - elapsed
+                    button.pulseTimeLeft = button.pulseTimeLeft - elapsed
+                    index = index + 1
+                else
+                    -- The duration-0 case, which is how `ToggleKeyRing` says "stop": the button is
+                    -- unhighlighted and dropped on the very first tick after the call.
+                    button:UnlockHighlight()
+                    button.pulseOn = 0
+                    tDeleteItem(PULSEBUTTONS, button)
+                    -- No index bump — tDeleteItem closed the hole, so the next entry is here now.
+                    -- (The reference walks with `for index, button in PULSEBUTTONS` and deletes
+                    -- mid-walk, which skips the entry after each removal; this is the same walk
+                    -- FADEFRAMES already spells out longhand for the same reason.)
+                end
+            end
+        end
+
+        function ButtonPulse_StopPulse(button)
+            button:UnlockHighlight()
+            button.pulseOn = 0
+            tDeleteItem(PULSEBUTTONS, button)
         end
 
         -- ── The tab kit (ref UIPanelTemplates.lua l.1-29/90-133, transcribed VERBATIM shape) ──
@@ -1778,6 +2131,17 @@
         <Scripts><OnUpdate>if not FADEFRAMES[1] then this:Hide() return end UIFrameFadeUpdate(arg1)</OnUpdate></Scripts>
     </Frame>
 
+    <!-- The pulse kit's tick source, the fade driver's twin — same reason, same shape: the ref
+         hangs ButtonPulse_OnUpdate on UIParent's OnUpdate (UIParent.xml l.16-22) and walks an
+         empty list every frame; this runs only while PULSEBUTTONS has entries, and SetButtonPulse
+         is the single inserter that shows it again. Hidden at load: nothing pulses until something
+         asks. -->
+    <Frame name="BenillaPulseDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts><OnUpdate>if not PULSEBUTTONS[1] then this:Hide() return end ButtonPulse_OnUpdate(arg1)</OnUpdate></Scripts>
+    </Frame>
+
     <!--
         The window tab button (ref CharacterFrameTabButtonTemplate — Interface\FrameXML\
         CharacterFrameTemplates.xml in patch.MPQ, NOT the base FrameXML.toc set; extracted via
@@ -1989,8 +2353,9 @@
             <!-- The name-entry box (ref StaticPopup.xml l.84-140): 130x32 at BOTTOM +45, the
                  chat-input three-slice border, hidden unless the entry sets hasEditBox. First
                  customer: the social window's ADD_FRIEND / ADD_IGNORE dialogs (decision 0668).
-                 Enter runs the entry's own EditBoxOnEnterPressed (the ref's hook name) and Escape
-                 dismisses the whole dialog, which is the ref's EditBoxOnEscapePressed default. -->
+                 All three of the ref's box hooks are wired (Enter / Escape / TextChanged), each
+                 delegating to the entry's own hook of that name; OnTextChanged rides the NARROW
+                 box alone, which is the ref's own asymmetry (StaticPopup.xml l.133 vs l.190). -->
             <EditBox name="$parentEditBox" historyLines="1" hidden="true" autoFocus="false">
                 <Size><AbsDimension x="130" y="32"/></Size>
                 <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="45"/></Offset></Anchor></Anchors>
@@ -2011,6 +2376,7 @@
                 <Scripts>
                     <OnEnterPressed>StaticPopup_EditBoxOnEnterPressed(self)</OnEnterPressed>
                     <OnEscapePressed>StaticPopup_EditBoxOnEscapePressed(self)</OnEscapePressed>
+                    <OnTextChanged>StaticPopup_EditBoxOnTextChanged(self)</OnTextChanged>
                 </Scripts>
                 <FontString inherits="ChatFontNormal"/>
             </EditBox>
@@ -2076,10 +2442,10 @@
             <OnUpdate>StaticPopup_OnUpdate(this, arg1)</OnUpdate>
         </Scripts>
     </Frame>
-    <Frame name="StaticPopup1" inherits="StaticPopupTemplate">
+    <Frame name="StaticPopup1" inherits="StaticPopupTemplate" parent="UIParent">
         <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-128"/></Offset></Anchor></Anchors>
     </Frame>
-    <Frame name="StaticPopup2" inherits="StaticPopupTemplate">
+    <Frame name="StaticPopup2" inherits="StaticPopupTemplate" parent="UIParent">
         <Anchors><Anchor point="TOP" relativeTo="StaticPopup1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
     </Frame>
 
@@ -2095,6 +2461,23 @@
                 self:RegisterEvent("DELETE_ITEM_CONFIRM")
             </OnLoad>
             <OnEvent>BenillaDeleteItemConfirmDriver_OnEvent(self)</OnEvent>
+        </Scripts>
+    </Frame>
+
+    <!-- The equip/auto-equip/use soulbind confirms (decision 1750). Same shape and same reason as
+         the delete driver above: the reference handles all four of these events in UIParent.lua's
+         own OnEvent, and none of them names a frame, so they get a dedicated hidden listener. -->
+    <Frame name="BenillaBindConfirmDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                self:RegisterEvent("EQUIP_BIND_CONFIRM")
+                self:RegisterEvent("AUTOEQUIP_BIND_CONFIRM")
+                self:RegisterEvent("USE_BIND_CONFIRM")
+                self:RegisterEvent("CURSOR_UPDATE")
+            </OnLoad>
+            <OnEvent>BenillaBindConfirmDriver_OnEvent(self)</OnEvent>
         </Scripts>
     </Frame>
 </Ui>

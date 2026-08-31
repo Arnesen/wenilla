@@ -9,7 +9,7 @@
 //!
 //! **The order below is load-bearing and is the client's own**, so the two binaries stay diffable
 //! (it was `worldview::engine`, "the cut line written down", before it was this). Two edges inside
-//! it are documented dependencies rather than taste: `WmoSkyPlugin` registers after `SkyPlugin`,
+//! it are documented dependencies rather than taste: `SkyboxPlugin` registers after `SkyPlugin`,
 //! whose dome it stands down, and `PerfPlugin` after the debug panel, whose egui context it
 //! needs (both instruments, and both the client's to add in that order now). `ArtScopePlugin` before `AssetPlugin` is *not* one — its own comment says so — but it
 //! costs nothing to keep.
@@ -163,7 +163,7 @@ impl PluginGroup for WorldPlugins {
             .add(crate::sky::SkyPlugin)
             // WMO skybox: the authored sky a building's `0x40000` group swaps in for that gradient
             // (Stratholme's burning city) — registered after SkyPlugin, whose dome it stands down.
-            .add(crate::wmo_sky::WmoSkyPlugin)
+            .add(crate::skybox::SkyboxPlugin)
             // Cloud coverage: the reference's procedural field — glare occlusion (occ1) + the
             // visible layer.
             .add(crate::clouds::CloudsPlugin)
@@ -265,6 +265,7 @@ impl Plugin for WorldFoundation {
             // (`collision::ColliderEpoch`). Tracked in `First` so a removal is stamped before any
             // consumer runs; the attach half is stamped by the streamer's own attach loop.
             .init_resource::<crate::collision::ColliderEpoch>()
+            .init_resource::<crate::collision::MoverTraceExclusions>()
             .add_systems(First, crate::collision::track_collider_removals);
         // Avian's pre-step copy of Bevy's transform propagation is OFF by default (the 1370
         // bracket surfaced the lane; the 3-round SW split then measured the skip at −0.40

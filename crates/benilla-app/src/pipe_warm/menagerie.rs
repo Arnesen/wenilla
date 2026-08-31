@@ -440,7 +440,7 @@ pub(super) fn spawn_menagerie(
     }
 
     // The WMO-skybox rows (decision 1264): the STATIC PLAIN layout only, and only on the world
-    // camera. `wmo_sky::build_skybox` inserts POSITION + NORMAL + UV_0 — `layouts[0]` exactly — a
+    // camera. `skybox::build_skybox` inserts POSITION + NORMAL + UV_0 — `layouts[0]` exactly — a
     // skybox is never skinned (the asteroid belts' bones are a deferral, not a shipped lane), never
     // vertex-coloured (M2 carries no MOCV), never far-twinned, and never reaches a portrait booth.
     {

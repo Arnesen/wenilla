@@ -34,9 +34,9 @@ use benilla_assets::materials::WowModelMaterial;
 use super::light::BoothLight;
 use super::{
     aim, body_frame, booth_anchors, new_target_image, spawn_booth_effects, spawn_booth_model,
-    wake_booth, Booth, BoothBillboardSpec, BoothCam, BoothEffects, BoothMotion, BoothPart,
-    BoothRider, Booths, PortraitImages, PortraitSource, PreviewBillboard, PreviewEffects,
-    PreviewPart, PreviewRider, BOOTH_SETTLE_FRAMES, DRESSUP_LAYER, PAPERDOLL_SIZE,
+    wake_booth, Booth, BoothBillboardSpec, BoothCam, BoothEffects, BoothInstance, BoothMotion,
+    BoothPart, BoothRider, BoothTwins, Booths, PortraitImages, PortraitSource, PreviewBillboard,
+    PreviewEffects, PreviewPart, PreviewRider, BOOTH_SETTLE_FRAMES, DRESSUP_LAYER, PAPERDOLL_SIZE,
 };
 
 /// The dressing-room booth slot token (its key in [`PortraitImages`] / [`Booths`]).
@@ -266,6 +266,7 @@ pub(super) fn sync_dressup_booth(
                 material: relight(&p.material),
                 // `None` — the same known gap as the glue preview's (decision 0807).
                 alpha_anim: None,
+                twins: BoothTwins::default(),
             })
             .collect();
         let booth_riders: Vec<BoothRider> = bake
@@ -276,6 +277,7 @@ pub(super) fn sync_dressup_booth(
                 material: relight(&r.material),
                 bone: r.bone,
                 offset: r.offset,
+                twins: BoothTwins::default(),
             })
             .collect();
         let booth_billboards: Vec<BoothBillboardSpec> = bake
@@ -287,6 +289,7 @@ pub(super) fn sync_dressup_booth(
                 bone: b.bone,
                 offset: b.offset,
                 kind: b.kind,
+                twins: BoothTwins::default(),
             })
             .collect();
         // Never latch a world-lane material into a pane (the [`super::light`] law): retry instead.
@@ -311,6 +314,7 @@ pub(super) fn sync_dressup_booth(
             BoothMotion::Loop,
             bake.grip,
             &booth_billboards,
+            BoothInstance::default(),
         );
         let (fx_emitters, _) = spawn_booth_effects(
             &mut commands,
@@ -326,6 +330,7 @@ pub(super) fn sync_dressup_booth(
                     emitters: fx.emitters.clone(),
                 })
                 .collect::<Vec<_>>(),
+            BoothInstance::default(),
         );
         // The bake animates, so its camera can't sleep — `gate_booth_cameras` runs it every frame
         // the window is drawing this pane, and none once it closes.

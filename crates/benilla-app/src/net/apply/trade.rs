@@ -7,26 +7,31 @@
 
 use benilla_protocol::messages::{TradeStatus, TradeStatusExtended};
 
-use crate::net::{ClientCommand, NetCommands};
 use crate::ui_trade::TradeSession;
 
 /// `SessionEvent::TradeStatus` (`SMSG_TRADE_STATUS`) — the trade state machine (decision 0592 P1).
-/// `BEGIN_TRADE` records the partner and auto-answers `CMSG_BEGIN_TRADE` (the reference client's
-/// auto-reply, vmangos `TradeHandler.cpp` — it makes the server emit `OPEN_WINDOW` to both sides);
-/// `OPEN_WINDOW` opens the window; `TRADE_ACCEPT`/`BACK_TO_TRADE` drive the accept glow; the terminal
-/// and refusal codes close it. The refusal statuses' red error text is decision 0592 P3;
-/// `ONLY_CONJURED` (a rejected item placement, not a window close) and any out-of-range code are inert.
-pub(super) fn trade_status(status: TradeStatus, trade: &mut TradeSession, commands: &NetCommands) {
+/// `BEGIN_TRADE` records the incoming request **without answering it** (decision 1764 — the reply
+/// is a policy with five gates and the player's own consent, so
+/// [`crate::ui_trade::answer_trade_request`] owns it); `OPEN_WINDOW` opens the window;
+/// `TRADE_ACCEPT`/`BACK_TO_TRADE` drive the accept glow; the terminal and refusal codes close it.
+/// The refusal statuses' red error text is decision 0592 P3; `ONLY_CONJURED` (a rejected item
+/// placement, not a window close) and any out-of-range code are inert.
+pub(super) fn trade_status(status: TradeStatus, trade: &mut TradeSession) {
     bevy::log::info!(target: "trade", "SMSG_TRADE_STATUS {status:?}");
     match status {
-        TradeStatus::BeginTrade { partner } => {
-            trade.begin(partner);
-            let _ = commands.0.send(ClientCommand::BeginTrade);
-        }
+        TradeStatus::BeginTrade { partner } => trade.request(partner),
         TradeStatus::OpenWindow => trade.open_window(),
         TradeStatus::Accept => trade.partner_accepted(),
         TradeStatus::BackToTrade => trade.back_to_trade(),
         // Terminal (complete/cancel/close) + every initiate/in-trade refusal → close the window.
+        //
+        // **Two statuses sit outside the reference's own clear set, and neither is reachable on
+        // vmangos** (decision 1764, noticed rather than chased). The reference clears its trade
+        // cells in the status handler's common tail on 0, 3, 5, 6, 8, 10, 11, 12, 13 and 14–21;
+        // this list is that set minus `Rejected` (9), which we close on and it does not, plus
+        // `Unknown13` (13), which it clears on and we treat as inert below. vmangos sends neither,
+        // so there is no observable to settle it against — which is exactly why it is written down
+        // here instead of being guessed at in either direction.
         TradeStatus::Canceled
         | TradeStatus::Complete
         | TradeStatus::CloseWindow { .. }

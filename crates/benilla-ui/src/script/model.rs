@@ -4,12 +4,12 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    auction, backdrop, bank, char_stats, chat_window, colorselect, container, craft, cursor, death,
-    duel, follow, gossip, guild, inspect, item_text, loot, loot_roll, macros, mail, merchant,
-    party, petition, pvp, quest, quest_log, reputation, session, simplehtml, skills, slider,
-    social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot,
-    AuraState, FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest,
-    UnitState,
+    auction, backdrop, bank, bind_confirm, camera_view, char_stats, chat_window, colorselect,
+    container, craft, cursor, death, duel, follow, gossip, guild, inspect, item_text, loot,
+    loot_roll, macros, mail, merchant, party, petition, pvp, quest, quest_log, reputation, session,
+    simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill, trainer,
+    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
+    RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -319,6 +319,16 @@ pub(crate) struct Model {
     /// same-frame press+release test in [`UiScript::mouse_button`]. Keyed by button so a `LeftButton`
     /// press is not cleared by a `RightButton` release.
     pub(crate) mouse_down_on: HashMap<String, FrameHandle>,
+    /// The client's single mouse-capture slot **`root+0x80`** — the frame a press captured, held
+    /// until every button is up. The same fact as [`Model::mouse_down_on`] in the one-slot form,
+    /// and the two differ only while more than one button is held; this is the form the
+    /// mouse-down **raise** reads, which is what needs the precedence to be unambiguous.
+    ///
+    /// Written at `0x7663e6` with the resolved target — capture-**else**-hover, so an existing
+    /// capture survives a chorded press over a different frame — and cleared at `0x7664bb` only
+    /// when the post-event button mask is empty, so a chorded release keeps it. A title-region
+    /// press never reaches `0x7663e6` and so captures nothing.
+    pub(crate) mouse_capture: Option<FrameHandle>,
     /// Per **frame**, the [`UiScript::now`] second at which its last single `OnClick` fired — the
     /// double-click detector's entire state, and the faithful stand-in for the client's per-widget
     /// timestamp `[CButton+0x334]` (wow-re `ui/scratch/button-doubleclick-law.md`).
@@ -392,11 +402,17 @@ pub(crate) struct Model {
     /// [`super::aura::TrackingState`]), pushed by the app's aura feed beside `auras`. `None` =
     /// no tracking active.
     pub(crate) tracking: Option<super::aura::TrackingState>,
-    /// Unit tokens `TargetUnit` queued since the app's last [`UiScript::take_target_requests`] drain
-    /// — the outbound twin of `units` above (the reference's `TargetUnit` Lua shim → SetSelection).
-    /// The app resolves each token to a streamed entity and commits the selection; a token it can't
-    /// resolve is a no-op, as the real client no-ops `TargetUnit` on a nonexistent unit ([`unit`]).
-    pub(crate) target_requests: Vec<String>,
+    /// Selection asks queued since the app's last [`UiScript::take_selection_requests`] drain — the
+    /// outbound twin of `units` above, carrying `TargetUnit` / `AssistUnit` / `TargetLastEnemy` in
+    /// call order because the reference reaches selection through one helper for all three
+    /// ([`super::SelectionRequest`]). The app resolves each to a streamed entity and commits the
+    /// selection; one it can't resolve is a no-op, as the real client no-ops `TargetUnit` on a
+    /// nonexistent unit ([`unit`]).
+    pub(crate) selection_requests: Vec<super::SelectionRequest>,
+    /// `TargetNearestFriend([reverse])` presses queued since the app's last
+    /// [`UiScript::take_target_nearest_friend_requests`] drain — one entry per call, `true` for the
+    /// reverse (backward) cycle. The app runs the friendly half of the TAB scan ([`unit`]).
+    pub(crate) target_nearest_friend_requests: Vec<bool>,
     /// `(name, exactMatch)` pairs `TargetByName` queued since the app's last
     /// [`UiScript::take_target_by_name_requests`] drain — the by-NAME twin of
     /// [`Self::target_requests`], which takes unit tokens. The app runs the shared by-name
@@ -432,6 +448,15 @@ pub(crate) struct Model {
     pub(crate) saved_instances: Vec<party::SavedInstanceInfo>,
     /// `SetRaidRosterSelection`'s cursor — a client-side raid row index, never sent anywhere.
     pub(crate) raid_selection: i64,
+    /// The current map's `Map.dbc` `InstanceType`, pushed by the app — `IsInInstance()`'s whole
+    /// input ([`instance`]). `None` = the map id has no DBC row.
+    pub(crate) instance_type: Option<u32>,
+    /// `CanShowResetInstances()`'s answer, pushed by the app (decision 1748) — the four-term
+    /// predicate the reference computes at `0x495c90` over state only the app holds.
+    pub(crate) can_reset_instances: bool,
+    /// `ResetInstances()` calls queued since the app's last
+    /// [`super::UiScript::take_reset_instance_asks`] drain — the outbound seam ([`instance`]).
+    pub(crate) reset_instance_asks: u32,
     /// The social snapshot the app pushes (friends, ignores, the last `/who` — decision 0668):
     /// `GetNumFriends`/`GetFriendInfo`/`GetWhoInfo`/… read it ([`social`]). Already
     /// display-resolved (names, class/zone names) because the reference resolves them
@@ -499,6 +524,13 @@ pub(crate) struct Model {
     /// queue's twin, snapshot-less for the same reason: the only thing the UI reads back is the
     /// `AUTOFOLLOW_BEGIN`/`AUTOFOLLOW_END` pair the app fires, which carries its own argument.
     pub(crate) follow_requests: Vec<follow::FollowRequest>,
+    /// Camera-view intents (`SetView`/`SaveView`/`ResetView`/`NextView`/`PrevView`/
+    /// `FlipCameraYaw`) queued since the app's last
+    /// [`super::UiScript::take_camera_view_requests`] drain — the outbound seam
+    /// ([`camera_view`]). Snapshot-less like the follow queue: the five views live on the app's
+    /// camera rig, and they reach Lua the way the reference's do — as the
+    /// `cameraView` / `camera{Distance,Pitch,Yaw}{,A..D}` CVars — not as a second copy here.
+    pub(crate) camera_view_requests: Vec<camera_view::CameraViewRequest>,
     /// Session-exit intents (`Logout`/`Quit`/`CancelLogout`/`ForceQuit`) queued since the app's
     /// last [`super::UiScript::take_session_requests`] drain — the outbound seam ([`session`]).
     /// Snapshot-less like the duel queue above: what the UI reads back (the camp/quit countdown)
@@ -606,7 +638,7 @@ pub(crate) struct Model {
     /// reads it ([`action`]). Keyed like `actions`; an absent action reads cold/nil.
     pub(crate) action_states: HashMap<u32, super::action::StoredActionState>,
     pub(crate) bonus_bar_offset: u8,
-    pub(crate) action_uses: Vec<u32>,
+    pub(crate) action_uses: Vec<super::action::ActionUse>,
     /// `(lua action id, packed)` pairs queued by `PickupAction`/`PlaceAction` (decision 0216 §7,
     /// slice 4) — one entry per local slot mutation, `packed == 0` clearing the slot. Drained by
     /// the app into `CMSG_SET_ACTION_BUTTON`, one send per entry (client-authoritative, per-change
@@ -817,6 +849,9 @@ pub(crate) struct Model {
     /// `(bag, slot)` sources queued by `AutoEquipCursorItem` (decision 0208 phase 1b, `cursor`'s
     /// `doll` submodule) — drained by the app into `CMSG_AUTOEQUIP_ITEM`.
     pub(crate) container_autoequips: Vec<(i64, u32)>,
+    /// Auto-stores queued by `PutItemInBag`/`PutItemInBackpack` (`cursor`'s `bag_verbs` submodule) —
+    /// drained by the app into `CMSG_AUTOSTORE_BAG_ITEM` (or `CMSG_SPLIT_ITEM` for a split carry).
+    pub(crate) bag_autostores: Vec<container::BagAutoStore>,
 
     /// Per-frame drag-button registrations (`RegisterForDrag`) — kind-independent (any Frame, not
     /// just a Button), so it lives beside [`Model::mouse_down_on`] rather than inside a per-kind
@@ -971,10 +1006,27 @@ pub(crate) struct Model {
     /// drain.
     pub(crate) craft_close: bool,
 
-    /// The open loot's row snapshot the app pushes (`None` = no loot open), the `LootSlot` row-pick
-    /// intents it drains, and whether `CloseLoot` was called — the loot seam ([`loot`]).
+    /// The `EquipPendingItem`/`CancelPendingEquip` answers the app drains, in call order, and the
+    /// `ConfirmBindOnUse()` count — the non-loot soulbind confirmations' whole Lua side
+    /// ([`bind_confirm`], decision 1750). The pending records themselves are the app's.
+    pub(crate) pending_equip_answers: Vec<bind_confirm::PendingEquipAnswer>,
+    pub(crate) bind_on_use_confirms: u32,
+
+    /// The open loot's row snapshot the app pushes (`None` = no loot open), the row-pick intents it
+    /// drains, and whether `CloseLoot` was called — the loot seam ([`loot`]).
+    ///
+    /// **The picks come in two flavours, and the flavour is load-bearing** (decision 1744): the
+    /// reference's take dispatcher `0x4c2790(slot, flag)` is one function with two entries, and the
+    /// flag decides whether a bind-on-pickup row raises the LOOT_BIND confirm or is taken outright.
+    /// `flag == 0` is the row click, which in 1.12 is the C `CLootButton`'s own behaviour and here
+    /// is `BenillaTakeLootSlot`; `flag != 0` is the confirm continuation, which is the ONLY thing
+    /// the 1.12 Lua binding `LootSlot` does (`0x4c2e70` passes `edx = 1`, and its sole FrameXML
+    /// caller is `StaticPopupDialogs["LOOT_BIND"].OnAccept`).
     pub(crate) loot: Option<loot::LootState>,
     pub(crate) loot_picks: Vec<u32>,
+    /// The `LootSlot(slot)` confirm continuations — 1-based display rows, drained separately from
+    /// [`Self::loot_picks`] so the app can honour the reference's pending-slot gate.
+    pub(crate) loot_confirms: Vec<u32>,
     pub(crate) loot_close: bool,
     /// The `GiveMasterLoot(slot, candidateIndex)` assignments the app drains — both 1-based and
     /// both display-side: the row as the window numbers it, and the candidate's position in
@@ -1082,6 +1134,15 @@ pub(crate) struct Model {
     pub(crate) quest_log_selection: u32,
     pub(crate) quest_log_abandon_mark: u32,
     pub(crate) quest_log_abandons: Vec<u32>,
+    /// Quest ids `QuestLogPushQuest()` queued for the app to push to the party (decision 1733).
+    /// **Ids, not entry indices** — unlike the abandon mark above, whose two-step confirm is the
+    /// whole reason it pins an index: a push is one click, so the id is resolved right then and a
+    /// log shuffle between click and drain cannot retarget it.
+    pub(crate) quest_log_pushes: Vec<u32>,
+    /// How many times `ConfirmAcceptQuest()` was called — the escort confirm's Yes. A counter, not
+    /// a quest id: the reference's verb takes no argument and answers whatever confirm the client
+    /// is holding, so the id lives app-side with the pending confirm (decision 1733).
+    pub(crate) quest_confirms: u32,
     /// The shared item-template store: `item id → full tooltip view` ([`item_stats`] module doc,
     /// decision 0274 P1).
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
@@ -1195,6 +1256,11 @@ pub(crate) struct Model {
     /// binding's route is a fork between them (the [`Self::pet_book`] precedent).
     pub(crate) pet_combat_stats: Option<char_stats::UnitCombatStats>,
     pub(crate) inventory_slots: char_stats::InventorySlots,
+    /// The six bank-bag slots (live ids 64..=69) — the third band of
+    /// [`char_stats::Model::inv_slot`], and a store rather than a view because a bank bag has no
+    /// container slot to be read out of: it IS the container. Fed beside
+    /// [`Self::inventory_slots`] off the player descriptor's own guids.
+    pub(crate) bank_bag_slots: char_stats::BankBagSlots,
     /// The 12 alert-region statuses (`GetInventoryAlertStatus`, DurabilityFrame's armor-guy
     /// feed) in the client's own `0x806eb8` table order (11 equipment regions + the low-ammo
     /// 12th) — recomputed on every inventory push, which fires `UPDATE_INVENTORY_ALERTS`
@@ -1358,6 +1424,16 @@ pub(crate) struct Model {
     /// CONFIRM_BINDER dialog polls it from OnUpdate and hides itself when it goes false, which is
     /// how walking away from the innkeeper takes the question off screen (decision 1331).
     pub(crate) binder_pending: bool,
+    /// The summon question's three resolved reads, pushed by the app each frame
+    /// ([`super::UiScript::set_summon_confirm`]) — what `GetSummonConfirmSummoner`,
+    /// `GetSummonConfirmAreaName` and `GetSummonConfirmTimeLeft` answer ([`super::summon`]).
+    /// Default (two empty strings and a zero) is exactly what the reference's getters answer with
+    /// nothing pending, so the pre-push window behaves like the post-expiry one (decision 1747).
+    pub(crate) summon_confirm: super::summon::SummonConfirmUiState,
+    /// `ConfirmSummon()` calls queued since the app's last drain — each is one outbound
+    /// `CMSG_SUMMON_RESPONSE`. A COUNT for [`Self::binder_confirms`]'s reason: the app holds the
+    /// summoner's guid, so the intent carries no payload of its own.
+    pub(crate) summon_confirms: u32,
     /// Frames per second, behind `GetFramerate()`. Pushed per tick by the app, which owns the
     /// clock this crate does not have.
     pub(crate) framerate: f64,
@@ -1463,6 +1539,7 @@ impl Model {
             mouseover: None,
             hover_repick: false,
             mouse_down_on: HashMap::new(),
+            mouse_capture: None,
             last_click: HashMap::new(),
             pending_size_changed: Vec::new(),
             errors: Vec::new(),
@@ -1476,7 +1553,8 @@ impl Model {
             auras: HashMap::new(),
             cancel_aura_requests: Vec::new(),
             tracking: None,
-            target_requests: Vec::new(),
+            selection_requests: Vec::new(),
+            target_nearest_friend_requests: Vec::new(),
             target_by_name_requests: Vec::new(),
             drop_item_on_unit: Vec::new(),
             target_clear: false,
@@ -1485,6 +1563,9 @@ impl Model {
             party_requests: Vec::new(),
             saved_instances: Vec::new(),
             raid_selection: 0,
+            instance_type: None,
+            can_reset_instances: false,
+            reset_instance_asks: 0,
             social: social::SocialState::default(),
             social_requests: Vec::new(),
             guild: guild::GuildState::default(),
@@ -1502,6 +1583,7 @@ impl Model {
             default_language: None,
             duel_requests: Vec::new(),
             follow_requests: Vec::new(),
+            camera_view_requests: Vec::new(),
             session_requests: Vec::new(),
             pvp_toggles: 0,
             honor: None,
@@ -1572,6 +1654,7 @@ impl Model {
             ui_cursor: None,
             ui_cursor_dirty: false,
             container_autoequips: Vec::new(),
+            bag_autostores: Vec::new(),
             drag_registered: HashMap::new(),
             drag: None,
             moving: None,
@@ -1617,7 +1700,10 @@ impl Model {
             craft_selection: 0,
             craft_close: false,
             loot: None,
+            pending_equip_answers: Vec::new(),
+            bind_on_use_confirms: 0,
             loot_picks: Vec::new(),
+            loot_confirms: Vec::new(),
             loot_close: false,
             loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),
@@ -1669,6 +1755,8 @@ impl Model {
             quest_log_selection: 0,
             quest_log_abandon_mark: 0,
             quest_log_abandons: Vec::new(),
+            quest_log_pushes: Vec::new(),
+            quest_confirms: 0,
             item_templates: HashMap::new(),
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),
@@ -1697,6 +1785,8 @@ impl Model {
             stuck_casts: 0,
             binder_confirms: 0,
             binder_pending: false,
+            summon_confirm: super::summon::SummonConfirmUiState::default(),
+            summon_confirms: 0,
             framerate: 0.0,
             modifiers: (false, false, false),
             money: 0,
@@ -1721,6 +1811,7 @@ impl Model {
             player_combat_stats: None,
             pet_combat_stats: None,
             inventory_slots: Default::default(),
+            bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
             paperdoll_yaw: 0.0,
             inventory_uses: Vec::new(),

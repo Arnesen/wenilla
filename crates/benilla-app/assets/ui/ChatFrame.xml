@@ -1412,7 +1412,7 @@
         one script here that is genuinely ChatFrame1's rather than the dock's, so the template
         carries the gate rather than the registration.
     -->
-    <ScrollingMessageFrame name="BenillaChatFrameTemplate" virtual="true"
+    <ScrollingMessageFrame name="BenillaChatFrameTemplate" toplevel="true" virtual="true" parent="UIParent"
                            frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128"
                            movable="true" resizable="true">
         <!-- ref FloatingChatFrame.xml l.222-230, verbatim. The only `<ResizeBounds>` in the whole
@@ -1938,12 +1938,12 @@
          the ref's PanelTemplates_TabResize(5, tab) from FCF_DockUpdate). Hidden by alpha
          (hover reveals).
 
-         ChatFrame2Tab ("Combat Log") is deliberately NOT built: the combat log renders nothing
-         real yet (window 2 gets its chat-cache groups from the router, but the combat-event →
-         line pipeline doesn't exist), so the tab just selected an empty window. ChatFrame2
-         itself stays above (the router keeps feeding it) so the tab can return whole with the
-         combat-log arc — director's call, 2026-07-11. The FCF loops guard the missing tab. ── -->
-    <Button name="BenillaChatTabTemplate" virtual="true" frameStrata="LOW" alpha="0">
+         ChatFrame2Tab ("Combat Log") is built below; what is still missing is what goes IN it —
+         window 2 gets its chat-cache groups from the router, but the combat-event → line pipeline
+         does not exist, so the tab selects a window the combat log never writes to. That is also
+         why the four 1.12 COMBATLOG* bindings are recorded absent rather than registered
+         (`bindings::commands::ABSENT`). ── -->
+    <Button name="BenillaChatTabTemplate" virtual="true" parent="UIParent" frameStrata="LOW" alpha="0">
         <Size><AbsDimension x="70" y="32"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
@@ -2143,7 +2143,7 @@
         <HighlightFont inherits="GameFontHighlight" justifyH="LEFT"/>
         <DisabledFont inherits="GameFontDisable" justifyH="LEFT"/>
     </Button>
-    <Frame name="UIMenuTemplate" frameStrata="DIALOG" virtual="true">
+    <Frame name="UIMenuTemplate" toplevel="true" frameStrata="DIALOG" virtual="true">
         <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
             <BackgroundInsets><AbsInset left="4" right="4" top="4" bottom="4"/></BackgroundInsets>
             <TileSize><AbsValue val="32"/></TileSize>
@@ -2198,7 +2198,7 @@
 
     <!-- ── The chat menu button (ref ChatFrameMenuButton): the bubble icon atop the scroll
          column; click opens ChatMenu (ref ChatFrame_OpenMenu). ──────────────────────────── -->
-    <Button name="ChatFrameMenuButton" frameStrata="LOW">
+    <Button name="ChatFrameMenuButton" parent="UIParent" frameStrata="LOW">
         <Size><AbsDimension x="32" y="32"/></Size>
         <Anchors>
             <Anchor point="BOTTOM" relativeTo="ChatFrame1UpButton" relativePoint="TOP"/>
@@ -2220,19 +2220,19 @@
          Voice-menu-left-open corner). The submenus are authored as children (the ref's
          parent="ChatMenu" attr — this engine attaches by nesting, CharacterFrame.xml's note),
          so hiding ChatMenu hides them with it. -->
-    <Frame name="ChatMenu" inherits="UIMenuTemplate" hidden="true">
+    <Frame name="ChatMenu" inherits="UIMenuTemplate" parent="UIParent" hidden="true">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="ChatFrameMenuButton" relativePoint="TOPRIGHT"/>
         </Anchors>
         <Frames>
-            <Frame name="EmoteMenu" inherits="UIMenuTemplate" hidden="true">
+            <Frame name="EmoteMenu" inherits="UIMenuTemplate" parent="ChatMenu" hidden="true">
                 <Scripts>
                     <OnLoad>
                         BenillaOnEmoteMenuLoad(BenillaEmoteMenuList)
                     </OnLoad>
                 </Scripts>
             </Frame>
-            <Frame name="VoiceMacroMenu" inherits="UIMenuTemplate" hidden="true">
+            <Frame name="VoiceMacroMenu" inherits="UIMenuTemplate" parent="ChatMenu" hidden="true">
                 <Scripts>
                     <OnLoad>
                         BenillaOnEmoteMenuLoad(BenillaVoiceMacroList)
@@ -2271,7 +2271,7 @@
          arrow-steering working and the keys being dead. -->
     <!-- historyLines: the ref template ships 32; 64 at the director's call ("at least 50",
          2026-07-26) — the recall walk is the modern law already (decision 0301). -->
-    <EditBox name="ChatFrameEditBox" frameStrata="DIALOG" hidden="true" historyLines="64" letters="255">
+    <EditBox name="ChatFrameEditBox" toplevel="true" parent="UIParent" frameStrata="DIALOG" hidden="true" historyLines="64" letters="255">
         <Size><AbsDimension x="0" y="32"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="ChatFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="-2"/></Offset></Anchor>

@@ -16,6 +16,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
 use benilla_assets::materials::WowModelMaterial;
+use benilla_world::model_fade::FadeMaterials;
 
 /// One mesh headed into a booth bake: the mirrored part's twins + its studio-lit material.
 pub(super) struct BoothPart {
@@ -29,6 +30,88 @@ pub(super) struct BoothPart {
     /// 0807 — B121's black corners were UI_Tauren's 0.55 `LENSALPHA` vignette at full strength).
     /// `None` for the overwhelming majority of batches, which are opaque.
     pub(super) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
+    /// The batch's translucency twins, for a bake whose **instance alpha** is below 1
+    /// ([`BoothInstance`]) — the blend twin it draws through and the depth-prime twin that keeps
+    /// it one layer. Both already exist on every M2 batch (`EntityPart::fade_blend`/`zfill`,
+    /// the char composite's quint); the booth relights them beside the steady one and hands them
+    /// here. `None` for a batch that cannot feather at all — the reference's own twin gate.
+    pub(super) twins: BoothTwins,
+}
+
+/// A batch's translucency twins as the bake sees them — see [`BoothPart::twins`]. Default (both
+/// `None`) is "cannot feather", which is what every opaque-bake caller passes.
+#[derive(Clone, Default)]
+pub(crate) struct BoothTwins {
+    pub(crate) blend: Option<Handle<WowModelMaterial>>,
+    pub(crate) zfill: Option<Handle<WowModelMaterial>>,
+}
+
+/// **The bake's instance-level render properties** — the reference's per-CM2-instance alpha
+/// (`model+0x180`) and modulate colour (`model+0x184..0x18c`), which every batch of the model draws
+/// through and which every model *attached* to it composes onto (`0x714000`'s recursion).
+///
+/// One value per bake rather than one per batch, deliberately: that is what it is in the reference,
+/// and it is why a booth's riders and cards take it as surely as its body batches do — an item on a
+/// ghost is as translucent and as blue as the arm holding it.
+///
+/// A booth composes at **bake time**, so this is where benilla's one-alpha law (decision 1164 — the
+/// game declares the translucency, the engine owns the write, the composition and the material
+/// swap) is discharged for a booth: the three things the engine owes a translucent instance (the
+/// tag's alpha field, the blend-twin swap, and the [`FadeMaterials`] record the depth prime arms
+/// off) all happen in [`spawn_booth_model`], together, or not at all.
+#[derive(Clone, Copy)]
+pub(super) struct BoothInstance {
+    /// `model+0x180`. `1.0` = opaque, which is every bake but a ghosted one.
+    pub(super) alpha: f32,
+}
+
+impl Default for BoothInstance {
+    fn default() -> Self {
+        Self { alpha: 1.0 }
+    }
+}
+
+impl BoothInstance {
+    /// Does this instance draw translucent — the gate on the whole twin/tag/`FadeMaterials` arm.
+    /// Mirrors the reference's own `0 < A < 1` band ([`benilla_world::mesh_tag::translucent`],
+    /// which is what the depth prime keys on once the tag is written).
+    pub(super) fn feathering(self) -> bool {
+        self.alpha < 1.0
+    }
+
+    /// The material this instance draws `steady` with, given the batch's twins — the blend twin
+    /// while feathering, the steady material otherwise (and the steady one anyway for a batch that
+    /// has no twin: a Mod/Mod2x batch reads no alpha, so no swap can feather it — it rides the
+    /// shader's identity lerp on the tag alpha instead, decision 0865/1489).
+    fn material(
+        self,
+        steady: &Handle<WowModelMaterial>,
+        twins: &BoothTwins,
+    ) -> Handle<WowModelMaterial> {
+        match (self.feathering(), twins.blend.as_ref()) {
+            (true, Some(blend)) => blend.clone(),
+            _ => steady.clone(),
+        }
+    }
+
+    /// The persistent [`FadeMaterials`] record a feathering batch carries, so
+    /// [`benilla_world::zfill`]'s depth prime arms on it exactly as it does on a stealthed body in
+    /// the world. `None` when the batch cannot feather, or the instance is opaque.
+    fn fade_materials(
+        self,
+        steady: &Handle<WowModelMaterial>,
+        twins: &BoothTwins,
+    ) -> Option<FadeMaterials> {
+        let blend = twins.blend.clone()?;
+        self.feathering().then(|| FadeMaterials {
+            cutout: steady.clone(),
+            blend,
+            // A booth is never interior-classified: it has no room around it, and its light is
+            // the scene's own authored rig.
+            bake_blend: None,
+            zfill: twins.zfill.clone(),
+        })
+    }
 }
 
 /// Marks a booth part whose render-alpha `MeshTag` **and `Visibility`** are driven by its own
@@ -55,6 +138,9 @@ pub(super) struct BoothRider {
     pub(super) material: Handle<WowModelMaterial>,
     pub(super) bone: u16,
     pub(super) offset: Vec3,
+    /// This rider's translucency twins — an attached model composes onto its parent instance's
+    /// alpha (`0x714000`), so a ghost's helm feathers with the head under it. See [`BoothTwins`].
+    pub(super) twins: BoothTwins,
 }
 
 /// One camera-facing batch headed into a booth bake — the undead/night-elf **eye-glow** (a quad on
@@ -71,6 +157,10 @@ pub(super) struct BoothBillboardSpec {
     /// model itself — the joint frame already bakes the bone pivot (the 0130 rig identity).
     pub(super) offset: Vec3,
     pub(super) kind: BillboardKind,
+    /// The card's translucency twins — a card is a batch of the model like any other, so it takes
+    /// the instance alpha too (the reference has ONE instance alpha every batch draws through,
+    /// billboard batches included; decision 0836 is the same rule on the world's card lanes).
+    pub(super) twins: BoothTwins,
 }
 
 /// A spawned booth billboard card: the centred quad seated on its billboard bone's joint (which
@@ -124,6 +214,11 @@ pub(super) struct BoothEffects {
 pub(super) struct BoothRig {
     root: Entity,
     rig: Option<benilla_world::rig_anim::RigPose>,
+    /// The palette rig slot this bake allocated (`0` = boneless bake, or the pool was full). It is
+    /// also this instance's index into the per-instance TINT table
+    /// ([`benilla_world::instance_tint`]) — the same field the vertex stage skins from — so a
+    /// caller that wants to colour the whole bake writes it here.
+    slot: u16,
 }
 
 impl BoothRig {
@@ -139,6 +234,12 @@ impl BoothRig {
     /// Whether a rig stands at all — the park gate's "is there anything to park".
     pub(super) fn rigged(&self) -> bool {
         self.rig.is_some()
+    }
+
+    /// This bake's palette/tint slot — see [`Self::slot`]. `0` is the world's no-rig sentinel and
+    /// is never a real slot, so `0` reads as "this bake cannot be tinted".
+    pub(super) fn slot(&self) -> u16 {
+        self.slot
     }
 
     /// Commit the pose buffer onto the booth root — after every consumer is seated. `StageRig`
@@ -193,6 +294,9 @@ pub(super) fn spawn_booth_effects(
     layer: &RenderLayers,
     light: Option<&bevy::render::render_resource::Buffer>,
     effects: &[BoothEffects],
+    // The bake's instance-level properties ([`BoothInstance`]). An effect model attached to a
+    // translucent instance composes onto it — see the host spawn below.
+    instance: BoothInstance,
 ) -> (usize, usize) {
     let mut spawned = 0usize;
     let mut frames = 0usize;
@@ -200,14 +304,28 @@ pub(super) fn spawn_booth_effects(
         let Some(joint) = rig.anchor(commands, fx.bone) else {
             continue; // bad bone index — bake the body without this model's effects
         };
-        let host = commands
-            .spawn((
-                Transform::from_translation(fx.offset),
-                Visibility::default(),
-                ChildOf(joint),
-                layer.clone(),
-            ))
-            .id();
+        // The host stands for the ATTACHED MODEL, which is what makes it the right place to hang
+        // the composed alpha: the reference recomposes an attached model's own instance alpha every
+        // frame as `child+0x19c = parent+0x19c × child+0x180` (`0x714260`), and the emitter lane
+        // then copies that into `emitter+0x1a8` (`0x718960` @`0x719073`) to fold into every
+        // particle's alpha. Our particle sim already walks that chain
+        // ([`benilla_world::model_fade::ModelAlphas`], decisions 0827/0833) — it had simply never
+        // been given a link to walk from a booth, because until a bake could be translucent every
+        // booth rider really was opaque. A ghosted select body is the case that made it false.
+        //
+        // `ModelFade`, not `ModelAlpha`: the game declares the translucency and the engine owns the
+        // composition (decision 1164). A booth bake has no ramps to fold, so the walk reads the
+        // declared value straight — see [`benilla_world::model_fade::ModelAlphas`].
+        let mut host = commands.spawn((
+            Transform::from_translation(fx.offset),
+            Visibility::default(),
+            ChildOf(joint),
+            layer.clone(),
+        ));
+        if instance.feathering() {
+            host.insert(benilla_world::model_fade::ModelFade(instance.alpha));
+        }
+        let host = host.id();
         for em in &fx.emitters {
             // A **billboard** bone in the emitter's chain (decision 0813): its palette rows are
             // replaced with the rendering camera's basis about the bone's own pivot, and children
@@ -242,9 +360,10 @@ pub(super) fn spawn_booth_effects(
                     anchor: Some(host), // the cloud anchors at the MODEL; bones compose births only
                     // A booth rider's host is torn down with the bake it belongs to.
                     on_owner_loss: benilla_world::particles::OwnerLoss::Free,
-                    // A booth bake has no appear/despawn ramp and no self-avatar feather — its
-                    // riders are always opaque (0827).
-                    alpha: None,
+                    // The MODEL this cloud multiplies by (0827): its own host, whose composed
+                    // alpha is the bake's instance alpha. `ModelAlphas` reads 1.0 through an
+                    // entity carrying no `ModelAlpha`, so an opaque bake costs exactly what it did.
+                    alpha: Some(host),
                     // A booth's light is its own buffer (`EffectLightOverride` below), never a
                     // world light node — the world's would fog and shade the pane by the world's
                     // time of day.
@@ -405,6 +524,9 @@ pub(super) fn spawn_booth_model(
     // joint and re-faced to the booth camera by [`face_booth_billboards`]. Needs the rig (no bones =
     // no eye bone); the boneless bake below drops them. `&[]` for booths that dress none.
     billboards: &[BoothBillboardSpec],
+    // The bake's instance-level render properties — see [`BoothInstance`]. `default()` (opaque) for
+    // every booth but a ghosted character select.
+    instance: BoothInstance,
 ) -> BoothRig {
     // A re-bake must not inherit the previous model's animation state on the shared root — nor a
     // stale pose buffer (its anchors died with the child despawn), nor the previous rig's palette
@@ -414,24 +536,40 @@ pub(super) fn spawn_booth_model(
         for p in parts {
             let mut child = commands.spawn((
                 Mesh3d(p.static_mesh.clone()),
-                MeshMaterial3d(p.material.clone()),
+                MeshMaterial3d(instance.material(&p.material, &p.twins)),
                 Transform::IDENTITY,
                 layer.clone(),
                 ChildOf(root),
             ));
             // The authored material alpha reaches the boneless bake too — it is a property of the
-            // batch, not of the rig.
+            // batch, not of the rig. The INSTANCE alpha multiplies into it, the reference's
+            // `model+0x180 × the batch factor` (`0x707680`).
             if let Some(anim) = &p.alpha_anim {
                 let mat_anim =
                     benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
                 child.insert((
-                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(0, mat_anim.current)),
+                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                        0,
+                        mat_anim.current * instance.alpha,
+                    )),
                     mat_anim,
                     BoothMatAlpha,
                 ));
+            } else if instance.feathering() {
+                child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                    0,
+                    instance.alpha,
+                )));
+            }
+            if let Some(fm) = instance.fade_materials(&p.material, &p.twins) {
+                child.insert(fm);
             }
         }
-        return BoothRig { root, rig: None };
+        return BoothRig {
+            root,
+            rig: None,
+            slot: 0,
+        };
     };
     // The collapsed pose buffer (decision 1443, replaying 0724/1365 for the last entity-joint
     // rig lane): bind-pose composed, evaluated in place by the 0712 evaluator off the player
@@ -502,7 +640,7 @@ pub(super) fn spawn_booth_model(
         };
         let mut child = commands.spawn((
             Mesh3d(mesh),
-            MeshMaterial3d(p.material.clone()),
+            MeshMaterial3d(instance.material(&p.material, &p.twins)),
             Transform::IDENTITY,
             layer.clone(),
             ChildOf(root),
@@ -519,15 +657,22 @@ pub(super) fn spawn_booth_model(
             child.insert((
                 bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
                     tag_slot,
-                    mat_anim.current,
+                    mat_anim.current * instance.alpha,
                 )),
                 mat_anim,
                 BoothMatAlpha,
             ));
-        } else if use_rig {
+        } else if use_rig || instance.feathering() {
             child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
-                tag_slot, 1.0,
+                tag_slot,
+                instance.alpha,
             )));
+        }
+        // The persistent twin record: while this instance draws translucent, `benilla_world::zfill`
+        // keeps a colour-masked, z-writing child on it, so overlapping limbs stay ONE blended
+        // layer instead of compounding 0.5 over 0.5 (the reference's `M2UseZFill`, decision 0831).
+        if let Some(fm) = instance.fade_materials(&p.material, &p.twins) {
+            child.insert(fm);
         }
         if use_rig {
             child.insert(benilla_world::rig_palette::RigPart(root));
@@ -550,18 +695,32 @@ pub(super) fn spawn_booth_model(
     let mut booth_rig = BoothRig {
         root,
         rig: Some(pose),
+        slot: rig_slot,
     };
     for r in riders {
         let Some(anchor) = booth_rig.anchor(commands, r.bone) else {
             continue; // bad bone index — bake the body without this rider
         };
-        commands.spawn((
+        let mut child = commands.spawn((
             Mesh3d(r.mesh.clone()),
-            MeshMaterial3d(r.material.clone()),
+            MeshMaterial3d(instance.material(&r.material, &r.twins)),
             Transform::from_translation(r.offset),
             layer.clone(),
             ChildOf(anchor),
         ));
+        // An attached model composes onto its parent instance's colour and alpha (the reference's
+        // `0x714000` recursion; decision 0820's "an item's parts carry the wearer's instance
+        // bits"). Untagged means opaque + slot 0, so the tag only goes up when there is something
+        // to say — a translucent instance, or a tint slot to borrow.
+        if instance.feathering() || rig_slot != 0 {
+            child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                rig_slot,
+                instance.alpha,
+            )));
+        }
+        if let Some(fm) = instance.fade_materials(&r.material, &r.twins) {
+            child.insert(fm);
+        }
     }
     // The camera-facing batches (the eye-glow, an item's gem, a glow model's quad): seat the centred
     // quad under its bone's anchor at the spec's offset — zero for the body's own batches, whose
@@ -573,14 +732,23 @@ pub(super) fn spawn_booth_model(
         let Some(anchor) = booth_rig.anchor(commands, bb.bone) else {
             continue;
         };
-        commands.spawn((
+        let mut card = commands.spawn((
             Mesh3d(bb.mesh.clone()),
-            MeshMaterial3d(bb.material.clone()),
+            MeshMaterial3d(instance.material(&bb.material, &bb.twins)),
             Transform::from_translation(bb.offset),
             layer.clone(),
             ChildOf(anchor),
             BoothBillboard { kind: bb.kind },
         ));
+        if instance.feathering() || rig_slot != 0 {
+            card.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                rig_slot,
+                instance.alpha,
+            )));
+        }
+        if let Some(fm) = instance.fade_materials(&bb.material, &bb.twins) {
+            card.insert(fm);
+        }
     }
     // Arm Stand and freeze: the player is configured *before* insertion (plain component data),
     // so the pose lands with the first animation pass — no play-after-spawn ordering dance.
@@ -1258,12 +1426,14 @@ mod tests {
                 static_mesh: Handle::default(),
                 material: Handle::default(),
                 alpha_anim: None,
+                twins: BoothTwins::default(),
             },
             BoothPart {
                 skinned: None,
                 static_mesh: Handle::default(),
                 material: Handle::default(),
                 alpha_anim: None,
+                twins: BoothTwins::default(),
             },
         ];
 
@@ -1287,6 +1457,7 @@ mod tests {
                 BoothMotion::Frozen,
                 [false, false],
                 &[],
+                BoothInstance::default(),
             )
             .finish(&mut commands);
         }
@@ -1672,5 +1843,92 @@ mod tests {
         assert!(turn.shuffle.is_none(), "no expiry was ever scheduled");
         assert!(turn.fade.is_none(), "and nothing was cross-faded");
         assert_eq!(weight(&player, 1), Some(1.0), "the bake's Stand, untouched");
+    }
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+
+    /// Three distinguishable handles — the assertions are about *which* of them the instance
+    /// picks, so they only need to be unequal.
+    fn handles() -> (
+        Handle<WowModelMaterial>,
+        Handle<WowModelMaterial>,
+        Handle<WowModelMaterial>,
+    ) {
+        let assets = Assets::<WowModelMaterial>::default();
+        let one = || assets.reserve_handle();
+        (one(), one(), one())
+    }
+
+    /// The three things the engine owes a translucent instance happen **together, or not at all**
+    /// (decision 1164's law, discharged at bake time): the blend-twin swap, and the persistent
+    /// [`FadeMaterials`] record the depth prime arms off. An opaque bake gets neither — which is
+    /// what keeps every existing booth bit-for-bit unchanged by the ghost lane.
+    #[test]
+    fn an_opaque_bake_draws_steady_and_arms_no_depth_prime() {
+        let (steady, blend, zfill) = handles();
+        let twins = BoothTwins {
+            blend: Some(blend),
+            zfill: Some(zfill),
+        };
+        let opaque = BoothInstance::default();
+        assert!(!opaque.feathering());
+        assert_eq!(opaque.material(&steady, &twins), steady);
+        assert!(opaque.fade_materials(&steady, &twins).is_none());
+    }
+
+    /// A ghosted bake takes the blend twin and carries the record — with the **zfill** twin in it,
+    /// which is the whole reason a 0.5 body does not compound `0.5` over `0.5` where an arm crosses
+    /// the torso (the reference's `M2UseZFill`, decision 0831).
+    #[test]
+    fn a_ghosted_bake_takes_the_blend_twin_and_carries_the_zfill() {
+        let (steady, blend, zfill) = handles();
+        let twins = BoothTwins {
+            blend: Some(blend.clone()),
+            zfill: Some(zfill.clone()),
+        };
+        let ghost = BoothInstance { alpha: 0.5 };
+        assert!(ghost.feathering());
+        assert_eq!(ghost.material(&steady, &twins), blend);
+        let fm = ghost
+            .fade_materials(&steady, &twins)
+            .expect("a feathering batch with a twin carries the record");
+        assert_eq!(fm.cutout, steady, "the steady material it settles back to");
+        assert_eq!(fm.blend, blend);
+        assert_eq!(fm.zfill, Some(zfill));
+        assert!(
+            fm.bake_blend.is_none(),
+            "a booth is never interior-classified"
+        );
+    }
+
+    /// The emitters an attached effect model carries compose onto the instance too — the reference
+    /// recomposes `child+0x19c = parent+0x19c × child+0x180` every frame (`0x714260`) and copies it
+    /// into `emitter+0x1a8`. Pinned as the *link* rather than the arithmetic (the fold itself is
+    /// `benilla_world`'s and already tested there): what this asserts is that a feathering bake
+    /// gives its effect host a `ModelAlpha` at all, which is the half that was missing — a ghost's
+    /// wisps drew at full strength over a body at 0.5 until it existed.
+    #[test]
+    fn a_feathering_bake_hands_its_effect_host_an_alpha_to_compose() {
+        assert!(BoothInstance { alpha: 0.5 }.feathering());
+        assert!(
+            !BoothInstance::default().feathering(),
+            "and an opaque bake hands it none, so every existing booth is untouched"
+        );
+    }
+
+    /// A batch that cannot feather keeps its steady material even while the instance is
+    /// translucent, and arms no prime — the reference's own twin gate, and the Mod/Mod2x rule
+    /// (their blend equation reads no alpha, so no material swap can feather them; the shader's
+    /// identity lerp on the tag alpha does it instead — decisions 0865/1489).
+    #[test]
+    fn a_twinless_batch_stays_steady_even_while_the_instance_feathers() {
+        let (steady, _, _) = handles();
+        let none = BoothTwins::default();
+        let ghost = BoothInstance { alpha: 0.5 };
+        assert_eq!(ghost.material(&steady, &none), steady);
+        assert!(ghost.fade_materials(&steady, &none).is_none());
     }
 }

@@ -52,10 +52,10 @@ use bevy::prelude::*;
 
 use crate::creature_anim::{Engaged, SwingMessage};
 use crate::names::NameCache;
-use crate::net::{ClientCommand, Guid, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{ClientCommand, Guid, GuidIndex, NetEntity, ObjectStore, Reputations, SelfPlayer};
 use benilla_assets::{LockRecover, WorldAssets};
 
-use super::relations::can_attack;
+use super::relations::{can_assist, can_attack};
 use super::ring::reaction_from_player;
 use super::{Factions, Selection};
 
@@ -96,6 +96,38 @@ const COMBAT_WITH_ME_BONUS: f32 = 3.0;
 fn tab_trace_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_TAB_TRACE").is_some())
+}
+
+/// Which side a press is looking for — the reference's **mode** argument, and the only thing that
+/// forks on the whole path.
+///
+/// The four `TargetNearest*` shims are one function with one changed immediate: `0x489a80`
+/// (`TargetNearestEnemy`) pushes `edx = 1`, `0x489aa0` (`TargetNearestFriend`) pushes `edx = 2`,
+/// and `0x489ac0`/`0x489ae0` push 3 and 4 for the party and raid siblings — every one of them then
+/// calls the single cycler `0x493f60(ecx = reverse, edx = mode)`. The mode reaches exactly one
+/// place: `0x493e40`'s jump table (`0x493f50 = {0x493e73, 0x493eca, 0x493eed, 0x493f15}`). The
+/// enumeration, the creature-type table, the range cvars, the scene-attach gate, the scorer
+/// `0x494200`, the comparator `0x494450` and the commit `0x493540` are literally the same
+/// instructions for both sides — so this is a parameter on the one scan, never a second scanner
+/// (wow-re `object-layer/scratch/targeting-nearest-and-autoacquire.md` PART A;
+/// `object-layer/scratch/targeting-by-name.md` "the mode filter").
+///
+/// Modes 3 and 4 (party / raid) are not built: they need the roster-only candidate set, and the
+/// two commands that drive them stay in the binding registry's absent table until they are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanSide {
+    /// **Mode 1** (`0x493e73`) — the liveness triple (`0x605f90`, health, dynflag/stand-state) and
+    /// `CanAttack 0x606980`.
+    Enemy,
+    /// **Mode 2** (`0x493eca`) — `CanAssist 0x6066f0`, then `UNIT_FIELD_HEALTH > 0`, and nothing
+    /// else. Two things fall out of that being *shorter* than mode 1 rather than its mirror: a
+    /// **feigning** friendly (health > 0, `UNIT_DYNFLAG_DEAD` set) is still a candidate, because
+    /// mode 2 has no dynflag leg; and `CanAssist`'s own ladder is **friendly or better** — neutral
+    /// fails (`0x60671e cmp eax,4; jge`, on the internal 0-based rank, so Lua's FRIENDLY(5) is
+    /// internal 4). Its NPC arm is `IsPvP 0x605ff0` on the candidate (owner-chased), so a friendly
+    /// creature with no `UNIT_FLAG_PVP` is NOT a `TargetNearestFriend` candidate at all — the
+    /// same predicate that already denies its buffs (decision 1035).
+    Friend,
 }
 
 /// One scored candidate. `score`: lower is better. `on_screen`: inside the pulled-in frustum
@@ -167,6 +199,23 @@ fn pick_forward(
     Some((0, true))
 }
 
+/// The **backward** pick (Shift-TAB / `TargetNearestFriend(1)` — the reference's `reverse` flag):
+/// walk the history newest-first for a guid that is neither the current selection nor gone from
+/// the pool. `None` = nothing to step back to, and the caller falls through to [`pick_forward`],
+/// which is what makes the very first reverse press behave like a forward one.
+///
+/// The reference cycles a *snapshot list* by a cursor and simply decrements it (`cursor == 0 ?
+/// count-1 : cursor-1`, no timer check — the asymmetry is its own); decision 0567 replaced the
+/// snapshot with this history, so "back" means "the target before this one" rather than "the
+/// previous array slot". Pure, and beside its forward twin, so the two are read together.
+fn pick_back(visited: &[u64], pool: &[Candidate], current: Option<u64>) -> Option<usize> {
+    visited.iter().rev().find_map(|g| {
+        (Some(*g) != current)
+            .then(|| pool.iter().position(|c| c.guid == *g))
+            .flatten()
+    })
+}
+
 /// "Fighting me": the unit's UNIT_FIELD_TARGET is my guid AND its in-combat flag
 /// (UNIT_FLAG_IN_COMBAT, bit 19) is set — the `TargetPriorityCombatLock=2` notion ("in-combat
 /// with player"), the one that matters solo.
@@ -175,11 +224,17 @@ fn combat_with_me(store: &ObjectStore, me: Option<u64>) -> bool {
 }
 
 /// The CreatureType.dbc flags table (see `benilla-formats`); absent (load failure) = no
-/// critter/totem filtering, like the missing-catalog fallbacks elsewhere.
+/// critter filtering, like the missing-catalog fallbacks elsewhere.
+///
+/// **Critter alone** — the flag column is 1 for CreatureType 8 and for nothing else in the shipped
+/// 5875 DBC (Totem reads 0, and 1.12 has no non-combat-pet row). This prose said "critter/totem",
+/// copying a wow-re gloss that its own `targeting-friend-and-lastenemy.md` has since closed
+/// against the file; the code was always reading the flag rather than a type list, so only the
+/// words were wrong.
 #[derive(Resource)]
 pub(crate) struct CreatureTypes(CreatureTypeFlags);
 
-/// Startup (after the MPQ chain opens): load CreatureType.dbc for the critter/totem TAB filter.
+/// Startup (after the MPQ chain opens): load CreatureType.dbc for the critter TAB filter.
 pub(super) fn load_creature_types(mut commands: Commands, world_assets: Option<Res<WorldAssets>>) {
     let Some(world_assets) = world_assets else {
         return;
@@ -199,9 +254,26 @@ pub(super) fn load_creature_types(mut commands: Commands, world_assets: Option<R
 /// `pub(crate)` rather than `pub(super)` because the **pet bar's** ATTACK arm runs the same
 /// `TargetNearestEnemy()` the player's does ([`attack_order_target`]), and its drain lives in
 /// `ui_pet`.
+///
+/// # `Without<SelfPlayer>` is a divergence, and a deliberate one
+///
+/// **The reference's friendly cycler can select YOU.** Nothing on the `0x493f60` chain excludes
+/// the player: `CanAssist(P, P)` is true (`0x6061e0` returns 4 when A == B) and the cone test
+/// `0x47f220(p, p)` returns exactly π/2, so the self entry is in-cone whenever your facing falls
+/// in (π/3, 2π/3) and — at distance² 0 — sorts first. Plain TAB is spared only because
+/// `CanAttack(P, P)` is false. (wow-re `targeting-friend-and-lastenemy.md`, verified
+/// exhaustively; its own write-up asks a re-implementation to add the player to both candidate
+/// sets.)
+///
+/// We do not, and the reason is 0567: that behaviour is an artifact of the ±30° facing cone, and
+/// 0567 replaced the cone with screen-space priority. Under our scoring the player is at distance
+/// 0 and screen-centre *unconditionally*, so porting the byte-level rule would make `CTRL-TAB`
+/// self-target on **every** press rather than facing-dependently — faithful to the bytes,
+/// unfaithful to the behaviour, which is the trade `CLAUDE.md` §7 hands to the director rather
+/// than to this file. Recorded here so it is a known divergence and not a gap (decision 1745).
 #[derive(SystemParam)]
 #[allow(clippy::type_complexity)] // one bundled system param — the app's convention for big query sets
-pub(crate) struct EnemyScan<'w, 's> {
+pub(crate) struct TargetScan<'w, 's> {
     units: Query<
         'w,
         's,
@@ -237,23 +309,60 @@ pub(crate) struct EnemyScan<'w, 's> {
     reputations: Res<'w, Reputations>,
     names: Res<'w, NameCache>,
     creature_types: Option<Res<'w, CreatureTypes>>,
+    /// Every store, ours included — read only by the friend arm's `CanAssist`, whose `IsPvP` leg
+    /// chases the candidate's owner. `units` above cannot serve: it excludes our own body, which
+    /// is exactly who owns our pet.
+    stores: Query<'w, 's, &'static ObjectStore>,
+    /// The guid → entity map the owner chase lands in. `Option` for the same reason
+    /// [`crate::ui_unit::UnitTokens`] carries it that way — a UI-only harness runs with no net
+    /// stack, and a bare `Res` would turn that into a system-validation panic.
+    index: Option<Res<'w, GuidIndex>>,
 }
 
-impl EnemyScan<'_, '_> {
-    /// The `0x493e40` mode-1 validity filter — liveness + hostility (kept byte-law).
-    fn is_valid(&self, store: Option<&ObjectStore>, self_store: Option<&ObjectStore>) -> bool {
-        // The liveness leg is the reference's own reads-dead triple `0x605f90` — health, the
-        // `UNIT_DYNFLAG_DEAD` bit (feign death) and stand state 7 — now the shared predicate
-        // rather than a third transcription of it (decision 1022).
-        if store.is_some_and(|s| s.0.unit_reads_dead()) {
-            return false;
+impl TargetScan<'_, '_> {
+    /// The `0x493e40` per-candidate validity filter, both arms — the one thing [`ScanSide`] forks.
+    fn is_valid(
+        &self,
+        side: ScanSide,
+        store: Option<&ObjectStore>,
+        self_store: Option<&ObjectStore>,
+    ) -> bool {
+        match side {
+            // Mode 1 (`0x493e73`) — liveness + hostility (kept byte-law). The liveness leg is the
+            // reference's own reads-dead triple `0x605f90` — health, the `UNIT_DYNFLAG_DEAD` bit
+            // (feign death) and stand state 7 — the shared predicate rather than a third
+            // transcription of it (decision 1022).
+            ScanSide::Enemy => {
+                if store.is_some_and(|s| s.0.unit_reads_dead()) {
+                    return false;
+                }
+                can_attack(
+                    store,
+                    self.factions.as_deref(),
+                    &self.reputations,
+                    self_store,
+                )
+            }
+            // Mode 2 (`0x493eca`) — `CanAssist 0x6066f0` first, then `[[cand+0x110]+0x40] > 0`.
+            // The order is the reference's and so is the *narrowness* of the liveness leg: it
+            // reads raw HEALTH, not the reads-dead triple, so this deliberately does NOT reuse
+            // `unit_reads_dead` (see [`ScanSide::Friend`]).
+            ScanSide::Friend => {
+                can_assist(
+                    store,
+                    self.factions.as_deref(),
+                    &self.reputations,
+                    self_store,
+                    |owner| self.store_of(owner).cloned(),
+                ) && !store.is_some_and(|s| s.0.unit_is_dead())
+            }
         }
-        can_attack(
-            store,
-            self.factions.as_deref(),
-            &self.reputations,
-            self_store,
-        )
+    }
+
+    /// A guid's streamed descriptor, whichever entity holds it — `CanAssist`'s owner chase.
+    fn store_of(&self, guid: u64) -> Option<&ObjectStore> {
+        let entity = *self.index.as_ref()?.0.get(&guid)?;
+        self.stores.get(entity).ok()
     }
 
     /// Our own descriptor, for whichever leg needs the reaction's second party outside [`build`].
@@ -308,7 +417,17 @@ impl EnemyScan<'_, '_> {
     /// The full build: walk every known unit, filter (the kept 1.12 legality laws), project
     /// through the live camera, score, sort (tier, then score). Fresh every press — the live
     /// world is the list (no snapshot to go stale).
-    fn build(&self) -> Vec<Candidate> {
+    ///
+    /// `side` reaches exactly one line — [`Self::is_valid`] — which is the reference's own shape:
+    /// the mode byte forks `0x493e40` and nothing else on the path.
+    ///
+    /// **Our own body is never a candidate**: the query is `Without<SelfPlayer>`. For the enemy
+    /// side that is free (`CanAttack(me, me)` is false anyway); for the friend side it is a
+    /// deliberate divergence, because the reference's enumeration walks ClntObjMgr table #1 —
+    /// which holds the player's own object — and no self-compare has been derived on the mode-2
+    /// path. Self sits at dist² 0 dead-centre, so a faithful `TargetNearestFriend` would appear to
+    /// always self-target; we refuse to ship that on an underived gate. RE dispatched.
+    fn build(&self, side: ScanSide) -> Vec<Candidate> {
         let Ok((self_tf, self_store, self_guid)) = self.self_q.single() else {
             return Vec::new();
         };
@@ -348,8 +467,15 @@ impl EnemyScan<'_, '_> {
             if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
                 continue;
             }
-            if !self.is_valid(store, self_store) {
-                trace_unit(guid_c.0, tf, "REJECT dead-or-unattackable");
+            if !self.is_valid(side, store, self_store) {
+                trace_unit(
+                    guid_c.0,
+                    tf,
+                    match side {
+                        ScanSide::Enemy => "REJECT dead-or-unattackable",
+                        ScanSide::Friend => "REJECT dead-or-unassistable",
+                    },
+                );
                 continue;
             }
             // The creature-type gate (CreatureType.dbc flag bit 0 — critters; kept byte-law).
@@ -377,7 +503,13 @@ impl EnemyScan<'_, '_> {
                 continue;
             }
             let off_center = project(tf.translation + Vec3::Y);
-            let cwm = store.is_some_and(|s| combat_with_me(s, me));
+            // **Enemy side only.** The bonus exists to surface *the thing attacking me*
+            // (`TargetPriorityCombatLock`'s spirit, decisions 0567/0568) — a notion with no
+            // friendly meaning, and the reference has no such term on either side. Left ungated it
+            // would fire on an ally who is in combat and targeting me — a healer on you — and
+            // shove them to the head of the CTRL-TAB pool ahead of everyone, by accident rather
+            // than by anybody's decision.
+            let cwm = side == ScanSide::Enemy && store.is_some_and(|s| combat_with_me(s, me));
             let score = priority_score(off_center, dist, cwm);
             if trace {
                 let screen = off_center
@@ -422,11 +554,23 @@ impl EnemyScan<'_, '_> {
 pub(super) struct TabHistory {
     /// `(guid, when)` — insertion-ordered; the back is the most recent (Shift-TAB's walk).
     visited: Vec<(u64, f64)>,
+    /// Which side the standing history belongs to. **One history, cleared on a side switch** —
+    /// the reference's `cachedMode != mode` rebuild condition (`0x493f60`), which resets the
+    /// cursor to 0 and drops the candidate list whenever the mode byte changes. Without it a
+    /// CTRL-TAB through the friendly pool would poison the enemy cycle's skip set.
+    side: Option<ScanSide>,
 }
 
 impl TabHistory {
     fn prune(&mut self, now: f64) {
         self.visited.retain(|&(_, t)| now - t < HISTORY_SECS);
+    }
+    /// `0x493f60`'s cached-mode check: a press on the other side starts from nothing.
+    fn enter(&mut self, side: ScanSide) {
+        if self.side != Some(side) {
+            self.visited.clear();
+            self.side = Some(side);
+        }
     }
     fn guids(&self) -> Vec<u64> {
         self.visited.iter().map(|&(g, _)| g).collect()
@@ -513,35 +657,35 @@ pub(super) fn commit(
     }
 }
 
-/// TARGETNEARESTENEMY / TARGETPREVIOUSENEMY (0997: two commands through the binding table now,
-/// defaults TAB / SHIFT-TAB — no shift fork here anymore), Classic-priority style: re-score the
-/// live world, pool by tier, skip the recent history forward (or walk it backward), commit
-/// through the byte-law [`commit`]. The dispatch already applied the typing gate (a focused
-/// EditBox owns TAB) and the exact-modifier law.
-pub(super) fn tab_target(
-    binds: Res<crate::bindings::BindingsState>,
-    time: Res<Time>,
-    scan: EnemyScan,
-    mut history: ResMut<TabHistory>,
-    mut selection: ResMut<Selection>,
-    mut seam: crate::creature_anim::AttackSeam,
-    engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
+/// **One press, either side** — the whole of the Classic-priority cycle, shared by the enemy TAB
+/// ([`tab_target`]) and the friendly one ([`target_nearest_friend_requests`]) because the
+/// reference shares it too: all four `TargetNearest*` shims are one call into `0x493f60` with a
+/// different mode byte, and the byte reaches only the per-candidate filter ([`ScanSide`]).
+///
+/// Re-score the live world, pool by tier, skip the recent history forward (or walk it backward),
+/// commit through the byte-law [`commit`].
+#[allow(clippy::too_many_arguments)] // the shared core's full input set, one press's worth
+fn cycle(
+    side: ScanSide,
+    reverse: bool,
+    now: f64,
+    scan: &TargetScan,
+    history: &mut TabHistory,
+    selection: &mut Selection,
+    seam: &mut crate::creature_anim::AttackSeam,
+    engaged: bool,
 ) {
-    let reverse = binds.fired(crate::bindings::cmd::TARGET_PREVIOUS_ENEMY);
-    if !reverse && !binds.fired(crate::bindings::cmd::TARGET_NEAREST_ENEMY) {
-        return;
-    }
-    let now = time.elapsed_secs_f64();
+    history.enter(side);
     history.prune(now);
     let trace = tab_trace_on();
     if trace {
         info!(
-            "tab-trace: TAB press (reverse={reverse}), selection {:?}, history {}",
+            "tab-trace: {side:?} press (reverse={reverse}), selection {:?}, history {}",
             selection.guid.map(|g| format!("{g:#x}")),
             history.visited.len()
         );
     }
-    let cands = scan.build();
+    let cands = scan.build(side);
     if cands.is_empty() {
         if trace {
             info!("tab-trace: no candidates — target unchanged");
@@ -561,20 +705,14 @@ pub(super) fn tab_target(
             }
         );
     }
-    // The pick. Reverse walks the history back (most recent visited that is not current and
-    // still in the pool); an empty walk falls through to the forward rule.
+    // The pick. Reverse walks the history back ([`pick_back`]); an empty walk falls through to the
+    // forward rule.
     let visited = history.guids();
     let back = reverse
-        .then(|| {
-            history.visited.iter().rev().find_map(|&(g, _)| {
-                (Some(g) != selection.guid)
-                    .then(|| pool.iter().find(|c| c.guid == g).copied())
-                    .flatten()
-            })
-        })
+        .then(|| pick_back(&visited, &pool, selection.guid))
         .flatten();
     let (entity, guid, wrapped) = match back {
-        Some(c) => (c.entity, c.guid, false),
+        Some(i) => (pool[i].entity, pool[i].guid, false),
         None => {
             let Some((i, wrapped)) = pick_forward(&pool, &visited, selection.guid) else {
                 return;
@@ -591,13 +729,20 @@ pub(super) fn tab_target(
         history.push(old, now);
     }
     let out = commit(
-        &mut selection,
-        &mut seam,
+        selection,
+        seam,
         entity,
         guid,
-        !engaged.is_empty(),
+        engaged,
         None,
-        true,
+        // Attack `0x5ecb70`'s new-target validation, which is what this flag carries: a mode-2
+        // pick can never pass it. `CanAssist` demands reaction ≥ 4 and `CanAttack`'s mixed arm
+        // demands < 4, so the two candidate sets are disjoint on that leg — a CTRL-TAB in the
+        // middle of a fight moves the selection and must NOT re-point the swing at an ally.
+        // (Disclosed corner: `CanAttack`'s duel / FFA-PvP arms don't read the reaction, so a
+        // duelling friendly is attackable AND assistable; we still refuse the re-swing there,
+        // which is the conservative half.)
+        side == ScanSide::Enemy,
     );
     if out.changed {
         history.push(guid, now);
@@ -612,6 +757,77 @@ pub(super) fn tab_target(
             } else {
                 "NO-OP (already the selection)"
             }
+        );
+    }
+}
+
+/// TARGETNEARESTENEMY / TARGETPREVIOUSENEMY (0997: two commands through the binding table now,
+/// defaults TAB / SHIFT-TAB — no shift fork here anymore). The dispatch already applied the typing
+/// gate (a focused EditBox owns TAB) and the exact-modifier law.
+pub(super) fn tab_target(
+    binds: Res<crate::bindings::BindingsState>,
+    time: Res<Time>,
+    scan: TargetScan,
+    mut history: ResMut<TabHistory>,
+    mut selection: ResMut<Selection>,
+    mut seam: crate::creature_anim::AttackSeam,
+    engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
+) {
+    let reverse = binds.fired(crate::bindings::cmd::TARGET_PREVIOUS_ENEMY);
+    if !reverse && !binds.fired(crate::bindings::cmd::TARGET_NEAREST_ENEMY) {
+        return;
+    }
+    cycle(
+        ScanSide::Enemy,
+        reverse,
+        time.elapsed_secs_f64(),
+        &scan,
+        &mut history,
+        &mut selection,
+        &mut seam,
+        !engaged.is_empty(),
+    );
+}
+
+/// Drain `TargetNearestFriend([reverse])` — the same cycle with mode 2 (`0x489aa0` →
+/// `0x493f60(reverse, 2)`).
+///
+/// Lua-driven rather than binding-driven, because that is where the reference puts it: TAB reaches
+/// the enemy scan through a Rust command here only because 0997 wired the two enemy commands
+/// straight to [`tab_target`]; the friendly pair's `Bindings.xml` bodies are literally
+/// `TargetNearestFriend()` and `TargetNearestFriend(1)`, so a binding row for them needs no new
+/// mechanism — it needs the global, which now exists. Every FrameXML and addon caller lands here
+/// too.
+///
+/// Each queued press is one cycle, in call order, exactly as repeated key presses would be.
+pub(super) fn target_nearest_friend_requests(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    time: Res<Time>,
+    scan: TargetScan,
+    mut history: ResMut<TabHistory>,
+    mut selection: ResMut<Selection>,
+    mut seam: crate::creature_anim::AttackSeam,
+    engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let presses = script.take_target_nearest_friend_requests();
+    if presses.is_empty() {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    let engaged = !engaged.is_empty();
+    for reverse in presses {
+        cycle(
+            ScanSide::Friend,
+            reverse,
+            now,
+            &scan,
+            &mut history,
+            &mut selection,
+            &mut seam,
+            engaged,
         );
     }
 }
@@ -635,12 +851,12 @@ pub(super) fn tab_target(
 /// world every call and always hands back the head. That is decision 0567's trade for the whole
 /// module (history cycling replaces the snapshot cursor), and an acquire is a fresh pick in both.
 fn acquire_nearest_enemy(
-    scan: &EnemyScan,
+    scan: &TargetScan,
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
     errors: &mut crate::ui_action::UiErrorKeys,
 ) -> Option<(Entity, u64)> {
-    let cands = scan.build();
+    let cands = scan.build(ScanSide::Enemy);
     let Some(c) = cands.first() else {
         // `0x6130d9` — the acquire ran and came back empty, so the selection re-read at `0x6130c1`
         // still finds nothing: errorId `0xa0` `ERR_NO_ATTACK_TARGET`.
@@ -688,7 +904,7 @@ fn acquire_nearest_enemy(
 /// a reason to go find something else. `0x613159`'s odd second leg is verbatim — a zero-health
 /// target passes iff `UNIT_DYNAMIC_FLAGS` bit 5 is set.
 pub(crate) fn attack_order_target(
-    scan: &EnemyScan,
+    scan: &TargetScan,
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
     errors: &mut crate::ui_action::UiErrorKeys,
@@ -766,7 +982,7 @@ pub(crate) struct AttackNearestRequest;
 #[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn acquire_and_attack(
     mut requests: MessageReader<AttackNearestRequest>,
-    scan: EnemyScan,
+    scan: TargetScan,
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
     self_store: Query<&crate::net::ObjectStore, With<SelfPlayer>>,
@@ -808,6 +1024,86 @@ pub(super) fn acquire_and_attack(
     // auto-draw AND the auto-repeat cancel its hand-rolled copy used to miss. The selection was
     // empty on entry, so we cannot have been engaged: no stop is in flight.
     seam.start(guid, false, false);
+}
+
+/// **`TargetLastEnemy`'s memory** — the last *attackable* unit that was selected.
+///
+/// The reference keeps two guid pairs beside the current selection, both written inside
+/// `SetSelection 0x493540`: `[0xb4e2e0]/[0xb4e2e4]`, the plain outgoing target (`TargetLastTarget`
+/// reads it, `0x493622`/`0x493628` write it), and `[0xb4e2e8]/[0xb4e2ec]`, the last **attackable**
+/// one (`TargetLastEnemy` reads it at `0x489b45`, `0x49377d` writes it) — wow-re
+/// `object-layer/scratch/selection-attack-seam.md` §3.1. So the memory belongs at the **selection
+/// commit**, which is where this puts it, and it is deliberately not a second thing to remember at
+/// each of [`commit`]'s six call sites: [`remember_last_enemy`] reads the frame's settled
+/// selection instead, so a selection writer added later cannot forget to stamp.
+///
+/// **A stale guid is never cleared and never resurrects anything.** The reference's globals are
+/// plain guids that nothing zeroes when the unit despawns; what protects it is the shim's route
+/// through the select-if-resolves helper `0x489a40`, whose third arm — the guid resolves to no
+/// streamed object and is on no roster — is a bare `ret`: **not a deselect**. So we keep the guid
+/// and let the drain no-op on it (`crate::target::click`), which is the same observable.
+#[derive(Resource, Default)]
+pub(crate) struct LastEnemy(pub(crate) Option<u64>);
+
+/// Stamp [`LastEnemy`] from the frame's settled selection — the `0x49377d` write, sampled at the
+/// end of the target chain rather than threaded through [`commit`].
+///
+/// Sampling is not a shortcut: the observable "the last attackable guid I had selected" is the
+/// same either way, because the only guid a commit could stamp is the one still standing here.
+/// What it buys is that every present and future selection writer — the click, TAB, the two
+/// auto-acquires, `TargetUnit`, `/target`, `/assist` — is covered without knowing this exists.
+///
+/// **Ordered before `ring::update_ring`'s death-clear on purpose**: a hostile that dies while
+/// selected must still be remembered, because the reference's shim has no liveness gate either —
+/// `TargetLastEnemy` back onto a corpse is faithful, and it is what you want a second after a kill.
+///
+/// **The whole gate, not just the attackability leg.** `0x49372f`–`0x493778` is five conjuncts and
+/// this shipped with one of them (wow-re `targeting-friend-and-lastenemy.md`, §5 trio — the note
+/// was dispatched from this work and landed after it): the player object resolves, **the player is
+/// not dead or a ghost**, **the player is not mounted**, the new target reads
+/// `HEALTH > 0 || UNIT_DYNFLAG_DEAD`, and `CanAttack(player, new)`. Without the middle three we
+/// remembered in three states the reference does not — targeting a hostile while mounted, while
+/// dead or ghost, or targeting an already-dead one — which is a `TargetLastEnemy` that lands
+/// somewhere the real client's would not.
+///
+/// The odd-looking fourth conjunct is transcribed rather than simplified: `HEALTH > 0` **or** the
+/// dead-looking dynflag, so a feigning unit stays remembered while a genuinely dead one does not.
+///
+/// One disclosed divergence from a commit-time stamp remains, and it is the sampling itself: a
+/// unit selected while neutral that *turns* hostile while still selected is remembered here and
+/// would not be at the reference's write, which runs once at `SetSelection`. That is the better
+/// answer of the two, and it is the only case where they differ.
+pub(super) fn remember_last_enemy(
+    selection: Res<Selection>,
+    stores: Query<&ObjectStore>,
+    self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    factions: Option<Res<Factions>>,
+    reputations: Res<Reputations>,
+    mut last: ResMut<LastEnemy>,
+) {
+    let Some((entity, guid)) = selection.target.zip(selection.guid) else {
+        return;
+    };
+    // Conjunct 1: the player object resolves at all.
+    let Some(me) = self_store.iter().next() else {
+        return;
+    };
+    // Conjuncts 2 and 3 — the two states of OUR body that suppress the stamp. `player_is_ghost`
+    // is its own read because a ghost's wire health is 1, so `unit_is_dead` is false for one
+    // (`player.rs`'s note on the UnitIsDead/UnitIsGhost/UnitIsDeadOrGhost trio).
+    if me.0.unit_is_dead() || me.0.player_is_ghost() || me.0.unit_mount_display_id() != 0 {
+        return;
+    }
+    let store = stores.get(entity).ok();
+    // Conjunct 4 — the new target is not a corpse. Verbatim: health, OR the dead-looking flag.
+    let alive_enough = store.is_some_and(|s| !s.0.unit_is_dead() || s.0.unit_dynflag_dead());
+    if !alive_enough {
+        return;
+    }
+    // Conjunct 5.
+    if can_attack(store, factions.as_deref(), &reputations, Some(me)) {
+        last.0 = Some(guid);
+    }
 }
 
 /// Auto-acquire the attacker (behavior 2): the ATTACKERSTATEUPDATE victim handler's
@@ -877,6 +1173,7 @@ mod tests {
         world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
         world.init_resource::<crate::ui_action::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<Messages<crate::player::StandStateRequest>>();
         world.init_resource::<Selection>();
         world.spawn(SelfPlayer);
 
@@ -1113,6 +1410,308 @@ mod tests {
             &reps,
             None
         ));
+    }
+
+    /// The **backward** pick, beside its forward twin: newest-first through the history, skipping
+    /// the current selection and anything that has left the pool; nothing to step back to ⇒ `None`,
+    /// which is what makes the first reverse press fall through to the forward rule.
+    ///
+    /// This is the whole of `reverse` — the flag `TargetNearestEnemy`/`TargetNearestFriend` take as
+    /// their optional Lua argument (`0x489a80`/`0x489aa0` fetch it with `0x6f1c10`, default 0) and
+    /// hand to the one cycler as `ecx`. Forward and backward walk the same order in opposite
+    /// directions: with A,B,C visited in that order, back from C is B and back from B is A.
+    #[test]
+    fn pick_back_walks_the_history_newest_first() {
+        let pool = [
+            cand(0xA, 0.1, true),
+            cand(0xB, 0.2, true),
+            cand(0xC, 0.3, true),
+        ];
+        // Forward over a fresh pool visits A, then B, then C — the order `pick_back` reverses.
+        assert_eq!(pick_forward(&pool, &[], None), Some((0, false)));
+        assert_eq!(pick_forward(&pool, &[0xA], Some(0xA)), Some((1, false)));
+        assert_eq!(
+            pick_forward(&pool, &[0xA, 0xB], Some(0xB)),
+            Some((2, false))
+        );
+        // Back from C is B; back from B is A — the exact reverse of the walk above.
+        assert_eq!(pick_back(&[0xA, 0xB, 0xC], &pool, Some(0xC)), Some(1));
+        assert_eq!(pick_back(&[0xA, 0xB], &pool, Some(0xB)), Some(0));
+        // Nothing behind us: the caller falls through to the forward rule.
+        assert_eq!(pick_back(&[], &pool, None), None);
+        assert_eq!(pick_back(&[0xA], &pool, Some(0xA)), None);
+        // A remembered guid that has left the pool (died, streamed out) is skipped, not picked.
+        let shrunk = [cand(0xA, 0.1, true), cand(0xC, 0.3, true)];
+        assert_eq!(pick_back(&[0xA, 0xB, 0xC], &shrunk, Some(0xC)), Some(0));
+    }
+
+    /// The history is **per side**: a friendly press wipes the enemy cycle's skip set and vice
+    /// versa — the reference's `cachedMode != mode` rebuild condition (`0x493f60`), which drops the
+    /// candidate list and resets the cursor whenever the mode byte changes.
+    #[test]
+    fn a_side_switch_clears_the_history() {
+        let mut h = TabHistory::default();
+        h.enter(ScanSide::Enemy);
+        h.push(0xA, 0.0);
+        h.push(0xB, 1.0);
+        h.enter(ScanSide::Enemy); // same side: nothing happens
+        assert_eq!(h.guids(), [0xA, 0xB]);
+        h.enter(ScanSide::Friend); // the other side: start from nothing
+        assert!(h.guids().is_empty());
+    }
+
+    /// Field indices, for the store builders below (`benilla-protocol`'s own numbering).
+    const F_TYPE: u16 = 2;
+    const F_HEALTH: u16 = 22;
+    const F_MAXHEALTH: u16 = 28;
+    const F_FLAGS: u16 = 46;
+    const F_DYNFLAGS: u16 = 143;
+    const F_MOUNTDISPLAYID: u16 = 133;
+    const F_DUEL_ARBITER: u16 = 188;
+    const F_PLAYER_FLAGS: u16 = 190;
+    const F_DUEL_TEAM: u16 = 196;
+    /// `UNIT_FLAG_PVP_ATTACKABLE` — behaviourally "player-controlled"; the wire always carries it
+    /// on a player, which is what selects `CanAttack`'s and `CanAssist`'s player arms.
+    const CONTROLLED: u32 = 0x8;
+    /// `OBJECT_FIELD_TYPE` for a Player object (OBJECT|UNIT|PLAYER).
+    const TYPE_PLAYER: u32 = 0x19;
+
+    fn store(pairs: &[(u16, u32)]) -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs))
+    }
+
+    /// **The two sides of one scan, over one world** — the mode byte is the only fork, so this
+    /// drives the real [`TargetScan::build`] twice and asserts each side's pool.
+    ///
+    /// With no `FactionTemplate.dbc` loaded every reaction resolves to neutral, which is exactly
+    /// the regime that separates the two filters: neutral is **attackable** (`CanAttack`'s mixed
+    /// arm is `< 4`) and **not assistable** (`CanAssist`'s ladder is `>= 4`). To get a genuinely
+    /// friendly reaction with no catalog the ally here is a **same-team duel partner** — the one
+    /// rung of `UnitReaction 0x6061e0` that answers 4 off descriptor fields alone (decision 0633).
+    /// It is also a fair model of the real case: `TargetNearestFriend` is mostly about players.
+    ///
+    /// Four candidates pin four separate claims:
+    /// * the neutral mob is an enemy candidate and never a friendly one — **the control that must
+    ///   not change**;
+    /// * the friendly player is a friendly candidate and never an enemy one;
+    /// * a friendly **corpse** is out — mode 2's `UNIT_FIELD_HEALTH > 0` leg;
+    /// * a friendly **feigner** is IN — mode 2 has no `UNIT_DYNFLAG_DEAD` leg, though mode 1's
+    ///   reads-dead triple does. That asymmetry is transcribed, not tidied.
+    #[test]
+    fn the_two_sides_of_the_scan_never_pick_each_others_units() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ARBITER: u32 = 7;
+        const MOB: u64 = 0xF0E;
+        const ALLY: u64 = 0xA11;
+        const ALLY_CORPSE: u64 = 0xDEAD;
+        const ALLY_FEIGN: u64 = 0xFE16;
+
+        let mut world = World::new();
+        world.init_resource::<Reputations>();
+        world.init_resource::<NameCache>();
+        // Us: a live player, mid-duel on team 1.
+        world.spawn((
+            SelfPlayer,
+            Transform::default(),
+            Guid(1),
+            store(&[
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+                (F_DUEL_ARBITER, ARBITER),
+                (F_DUEL_TEAM, 1),
+            ]),
+        ));
+        let unit = |guid: u64, x: f32, fields: &[(u16, u32)]| {
+            (
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                Guid(guid),
+                Transform::from_xyz(x, 0.0, 0.0),
+                store(fields),
+            )
+        };
+        let ally_fields = |extra: &[(u16, u32)]| {
+            let mut v = vec![
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+                (F_DUEL_ARBITER, ARBITER),
+                (F_DUEL_TEAM, 1),
+            ];
+            v.extend_from_slice(extra);
+            v
+        };
+        world.spawn(unit(MOB, 5.0, &[(F_HEALTH, 100), (F_MAXHEALTH, 100)]));
+        world.spawn(unit(ALLY, 10.0, &ally_fields(&[])));
+        world.spawn(unit(ALLY_CORPSE, 15.0, &ally_fields(&[(F_HEALTH, 0)])));
+        world.spawn(unit(
+            ALLY_FEIGN,
+            20.0,
+            &ally_fields(&[(F_DYNFLAGS, 1 << 5)]),
+        ));
+
+        let pool = |world: &mut World, side: ScanSide| {
+            world
+                .run_system_once(move |scan: TargetScan| {
+                    scan.build(side).iter().map(|c| c.guid).collect::<Vec<_>>()
+                })
+                .expect("the scan runs as a one-shot system")
+        };
+
+        // Mode 1: the neutral mob only. Every duel-team ally is refused by `CanAttack`'s
+        // both-player-controlled arm (a friendly reaction returns 0 outright).
+        assert_eq!(pool(&mut world, ScanSide::Enemy), [MOB]);
+        // Mode 2: the live ally and the feigning one — never the mob, never the corpse. With no
+        // camera in the world nothing projects, so the order is pure distance (ALLY at 10 yd
+        // before ALLY_FEIGN at 20).
+        assert_eq!(pool(&mut world, ScanSide::Friend), [ALLY, ALLY_FEIGN]);
+    }
+
+    /// [`LastEnemy`] tracks the last **attackable** selection and nothing else — `TargetLastEnemy`'s
+    /// whole memory (`[0xb4e2e8]/[0xb4e2ec]`, `0x49377d`).
+    ///
+    /// The three claims that make the verb behave: it follows a hostile switch; a **friendly**
+    /// selection does not overwrite it (that is what separates it from `TargetLastTarget`'s pair);
+    /// and **clearing the target leaves it standing**, which is the whole point — you press `G`
+    /// after an Esc, not before one.
+    #[test]
+    fn last_enemy_remembers_the_last_attackable_selection_across_a_clear() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ARBITER: u32 = 7;
+        let mut world = World::new();
+        world.init_resource::<Reputations>();
+        world.init_resource::<Selection>();
+        world.init_resource::<LastEnemy>();
+        world.spawn((
+            SelfPlayer,
+            store(&[
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+                (F_DUEL_ARBITER, ARBITER),
+                (F_DUEL_TEAM, 1),
+            ]),
+        ));
+        let mob = |world: &mut World| {
+            world
+                .spawn(store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]))
+                .id()
+        };
+        let a = mob(&mut world);
+        let b = mob(&mut world);
+        // A same-team duel partner: friendly reaction, so `CanAttack`'s PvP arm refuses.
+        let friend = world
+            .spawn(store(&[
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+                (F_DUEL_ARBITER, ARBITER),
+                (F_DUEL_TEAM, 1),
+            ]))
+            .id();
+
+        let select = |world: &mut World, target: Option<(Entity, u64)>| {
+            let mut sel = world.resource_mut::<Selection>();
+            sel.target = target.map(|(e, _)| e);
+            sel.guid = target.map(|(_, g)| g);
+            world
+                .run_system_once(remember_last_enemy)
+                .expect("the sampler runs as a one-shot system");
+            world.resource::<LastEnemy>().0
+        };
+
+        assert_eq!(
+            world.resource::<LastEnemy>().0,
+            None,
+            "nothing hostile targeted yet"
+        );
+        assert_eq!(select(&mut world, Some((a, 0xA))), Some(0xA));
+        assert_eq!(select(&mut world, Some((b, 0xB))), Some(0xB));
+        // A friendly selection is not an enemy — the memory holds at B.
+        assert_eq!(select(&mut world, Some((friend, 0xF))), Some(0xB));
+        // …and neither is an empty one. This is the case the verb exists for.
+        assert_eq!(select(&mut world, None), Some(0xB));
+
+        // **The four conjuncts besides `CanAttack`** (`0x49372f`-`0x493778`). Each is asserted by
+        // moving one state and re-selecting an ordinary hostile that would otherwise stamp: the
+        // memory has to hold at B every time. Written as one test rather than four because the
+        // whole point is that they are one gate, and a gate with a leg missing is what shipped.
+        let dead_mob = world
+            .spawn(store(&[(F_HEALTH, 0), (F_MAXHEALTH, 100)]))
+            .id();
+        assert_eq!(
+            select(&mut world, Some((dead_mob, 0xD))),
+            Some(0xB),
+            "a corpse is not remembered — the target's health leg"
+        );
+        // …unless it carries the dead-looking dynflag, which is a FEIGN and stays remembered.
+        let feigner = world
+            .spawn(store(&[
+                (F_HEALTH, 0),
+                (F_MAXHEALTH, 100),
+                (F_DYNFLAGS, 0x20),
+            ]))
+            .id();
+        assert_eq!(
+            select(&mut world, Some((feigner, 0xE))),
+            Some(0xE),
+            "`HEALTH > 0 || dynflag 0x20` is an OR, transcribed not simplified"
+        );
+
+        // Our own body's three states. Each is set, a live hostile selected, and the memory must
+        // not move off 0xE.
+        let with_self = |world: &mut World, fields: &[(u16, u32)]| {
+            let me = world
+                .query_filtered::<Entity, With<SelfPlayer>>()
+                .single(world)
+                .expect("one self player");
+            let mut base = vec![
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+                (F_DUEL_ARBITER, ARBITER),
+                (F_DUEL_TEAM, 1),
+            ];
+            base.extend_from_slice(fields);
+            world.entity_mut(me).insert(store(&base));
+        };
+        let c = mob(&mut world);
+        with_self(&mut world, &[(F_MOUNTDISPLAYID, 1234)]);
+        assert_eq!(
+            select(&mut world, Some((c, 0xC))),
+            Some(0xE),
+            "mounted: the reference does not stamp"
+        );
+        with_self(&mut world, &[(F_HEALTH, 0)]);
+        assert_eq!(
+            select(&mut world, Some((c, 0xC))),
+            Some(0xE),
+            "dead: the reference does not stamp"
+        );
+        with_self(&mut world, &[(F_PLAYER_FLAGS, 0x10)]);
+        assert_eq!(
+            select(&mut world, Some((c, 0xC))),
+            Some(0xE),
+            "ghost: a ghost's wire health is 1, so this needs its own leg"
+        );
+        // The control: put the body back and the same selection stamps.
+        with_self(&mut world, &[]);
+        assert_eq!(
+            select(&mut world, Some((c, 0xC))),
+            Some(0xC),
+            "the gate is the three states, not the selection"
+        );
     }
 
     /// The history: pruning honors the window, a re-visit moves to most-recent.

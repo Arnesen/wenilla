@@ -1,4 +1,6 @@
-use benilla_ui::script::{QuadContent, ScriptValue, SoundRequest, UiScript, UnitState};
+use benilla_ui::script::{
+    QuadContent, ScriptValue, SelectionRequest, SoundRequest, UiScript, UnitState,
+};
 
 /// Load one shipped `assets/ui/<file>` (the panel tests' loader, duplicated to stay
 /// self-contained), panicking on any loader error.
@@ -383,7 +385,7 @@ fn left_clicking_the_player_frame_targets_self() {
     s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
     s.resolve();
     assert!(
-        s.take_target_requests().is_empty(),
+        s.take_selection_requests().is_empty(),
         "no request before any click"
     );
 
@@ -394,7 +396,7 @@ fn left_clicking_the_player_frame_targets_self() {
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
     assert!(
-        s.take_target_requests().is_empty(),
+        s.take_selection_requests().is_empty(),
         "right-click queues no target"
     );
     // Solo, every SELF row is gated off (only CANCEL survives) — the ref opens no menu. 1.12 has
@@ -408,8 +410,8 @@ fn left_clicking_the_player_frame_targets_self() {
     s.mouse_button(cx as f32, cy as f32, "LeftButton", true);
     s.mouse_button(cx as f32, cy as f32, "LeftButton", false);
     assert_eq!(
-        s.take_target_requests(),
-        vec!["player"],
+        s.take_selection_requests(),
+        vec![SelectionRequest::Unit("player".into())],
         "left-click queues a self-target"
     );
 
@@ -421,6 +423,9 @@ fn left_clicking_the_player_frame_targets_self() {
             guid: 0xA11CE,
         }],
         leader_index: 0, // we lead
+        // The player's own guid, which this fixture leaves unset — spelled out because a bare 0
+        // is also the reference's "ungrouped" sentinel and this party has a member.
+        leader_guid: 0,
         raid: Vec::new(),
         loot_method: "group".into(),
         master_looter: None,
@@ -510,6 +515,7 @@ fn raid_mark_clicks_through_the_nested_level() {
             guid: 0xA11CE,
         }],
         leader_index: 0, // we lead — the mark rows are leader-gated
+        leader_guid: 0,  // the player's own guid; this fixture leaves it unset
         raid: Vec::new(),
         loot_method: "group".into(),
         master_looter: None,
@@ -1791,6 +1797,8 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
             guid: 0x7A17,
         }],
         leader_index,
+        // Follows `leader_index`: 0 = the player (unset here), else the member who leads.
+        leader_guid: if leader_index == 0 { 0 } else { 0x7A17 },
         raid: Vec::new(),
         loot_method: method.into(),
         master_looter,

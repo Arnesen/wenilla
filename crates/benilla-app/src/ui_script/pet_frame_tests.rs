@@ -5,7 +5,9 @@
 //! of these test: `UNIT_PET` names the OWNER (`arg1 == "player"`, wow-re §9), every other `UNIT_*`
 //! names the pet itself, and a frame that mixes the two repaints off the player's health.
 
-use benilla_ui::script::{AuraState, QuadContent, ScriptValue, UiScript, UnitState};
+use benilla_ui::script::{
+    AuraState, QuadContent, ScriptValue, SelectionRequest, UiScript, UnitState,
+};
 
 /// Load one shipped `assets/ui/<file>`, panicking on any loader error (the unit-frame tests'
 /// loader).
@@ -322,11 +324,14 @@ fn left_clicking_the_pet_frame_targets_it() {
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
 
     s.run("PetFrame_OnClick(\"LeftButton\")").unwrap();
-    assert_eq!(s.take_target_requests(), vec!["pet".to_string()]);
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![SelectionRequest::Unit("pet".into())]
+    );
 
     // The right button is the deferred PET menu — it must do nothing at all, not target.
     s.run("PetFrame_OnClick(\"RightButton\")").unwrap();
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
 }
 
 /// **All three legs of `PetFrame_OnClick` survive the click** — B208's "dropping food from the bag
@@ -394,7 +399,7 @@ fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
         "a held item + a pet click queues the drop"
     );
     // …and it is the DROP leg, not the target leg — the reference's if/elseif is exclusive.
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
 }
 
 /// The GlobalStrings the happiness tooltip resolves by key. Loaded from the MPQ in production; the

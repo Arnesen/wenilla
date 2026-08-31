@@ -22,6 +22,7 @@ mod attack;
 mod auction;
 mod bank;
 mod binder;
+mod broadcast;
 mod channel;
 mod chat;
 mod client;
@@ -33,6 +34,7 @@ mod gm_ticket;
 mod gossip;
 mod group;
 mod guild;
+mod instance;
 mod items;
 mod loot;
 mod mail;
@@ -57,6 +59,7 @@ mod social;
 mod spellbook;
 mod spells;
 mod stable;
+mod summon;
 mod taxi;
 mod trade;
 mod trainer;
@@ -141,6 +144,10 @@ pub use guild::{
     GUILD_MOTD_MAX_LENGTH, GUILD_NAME_MAX_LENGTH, GUILD_NOTE_MAX_LENGTH, GUILD_RANKS_MAX_COUNT,
     GUILD_RANKS_MIN_COUNT, GUILD_RANK_MAX_LENGTH, GUILD_RANK_RIGHT_ORDER,
 };
+pub use instance::{
+    reset_instances, InstanceResetFailed, InstanceResetFailure, RaidInstanceMessage,
+    RaidInstanceWarning,
+};
 pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
     split_item, swap_inv_item, swap_item, use_item, ItemDamage, ItemInfo, ItemSpellEntry,
@@ -188,12 +195,13 @@ pub use progression::{
 };
 pub use pvp::{inspect_honor_stats, InspectHonorStats, PvpCredit};
 pub use quest::{
-    dialog_status, quest_query, questgiver_accept_quest, questgiver_choose_reward,
-    questgiver_complete_quest, questgiver_hello, questgiver_query_quest, questgiver_request_reward,
-    questgiver_status_query, questlog_remove_quest, questlog_swap_quest, QuestComplete,
-    QuestDetails, QuestGiverList, QuestListEntry, QuestObjective, QuestOfferReward,
-    QuestRequestItems, QuestRequiredItem, QuestRewardItem, QuestTemplate, QUEST_EMOTE_COUNT,
-    QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
+    dialog_status, push_quest_to_party, quest_confirm_accept, quest_flags, quest_push_result,
+    quest_query, questgiver_accept_quest, questgiver_choose_reward, questgiver_complete_quest,
+    questgiver_hello, questgiver_query_quest, questgiver_request_reward, questgiver_status_query,
+    questlog_remove_quest, questlog_swap_quest, QuestComplete, QuestConfirmAccept, QuestDetails,
+    QuestGiverList, QuestListEntry, QuestObjective, QuestOfferReward, QuestPushResult,
+    QuestRequestItems, QuestRequiredItem, QuestRewardItem, QuestShareMsg, QuestTemplate,
+    QUEST_EMOTE_COUNT, QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
 };
 pub use reputation::{
     set_faction_at_war, set_faction_inactive, set_watched_faction, WATCHED_FACTION_NONE,
@@ -220,6 +228,7 @@ pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
     StabledPet,
 };
+pub use summon::{summon_response, SummonRequest};
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,
     taxi_reply, TaxiMask,

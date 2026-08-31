@@ -302,6 +302,20 @@ pub(crate) fn start_attack_local(
     commands: &mut Commands,
     net: &crate::net::NetCommands,
 ) {
+    // **Starting an attack stands you up** — `0x5ecc9b call 0x5ed430(0)`, inside this function and
+    // ahead of everything else it does (decision 1768).
+    //
+    // Its position is the content. It sits **after** the attackability cluster
+    // (`0x5ecc2e`/`0x5ecc35`, whose not-attackable leg diverts to `0x5ecc37` and never reaches the
+    // stand) — which is why a right-click on a friendly NPC does not stand you — and **before any
+    // range logic**, `CMSG_ATTACKSWING` being all the way down at `0x5eccfd`. So an attackable
+    // target out of reach *does* stand you, and so does re-issuing an attack you are already
+    // making: that skip lands at `0x5ecd78`, 73 bytes past the stand. Hence unconditional here,
+    // above the swing's own `engaged` fork, rather than inside it.
+    //
+    // benilla's callers own the attackability walk (see this function's header), so by the time we
+    // are called the diverting leg has already been taken elsewhere.
+    commands.write_message(crate::player::StandStateRequest { state: 0 });
     if !engaged || stop_in_flight {
         let _ = net
             .0
@@ -1120,6 +1134,65 @@ fn find_resolved<'a>(
     catalog: Option<&AnimDataCatalog>,
 ) -> Option<&'a AnimClip> {
     anims.find(resolved_id(anims, id, catalog))
+}
+
+#[cfg(test)]
+mod attack_stand_tests {
+    use super::*;
+
+    /// **`StartAttack` stands a seated player** — `0x5ecc9b`, and unconditionally within this
+    /// function (decision 1768).
+    ///
+    /// `engaged = true` is the case worth pinning. It takes `0x5ecb70`'s skip, which jumps to the
+    /// tail at `0x5ecd78` — **73 bytes past the stand** — so re-issuing an attack you are already
+    /// making still stands you, and no `CMSG_ATTACKSWING` goes out. A stand written only on the
+    /// swing's own leg would miss exactly this case.
+    ///
+    /// This is the behaviour that replaces the turn-driven stand 1766 deleted: what stands a
+    /// seated player on a right-click is the *action* the click dispatches, not the gesture.
+    #[test]
+    fn starting_an_attack_stands_you_even_when_the_swing_is_skipped() {
+        let mut app = App::new();
+        app.add_message::<SheathRequest>()
+            .add_message::<crate::player::StandStateRequest>();
+        // A dead-letter net channel: the send is `let _ = …` and no packet is under test here.
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        app.insert_resource(crate::ui_action::AutoRepeatActive(None));
+
+        let me = app.world_mut().spawn_empty().id();
+        app.add_systems(
+            Update,
+            move |mut commands: Commands,
+                  mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
+                  mut sheath: MessageWriter<SheathRequest>,
+                  net: Res<crate::net::NetCommands>| {
+                start_attack_local(
+                    me,
+                    0xdead_beef,
+                    true, // already engaged — the skip leg
+                    false,
+                    &mut auto_repeat,
+                    &mut sheath,
+                    &mut commands,
+                    &net,
+                );
+            },
+        );
+        app.update();
+
+        let stands: Vec<u8> = app
+            .world_mut()
+            .resource_mut::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>()
+            .drain()
+            .map(|r| r.state)
+            .collect();
+        assert_eq!(
+            stands,
+            vec![0],
+            "StartAttack asks for stand state 0 exactly once, even on the leg that sends no swing"
+        );
+    }
 }
 
 #[cfg(test)]

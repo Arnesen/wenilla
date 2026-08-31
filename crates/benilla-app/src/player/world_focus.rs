@@ -44,6 +44,10 @@ pub(super) fn publish_viewer(
         ),
         Err(_) => (0.0, false),
     };
+    // The ghost A/B override (`WOW_GHOST_PROBE`) lands here rather than beside the screen pass it
+    // used to pin alone: this flag is what the death light and the DeathClouds sky both read, so
+    // overriding it is what makes the probe mean "the ghost world" rather than "the ghost filter".
+    let ghost = crate::death::ghost_probe().unwrap_or(ghost);
     let body = match player.as_deref() {
         Some(p) if p.active && !p.detached => Viewer {
             at: Some(p.pos),

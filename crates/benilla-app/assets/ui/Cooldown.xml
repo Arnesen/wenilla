@@ -19,18 +19,22 @@
         --
         -- THE ONE FORK, and why it is two faithful branches rather than a guard. The reference's
         -- body arms a Model (`this.start = start … this:SetSequence(0)`); ours arms our native
-        -- <Cooldown> widget, which is where 0263 put that machine. Both kinds really do reach this
-        -- function: our own windows pass a <Cooldown>, and an addon inheriting the template below
-        -- passes a <Model>, because an XML instance is created from ITS OWN tag and every real
-        -- caller writes the reference's `<Model … inherits="CooldownFrameTemplate"/>`.
+        -- <Cooldown> widget, which is where 0263 put that machine.
         --
-        -- Calling SetCooldown unconditionally is what shipped, and it raised on exactly that case:
-        -- a Bagnon slot holding an item with a live cooldown died on
-        -- `attempt to call method 'SetCooldown' (a nil value)` — and, because !OmniCC wraps this
-        -- very function, it took OmniCC's countdown down with it. A Model has no sweep for this
-        -- engine to arm (`SetSequence`/`AdvanceTime` are not bindings here), so that branch shows
-        -- and hides the frame and nothing more: the addon's own cooldown child stays inert, which
-        -- is a missing visual, not a broken window.
+        -- **Since decision 1751 the fork is almost never taken, and that is the fix.** The loader
+        -- now materializes a `<Model>` whose file IS the cooldown indicator as a real `<Cooldown>`
+        -- (`loader::frame_kind_of`) — the file is the thing's identity, and this engine draws that
+        -- sweep natively. So `<Model … inherits="CooldownFrameTemplate"/>`, which is what every
+        -- real caller writes (the reference's own ContainerFrameItemButtonTemplate, its action
+        -- buttons, three corpus addons), arrives here as a Cooldown and sweeps.
+        --
+        -- The `if this.SetCooldown` guard stays for the case that remains: a Model built with
+        -- some OTHER file, or a plain frame handed in by an addon. Calling SetCooldown
+        -- unconditionally is what shipped, and it raised on exactly that: a Bagnon slot holding an
+        -- item with a live cooldown died on `attempt to call method 'SetCooldown' (a nil value)`
+        -- — and, because !OmniCC wraps this very function, it took OmniCC's countdown down with
+        -- it. That branch shows and hides the frame and nothing more, which is a missing visual,
+        -- not a broken window.
         function CooldownFrame_SetTimer(this, start, duration, enable)
             if ( start > 0 and duration > 0 and enable > 0 ) then
                 if ( this.SetCooldown ) then
@@ -44,11 +48,12 @@
     ]]></Script>
 
     <!--
-        ref Cooldown.xml l.4-14. The reference's own attributes are kept verbatim
-        (its .mdx file, its 0.75 scale, setAllPoints, hidden) even where this engine has no use for
-        the model file: the template's JOB here is to exist under the reference's name so an
-        addon's `inherits=` resolves and its cooldown child inherits the geometry the addon is
-        counting on.
+        ref Cooldown.xml l.4-14. The reference's own attributes are kept verbatim (its .mdx file,
+        its 0.75 scale, setAllPoints, hidden) — and the `file=` is no longer decoration: since
+        decision 1751 it is what the loader reads to know that an inheriting `<Model>` is really
+        this engine's `<Cooldown>` widget (`loader::frame_kind_of`). The template's other job is
+        unchanged: to exist under the reference's name so an addon's `inherits=` resolves and its
+        cooldown child inherits the geometry the addon is counting on.
 
         Its two `<Scripts>` — OnUpdateModel / OnAnimFinished — are deliberately NOT transcribed.
         Both are real 1.12 script slots that this engine does not fire (see

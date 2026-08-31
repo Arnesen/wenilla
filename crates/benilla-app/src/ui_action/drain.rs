@@ -163,6 +163,33 @@ pub(super) fn drain_chain_casts(
     }
 }
 
+/// The **self-cast modifier**, applied to a cast's targeting inputs: `UseAction`'s third argument
+/// (1.12's `SELFACTIONBUTTON1`-`12`, `ALT-1`…`ALT-=`, through `ActionButtonUp(id, 1)`).
+///
+/// It substitutes the caster for the selection as the bind candidate — both halves of the
+/// substitution, the guid *and* the store the relation checks read, which is exactly the pair
+/// `resolve_cast_target`'s own autoSelfCast fallback swaps at `0x6e53d7`. So a self-cast runs the
+/// ordinary binder against the ordinary candidate and needs no leg of its own; a spell that
+/// cannot target a friendly unit refuses for the reason it always would, and one that needs no
+/// target at all is still `SelfImplicit`.
+///
+/// **The behaviour is not in doubt; the byte attribution is INFERRED.** The reference's
+/// `UseAction 0x4f1460` was not traced for this — the modelling here is that `onSelf` fills
+/// `ArmCast 0x6e5250`'s explicit-guid argument (`6e5393`), the slot every benilla caster passes
+/// zero in, because that is the one input that already means "bind this unit instead of the
+/// selection". A forced-self leg of its own would be observationally identical, so nothing
+/// downstream rests on which it is.
+fn self_bound<'a>(
+    mut ctx: cast_target::CastContext<'a>,
+    press: benilla_ui::script::ActionUse,
+) -> cast_target::CastContext<'a> {
+    if press.on_self {
+        ctx.selection_guid = ctx.self_guid;
+        ctx.rel.target_store = ctx.rel.self_store;
+    }
+    ctx
+}
+
 pub(super) fn drain_action_uses(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,
@@ -172,12 +199,14 @@ pub(super) fn drain_action_uses(
     // (`ladder.cast_errors` is the reason-coded one, `ladder.ground` the targeting mode).
     mut ui_errors: ResMut<UiErrorKeys>,
     mut ladder: CastLadder,
+    mut gate: crate::ui_bind_confirm::BindGate,
 ) {
     let selection = &targeting.selection;
     let Some(mut script) = script else {
         return;
     };
-    for action in script.take_action_uses() {
+    for press in script.take_action_uses() {
+        let action = press.action;
         let slot = match u8::try_from(action.saturating_sub(1)) {
             Ok(s) => s,
             Err(_) => continue,
@@ -267,8 +296,17 @@ pub(super) fn drain_action_uses(
                         }
                     }
                 }
-                debug!("ui_action: cast {} (target {:?})", b.action, selection.guid);
-                ladder.send(b.action, &targeting.context(), CastCommit::Spell);
+                debug!(
+                    "ui_action: cast {} (target {:?}{})",
+                    b.action,
+                    selection.guid,
+                    if press.on_self { ", on self" } else { "" }
+                );
+                ladder.send(
+                    b.action,
+                    &self_bound(targeting.context(), press),
+                    CastCommit::Spell,
+                );
             }
             // An item action names an item ENTRY, not a position, so the click has to find a copy
             // — [`item_action_route`] is that law. A miss (the copy left the bags between the
@@ -313,10 +351,19 @@ pub(super) fn drain_action_uses(
                     // equippable quest-starter on the bar equips, exactly as the reference does
                     // (decision 0664).
                     debug!("ui_action: item action {action} auto-equip (wire {bag_index}/{slot0})");
-                    let _ = ladder.commands.0.send(ClientCommand::AutoEquipItem {
+                    // Through the one auto-equip sender (decision 1750), which carries the ammo
+                    // fork and the soulbind deferral: a BoE dragged to the bar and pressed asks
+                    // before it binds, exactly as the same item right-clicked in the bag does.
+                    crate::ui_items::send_auto_equip(
+                        &mut script,
+                        &mut gate,
+                        &mut ladder.items,
+                        &ladder.commands,
                         bag_index,
-                        slot: slot0,
-                    });
+                        slot0,
+                        Some(guid),
+                        false,
+                    );
                 } else {
                     // …then the shared use fork (`CGItem::Use` — the bar's engine calls the very
                     // same function at `0x4e607b`), so a quest-starter on the bar offers its quest
@@ -346,6 +393,9 @@ pub(super) fn drain_action_uses(
                         },
                         &targeting.context(),
                         &mut ladder,
+                        &mut script,
+                        &mut gate,
+                        false,
                     );
                 }
             }

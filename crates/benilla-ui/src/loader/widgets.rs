@@ -95,14 +95,29 @@ impl Loader<'_> {
                     this.call(wrapper, method, file.to_string(), dbg);
                 } else if let Some(c) = children_named(t, "Color").next().map(color_of) {
                     this.call(wrapper, method, (c[0], c[1], c[2], c[3]), dbg);
-                } else if t.name().is_some() {
-                    // A NAMED state texture with no art of its own — `<NormalTexture
+                } else {
+                    // A state texture with no art of its own — a NAMED one (`<NormalTexture
                     // name="$parentIcon">` on the ref's own MacroFrameButtonTemplate, whose art
-                    // arrives later through `SetTexture`. The setter is what MATERIALIZES the
-                    // slot's region, so without this call the getter below finds nothing and the
-                    // name never publishes: `getglobal("MacroButton1Icon")` would be nil and the
-                    // window's whole Update would die on it. `""` is the live API's own blank form
-                    // (`set_slot_texture`'s empty-string arm), so this creates without painting.
+                    // arrives later through `SetTexture`) or a BARE one (`<NormalTexture/>`, the
+                    // ref's own SpellBookSkillLineTabTemplate l.36). **The ELEMENT is what creates
+                    // the region; `file=` is not a gate.** wow-re `system/ui/ui.md` + `scratch/
+                    // region-implicit-anchor.md` §3: `Button::LoadXML 0x7788c0` routes all four
+                    // `<...Texture>` children through the SAME texture adder the `<Layers>` walker
+                    // uses (`0x6f26f0` — `0x778903` <NormalTexture> tag `0x879a30`, `0x778935`
+                    // <PushedTexture>, `0x778967` <DisabledTexture>, `0x778999` <HighlightTexture>),
+                    // "each followed only by the slot store (`0x778fd0` state-texture family /
+                    // `0x779110` highlight install), which does no geometry". The adder constructs;
+                    // nothing in that path reads an attribute first.
+                    //
+                    // This arm used to require `t.name().is_some()`, so a bare element built
+                    // nothing and `GetNormalTexture()` answered nil where the real client answers a
+                    // live blank texture. pfUI's spellbook skin is the report — it takes
+                    // `SpellBookSkillLineTab<i>:GetNormalTexture()` and immediately
+                    // `:SetTexCoord()`s it — and the corpus carries 38 more bare
+                    // `<DisabledTexture />` besides.
+                    //
+                    // `""` is the live API's own blank form (`set_slot_texture`'s empty-string arm,
+                    // which runs `ensure_slot` and then clears), so this creates without painting.
                     this.call(wrapper, method, String::new(), dbg);
                 }
                 // alphaMode / <Size> / <Anchors> / <TexCoords> apply to the region the setter just

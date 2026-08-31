@@ -42,10 +42,17 @@
 //! - **`hidden="true"` keeps a binding out of the Key Bindings window** while leaving it bindable
 //!   and dispatchable — 1.12 uses it for the debug toggles and for the three mouselook bindings
 //!   (`TURNORACTION`, `CAMERAORSELECTORMOVE`, …) that the mouse owns rather than the player.
-//! - `debug` and `platform` are **read and not acted on**: both appear only in the client's own
-//!   file, which we never load (our registry is the Rust `SPECS` table — decision 0997's honest
-//!   tree), and no addon in the wild uses them. Recording that they exist is the point; inventing
-//!   a meaning for them here would be a guess.
+//! - **`platform="mac"` is the file's own OS gate**, and its five uses are the whole of it: the
+//!   `ITUNES_REMOTE` block, which remotes the *system* music player and therefore exists only in
+//!   the Mac build. It is carried on [`AddonBinding::platform`] and acted on at registration
+//!   ([`crate::script::UiScript::register_addon_bindings`]) — a row for another platform is not
+//!   registered at all, so it never reaches the Key Bindings window, a save file, or a chord.
+//!   Registering it instead would list a command whose body calls functions this build does not
+//!   have, which is a row that can only ever error on its first press.
+//! - `debug="true"` is **read and not acted on**: it appears only on the client's own nine
+//!   hidden dev toggles, always together with `hidden="true"` (which IS acted on and is what
+//!   keeps them out of the window), and no addon in the wild uses it. Recording that it exists is
+//!   the point; inventing a second meaning for it would be a guess.
 //!
 //! ## Why this lives beside `toc` and `framexml` rather than under `script/`
 //!
@@ -82,6 +89,9 @@ pub struct AddonBinding {
     pub run_on_up: bool,
     /// `hidden="true"` — bindable and dispatchable, but not listed in the Key Bindings window.
     pub hidden: bool,
+    /// `platform="mac"` — the row belongs to one build only, lower-cased. `None` on every row
+    /// that carries no such attribute, which is every row but five.
+    pub platform: Option<String>,
     /// The element's own text: one Lua chunk, verbatim (entities already decoded, so a body that
     /// wrote `&lt;` arrives as `<`).
     pub body: String,
@@ -137,6 +147,9 @@ pub fn parse(text: &str) -> Result<Vec<AddonBinding>, Error> {
             header: attr_ci(node, "header").filter(|h| !h.is_empty()),
             run_on_up: attr_bool(node, "runOnUp"),
             hidden: attr_bool(node, "hidden"),
+            platform: attr_ci(node, "platform")
+                .filter(|p| !p.is_empty())
+                .map(|p| p.to_ascii_lowercase()),
             body: direct_text(node),
         });
     }
@@ -206,13 +219,16 @@ mod tests {
     <Binding name="PROBELOOSE" runOnUp="1">
         Probe();
     </Binding>
+    <Binding name="ITUNES_PLAYPAUSE" header="ITUNES_REMOTE" platform="mac">
+        MusicPlayer_PlayPause();
+    </Binding>
 </Bindings>"#,
         )
         .expect("well-formed");
 
         assert_eq!(
             binds.len(),
-            5,
+            6,
             "one per <Binding>, comments are not bindings"
         );
 
@@ -224,6 +240,14 @@ mod tests {
             "the RAW attribute — BINDING_HEADER_ is registration's prefix to add, not ours"
         );
         assert!(fwd.run_on_up && !fwd.hidden);
+        assert_eq!(fwd.platform, None, "no platform= is every row but five");
+        let itunes = &binds[5];
+        assert_eq!(itunes.name, "ITUNES_PLAYPAUSE");
+        assert_eq!(
+            itunes.platform.as_deref(),
+            Some("mac"),
+            "platform= is the file's own OS gate; registration acts on it"
+        );
         assert!(fwd.body.contains("MoveForwardStart();"));
         assert!(fwd.body.contains("MoveForwardStop();"));
         assert!(

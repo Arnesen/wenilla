@@ -36,6 +36,13 @@ pub struct MapCatalog {
     names: HashMap<u32, String>,
     /// `mapId → LoadingScreenID` FK into `LoadingScreens.dbc` (only maps with a non-zero FK).
     loading_screens: HashMap<u32, u32>,
+    /// `mapId → InstanceType` (field 2, `+0x8` — the offset the binary reads at `0x48a772`,
+    /// `0x495cb9` and `0x495d33`). VERIFIED by dumping the shipped patch-2 `Map.dbc`, 2026-08-30:
+    /// **0** none (Azeroth, Kalimdor, Deeprun Tram), **1** party dungeon (Deadmines, Scholomance),
+    /// **2** raid (Molten Core, Naxxramas), **3** battleground (Alterac Valley, Warsong Gulch) —
+    /// the same four the client's own `IsInInstance` string table spells `none`/`party`/`raid`/
+    /// `pvp` (`0x83de58`, indexed by this value with a `< 4` guard).
+    instance_types: HashMap<u32, u32>,
 }
 
 impl MapCatalog {
@@ -59,6 +66,21 @@ impl MapCatalog {
         self.loading_screens.get(&map_id).copied()
     }
 
+    /// `InstanceType` for `map_id` (see [`MapCatalog::instance_types`]), or `None` for a map id
+    /// the DBC has no row for. The client treats a missing row as "not an instance" everywhere it
+    /// asks — it null-checks the record pointer first and takes the same branch as type 0.
+    pub fn instance_type(&self, map_id: u32) -> Option<u32> {
+        self.instance_types.get(&map_id).copied()
+    }
+
+    /// Whether `map_id` is a **party dungeon** (`InstanceType == 1`). This exact predicate — not
+    /// "is an instance" — is the one the reference's lockout bookkeeping runs on: `cmp [rec+8],1`
+    /// gates both what `SMSG_UPDATE_LAST_INSTANCE` records and both halves of
+    /// `CanShowResetInstances` (decision 1748).
+    pub fn is_party_dungeon(&self, map_id: u32) -> bool {
+        self.instance_type(map_id) == Some(1)
+    }
+
     pub fn len(&self) -> usize {
         self.dirs.len()
     }
@@ -71,15 +93,19 @@ impl MapCatalog {
 /// Field index of the enUS `MapName_Lang` string (`+0x10`, see [`MapCatalog::names`]).
 const MAP_NAME_FIELD: usize = 4;
 
-/// 42 fields total; field 0 = ID, field 1 = Directory string, field 4 = MapName (enUS),
-/// field 38 = LoadingScreenID (FK). Remaining fields are placeholders (4-byte dwords; the schema
-/// only needs to total 168 B).
+/// Field index of `InstanceType` (`+0x8`, see [`MapCatalog::instance_types`]).
+const INSTANCE_TYPE_FIELD: usize = 2;
+
+/// 42 fields total; field 0 = ID, field 1 = Directory string, field 2 = InstanceType,
+/// field 4 = MapName (enUS), field 38 = LoadingScreenID (FK). Remaining fields are placeholders
+/// (4-byte dwords; the schema only needs to total 168 B).
 fn map_schema() -> Schema {
     let mut s = Schema::new("Map");
     s.add_field(SchemaField::new("ID", FieldType::UInt32));
     s.add_field(SchemaField::new("Directory", FieldType::String));
     for i in 2..42 {
         match i {
+            INSTANCE_TYPE_FIELD => s.add_field(SchemaField::new("InstanceType", FieldType::UInt32)),
             MAP_NAME_FIELD => s.add_field(SchemaField::new("MapName", FieldType::String)),
             LOADING_SCREEN_FIELD => {
                 s.add_field(SchemaField::new("LoadingScreenID", FieldType::UInt32))
@@ -99,6 +125,7 @@ pub fn load_map_catalog(chain: &mut Chain) -> Result<MapCatalog> {
     let mut dirs = HashMap::with_capacity(rs.records().len());
     let mut names = HashMap::with_capacity(rs.records().len());
     let mut loading_screens = HashMap::new();
+    let mut instance_types = HashMap::with_capacity(rs.records().len());
     for r in rs.records() {
         let Some(id) = u32_at(r, 0) else { continue };
         if let Some(dir) = str_at(&rs, r, 1) {
@@ -106,6 +133,11 @@ pub fn load_map_catalog(chain: &mut Chain) -> Result<MapCatalog> {
         }
         if let Some(name) = str_at(&rs, r, MAP_NAME_FIELD).filter(|n| !n.is_empty()) {
             names.insert(id, name);
+        }
+        // Every row's type is recorded, 0 included: "0" and "no such map" are different answers
+        // to `instance_type`, and the second is what a bad map id must give.
+        if let Some(ty) = u32_at(r, INSTANCE_TYPE_FIELD) {
+            instance_types.insert(id, ty);
         }
         // 0 = "no loading screen" (dev/test maps); only record real FKs.
         if let Some(ls) = u32_at(r, LOADING_SCREEN_FIELD).filter(|&v| v != 0) {
@@ -116,5 +148,6 @@ pub fn load_map_catalog(chain: &mut Chain) -> Result<MapCatalog> {
         dirs,
         names,
         loading_screens,
+        instance_types,
     })
 }

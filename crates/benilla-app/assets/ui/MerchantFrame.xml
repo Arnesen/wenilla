@@ -32,8 +32,8 @@
         opening one over the other REPLACES it at the left slot.
     -->
     <Script><![CDATA[
-        BENILLA_MERCHANT_MAX = 10  -- MERCHANT_ITEMS_PER_PAGE (ref MerchantFrame.lua l.1)
-        BENILLA_BUYBACK_MAX = 12   -- BUYBACK_ITEMS_PER_PAGE (ref l.2; rows 11/12 are buyback-only)
+        MERCHANT_ITEMS_PER_PAGE = 10  -- MERCHANT_ITEMS_PER_PAGE (ref MerchantFrame.lua l.1)
+        BUYBACK_ITEMS_PER_PAGE = 12   -- BUYBACK_ITEMS_PER_PAGE (ref l.2; rows 11/12 are buyback-only)
 
         -- The coin display, quoted from the real SmallMoneyFrame (ref MoneyFrame.xml/lua): a copper
         -- amount renders as a number + a 13px coin icon per NONZERO denomination, cut from the one
@@ -187,7 +187,7 @@
         -- The merchant-list index a row button shows on the current page (ref index arithmetic,
         -- MerchantFrame.lua l.74).
         function BenillaMerchantFrame_ItemIndex(button)
-            return ((MerchantFrame.page or 1) - 1) * BENILLA_MERCHANT_MAX + button.merchantIndex
+            return ((MerchantFrame.page or 1) - 1) * MERCHANT_ITEMS_PER_PAGE + button.merchantIndex
         end
 
         function BenillaMerchantItem_OnClick(button, mouseButton)
@@ -330,9 +330,9 @@
             local page = frame.page or 1
             local numItems = GetMerchantNumItems()
 
-            for i = 1, BENILLA_MERCHANT_MAX do
+            for i = 1, MERCHANT_ITEMS_PER_PAGE do
                 local button = getglobal("MerchantItem" .. i)
-                local index = (page - 1) * BENILLA_MERCHANT_MAX + i
+                local index = (page - 1) * MERCHANT_ITEMS_PER_PAGE + i
                 if index <= numItems then
                     local name, texture, price, quantity, numAvailable, isUsable = GetMerchantItemInfo(index)
                     BenillaMerchantRow_Fill(button, name, texture, price, quantity, numAvailable == 0, isUsable)
@@ -413,10 +413,10 @@
             local prevButton = getglobal("MerchantPrevPageButton")
             local nextButton = getglobal("MerchantNextPageButton")
             local pageText = getglobal("MerchantPageText")
-            if numItems > BENILLA_MERCHANT_MAX then
+            if numItems > MERCHANT_ITEMS_PER_PAGE then
                 pageText:SetText(string.format("Page %d", page)) -- PAGE_NUMBER
                 if page == 1 then prevButton:Disable() else prevButton:Enable() end
-                if page >= math.ceil(numItems / BENILLA_MERCHANT_MAX) then
+                if page >= math.ceil(numItems / MERCHANT_ITEMS_PER_PAGE) then
                     nextButton:Disable()
                 else
                     nextButton:Enable()
@@ -459,7 +459,7 @@
             getglobal("MerchantItem9"):SetPoint("TOPLEFT", getglobal("MerchantItem7"), "BOTTOMLEFT", 0, -15)
 
             local numBuyback = GetNumBuybackItems()
-            for i = 1, BENILLA_BUYBACK_MAX do
+            for i = 1, BUYBACK_ITEMS_PER_PAGE do
                 local button = getglobal("MerchantItem" .. i)
                 if i <= numBuyback then
                     local name, texture, price, quantity, numAvailable, isUsable = GetBuybackItemInfo(i)
@@ -776,7 +776,7 @@
         </Scripts>
     </Button>
 
-    <Frame name="MerchantFrame" hidden="true">
+    <Frame name="MerchantFrame" enableMouse="true" toplevel="true" parent="UIParent" hidden="true">
         <!-- The real 384×512 window (ref l.117-119). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints
              this to the left slot on open. -->
         <Size><AbsDimension x="384" y="512"/></Size>

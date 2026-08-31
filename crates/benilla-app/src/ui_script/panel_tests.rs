@@ -3,27 +3,17 @@ use benilla_ui::script::{
     QuadContent, SoundRequest, UiScript,
 };
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error and returning the
-/// frame count it materialized — the panel tests all load `UiPanels.xml` (decision 0084 §2's slot
-/// manager) before the panel frame(s) under test, exactly as `ui_script.rs`'s own shipped-list
-/// order does, so `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent
-/// references them.
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+/// Load one manifest entry into `s`, panicking on any loader error and returning the frame count
+/// it materialized — the panel tests all load `UiPanels.xml` (decision 0084 §2's slot manager)
+/// before the panel frame(s) under test, exactly as `benilla.toc`'s own order does, so
+/// `ShowUIPanel`/`HideUIPanel` already exist when a frame's OnLoad/OnEvent references them.
+///
+/// This was a private disk-only reader until 1751's second window: `BankFrame.xml` is the
+/// reference's own file off the player's chain now, and a reader that only knows `assets/ui`
+/// cannot name it. [`super::test_ui::load_ui`] knows both stores by the manifest's own rule, so a
+/// caller that names a chain entry has to open with `wow_data_or_skip!` (only the bank test below
+/// does).
+use super::test_ui::load_ui as load_xml;
 
 /// Find a bare frame's own rect via its `QuadContent::Frame` entry (every frame emits one, at its
 /// resolved rect, whether or not it paints anything itself — `UiScript::extract`'s doc). Used for
@@ -55,14 +45,18 @@ fn shipped_gossip_frame_drives_end_to_end() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
-                                         // The window + its scroll frame (bar + child) + the 32-row shared pool (quest rows and option
-                                         // rows both draw from it, decision 0088 §3 — the reference's own NUMGOSSIPBUTTONS) + the close
-                                         // button + the GOODBYE button. The greeting and the NPC-name banner are FontString layers (the
-                                         // real GossipGreetingText ref l.241 / GossipFrameNpcNameText ref l.170) — not their own frames.
+                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
+                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
+                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "UIPanelTemplates.xml");
+    // The window + its scroll frame (bar + child) + the 32-row shared pool (quest rows and option
+    // rows both draw from it, decision 0088 §3 — the reference's own NUMGOSSIPBUTTONS) + the close
+    // button + the GOODBYE button. The greeting and the NPC-name banner are FontString layers (the
+    // real GossipGreetingText ref l.241 / GossipFrameNpcNameText ref l.170) — not their own frames.
     assert_eq!(
         load_xml(&s, "GossipFrame.xml"),
-        40,
-        "window + scroll + bar (+2 arrows) + child + 32 rows + close + goodbye"
+        41,
+        "window + greeting panel + scroll + bar (+2 arrows) + child + 32 rows + close + goodbye"
     );
 
     // Hidden by default: no gossip icon on screen.
@@ -111,8 +105,8 @@ fn shipped_gossip_frame_drives_end_to_end() {
     // so the shared pool starts filling from option 1 at row 1 — decision 0088 §3).
     let states: (bool, bool, bool, bool) = s
         .eval(
-            "return GossipRow1:IsVisible(), GossipRow1:IsEnabled(),\n\
-                        GossipRow2:IsEnabled(), GossipRow3:IsVisible()",
+            "return GossipTitleButton1:IsVisible(), GossipTitleButton1:IsEnabled() ~= 0,\n\
+                        GossipTitleButton2:IsEnabled() ~= 0, GossipTitleButton3:IsVisible()",
         )
         .unwrap();
     assert_eq!(
@@ -233,6 +227,10 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
+                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
+                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "GossipFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
@@ -269,10 +267,10 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
         bool,
     ) = s
         .eval(
-            "return GossipRow1Label:GetText(), GossipRow1:IsVisible(),\n\
-                        GossipRow2Label:GetText(), GossipRow2:IsVisible(),\n\
-                        GossipRow3Label:GetText(), GossipRow3:IsVisible(),\n\
-                        GossipRow4:IsVisible()",
+            "return GossipTitleButton1Label:GetText(), GossipTitleButton1:IsVisible(),\n\
+                        GossipTitleButton2Label:GetText(), GossipTitleButton2:IsVisible(),\n\
+                        GossipTitleButton3Label:GetText(), GossipTitleButton3:IsVisible(),\n\
+                        GossipTitleButton4:IsVisible()",
         )
         .unwrap();
     assert_eq!((r1_text.as_str(), r1_vis), ("Report to Goldshire", true));
@@ -323,7 +321,8 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     // Click quest row 2 (available, "A Threat Within") → SelectGossipQuest(2) queues the seam's
     // 1-based quest-row position; the app maps it to the quest id + guid and sends
     // CMSG_QUESTGIVER_QUERY_QUEST (decision 0088 §3).
-    s.run("BenillaGossipRow_OnClick(GossipRow2)").unwrap();
+    s.run("BenillaGossipRow_OnClick(GossipTitleButton2)")
+        .unwrap();
     assert_eq!(s.take_gossip_quest_selects(), vec![2]);
     assert!(
         s.take_gossip_selects().is_empty(),
@@ -349,6 +348,10 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
+                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
+                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "GossipFrame.xml");
 
     // Three long options — the shape of a real judgement/roleplay menu, every one of them wrapping
@@ -410,8 +413,8 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
 
     let row = |i: u32| -> (f32, f32, f32) {
         s.eval::<(f32, f32, f32)>(&format!(
-            "return GossipRow{i}:GetTop(), GossipRow{i}:GetBottom(), \
-             GossipRow{i}Label:GetHeight()"
+            "return GossipTitleButton{i}:GetTop(), GossipTitleButton{i}:GetBottom(), \
+             GossipTitleButton{i}Label:GetHeight()"
         ))
         .unwrap()
     };
@@ -456,6 +459,10 @@ fn gossip_show_hide_plays_open_and_close_kits() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
+                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
+                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "GossipFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
@@ -493,6 +500,10 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
+                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
+                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -575,6 +586,10 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+                                         // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
+                                         // optional: a missing template is a loader *warning*, not an error, so an under-loaded
+                                         // list passes load_xml and then loses the scrollbar silently.
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -704,21 +719,30 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
 /// center-parked "left-area" occupant back — UIParent.lua l.777-782).
 #[test]
 fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
-    use benilla_ui::script::{BankState, ScriptValue};
+    use benilla_ui::script::BankState;
+
+    // The bank window is the reference's own file off the player's chain (1751).
+    let _data = benilla_formats::wow_data_or_skip!();
 
     // The bank window's own dependency chain (bank_tests::setup), plus the gossip window.
     let order_first = |bank_first: bool| {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         load_xml(&s, "Fonts.xml");
+        load_xml(&s, "ItemButtonTemplate.xml"); // the reference bank's slot buttons inherit it
         load_xml(&s, "MoneyFrame.xml");
         load_xml(&s, "UiPanels.xml");
         load_xml(&s, "Cooldown.xml");
         load_xml(&s, "BagFrame.xml");
         load_xml(&s, "GameTooltip.xml");
-        load_xml(&s, "MerchantFrame.xml");
-        load_xml(&s, "BankFrame.xml");
         load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+                                             // UIPanelScrollFrameTemplate lives here, and the gossip scroll frame inherits it. NOT
+                                             // optional: a missing template is a loader *warning*, not an error, so an under-loaded
+                                             // list passes load_xml and then loses the scrollbar silently.
+                                             // Before BankFrame, not after: its close and purchase buttons inherit UIPanelCloseButton
+                                             // and UIPanelButtonTemplate, and an `inherits=` is resolved at LOAD.
+        load_xml(&s, "UIPanelTemplates.xml");
+        load_xml(&s, "Interface\\FrameXML\\BankFrame.xml");
         load_xml(&s, "GossipFrame.xml");
 
         // The gossip menu is open on the banker (its bank option showing).
@@ -743,11 +767,11 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         s.set_bank(Some(BankState::default()));
         s.set_gossip(None);
         if bank_first {
-            s.fire_event("BANKFRAME_OPENED", vec![ScriptValue::Str("Banker".into())]);
+            s.fire_event("BANKFRAME_OPENED", vec![]);
             s.fire_event("GOSSIP_CLOSED", vec![]);
         } else {
             s.fire_event("GOSSIP_CLOSED", vec![]);
-            s.fire_event("BANKFRAME_OPENED", vec![ScriptValue::Str("Banker".into())]);
+            s.fire_event("BANKFRAME_OPENED", vec![]);
         }
         assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -786,6 +810,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
     load_xml(&s, "GossipFrame.xml");
 
     // Eight wrapping options: ~4 lines each, far past the 334 px scroll frame.
@@ -830,8 +855,8 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // The child grew past the 334 px frame, so there is a range to scroll …
     let (child_h, range): (f32, f32) = s
         .eval(
-            "return GossipGreetingScrollChild:GetHeight(), \
-             GossipGreetingScroll:GetVerticalScrollRange()",
+            "return GossipGreetingScrollChildFrame:GetHeight(), \
+             GossipGreetingScrollFrame:GetVerticalScrollRange()",
         )
         .unwrap();
     assert!(
@@ -841,7 +866,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // … and the bar is up for it (it stays hidden when everything fits — the fit case is covered by
     // `shipped_gossip_frame_drives_end_to_end`'s two-option menu).
     assert!(
-        s.eval::<bool>("return GossipGreetingScrollBar:IsVisible()")
+        s.eval::<bool>("return GossipGreetingScrollFrameScrollBar:IsVisible()")
             .unwrap(),
         "the scrollbar shows once the menu overflows"
     );
@@ -852,7 +877,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // out with: it must be the scroll frame's own rect, and rows past the bottom must be entirely
     // outside it (nothing of them survives the clip).
     let (frame_top, frame_bottom): (f32, f32) = s
-        .eval("return GossipGreetingScroll:GetTop(), GossipGreetingScroll:GetBottom()")
+        .eval("return GossipGreetingScrollFrame:GetTop(), GossipGreetingScrollFrame:GetBottom()")
         .unwrap();
     let painted_rows =
         |s: &mut UiScript| -> Vec<(benilla_ui::layout::Rect, benilla_ui::layout::Rect)> {
@@ -885,9 +910,9 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // Scrolling pans the content up under that clip by exactly the scroll amount. Rects are y-up
     // (`ExtractedQuad::rect`), so "up" means row 1's top EDGE VALUE grows as it slides off the top.
     let first_top =
-        |s: &mut UiScript| -> f32 { s.eval::<f32>("return GossipRow1:GetTop()").unwrap() };
+        |s: &mut UiScript| -> f32 { s.eval::<f32>("return GossipTitleButton1:GetTop()").unwrap() };
     let before = first_top(&mut s);
-    s.run("BenillaScroll_Step(GossipGreetingScroll, 100)")
+    s.run("BenillaScroll_Step(GossipGreetingScrollFrame, 100)")
         .unwrap();
     s.resolve();
     let after = first_top(&mut s);
@@ -897,7 +922,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     );
     // The bar followed the scroll (SyncBar off OnVerticalScroll), and the rows are still clipped.
     assert_eq!(
-        s.eval::<f32>("return GossipGreetingScrollBar:GetValue()")
+        s.eval::<f32>("return GossipGreetingScrollFrameScrollBar:GetValue()")
             .unwrap(),
         100.0,
         "the bar seats at the scroll offset"
@@ -932,6 +957,7 @@ fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
     load_xml(&s, "MoneyFrame.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml"); // UIPanelScrollFrameTemplate — see the note above
     load_xml(&s, "GossipFrame.xml");
 
     // The addon's three lines, in the order an addon writes them.

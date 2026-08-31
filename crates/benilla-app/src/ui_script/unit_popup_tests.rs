@@ -828,7 +828,7 @@ fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
         "an open menu ticks the enable pass"
     );
     assert!(
-        !s.eval::<bool>("return DropDownList1Button2:IsEnabled()")
+        !s.eval::<bool>("return DropDownList1Button2:IsEnabled() ~= 0")
             .unwrap(),
         "Whisper greys against a disconnected target"
     );
@@ -851,7 +851,7 @@ fn an_idle_unit_popup_driver_parks_itself_off_the_tick() {
     s.tick(0.016);
     s.resolve();
     assert!(
-        s.eval::<bool>("return DropDownList1Button2:IsEnabled()")
+        s.eval::<bool>("return DropDownList1Button2:IsEnabled() ~= 0")
             .unwrap(),
         "Whisper enables the frame the target reconnects"
     );

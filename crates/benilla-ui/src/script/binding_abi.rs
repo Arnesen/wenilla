@@ -95,6 +95,38 @@ pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     }
 }
 
+/// **[`string_arg`]'s shape-C partner**: coerce like the reference, and treat everything else as
+/// **absent** rather than raising.
+///
+/// The pair is 1717's rule applied to string positions — *which* shape a position takes is settled
+/// per binding, never generalised — and the model-pane and region constructors are the two ends of
+/// it, verified together (wow-re `ui/scratch/xml-template-name-lookup.md` §5.2):
+///
+/// | position | fetch | a table there |
+/// |---|---|---|
+/// | `Model:SetModel` arg 1 | `0x6f3510` → `0x6f3690`, result **tested** | **raises** ([`string_arg`]) |
+/// | `CreateFontString`/`CreateTexture` `name`, `layer` | `0x6f3510` → `0x6f3690`, result **not** tested | absent — this fn |
+/// | `CreateFrame` `name`, `inherits` | `0x6f3690` **unguarded** | absent — this fn |
+///
+/// **The discriminator is not the argument's type; it is whether the binding TESTS its parser's
+/// return.** That is the sentence `numeric-arg-coercion-law.md` §6 had wrong ("an unrecognised
+/// string argument raises"), refuted by this round.
+///
+/// A **number** is accepted and stringified, exactly as `lua_tostring` coerces it — so
+/// `CreateFrame("Frame", 5)` names the frame `"5"`. Callers that must *not* coerce a number (the
+/// `lua_type(L,idx) == LUA_TSTRING` gate `CreateTexture`/`CreateFontString` put on their **fourth**
+/// argument, and only there) test the tag themselves before calling this.
+pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
+    match v {
+        Value::String(_) | Value::Number(_) | Value::Integer(_) => lua
+            .coerce_string(v.clone())
+            .ok()
+            .flatten()
+            .and_then(|s| s.to_str().ok().map(|t| t.to_owned())),
+        _ => None,
+    }
+}
+
 /// `GetBoolOrDefault` (`0x6f1c10`) — the reference's **boolean argument** coercion, which is *not*
 /// Lua truthiness and gets three arms backwards from the obvious reading. Byte-VERIFIED: wow-re
 /// `system/ui/scratch/action-bar-toggles.md` §2.1 re-derives the whole jump table at `0x6f1ce8`

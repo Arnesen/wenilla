@@ -84,7 +84,7 @@
 //! | `0x775b0a` (Lua `Frame:Raise()`) | the explicit script call | [`install`] |
 //! | `0x76aeec` in `effective_visible_show 0x76ae10` | **the Show trigger** | [`raise_on_show`], run from [`crate::script::event::fire_visibility_changes`] |
 //! | `0x7652d7` in begin-move `0x7652b0` | drag start | [`super::movable`]'s `start_moving` |
-//! | `0x766392` in the mouse-down handler `0x7662c0` | **the click trigger** | **not wired** — the pointer path is another concern's; the hook is one call in `pointer.rs`'s button-down arm |
+//! | `0x766392` in the mouse-down handler `0x7662c0` | **the click trigger** | [`crate::script::UiScript::mouse_button`]'s down arm, first thing — capture-else-hover, unguarded, ahead of the title-region swallow |
 //! | `0x764a4c` (`force = 0`) | re-applies an already-computed bit `0x10` | no counterpart (see the OVERLAPPED note above) |
 //! | `0x7650d6` | dead — zero references binary-wide | — |
 //!

@@ -329,6 +329,37 @@ impl UiScript {
     /// statement-position calls (`script.mouse_button(...);`) are unaffected.
     pub fn mouse_button(&mut self, x: f32, y: f32, button: &str, down: bool) -> bool {
         let hit_id = self.hit_test(x, y);
+        // ── The RAISE, and it happens FIRST ─────────────────────────────────────────────────────
+        //
+        // wow-re ledger `0x7662c0` (VERIFIED, the `toplevel-raise.md` §5 fan-out): the
+        // mouse-button-DOWN handler "resolves target = root+0x80 (existing capture) else
+        // root+0x7c (hover frame), calls `0x76a5b0` Raise() **UNGUARDED** @`0x766392` (the
+        // toplevel gate is inside `0x7650f0`, so the raised frame may be an ancestor of the
+        // clicked one), then title-region drag or capture+OnMouseDown".
+        //
+        // Four clauses, each load-bearing and each visible:
+        //
+        //  · **DOWN only.** The sibling category-`0xe` handler `0x766420` never raises — a window
+        //    comes forward on the press, not on the release.
+        //  · **Before the title-region swallow below**, so grabbing a window by its title bar
+        //    raises it too, even though that path dispatches no `OnMouseDown` at all.
+        //  · **Unguarded** — no toplevel test out here. [`toplevel::raise`] walks to the nearest
+        //    toplevel self-or-ancestor and does nothing when there is none, which is exactly what
+        //    makes a click on a *child* (a button, a tab, the window's own background texture)
+        //    bring the whole window forward.
+        //  · **Capture else hover.** [`Model::mouse_capture`] is `root+0x80`; while a button is
+        //    held it wins, so a chorded press over a different window raises the one being
+        //    dragged, not the one under the cursor.
+        //
+        // Nothing here is gated on the frame being mouse-enabled: the "hover frame" is the
+        // hit-test result, which already applies that gate.
+        if down {
+            let target = self.model_ref().mouse_capture;
+            if let Some(t) = target.or_else(|| self.hit_test_frame(x, y)) {
+                let mut model = self.model_mut();
+                super::object::toplevel::raise(&mut model, t);
+            }
+        }
         // ── The title region, and it SWALLOWS the press ─────────────────────────────────────────
         //
         // A mouse-down inside `frame:GetTitleRegion()` starts a mode-2 move and never reaches the
@@ -420,6 +451,11 @@ impl UiScript {
                         model.mouse_down_on.remove(button);
                     }
                 }
+                // `0x7663e6` writes the resolved target into `root+0x80` — capture-else-hover, so
+                // this is an `or`, not an assignment: an existing capture is not displaced by a
+                // second button pressed elsewhere. (This is the point the reference reaches only
+                // on a title-region MISS, which is why the swallow above returns before it.)
+                model.mouse_capture = model.mouse_capture.or(hit_handle);
                 // A press REPLACES any in-flight gesture, so a started one has to be ended first
                 // — `abandon_drag`'s own doc carries why a silent drop is a stuck UI rather than a
                 // cancelled drag. Its `OnDragStop` fires below, outside this borrow.
@@ -451,6 +487,12 @@ impl UiScript {
                 (click, None, false, jump, None, abandoned, color_jump)
             } else {
                 let pressed = model.mouse_down_on.remove(button);
+                // `root+0x80` is cleared at `0x7664bb` **only when the post-event button mask is
+                // zero** — a chorded release keeps the capture for the button still held. With the
+                // per-button map already drained above, "mask is zero" is "the map is empty".
+                if model.mouse_down_on.is_empty() {
+                    model.mouse_capture = None;
+                }
                 // A left release ends any in-flight thumb drag (decision 0250 §5).
                 if button == "LeftButton" {
                     super::slider::end_drag(&mut model);

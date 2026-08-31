@@ -1,57 +1,47 @@
 <Ui>
     <!--
-        benilla's bag windows (decision 0068 T2), RE-SKINNED to the real 1.12 ContainerFrame
-        (dressing arc, decision 0084; whole-space generalization, decision 0216 slice 2): the
-        geometry and art below are QUOTED from the real `ContainerFrame.xml`/`ContainerFrame.lua`
-        (scratchpad `ref-framexml/ContainerFrame.xml`, `ContainerFrame.lua`; line citations inline),
-        turned onto our own container feed/intents. FIVE windows now — the backpack (bag id 0, 16
-        slots, its own hand-authored block below, unchanged in shape) plus the four equipped bags
-        (ids 1..4, `BenillaBagWindowTemplate`, up to 20 slots each) — the ContainerFrameTemplate
-        generalization this file's header always said was coming.
+        **benilla's bag BAR** — the five buttons on the right of the main action bar, and nothing
+        else. The bag WINDOWS this file used to hold are gone: they are the reference's own
+        `ContainerFrame1..12`, executed off the player's installed patch chain (decision 1751,
+        `Interface\FrameXML\ContainerFrame.xml` in benilla.toc, three lines above this one).
 
-        Every window shares the same handler functions, deriving its bag id from
-        `button:GetParent():GetID()`/`frame:GetID()` (the ref's own `this:GetParent():GetID()`
-        pattern, ContainerFrame.lua:88 &c.) rather than a hardcoded global — the XML `id=` attribute
-        is applied (SetID) before any child's OnLoad fires (the loader's bottom-up materialize order,
-        `loader/mod.rs` step 5 before step 7), so a slot button's OnLoad can already read its
-        parent's id. All state arrives through the container snapshot
-        (GetContainerNumSlots/GetContainerItemInfo) and refreshes on BAG_UPDATE/ITEM_LOCK_CHANGED.
-        LEFT-click drives the cursor drag (PickupContainerItem → pick up / place / swap, the app's
-        move drain → CMSG_SWAP_INV_ITEM/CMSG_SWAP_ITEM); RIGHT-click cancels a held cursor, else uses
-        the slot (UseContainerItem → CMSG_USE_ITEM / auto-equip, or a merchant sell); SHIFT+left-click
-        opens the stack-split spinner (the reference fork, ContainerFrame.lua:567-577).
+        So what remains is this client's stand-in for the reference's `MainMenuBarBagButtons.xml` /
+        `.lua` — the backpack button, `CharacterBag0Slot`..`CharacterBag3Slot`, `KeyRingButton`, and
+        the item-push card that flies into whichever of them took an item. It keeps the reference's
+        names because those are what addons reach for, and it will be replaced by the reference's
+        own file the day `PutItemInBag` / `PickupBagFromSlot` are bound (see the note at
+        `BagSlotButton_OnClick`, which is the migration ticket).
 
-        REAL-CLIENT DIVERGENCES (noted, not bugs):
-        - The real client scales the whole frame to CONTAINER_SCALE=0.90 (ContainerFrame.lua l.13);
-          we don't do frame scale, so every window renders ~11% larger. Scaling is uniform over the
-          frame + its children + the background art, so the slot buttons still seat in the painted
-          wells — only the on-screen size differs.
-        - The bag portrait is the C-side SetBagPortaitTexture (ContainerFrame.lua l.422): the backpack
-          shows the static `Interface\Buttons\Button-Backpack-Up` art, an equipped bag its own item
-          icon (BenillaBagWindow_Update reads inv slot 19+bagId).
-        - Bags 1..4 SNUG-FIT to their real row count (BenillaBagWindow_FitBackground): the background
-          is stitched from the real client's `UI-Bag-Components` top/middle/bottom pieces sized to
-          ceil(size/4) rows (ContainerFrame.lua ContainerFrame_GenerateFrame, id~=0 branch), so a
-          6-slot pouch is a 2-row window, not the backpack's 5-row slab. The backpack (id 0) keeps its
-          own single `UI-BackpackBackground` slab (the id==0 branch), unchanged.
-        MONEY: reuses the shared BenillaMoney_Set/_Clear purse helpers (they live in MerchantFrame.xml
-        — decision 0084's reusable money display; the same reuse the loot window makes). At runtime
-        every FrameXML file is loaded before any event fires, so the helper is defined by the time
-        BenillaBagWindow_Update first runs; a unit test that loads this file in isolation must also
-        load MerchantFrame.xml (as the loot tests do). Money is BACKPACK ONLY (ContainerFrame.lua
-        l.314 shows the MoneyFrame only for id==0) — every other window hides it.
+        THE VERBS ARE THE REFERENCE'S NOW, and every button below calls them through the global:
+        `ToggleBackpack`, `ToggleBag`, `OpenAllBags`, `ToggleKeyRing`, `PutKeyInKeyRing`,
+        `IsBagOpen` — all from the sourced `ContainerFrame.lua`. That is not incidental: those
+        names are precisely what a bag addon replaces, so a button that called a private body
+        instead would make the addon silently inert (the lesson this file's own history carries —
+        four of the five buttons did exactly that once).
 
-        The title inherits GameFontHighlight and the counts NumberFontNormal — both live in the
-        shipped Fonts.xml (the font-object slice already landed), so they render in the real fonts.
+        WHAT LIGHTS A BUTTON. The reference's `ContainerFrame_OnShow`/`_OnHide` write
+        `MainMenuBarBackpackButton:SetChecked` / `CharacterBag<N>Slot:SetChecked` directly, so with
+        stock windows the flag is already correct by the time a click handler's tail runs; each
+        tail below re-derives it with `IsBagOpen`, which is the reference's own scan under the name
+        it publishes for it. `KeyRingButton` is the same at `KEYRING_CONTAINER`.
+
+        KEYRING. `KEYRING_CONTAINER = -2` lives here because it lives in
+        `MainMenuBarBagButtons.lua:1` in the reference — and the sourced `ContainerFrame.lua` reads
+        it, so this file is load-bearing for a file above it in the manifest. Decision 0765's
+        keyring-as-container stands: the app feeds it like any other bag, so the reference's own
+        window, verbs and sounds take it unchanged. The one place the reference detours out of the
+        container API for a keyring slot is its tooltip, and that detour is adapted — with its
+        reasons — in `ContainerFrameAdapters.xml`.
+
+        ITEM PUSH (decision 0887): `BENILLA_ITEM_PUSH_*` + `BenillaItemPushAnim_*` are ours, and
+        deliberately not the reference's `ItemAnimTemplate` — that is a `<Model>` playing an .mdx
+        sequence, and this engine renders no FrameXML models (see `Cooldown.xml`'s own note). The
+        card below is the same animation sampled from the model's tracks and drawn as a quad.
+
+        The counts are NumberFontNormal and the labels GameFontHighlight — both from the shipped
+        Fonts.xml, so they render in the real fonts.
     -->
     <Script><![CDATA[
-        -- The five windows' shared slot count cap: the backpack is always exactly 16
-        -- (GetContainerNumSlots(0) never varies — PACK_SLOTS is a wire constant); the
-        -- equipped-bag windows show up to this many (5 rows × 4 columns — the reference template's
-        -- true max is 36, but 20 is vanilla's largest actual equippable bag, and building out to 36
-        -- slot buttons per window for content that can never exist would be pure waste. Hides the
-        -- unused tail via BenillaBagSlot_Update's physIndex-past-size branch, same as the backpack.
-        BENILLA_BAG_WINDOW_MAX_SLOTS = 20
 
         -- The keyring's container id (ref MainMenuBarBagButtons.lua:1) — decision 0765. It is an
         -- ordinary container in every respect the seam cares about: the app feeds it like any other
@@ -60,591 +50,6 @@
         -- What makes it special is only what the reference makes special: the window's art, its
         -- open/close sound, and the fact that its capacity is not a wire field.
         KEYRING_CONTAINER = -2
-
-        -- The keyring's usable slot count (ref GetKeyRingSize, ContainerFrame.lua:773). The
-        -- reference recomputes a level ladder in Lua (4 / 8 at 40 / 12 at 50 / 16 above 60) that the
-        -- server enforces identically (Player::GetMaxKeyringSize); benilla computes it once app-side
-        -- and feeds it as the container's own size, so this reads it back rather than keeping a
-        -- second copy of the ladder that could drift from the one the feed uses.
-        function GetKeyRingSize()
-            return GetContainerNumSlots(KEYRING_CONTAINER)
-        end
-
-        -- BenillaBagSlot_OnLoad(button, physIndex): physIndex is the button's CHAIN position (1 =
-        -- bottom-right, growing up-and-left — the anchor order below), not the game slot. The ref's
-        -- own formula (index = size - j + 1, ContainerFrame.lua:426/446) maps chain position → game
-        -- slot dynamically in BenillaBagSlot_Update, so slot 1 always reads top-left regardless of
-        -- how many of the window's slots are actually occupied — recomputed every Update (the ref
-        -- only computes it once, at window generation; recomputing is a strict robustness win for
-        -- the rare live bag-swap case, not a behavior change for a size that never moves).
-        function BenillaBagSlot_OnLoad(button, physIndex)
-            button.physIndex = physIndex
-            button.icon = getglobal(button:GetName() .. "Icon")
-            button.count = getglobal(button:GetName() .. "Count")
-            -- Both buttons must reach OnClick (the default set is LeftButtonUp only): LEFT-click is the
-            -- pickup gesture (PickupContainerItem — pick up / place / swap on the cursor); RIGHT-click
-            -- cancels a held cursor, else uses the slot (the C side sells it when a merchant is open —
-            -- our container drain forks).
-            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-            -- The drag trio (decision 0216 §3): click-carry and drag are ONE code path in the
-            -- reference (ContainerFrame.xml:40-55 routes OnDragStart/OnReceiveDrag to the same
-            -- OnClick("LeftButton", ignoreModifiers=1) the plain click uses) — see
-            -- BenillaBagSlot_OnClick below for the identical routing (its own `ignoreModifiers`
-            -- suppresses the shift-split fork, the reference's own contract for drag/receive).
-            button:RegisterForDrag("LeftButton")
-            BenillaBagSlot_Update(button)
-        end
-
-        function BenillaBagSlot_OnClick(button, mouseButton, ignoreModifiers)
-            if button.slot == nil then return end -- a hidden button (physIndex past the bag's size)
-            local bagId = button:GetParent():GetID()
-            if mouseButton == "LeftButton" then
-                -- The reference's own five returns (ContainerFrame.lua:241) — decision 1199
-                -- put this binding back on its 1.12 shape.
-                local texture, itemCount, locked, quality, readable =
-                    GetContainerItemInfo(bagId, button.slot)
-                -- The modifier fork, the reference's own order (ContainerFrame.lua:563-579;
-                -- BankFrame.lua:141-152 for a bank slot, which is this same handler at container
-                -- -1). `ignoreModifiers` (the drag-trio calls, both true) suppresses it whole —
-                -- the reference's drag/receive contract.
-                --
-                -- CTRL: preview the item on your own character in the dressing room (decision 1060).
-                if IsControlKeyDown() and not ignoreModifiers then
-                    DressUpItemLink(GetContainerItemLink(bagId, button.slot))
-                    return
-                end
-                -- SHIFT: post the item's link into the chat edit box if it's open, ELSE split the
-                -- stack. The ref's own `else` (l.567-577) — and note it gates on `IsShown()` here
-                -- where its siblings use `IsVisible()`; ours are the same thing (the edit box's only
-                -- parent is UIParent), so the ref's own word is quoted at each site.
-                if IsShiftKeyDown() and not ignoreModifiers then
-                    -- The visibility test is the REF'S fork, not the helper's: with chat open this
-                    -- arm never splits, even in the one benilla state where nothing can be posted
-                    -- (an unresolved template — `BenillaChatEdit_InsertLink`'s own note).
-                    if ChatFrameEditBox and ChatFrameEditBox:IsShown() then
-                        BenillaChatEdit_InsertLink(GetContainerItemLink(bagId, button.slot))
-                        return
-                    end
-                    if texture ~= nil and not locked and (itemCount or 1) >= 2 then
-                        button.SplitStack = function(btn, n)
-                            SplitContainerItem(bagId, btn.slot, n)
-                            BenillaBagWindow_Repaint(btn:GetParent())
-                        end
-                        -- Ref ContainerFrameItemButton_OnLoad/_OnClick (ContainerFrame.lua:558-560,
-                        -- 573-576): the owner's own SplitStack closure carries the bag/slot so
-                        -- StackSplitFrameOkay_Click's generic `owner.SplitStack(owner, split)` call
-                        -- needs no window-specific knowledge. SplitContainerItem lives in cursor.rs
-                        -- rather than container.rs — it is the one container-named verb whose
-                        -- payload is the cursor's, not a bag's — but like every container verb it is
-                        -- a plain top-level global (decision 1198).
-                        OpenStackSplitFrame(itemCount, button, "BOTTOMRIGHT", "TOPRIGHT")
-                    end
-                    return
-                end
-                -- A plain click hides any open split frame (ref ContainerFrame.lua:581) before the
-                -- ordinary pickup/place proceeds.
-                local split = getglobal("StackSplitFrame")
-                if split then split:Hide() end
-                -- PickupContainerItem is the single drag entry point (real client): an empty cursor
-                -- picks this slot up; a held cursor places/swaps into it (same slot = cancel). Hide the
-                -- hover tooltip (the item just left the slot for the cursor) and repaint so the picked
-                -- slot dims / un-dims immediately — the swap itself settles when the server answers.
-                PickupContainerItem(bagId, button.slot)
-                GameTooltip:Hide()
-                BenillaBagWindow_Repaint(button:GetParent())
-            elseif mouseButton == "RightButton" then
-                -- A held cursor cancels (client-side, nothing sent); otherwise use/equip/sell the slot.
-                if CursorHasItem() then
-                    ClearCursor()
-                    BenillaBagWindow_Repaint(button:GetParent())
-                else
-                    UseContainerItem(bagId, button.slot)
-                end
-            end
-        end
-
-        -- Hover: the era-true GameTooltip:SetBagItem(bag, slot) — the ENGINE renders the full
-        -- item tooltip from the template store and owns the sell-price money law (real instance
-        -- + merchant open + repair off ⇒ OnTooltipAddMoney(SellPrice × stack), or the
-        -- ITEM_UNSELLABLE line — wow-re ui/scratch/tooltip-money.md's byte-verified gate,
-        -- decision 0274 P1). The durability-adjusted damaged price is deferred until durability
-        -- damage reaches the feed (a pristine item reduces to SellPrice × stack, the case we
-        -- ship). Nothing shows while the template is in flight — the OnUpdate re-enter fills it.
-        function BenillaBagSlot_OnEnter(button)
-            if button.slot == nil then return end
-            local bagId = button:GetParent():GetID()
-            local texture, itemCount, locked, quality, readable =
-                GetContainerItemInfo(bagId, button.slot)
-            -- An emptied slot drops its tooltip (ref ContainerFrame_Update's texture-nil branch,
-            -- ContainerFrame.lua:281-283) — without this the OnUpdate re-enter below would leave
-            -- a stale tooltip up after the item is sold or moved out from under the hover.
-            if not texture then
-                if GameTooltip:IsOwned(button) then GameTooltip:Hide() end
-                return
-            end
-            -- Ref ContainerFrameItemButton_OnEnter (ContainerFrame.lua:602-612) verbatim: a slot
-            -- in the RIGHT half of the screen hangs its tooltip LEFT, so it never runs off the
-            -- edge (the bag lives at the bottom-right — this is the ref's own screen-edge answer,
-            -- a side-pick, not a clamp).
-            if (button:GetRight() or 0) >= (GetScreenWidth() / 2) then
-                GameTooltip:SetOwner(button, "ANCHOR_LEFT")
-            else
-                GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
-            end
-            GameTooltip:SetBagItem(bagId, button.slot)
-            -- The pouch/magnifier cursor (ref ContainerFrameItemButton_OnEnter tail,
-            -- ContainerFrame.lua l.636-642): merchant open on the MERCHANT tab and not repair
-            -- mode → the sell cursor over this slot; else a readable item (a mail letter copy —
-            -- right-click opens the reader) → the Inspect magnifier; anything else restores the
-            -- base cursor. The OnUpdate re-enter keeps it current while hovering (the ref's own
-            -- loop). The ref's `IsControlKeyDown() and hasItem` magnifier arm (l.638) is the
-            -- dress-up preview's own cursor tell — it landed with the dressing room (decision
-            -- 1060); `info` is non-nil above, which is the ref's `hasItem`.
-            if MerchantFrame and MerchantFrame:IsShown()
-                and MerchantFrame.selectedTab == 1 and not InRepairMode() then
-                ShowContainerSellCursor(bagId, button.slot)
-            elseif readable or IsControlKeyDown() then
-                ShowInspectCursor()
-            else
-                ResetCursor()
-            end
-            GameTooltip:Show()
-        end
-
-        function BenillaBagSlot_OnLeave(button)
-            GameTooltip:Hide()
-            -- Ref ItemButton OnLeave (ContainerFrame.xml): the hover's sell cursor drops with it.
-            ResetCursor()
-        end
-
-        -- Ref ContainerFrameItemButton_OnUpdate (ContainerFrame.lua:645-660): while the tooltip
-        -- is ours, re-run OnEnter every frame — the ref ships this loop UNTHROTTLED (its
-        -- updateTooltip throttle is commented out in 1.12). It is the real client's own refresh
-        -- mechanism: a tooltip set while the item template was still in flight fills itself in
-        -- the moment the answer lands, no re-hover.
-        function BenillaBagSlot_OnUpdate(button)
-            if GameTooltip:IsOwned(button) then
-                BenillaBagSlot_OnEnter(button)
-            end
-        end
-
-        -- The item's use-cooldown sweep (ref ContainerFrame_UpdateCooldown,
-        -- ContainerFrame.lua:295-299, verbatim shape over our container dialect).
-        function BenillaBagSlot_UpdateCooldown(button, bagId)
-            local cooldown = getglobal(button:GetName() .. "Cooldown")
-            local start, duration, enable = GetContainerItemCooldown(bagId, button.slot)
-            CooldownFrame_SetTimer(cooldown, start, duration, enable)
-        end
-
-        -- The physIndex → game-slot resolution (the module doc above) + the paint (ref
-        -- ContainerFrame_Update, ContainerFrame.lua:234-293). Shared by every window's slot
-        -- buttons. The occupied/empty fork drives the cooldown exactly as the ref does
-        -- (l.248-253: occupied → UpdateCooldown, empty → Cooldown:Hide()).
-        function BenillaBagSlot_Update(button)
-            local bagId = button:GetParent():GetID()
-            local size = GetContainerNumSlots(bagId)
-            if button.physIndex > size then
-                button.slot = nil
-                button:Hide()
-                return
-            end
-            button.slot = size - button.physIndex + 1
-            button:Show()
-            local texture, itemCount, locked = GetContainerItemInfo(bagId, button.slot)
-            if texture ~= nil or itemCount ~= nil then
-                BenillaBagSlot_UpdateCooldown(button, bagId)
-                button.icon:SetTexture(texture or BENILLA_FALLBACK_ICON)
-                -- A locked slot (its item is up on the cursor, or a send is still pending
-                -- server-side, decision 0216 §4/0218 §3) dims, the real client's drag feedback.
-                if locked then
-                    button.icon:SetVertexColor(0.4, 0.4, 0.4)
-                else
-                    button.icon:SetVertexColor(1, 1, 1)
-                end
-                if (itemCount or 1) > 1 then
-                    button.count:SetText(itemCount)
-                else
-                    button.count:SetText("")
-                end
-            else
-                button.icon:SetTexture(nil)
-                button.count:SetText("")
-                getglobal(button:GetName() .. "Cooldown"):Hide()
-            end
-        end
-
-        -- The generic per-window repaint (decision 0216 slice 2): every slot up to this window's
-        -- cap, the title (GetBagName — dynamic since a live bag swap changes it), and the money
-        -- purse (backpack only, ContainerFrame.lua l.314). BenillaBagFrame_Update (below) is the
-        -- backpack's zero-arg convenience alias, kept for existing callers (UiPanels.xml's
-        -- OpenBackpack/CloseBackpack, and the tests that patch it directly).
-        function BenillaBagWindow_Update(frame)
-            local bagId = frame:GetID()
-            local maxSlots = (bagId == 0) and 16 or BENILLA_BAG_WINDOW_MAX_SLOTS
-            -- The backpack predates the $parent-prefixed slot naming (BenillaBagSlot1..16, not
-            -- BenillaBagFrameSlot1..16 — its buttons are hand-authored, not $parent-templated) and
-            -- several existing tests reference that exact name directly; every other window's slots
-            -- DO follow frame:GetName().."Slot"..i (the virtual template's $parentSlotN).
-            local slotPrefix = (bagId == 0) and "BenillaBagSlot" or (frame:GetName() .. "Slot")
-            for i = 1, maxSlots do
-                local button = getglobal(slotPrefix .. i)
-                if button then BenillaBagSlot_Update(button) end
-            end
-            local title = getglobal(frame:GetName() .. "Name")
-            if title then
-                -- The keyring is titled from the localized KEYRING string, not GetBagName — it has
-                -- no bag ITEM to be named after (ref ContainerFrame.lua l.418).
-                if bagId == KEYRING_CONTAINER then
-                    title:SetText(KEYRING)
-                else
-                    title:SetText(GetBagName(bagId) or "")
-                end
-            end
-            if bagId == 0 then
-                BenillaMoney_Set("BenillaBagMoney", GetMoney())
-            elseif bagId == KEYRING_CONTAINER then
-                -- Fixed art, again because there is no bag item: the keyring's own portrait
-                -- (ref ContainerFrame.lua l.419) and its own background variant, snug-fitted to the
-                -- level-gated slot count exactly like an equipped bag.
-                -- The GLOBAL form, which is the reference's own (ContainerFrame.lua l.419
-                -- writes exactly this call) — 1.12 has no such Texture method.
-                SetPortraitToTexture(frame:GetName() .. "Portrait",
-                    "Interface\\ContainerFrame\\KeyRing-Bag-Icon")
-                local size = GetContainerNumSlots(bagId)
-                if size > 0 then BenillaBagWindow_FitBackground(frame, size) end
-            else
-                -- The window's portrait is the bag's OWN item icon (the real client's
-                -- C-side SetBagPortaitTexture), not the default backpack art. An equipped bag
-                -- (1..4) reads its doll slot (19+bagId, Bag0Slot..Bag3Slot); a bank bag (5..10,
-                -- decision 0604) reads the app-resolved bank-bag feed instead — the doll array
-                -- stops at the equipped bags, so GetInventoryItemTexture can't reach the vault's.
-                -- Falls back to the backpack icon while the item template's icon is in flight.
-                local portrait = getglobal(frame:GetName() .. "Portrait")
-                if portrait then
-                    local icon
-                    if bagId >= 5 then
-                        icon = BenillaGetBankBagTexture(bagId - 4)
-                    else
-                        icon = GetInventoryItemTexture("player", 19 + bagId)
-                    end
-                    if icon then
-                        -- The circular crop (the real SetBagPortaitTexture is C-side and masks the
-                        -- icon to the ring's inscribed circle): a raw square icon pokes its corners
-                        -- past the round rim — the director's bank-bag popout artifact.
-                        SetPortraitToTexture(frame:GetName() .. "Portrait", icon)
-                    else
-                        -- The backpack fallback art is authored round — no crop to apply.
-                        portrait:SetTexture("Interface\\Buttons\\Button-Backpack-Up")
-                    end
-                end
-                -- Equipped bags snug-fit their stitched background to the live row count.
-                local size = GetContainerNumSlots(bagId)
-                if size > 0 then BenillaBagWindow_FitBackground(frame, size) end
-            end
-        end
-
-        -- Fit an equipped-bag window's stitched background (BgTop/BgMiddle/BgBottom, authored in the
-        -- template above) and its OWN height to the bag's actual row count. This is a transcription of
-        -- the real client's ContainerFrame_GenerateFrame (the id~=0 branch) as shipped in the 1.12.1
-        -- MPQ (Interface\FrameXML\ContainerFrame.lua) — every constant below is the reference's, not a
-        -- measured approximation. rows = ceil(size/4). The TOP piece carries the header + the first
-        -- well row; the MIDDLE tiles the remaining rows; the BOTTOM is the frame's bottom rim. The
-        -- slot buttons anchor UP from the frame's BOTTOMRIGHT (first at -12,9) and hide past `size`
-        -- (BenillaBagSlot_Update), so nothing here touches them — only the art + the frame height.
-        -- Which UI-Bag-Components variant a window is stitched from — the ref's own `bagTextureSuffix`
-        -- (ContainerFrame_GenerateFrame, ContainerFrame.lua l.326-334): the bank bags get the
-        -- tinted "-Bank" plate, the keyring the "-Keyring" one, an equipped bag the plain sheet.
-        -- All three atlases are 256x512 with the same band layout, so FitBackground's tex-coords
-        -- are shared verbatim and only the file differs. (Ours ALSO applies the "-Bank" arm, which
-        -- benilla had been quietly skipping — the bank popouts have been drawing ordinary bag art
-        -- since decision 0604.)
-        function BenillaBagWindow_BgTexture(bagId)
-            local suffix = ""
-            if bagId >= 5 then
-                suffix = "-Bank"
-            elseif bagId == KEYRING_CONTAINER then
-                suffix = "-Keyring"
-            end
-            return "Interface\\ContainerFrame\\UI-Bag-Components" .. suffix
-        end
-
-        function BenillaBagWindow_FitBackground(frame, size)
-            local name = frame:GetName()
-            local top = getglobal(name .. "BgTop")
-            local middle = getglobal(name .. "BgMiddle")
-            local bottom = getglobal(name .. "BgBottom")
-            if not (top and middle and bottom) then return end
-            -- Re-set every fit, as the ref does at every generate: the template authors the plain
-            -- sheet, and a window's kind is only known from its id.
-            local bg = BenillaBagWindow_BgTexture(frame:GetID())
-            top:SetTexture(bg)
-            middle:SetTexture(bg)
-            bottom:SetTexture(bg)
-            local rowH = 41 -- rowHeight
-            local rows = math.ceil(size / 4)
-            if rows < 1 then rows = 1 end
-            -- isPlusTwoBag: a size leaving a remainder of 2 (6/10/14/18) has a 2-well top row, and the
-            -- texture carries a whole separate top band for it.
-            local plusTwo = (size - math.floor(size / 4) * 4) == 2
-            local topH
-            if plusTwo then
-                topH = 72
-                top:SetTexCoord(0, 1, 0.189453125, 0.330078125)
-            elseif rows == 1 then
-                topH = 86 -- one row only: chop the bottom of the texture
-                top:SetTexCoord(0, 1, 0.00390625, 0.16796875)
-            else
-                topH = 94
-                top:SetTexCoord(0, 1, 0.00390625, 0.18359375)
-            end
-            top:SetHeight(topH)
-            -- The top piece already carries one row, so the middle tiles `rows - 1` more. Its height is
-            -- one row short of a clean multiple: the reference's firstRowPixelOffset = 9 accounts for
-            -- the 9px the BOTTOM rim itself contributes to the final row's frame. Getting this wrong
-            -- pushes the rim a row-fraction too low and bleeds the NEXT row's wells in above it.
-            local middleH = 0
-            bottom:ClearAllPoints()
-            if rows > 1 then
-                -- A single middle piece spans at most ROWS_IN_BG_TEXTURE (6) rows; the reference
-                -- cycles up to MAX_BG_TEXTURES for windows taller than that. Our largest window is a
-                -- 20-slot bag (4 middle rows) and the keyring caps at 16 (3), so one always suffices.
-                middleH = (rows - 1) * rowH - 9
-                middle:SetHeight(middleH)
-                middle:SetTexCoord(0, 1, 0.353515625, middleH / 512 + 0.353515625)
-                middle:Show()
-                bottom:SetPoint("TOPRIGHT", middle, "BOTTOMRIGHT", 0, 0)
-            else
-                -- One row: the rim seats straight under the top piece. (The reference anchors it to the
-                -- hidden middle's TOP, which is the same point — the middle hangs off the top's bottom.)
-                middle:Hide()
-                bottom:SetPoint("TOPRIGHT", top, "BOTTOMRIGHT", 0, 0)
-            end
-            -- The bottom rim is a FIXED 10px band at texture v 0.330078125..0.349609375 — the strip
-            -- immediately below the plus-two top band, and the only true outer bottom border in the
-            -- texture. The reference never rescales or re-coords it; it is authored once in XML.
-            local bottomH = 10
-            bottom:SetHeight(bottomH)
-            bottom:SetTexCoord(0, 1, 0.330078125, 0.349609375)
-            frame:SetHeight(topH + middleH + bottomH)
-            -- A live size change (a bag swap while the stack is open) shifts every window stacked above
-            -- this one; re-run the stack layout so they re-seat against the new height.
-            if frame:IsShown() then BenillaBagStack_Relayout() end
-        end
-
-        function BenillaBagFrame_Update()
-            BenillaBagWindow_Update(BenillaBagFrame)
-        end
-
-        -- Routes a repaint through the backpack's own zero-arg BenillaBagFrame_Update alias when
-        -- `frame` IS the backpack — preserving that global's observability (existing tests patch it
-        -- directly to count backpack repaints, e.g. delete_item_tests.rs's stuck-darkening
-        -- regression check) — and BenillaBagWindow_Update generically for every other window. Every
-        -- runtime repaint trigger (a slot click, an event, OpenAllBags' pre-show paint) goes
-        -- through this (BenillaBagBarSlot_OnClick reaches it through the ToggleBag global too).
-        function BenillaBagWindow_Repaint(frame)
-            if frame:GetID() == 0 then
-                BenillaBagFrame_Update()
-            else
-                BenillaBagWindow_Update(frame)
-            end
-        end
-
-        -- OnLoad/OnEvent (generic, shared by all five windows — each already receives `frame`, so
-        -- deriving bagId from `frame:GetID()` needs no per-window body).
-        function BenillaBagFrame_OnLoad(frame)
-            frame:RegisterEvent("BAG_UPDATE")
-            -- The engine fires ITEM_LOCK_CHANGED(bag, slot) on every cursor pickup/clear AND every
-            -- pending-op send/resolve (decisions 0216 §4/0218 §3) — including clears the bag never
-            -- clicked through (the delete popup's No, ESC; a server failure), which the click-time
-            -- repaint can't see. The reference ContainerFrame repaints on exactly this event.
-            frame:RegisterEvent("ITEM_LOCK_CHANGED")
-            -- Item cooldown starts/ends (ref ContainerFrame_OnLoad, ContainerFrame.lua:21 —
-            -- BAG_UPDATE_COOLDOWN carries no bag argument; every open window refreshes).
-            frame:RegisterEvent("BAG_UPDATE_COOLDOWN")
-            -- The real backpack MoneyFrame refreshes on PLAYER_MONEY (SmallMoneyFrame's own OnEvent);
-            -- keep the purse live while the window is open. Backpack only — the other windows never
-            -- show a purse, so there's nothing for them to refresh.
-            if frame:GetID() == 0 then
-                frame:RegisterEvent("PLAYER_MONEY")
-            end
-        end
-
-        function BenillaBagFrame_OnEvent(frame)
-            if event == "PLAYER_MONEY" then
-                BenillaMoney_Set("BenillaBagMoney", GetMoney())
-                return
-            end
-            -- The cooldown-only refresh (ref ContainerFrame_UpdateCooldowns via OnEvent,
-            -- ContainerFrame.lua:243-253's loop shape): no bag argument — sweep every shown
-            -- slot of THIS window, no full repaint.
-            if event == "BAG_UPDATE_COOLDOWN" then
-                local bagId = frame:GetID()
-                local maxSlots = (bagId == 0) and 16 or BENILLA_BAG_WINDOW_MAX_SLOTS
-                local slotPrefix = (bagId == 0) and "BenillaBagSlot" or (frame:GetName() .. "Slot")
-                for i = 1, maxSlots do
-                    local button = getglobal(slotPrefix .. i)
-                    if button and button.slot then
-                        BenillaBagSlot_UpdateCooldown(button, bagId)
-                    end
-                end
-                return
-            end
-            -- BAG_UPDATE / ITEM_LOCK_CHANGED name their bag in arg1; only THIS window's own bag
-            -- repaints (ref ContainerFrame_OnEvent, ContainerFrame.lua:26-44: `this:GetID() == arg1`).
-            if (event == "BAG_UPDATE" or event == "ITEM_LOCK_CHANGED") and arg1 ~= frame:GetID() then
-                return
-            end
-            BenillaBagWindow_Repaint(frame)
-        end
-
-        -- ToggleBag / ToggleBackpack / OpenAllBags (ref ContainerFrame.lua l.46-82, l.662-700) —
-        -- TWO DISTINCT KNOBS, and benilla ran them as one until 1494. The reference's split, which
-        -- is now ours:
-        --
-        --   B / F12  TOGGLEBACKPACK -> ToggleBackpack()  — the BACKPACK's toggle. Closed: opens
-        --            bag 0 ALONE. Already open: hides every container window there is. The
-        --            asymmetry is the reference's own — one bag out, all bags in.
-        --   SHIFT-B  OPENALLBAGS    -> OpenAllBags()     — the ALL-bags toggle: everything open
-        --            already closes the lot, anything else opens the lot.
-        --   F8..F11  TOGGLEBAG1..4  -> ToggleBag(4..1)   — one equipped bag each (note the
-        --            reference's REVERSED numbering: TOGGLEBAG1 is bag 4).
-        --
-        -- "All bags" = the backpack (bag 0, which always exists) plus each equipped-bag slot 1..4
-        -- that actually holds a bag (GetContainerNumSlots > 0); an empty slot has no window to
-        -- show. The five windows, indexed by bag id (BENILLA_BAG_WINDOWS[bagId+1]) — one code path
-        -- over all of them. The keyring is a seventh window with its own ToggleKeyRing: swept by
-        -- the two close arms below (the ref's sweeps are over ALL ContainerFrames, which is what
-        -- its keyring lives in), never counted as an open bag and never opened by them.
-        BENILLA_BAG_WINDOWS = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2", "BenillaBagFrame3", "BenillaBagFrame4" }
-
-        -- THE REFERENCE'S NAMES ARE THE REAL ENTRY POINTS, and our own UI calls THEM.
-        --
-        -- This is how a 1.12 addon customises anything: it replaces a global and expects the
-        -- client to call its replacement. `Bagnon_Core/core/Overrides.lua` is the canonical shape —
-        --     local bToggleBackpack = ToggleBackpack
-        --     ToggleBackpack = function() ... end
-        -- and until now that override was INERT here, because the bag bindings and the bag button
-        -- called `BenillaBagToggle_OnClick` directly and nothing ever looked up `ToggleBackpack`.
-        -- Bagnon loaded, appeared in the AddOns list, replaced the globals, and the player still
-        -- got the stock bags. The director saw that; no instrument here could, because the corpus
-        -- survey loads addons and fires events but never CLICKS anything.
-        --
-        -- The class is far wider than one addon: every "hook a global to change behaviour" addon is
-        -- silently inert wherever our UI calls a benilla-named equivalent instead of the
-        -- reference's name. `CloseAllBags`/`OpenBackpack`/`CloseBackpack` already lived under the
-        -- ref's names in UiPanels.xml for exactly this reason; these are the three that did not.
-        --
-        -- `OpenAllBags(forceOpen)` is the ref's SHIFT-B body (ContainerFrame.lua l.662-700) and it
-        -- is a TOGGLE, not a plain open: one pass hides every open window while counting them
-        -- against how many CAN be open, and if everything already was, that pass IS the close and
-        -- it returns. `forceOpen` (the ref's own argument, used by callers that mean "open") skips
-        -- the close arm. The open arm calls the GLOBALS `ToggleBackpack()`/`ToggleBag(1..4)` on a
-        -- now-closed set — the ref's exact tail, so a bag addon holding either name gets both.
-        function OpenAllBags(forceOpen)
-            if UIParent and not UIParent:IsVisible() then return end
-            local totalBags = 1 -- the backpack always counts
-            for bagId = 1, 4 do
-                if GetContainerNumSlots(bagId) > 0 then totalBags = totalBags + 1 end
-            end
-            local bagsOpen = 0
-            for _, name in ipairs(BENILLA_BAG_WINDOWS) do
-                local frame = getglobal(name)
-                if frame and frame:IsShown() then
-                    frame:Hide()
-                    bagsOpen = bagsOpen + 1
-                end
-            end
-            -- Swept with the rest, but never counted (ref: `if GetID() ~= KEYRING_CONTAINER`).
-            local keyring = getglobal("BenillaKeyRingFrame")
-            if keyring and keyring:IsShown() then keyring:Hide() end
-            if bagsOpen >= totalBags and not forceOpen then return end
-            ToggleBackpack()
-            ToggleBag(1)
-            ToggleBag(2)
-            ToggleBag(3)
-            ToggleBag(4)
-        end
-
-        -- `ToggleBag(id)` — the ref's per-bag toggle (ContainerFrame.lua l.46-65), and the other
-        -- global Bagnon replaces. Ours drives the same window the all-bags path does.
-        --
-        -- The ref's `if size > 0` gate is load-bearing here and was missing until 1494: it is what
-        -- keeps `OpenAllBags`' blind `ToggleBag(1..4)` tail from showing an empty slot's window.
-        -- Bag 0 is exempt for the same reason `OpenBag` exempts it (it always exists even when the
-        -- feed has not told us its size yet) — the ref gets that for free from its own always-16
-        -- backpack.
-        function ToggleBag(id)
-            id = id or 0
-            if id ~= 0 and GetContainerNumSlots(id) <= 0 then return end
-            local frame = getglobal(BENILLA_BAG_WINDOWS[id + 1])
-            if not frame then return end
-            if frame:IsShown() then
-                frame:Hide()
-            else
-                BenillaBagWindow_Repaint(frame)
-                frame:Show()
-            end
-        end
-
-        -- `OpenBag(id)` / `CloseBag(id)` / `IsBagOpen(id)` — ToggleBag's three siblings from the
-        -- same reference file (ContainerFrame.lua l.144-185), and the last of that family that was
-        -- still missing here. `Bagnon_Core/core/Overrides.lua` l.42/51 captures BOTH of the first
-        -- two and calls the capture back for any bag Bagnon does not control — a nil call, on the
-        -- ordinary path, for an addon that only *partly* takes the bags over.
-        --
-        -- The reference's `OpenBag` opens a bag only when `GetContainerNumSlots(id) > 0`; ours keeps
-        -- that gate for 1..4 and exempts bag 0, which always exists (the same rule `OpenAllBags`
-        -- above already applies, for the same reason).
-        function OpenBag(id)
-            id = id or 0
-            if id ~= 0 and GetContainerNumSlots(id) <= 0 then return end
-            local frame = getglobal(BENILLA_BAG_WINDOWS[id + 1])
-            if frame and not frame:IsShown() then
-                BenillaBagWindow_Repaint(frame)
-                frame:Show()
-            end
-        end
-
-        function CloseBag(id)
-            local frame = getglobal(BENILLA_BAG_WINDOWS[(id or 0) + 1])
-            if frame and frame:IsShown() then frame:Hide() end
-        end
-
-        -- ONE STATED DIVERGENCE. The reference returns the INDEX of the ContainerFrame showing that
-        -- bag (1..NUM_CONTAINER_FRAMES) so its own code can `getglobal("ContainerFrame"..i)`; we
-        -- ship no such pool (each bag has one fixed window), so there is no index to name and this
-        -- answers 1 / nil. Every corpus caller — and the reference's own `ToggleBackpack` — uses it
-        -- as a boolean; a caller that indexed the result would already be reaching for frames that
-        -- do not exist here.
-        function IsBagOpen(id)
-            local frame = getglobal(BENILLA_BAG_WINDOWS[(id or 0) + 1])
-            if frame and frame:IsShown() then return 1 end
-            return nil
-        end
-
-        -- `ToggleBackpack()` — ref ContainerFrame.lua l.67-82, and NOT the all-bags toggle it was
-        -- here until 1494:
-        --
-        --     if ( IsBagOpen(0) ) then  <hide every ContainerFrame>  else  ToggleBag(0)  end
-        --
-        -- Open arm: `ToggleBag(0)`, the backpack ALONE (through the global, so a bag addon holding
-        -- `ToggleBag` gets it). Close arm: the ref's own frame sweep — every window, keyring
-        -- included — and NOT a `CloseAllBags()` call, because the reference does not make one here
-        -- and an addon holding that name would fire on a path the real client never runs it on.
-        -- The condition reads bag 0 SPECIFICALLY: with only bag 2 open, B opens the backpack
-        -- beside it rather than closing anything.
-        function ToggleBackpack()
-            if IsBagOpen(0) then
-                for _, name in ipairs(BENILLA_BAG_WINDOWS) do
-                    local frame = getglobal(name)
-                    if frame and frame:IsShown() then frame:Hide() end
-                end
-                local keyring = getglobal("BenillaKeyRingFrame")
-                if keyring and keyring:IsShown() then keyring:Hide() end
-            else
-                ToggleBag(0)
-            end
-        end
 
         -- The backpack button (MainMenuBarBackpackButton): if any bag window is open, close them
         -- all; otherwise open every existing bag (ref ToggleBackpack — "if numOpen > 0 then
@@ -671,137 +76,6 @@
         function BenillaBagToggle_OnClick()
             -- Through the GLOBAL, so an addon that replaced `ToggleBackpack` gets the click.
             ToggleBackpack()
-        end
-
-        -- The window's bar button (ref ContainerFrame_OnShow/OnHide: bag 0 →
-        -- MainMenuBarBackpackButton, bags 1..4 → CharacterBag(N-1)Slot).
-        function BenillaBagWindow_BarButton(frame)
-            local name = frame:GetName()
-            if name == "BenillaKeyRingFrame" then return getglobal("KeyRingButton") end
-            for bagId = 0, 4 do
-                if name == BENILLA_BAG_WINDOWS[bagId + 1] then
-                    if bagId == 0 then return getglobal("MainMenuBarBackpackButton") end
-                    return getglobal("CharacterBag" .. (bagId - 1) .. "Slot")
-                end
-            end
-        end
-
-        -- Open/close sounds — the window-sound convention (decision 0090), wrapper form: a named
-        -- Benilla<Window>Frame_OnShow/_OnHide fn (used when the handler is more than the bare
-        -- PlaySound, or — as here — to carry the cite). Kits quoted from the real ContainerFrame.lua
-        -- ContainerFrame_OnShow/OnHide (l.124-142 / l.100-122), reused VERBATIM by every window
-        -- (backpack included), INCLUDING the real fn's keyring fork: the keyring has its own
-        -- jingling KeyRingOpen/KeyRingClose pair (both real SoundEntries kits), every other window
-        -- the plain igBackPackOpen/igBackPackClose. Fired on every visibility transition (a Show/Hide
-        -- from a toggle button, a bag binding, a close button, or ESC), never at load (every window
-        -- is authored hidden="true", so none ever transitions on startup).
-        --
-        -- The `this` legacy global (RF-0025, script/event.rs) names the window that just
-        -- shown/hidden — used here for the open-window STACK the layout law below reads, rather
-        -- than a per-window OnShow/OnHide body (which would defeat the whole point of sharing one
-        -- handler across five windows).
-        function BenillaBagFrame_OnShow()
-            if this:GetID() == KEYRING_CONTAINER then
-                PlaySound("KeyRingOpen")
-            else
-                PlaySound("igBackPackOpen")
-            end
-            -- The bar lights the open bag's button (ref ContainerFrame_OnShow l.124-131,
-            -- SetChecked(1)) — the window side is the source of truth, so a bag opened by any
-            -- path (the B key, a bar click, open-all at a vendor) lights its button.
-            local barButton = BenillaBagWindow_BarButton(this)
-            if barButton then barButton:SetChecked(1) end
-            BenillaBagStack_Open(this)
-        end
-
-        function BenillaBagFrame_OnHide()
-            if this:GetID() == KEYRING_CONTAINER then
-                PlaySound("KeyRingClose")
-            else
-                PlaySound("igBackPackClose")
-            end
-            -- ...and clears it on any close (ref ContainerFrame_OnHide l.84-95, SetChecked(0)).
-            local barButton = BenillaBagWindow_BarButton(this)
-            if barButton then barButton:SetChecked(0) end
-            BenillaBagStack_Close(this)
-        end
-
-        -- ── The open-bag stack + layout law (ref ContainerFrame1.bags +
-        -- updateContainerFrameAnchors, ContainerFrame.lua:472-552, transcribed shape) ─────────────
-        -- Open windows stack bottom-right UPWARD in show order: the first at the bottom-right
-        -- CLEARANCE CORNER, each next one anchored above the previous (TOPRIGHT → BOTTOMRIGHT,
-        -- CONTAINER_SPACING=0 gap); when a stack would run off the top of the screen, the NEXT
-        -- window starts a fresh column one CONTAINER_WIDTH further left.
-        -- Out of scope (nothing here ever needs it): the ref's UI-scale/BankFrame-collision shrink
-        -- branch (l.505-539) — benilla has no uiScale CVar and no bank window yet.
-        --
-        -- The corner is `CONTAINER_OFFSET_X`/`CONTAINER_OFFSET_Y` — the two GLOBALS
-        -- `UIParent_ManageFramePositions()` recomputes every time the bottom of the screen fills up
-        -- or empties (UIParent.xml's var rows). Reading them live is the whole point and it is
-        -- load-bearing, not tidiness: this file used to keep its own `local
-        -- BENILLA_CONTAINER_OFFSET_X/Y = 0/70` shadow pair, which meant the stack sat at the
-        -- no-bars-raised corner FOREVER — with a bottom multibar up, the lowest bag window drew
-        -- straight through the bar's buttons (director-caught, decision 1499). A shadow copy of a
-        -- managed value cannot be kept in sync by anyone; the fix is to have no copy.
-        -- `BenillaBagStack_Relayout` is registered as a managed-position LISTENER at the end of this
-        -- file, so a bar raised while bags are open re-seats them on the same pass that moves the
-        -- cast bar and the chat frames.
-        BENILLA_BAG_STACK = {}
-        local BENILLA_CONTAINER_WIDTH = 192
-        local BENILLA_CONTAINER_SPACING = 0
-        local BENILLA_VISIBLE_CONTAINER_SPACING = 3
-
-        function BenillaBagStack_Open(frame)
-            table.insert(BENILLA_BAG_STACK, frame)
-            BenillaBagStack_Relayout()
-        end
-
-        function BenillaBagStack_Close(frame)
-            for i = 1, table.getn(BENILLA_BAG_STACK) do
-                if BENILLA_BAG_STACK[i] == frame then
-                    table.remove(BENILLA_BAG_STACK, i)
-                    break
-                end
-            end
-            BenillaBagStack_Relayout()
-        end
-
-        function BenillaBagStack_Relayout()
-            -- Read the clearance corner FRESH on every pass — never cached in a local that outlives
-            -- the call (see the law above). The `or` fallbacks cover the per-window test harnesses
-            -- that load this file without UIParent.xml: with no manage pass in the VM the globals
-            -- are nil, and the no-bars-raised corner is the right answer there by construction.
-            local offsetX = CONTAINER_OFFSET_X or 0
-            local offsetY = CONTAINER_OFFSET_Y or 70
-            local screenHeight = GetScreenHeight()
-            local freeHeight = screenHeight - offsetY
-            local column = 0
-            for i = 1, table.getn(BENILLA_BAG_STACK) do
-                local frame = BENILLA_BAG_STACK[i]
-                if i == 1 then
-                    frame:SetPoint("BOTTOMRIGHT", -offsetX, offsetY)
-                elseif freeHeight < frame:GetHeight() then
-                    column = column + 1
-                    freeHeight = screenHeight - offsetY
-                    frame:SetPoint("BOTTOMRIGHT",
-                        -(column * BENILLA_CONTAINER_WIDTH) - offsetX,
-                        offsetY)
-                else
-                    frame:SetPoint("BOTTOMRIGHT", BENILLA_BAG_STACK[i - 1], "TOPRIGHT", 0, BENILLA_CONTAINER_SPACING)
-                end
-                freeHeight = freeHeight - frame:GetHeight() - BENILLA_VISIBLE_CONTAINER_SPACING
-            end
-        end
-
-        -- The stack is a CONSUMER of two managed vars, so it joins the pass's listener list: the
-        -- pass writes CONTAINER_OFFSET_X/Y and then calls everything registered here, which is how
-        -- an open bag stack gets out of the way of a bar raised underneath it. (The reference does
-        -- the same thing by hard-calling `updateContainerFrameAnchors()` from the end of its own
-        -- pass — UIParent.lua:1774; ours is that call generalized so the next var consumer does not
-        -- have to edit UIParent.xml to be noticed. Decision 1499.) Existence-guarded for the
-        -- harnesses that load this file alone.
-        if UIParent_RegisterManagedPositionListener then
-            UIParent_RegisterManagedPositionListener(BenillaBagStack_Relayout)
         end
 
         -- ── The bag bar (decision 0216 slice 2) — four 30×30 buttons left of MainMenuBarBackpackButton,
@@ -885,12 +159,12 @@
             -- The click's own CheckButton auto-toggle is provisional — re-derive from the NATIVE
             -- window on every branch, the ref's exact tail (BagSlotButton_OnClick l.12-20 scans
             -- ContainerFrame1..N: SetChecked(isVisible) whether the click toggled, placed a bag,
-            -- or did nothing). Reading the WINDOW rather than what ToggleBag did is load-bearing
-            -- both ways: stock, the flag is already set when the tail runs; with an addon holding
-            -- the bags, the native stays hidden and the slot button stays unlit — the reference's
-            -- own behaviour (its scan is equally blind to addon frames).
-            local frame = getglobal("BenillaBagFrame" .. button.bagId)
-            button:SetChecked(frame and frame:IsShown())
+            -- or did nothing). `IsBagOpen` IS that scan, under the name the reference publishes
+            -- for it. Reading the WINDOW rather than what ToggleBag did is load-bearing both ways:
+            -- stock, the flag is already set when the tail runs (ContainerFrame_OnShow wrote it);
+            -- with an addon holding the bags, no ContainerFrame is shown and the slot button stays
+            -- unlit — the reference's own behaviour, its scan being equally blind to addon frames.
+            button:SetChecked(IsBagOpen(button.bagId) and 1 or nil)
         end
 
         function BenillaBagBarSlot_OnEvent(button)
@@ -913,6 +187,22 @@
         -- the full-keyring refusal.
         KEYRING = KEYRING or "Keyring"
         NO_EMPTY_KEYRING_SLOTS_ERROR = NO_EMPTY_KEYRING_SLOTS_ERROR or "Your keyring is full."
+        -- **A REFERENCE TYPO, repaired here rather than lived with** (decision 1751: a divergence
+        -- becomes faithful or becomes a record, never silent — this is the record).
+        --
+        -- `PutKeyInKeyRing`'s full-ring arm reads `NO_EMPTY_KEYRING_SLOTS`
+        -- (ContainerFrame.lua l.753), and 1.12 ships **only** `NO_EMPTY_KEYRING_SLOTS_ERROR`
+        -- (GlobalStrings.lua l.2810 — checked, the shorter name appears nowhere in the file). So
+        -- in the real client the text is nil, `UIErrorsFrame:AddMessage` refuses it, and dropping
+        -- a key onto a full keyring reports nothing at all.
+        --
+        -- benilla ran its own `PutKeyInKeyRing` before 1751 and simply used the right name; now
+        -- the reference's own file runs, so the choice is explicit. **Supplying the name the
+        -- reference meant is the call**: the mechanism is not in dispute (its own line says which
+        -- string it wants), nothing of Blizzard's is edited, and the alternative is a player
+        -- gesture that silently does nothing while an error scrolls past. If fidelity to the bug
+        -- is ever wanted instead, deleting this line is the whole change.
+        NO_EMPTY_KEYRING_SLOTS = NO_EMPTY_KEYRING_SLOTS or NO_EMPTY_KEYRING_SLOTS_ERROR
 
         -- Both are PLAIN tooltips — the reference calls GameTooltip:SetText here, not
         -- GameTooltip_AddNewbieTip, so unlike the micro buttons next door (0661) there is no second
@@ -974,54 +264,51 @@
             BenillaBagBarSlot_OnEnter(this)
         end
 
+        -- ref BagSlotButton_OnClick / _OnDrag / _OnShiftClick (MainMenuBarBagButtons.lua l.3-53),
+        -- published beside _OnEnter above for the same reason it was: they are the names
+        -- BagSlotButtonTemplate binds, and an addon that builds its bag bar from that template
+        -- reaches them and nothing else. pfUI is the measured caller (modules/bags.lua l.537), and
+        -- it CHAINS them — `GetScript("OnEnter")` then calling what it got — so a missing one is
+        -- not a dead button, it is a nil call inside the addon's own wrapper.
+        --
+        -- **Our four bar slots do not come through here** and are untouched: they carry an explicit
+        -- bagId from BenillaBagBarSlot_OnLoad and wire the Benilla bodies directly. These three
+        -- exist so a TEMPLATE-built button reaches the same bodies — one implementation, two entry
+        -- points, which is the whole point of publishing the reference's name over ours.
+        --
+        -- NOT the reference's bodies, and ONE of the two reasons for that expired with decision
+        -- 1751's bag swap. The reference's versions do two things: scan
+        -- ContainerFrame1..NUM_CONTAINER_FRAMES to re-derive the checked state — which now works
+        -- here, and the tails below do exactly it through `IsBagOpen` — and reach for
+        -- `PutItemInBag` / `PickupBagFromSlot`, which this client still does not bind (our
+        -- equip/swap arm is the paper doll's `PickupInventoryItem`, 0208 1b). That second half is
+        -- what still keeps `Interface\FrameXML\MainMenuBarBagButtons.xml` out of the manifest:
+        -- sourcing it today hands every caller a body that raises on a verb we have not built.
+        -- Those two verbs are the bag BAR's migration ticket, and this file is what it replaces.
+        function BagSlotButton_OnClick()
+            BenillaBagBarSlot_OnClick(this)
+        end
+
+        -- The drag arm: ref picks the equipped bag up with PickupBagFromSlot; ours is the same
+        -- PickupInventoryItem transition the bar slots already use, so an empty cursor picks the
+        -- bag up and a held bag places it.
+        function BagSlotButton_OnDrag()
+            BenillaBagBarSlot_Place(this)
+        end
+
+        -- Shift-click opens every bag if this slot HOLDS one (ref l.38-41 verbatim), then re-reads
+        -- the checked state off our own window the way BenillaBagBarSlot_OnClick's tail does.
+        function BagSlotButton_OnShiftClick()
+            if GetInventoryItemTexture("player", this:GetID()) then
+                OpenAllBags()
+            end
+            this:SetChecked(this.bagId and IsBagOpen(this.bagId) and 1 or nil)
+        end
+
         -- ref OnLeave for both (l.100-102 / the template's own): a plain Hide, no fade — the item
         -- half of the split BenillaUnitFrame_OnLeave's comment describes.
         function BenillaBagBarButton_OnLeave()
             if GameTooltip then GameTooltip:Hide() end
-        end
-
-        -- ── The keyring (decision 0765) ──────────────────────────────────────────────────────────
-        -- ref ToggleKeyRing (ContainerFrame.lua:757-771). The reference generates the window on
-        -- demand from a pool of generic ContainerFrames sized to GetKeyRingSize(); ours is a fixed
-        -- window like the other six, so the toggle is the bag bar's own show/hide shape and the
-        -- size arrives through the feed. The ref's IsOptionFrameOpen() guard has no analogue here
-        -- (our bag-bar buttons carry none either — the game menu greys the row instead, 0674), and
-        -- its SetButtonPulse stop is moot with no pulse to stop (0304).
-        function ToggleKeyRing()
-            local frame = getglobal("BenillaKeyRingFrame")
-            if not frame then return end
-            if frame:IsShown() then
-                frame:Hide()
-            else
-                BenillaBagWindow_Update(frame)
-                frame:Show()
-            end
-        end
-
-        -- ref PutKeyInKeyRing (ContainerFrame.lua:740-755) — dropping a held key onto the keyring
-        -- BUTTON files it in the first free slot. "Pick up" from an empty slot IS the place gesture
-        -- (PickupContainerItem is the one entry point: empty cursor picks up, a held cursor places),
-        -- which is why the reference's own line reads as a pickup.
-        --
-        -- One deliberate un-quirking: the ref passes `NO_EMPTY_KEYRING_SLOTS`, but GlobalStrings
-        -- only ever defined `NO_EMPTY_KEYRING_SLOTS_ERROR` — so the real client silently prints
-        -- nothing when your keyring is full. We print the string that exists.
-        function PutKeyInKeyRing()
-            for i = 1, GetKeyRingSize() do
-                -- Occupancy is `texture or itemCount`, not `texture` alone. The reference tests
-                -- the texture (ContainerFrame_Update) because ITS client always has the icon by
-                -- the time a slot is populated; ours can hold an item whose icon has not resolved
-                -- yet, and reading that as an empty slot would file the key on top of it
-                -- (decision 1199 — the transient our five-value shape exposed).
-                local texture, itemCount = GetContainerItemInfo(KEYRING_CONTAINER, i)
-                if texture == nil and itemCount == nil then
-                    PickupContainerItem(KEYRING_CONTAINER, i)
-                    return
-                end
-            end
-            if UIErrorsFrame then
-                UIErrorsFrame:AddMessage(NO_EMPTY_KEYRING_SLOTS_ERROR, 1.0, 0.1, 0.1)
-            end
         end
 
         -- ref KeyRingButton's OnLoad/OnClick/OnReceiveDrag (MainMenuBarBagButtons.xml l.142-199).
@@ -1052,9 +339,9 @@
                 ToggleKeyRing()
             end
             -- Re-derive the lit ring from the window, the same provisional-toggle tail every other
-            -- bag-bar button uses.
-            local frame = getglobal("BenillaKeyRingFrame")
-            button:SetChecked(frame and frame:IsShown())
+            -- bag-bar button uses. The keyring's window is an ordinary ContainerFrame now, so this
+            -- is the same `IsBagOpen` scan as the four bag slots', at KEYRING_CONTAINER.
+            button:SetChecked(IsBagOpen(KEYRING_CONTAINER) and 1 or nil)
         end
 
         -- ref l.180-184: the plain KEYRING title plus the ref's own empty AddLine (which reserves
@@ -1074,7 +361,7 @@
             -- drag feedback, IsInventoryItemLocked — the bag-slot twin of BenillaBagSlot_Update).
             if IsInventoryItemLocked(invSlot) then
                 button.icon:SetVertexColor(0.4, 0.4, 0.4)
-            elseif button:IsEnabled() then
+            elseif button:IsEnabled() ~= 0 then
                 button.icon:SetVertexColor(1, 1, 1)
             else
                 -- Disabled by Disable_BagButtons below: keep the grey. The reference needs no such
@@ -1338,517 +625,6 @@
     ]]></Script>
 
     <!--
-        One bag slot (ref ItemButtonTemplate, scratchpad `ref-ItemButtonTemplate.xml` l.4-45): a 37×37
-        button (l.5-7); the icon fills the button (l.10, no size/anchors → owner-sized); the "xN" count
-        is NumberFontNormal, right-justified, at BOTTOMRIGHT (-5,2) (l.11-19); the NormalTexture is the
-        64×64 UI-Quickslot2 ring centered at (0,-1) (l.31-42); PushedTexture UI-Quickslot-Depress
-        (l.43); HighlightTexture ButtonHilight-Square ADD (l.44). Shared by every window (backpack +
-        the four equipped bags) — physIndex-driven, see BenillaBagSlot_OnLoad's own comment.
-    -->
-    <Button name="BenillaBagSlotTemplate" virtual="true">
-        <Size><AbsDimension x="37" y="37"/></Size>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentIcon"/>
-            </Layer>
-            <Layer level="OVERLAY">
-                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
-                    <Anchors>
-                        <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
-        <Frames>
-            <!-- The item's use-cooldown sweep (ref ContainerFrame.xml:13 — $parentCooldown
-                 inherits CooldownFrameTemplate; ours is the native Cooldown widget, same as the
-                 action buttons'). Driven by BenillaBagSlot_Update / BAG_UPDATE_COOLDOWN via
-                 GetContainerItemCooldown + CooldownFrame_SetTimer (ActionBar.xml's transcription,
-                 loaded before this file). -->
-            <Cooldown name="$parentCooldown" hidden="true">
-                <Size><AbsDimension x="36" y="36"/></Size>
-                <Anchors>
-                    <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
-                </Anchors>
-            </Cooldown>
-        </Frames>
-        <NormalTexture file="Interface\Buttons\UI-Quickslot2">
-            <Size><AbsDimension x="64" y="64"/></Size>
-            <Anchors>
-                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
-            </Anchors>
-        </NormalTexture>
-        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
-        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
-        <Scripts>
-            <OnClick>BenillaBagSlot_OnClick(self, arg1)</OnClick>
-            <OnEnter>BenillaBagSlot_OnEnter(self)</OnEnter>
-            <OnLeave>BenillaBagSlot_OnLeave(self)</OnLeave>
-            <OnUpdate>BenillaBagSlot_OnUpdate(self)</OnUpdate>
-            <!-- The drag trio (decision 0216 §3): both route to the SAME left-click path the
-                 reference uses for both gestures (ContainerFrame.xml:40-55) — "LeftButton" hardcoded,
-                 exactly as the reference calls it, since RegisterForDrag above only ever arms Left —
-                 `true` (ignoreModifiers) suppresses the shift-split fork, matching the ref's own
-                 ignoreModifiers contract for a drag/receive. -->
-            <OnDragStart>BenillaBagSlot_OnClick(self, "LeftButton", true)</OnDragStart>
-            <OnReceiveDrag>BenillaBagSlot_OnClick(self, "LeftButton", true)</OnReceiveDrag>
-        </Scripts>
-    </Button>
-
-    <Frame name="BenillaBagFrame" id="0" hidden="true">
-        <!-- The real backpack frame: 192 wide (CONTAINER_WIDTH, ContainerFrame.lua l.8,412) × 240 tall
-             (l.325), anchored to UIParent BOTTOMRIGHT with CONTAINER_OFFSET_X=0 / CONTAINER_OFFSET_Y=70
-             (l.11-12) — the STACK's own anchor once shown (BenillaBagStack_Relayout); this static
-             anchor is only the pre-first-show placeholder. -->
-        <Size><AbsDimension x="192" y="240"/></Size>
-        <Anchors>
-            <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT">
-                <Offset><AbsDimension x="0" y="70"/></Offset>
-            </Anchor>
-        </Anchors>
-        <Layers>
-            <!-- The bag portrait: 40×40 at the frame TOPLEFT (7,-5) (ref-ContainerFrame.xml l.67-78).
-                 BACKGROUND (below the ARTWORK background art) so it shows through the background's
-                 portrait-ring cut-out — the same layering the loot-frame skull uses. Static
-                 Button-Backpack-Up (the backpack portrait art; the real client's C-side
-                 SetBagPortaitTexture). -->
-            <Layer level="BACKGROUND">
-                <Texture name="BenillaBagPortrait" file="Interface\Buttons\Button-Backpack-Up">
-                    <Size><AbsDimension x="40" y="40"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-5"/></Offset></Anchor>
-                    </Anchors>
-                </Texture>
-            </Layer>
-            <Layer level="ARTWORK">
-                <!-- The single backpack background slab (ContainerFrame.lua l.316-318, the id==0
-                     branch): UI-BackpackBackground, 256×256, full TexCoords (0,1,0,1), anchored TOPRIGHT
-                     of the frame (ref-ContainerFrame.xml l.86). Wider/taller than the 192×240 frame — it
-                     overhangs left and down, exactly as the real art does; the painted slot wells assume
-                     this TOPRIGHT anchoring. The middle/bottom strips are hidden for the backpack
-                     (l.321-324), so this one texture is the whole window art. -->
-                <Texture name="BenillaBagBackground" file="Interface\ContainerFrame\UI-BackpackBackground">
-                    <Size><AbsDimension x="256" y="256"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                    </Anchors>
-                    <TexCoords left="0" right="1" top="0" bottom="1"/>
-                </Texture>
-                <!-- Title: the bag name, GameFontHighlight, 112×12 at the frame TOPLEFT (47,-10)
-                     (ref-ContainerFrame.xml l.120-131). BenillaBagWindow_Update keeps it current via
-                     GetBagName(0), which always answers "Backpack" — the authored text is just the
-                     pre-first-Update placeholder. -->
-                <FontString name="BenillaBagFrameName" inherits="GameFontHighlight" text="Backpack">
-                    <Size><AbsDimension x="112" y="12"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="47" y="-10"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
-        <Frames>
-            <!--
-                The item grid (ContainerFrame.lua l.425-444). Authored verbatim from the real backpack
-                anchor chain: Item1 at the frame BOTTOMRIGHT (-12,30) (the id==0 first-button offset,
-                l.433); each new row (j-1 divisible by NUM_CONTAINER_COLUMNS=4) anchors BOTTOMRIGHT to
-                Item(j-4)'s TOPRIGHT (0,4) (l.440), and every other button BOTTOMRIGHT to Item(j-1)'s
-                BOTTOMLEFT (-5,0) (l.442). So button 1 is bottom-right and the chain fills up-and-left.
-                Slot1 (self, 1) is CHAIN POSITION 1 (physIndex), not the game slot — BenillaBagSlot_Update
-                resolves the game slot dynamically (size - physIndex + 1 = 16 - physIndex + 1 for the
-                backpack's fixed 16), so slot 1 renders TOP-LEFT and slot 16 BOTTOM-RIGHT, matching the
-                ref's own visual order.
-            -->
-            <Button name="BenillaBagSlot1" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="30"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot2" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot3" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot4" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot5" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot6" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot7" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot8" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot9" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot10" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot11" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot12" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot13" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot14" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot15" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaBagSlot16" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaBagSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
-            </Button>
-
-            <!-- The money purse (ContainerFrame.lua l.314 shows the MoneyFrame for the backpack; ref
-                 SmallMoneyFrame anchored TOPRIGHT (-2,-216), ref-ContainerFrame.xml l.135-143). The
-                 template pads 13px right of the copper coin (its content chains from x=-13 inside
-                 the frame — same pad as the merchant purse), so the COIN edge the ref frame anchor
-                 implies is -2-13 = -15. Three position-slots chained right-to-left with the real 4px
-                 spacing (Coin1 rightmost, copper), filled copper-first and shrunk to content by
-                 BenillaMoney_Set("BenillaBagMoney", GetMoney()); Coin2/3 chain to its left. -->
-            <Frame name="BenillaBagMoneyCoin1">
-                <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors>
-                    <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-15" y="-216"/></Offset></Anchor>
-                </Anchors>
-                <Layers>
-                    <Layer level="OVERLAY">
-                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                            <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
-                        </Texture>
-                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
-                            <Size><AbsDimension x="20" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-            </Frame>
-            <Frame name="BenillaBagMoneyCoin2">
-                <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors>
-                    <Anchor point="RIGHT" relativeTo="BenillaBagMoneyCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
-                </Anchors>
-                <Layers>
-                    <Layer level="OVERLAY">
-                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                            <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
-                        </Texture>
-                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
-                            <Size><AbsDimension x="20" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-            </Frame>
-            <Frame name="BenillaBagMoneyCoin3">
-                <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors>
-                    <Anchor point="RIGHT" relativeTo="BenillaBagMoneyCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
-                </Anchors>
-                <Layers>
-                    <Layer level="OVERLAY">
-                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
-                            <Size><AbsDimension x="13" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
-                            <TexCoords left="0" right="0.25" top="0" bottom="1"/>
-                        </Texture>
-                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
-                            <Size><AbsDimension x="20" y="13"/></Size>
-                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
-                </Layers>
-            </Frame>
-
-            <!-- Close: the real ContainerFrame close button position, TOPRIGHT (0,-1)
-                 (ref-ContainerFrame.xml l.217-224), on the minimize-button art UIPanelCloseButton
-                 itself uses (ref-UIPanelTemplates.xml l.100-102 — the same art merchant/loot draw; our
-                 engine ships no UIPanelCloseButton template, so we draw it, matching the house style).
-                 A close hides the window (the standalone-addon equivalent of ToggleBag). -->
-            <Button name="BenillaBagCloseButton">
-                <Size><AbsDimension x="32" y="32"/></Size>
-                <Anchors>
-                    <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
-                </Anchors>
-                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
-                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
-                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
-                <Scripts>
-                    <OnClick>getglobal("BenillaBagFrame"):Hide()</OnClick>
-                </Scripts>
-            </Button>
-        </Frames>
-        <Scripts>
-            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaBagFrame_OnShow()</OnShow>
-            <OnHide>BenillaBagFrame_OnHide()</OnHide>
-        </Scripts>
-    </Frame>
-
-    <!--
-        The generalized equipped-bag window (decision 0216 slice 2): the same portrait + slot template
-        as the backpack, but a stitched UI-Bag-Components background that SNUG-FITS the bag's row count
-        (BenillaBagWindow_FitBackground) rather than the backpack's fixed slab. The authored 260 height
-        is only a placeholder — FitBackground sets the live height on every repaint (before Show). No
-        money frame; first slot at the ref's non-backpack offset (-12,9 vs the backpack's -12,30 —
-        ContainerFrame.lua l.435 vs l.433, the id==0 fork). Carries NO <Scripts> block — each of the
-        four concrete windows below supplies its own (so the template/instance merge never has to
-        reconcile two OnLoad bodies; see `framexml.rs::merge`'s doc — a template with no Scripts child
-        can't collide with the instance's).
-    -->
-    <Frame name="BenillaBagWindowTemplate" virtual="true" hidden="true">
-        <Size><AbsDimension x="192" y="260"/></Size>
-        <Anchors>
-            <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT">
-                <Offset><AbsDimension x="0" y="70"/></Offset>
-            </Anchor>
-        </Anchors>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentPortrait" file="Interface\Buttons\Button-Backpack-Up">
-                    <Size><AbsDimension x="40" y="40"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-5"/></Offset></Anchor>
-                    </Anchors>
-                </Texture>
-            </Layer>
-            <Layer level="ARTWORK">
-                <!-- The snug-fit background, STITCHED from the real client's UI-Bag-Components (256×512;
-                     ContainerFrame.lua ContainerFrame_GenerateFrame, the id~=0 branch), so an equipped
-                     bag's window is exactly its row count tall instead of the backpack's fixed 5-row
-                     slab (decision 0216's flagged divergence, now closed). Three right-anchored 256-wide
-                     pieces, all sized/tex-coorded per-bag by BenillaBagWindow_FitBackground (below): the
-                     TOP carries the title bar + portrait ring + the top well row (a full 4-well row, or
-                     a partial 2-well row for a size%4==2 bag — the reference's isPlusTwoBag fork); the
-                     MIDDLE tiles the remaining full well rows (41px each, the button row stride, from
-                     texture v 0.353515625 = the grid's top edge); the BOTTOM is the frame's bottom rim.
-                     Authored values are a 2-row full-bag placeholder — every Show repaints through
-                     FitBackground first, so the live geometry always wins. -->
-                <Texture name="$parentBgTop" file="Interface\ContainerFrame\UI-Bag-Components">
-                    <Size><AbsDimension x="256" y="94"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                    </Anchors>
-                    <TexCoords left="0" right="1" top="0.00390625" bottom="0.18359375"/>
-                </Texture>
-                <Texture name="$parentBgMiddle" file="Interface\ContainerFrame\UI-Bag-Components">
-                    <Size><AbsDimension x="256" y="32"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPRIGHT" relativeTo="$parentBgTop" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                    </Anchors>
-                    <TexCoords left="0" right="1" top="0.353515625" bottom="0.416015625"/>
-                </Texture>
-                <Texture name="$parentBgBottom" file="Interface\ContainerFrame\UI-Bag-Components">
-                    <Size><AbsDimension x="256" y="10"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPRIGHT" relativeTo="$parentBgMiddle" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
-                    </Anchors>
-                    <TexCoords left="0" right="1" top="0.330078125" bottom="0.349609375"/>
-                </Texture>
-                <FontString name="$parentName" inherits="GameFontHighlight">
-                    <Size><AbsDimension x="112" y="12"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="47" y="-10"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
-        <Frames>
-            <!-- 20 slots, 5 rows × 4 columns, chain-anchored exactly like the backpack's own 16 (see
-                 that block's comment) but from the non-backpack first-button offset (-12,9). -->
-            <!-- First slot at (-12, 9) — the reference's id~=0 first-button offset (the backpack's is
-                 -12,30). The grid then seats itself on the baked wells for free, because the background
-                 is built bottom-up from the same 41px stride: the rim is 10px, the button's bottom edge
-                 sits 9px up, and every row above is +41. -->
-            <Button name="$parentSlot1" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="9"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot2" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot3" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot4" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot5" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot6" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot7" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot8" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot9" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot10" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot11" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot12" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot13" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot14" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot15" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot16" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot17" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot18" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot19" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
-            </Button>
-            <Button name="$parentSlot20" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
-            </Button>
-
-            <!-- Close: same art/position as the backpack's, but resolves ITS OWN parent via `this`
-                 (the button, legacy global) rather than a hardcoded name — one body, five windows. -->
-            <Button name="$parentCloseButton">
-                <Size><AbsDimension x="32" y="32"/></Size>
-                <Anchors>
-                    <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
-                </Anchors>
-                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
-                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
-                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
-                <Scripts>
-                    <OnClick>this:GetParent():Hide()</OnClick>
-                </Scripts>
-            </Button>
-        </Frames>
-    </Frame>
-
-    <!-- The four equipped-bag windows: id=1..4 (SetID applied before any child's OnLoad — the
-         loader's bottom-up materialize order), each supplying its OWN Scripts block (the template
-         above carries none, so there is nothing to merge/collide with). -->
-    <Frame name="BenillaBagFrame1" id="1" inherits="BenillaBagWindowTemplate">
-        <Scripts>
-            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaBagFrame_OnShow()</OnShow>
-            <OnHide>BenillaBagFrame_OnHide()</OnHide>
-        </Scripts>
-    </Frame>
-    <Frame name="BenillaBagFrame2" id="2" inherits="BenillaBagWindowTemplate">
-        <Scripts>
-            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaBagFrame_OnShow()</OnShow>
-            <OnHide>BenillaBagFrame_OnHide()</OnHide>
-        </Scripts>
-    </Frame>
-    <Frame name="BenillaBagFrame3" id="3" inherits="BenillaBagWindowTemplate">
-        <Scripts>
-            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaBagFrame_OnShow()</OnShow>
-            <OnHide>BenillaBagFrame_OnHide()</OnHide>
-        </Scripts>
-    </Frame>
-    <Frame name="BenillaBagFrame4" id="4" inherits="BenillaBagWindowTemplate">
-        <Scripts>
-            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaBagFrame_OnShow()</OnShow>
-            <OnHide>BenillaBagFrame_OnHide()</OnHide>
-        </Scripts>
-    </Frame>
-
-    <!--
-        The keyring window (decision 0765) — id = KEYRING_CONTAINER. Structurally just a seventh
-        container window on the SAME template as the four equipped bags and the six bank popouts;
-        everything that makes it a keyring (the "-Keyring" plate, the KeyRing-Bag-Icon portrait, the
-        KEYRING title, the jingling open/close pair) is the id-keyed fork inside the shared handlers,
-        exactly as ContainerFrame.lua does it. Its 20 template buttons cover the keyring's 16-slot
-        ceiling; the level-gated remainder hides through the ordinary physIndex-past-size branch.
-
-        It is deliberately NOT in BENILLA_BAG_WINDOWS: the keyring is not one of "your bags", so no
-        bag toggle ever OPENS it and a vendor's auto-open never touches it — the reference's own
-        arrangement (OpenAllBags' open arm is ToggleBackpack + ToggleBag(1..4), and its count
-        explicitly excludes KEYRING_CONTAINER). It is still SWEPT by the two close arms, which the
-        ref runs over every ContainerFrame — the keyring lives in one there, so 1494 sweeps ours by
-        name alongside the list. ESC closes it too — UiPanels.xml's CloseAllWindows hides every open
-        container, the ref's own loop.
-    -->
-    <Frame name="BenillaKeyRingFrame" id="-2" inherits="BenillaBagWindowTemplate">
-        <Scripts>
-            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaBagFrame_OnShow()</OnShow>
-            <OnHide>BenillaBagFrame_OnHide()</OnHide>
-        </Scripts>
-    </Frame>
-
-    <!--
         The backpack toggle, RELOCATED onto the main action bar's right side so the bar reads whole
         (the real client's MainMenuBarBackpackButton, ref-MainMenuBarBagButtons.xml l.54-64): a 37x37
         button parented/anchored to the bar art frame at BOTTOMRIGHT (-6,2). Its behavior (toggle the
@@ -1856,7 +632,7 @@
         the bar. (MainMenuBarArtFrame is defined in ActionBar.xml, which the loader loads before
         this file; the anchor resolves by name.)
     -->
-    <CheckButton name="MainMenuBarBackpackButton">
+    <CheckButton name="MainMenuBarBackpackButton" id="0" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="37" y="37"/></Size>
         <Anchors>
             <Anchor point="BOTTOMRIGHT" relativeTo="MainMenuBarArtFrame" relativePoint="BOTTOMRIGHT">
@@ -1934,7 +710,7 @@
         66×66 UI-Quickslot2 ring, 6px chain gap = the 42px stride), so the bag icons fill their slots
         exactly like the spell icons instead of floating undersized (the earlier 30×30 guess).
     -->
-    <CheckButton name="CharacterBag0Slot">
+    <CheckButton name="CharacterBag0Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="MainMenuBarBackpackButton" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -1989,7 +765,7 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="CharacterBag1Slot">
+    <CheckButton name="CharacterBag1Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag0Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -2043,7 +819,7 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="CharacterBag2Slot">
+    <CheckButton name="CharacterBag2Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag1Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -2097,7 +873,7 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="CharacterBag3Slot">
+    <CheckButton name="CharacterBag3Slot" parent="MainMenuBarArtFrame">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag2Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
@@ -2168,7 +944,7 @@
         an $parentIcon layer, so Disable_BagButtons' SetDesaturation(b.icon) has nothing to grey —
         and the ref leaves it out of its own Disable_BagButtons for the same reason.
     -->
-    <CheckButton name="KeyRingButton" hidden="true">
+    <CheckButton name="KeyRingButton" parent="MainMenuBarArtFrame" hidden="true">
         <Size><AbsDimension x="18" y="39"/></Size>
         <Anchors>
             <Anchor point="RIGHT" relativeTo="CharacterBag3Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>

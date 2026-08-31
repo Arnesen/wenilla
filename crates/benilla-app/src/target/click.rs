@@ -1,9 +1,12 @@
 //! The click/USE router — the input half of targeting: a clean left-click selects the
 //! [`super::Hovered`] unit, a clean right-click dispatches the context action (attack, NPC
-//! interact, GameObject USE with the lock/refusal ladder), and the UI's `TargetUnit` requests +
-//! Esc drain into the same [`super::Selection`]. Split from `mod.rs` (which keeps the state
-//! resources and the plugin) along the state-vs-input seam; the systems here are registered by
-//! [`super::TargetPlugin`] in the target chain after the hover picks and the cursor classifier.
+//! interact, GameObject USE with the lock/refusal ladder), and the UI's selection asks
+//! (`TargetUnit` / `AssistUnit` / `TargetLastEnemy`) + Esc drain into the same
+//! [`super::Selection`]. Split from `mod.rs` (which keeps the state resources and the plugin)
+//! along the state-vs-input seam; the systems here are registered by [`super::TargetPlugin`] in
+//! the target chain after the hover picks and the cursor classifier.
+
+use benilla_ui::script::SelectionRequest;
 
 use super::lock::GoLockInputs;
 use super::*;
@@ -398,7 +401,26 @@ pub(super) fn act_on_right_click(
             );
         }
         if store.is_some_and(|s| s.0.corpse_lootable()) {
-            // Leg 1. Range rides the cursor's own gray, exactly as the unit loot branch does —
+            // **`GetStandState() != 0` refuses before the send** (`0x5d6c3b call [playerVtbl+0xa4]`
+            // = `0x5ed570`, non-zero → `0x496720(0x85)`): sitting, kneeling or asleep, the click
+            // raises the client-local red **`ERR_LOOT_NOTSTANDING`** as a `UI_ERROR_MESSAGE` and
+            // sends nothing. Client-local, so the line shows even where the server would also have
+            // refused — and unlike the range gray it is loud, because the player can fix it.
+            // Scoped to the corpse leg: this is the gate the §5 round read, and the unit loot
+            // branch's own copy of it is unverified here (1729).
+            let standing = self_player
+                .single()
+                .ok()
+                .and_then(|(e, _, _)| stores.get(e).ok())
+                .is_none_or(|(s, _)| s.0.unit_stand_state() == 0);
+            if !standing {
+                debug!("right-click corpse loot: refused, not standing ({guid:#x})");
+                ui_error_keys
+                    .0
+                    .push(crate::ui_action::UiError::key("ERR_LOOT_NOTSTANDING"));
+                return;
+            }
+            // Range rides the cursor's own gray, exactly as the unit loot branch does —
             // the classifier and the click ask literally the same question, so the pouch can never
             // be lit on something a click refuses.
             if !cursor.unable {
@@ -716,7 +738,6 @@ fn route_lock_refusal(
                 key: "ERR_USE_LOCKED_WITH_ITEM_S",
                 fill_s: Some(name),
                 fill_d: None,
-                info: false,
             }),
         },
         benilla_formats::LOCK_KEY_SKILL => {
@@ -727,14 +748,12 @@ fn route_lock_refusal(
                     key: "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
                     fill_s: Some(name),
                     fill_d: Some(required),
-                    info: false,
                 })
             } else {
                 Some(UiError {
                     key: "ERR_USE_LOCKED_WITH_SPELL_S",
                     fill_s: Some(name),
                     fill_d: None,
-                    info: false,
                 })
             }
         }
@@ -838,23 +857,40 @@ pub(super) fn clear_target_requests(
     }
 }
 
-/// Drain the UI's `TargetUnit(token)` requests and commit each through the shared SetSelection path
-/// ([`scan::commit`]) — the app half of the reference's `TargetUnit` Lua shim. Callers: the player
-/// frame's left-click (`TargetUnit("player")`) and the party frames' (`TargetUnit("partyN")`,
-/// decision 0434 phase 5). Only tokens resolving to a STREAMED unit act: `"player"` → our avatar;
-/// `"target"` → the current selection (a dedup no-op); `"partyN"`/`"raidN"` → that roster slot
-/// when its entity is in range (an out-of-range member needs the guid-only selection the phase-4
-/// out-of-range slice owns — until then the click no-ops, like the real client on a nonexistent
-/// unit); `"pet"` → the bar's cached pet guid (decision 0990, the pet frame's left click);
-/// `"targettarget"` → the selection's own `UNIT_FIELD_TARGET` (decision 1576, the ToT frame's).
-/// Everything else (mouseover/name) waits for its wire.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn target_unit_requests(
+/// Drain the UI's **selection asks** — `TargetUnit(token)`, `AssistUnit(token)` and
+/// `TargetLastEnemy()` — and commit each through the shared SetSelection path ([`scan::commit`]).
+///
+/// One drain for the three because the reference has one function for them: `TargetUnit
+/// 0x4899d0`, `AssistUnit 0x489b80`, `TargetLastEnemy` and `TargetLastTarget` all reach selection
+/// through the "select if it resolves" helper `0x489a40` (wow-re
+/// `object-layer/scratch/selection-attack-seam.md` §1), whose three arms — resolves → commit;
+/// doesn't resolve but is on the roster → commit anyway; **neither, including guid 0 → a bare
+/// `ret`** — are the same for every caller. That third arm is the one worth naming: a token,
+/// basis or remembered guid that does not resolve is a **no-op, not a deselect**. Draining them
+/// in one ordered queue also keeps their relative order, which a macro can observe.
+///
+/// `TargetUnit` callers: the player frame's left-click (`TargetUnit("player")`), the party frames'
+/// (`TargetUnit("partyN")`, decision 0434 phase 5), the TARGETSELF binding. Only tokens resolving
+/// to a STREAMED unit act: `"player"` → our avatar; `"target"` → the current selection (a dedup
+/// no-op); `"partyN"`/`"raidN"` → that roster slot when its entity is in range (an out-of-range
+/// member needs the guid-only selection the phase-4 out-of-range slice owns — until then the click
+/// no-ops, like the real client on a nonexistent unit); `"pet"` → the bar's cached pet guid
+/// (decision 0990, the pet frame's left click); `"targettarget"` → the selection's own
+/// `UNIT_FIELD_TARGET` (decision 1576, the ToT frame's). Everything else (mouseover/name) waits
+/// for its wire.
+///
+/// `AssistUnit` resolves the same token and then runs the shared assist tail
+/// ([`super::by_name::SelectCommit::assist`]) — the basis's own `UNIT_FIELD_TARGET`, which is the
+/// hop `"targettarget"` already makes for the ToT frame. `TargetLastEnemy` skips the token
+/// grammar entirely and reads [`scan::LastEnemy`].
+pub(super) fn selection_requests(
     script: Option<NonSendMut<UiScript>>,
     // The one unit-token resolver (`crate::ui_unit::UnitTokens`) — the arms this drain used to
     // spell out inline. It is shared with the reach feed precisely so `TargetUnit("target")` and
     // `CheckInteractDistance("target", …)` can never mean two different units (B304).
     tokens: crate::ui_unit::UnitTokens,
+    // `TargetLastEnemy`'s memory — `[0xb4e2e8]/[0xb4e2ec]`, stamped by `scan::remember_last_enemy`.
+    last_enemy: Res<scan::LastEnemy>,
     // The one SetSelection tail, shared with `/target` and `/assist` (decision 1583). It carries
     // the classification too, which is why this drain no longer states one: hand-stating it here
     // is exactly how a `false` that the binary refutes got written down.
@@ -863,16 +899,47 @@ pub(super) fn target_unit_requests(
     let Some(mut script) = script else {
         return;
     };
-    let requests = script.take_target_requests();
+    let requests = script.take_selection_requests();
     if requests.is_empty() {
         return;
     }
-    for token in requests {
-        // Resolved before the commit borrows the selection mutably. An unstreamed unit — an
-        // out-of-range party member, a despawned pet — resolves to nothing and no-ops.
-        let resolved = tokens.resolve(&token, &commit.selection);
-        if let Some((entity, guid)) = resolved {
-            commit.commit(entity, guid);
+    for request in requests {
+        match request {
+            // Resolved before the commit borrows the selection mutably. An unstreamed unit — an
+            // out-of-range party member, a despawned pet — resolves to nothing and no-ops.
+            SelectionRequest::Unit(token) => {
+                if let Some((entity, guid)) = tokens.resolve(&token, &commit.selection) {
+                    commit.commit(entity, guid);
+                }
+            }
+            // `0x489ba9 call 0x515940(token)` — the same token grammar, then the shared tail. An
+            // unresolvable token is silent here: the reference emits game-message `0xb8`, whose
+            // id→string table is runtime-populated BSS wow-re could not statically recover — the
+            // known deviation `TargetByName` already carries on this path.
+            SelectionRequest::Assist(token) => match tokens.resolve(&token, &commit.selection) {
+                Some((basis, _)) => commit.assist(basis, "AssistUnit"),
+                None => info!("assist (AssistUnit): \"{token}\" names nothing; silent no-op"),
+            },
+            // `0x489b45` reads the last-attackable pair and hands it to the same `0x489a40`.
+            // **Empty memory is a no-op, and that is derived now**: the shim `0x489b40` is
+            // thirteen bytes with no emptiness test at all, where `TargetLastTarget 0x489b00`
+            // really does reach `0x493540(0,0)` and deselect. The two shims differ exactly here
+            // (wow-re `targeting-friend-and-lastenemy.md`, §5 trio — dispatched from this work).
+            SelectionRequest::LastEnemy => {
+                let Some(guid) = last_enemy.0 else {
+                    info!("TargetLastEnemy: nothing hostile has been targeted yet; no-op");
+                    continue;
+                };
+                match tokens.held(guid) {
+                    Some((entity, guid)) => commit.commit(entity, guid),
+                    // The stale-guid arm: the remembered unit has streamed out or despawned. The
+                    // memory is deliberately kept (the reference never clears its globals either)
+                    // and this is a bare no-op, never a deselect.
+                    None => info!(
+                        "TargetLastEnemy: {guid:#x} is no longer streamed; target left untouched"
+                    ),
+                }
+            }
         }
     }
 }
@@ -1111,5 +1178,102 @@ mod tests {
             interact_command(CursorKind::Buy, 0x42, 0x1100),
             Some(ClientCommand::BankerActivate { guid: 0x42 })
         ));
+    }
+
+    /// **The selection queue, end to end** — Lua in, `Selection` out — over the four ways it is
+    /// reachable from a player macro. Every one of them is a shipped binding body: `AssistUnit`
+    /// is ASSISTTARGET's (default `F`), `TargetLastEnemy` is TARGETLASTHOSTILE's (default `G`).
+    ///
+    /// What it pins, claim by claim:
+    /// * `AssistUnit("target")` on a basis that has a target selects **that unit** — the shared
+    ///   assist tail's one hop off `UNIT_FIELD_TARGET`;
+    /// * a basis with **no** target is a silent no-op — the reference's tail bails before any send;
+    /// * a **garbage token** resolves to nothing and is a no-op, never a deselect (`0x489a40`'s
+    ///   arm 3 is a bare `ret`) — and, being reachable from any macro, must not panic;
+    /// * `TargetLastEnemy()` re-selects the remembered guid, and with a **stale** one — the unit
+    ///   despawned or streamed out — leaves the target exactly where it was.
+    #[test]
+    fn the_selection_queue_runs_assist_and_last_enemy_without_ever_deselecting() {
+        use crate::net::NetCommands;
+        use benilla_ui::script::UiScript;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ME: u64 = 1;
+        const BASIS: u64 = 0xB0A2;
+        const VICTIM: u64 = 0xC0DE;
+        const GONE: u64 = 0x6017;
+        // `UNIT_FIELD_TARGET` is a 2-field guid at index 16; HEALTH/MAXHEALTH keep the units live.
+        let store =
+            |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut world = World::new();
+        world.insert_resource(NetCommands(tx));
+        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
+        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<crate::ui_party::GroupState>();
+        world.init_resource::<crate::net::GuidIndex>();
+        world.init_resource::<crate::net::Reputations>();
+        world.init_resource::<Selection>();
+        world.init_resource::<scan::LastEnemy>();
+        world.insert_non_send_resource(UiScript::new().expect("a bare VM"));
+
+        world.spawn((SelfPlayer, Guid(ME), store(&[(22, 100), (28, 100)])));
+        // The basis is pointing at the victim; the victim points at nobody.
+        let basis = world
+            .spawn((
+                Guid(BASIS),
+                store(&[(22, 100), (28, 100), (16, VICTIM as u32)]),
+            ))
+            .id();
+        let victim = world
+            .spawn((Guid(VICTIM), store(&[(22, 100), (28, 100)])))
+            .id();
+        let index = &mut world.resource_mut::<crate::net::GuidIndex>().0;
+        index.insert(BASIS, basis);
+        index.insert(VICTIM, victim);
+
+        let run = |world: &mut World, lua: &str| {
+            world
+                .non_send_resource_mut::<UiScript>()
+                .eval::<()>(lua)
+                .expect("the binding runs");
+            world
+                .run_system_once(selection_requests)
+                .expect("the drain runs as a one-shot system");
+            world.resource::<Selection>().guid
+        };
+        let set = |world: &mut World, target: Option<(Entity, u64)>| {
+            let mut sel = world.resource_mut::<Selection>();
+            sel.target = target.map(|(e, _)| e);
+            sel.guid = target.map(|(_, g)| g);
+        };
+
+        // Assist the current target: one hop onto ITS target.
+        set(&mut world, Some((basis, BASIS)));
+        assert_eq!(run(&mut world, r#"AssistUnit("target")"#), Some(VICTIM));
+
+        // The victim targets nobody — assisting it is a silent no-op, not a deselect.
+        assert_eq!(run(&mut world, r#"AssistUnit("target")"#), Some(VICTIM));
+
+        // A token that names nothing: a no-op, and above all not a panic.
+        assert_eq!(run(&mut world, r#"AssistUnit("nosuchunit")"#), Some(VICTIM));
+        assert_eq!(run(&mut world, r#"TargetUnit("nosuchunit")"#), Some(VICTIM));
+
+        // TargetLastEnemy with nothing remembered: also a no-op.
+        assert_eq!(run(&mut world, "TargetLastEnemy()"), Some(VICTIM));
+
+        // Remember the victim, drop the target, and press it: back onto the victim.
+        world.resource_mut::<scan::LastEnemy>().0 = Some(VICTIM);
+        set(&mut world, None);
+        assert_eq!(run(&mut world, "TargetLastEnemy()"), Some(VICTIM));
+
+        // A STALE memory — the unit despawned, so the guid is in no index. The target stays put;
+        // the reference's helper returns without touching the selection.
+        world.resource_mut::<scan::LastEnemy>().0 = Some(GONE);
+        assert_eq!(run(&mut world, "TargetLastEnemy()"), Some(VICTIM));
+        set(&mut world, None);
+        assert_eq!(run(&mut world, "TargetLastEnemy()"), None);
     }
 }

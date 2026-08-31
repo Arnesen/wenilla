@@ -472,6 +472,24 @@ fn write_inset_anchors(lua: &Lua, h: FrameHandle, rh: RegionHandle, [l, r, t, b]
     }
 }
 
+/// The wrapper for an EditBox's **embedded** text FontString — the region its ctor built at
+/// `0x779bee` (`Arena::build_editbox_engine_regions`). `None` when `frame` is not a live EditBox.
+///
+/// The loader's special-`<FontString>` pass uses this instead of `CreateFontString`: RF-0028 lists
+/// `<FontString>` as the EditBox's *embedded* font string (its `bytes` attr writes the box's own
+/// `maxBytes`), so the element DECLARES the ctor's object rather than adding a region. Creating a
+/// second one would leave an orphan on the frame and push the authored `<Layers>` regions one place
+/// down the creation-ordered list `GetRegions` walks.
+pub(crate) fn editbox_text_region_wrapper(lua: &Lua, frame: &Table) -> Option<Table> {
+    let h = frame_handle_of(lua, frame).ok()?;
+    let rh = ensure_text_region(lua, h)?;
+    let id = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        model.region_id(rh)
+    };
+    super::region::region_wrapper(lua, id).ok()
+}
+
 /// The loader's special-`<FontString>` slot assignment: adopt `region` as `frame`'s text region,
 /// anchored by the current insets. The engine ASSIGNS an EditBox's font string at LoadXML — it
 /// never searches the region list (a find-first here once grabbed a `<Layers>` FontString, the
@@ -504,20 +522,28 @@ pub(super) fn ensure_text_region(lua: &Lua, h: FrameHandle) -> Option<RegionHand
         Some(KindState::EditBox(eb)) => (eb.text_region, eb.multi_line),
         _ => return None,
     };
-    if existing.is_some() {
-        return existing;
-    }
-    let rh = model
-        .arena
-        .create_region(h, RegionKind::FontString, DrawLayer::Overlay, 0)?;
-    let mut data = RegionData {
-        // Some("") from birth — the empty box still emits its Text quad for the host caret.
-        text: Some(String::new()),
-        ..RegionData::default()
+    // The ctor already built it (`Arena::build_editbox_engine_regions` — the client's own
+    // `0x779bee`, the first of the five regions a CSimpleEditBox is born with). The REGION exists
+    // from birth; its `RegionData` does not, because the arena has no access to it — so seed that
+    // here, once, on whichever call arrives first.
+    let rh = match existing {
+        Some(rh) => rh,
+        // A box whose ctor pass could not run (a dead handle, or a non-EditBox that slipped the
+        // guard above) still gets a region rather than silently rendering nothing.
+        None => model
+            .arena
+            .create_region(h, RegionKind::FontString, DrawLayer::Overlay, 0)?,
     };
-    apply_text_region_justify(&mut data, multi_line);
-    model.region_data.insert(rh, data);
-    model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
+    if let std::collections::hash_map::Entry::Vacant(slot) = model.region_data.entry(rh) {
+        let mut data = RegionData {
+            // Some("") from birth — the empty box still emits its Text quad for the host caret.
+            text: Some(String::new()),
+            ..RegionData::default()
+        };
+        apply_text_region_justify(&mut data, multi_line);
+        slot.insert(data);
+        model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
+    }
     if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         eb.text_region = Some(rh);
     }

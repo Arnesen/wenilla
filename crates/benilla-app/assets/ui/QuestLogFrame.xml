@@ -21,9 +21,11 @@
         doc). `ToggleQuestLog()` (pin §8, `QuestLogFrame.lua:24-30`) is the show/hide entry point the
         app's 'L' binding already calls (`ui_script/mod.rs`).
 
-        Faux-scroll (pin §2): 6 title rows (`QUESTS_DISPLAYED`), a Lua-side `questLogOffset` upvalue
-        standing in for the real `QuestLogListScrollFrame`/`FauxScrollFrame_Update` (no real
-        ScrollFrame/FauxScrollFrame engine exists yet) — `<OnMouseWheel>` adjusts it directly. The
+        Faux-scroll (pin §2): 6 title rows (`QUESTS_DISPLAYED`) under a REAL
+        `QuestLogListScrollFrame` (a `FauxScrollFrameTemplate` instance, ref l.291-307) driven by
+        `FauxScrollFrame_Update`/`_GetOffset`. This paragraph used to say the offset was "a Lua-side
+        `questLogOffset` upvalue standing in for [them] (no real ScrollFrame/FauxScrollFrame engine
+        exists yet)" — false since the faux kit landed; six other windows ride it. The
         wheel handler lives on the window Frame itself: the engine bubbles a spin UP the parent chain
         (`script/pointer.rs` `mouse_wheel`), so a spin over a title row (no handler of its own) rises to
         this window and scrolls. (A bare `<Frame>` is not a mouse HIT target — only
@@ -34,10 +36,9 @@
         now only gives the list's EMPTY tail a hit-target whose spin also bubbles here.
 
         v1 scope/deviations from the pin (each cited again at its own widget below):
-          - The LIST page still has no real ScrollFrame — `questLogOffset`'s faux-scroll stands in
-            (this comment's own "Faux-scroll" paragraph above); real real-estate accounting there
-            would need a genuine header/collapse model this v1 doesn't ship. The DETAIL page now
-            DOES sit on a real ScrollFrame (`QuestLogDetailScroll`, decision 0112's mechanism)
+          - Both pages sit on real scroll frames now: the LIST on a `FauxScrollFrameTemplate`
+            (`QuestLogListScrollFrame`) and the DETAIL on a `UIPanelScrollFrameTemplate`
+            (`QuestLogDetailScrollFrame`, decision 0112's mechanism)
             — a quest with many objectives/a long description/many rewards scrolls and clips at the
             pane's own edge instead of running past the window's bottom (pin §3's doNotScroll
             asymmetry is implemented — see `BenillaQuestLogDetail_Update`'s own comment).
@@ -69,11 +70,12 @@
     -->
     <Script><![CDATA[
         QUESTS_DISPLAYED = 6            -- QUESTS_DISPLAYED (pin §2, QuestLogFrame.lua:1)
+        QUESTLOG_QUEST_HEIGHT = 16      -- the row pitch the faux kit scrolls by (ref l.4)
         MAX_QUESTLOG_QUESTS = 20     -- MAX_QUESTLOG_QUESTS (pin §2, :6) — display cap only
         MAX_OBJECTIVES = 10  -- MAX_OBJECTIVES (pin §3, QuestLogFrame.lua:3)
         -- Reward/choice row cap: the SAME v1 cap `QuestFrame.xml`'s BENILLA_QUEST_MAX_ITEMS uses (the
         -- ref's own MAX_NUM_ITEMS is 10, QuestFrame.lua:2 — we halve it there too).
-        BENILLA_QUESTLOG_MAX_ITEMS = 6
+        MAX_NUM_ITEMS = 6
         -- MAX_WATCHABLE_QUESTS (pin §2/§5, QuestLogFrame.lua:8) — the SAME cap `quest_log.rs`'s
         -- AddQuestWatch already enforces engine-side; this is just this file's own guard so the
         -- right-click handler can skip the AddQuestWatch call (and its error) locally.
@@ -98,14 +100,14 @@
         BENILLA_QUESTLOG_DETAIL_OBJ_ROW = 12    -- one objective line (Objective1's own comment)
         BENILLA_QUESTLOG_DETAIL_OBJ_STEP = 2    -- gap between objective lines
         BENILLA_QUESTLOG_DETAIL_BOTTOM_PAD = 10 -- v1: a little breathing room past the last row
-        -- The detail pane's minimal scrollbar (`BenillaQuestLogDetailScroll_SyncBar`'s own comment).
-        BENILLA_QUESTLOG_SCROLL_STEP = 20        -- px per wheel notch / arrow click
-        BENILLA_QUESTLOG_SCROLL_TRACK_H = 229    -- ScrollFrame height 261 - 16 (up) - 16 (down)
-        BENILLA_QUESTLOG_SCROLL_THUMB_H = 16
 
-        -- The faux-scroll offset (pin §2's FauxScrollFrame stand-in) — a plain chunk-local upvalue
-        -- every function below closes over, the same pattern `UiPanels.xml`'s `slots` table uses.
-        local questLogOffset = 0
+        -- The list's scroll offset lives on the REAL `QuestLogListScrollFrame` now (a
+        -- FauxScrollFrameTemplate instance, ref l.291-307), read with `FauxScrollFrame_GetOffset`.
+        -- What stood here was `local questLogOffset = 0`, a chunk-local upvalue standing in for it
+        -- "because no real ScrollFrame/FauxScrollFrame engine exists yet" — which stopped being
+        -- true when the faux kit landed (SkillFrame.xml, TrainerFrame.xml and four more ride it).
+        -- The stand-in also meant this window published no `QuestLogListScrollFrame` at all, which
+        -- pfUI's `skins/blizzard/questlog.lua` indexes at l.135-136, l.149-153, l.163-164 and l.181.
 
         -- The detail pane's last-computed resize inputs (`BenillaQuestLogDetail_ResizeChild`'s own
         -- comment on WHY a re-check is needed at all: `GetHeight()` on the auto-height FontStrings
@@ -164,7 +166,7 @@
 
         -- ── The list page ────────────────────────────────────────────────────────────────────────
         -- `mouseButton` is arg1 off RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        -- (BenillaQuestLogTitleTemplate's OnLoad). The watch toggle is SHIFT+left-click, the ref's
+        -- (QuestLogTitleButtonTemplate's OnLoad). The watch toggle is SHIFT+left-click, the ref's
         -- own fork (QuestLogFrame.lua:469-505) — the modifier plumbing this file's header once
         -- named as the missing engine slice landed with the cursor arc (0216/0218 follow-up), so
         -- the documented right-click substitute is retired.
@@ -275,8 +277,8 @@
             -- pill's middle piece then shrinks to the text (ref sizes it every update). The >10
             -- guard skips the first-ever paint, where the host hasn't measured the string yet
             -- (GetWidth 0 would collapse the pill; the next update — and every one after — sizes it).
-            getglobal("QuestLogCount"):SetText(string.format("Quests: |cffffffff%d/%d|r", numQuests, MAX_QUESTLOG_QUESTS))
-            local countWidth = getglobal("QuestLogCount"):GetWidth()
+            getglobal("QuestLogQuestCount"):SetText(string.format("Quests: |cffffffff%d/%d|r", numQuests, MAX_QUESTLOG_QUESTS))
+            local countWidth = getglobal("QuestLogQuestCount"):GetWidth()
             if countWidth and countWidth > 10 then
                 getglobal("QuestLogCountMiddle"):SetWidth(countWidth)
             end
@@ -288,20 +290,35 @@
             -- convention predates region Show/Hide (`region.rs` has the real pair now, and the
             -- loader honours hidden= on regions); an empty string draws nothing, so it is equivalent
             -- either way and the idiom stays for consistency with the sibling windows.
-            local abandonButton = getglobal("QuestLogAbandonButton")
+            -- ref QuestLogFrame.lua l.108-119, its own two arms: the empty page is a FRAME that
+            -- shows or hides, not a string that is written or blanked. (The blank-text convention
+            -- above still holds for this window's other text; it is the EmptyQuestLogFrame case
+            -- that the reference does differently, because its page carries art as well as a line.)
+            local abandonButton = getglobal("QuestLogFrameAbandonButton")
             if numEntries == 0 then
-                getglobal("QuestLogEmptyText"):SetText("Your quest log is empty.")
+                getglobal("EmptyQuestLogFrame"):Show()
                 abandonButton:Disable()
             else
-                getglobal("QuestLogEmptyText"):SetText("")
+                getglobal("EmptyQuestLogFrame"):Hide()
                 abandonButton:Enable()
             end
 
-            -- Clamp the faux-scroll offset (pin §2's FauxScrollFrame_Update clamp).
-            local maxOffset = numEntries - QUESTS_DISPLAYED
-            if maxOffset < 0 then maxOffset = 0 end
-            if questLogOffset > maxOffset then questLogOffset = maxOffset end
-            if questLogOffset < 0 then questLogOffset = 0 end
+            -- Share Quest (ref QuestLog_Update's tail, QuestLogFrame.lua:299-305) — the predicate
+            -- verbatim, in the ref's own guard order: an EMPTY log disables outright, otherwise the
+            -- quest must be sharable AND we must be in a party. Both halves matter and neither is
+            -- redundant. GetQuestLogPushable() reads the SELECTION's QUEST_FLAGS_SHARABLE bit off
+            -- the template cache, which is the client's own test and the server's only reliance:
+            -- vmangos never re-checks the bit on the push, only on the receiver's accept, so a
+            -- button we wrongly lit would push a quest the party is then refused (decision 1733).
+            BenillaQuestLogPushButton_Update(numEntries)
+
+            -- ref QuestLogFrame.lua l.127, its own call: the kit owns the clamp, the bar range
+            -- and the arrows. (The ref passes QuestLogHighlightFrame + two offsets as the
+            -- highlight-repositioning tail; ours repositions its own highlight below, so those
+            -- trailing arguments stay off.)
+            local listScroll = getglobal("QuestLogListScrollFrame")
+            FauxScrollFrame_Update(listScroll, numEntries, QUESTS_DISPLAYED, QUESTLOG_QUEST_HEIGHT)
+            local questLogOffset = FauxScrollFrame_GetOffset(listScroll)
 
             local selection = GetQuestLogSelection()
 
@@ -346,7 +363,7 @@
                     end
                     -- pin §2's $parentCheck: the per-row watch checkbox. SetTexture(path)/
                     -- SetTexture(nil) as the show/hide toggle — the icon-slot blanking pattern
-                    -- (`BenillaBagSlot_Update` etc.). (Regions DO have Show/Hide these days —
+                    -- (the icon-clearing every slot repaint does). (Regions DO have Show/Hide these days —
                     -- region.rs; this site just predates it and the pattern is equivalent.)
                     if not isHeader and IsQuestWatched(index) then
                         button.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
@@ -366,7 +383,7 @@
             -- scrolls back to it. Ref l.337-339 verbatim: the glow rides at (5,0) on the row and is
             -- vertex-colored to the row's own difficulty color (that green bar in the ref shot IS
             -- this vertex color on the white ADD gradient).
-            local hl = getglobal("QuestLogSelectHighlight")
+            local hl = getglobal("QuestLogHighlightFrame")
             if selection > questLogOffset and selection <= questLogOffset + QUESTS_DISPLAYED
                 and selection <= numEntries then
                 local selButton = getglobal("QuestLogTitle" .. (selection - questLogOffset))
@@ -387,20 +404,16 @@
 
         function BenillaQuestLogFrame_OnMouseWheel(delta)
             -- WoW wheel convention: +1 per notch up, -1 down (ChatFrame.xml's own handler quotes the
-            -- same convention). Up = earlier entries (offset toward 0); down = later entries.
-            if delta > 0 then
-                questLogOffset = questLogOffset - 1
-            else
-                questLogOffset = questLogOffset + 1
-            end
-            BenillaQuestLogList_Update()
+            -- same convention). Up = earlier entries (offset toward 0); down = later entries. The
+            -- shared kit's own wheel step, off the real frame — the same call SkillFrame.xml makes.
+            BenillaFauxScrollFrame_OnMouseWheel(getglobal("QuestLogListScrollFrame"), delta)
         end
 
         -- ── The detail page ──────────────────────────────────────────────────────────────────────
         -- The detail pane's real ScrollFrame (decision 0112's mechanism, landed this session — this
         -- window used to be a fixed layout that simply clipped past the window's bottom edge, this
-        -- file's header comment). `QuestLogDetailScroll`'s ScrollChild is
-        -- `QuestLogDetailChild`: every FontString/Button below that used to live flat on
+        -- file's header comment). `QuestLogDetailScrollFrame`'s ScrollChild is
+        -- `QuestLogDetailScrollChildFrame`: every FontString/Button below that used to live flat on
         -- `QuestLogFrame` now lives on that child instead (the 0088 §2 flat-frame constraint
         -- this file's header comment quoted DIED with the 0112 resolver fixpoint — child frames
         -- render their own `<Layers>` regions again), so its subtree clips at the ScrollFrame's own
@@ -442,14 +455,14 @@
         -- FontString's measured `GetHeight()` + `rewardSectionHeight` (BenillaQuestLogRewards_Update's
         -- own return — its header-through-money layout has its own conditional branches, cheaper to
         -- total right where those branches already live than to re-derive them here). Then
-        -- `UpdateScrollChildRect()` so the scrollbar (BenillaQuestLogDetailScroll_SyncBar) hears the
+        -- `UpdateScrollChildRect()` so the scrollbar (the template's OnScrollRangeChanged) hears the
         -- new range.
         function BenillaQuestLogDetail_ResizeChild(objAnchorIndex, rewardSectionHeight)
             detailObjAnchorIndex = objAnchorIndex
             detailRewardHeight = rewardSectionHeight
             local title = getglobal("QuestLogQuestTitle")
             local objectivesText = getglobal("QuestLogObjectivesText")
-            local description = getglobal("QuestLogDescription")
+            local description = getglobal("QuestLogQuestDescription")
 
             local objSpan
             if objAnchorIndex > 0 then
@@ -483,12 +496,12 @@
 
             if height ~= detailLastAppliedHeight then
                 detailLastAppliedHeight = height
-                getglobal("QuestLogDetailChild"):SetHeight(height)
-                getglobal("QuestLogDetailScroll"):UpdateScrollChildRect()
+                getglobal("QuestLogDetailScrollChildFrame"):SetHeight(height)
+                getglobal("QuestLogDetailScrollFrame"):UpdateScrollChildRect()
             end
         end
 
-        -- The re-check `QuestLogDetailScroll`'s own `<OnUpdate>` calls every frame the log
+        -- The re-check `QuestLogDetailScrollFrame`'s own `<OnUpdate>` calls every frame the log
         -- window is open (`UiScript::tick`'s OnUpdate gate gates it on effective-visibility, so this
         -- costs nothing while the window is closed): re-sums the SAME inputs the last full populate
         -- computed (`BenillaQuestLogDetail_ResizeChild`'s own header comment on why a single populate
@@ -518,45 +531,12 @@
             end
         end
 
-        -- Steps the detail ScrollFrame by `delta` px — the wheel handler and both scrollbar arrow
-        -- buttons share this one path; SetVerticalScroll's own clamp (benilla-ui's `scrollframe.rs`)
-        -- does the range-bounding, this function just supplies the signed step.
-        function BenillaQuestLogDetailScroll_Step(delta)
-            local sf = getglobal("QuestLogDetailScroll")
-            sf:SetVerticalScroll(sf:GetVerticalScroll() + delta)
-        end
-
-        -- Repaints the minimal scrollbar (this window's own scrollbar comment: VISUAL only, no
-        -- drag) from the CURRENT offset/range — wired to both OnVerticalScroll (the value changed)
-        -- and OnScrollRangeChanged (the content resized), the ref UIPanelScrollFrameTemplate's own
-        -- pair (UIPanelTemplates.xml). Hides the whole bar when nothing overflows (range 0); disables
-        -- either arrow at its own end, mirroring the ref's identical two Enable/Disable calls off a
-        -- real Slider's min/max (there's no Slider here — this window's own comment on why).
-        function BenillaQuestLogDetailScroll_SyncBar()
-            local sf = getglobal("QuestLogDetailScroll")
-            local value = sf:GetVerticalScroll()
-            local range = sf:GetVerticalScrollRange()
-            local bar = getglobal("QuestLogDetailScrollBar")
-            if range <= 0 then
-                bar:Hide()
-                return
-            end
-            bar:Show()
-            if value > 0 then
-                getglobal("QuestLogDetailScrollUp"):Enable()
-            else
-                getglobal("QuestLogDetailScrollUp"):Disable()
-            end
-            if value < range then
-                getglobal("QuestLogDetailScrollDown"):Enable()
-            else
-                getglobal("QuestLogDetailScrollDown"):Disable()
-            end
-            local travel = BENILLA_QUESTLOG_SCROLL_TRACK_H - BENILLA_QUESTLOG_SCROLL_THUMB_H
-            local frac = value / range
-            getglobal("QuestLogDetailScrollThumb"):SetPoint(
-                "TOPLEFT", getglobal("QuestLogDetailScrollTrack"), "TOPLEFT", 0, -(frac * travel))
-        end
+        -- The detail pane's scrollbar is the ref's own `UIPanelScrollFrameTemplate` Slider now
+        -- (ref l.276-289): the wheel, the arrows, the draggable thumb and the range bookkeeping all
+        -- come from the template. What stood here was `BenillaQuestLogDetailScroll_Step`/`_SyncBar`
+        -- over a hand-rolled, no-drag `QuestLogDetailScrollBar` — a private name pfUI's
+        -- `skins/blizzard/questlog.lua` l.199 falls through, since it skins
+        -- `QuestLogDetailScrollFrameScrollBar`.
 
         function BenillaQuestLogDetail_Clear()
             getglobal("QuestLogQuestTitle"):SetText("")
@@ -567,16 +547,15 @@
             BenillaQuestLogHasTimer = nil
             getglobal("QuestLogTimerText"):SetText("")
             getglobal("QuestLogDescriptionTitle"):SetText("")
-            getglobal("QuestLogDescription"):SetText("")
+            getglobal("QuestLogQuestDescription"):SetText("")
             for i = 1, MAX_OBJECTIVES do
                 getglobal("QuestLogObjective" .. i):SetText("")
             end
             getglobal("QuestLogRewardTitleText"):SetText("")
             getglobal("QuestLogItemChooseText"):SetText("")
             getglobal("QuestLogItemReceiveText"):SetText("")
-            for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
-                getglobal("QuestLogChoice" .. i):Hide()
-                getglobal("QuestLogReward" .. i):Hide()
+            for i = 1, MAX_NUM_ITEMS do
+                getglobal("QuestLogItem" .. i):Hide()
             end
             BenillaMoney_Clear("QuestLogMoney")
             -- Nothing selected: the header-only span (BenillaQuestLogRewards_Update's own
@@ -642,7 +621,7 @@
         -- The reward-panel layout, ported from the ref's shared `QuestFrameItems_Update`
         -- (QuestFrame.lua:311-522, the same routine the live QuestFrame reward panel uses) — this
         -- window's v1 subset of it: no spell-reward row (GetQuestLogRewardSpell has no v1 caller,
-        -- QuestLogFrame.xml's header comment), capped at BENILLA_QUESTLOG_MAX_ITEMS (6, half the ref's
+        -- QuestLogFrame.xml's header comment), capped at MAX_NUM_ITEMS (6, half the ref's
         -- MAX_NUM_ITEMS=10, same halving QuestFrame.xml's own BENILLA_QUEST_MAX_ITEMS does). Every
         -- SetPoint below mirrors the ref's own line-for-line (cited per block) — this is the mechanism
         -- the ref itself uses; a static XML band was never right, and now that a runtime SetPoint
@@ -673,25 +652,26 @@
             -- the row two back (0,-2) — starts a new row; each EVEN index anchors TOPRIGHT of the
             -- previous (1,0) — sits beside it. ──
             local chooseText = getglobal("QuestLogItemChooseText")
-            local lastChoice = math.min(numChoices, BENILLA_QUESTLOG_MAX_ITEMS)
+            local lastChoice = math.min(numChoices, MAX_NUM_ITEMS)
             if numChoices > 0 then
                 chooseText:SetText("You may choose one of these rewards:")
             else
                 chooseText:SetText("")
             end
-            for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
-                local choice = getglobal("QuestLogChoice" .. i)
-                if i <= lastChoice then
-                    BenillaQuestLogItem_Set(choice, GetQuestLogChoiceInfo, i, "choice")
-                    if i == 1 then
-                        choice:SetPoint("TOPLEFT", chooseText, "BOTTOMLEFT", -3, -5)
-                    elseif i % 2 == 1 then
-                        choice:SetPoint("TOPLEFT", getglobal("QuestLogChoice" .. (i - 2)), "BOTTOMLEFT", 0, -2)
-                    else
-                        choice:SetPoint("TOPLEFT", getglobal("QuestLogChoice" .. (i - 1)), "TOPRIGHT", 1, 0)
-                    end
+            -- ref l.358-361: hide the tail of the pool BEFORE laying any of it out.
+            local totalRewards = numChoices + numRewards
+            for i = totalRewards + 1, MAX_NUM_ITEMS do
+                getglobal("QuestLogItem" .. i):Hide()
+            end
+            for i = 1, lastChoice do
+                local choice = getglobal("QuestLogItem" .. i)
+                BenillaQuestLogItem_Set(choice, GetQuestLogChoiceInfo, i, "choice")
+                if i == 1 then
+                    choice:SetPoint("TOPLEFT", chooseText, "BOTTOMLEFT", -3, -5)
+                elseif i % 2 == 1 then
+                    choice:SetPoint("TOPLEFT", getglobal("QuestLogItem" .. (i - 2)), "BOTTOMLEFT", 0, -2)
                 else
-                    choice:Hide()
+                    choice:SetPoint("TOPLEFT", getglobal("QuestLogItem" .. (i - 1)), "TOPRIGHT", 1, 0)
                 end
             end
 
@@ -706,7 +686,7 @@
                     receiveText:SetText("You will also receive:")
                     local anchorIndex = lastChoice
                     if anchorIndex % 2 == 0 then anchorIndex = anchorIndex - 1 end
-                    receiveText:SetPoint("TOPLEFT", getglobal("QuestLogChoice" .. anchorIndex), "BOTTOMLEFT", 3, -5)
+                    receiveText:SetPoint("TOPLEFT", getglobal("QuestLogItem" .. anchorIndex), "BOTTOMLEFT", 3, -5)
                 else
                     receiveText:SetText("You will receive:")
                     receiveText:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 3, -5)
@@ -717,20 +697,18 @@
 
             -- ── Fixed rewards (QuestFrame.lua:474-513): row 1 anchors below ItemReceiveText (-3,-5);
             -- the same odd/even 2-per-row pattern as the choice rows above, chained off each other. ──
-            local lastReward = math.min(numRewards, BENILLA_QUESTLOG_MAX_ITEMS)
-            for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
-                local reward = getglobal("QuestLogReward" .. i)
-                if i <= lastReward then
-                    BenillaQuestLogItem_Set(reward, GetQuestLogRewardInfo, i, "reward")
-                    if i == 1 then
-                        reward:SetPoint("TOPLEFT", receiveText, "BOTTOMLEFT", -3, -5)
-                    elseif i % 2 == 1 then
-                        reward:SetPoint("TOPLEFT", getglobal("QuestLogReward" .. (i - 2)), "BOTTOMLEFT", 0, -2)
-                    else
-                        reward:SetPoint("TOPLEFT", getglobal("QuestLogReward" .. (i - 1)), "TOPRIGHT", 1, 0)
-                    end
+            -- The fixed rows CONTINUE the pool after the choices (ref's own running `rewardsCount`).
+            local lastReward = math.min(numRewards, MAX_NUM_ITEMS - lastChoice)
+            for i = 1, lastReward do
+                local index = i + lastChoice
+                local reward = getglobal("QuestLogItem" .. index)
+                BenillaQuestLogItem_Set(reward, GetQuestLogRewardInfo, i, "reward")
+                if i == 1 then
+                    reward:SetPoint("TOPLEFT", receiveText, "BOTTOMLEFT", -3, -5)
+                elseif i % 2 == 1 then
+                    reward:SetPoint("TOPLEFT", getglobal("QuestLogItem" .. (index - 2)), "BOTTOMLEFT", 0, -2)
                 else
-                    reward:Hide()
+                    reward:SetPoint("TOPLEFT", getglobal("QuestLogItem" .. (index - 1)), "TOPRIGHT", 1, 0)
                 end
             end
 
@@ -779,7 +757,7 @@
             if selection == 0 or selection > GetNumQuestLogEntries() then
                 BenillaQuestLogDetail_Clear()
                 if not doNotScroll then
-                    getglobal("QuestLogDetailScroll"):SetVerticalScroll(0)
+                    getglobal("QuestLogDetailScrollFrame"):SetVerticalScroll(0)
                 end
                 return
             end
@@ -816,7 +794,7 @@
                 timerText:SetText("")
                 objective1:SetPoint("TOPLEFT", getglobal("QuestLogObjectivesText"), "BOTTOMLEFT", 0, -10)
             end
-            getglobal("QuestLogDescription"):SetText(description or "")
+            getglobal("QuestLogQuestDescription"):SetText(description or "")
             -- Lua-managed header (ref text=QUEST_DESCRIPTION is static since the ref always has a real
             -- selection whenever this pane is even visible; our flat window keeps the same FontString
             -- alive with no selection, so THIS function — not a static `text=` — owns "Description",
@@ -865,7 +843,7 @@
             local rewardHeight = BenillaQuestLogRewards_Update()
             BenillaQuestLogDetail_ResizeChild(objAnchorIndex, rewardHeight)
             if not doNotScroll then
-                getglobal("QuestLogDetailScroll"):SetVerticalScroll(0)
+                getglobal("QuestLogDetailScrollFrame"):SetVerticalScroll(0)
             end
         end
 
@@ -1091,8 +1069,36 @@
             end
         end
 
+        -- The Share Quest button's enable state (ref QuestLogFrame.lua:299-305 and :74-79, which
+        -- are the same three lines twice: the full update runs it with the entry count to hand,
+        -- and PARTY_MEMBERS_CHANGED runs it alone because a party you just joined or left changes
+        -- the answer without changing the log). `numEntries` is optional — omitted, it is read
+        -- here, which is what the event path wants.
+        function BenillaQuestLogPushButton_Update(numEntries)
+            if not numEntries then
+                numEntries = GetNumQuestLogEntries()
+            end
+            local pushButton = getglobal("QuestFramePushQuestButton")
+            if numEntries == 0 then
+                pushButton:Disable()
+            elseif GetQuestLogPushable() and GetNumPartyMembers() > 0 then
+                pushButton:Enable()
+            else
+                pushButton:Disable()
+            end
+        end
+
         function BenillaQuestLogFrame_OnLoad(frame)
             frame:RegisterEvent("QUEST_LOG_UPDATE")
+            -- ref QuestLog_OnLoad (QuestLogFrame.lua:44-54) registers this for exactly one reason:
+            -- the Share Quest button's second conjunct. Joining or leaving a party changes whether
+            -- the selected quest can be shared without changing the quest log at all, so
+            -- QUEST_LOG_UPDATE alone would leave the button stale (decision 1733).
+            frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+            -- The faux kit's owner hook (ScrollTemplates.xml l.37): a bar drag or arrow click sets
+            -- the frame's offset and then calls this to repaint the rows. SkillFrame.xml wires its
+            -- own the same way.
+            getglobal("QuestLogListScrollFrame").updateFunc = BenillaQuestLogList_Update
         end
 
         function BenillaQuestLogFrame_OnEvent(frame)
@@ -1101,6 +1107,11 @@
                 -- passes `1`) — a quest updating while already being read must not yank the reader's
                 -- scroll position back to the top.
                 BenillaQuestLogFrame_Update(true)
+            elseif event == "PARTY_MEMBERS_CHANGED" then
+                -- The ref runs a whole QuestLog_Update here (its else-branch, QuestLogFrame.lua:71-81)
+                -- and then re-tests the button; the list cannot have changed, so only the button is
+                -- repainted. Same observable state, no scroll or selection churn.
+                BenillaQuestLogPushButton_Update()
             end
         end
 
@@ -1193,7 +1204,7 @@
         this mirrors the ref's own duplication, not just an engine workaround. Keep the two shapes in
         sync by hand if either is revisited.
     -->
-    <Button name="BenillaQuestLogItemTemplate" virtual="true" hidden="true">
+    <Button name="QuestLogRewardItemTemplate" virtual="true" hidden="true">
         <!-- Ref-verbatim geometry (QuestFrameTemplates.xml:85-138): a bare 39×39 icon at TOPLEFT
              (no slot-well texture behind it — the earlier `UI-EmptySlot` here was our own addition
              and read as a heavy black box on the parchment), the name plate overlapping the icon's
@@ -1248,7 +1259,7 @@
     <!--
         One list row (pin §2's QuestLogTitleButtonTemplate, QuestLogFrame.xml:4-107, ~300×16). Text
         lives on a NAMED `$parentText` FontString (not the auto ButtonText slot — same convention
-        `GossipFrame.xml`'s `BenillaGossipRowTemplate` uses for its `$parentLabel`), so it can carry
+        `GossipFrame.xml`'s `GossipTitleButtonTemplate` uses for its `$parentLabel`), so it can carry
         an explicit LEFT justify. v1 simplification: the ref's Complete/Failed tag rides a SEPARATE
         right-justified `$parentTag` FontString the client shrinks the title to make room for; we
         append the tag straight onto the one title string instead (`BenillaQuestLogList_Update`) —
@@ -1259,7 +1270,7 @@
         16x16 UI-PlusButton-Hilight at the same spot is the ONLY hover art (quest rows clear it
         too — the ref has NO row-wide hover glow), and the text starts at LEFT+20 (the real
         indent; quest rows add the ref's own two-space prefix on top). The PERSISTENT selection bar
-        is the separate `QuestLogSelectHighlight` frame `BenillaQuestLogList_Update` moves.
+        is the separate `QuestLogHighlightFrame` frame `BenillaQuestLogList_Update` moves.
 
         `$parentCheck` (pin §2, ref `QuestLogFrame.xml:34-45`) is the per-row watch checkbox — a 16×16
         `UI-CheckBox-Check`, no `file=` here (where the ref uses `hidden="true"`): it starts with
@@ -1277,7 +1288,7 @@
         title+tag string means a "(Complete)" row seats the check after the tag, not between
         title and tag.
     -->
-    <Button name="BenillaQuestLogTitleTemplate" virtual="true" hidden="true">
+    <Button name="QuestLogTitleButtonTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="300" y="16"/></Size>
         <Layers>
             <Layer level="ARTWORK">
@@ -1307,7 +1318,7 @@
                 -- publish, state slots don't).
                 self.foldHighlight = self:GetHighlightTexture()
                 -- Both buttons must reach OnClick (the default set is LeftButtonUp only) — the same
-                -- convention `BagFrame.xml`'s `BenillaBagSlot_OnLoad` uses for its own left/right split.
+                -- convention the reference's own `BankFrameBaseButton_OnLoad` uses for its left/right split.
                 self:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             </OnLoad>
             <OnClick>BenillaQuestLogTitle_OnClick(self, arg1)</OnClick>
@@ -1316,7 +1327,7 @@
 
     <!-- A panel action button (Abandon/Exit/Yes/No) — the UIPanelButtonTemplate face from
          `QuestFrame.xml`'s `BenillaQuestPanelButtonTemplate`, duplicated for the same per-window
-         test-isolation reason as `BenillaQuestLogItemTemplate` above. UNLIKE the giver window's
+         test-isolation reason as `QuestLogRewardItemTemplate` above. UNLIKE the giver window's
          template this one is NOT hidden="true": the giver's panel-switch Lua re-Show()s each
          panel's pair every switch, but this window's Abandon/Exit are always-visible chrome (ref
          QuestLogFrame.xml:451/482) with no code path that would ever Show() them — inheriting
@@ -1332,7 +1343,7 @@
         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
     </Button>
 
-    <Frame name="QuestLogFrame" hidden="true">
+    <Frame name="QuestLogFrame" enableMouse="true" toplevel="true" parent="UIParent" hidden="true">
         <!-- The real 384×512 window (pin §1). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints this
              to the left slot on open, exactly like Gossip/Merchant/Quest. -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -1374,20 +1385,11 @@
                     <Anchors><Anchor point="RIGHT" relativeTo="QuestLogCountMiddle" relativePoint="LEFT"/></Anchors>
                     <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
                 </Texture>
-                <FontString name="QuestLogCount" inherits="GameFontNormalSmall" justifyH="RIGHT">
+                <FontString name="QuestLogQuestCount" inherits="GameFontNormalSmall" justifyH="RIGHT">
                     <Anchors><Anchor point="RIGHT" relativeTo="QuestLogCountRight" relativePoint="RIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
                 </FontString>
-                <!-- v1 empty state (pin §2's EmptyQuestLogFrame, simplified — this file's header
-                     comment): one centered message over the row area. No `text=`/`hidden=` here —
-                     `BenillaQuestLogList_Update` owns this entirely via SetText(""), this file's
-                     blank-text convention (see that function's comment). -->
-                <FontString name="QuestLogEmptyText" inherits="GameFontNormal" justifyH="CENTER">
-                    <Size><AbsDimension x="300" y="0"/></Size>
-                    <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-90"/></Offset></Anchor></Anchors>
-                </FontString>
-
-                <!-- Detail page (pin §3): NOW lives on `QuestLogDetailChild`, a real
-                     ScrollFrame's scroll child (`QuestLogDetailScroll`, below in this window's
+                <!-- Detail page (pin §3): NOW lives on `QuestLogDetailScrollChildFrame`, a real
+                     ScrollFrame's scroll child (`QuestLogDetailScrollFrame`, below in this window's
                      own `<Frames>`) — the 0088 §2 flat-frame constraint this file used to quote here
                      DIED with the 0112 resolver fixpoint (child frames render their own `<Layers>`
                      regions again), so the whole chain (QuestTitle → ItemReceiveText, the choice/
@@ -1410,7 +1412,7 @@
 
             <!-- pin §1: the top-right close X (UIPanelCloseButton in the ref; our engine ships no such
                  template — QuestFrame.xml/BagFrame.xml already draw it by hand on the same art). -->
-            <Button name="QuestLogCloseButton">
+            <Button name="QuestLogFrameCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-30" y="-8"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
@@ -1428,7 +1430,7 @@
                 <Size><AbsDimension x="54" y="32"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-48"/></Offset></Anchor></Anchors>
                 <Frames>
-                    <Button name="QuestLogCollapseAllButton" inherits="BenillaQuestLogTitleTemplate" hidden="false" text="All">
+                    <Button name="QuestLogCollapseAllButton" inherits="QuestLogTitleButtonTemplate" hidden="false" text="All">
                         <Size><AbsDimension x="40" y="22"/></Size>
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -1513,7 +1515,7 @@
                  the title text and washed it out — 0112's capture gate caught the wash, this scrub
                  found the cause). Moved onto the selected row (at the ref's (5,0)) and vertex-colored
                  to the row's difficulty color by `BenillaQuestLogList_Update` (ref lua l.337-339). -->
-            <Frame name="QuestLogSelectHighlight" hidden="true">
+            <Frame name="QuestLogHighlightFrame" hidden="true">
                 <Size><AbsDimension x="293" y="16"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                 <Layers><Layer level="ARTWORK">
@@ -1526,14 +1528,30 @@
             <!-- pin §2, geometry byte-for-byte (ref QuestLogFrame.xml:535-588): 6 title rows,
                  300×16, row1 TOPLEFT of the frame at (19,-75); rows 2-6 chain TOPLEFT→prior BOTTOMLEFT
                  at (0,+1) — a TIGHT 1px OVERLAP, not a gap (the ref's own offset is positive). -->
-            <Button name="QuestLogTitle1" inherits="BenillaQuestLogTitleTemplate">
+            <!-- ref l.291-307. The list's real faux-scroll frame: an invisible container over the
+                 6 title rows whose right-hand Slider is the only part that draws, sized to the row
+                 span and anchored where row 1 starts (SkillFrame.xml's own convention). It replaces
+                 a `questLogOffset` upvalue this file kept "because no real ScrollFrame/
+                 FauxScrollFrame engine exists yet" — long false, and the reason this window
+                 published no QuestLogListScrollFrame for addons to find. -->
+            <Frame name="QuestLogListScrollFrame" inherits="FauxScrollFrameTemplate">
+                <Size><AbsDimension x="300" y="93"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnVerticalScroll>
+                        FauxScrollFrame_OnVerticalScroll(QUESTLOG_QUEST_HEIGHT, BenillaQuestLogList_Update)
+                    </OnVerticalScroll>
+                </Scripts>
+            </Frame>
+
+            <Button name="QuestLogTitle1" inherits="QuestLogTitleButtonTemplate" id="1">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="QuestLogTitle2" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle3" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle4" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle5" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
-            <Button name="QuestLogTitle6" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle2" inherits="QuestLogTitleButtonTemplate" id="2"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle3" inherits="QuestLogTitleButtonTemplate" id="3"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle4" inherits="QuestLogTitleButtonTemplate" id="4"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle5" inherits="QuestLogTitleButtonTemplate" id="5"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="QuestLogTitle6" inherits="QuestLogTitleButtonTemplate" id="6"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogTitle5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
 
             <!-- The detail pane's real ScrollFrame (decision 0112's mechanism): 300×261, TOPLEFT of
                  this window at (19,-175) — the ref's own `QuestLogDetailScrollFrame` position, this
@@ -1544,10 +1562,10 @@
                  any wheel/click landing inside its own rect (this file's header comment on hit-test
                  z-order) — scrolling over the detail text no longer scrolls the LIST underneath it,
                  a latent mix-up the flat layout had no way to avoid. -->
-            <ScrollFrame name="QuestLogDetailScroll">
+            <ScrollFrame name="QuestLogDetailScrollFrame" inherits="UIPanelScrollFrameTemplate">
                 <Size><AbsDimension x="300" y="261"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-175"/></Offset></Anchor></Anchors>
-                <Frames>
+                <ScrollChild>
                     <!-- The scroll child (`SetScrollChild`'d in this ScrollFrame's own OnLoad below):
                          300 wide, matching the ref's `QuestLogDetailScrollChildFrame`; HEIGHT is
                          runtime-set by `BenillaQuestLogDetail_ResizeChild` (a Frame's height is only
@@ -1560,7 +1578,7 @@
                          subtree; everything downstream still chains by NAME exactly as before (anchor
                          resolution is name-keyed, not parent-scoped — unaffected by which frame owns
                          which region). -->
-                    <Frame name="QuestLogDetailChild">
+                    <Frame name="QuestLogDetailScrollChildFrame">
                         <Size><AbsDimension x="300" y="261"/></Size>
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                         <Layers>
@@ -1648,7 +1666,7 @@
                                     <Size><AbsDimension x="285" y="18"/></Size>
                                     <Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogObjectivesText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                 </FontString>
-                                <FontString name="QuestLogDescription" inherits="QuestFont" justifyH="LEFT">
+                                <FontString name="QuestLogQuestDescription" inherits="QuestFont" justifyH="LEFT">
                                     <Size><AbsDimension x="270" y="0"/></Size>
                                     <Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogDescriptionTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                 </FontString>
@@ -1656,7 +1674,7 @@
                                      (toggles "Rewards" / "" — this file's blank-text convention). -->
                                 <FontString name="QuestLogRewardTitleText" inherits="QuestTitleFont" justifyH="LEFT">
                                     <Size><AbsDimension x="300" y="18"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogDescription" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogQuestDescription" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
                                 </FontString>
                                 <!-- REWARD_CHOICES (ref QuestLogFrame.xml:821-832) — our literal transcription of the
                                      token's string. Lua-managed (`BenillaQuestLogRewards_Update` toggles the text). -->
@@ -1679,21 +1697,22 @@
                                  `BenillaQuestLogRewards_Update` SetPoints every shown row every repaint, porting
                                  `QuestFrameItems_Update`'s own SetPoint math verbatim (QuestFrame.lua:311-522,
                                  cited per-line in that function). -->
-                            <Button name="QuestLogChoice1" inherits="BenillaQuestLogItemTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogItemChooseText" relativePoint="BOTTOMLEFT"/></Anchors>
-                            </Button>
-                            <Button name="QuestLogChoice2" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogChoice1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogChoice3" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogChoice2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogChoice4" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogChoice3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogChoice5" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogChoice4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogChoice6" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogChoice5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-
-                            <Button name="QuestLogReward1" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogItemReceiveText" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogReward2" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogReward1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogReward3" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogReward2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogReward4" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogReward3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogReward5" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogReward4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                            <Button name="QuestLogReward6" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogReward5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <!-- ONE pool of 10, the ref's own (ref l.837-887): the detail page packs CHOICES,
+                                 then the reward-spell row, then FIXED rewards into a single numbered run and
+                                 positions each at runtime, so every row carries a bare TOPLEFT anchor. This was
+                                 two static 6-deep pools (QuestLogChoice*/QuestLogReward*), names the reference
+                                 does not have; pfUI's skins/blizzard/questlog.lua l.219-224 walks QuestLogItem
+                                 1..6 and indexes :GetWidth() unguarded. -->
+                            <Button name="QuestLogItem1" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem2" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem3" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem4" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem5" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem6" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem7" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem8" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem9" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
+                            <Button name="QuestLogItem10" inherits="QuestLogRewardItemTemplate"><Anchors><Anchor point="TOPLEFT"/></Anchors></Button>
 
                             <!-- Reward money (pin §3, GetQuestLogRewardMoney) — ref QuestLogMoneyFrame anchors LEFT
                                  to QuestLogItemReceiveText's RIGHT, offset (15,0) (QuestLogFrame.xml:896-903). -->
@@ -1723,104 +1742,76 @@
                             </Frame>
                         </Frames>
                     </Frame>
-
-                    <!-- A minimal ref-shaped scrollbar (ref UIPanelScrollFrameTemplate/
-                         UIPanelScrollBarTemplate, UIPanelTemplates.xml): up/down step buttons + a
-                         thumb texture positioned from GetVerticalScroll/GetVerticalScrollRange. VISUAL
-                         only — no drag: this engine has no Slider widget (no drag-capture affordance
-                         anywhere yet, the same class of gap this file's header comment already notes
-                         for modifier keys), so the ref's real `Slider` track is a named DEFERRED
-                         follow-up, not modeled here; the wheel + the two arrow buttons are the only
-                         interactive paths to scroll, which is already the ENTIRE ask (the ref's own
-                         mouse-drag-the-thumb affordance is the one piece missing). Hidden whenever
-                         nothing overflows (`BenillaQuestLogDetailScroll_SyncBar`). -->
-                    <Frame name="QuestLogDetailScrollBar" hidden="true">
-                        <Size><AbsDimension x="16" y="261"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogDetailScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
-                        <Frames>
-                            <Button name="QuestLogDetailScrollUp">
-                                <Size><AbsDimension x="16" y="16"/></Size>
-                                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
-                                <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
-                                <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
-                                <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
-                                <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestLogDetailScroll_Step(-BENILLA_QUESTLOG_SCROLL_STEP)</OnClick></Scripts>
-                            </Button>
-                            <Button name="QuestLogDetailScrollDown">
-                                <Size><AbsDimension x="16" y="16"/></Size>
-                                <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"/></Anchors>
-                                <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
-                                <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
-                                <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
-                                <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestLogDetailScroll_Step(BENILLA_QUESTLOG_SCROLL_STEP)</OnClick></Scripts>
-                            </Button>
-                            <!-- The track: BENILLA_QUESTLOG_SCROLL_TRACK_H (229) tall, between the two
-                                 arrow buttons (261 - 16 - 16). The thumb texture is a plain child
-                                 region SetPoint'd by BenillaQuestLogDetailScroll_SyncBar off the
-                                 CURRENT GetVerticalScroll()/GetVerticalScrollRange() fraction. -->
-                            <Frame name="QuestLogDetailScrollTrack">
-                                <Size><AbsDimension x="16" y="229"/></Size>
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="QuestLogDetailScrollUp" relativePoint="BOTTOMLEFT"/></Anchors>
-                                <Layers><Layer level="OVERLAY">
-                                    <Texture name="QuestLogDetailScrollThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
-                                        <Size><AbsDimension x="16" y="16"/></Size>
-                                        <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
-                                        <!-- The ref thumb samples the knob art's CENTER quarter
-                                             (UIPanelScrollBarButton's TexCoords, UIPanelTemplates.xml
-                                             :104-106 + :160-164) — full UVs squash the 32px canvas
-                                             into 16px and the knob reads half-size (director's
-                                             "scroll cube is too small"). -->
-                                        <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
-                                    </Texture>
-                                </Layer></Layers>
-                            </Frame>
-                        </Frames>
-                    </Frame>
-                </Frames>
-                <Scripts>
-                    <OnLoad>self:SetScrollChild(getglobal("QuestLogDetailChild"))</OnLoad>
-                    <OnMouseWheel>
-                        if arg1 > 0 then
-                            BenillaQuestLogDetailScroll_Step(-BENILLA_QUESTLOG_SCROLL_STEP)
-                        else
-                            BenillaQuestLogDetailScroll_Step(BENILLA_QUESTLOG_SCROLL_STEP)
-                        end
-                    </OnMouseWheel>
-                    <OnVerticalScroll>BenillaQuestLogDetailScroll_SyncBar()</OnVerticalScroll>
-                    <OnScrollRangeChanged>BenillaQuestLogDetailScroll_SyncBar()</OnScrollRangeChanged>
-                    <!-- BenillaQuestLogDetail_OnUpdate's own comment: the FIRST populate of a
-                         freshly-selected quest's text sizes off a one-tick-stale (zero, brand-new
-                         text) GetHeight() — nothing else re-asks once the quest log's data itself
-                         stops changing, so this keeps re-checking every frame the window is open
-                         until the real measurement lands and the resize stops changing (its own
-                         guard makes every further call here a no-op). -->
-                    <OnUpdate>BenillaQuestLogDetail_OnUpdate()</OnUpdate>
-                </Scripts>
+                </ScrollChild>
             </ScrollFrame>
+
+            <!-- ref l.370-440. The empty-log page: four `UI-QuestLog-Empty-*` slabs and the
+                 "no quests" line, shown as ONE frame when the log is empty and hidden otherwise
+                 (ref QuestLogFrame.lua l.108-119). This window used to carry only the FontString,
+                 loose on its own Layers and blanked with SetText("") — the simplification the
+                 header called "pin §2's EmptyQuestLogFrame, simplified". pfUI's
+                 `skins/blizzard/questlog.lua` l.118-131 strips it, hooks its OnShow/OnHide, and
+                 drives its own expand button off them, so the FRAME is the contract, not the text. -->
+            <Frame name="EmptyQuestLogFrame" hidden="true">
+                <Size><AbsDimension x="384" y="512"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="19" y="-73"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture file="Interface\QuestFrame\UI-QuestLog-Empty-TopLeft">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Texture>
+                        <Texture file="Interface\QuestFrame\UI-QuestLog-Empty-TopRight">
+                            <Size><AbsDimension x="64" y="256"/></Size>
+                            <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-64" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture file="Interface\QuestFrame\UI-QuestLog-Empty-BotLeft">
+                            <Size><AbsDimension x="256" y="128"/></Size>
+                            <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="0" y="128"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture file="Interface\QuestFrame\UI-QuestLog-Empty-BotRight">
+                            <Size><AbsDimension x="64" y="128"/></Size>
+                            <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-64" y="128"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <FontString name="QuestLogNoQuestsText" inherits="GameFontHighlight" text="Your quest log is empty.">
+                            <Size><AbsDimension x="200" y="16"/></Size>
+                            <Anchors><Anchor point="TOP" relativeTo="QuestLogTitleText"><Offset><AbsDimension x="-20" y="-90"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
 
             <!-- pin §4, geometry byte-for-byte (ref QuestLogFrame.xml:451-498): Abandon 125×21 at
                  (17,54), Exit 77×21 at (-43,54). numEntries==0 disables Abandon. -->
-            <Button name="QuestLogAbandonButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Abandon Quest">
+            <Button name="QuestLogFrameAbandonButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Abandon Quest">
                 <Size><AbsDimension x="125" y="21"/></Size>
                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="17" y="54"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaQuestLogAbandonButton_OnClick()</OnClick></Scripts>
             </Button>
-            <Button name="QuestLogExitButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Exit">
+            <Button name="QuestFrameExitButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Exit">
                 <Size><AbsDimension x="77" y="21"/></Size>
                 <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-43" y="54"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>HideUIPanel(getglobal("QuestLogFrame"))</OnClick></Scripts>
             </Button>
             <!-- Share Quest (ref QuestFramePushQuestButton, QuestLogFrame.xml:499-521): 123×21 flush
-                 LEFT of Exit. Party quest-sharing is a named deferral (no QuestLogPushQuest wire yet),
-                 so this ships permanently DISABLED — exactly how the ref presents it solo (its lua
-                 disables it whenever the party can't receive the quest); the button existing is what
-                 fills the bottom row's middle slot the frame art reserves for it. -->
-            <Button name="QuestLogPushQuestButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Share Quest">
+                 LEFT of Exit. Live since decision 1733; it starts DISABLED because that is the
+                 solo/no-selection state the ref's own predicate produces, and
+                 BenillaQuestLogPushButton_Update re-tests it on every list update and every
+                 PARTY_MEMBERS_CHANGED. The newbie tooltip is the ref's (NEWBIE_TOOLTIP_SHAREQUEST,
+                 GlobalStrings.lua:2764), through the same GameTooltip_AddNewbieTip the ref calls. -->
+            <Button name="QuestFramePushQuestButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Share Quest">
                 <Size><AbsDimension x="123" y="21"/></Size>
-                <Anchors><Anchor point="RIGHT" relativeTo="QuestLogExitButton" relativePoint="LEFT"/></Anchors>
-                <Scripts><OnLoad>self:Disable()</OnLoad></Scripts>
+                <Anchors><Anchor point="RIGHT" relativeTo="QuestFrameExitButton" relativePoint="LEFT"/></Anchors>
+                <Scripts>
+                    <OnLoad>self:Disable()</OnLoad>
+                    <OnClick>QuestLogPushQuest()</OnClick>
+                    <OnEnter>
+                        if GameTooltip_AddNewbieTip then
+                            GameTooltip_AddNewbieTip(SHARE_QUEST, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_SHAREQUEST, 1)
+                        end
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
             </Button>
         </Frames>
         <Scripts>
@@ -1863,7 +1854,7 @@
         too (it's the log's own on-screen echo, driven by the same Lua functions/getters as the log
         window above), and this file's tests already load nothing else — a second file would need its
         own duplicate test-harness load list for zero isolation benefit (contrast the
-        `BenillaQuestLogItemTemplate`/`BenillaQuestLogPanelButtonTemplate` duplication above, which
+        `QuestLogRewardItemTemplate`/`BenillaQuestLogPanelButtonTemplate` duplication above, which
         buys real per-window test isolation).
 
         v1 placement: TOPRIGHT of the screen, offset (-10,-170) — no minimap frame exists in benilla
@@ -1892,7 +1883,7 @@
          lines*13) so the left-aligned column hugs the minimap's right edge like the ref; the
          GetWidth reads are extract-measured (one frame stale), so the sizing tail re-runs from
          OnUpdate for two frames after each repaint (`resize_pending`) and converges next frame. -->
-    <Frame name="QuestWatchFrame">
+    <Frame name="QuestWatchFrame" toplevel="true" parent="UIParent">
         <Size><AbsDimension x="280" y="20"/></Size>
         <Anchors>
             <Anchor point="TOPRIGHT" relativeTo="MinimapCluster" relativePoint="BOTTOMRIGHT">

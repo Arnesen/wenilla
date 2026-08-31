@@ -25,9 +25,11 @@
       reference. `/pvp` is the toggle the client has.
     - DEFERRED ENTRIES: rows whose backing system doesn't exist yet are HIDDEN outright (the
       BENILLA_UNITPOPUP_DEFERRED set below) rather than shown-dead: TARGET (the friends
-      list), RESET_INSTANCES (instances). TRADE came out
+      list). TRADE came out
       with decision 0592 P1, DUEL with 0633, INSPECT with 0631, GUILD_PROMOTE/GUILD_LEAVE with
-      the guild arc (1257 — their hide predicates and click rows are below), FOLLOW with 0890's
+      the guild arc (1257 — their hide predicates and click rows are below), RESET_INSTANCES with
+      the instance-lockout arc (1748 — its predicate is the reference's own
+      `CanShowResetInstances()`, whose four terms are now real), FOLLOW with 0890's
       follow-up — and
       that last entry's stated reason ("its CMSG family is its own slice") was simply WRONG: 0890
       verified auto-follow sends nothing at all, it is pure client-side movement, so the row was
@@ -228,7 +230,6 @@
         -- The DEFERRED set (header): entries hidden until their backing arc lands.
         BENILLA_UNITPOPUP_DEFERRED = {
             TARGET = 1,
-            RESET_INSTANCES = 1,
         };
 
         -- ── Shared helpers ─────────────────────────────────────────────────────────────────
@@ -346,6 +347,15 @@
         HIDE_ROW["LEAVE"] = hideOutsideAParty;
         HIDE_ROW["LOOT_METHOD"] = hideOutsideAParty;
         HIDE_ROW["LOOT_THRESHOLD"] = hideOutsideAParty;
+
+        -- "Reset all instances", ref UnitPopup.lua l.377-380 (decision 1748) — TWO conditions,
+        -- and the second is not `hideUnlessLeading`: a SOLO player may reset (there is no party
+        -- to hold anyone inside), a party LEADER may, and a party member may not. The engine half
+        -- is the interesting one: `CanShowResetInstances()` is true only while we hold a
+        -- permanent bind, are not standing in a 5-man, and left one within the last 25 hours.
+        HIDE_ROW["RESET_INSTANCES"] = function(menu, party)
+            return not CanShowResetInstances() or (party.inParty == 1 and party.isLeader == 0);
+        end
 
         local function hideUnlessLeading(menu, party)
             return party.inParty == 0 or party.isLeader == 0;
@@ -711,6 +721,13 @@
 
         CLICK_ROW["LEAVE"] = function()
             LeaveParty();
+        end
+
+        -- Resetting goes behind a confirm (ref UnitPopup_OnClick l.620-621): the send is
+        -- irreversible and takes every dungeon we own at once. The dialog is registered with the
+        -- rest of the instance arc, in RaidFrame.xml.
+        CLICK_ROW["RESET_INSTANCES"] = function()
+            StaticPopup_Show("CONFIRM_RESET_INSTANCES");
         end
 
         -- Picking a loot method sets it and writes the choice back onto the parent row — list 1,

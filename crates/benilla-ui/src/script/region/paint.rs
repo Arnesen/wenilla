@@ -3,7 +3,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use crate::script::object::{as_f32, draw_layer_from_str};
+use crate::script::object::{as_f32, draw_layer_from_str, draw_layer_name};
 use crate::script::{Model, TexCoords};
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
@@ -399,6 +399,30 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 }
             }
             Ok(())
+        })?,
+    )?;
+
+    // GetDrawLayer() — the setter's pair, present on BOTH region leaves in the client (Texture
+    // `0x79a6c0`, FontString `0x79c660`, each its own copy — read off the method-table pair bytes).
+    //
+    // This module's own note used to end "GetDrawLayer is in the client's pair and absent here;
+    // absent is absent" — accurate, and a gap rather than a decision. pfUI's `GetNoNameObject`
+    // (api/api.lua:1342) reads it off every child while reskinning a Blizzard frame, and died
+    // there; that is the measurement (1719).
+    //
+    // Returns the layer NAME alone. The sub-level we store beside it is not a second return here:
+    // 1.12's pair is layer-only, and `SetDrawLayer`'s optional sub-level argument above is already
+    // marked as this engine's extension point.
+    m.set(
+        "GetDrawLayer",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let dl = model
+                .arena
+                .region(rh)
+                .map_or(crate::order::DrawLayer::Artwork, |r| r.draw_layer);
+            Ok(draw_layer_name(dl))
         })?,
     )?;
 

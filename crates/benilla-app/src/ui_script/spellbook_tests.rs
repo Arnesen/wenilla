@@ -171,7 +171,8 @@ fn shipped_spellbook_drives_end_to_end() {
         "Fire Blast"
     );
     assert!(
-        !s.eval::<bool>("return SpellButton2:IsEnabled()").unwrap(),
+        !s.eval::<bool>("return SpellButton2:IsEnabled() ~= 0")
+            .unwrap(),
         "book id 7 is past the 2-spell Fire tab — disabled"
     );
 

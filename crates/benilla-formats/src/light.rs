@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{f32_at, parse, u32_at};
+use crate::dbc::{f32_at, parse, str_at, u32_at};
 use crate::Chain;
 
 mod atmosphere; // the resolved `Atmosphere` output type + the DBC row/field → meaning constants
@@ -33,7 +33,7 @@ use atmosphere::{
     FB_CLOUD_DENSITY, FB_FOG_END, FB_FOG_START_MULT, IB_AMBIENT, IB_CLOUD_GBASE, IB_CLOUD_SLOPE,
     IB_CLOUD_SUN, IB_DIFFUSE, IB_FOG_COLOR, IB_OCEAN_DEEP, IB_OCEAN_SHALLOW, IB_RIVER_DEEP,
     IB_RIVER_SHALLOW, IB_SKY0, IB_SUN_COLOR, LP_GLOW, LP_HIGHLIGHT, LP_OCEAN_DEEP_ALPHA,
-    LP_OCEAN_SHALLOW_ALPHA, LP_WATER_DEEP_ALPHA, LP_WATER_SHALLOW_ALPHA,
+    LP_OCEAN_SHALLOW_ALPHA, LP_SKYBOX, LP_WATER_DEEP_ALPHA, LP_WATER_SHALLOW_ALPHA,
 };
 pub use atmosphere::{ZERO_KEY_COLOR, ZERO_KEY_SCALAR};
 use tables::{band_schema, load_bands, load_float_bands, sample_color, sample_float, Band, DAY};
@@ -42,6 +42,7 @@ const LIGHT: &str = "DBFilesClient\\Light.dbc";
 const INT_BAND: &str = "DBFilesClient\\LightIntBand.dbc";
 const FLOAT_BAND: &str = "DBFilesClient\\LightFloatBand.dbc";
 const LIGHT_PARAMS: &str = "DBFilesClient\\LightParams.dbc";
+const LIGHT_SKYBOX: &str = "DBFilesClient\\LightSkybox.dbc";
 
 /// World-unit scale factor on Light.dbc positions/radii (stored as yards × 36).
 const POS_SCALE: f32 = 36.0;
@@ -198,6 +199,16 @@ pub struct LightCatalog {
     /// `LightParams.dbc` id → water-blend alphas `[waterShallow, waterDeep, oceanShallow, oceanDeep]`
     /// (fields 5–8). The from-above swatch's per-zone depth-alpha ramp endpoints.
     light_params_water_alpha: HashMap<u32, [f32; 4]>,
+    /// `LightParams.dbc` id → `lightSkyboxID` (field [`LP_SKYBOX`]), kept only for the non-zero rows
+    /// — 5 of 426 in the shipped chain, every one of them the ghost sky.
+    light_params_skybox: HashMap<u32, u32>,
+    /// `LightSkybox.dbc` id → the model it names, normalised to its chain path (`crate::models`'
+    /// `model_path`: lowercased, `.mdx` → the physical `.m2`) so both skybox sources hand the render
+    /// lane the same spelling and one model can never build twice under two names.
+    ///
+    /// Six rows in 5875; only id 3 (`DeathClouds.mdx`) is reachable from `LightParams` — the other
+    /// five are the WMO **MOSB** skyboxes, which this table does not drive (`crate::skybox`).
+    skyboxes: HashMap<u32, String>,
 }
 
 fn light_schema() -> Schema {
@@ -311,7 +322,12 @@ impl LightCatalog {
             FLOAT_BAND,
             band_schema("LightFloatBand", FieldType::Float32),
         )?;
-        let (light_params_glow, light_params_highlight, light_params_water_alpha) = {
+        let (
+            light_params_glow,
+            light_params_highlight,
+            light_params_water_alpha,
+            light_params_skybox,
+        ) = {
             let bytes = chain
                 .read_file(LIGHT_PARAMS)
                 .with_context(|| format!("reading {LIGHT_PARAMS}"))?;
@@ -319,6 +335,7 @@ impl LightCatalog {
             let mut glow = HashMap::with_capacity(rs.records().len());
             let mut highlight = HashMap::with_capacity(rs.records().len());
             let mut water_alpha = HashMap::with_capacity(rs.records().len());
+            let mut skybox = HashMap::new();
             for r in rs.records() {
                 let Some(id) = u32_at(r, 0) else { continue };
                 if let Some(g) = f32_at(r, LP_GLOW) {
@@ -338,8 +355,33 @@ impl LightCatalog {
                 ) {
                     water_alpha.insert(id, [ws, wd, os, od]);
                 }
+                // `lightSkyboxID`: 0 means "no skybox", which is 421 of the 426 rows — store only
+                // the live ones so a lookup miss and an explicit zero are the same answer.
+                match u32_at(r, LP_SKYBOX) {
+                    Some(0) | None => {}
+                    Some(sky) => {
+                        skybox.insert(id, sky);
+                    }
+                }
             }
-            (glow, highlight, water_alpha)
+            (glow, highlight, water_alpha, skybox)
+        };
+        // `LightSkybox.dbc` — 6 records × 2 fields (`ID`, `Name`), the model each skybox id names.
+        let skyboxes = {
+            let bytes = chain
+                .read_file(LIGHT_SKYBOX)
+                .with_context(|| format!("reading {LIGHT_SKYBOX}"))?;
+            let mut schema = Schema::new("LightSkybox");
+            schema.add_field(SchemaField::new("ID", FieldType::UInt32));
+            schema.add_field(SchemaField::new("Name", FieldType::String));
+            let rs = parse(&bytes, schema, "LightSkybox")?;
+            let mut m = HashMap::with_capacity(rs.records().len());
+            for r in rs.records() {
+                if let (Some(id), Some(path)) = (u32_at(r, 0), str_at(&rs, r, 1)) {
+                    m.insert(id, crate::models::model_path(&path));
+                }
+            }
+            m
         };
         Ok(LightCatalog {
             lights,
@@ -348,6 +390,8 @@ impl LightCatalog {
             light_params_glow,
             light_params_highlight,
             light_params_water_alpha,
+            light_params_skybox,
+            skyboxes,
         })
     }
 
@@ -441,6 +485,31 @@ impl LightCatalog {
                 None => println!("  float[{b}] = (unset)"),
             }
         }
+    }
+
+    /// The **ghost sky** for this position: the model `LightSkybox.dbc` names for the death
+    /// profile, or `None` when the chain's data does not name one.
+    ///
+    /// The caller gates on the `PLAYER_FLAGS` ghost bit — that bit is the *whole* condition, and it
+    /// is the reference's too. Byte-VERIFIED (wow-re `lighting/scratch/wmo-skybox.md` §3 +
+    /// `death-light.md`): the DBC skybox slot `[0xce9bb4]` is filled inside `dn_color_table_build
+    /// 0x6d2260` at `0x6d26cb`, **gated on the override cell `[0xce9bb0] != -1`**, which only
+    /// `0x6d4620` writes and only the ghost-bit selector `0x5de9c0` calls (`mov ecx,4` — param slot
+    /// [`SLOT_DEATH`]). So: ghost ⇒ this skybox; alive ⇒ none, with no other path into the table.
+    ///
+    /// **Read straight off slot 4, with no clear-slot fallback** — unlike the atmosphere's
+    /// `atmo_of`, which degrades an unset slot to [`SLOT_CLEAR`]. The reference resolves the row
+    /// with `0x6d6ab0(row, 4)` = `[row+0x2c]` and simply finds nothing if it is 0; degrading here
+    /// would instead read a slot that, in shipped data, never names a skybox at all.
+    ///
+    /// Resolved through [`pick_light`](Self::pick_light) so the sky comes from the same zone row
+    /// the water tint does. On 5875 data the choice is unobservable — all 374 `Light` rows reach
+    /// skybox **3** (`DeathClouds.mdx`) through slot 4 — but a chain that ever varied it would then
+    /// vary sky and zone together rather than drifting apart.
+    pub fn ghost_skybox(&self, map: u32, pos: [f32; 3]) -> Option<&str> {
+        let light = self.pick_light(map, pos)?;
+        let id = self.light_params_skybox.get(&light.params[SLOT_DEATH])?;
+        self.skyboxes.get(id).map(String::as_str)
     }
 
     /// Faithful **area-light blend** (step 2 isolation): replicates the real client's

@@ -171,9 +171,12 @@ impl ItemSubClassCatalog {
     }
 
     /// This subclass's raw `DisplayFlags` (`0` for an unknown key). Bit 0 is [`Self::hides_name`];
-    /// bit 1 marks a subclass the auction house's category filter does not offer. The bits are
-    /// served raw rather than as named predicates because each consumer owns the meaning of the
-    /// one it reads — the auction law lives in the auction module, not here.
+    /// bit 1 marks a subclass the auction house's category filter does not offer; **bit 2 (`0x4`)
+    /// is the "this bag counts what is inside it" gate** — `GetInventoryItemCount` (`0x4c881a`–
+    /// `0x4c8826`) reads it before summing an equipped bag's contents, and in the shipped 1.12.1
+    /// file it is set on Soul Bag (1/1) and the whole Quiver class (11/0..3) and nowhere else.
+    /// The bits are served raw rather than as named predicates because each consumer owns the
+    /// meaning of the one it reads — the auction law lives in the auction module, not here.
     pub fn display_flags(&self, class: u32, subclass: u32) -> u32 {
         self.rows
             .get(&(class, subclass))

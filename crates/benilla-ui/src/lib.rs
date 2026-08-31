@@ -28,6 +28,7 @@ pub mod justify;
 pub mod layout;
 pub mod loader;
 pub mod markup;
+pub mod messages;
 pub mod order;
 pub mod script;
 pub mod source;

@@ -31,16 +31,16 @@
         - The ref's shift-click "insert the item link into the chat editbox" (StackSplitFrame isn't
           even opened in that branch — ContainerFrame.lua:568-569 diverts to
           `ChatFrameEditBox:Insert` instead of `OpenStackSplitFrame`) never triggers here: the
-          shift-click gesture itself has no plumbing in this engine (BagFrame.xml's own comment on
-          `BenillaBagSlot_OnClick` — no modifier-key global exists at all), so there is no path that
+          shift-click gesture itself has no plumbing in this engine (no modifier-key global exists
+          at all), so there is no path that
           reaches this branch to defer. `EditBox:Insert` DOES exist on our engine (editbox.rs) for
           when that gap closes.
     -->
     <Script><![CDATA[
         -- OpenStackSplitFrame(maxStack, owner, anchor, anchorTo) — ref StackSplitFrame.lua:2-24,
         -- verbatim shape. `owner` must already carry `owner.SplitStack = function(owner, n) ... end`
-        -- (BagFrame.xml's `BenillaBagSlot_OnClick` sets it right before calling this, mirroring
-        -- ContainerFrameItemButton_OnClick's own closure). maxStack < 2 hides instead of showing (a
+        -- (the reference's own `ContainerFrameItemButton_OnClick` and `BankFrameItemButton_OnLoad`
+        -- both set it, and both are sourced since 1751). maxStack < 2 hides instead of showing (a
         -- 1-stack has nothing to split) — the ref's own guard.
         function OpenStackSplitFrame(maxStack, owner, anchor, anchorTo)
             local frame = StackSplitFrame

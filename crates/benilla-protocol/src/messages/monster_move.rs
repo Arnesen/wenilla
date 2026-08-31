@@ -25,6 +25,13 @@ const MONSTER_MOVE_STOP: u8 = 0x1;
 /// its Z. The client gates on this same bit (`0x6018f0: test ah,0x2`). It is also `Mask_CatmullRom` —
 /// flying paths interpolate (and wire-encode) as a curve, ground paths as straight segments.
 const SPLINE_FLAG_FLYING: u32 = 0x200;
+/// `SPLINEFLAG_RUNMODE` — the path is travelled at run speed. Its **absence** is what matters:
+/// the real client feeds this bit straight into `CMovement::SetRunMode 0x7c71c0`
+/// (`0x7c6ac2 and edi,0x100` → `0x7c6acb call 0x7c71c0`, inside the `SMSG_MONSTER_MOVE` commit
+/// `0x7c6a50`), and that setter's argument is *run* — so a spline **without** this bit **sets**
+/// `MOVEFLAG_WALK_MODE` on the unit it moves. The two `0x100`s are inverses of each other
+/// (wow-re `collision/scratch/walk-mode-law.md` §5.2; benilla decision 1758).
+const SPLINE_FLAG_RUNMODE: u32 = 0x100;
 
 /// Parse an `SMSG_MONSTER_MOVE` body into [`ServerPacket::MonsterMove`]. The head (mover, `start`, spline
 /// id, `moveType` + its final facing) is always present; a **stop** (`moveType 1`) ends there (the client
@@ -62,11 +69,15 @@ pub(super) fn read_monster_move(r: &mut &[u8]) -> io::Result<ServerPacket> {
             stop: true,
             duration_ms: 0,
             flying: false,
+            // The stop form carries no spline-flags dword at all, so there is no run/walk verdict
+            // in it — and it builds no path, so nothing downstream reads this.
+            run_mode: true,
         }
     } else {
         let spline_flags = read_u32_le(r)?;
         let duration_ms = read_u32_le(r)?;
         let flying = spline_flags & SPLINE_FLAG_FLYING != 0;
+        let run_mode = spline_flags & SPLINE_FLAG_RUNMODE != 0;
         // The decoded waypoints *after* the start (see [`read_monster_move_spline`]): a ground path's
         // first packed point re-encodes `start` (quantized), so drop it and anchor the path with the
         // exact wire `start`; a flying path sends only post-start points, kept whole. The result is the
@@ -89,6 +100,7 @@ pub(super) fn read_monster_move(r: &mut &[u8]) -> io::Result<ServerPacket> {
             stop: false,
             duration_ms,
             flying,
+            run_mode,
         }
     })
 }

@@ -19,6 +19,9 @@ pub(crate) struct Death {
     post_revive_query_sent: bool,
     corpse_gone: Option<bool>,
     corpse_create: Option<(u64, [f32; 3])>,
+    /// The corpse descriptor's interaction bits at create: `(CORPSE_FIELD_FLAGS, owner, bones,
+    /// lootable, insignia)` — decision 1723's inputs, read off the wire rather than assumed.
+    corpse_flags: Option<(u32, u64, bool, bool, bool)>,
 }
 
 impl Probe for Death {
@@ -65,19 +68,33 @@ impl Probe for Death {
                 guid,
                 kind,
                 position,
+                fields,
                 ..
             } => {
-                // --death: the corpse streams in as an `Other`-classified create once
-                // we've released (decision 0308 §4). No HIGHGUID_CORPSE classifier
-                // exists in `guid.rs` (a corpse carries no template entry to extract
-                // from its guid, unlike a creature/GameObject), so identify it
-                // positionally instead: the only other wire type `entity_kind` folds
-                // into `Other` is a DynamicObject (ground-effect markers), and nothing
-                // casts one in this scenario — so any `Other` create arriving after
-                // repop is the corpse.
+                // --death: the corpse streams in once we've released (decision 0308 §4).
+                //
+                // **It is `EntityKind::Corpse`, not `Other`** — and this line said `Other` from
+                // 0308 until 1723 found it. 1706 gave TYPEID_CORPSE its own `EntityKind` variant;
+                // the compiler enumerated every `match` on the enum and corrected them, but this
+                // is an `==`, so it stayed silent and the probe's corpse capture quietly stopped
+                // firing: the arc would have bailed "the corpse object never streamed" on a wire
+                // that was perfectly correct. An instrument that fails closed after a refactor is
+                // the expensive kind (the contract §5 — the instruments are part of the codebase).
                 let repop_sent = cx.world.death_arc.as_ref().is_some_and(|a| a.repop_sent);
-                if repop_sent && self.corpse_create.is_none() && *kind == EntityKind::Other {
+                if repop_sent && self.corpse_create.is_none() && *kind == EntityKind::Corpse {
                     self.corpse_create = Some((*guid, *position));
+                    // The descriptor bits the client's whole corpse interaction hangs off
+                    // (decision 1723): BONES picks the model, DYNAMIC_FLAGS bit 0 is the only
+                    // thing that opens the `CMSG_LOOT` route, FLAGS bit 5 is the PvP insignia the
+                    // skin leg reads. Printed rather than asserted — what vmangos actually sets on
+                    // a plain PvE death is a fact worth having in the log, not a pass/fail.
+                    self.corpse_flags = Some((
+                        fields.corpse_flags(),
+                        fields.corpse_owner().unwrap_or(0),
+                        fields.corpse_is_bones(),
+                        fields.corpse_lootable(),
+                        fields.corpse_pvp_insignia(),
+                    ));
                     println!(
                         "corpse object streamed: guid {guid:#x} pos ({:.1}, {:.1}, {:.1})",
                         position[0], position[1], position[2]
@@ -108,6 +125,7 @@ impl Probe for Death {
 
     fn verify(&mut self, cx: &mut Ctx) -> Result<()> {
         let self_map = cx.world.self_map;
+        let self_guid = cx.world.self_guid;
         let arc = cx
             .world
             .death_arc
@@ -194,6 +212,12 @@ impl Probe for Death {
             "  corpse         guid {corpse_guid:#x} pos ({:.1}, {:.1}, {:.1})  ({corpse_dist:.1} yd from death)",
             corpse_pos[0], corpse_pos[1], corpse_pos[2]
         );
+        if let Some((flags, owner, bones, lootable, insignia)) = self.corpse_flags {
+            println!(
+                "  corpse fields  FLAGS {flags:#06x} (bones={bones} insignia={insignia})  DYNFLAGS lootable={lootable}  owner {owner:#x}{}",
+                if owner == self_guid { " = us" } else { " ≠ US — the reclaim send would carry the wrong guid" }
+            );
+        }
         println!(
             "  graveyard      ({:.1}, {:.1}, {:.1})  ({graveyard_dist:.1} yd from death)",
             graveyard_pos[0], graveyard_pos[1], graveyard_pos[2]

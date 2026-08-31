@@ -25,11 +25,22 @@
         elapsed its OnUpdate is handed — we accumulate the handed value instead, which is one clock
         read fewer per frame and one field fewer on the frame.
 
-        SEATING. `parent="UIParent" setAllPoints="true"` with a CENTER-anchored string, which is
-        AutoFollowStatus's seat in ZoneText.xml and for the same reason: the reference parents this
-        to WorldFrame, benilla's WorldFrame is a stub (UIParent.xml) rather than the 3D layer, and
-        both are full-screen in the reference so their CENTERs coincide. TOOLTIP strata is the
-        reference's own — the confirmation has to be readable over whatever panel is open.
+        SEATING. `parent="WorldFrame" setAllPoints="true"` with a CENTER-anchored string — the
+        reference's own nesting (WorldFrame.xml l.42, inside WorldFrame's `<Frames>`), and it is
+        load-bearing rather than decorative. That file's header states the law in one line:
+        "Children of the world frame are visible even when the UI is turned off." benilla's
+        WorldFrame is a stub (UIParent.xml) rather than the 3D layer, but it is a stub with the
+        property that matters here — top-level, so nothing hides it.
+
+        This read `parent="UIParent"` until 1757, on a note that argued the two seats are the same
+        because both frames are full-screen and their CENTERs coincide. That was true of the
+        GEOMETRY and blind to the rest: decision 1734 restored `SetFullScreenFrame`'s
+        `UIParent:Hide()`, so under a fullscreen panel the UIParent seat is a hidden one — and the
+        case that exposes it is this frame's own, because `CinematicFrame` answers the SCREENSHOT
+        key by hand (`RunBinding`, 1701) precisely so a fly-by can be captured, and the
+        confirmation for that capture could never appear. TOOLTIP strata is the reference's own —
+        the confirmation has to be readable over whatever panel is open, and an explicit strata is
+        not dragged down by a BACKGROUND-strata parent.
     -->
     <Script>
         <![CDATA[
@@ -81,7 +92,7 @@
         ]]>
     </Script>
 
-    <Frame name="ScreenshotStatus" parent="UIParent" setAllPoints="true" frameStrata="TOOLTIP" hidden="true">
+    <Frame name="ScreenshotStatus" parent="WorldFrame" setAllPoints="true" frameStrata="TOOLTIP" hidden="true">
         <Layers>
             <Layer level="ARTWORK">
                 <FontString name="ScreenshotStatusText" inherits="SystemFont">

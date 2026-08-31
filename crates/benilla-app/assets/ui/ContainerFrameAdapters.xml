@@ -1,15 +1,25 @@
 <!--
-    OUR adapters over the reference's own `Interface\FrameXML\ContainerFrame.lua`.
+    OUR adapters over the reference's own `Interface\FrameXML\ContainerFrame.xml`/`.lua`.
 
-    **This client does not transcribe that file — it EXECUTES it, off the player's own patch
-    chain**, before any of our `assets/ui` files (`ui_script::reference_ui`, whose header carries
-    the rule and the licensing reason: Blizzard's Lua is never committed here). What is in THIS
-    file is only benilla's, and only where a reference body reaches for something this client
-    genuinely does not have.
+    **This client does not transcribe those files — it EXECUTES them, off the player's own patch
+    chain** (decision 1751; `ui_script::reference_ui` carries the rule, and `benilla.toc` carries
+    the position). The bag windows on screen ARE `ContainerFrame1..12`. What is in THIS file is
+    only benilla's, and only where a reference body reaches for something this client genuinely
+    does not have.
 
     The rule, restated in one line so it can be applied without re-reading the module: the sourced
-    file's globals stand unmodified; ours (loading after) win where both define a name; and where a
+    file's globals stand unmodified; ours, loading after, win where both define a name; and where a
     reference body needs a benilla answer, it is WRAPPED here — never silently stubbed.
+
+    TWO THINGS THIS FILE USED TO DO AND NO LONGER DOES, both retired by 1751's swap:
+    · It declared `ContainerFrameItemButtonTemplate`, transcribed from ContainerFrame.xml, because
+      the Lua could be sourced and the XML could not. The XML is sourced now, so the reference's
+      own declaration is the live one and the copy is deleted — the whole point of the migration.
+    · It defined `updateContainerFrameAnchors()` as a deliberate no-op, because the reference's
+      body walks twelve `ContainerFrame` windows this client did not build. It builds them, so the
+      reference's own body is correct here and the stub is deleted. Five corpus addons (Bongos,
+      Bongos_ActionBar, the CT_BarMod family) hook that global and call through; they now reach the
+      real thing.
 
     ── The one adapter, and why it is not a stub ────────────────────────────────────────────────
     `ContainerFrameItemButton_OnEnter` opens with a keyring fork (ref l.615-620):
@@ -23,17 +33,18 @@
     That fork exists because the REAL client's keyring items are inventory slots, not container
     slots, so it has to detour out of the container API to describe one. benilla's keyring is an
     ordinary container (id -2, decision 0765): its slots come through `GetContainerItemInfo` and
-    `GameTooltip:SetBagItem` like every other bag's. So the detour is not merely unavailable here
-    (`KeyRingButtonIDToInvSlotID` is not a binding here; `CursorUpdate` now is, transcribed from
-    UIParent.lua into UiPanels.xml, so only half the detour is missing) — it is *wrong* here,
-    and supplying the two verbs would buy an empty tooltip, because our keyring items were never
-    fed into the inventory-slot space it reads.
+    `GameTooltip:SetBagItem` like every other bag's — which is exactly why the reference's keyring
+    WINDOW, its verbs and its sounds all take our keyring unchanged, and why this one line is the
+    only thing in that file the swap did not simply inherit. The detour is not merely unavailable
+    here (`KeyRingButtonIDToInvSlotID` is not a binding here) — it is *wrong* here, and supplying
+    the verb would buy an empty tooltip, because our keyring items were never fed into the
+    inventory-slot space it reads.
 
     So the wrapper below answers the keyring case the way benilla answers every other bag, and
     hands EVERY other slot straight to the reference's own body. The path the player is actually
     on — hovering an ordinary bag slot — runs the real client's code, unedited.
 
-    ── Named, not hidden: what still does not work through the sourced file ─────────────────────
+    ── Named, not hidden: what still does not work through the sourced files ────────────────────
     · `MerchantItemButton_OnClick`. The reference's `ContainerFrameItemButton_OnClick` closes its
       shift-right-click-at-a-vendor arm with a `SplitStack` closure that calls that global, and
       benilla's merchant window publishes `BenillaMerchantItem_OnClick` instead. Confirming a stack
@@ -43,6 +54,11 @@
     · `REPAIR_COST` is read by the reference's repair-mode arm. It is a `GlobalStrings.lua` key and
       this client sources that file too, so it resolves at runtime — and the arm is unreachable
       today regardless, since `GameTooltip:SetBagItem`'s repairCost is an INTERIM 0.
+    · `NO_EMPTY_KEYRING_SLOTS` is read by the reference's `PutKeyInKeyRing` when the ring is full,
+      and no such GlobalString exists — 1.12 ships only `NO_EMPTY_KEYRING_SLOTS_ERROR`. That is a
+      REFERENCE BUG, and this client used to un-quirk it. It does not any more: the reference's own
+      file runs, so a full keyring prints the reference's own empty error line. Faithful, and
+      deliberately so (1751: a divergence becomes faithful or becomes a record, never silent).
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
@@ -80,28 +96,27 @@
             refItemButtonOnEnter(button)
         end
 
-        -- ── `updateContainerFrameAnchors` — a no-op here, and that IS the benilla answer ────────
-        -- The reference's body (l.480-489) opens `while ContainerFrame1.bags[index] do` and walks
-        -- the twelve `ContainerFrame1..12` windows it owns, positioning each into columns. benilla
-        -- does not build those windows at all — our bags are `BagFrame.xml`'s own, and they
-        -- position themselves. `ui_script::manifest` already records the same difference one
-        -- function over: *"ToggleBackpack walks twelve ContainerFrames we do not build; ours walks
-        -- our windows."*
+        -- ══ Re-publishing the three bag verbs 0561 shadows, and why it is HERE ═════════════
         --
-        -- So this is not a stub standing in for something missing: there is nothing here for it to
-        -- anchor, and the reference body raises `attempt to index global 'ContainerFrame1'` the
-        -- moment anything calls it. FIVE corpus addons did — Bongos, Bongos_ActionBar and the
-        -- CT_BarMod family all HOOK it (`BLIZZARD_Original_updateContainerFrameAnchors` in the
-        -- traceback) and then call through, so the raise landed inside a Blizzard file with our
-        -- bag layout nowhere in the stack.
+        -- `OpenBackpack`, `CloseBackpack` and `CloseAllBags` are all defined by the sourced
+        -- `ContainerFrame.lua` (l.187-217, l.702-707) — and benilla answers all three differently,
+        -- for one reason: **0561, the director's call that a window opening your bags opens EVERY
+        -- equipped bag**, not just the backpack. The vendor, bank, mail and trade windows call
+        -- `OpenBackpack` from their OnShow so your bags come up with them and you can sell or
+        -- deposit from one.
         --
-        -- Deliberately silent rather than warned: an addon calling this on every bag update would
-        -- turn a warn-once into a warn-always, and unlike the cases in the section above nothing is
-        -- LOST by doing nothing — the windows it would have moved are already where our own layout
-        -- put them. The header's "never silently stubbed" rule is about absent capability; this is
-        -- present capability with a different owner.
-        function updateContainerFrameAnchors()
-        end
-
+        -- The bodies live in `UiPanels.xml`, because every window that calls them is loaded by
+        -- harnesses that have no bag stack at all, and a nil `OpenBackpack` in a merchant test is
+        -- a nil for no reason. But UiPanels is manifest entry 7 and the reference's container file
+        -- is entry 46, so **its publications lose the collision** — the reference's bodies land on
+        -- top and the vendor silently stops opening your bags. That is not hypothetical: it is
+        -- what shipped for the length of one session before a test caught it.
+        --
+        -- So the bodies stay where their callers can reach them, under `Benilla*` names that
+        -- nothing overwrites, and this file — entry 49, after the reference's — puts them back on
+        -- the reference's names. Three lines, and they are the whole of the fix.
+        OpenBackpack = BenillaOpenBackpack
+        CloseBackpack = BenillaCloseBackpack
+        CloseAllBags = BenillaCloseAllBags
     ]]></Script>
 </Ui>

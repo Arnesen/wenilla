@@ -31,8 +31,8 @@ use super::framing::{
 };
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
-    BoothBillboardSpec, BoothCam, BoothEffects, BoothLight, BoothMotion, BoothPart, BoothRider,
-    Booths, PortraitImages, PortraitSource, GLUE_LAYER,
+    BoothBillboardSpec, BoothCam, BoothEffects, BoothInstance, BoothLight, BoothMotion, BoothPart,
+    BoothRider, BoothTwins, Booths, PortraitImages, PortraitSource, GLUE_LAYER,
 };
 
 /// The glue booth slot token (its key in [`super::PortraitImages`] / [`Booths`]).
@@ -235,6 +235,11 @@ pub(crate) struct CreateScene {
     /// Whether the current spawn wrote the fog rows enabled (the create law) — a screen hop with
     /// the same scene race still rebuilds when this flips.
     fog: bool,
+    /// Whether the light buffer currently holds the **ghost** rig ([`ghost_rig`]) rather than the
+    /// scene's authored one. Unlike [`Self::fog`] a change here does NOT rebuild the scene: the
+    /// reference's fork is a per-frame fill callback on models that are already standing, so the
+    /// buffer is rewritten in place and the stage's braziers keep burning across the click.
+    ghost: bool,
     /// The scene's own light buffer — the scene's **authored M2 light rig** folded per the world
     /// law (see [`SceneRig`]: directionals → ambient + SH probe slot 0, points → the per-vertex
     /// point table) plus the ref's per-race fog (`CharModelFogInfo`) — **create only**: at select
@@ -249,7 +254,50 @@ pub(crate) struct CreateScene {
     /// Bumped on every scene spawn — folded into `sync_glue_booth`'s change key so the character
     /// re-lights the moment the scene (and its rig) lands.
     rev: u64,
+    /// **The stage the selection has asked for but has not been given yet** — see
+    /// [`PendingSwap`]. `None` = the standing scene IS the requested one.
+    pending: Option<PendingSwap>,
 }
+
+/// A requested stage swap, waiting for its half of the pair.
+///
+/// **The two halves of a glue booth swap independently, and that is the whole defect.** Clicking a
+/// row rewrites [`GluePreview`] in one frame; the background scene is an M2 that loads in one or
+/// two more, and the character is an *assembly* — body display, composited skin, every worn item's
+/// model — that [`crate::entities::attach::preview::build_glue_preview`] deliberately withholds
+/// until all of it is ready. Whichever half wins is what the screen shows in the meantime:
+///
+/// ```text
+/// t=8.484  click Orcshafour (orc)          ← from a human
+/// t=8.487  create scene: UI_Orc up
+/// t=8.487  [booth] glue rebake display=49  ← the HUMAN, standing in the ORC stage, by=scene
+/// t=8.540  [booth] glue rebake display=51  ← 53 ms later, the orc
+/// ```
+///
+/// and the reverse order for a body whose model is already cached under a stage whose art is not
+/// (measured the same run, 34 ms of a human standing in the orc stage). That is the director's
+/// *"switching between chars that haven't been loaded before briefly shows a different model —
+/// a clear jump from something else to what it eventually turns out to look like"*.
+///
+/// The reference cannot express this state: `SelectCharacter` loads the background model and
+/// builds the character inside one blocking call, so the pair is atomic by construction. Ours
+/// makes it atomic by **holding the committed pair until the requested one is whole** — the loads
+/// still start the instant the row is clicked, so nothing is slower; only the *swap* waits.
+struct PendingSwap {
+    /// The requested scene token (`UI_<token>`).
+    token: &'static str,
+    /// Its model, loading since the click — the hold is about when the stage swaps, never about
+    /// when its art starts arriving.
+    handle: Handle<M2Model>,
+    /// `Time<Real>` at the click, for [`GLUE_SWAP_HOLD_SECS`].
+    since: f32,
+}
+
+/// 0737's never-hold-unbounded rule, applied to the swap above: a look whose assembly can never
+/// complete (a display the cache will not resolve, an item model that is not there) must not
+/// freeze the screen on the previous character. Generous, because the cost of waiting is a stale
+/// but COHERENT stage and the cost of releasing early is exactly the defect.
+const GLUE_SWAP_HOLD_SECS: f32 = 2.0;
 
 /// The scene's model-name token: `Interface\Glues\Models\UI_<token>\UI_<token>.mdx`. The race
 /// mapping is the ref's (`GlueParent.lua`'s `SetBackgroundModel` HACK block); the main menu is
@@ -266,6 +314,20 @@ fn scene_token(scene: GlueScene) -> &'static str {
             _ => "Human",
         },
     }
+}
+
+/// **May the stage swap to the requested scene this frame?** — [`PendingSwap`]'s whole law, as one
+/// function, because *when a glue selection is allowed to become visible* is the thing that was
+/// wrong and it should be readable (and testable) without standing up a booth.
+///
+/// - `standing` — is there a coherent pair on the stage to protect? With nothing standing there is
+///   no mispairing to avoid and the swap is free (the login → select hop, an empty account).
+/// - `art_ready` / `body_ready` — the requested scene's model is loaded, and the requested look's
+///   assembly has landed.
+/// - `waited` — seconds held, against [`GLUE_SWAP_HOLD_SECS`]'s fail-open bound (0737's rule: a
+///   cover — or a hold — is never unbounded).
+fn may_swap(standing: bool, art_ready: bool, body_ready: bool, waited: f32) -> bool {
+    !standing || (art_ready && body_ready) || waited >= GLUE_SWAP_HOLD_SECS
 }
 
 /// A glue scene's authored M2 light rig, folded for the booth's light buffer under the
@@ -323,6 +385,88 @@ fn scene_rig(lights: &[benilla_assets::ModelLight]) -> SceneRig {
     }
 }
 
+/// **The GHOST select screen's hardcoded sun** — the one directional the reference injects when the
+/// selected roster record carries `CHARSELECT+0xfc & 0x2000`, replacing the authored rig entirely
+/// (wow-re `glue-select-model.md` §C1–C4 + `glue-select-ghost-treatment.md`, VERIFIED).
+///
+/// `0x472150` is a per-model per-frame **fill callback** (`[model+0x3bc]`, registered by `0x7134b0`)
+/// whose *entire body* is gated on that bit (`47218e mov ecx,[record+0xfc]; 472194 test ch,0x20;
+/// 472197 je 0x4722b2`). It is registered on **three** models — the background scene M2
+/// (`0x472144`), the character (`0x472bac`) and the **pet** (`0x472ebd`) — so all three fork
+/// together off one `[0x83856c]`-keyed read. For a living selection the callback is a complete
+/// no-op and the authored rig stands, exactly as at create (decision 0435's law, select-confirmed).
+///
+/// For a ghost it does two things, and this function is both:
+///
+/// - **the collector is WIPED** — `0x71bc30` opens `mov ecx,0x6d; rep stosd`, 436 bytes zeroed, so
+///   the scene-DB gather is discarded: no authored ambient, and **no point lights** (which is why
+///   the ghost stage loses the NightElf/Scourge stage-local lamps that make those two scenes);
+/// - **one hardcoded directional is injected** (built by `0x71b4a0`, forced directional by
+///   `0x71b620(0)`, colours by two `0x6d6ad0()→0x6d62e0()` DN reads, specular left 0).
+///
+/// **The direction, and the trap in it.** `0x472280 mov [ebp-4],0xbf800000` writes the raw literal
+/// `(0,0,-1)` into `CGLight+0x24`, which is a **from-light** vector: `0x71b6a0` stores it verbatim
+/// (normalize only, no `fchs`) and `0x71bce0` negates all three components (`0x71be7c`/`0x71be81`/
+/// `0x71be86`) before accumulating the SH lobe, so the lobe is centred on `-u` = **`(0,0,+1)`, i.e.
+/// lit from directly overhead** (WoW Z up). The fixed-function lane agrees — `0x59c820` negates
+/// too, and GL's directional `GL_POSITION` *is* the to-light vector — so the sign does not depend
+/// on which lane you emulate. The trap: an **authored** M2 light has TWO negations (`0x718960`
+/// already stores `-Bz`, and [`scene_rig`] feeds `+bone_z` as its to-light to match), while this one
+/// has exactly ONE. Carrying the authored convention across double-negates and lights the ghost
+/// from below.
+///
+/// **The colours are DBC data, not a live capture.** `0x4721e2 mov esi,[edx+0xc]` hard-codes
+/// **`LightParams` row 3** — `Light.dbc`'s **death** preset column (id 3 in 59 of 374 rows and in no
+/// other column; the world's ghost arm selects the same slot, `0x5de9df mov ecx,4; call 0x6d4620`)
+/// — and `0x6d6ad0` maps it to `LightIntBand` ids `18·3−17+sub`: **37 diffuse** (colour sub 0),
+/// **38 ambient** (sub 1), sampled at a hardcoded time key of `0` (`xor edx,edx`; half-minutes,
+/// `[0, 2880)`). Both rows are **single-key in the shipped 1.12.1 chain**, hence time-invariant,
+/// hence these literals — 0469 parked this as "pending a live capture" on the earlier reading that
+/// the tables were runtime-only, and that park is withdrawn.
+///
+/// The values are stated rather than read back out of our own `Light.dbc` reader for one reason:
+/// the glue screens run **pre-world**, where no map, no zone and no `LightParams` state exist at
+/// all — the reference reaches them through the DN singleton it keeps alive across the glue, and we
+/// have no such thing to ask. A chain whose bands are keyed (a patched install) would diverge here;
+/// that is the stated bound.
+fn ghost_rig() -> SceneRig {
+    SceneRig {
+        // `LightIntBand` 38 = 0x001A3855 → (26, 56, 85).
+        ambient: [26.0 / 255.0, 56.0 / 255.0, 85.0 / 255.0],
+        // `LightIntBand` 37 = 0x005E99C6 → (94, 153, 198), on the to-light `(0,0,+1)`.
+        lobes: vec![(
+            benilla_assets::coords::wow_to_bevy([0.0, 0.0, 1.0]),
+            [94.0 / 255.0, 153.0 / 255.0, 198.0 / 255.0],
+        )],
+        // Wiped: the gather is discarded whole, so the stage's own lamps do not survive.
+        points: Vec::new(),
+    }
+}
+
+/// Pack a [`SceneRig`] into the glue scene's light buffer contents.
+///
+/// Rig materials read the probe + point table; the core rows still carry the plain ambient (with a
+/// zero sun) so any non-rig lane that ever lands in the booth degrades sanely. The directional fold
+/// lands in probe slot 0 — booth instances carry `MeshTag` 0, the rig lane's read side. The dial is
+/// 1.0: the rig lane ignores it, so byte levels stand.
+///
+/// One function for both rigs, so the authored and the ghost light cannot drift into two packings.
+fn scene_light_blob(
+    rig: &SceneRig,
+    fog_rgb: [f32; 3],
+    fog_far: f32,
+    fog: bool,
+) -> benilla_world::lighting::LightBlob {
+    let mut blob = benilla_world::lighting::LightBlob::model(rig.ambient, [0.0; 3], Vec3::NEG_Y)
+        .probe(rig.ambient, &rig.lobes)
+        .fog(fog_rgb, fog_far, fog)
+        .dial(1.0);
+    for (pos, color) in &rig.points {
+        blob = blob.point(*pos, SCENE_POINT_RANGE, *color);
+    }
+    blob
+}
+
 /// The ref's per-scene fog: the race rows are `CharModelFogInfo` (GlueParent.lua) — color + far,
 /// near always 0; the main menu's is `AccountLogin.xml`'s own `<FogColor>` + `fogFar` attribute.
 fn scene_fog(token: &str) -> ([f32; 3], f32) {
@@ -351,6 +495,11 @@ pub(crate) struct PreviewPart {
     /// has the field in hand (it reads the display's `EntityPart`s straight, with no compositor in
     /// between), so it fills it.
     pub(crate) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
+    /// The batch's translucency twins ([`BoothTwins`]) — carried so a bake whose INSTANCE alpha is
+    /// below 1 (the ghost select, [`GhostKit`]) can draw through the blend twin and arm the depth
+    /// prime. Empty for a look that cannot feather; the booth relights whatever is here beside the
+    /// steady material.
+    pub(crate) twins: BoothTwins,
 }
 
 /// One equipment rider on the assembled preview (helm / shoulder / sheathed weapon — decision
@@ -363,6 +512,8 @@ pub(crate) struct PreviewRider {
     pub(crate) material: Handle<WowModelMaterial>,
     pub(crate) bone: u16,
     pub(crate) offset: Vec3,
+    /// See [`PreviewPart::twins`] — an attached model composes onto its wearer's instance alpha.
+    pub(crate) twins: BoothTwins,
 }
 
 /// One **camera-facing batch** on the assembled preview — the world path's billboard card
@@ -390,6 +541,8 @@ pub(crate) struct PreviewBillboard {
     /// the rigged body itself — its joint already bakes the pivot.
     pub(crate) offset: Vec3,
     pub(crate) kind: benilla_formats::BillboardKind,
+    /// See [`PreviewPart::twins`] — a card is a batch of the model like any other.
+    pub(crate) twins: BoothTwins,
 }
 
 /// One **effect-bearing model** on the assembled preview, carried as its particle emitters plus the
@@ -414,6 +567,38 @@ pub(crate) struct PreviewEffects {
     pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
 }
 
+/// The select screen's **ghost** treatment on the character body — what the reference's
+/// `0x4727f0` applies when the selected roster record carries `CHARSELECT+0xfc & 0x2000`
+/// (wow-re `glue-select-model.md` §A2, VERIFIED; the row text is the same bit, `refresh.rs`).
+///
+/// **It is one hard-coded `SpellVisualKit` row, and we read it from the DBC exactly as the
+/// reference does.** `0x47280f` loads `idmap[989]` behind the guard `0x4727f6 cmp ds:0xc0d750,0x3dd`
+/// — the *id* is the constant, the values are data — and 989 is the state kit of `SpellVisual` 886,
+/// which is the visual of spell 8326 "Ghost", the very aura the WORLD ghost rides
+/// (`crate::aura_visual`, wow-re `ghost-death-visuals.md` §2/§5a). So the select mannequin and a
+/// released ghost in the world are the same kit reaching the same three render properties by two
+/// different code paths, and benilla resolves both through the one dispatch point
+/// ([`crate::aura_visual::node_for`]) rather than transcribing constants twice.
+///
+/// The shipped 5875 values, for orientation only — nothing here hardcodes them:
+/// `charProc = {1, 14, -1, -1}`, `charParamZero = {9222653.0, 0.5, …}` → tint `0x8CB9FD`
+/// = RGB (140, 185, 253), alpha 0.5, one attached effect — `Spells\Ghost_state.mdx` at
+/// attachment `0x13` (Base). That model is emitter-only (0 vertices, 5 bones, one
+/// `PARTICLES\FLAME02.BLP`), so it reaches the booth as [`PreviewEffects`] and nothing else —
+/// but the resolution below carries geometry and cards too, because what the row names is data.
+///
+/// **No ramp.** The world's proc-14 alpha eases in over 1000 ms (`StartAlphaFade 0x614f80`); the
+/// select path never reaches that block — `0x4727f0` writes `cc+0x180`/`+0x184..0x18c` straight
+/// through `0x710cb0`/`0x710cf0`. A selection is instantly ghosted, and re-selecting is instant too.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct GhostKit {
+    /// The whole-model modulate colour (CharProc 1 — `cc+0x184..0x18c`), as the packed byte triple
+    /// [`benilla_world::instance_tint::pack`] wants.
+    pub(crate) tint: [u8; 3],
+    /// The whole-model alpha factor (CharProc 14 — `cc+0x180`), applied instantly.
+    pub(crate) alpha: f32,
+}
+
 /// The entities-side builder's output (decisions 0423 + 0465): the geoset-filtered, composited
 /// parts for the current look (+ its equipment riders for a Select look), plus the body displayId
 /// (for the booth's framing/rig) and a revision that bumps on every real change — a new successful
@@ -436,6 +621,11 @@ pub(crate) struct GluePreviewBake {
     /// `HandsClosed` finger pose (wow-re `hand-grip-mechanism.md`). The builder knows the held items'
     /// attach ids (which the flat rider list drops), so it resolves the grip here for the booth spawn.
     pub(crate) grip: [bool; 2],
+    /// The selected character's **ghost** kit, or `None` for a living selection — see [`GhostKit`].
+    /// Its attached effect models are already folded into the lists above (they are ordinary
+    /// riders/cards/emitters at a body attach point); what stays here is what the *body itself*
+    /// renders with.
+    pub(crate) ghost: Option<GhostKit>,
     pub(crate) revision: u64,
 }
 
@@ -515,7 +705,12 @@ pub(super) fn spawn_glue_booth(
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
-        benilla_world::ffx_glow::FfxGlow::BOOTH,
+        // **The glue screens run the reference's own glue pass pair**, not a bake's nothing
+        // (decision 1731): this camera draws the fullscreen `UI_<Race>` diorama the reference
+        // brackets its glue FFX around (`0x46fad3`/`0x46fae0`), and the GlueXML frames composite
+        // over the result afterwards — which is why a ghost selection washes the scene steel-blue
+        // while the character list, the buttons and the logo stay clean.
+        benilla_world::ffx_glow::FfxGlow::GLUE_SCENE,
         // Placeholder — `sync_glue_booth` overwrites transform + projection from the model's bounds
         // on the first bake (the same `body_frame` law as the paper doll).
         Projection::from(bevy::camera::PerspectiveProjection {
@@ -582,10 +777,51 @@ pub(super) fn spawn_glue_booth(
         pet_stage_scale: 1.0,
         pet_baked: None,
         fog: true,
+        ghost: false,
         light: None,
         variants: default(),
         rev: 0,
+        pending: None,
     });
+}
+
+/// Drive the glue screens' **FFX state** ([`benilla_world::ffx_glow::GlueFfx`]) off the live look —
+/// which pass the glue pair has installed, and what `LightParams.glow` is pinned to.
+///
+/// One writer for all three glue screens, because the reference's three writers are all reached
+/// through the same widget and the same build (wow-re `glue-select-ghost-treatment.md`):
+///
+/// | look | reference | pass | glow |
+/// |---|---|---|---|
+/// | none (login, empty account) | `CSimpleModelFFX::OnShow 0x46fa60` | glow | `*0x8380b4` 0.30 |
+/// | a create look | same — no select build runs | glow | 0.30 |
+/// | a living select record | `0x472ff7`/`0x473002` | glow | `*0x838574` 0.40 |
+/// | a ghost select record | `0x472fde`/`0x472fe9` | **death** | `*0x838570` 0.15 |
+///
+/// An empty account really is the OnShow state and not the living arm: `0x472950` is gated
+/// `-1 ≤ [0x83856c] < [0xb42140]`, so with no roster nothing re-pins anything.
+///
+/// It reads [`GluePreview`] rather than the roster because that is what every glue screen already
+/// writes — the login screen's `None`, the create screen's `Create` look, the select screen's
+/// `Select` record — so no screen can forget to reset it on the way out.
+pub(super) fn sync_glue_ffx(
+    preview: Res<GluePreview>,
+    mut ffx: ResMut<benilla_world::ffx_glow::GlueFfx>,
+) {
+    use benilla_world::ffx_glow::GlueFfx;
+    let want = match preview.look {
+        Some(GlueLook::Select(l)) => {
+            if l.flags & benilla_protocol::CHARACTER_FLAG_GHOST != 0 {
+                GlueFfx::SelectGhost
+            } else {
+                GlueFfx::SelectLiving
+            }
+        }
+        Some(GlueLook::Create(_)) | None => GlueFfx::Shown,
+    };
+    if *ffx != want {
+        *ffx = want;
+    }
 }
 
 /// Drive the background scene (see [`CreateScene`]): load the selected race's `UI_*` model, spawn
@@ -617,9 +853,15 @@ pub(super) fn sync_glue_scene(
         ResMut<benilla_world::rig_palette::RigPaletteMirrors>,
         ResMut<benilla_world::model_forms::ModelForms>,
         ResMut<Assets<Mesh>>,
+        ResMut<benilla_world::instance_tint::InstanceTintMirrors>,
     ),
+    // The swap gate's two inputs ([`PendingSwap`]) — the character assembly this stage must land
+    // beside, and the real clock its bound is measured on. One tuple param: the 16-SystemParam
+    // ceiling, same reason as `particle_assets` above.
+    swap: (Res<GluePreviewBake>, Res<Time<bevy::time::Real>>),
 ) {
-    let (mut palettes, mut mirrors, mut forms, mut mesh_assets) = particle_assets;
+    let (mut palettes, mut mirrors, mut forms, mut mesh_assets, mut tint_mirrors) = particle_assets;
+    let (bake, real) = swap;
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
         return;
     };
@@ -667,11 +909,55 @@ pub(super) fn sync_glue_scene(
         GlueScene::MainMenu => true,
         GlueScene::Race(_) => matches!(preview.look, Some(GlueLook::Create(_))),
     };
+    // The GHOST light fork (wow-re `glue-select-model.md` §C1, and [`ghost_rig`]): the selected
+    // roster record's `CHARSELECT+0xfc & 0x2000`, which reaches the background scene, the character
+    // and the pet through one `[0x83856c]`-keyed read in the reference and through one light buffer
+    // here — all three of ours bind it.
+    let ghost = matches!(
+        preview.look,
+        Some(GlueLook::Select(l)) if l.flags & benilla_protocol::CHARACTER_FLAG_GHOST != 0
+    );
+    if scene.token == Some(token) {
+        // The request came back to the stage already standing (a re-click, a same-race row) —
+        // whatever swap was in flight is moot.
+        scene.pending = None;
+    }
     if scene.token != Some(token) {
+        // **The pair swaps together, or not at all** — see [`PendingSwap`] for the defect this
+        // exists to close and the measurements behind it. The load starts on the click; only the
+        // commit waits, and only while there is a coherent pair on the stage to protect.
+        let now = real.elapsed_secs();
+        let pending = match scene.pending.take() {
+            Some(p) if p.token == token => p,
+            _ => PendingSwap {
+                token,
+                handle: asset_server.load(m2_url(&format!(
+                    "Interface\\Glues\\Models\\UI_{token}\\UI_{token}.mdx"
+                ))),
+                since: now,
+            },
+        };
+        // Both halves of the REQUESTED selection: this stage's art, and the assembly for the look
+        // that asked for it (`build_glue_preview` publishes the look it actually built, so this
+        // compares "what stands" against "what was clicked" without re-deriving either).
+        let art_ready = m2s.get(&pending.handle).is_some();
+        let body_ready = bake.look == preview.look;
+        // An empty stage has no pair to break — the login → select hop, an empty account, a
+        // capture booting onto a glue screen.
+        let standing = bake.look.is_some() && !bake.parts.is_empty();
+        let waited = now - pending.since;
+        if !may_swap(standing, art_ready, body_ready, waited) {
+            scene.pending = Some(pending);
+            return; // hold the coherent pair already on the stage
+        }
+        if standing && waited >= GLUE_SWAP_HOLD_SECS {
+            warn!(
+                "glue scene: UI_{token} swapping after {waited:.1}s without its pair (art \
+                 {art_ready}, body {body_ready}) — the bound is GLUE_SWAP_HOLD_SECS"
+            );
+        }
         scene.token = Some(token);
-        scene.handle = Some(asset_server.load(m2_url(&format!(
-            "Interface\\Glues\\Models\\UI_{token}\\UI_{token}.mdx"
-        ))));
+        scene.handle = Some(pending.handle);
         scene.spawned = false;
         scene.cam = None;
         scene.art = None;
@@ -686,6 +972,33 @@ pub(super) fn sync_glue_scene(
         // Same scene, other screen: rebuild in place (the handle is cached — same-frame respawn).
         scene.spawned = false;
         commands.entity(scene.root).despawn_related::<Children>();
+    } else if scene.spawned && scene.ghost != ghost {
+        // Same scene, same screen, the selection crossed the ghost bit: **re-light, don't rebuild**.
+        // The reference's fork is a per-frame fill callback on models that are already standing
+        // (`0x472150` on `[model+0x3bc]`), so nothing is respawned there either — and respawning
+        // here would restart the stage's own emitters, which the click has no business touching.
+        if let (Some(model), Some(light)) = (
+            scene.handle.as_ref().and_then(|h| m2s.get(h)),
+            scene.light.clone(),
+        ) {
+            let rig = if ghost {
+                ghost_rig()
+            } else {
+                scene_rig(&model.lights)
+            };
+            let (fog_rgb, fog_far) = scene_fog(token);
+            scene_light_blob(&rig, fog_rgb, fog_far, fog).write(&queue, &light);
+            scene.ghost = ghost;
+            // The character and the pet re-bake onto the rewritten buffer (`sync_glue_booth` and
+            // `sync_glue_pet` both key on this).
+            scene.rev += 1;
+            info!(
+                "glue scene: {} light — {} directional, {} point light(s)",
+                if ghost { "GHOST" } else { "authored" },
+                rig.lobes.len(),
+                rig.points.len(),
+            );
+        }
     }
     if !scene.spawned {
         let Some(model) = scene.handle.as_ref().and_then(|h| m2s.get(h)) else {
@@ -705,20 +1018,15 @@ pub(super) fn sync_glue_scene(
             .iter()
             .find(|a| a.id == 0)
             .map_or((Quat::IDENTITY, 1.0), |a| stage_frame(model, a.bone));
-        let rig = scene_rig(&model.lights);
+        // A GHOST selection replaces the gather outright (see [`ghost_rig`]); a living one keeps
+        // the scene's authored rig, which is the create law select-confirmed.
+        let rig = if ghost {
+            ghost_rig()
+        } else {
+            scene_rig(&model.lights)
+        };
         let (fog_rgb, fog_far) = scene_fog(token);
-        // Rig materials read the probe + point table; the core rows still carry the plain ambient
-        // (with a zero sun) so any non-rig lane that ever lands in the booth degrades sanely. The
-        // directional fold lands in probe slot 0 — booth instances carry MeshTag 0, the rig lane's
-        // read side. The dial is 1.0: the rig lane ignores it, so byte levels stand.
-        let mut blob =
-            benilla_world::lighting::LightBlob::model(rig.ambient, [0.0; 3], Vec3::NEG_Y)
-                .probe(rig.ambient, &rig.lobes)
-                .fog(fog_rgb, fog_far, fog)
-                .dial(1.0);
-        for (pos, color) in &rig.points {
-            blob = blob.point(*pos, SCENE_POINT_RANGE, *color);
-        }
+        let blob = scene_light_blob(&rig, fog_rgb, fog_far, fog);
         let light = scene
             .light
             .get_or_insert_with(|| blob.create(&device, "wow_create_scene_light"))
@@ -726,8 +1034,14 @@ pub(super) fn sync_glue_scene(
         // The scene's rigs skin from THIS buffer's palette region (decision 0720): register it
         // as a mirror (re-registration replaces — a rebuilt scene's old buffer drops).
         mirrors.0.insert("glue_scene", light.clone());
+        // …and the per-instance TINT region beside the palette rows (decision 0812's channel):
+        // the glue character's own modulate colour is read out of THIS buffer, and the glue scene
+        // is the one off-world buffer that carries it — see
+        // [`benilla_world::instance_tint::InstanceTintMirrors`] for why the portrait booths do not.
+        tint_mirrors.0.insert("glue_scene", light.clone());
         blob.write(&queue, &light);
         scene.fog = fog;
+        scene.ghost = ghost;
         let dc = blob.probe_dc();
         info!(
             "create scene: UI_{token} rig — ambient {:?}, {} point light(s), probe dc ({:.2},{:.2},{:.2})",
@@ -772,6 +1086,7 @@ pub(super) fn sync_glue_scene(
                     // `CLOUDS`, a 0.73 gradient. Drawn at 1.0 the vignette blacked out the frame
                     // corners — B121.
                     alpha_anim: s.alpha_anim.clone(),
+                    twins: BoothTwins::default(),
                 }
             })
             .collect();
@@ -791,6 +1106,7 @@ pub(super) fn sync_glue_scene(
             BoothMotion::Loop, // sequence 0 loops — flags wave, clouds drift
             [false, false],    // the backdrop scene has no hands to grip
             &[],               // …nor a character's eye-glow
+            BoothInstance::default(),
         );
         // The scene's authored particle emitters (decision 0539 §5) — the braziers/embers every
         // UI_* scene carries (MainMenu 28, Orc 11, NightElf 12…). Lit/fogged by the SCENE's own
@@ -985,6 +1301,9 @@ pub(super) fn sync_glue_booth(
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+    // The per-instance modulate colour (decision 0812): a ghost selection paints the whole bake
+    // through it, keyed on the rig slot this bake allocates — the reference's `cc+0x184..0x18c`.
+    mut tints: ResMut<benilla_world::instance_tint::InstanceTints>,
     mut last: Local<Option<(u64, f32, u64)>>,
 ) {
     let Some(booth) = booths.0.get_mut(GLUE_SLOT) else {
@@ -1003,7 +1322,15 @@ pub(super) fn sync_glue_booth(
                 }
             });
     let (last_rev, last_yaw, last_scene) = last.unwrap_or((u64::MAX, f32::NAN, u64::MAX));
-    let rebake = last_rev != bake.revision || last_scene != scene_rev;
+    // **The other half of [`PendingSwap`]'s law**, for the arrival order it cannot catch: a body
+    // whose models are already cached assembles in a frame, under a stage whose art is still
+    // loading — measured at 34 ms of a human standing in the orc stage. `sync_glue_scene` runs
+    // ahead of this system and commits both halves in the frame they are both ready, so "the
+    // standing stage is the requested one" is exactly "this bake may be shown".
+    let staged = scene
+        .as_deref()
+        .is_none_or(|s| s.token == preview.scene.map(scene_token));
+    let rebake = staged && (last_rev != bake.revision || last_scene != scene_rev);
     let reyaw = last_yaw != preview.yaw;
     if !rebake && !reyaw {
         return;
@@ -1058,12 +1385,40 @@ pub(super) fn sync_glue_booth(
                 _ => booth_light.studio.variant(material, materials),
             }
         };
+        // The bake's instance-level render properties — the ghost kit's alpha, or opaque
+        // (`GhostKit`, wow-re `glue-select-model.md` §A2). It reaches every batch of the bake, the
+        // riders and cards included: the reference has ONE instance alpha per CM2 and every model
+        // attached to it composes onto that (`0x714000`).
+        let instance = BoothInstance {
+            alpha: bake.ghost.map_or(1.0, |g| g.alpha),
+        };
+        // Each twin is relit onto the same buffer as its steady sibling — a blend twin bound to the
+        // world's light buffer would draw the ghost body at world-sun intensity mid-feather.
+        let relight_twins = |t: &BoothTwins,
+                             scene: &mut Option<ResMut<CreateScene>>,
+                             booth_light: &mut BoothLight,
+                             materials: &mut Assets<WowModelMaterial>| {
+            if !instance.feathering() {
+                return BoothTwins::default(); // an opaque bake never reads them
+            }
+            BoothTwins {
+                blend: t
+                    .blend
+                    .as_ref()
+                    .map(|m| relight(m, scene, booth_light, materials)),
+                zfill: t
+                    .zfill
+                    .as_ref()
+                    .map(|m| relight(m, scene, booth_light, materials)),
+            }
+        };
         let mut booth_parts = Vec::with_capacity(bake.parts.len());
         for p in &bake.parts {
             booth_parts.push(BoothPart {
                 skinned: p.skinned_mesh.clone(),
                 static_mesh: p.static_mesh.clone(),
                 material: relight(&p.material, &mut scene, &mut booth_light, &mut materials),
+                twins: relight_twins(&p.twins, &mut scene, &mut booth_light, &mut materials),
                 // `None`, and a KNOWN GAP (decision 0807): a mirrored `PreviewPart` doesn't carry
                 // the batch's alpha loops, so a character batch with an authored dimming constant
                 // previews at 1.0 here. Closing it means threading `alpha_anim` through the
@@ -1081,6 +1436,7 @@ pub(super) fn sync_glue_booth(
                 material: relight(&r.material, &mut scene, &mut booth_light, &mut materials),
                 bone: r.bone,
                 offset: r.offset,
+                twins: relight_twins(&r.twins, &mut scene, &mut booth_light, &mut materials),
             })
             .collect();
         // The camera-facing batches (the eye-glow, a wand's gem, a glow model's quad), relit onto the
@@ -1095,8 +1451,24 @@ pub(super) fn sync_glue_booth(
                 bone: b.bone,
                 offset: b.offset,
                 kind: b.kind,
+                twins: relight_twins(&b.twins, &mut scene, &mut booth_light, &mut materials),
             })
             .collect();
+        // `WOW_BOOTH_LOG=1` — **which body is standing, and what put it there.** The gate timeline
+        // says the glue camera drew; only this says whose display it drew, and whether the re-bake
+        // was the look changing (`look`) or the SCENE's rig landing under an unchanged look
+        // (`scene`) — the second of which stands the OUTGOING character in the INCOMING race's
+        // stage until the new assembly is ready.
+        if super::booth_log() {
+            println!(
+                "[booth] glue rebake display={} parts={} riders={} bake_rev={} scene_rev={scene_rev} by={}",
+                bake.display_id,
+                bake.parts.len(),
+                bake.riders.len(),
+                bake.revision,
+                if last_rev != bake.revision { "look" } else { "scene" },
+            );
+        }
         commands.entity(booth.root).despawn_related::<Children>();
         let mut booth_rig = spawn_booth_model(
             &mut commands,
@@ -1112,6 +1484,20 @@ pub(super) fn sync_glue_booth(
             BoothMotion::Loop, // the glue preview is a live scene, not a still
             bake.grip,         // close each hand that draws a weapon (the ref's paperdoll rule)
             &booth_billboards,
+            instance,
+        );
+        // The whole-model TINT (`GhostKit::tint` — the reference's `cc+0x184..0x18c`, written by the
+        // select ghost proc `0x472939 -> 0x710cf0`): the bake's own rig slot indexes the per-instance
+        // table, and every batch that carries that slot in its `MeshTag` — body, riders, cards —
+        // reads it. Written every re-bake, cleared for a living selection, so a ghost's colour can
+        // never survive into the next character you click. (Slot `0` = a boneless bake or a full
+        // palette; `set` refuses it, which is the world's own no-rig sentinel rule.)
+        tints.set(
+            booth_rig.slot(),
+            match bake.ghost {
+                Some(g) => benilla_world::instance_tint::pack(g.tint),
+                None => benilla_world::instance_tint::IDENTITY,
+            },
         );
         // The worn items' effects: an equipped item model's OWN emitters (decision 0813 — the R14
         // pauldron's sparkle, the torch's flame; `#bugs` B118) and the held weapons' `ItemVisuals`
@@ -1135,6 +1521,7 @@ pub(super) fn sync_glue_booth(
                     emitters: fx.emitters.clone(),
                 })
                 .collect::<Vec<_>>(),
+            instance,
         );
         if fx_emitters > 0 {
             info!(
@@ -1162,23 +1549,30 @@ pub(super) fn sync_glue_booth(
         // framing here does not matter, because `sync_glue_scene` re-aims onto the scene's authored
         // camera the frame the art lands, and this rig only ever shows for those few loading
         // frames.
+        // …and ONLY with no scene up. It always was "the fallback" in intent (a scene re-aims
+        // onto its authored camera), but it used to rely on `sync_glue_scene` running *after* this
+        // system to overwrite it — which is also what made the character read last frame's stage
+        // and gave [`PendingSwap`] its one-frame gap. With the order corrected, the fallback has
+        // to know it is one.
         let (t, _) = body_frame(&anchors, 1.0);
         let record_fov = anchors
             .pane_camera
             .map_or(super::framing::PANE_FIXED_FOV, |c| c.fov);
-        aim(
-            &mut cams,
-            GLUE_SLOT,
-            &(
-                t,
-                Projection::from(PerspectiveProjection {
-                    fov: diag_to_vert(record_fov, PORTRAIT_ASPECT),
-                    near: 0.02,
-                    far: 100.0,
-                    ..default()
-                }),
-            ),
-        );
+        if !scene.as_deref().is_some_and(|s| s.spawned) {
+            aim(
+                &mut cams,
+                GLUE_SLOT,
+                &(
+                    t,
+                    Projection::from(PerspectiveProjection {
+                        fov: diag_to_vert(record_fov, PORTRAIT_ASPECT),
+                        near: 0.02,
+                        far: 100.0,
+                        ..default()
+                    }),
+                ),
+            );
+        }
     }
     apply_yaw(
         &mut commands,
@@ -1188,7 +1582,13 @@ pub(super) fn sync_glue_booth(
         stage_scale,
         preview.yaw,
     );
-    *last = Some((bake.revision, preview.yaw, scene_rev));
+    // A yaw-only pass must not record the bake/scene revisions it did NOT commit, or the held
+    // pair above would never be re-tried once the stage lands.
+    *last = Some((
+        if rebake { bake.revision } else { last_rev },
+        preview.yaw,
+        if rebake { scene_rev } else { last_scene },
+    ));
 }
 
 /// Stand the select screen's **pet** on scene attachment 1 — the hunter/warlock companion beside
@@ -1263,6 +1663,7 @@ pub(super) fn sync_glue_pet(
             static_mesh: p.static_mesh.clone(),
             material: relight(&p.material, &mut scene.variants),
             alpha_anim: p.alpha_anim.clone(),
+            twins: BoothTwins::default(),
         })
         .collect();
     let booth_billboards: Vec<BoothBillboardSpec> = pet
@@ -1274,6 +1675,7 @@ pub(super) fn sync_glue_pet(
             bone: b.bone,
             offset: b.offset,
             kind: b.kind,
+            twins: BoothTwins::default(),
         })
         .collect();
     commands
@@ -1294,6 +1696,7 @@ pub(super) fn sync_glue_pet(
         BoothMotion::Loop, // Stand, looping — the same live scene the character is
         [false, false],    // …and no hands to grip with
         &booth_billboards,
+        BoothInstance::default(),
     );
     // The pet's OWN emitters — the imp's flames (decision 1539). Authored on the pet's own bones,
     // so this is the model's-own recipe, NOT the worn-item one (`spawn_booth_effects`, which seats
@@ -1635,6 +2038,41 @@ mod tests {
         }
     }
 
+    /// GOLDEN — the ghost select screen's hardcoded sun, every number byte-VERIFIED (wow-re
+    /// `glue-select-ghost-treatment.md`; see [`ghost_rig`] for the citations).
+    ///
+    /// The **sign** is the assertion that matters. wow-re's earlier §C4 was internally
+    /// contradictory about it — it called `CGLight+0x24` a to-light vector with no sign flip in the
+    /// SH chain, then concluded "lit from directly overhead" via the fixed-function commit, which
+    /// negates. Those differ by 180°: a character lit from above versus from below. The round that
+    /// settled it found `0x71bce0` negating all three components (`0x71be7c`/`0x71be81`/`0x71be86`)
+    /// before it accumulates, so both lanes agree on `(0,0,+1)`. The trap it also found is why this
+    /// is pinned rather than trusted to a comment: an AUTHORED M2 light already carries one
+    /// negation (`0x718960` stores `-Bz`, which is why [`scene_rig`] feeds `+bone_z`), so reusing
+    /// the authored convention here double-negates and lights the ghost from underneath.
+    #[test]
+    fn the_ghost_sun_is_one_overhead_directional_over_a_wiped_gather() {
+        let rig = ghost_rig();
+        // The gather is WIPED — `0x71bc30`'s `mov ecx,0x6d; rep stosd`. No stage lamps survive.
+        assert!(
+            rig.points.is_empty(),
+            "a ghost selection discards the scene-DB gather whole"
+        );
+        // Exactly one directional.
+        assert_eq!(rig.lobes.len(), 1);
+        let (to_light, diffuse) = rig.lobes[0];
+        // Bevy +Y is up: `wow_to_bevy([0,0,1])`. Overhead, not underfoot.
+        assert_eq!(to_light, Vec3::Y, "lit from directly overhead (WoW Z up)");
+        // `LightIntBand` 37 = 0x005E99C6 → (94,153,198); 38 = 0x001A3855 → (26,56,85).
+        let byte = |c: f32| (c * 255.0).round() as u32;
+        assert_eq!(
+            diffuse.map(byte),
+            [94, 153, 198],
+            "LightParams row 3, sub 0"
+        );
+        assert_eq!(rig.ambient.map(byte), [26, 56, 85], "…and sub 1");
+    }
+
     /// GOLDEN — the rig fold's classification law (wow-re `m2-dynamic-lights.md` +
     /// `glue-model-lighting.md`): directionals accumulate (ambient tracks summed; diffuse×intensity
     /// as per-light SH lobes whose to-light is the **bone's +Z axis**, never the def position),
@@ -1708,5 +2146,36 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// **The glue booth swaps as a PAIR** ([`PendingSwap`], [`may_swap`]). The defect it closes,
+    /// measured on a cold walk of a seven-character roster: clicking an orc from a human stood the
+    /// human's display in the orc stage for 53 ms, and clicking a human back from an orc — a body
+    /// already cached, a stage still loading — stood the human in the *orc* stage for 34 ms. The
+    /// reference cannot express either state: `SelectCharacter` loads the background and builds
+    /// the character inside one blocking call.
+    #[test]
+    fn a_stage_swaps_only_beside_the_character_that_asked_for_it() {
+        // Nothing standing (the login → select hop, an empty account): no pair to break.
+        assert!(may_swap(false, false, false, 0.0));
+
+        // A character IS standing: neither half alone may swap the stage.
+        assert!(
+            !may_swap(true, true, false, 0.0),
+            "the stage's art landed first — swapping now stands the OUTGOING body in it"
+        );
+        assert!(
+            !may_swap(true, false, true, 0.0),
+            "the body assembled first — swapping now is the same mispairing, reversed"
+        );
+        assert!(
+            may_swap(true, true, true, 0.0),
+            "both halves ready: swap, in one frame"
+        );
+
+        // 0737's rule: the hold is bounded. A look whose assembly can never complete must not
+        // freeze the screen on the previous character.
+        assert!(!may_swap(true, true, false, GLUE_SWAP_HOLD_SECS - 0.01));
+        assert!(may_swap(true, true, false, GLUE_SWAP_HOLD_SECS));
     }
 }

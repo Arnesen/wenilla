@@ -7,12 +7,17 @@
 //! The threshold is the byte-verified NPC-service gate the cursor grays at
 //! ([`SERVICE_RANGE_SQ`], 5.5556 yd center-to-center — `crate::target::cursor_mode`), so a window
 //! closes exactly where the cursor says its NPC is out of service — one law for "out of service".
-//! Whether the real client's auto-close shares that exact gate is INFERRED (its close mechanism
-//! isn't RE'd); the constant is the knob if it reads too eager or too lax in play.
+//!
+//! **That last sentence used to end "…is INFERRED (its close mechanism isn't RE'd)". It is now a
+//! fact** (decision 1741): the close mechanism is `0x493230`, called per frame from
+//! `CGWorldFrame`'s layer update, and a census of all fourteen of the client's arming sites found
+//! thirteen pushing this very constant. The one thing the guess missed is that the leash is not
+//! the window's at all — it belongs to the latched OBJECT, and swaps to 14.0 yd for a player
+//! ([`leash_sq`]).
 
 use bevy::prelude::*;
 
-use crate::net::{GuidIndex, SelfPlayer};
+use crate::net::{ClientCommand, GuidIndex, NetCommands, SelfPlayer};
 use crate::target::SERVICE_RANGE_SQ;
 use benilla_world::schedule::WorldStage;
 
@@ -57,7 +62,46 @@ pub(crate) trait NpcSession: Resource {
     fn npc(&self) -> Option<u64>;
     /// The window's client-side close (no packet) — the same clear its close button does.
     fn close(&mut self);
+    /// What the WALK-AWAY close owes the wire, if anything — sent by the guard below just before
+    /// it closes, and `None` for every session but one.
+    ///
+    /// It exists because the reference's watchdog does not route through the window's own close
+    /// verb: `0x4933da` calls the quest session's end (`0x501130`) **directly**, skipping
+    /// `DeclineQuest`'s core — so walking away from an NPC's quest panel is network-silent (no
+    /// giver re-open, and the DETAILS suppression flag is not consulted) while walking away from a
+    /// party member's SHARED quest still owes them `MSG_QUEST_PUSH_RESULT{DECLINE_QUEST}`
+    /// (decision 1741). A hook rather than a call to [`Self::close`] because that difference —
+    /// send *less* on the walk-away than on the button — is exactly what the binary does.
+    fn walk_away_send(&self, _npc: u64) -> Option<ClientCommand> {
+        None
+    }
 }
+
+/// The leash the walk-away guard measures against, **chosen by the latched object's type, not by
+/// the window** — the reference's `0x4930d0`, which stores the opener's own range and then
+/// overwrites it when the object carries the PLAYER typemask bit (`0x493156`).
+///
+/// Thirteen of the client's fourteen arming sites push the same `50/9` yd
+/// ([`SERVICE_RANGE_SQ`]) — mailbox, loot, stable master, auctioneer, trainer, flight master,
+/// gossip, item text, petition, bank, vendor, questgiver — so benilla having one constant for all
+/// of them is right, and byte-exact. What benilla did not have is the swap: a session latched onto
+/// a **player** is leashed at `10.0 + 4.0 = 14.0` yd instead (`[0x8044b0] + [0x80306c]`, squared
+/// into the cell at `0x49316d`). The only such session that registers this guard is a shared
+/// quest — and 1733 read that case as "not range-guarded at all", which is wrong in the same
+/// direction a plain revert to 5.56 yd would have been wrong (decision 1741).
+///
+/// The 14.0 coinciding with vmangos's `QUEST_SHARE_DISTANCE` is corroboration, not the derivation:
+/// the client's number is two `.rdata` floats summed.
+fn leash_sq(npc: u64) -> f32 {
+    if benilla_protocol::guid::is_player(npc) {
+        PLAYER_LEASH_SQ
+    } else {
+        SERVICE_RANGE_SQ
+    }
+}
+
+/// `14.0²` — the player-typemask leash (see [`leash_sq`]).
+const PLAYER_LEASH_SQ: f32 = 196.0;
 
 /// Did an NPC-bound window switch to a **different** NPC of the same kind while it was already open
 /// (a `Some(a) → Some(b)`, `a != b`)? The real client can't just repaint: its `ShowUIPanel` early-
@@ -74,6 +118,7 @@ pub(crate) fn npc_switched(prev: Option<u64>, now: Option<u64>) -> bool {
 pub(crate) fn close_npc_session_out_of_range<T: NpcSession>(
     mut session: ResMut<T>,
     index: Res<GuidIndex>,
+    commands: Res<NetCommands>,
     self_q: Query<&Transform, With<SelfPlayer>>,
     transforms: Query<&Transform>,
 ) {
@@ -81,12 +126,18 @@ pub(crate) fn close_npc_session_out_of_range<T: NpcSession>(
     let Some(self_tf) = self_q.iter().next() else {
         return;
     };
+    // Boundary-INCLUSIVE, centre-to-centre, no bounding radii — the reference's own compare
+    // (`0x4932f2`/`0x4932fe`: `dist² <= leash²` keeps). The leash is the object's, not the
+    // window's ([`leash_sq`]).
     let out = match index.0.get(&npc).and_then(|e| transforms.get(*e).ok()) {
-        Some(tf) => tf.translation.distance_squared(self_tf.translation) > SERVICE_RANGE_SQ,
+        Some(tf) => tf.translation.distance_squared(self_tf.translation) > leash_sq(npc),
         None => true, // the NPC despawned out from under the window
     };
     if out {
         debug!("ui_session: NPC {npc:#x} out of range/gone — client-side close");
+        if let Some(cmd) = session.walk_away_send(npc) {
+            let _ = commands.0.send(cmd);
+        }
         session.close();
     }
 }
@@ -164,14 +215,28 @@ mod tests {
     use super::*;
     use crate::ui_merchant::MerchantOpen;
 
+    /// A realistic NPC guid — `HIGHGUID_UNIT` in the high word. Not a bare low guid: the high word
+    /// is what makes a guid a *player* (`guid::is_player`), and since 1741 the walk-away leash
+    /// depends on that, so a "vendor" numbered `0x42` is silently a player and gets 14 yd.
+    const VENDOR: u64 = 0xF130_0000_0000_0042;
+
     /// Drive the guard in a minimal Bevy app over the merchant session (the trait's first
     /// consumer): in range keeps the window, stepping past the service gate closes it, and a
     /// despawned NPC closes it too.
+    ///
+    /// The vendor guid is a real `HIGHGUID_UNIT` one. It used to be a bare `0x42`, which is a
+    /// **player** guid (the high word is what decides — `guid::is_player`), and that went unnoticed
+    /// until the leash started depending on the type: a "vendor" with a player guid is leashed at
+    /// 14 yd and this test's 6 yd step stopped closing it (decision 1741).
     #[test]
     fn out_of_range_or_despawned_npc_closes_the_session() {
         let mut app = App::new();
         app.init_resource::<MerchantOpen>();
         app.init_resource::<GuidIndex>();
+        // The guard sends the walk-away answer for the one session that owes one (1741); the
+        // merchant owes none, but the channel has to exist for the system to run.
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
         app.add_systems(Update, close_npc_session_out_of_range::<MerchantOpen>);
         app.world_mut()
             .spawn((SelfPlayer, Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -182,12 +247,12 @@ mod tests {
         app.world_mut()
             .resource_mut::<GuidIndex>()
             .0
-            .insert(0x42, vendor);
+            .insert(VENDOR, vendor);
 
         // 5.0 yd < the 5.5556 yd service gate: stays open.
         app.world_mut()
             .resource_mut::<MerchantOpen>()
-            .open(0x42, vec![]);
+            .open(VENDOR, vec![]);
         app.update();
         assert!(app.world().resource::<MerchantOpen>().is_open());
 
@@ -202,10 +267,105 @@ mod tests {
         // Re-open, then the NPC despawns out from under the window: closes too.
         app.world_mut()
             .resource_mut::<MerchantOpen>()
-            .open(0x42, vec![]);
-        app.world_mut().resource_mut::<GuidIndex>().0.remove(&0x42);
+            .open(VENDOR, vec![]);
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .remove(&VENDOR);
         app.update();
         assert!(!app.world().resource::<MerchantOpen>().is_open());
+    }
+
+    /// **The leash belongs to the OBJECT, not the window** (decision 1741, correcting 1733): a
+    /// session latched onto a player is guarded at 14.0 yd, one latched onto an NPC at 5.56 yd.
+    /// 1733 read the share case as "not range-guarded at all" — wrong in the same direction that
+    /// reverting it to the NPC range would have been wrong, which is why both bounds are moved
+    /// here against the same panel.
+    ///
+    /// It also pins what the walk-away SENDS: a shared quest still owes the sharer the decline,
+    /// and an NPC's panel closes silently — the reference's watchdog skips the giver re-open the
+    /// button's path does.
+    #[test]
+    fn the_walk_away_leash_is_the_givers_own_and_a_share_still_answers() {
+        use crate::ui_quest::{QuestGiver, QuestView};
+
+        fn detail(npc: u64) -> QuestView {
+            QuestView::Detail(benilla_protocol::messages::QuestDetails {
+                npc,
+                quest_id: 1,
+                title: "A Threat Within".into(),
+                details: String::new(),
+                objectives: String::new(),
+                auto_finish: 0,
+                choices: Vec::new(),
+                rewards: Vec::new(),
+                money: 0,
+                reward_spell: 0,
+            })
+        }
+
+        const SHARER: u64 = 0x0000_0000_0000_002A; // HIGHGUID_PLAYER: a zero high word
+        const NPC: u64 = 0xF130_0000_0000_0007; // HIGHGUID_UNIT
+
+        /// Open the panel on `giver`, stand `dist` yards away, run the guard once, and report
+        /// whether the window survived and what went out.
+        fn walk(giver: u64, dist: f32) -> (bool, Vec<ClientCommand>) {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            app.insert_resource(NetCommands(tx));
+            app.init_resource::<QuestGiver>();
+            app.init_resource::<GuidIndex>();
+            app.add_systems(Update, close_npc_session_out_of_range::<QuestGiver>);
+            app.world_mut()
+                .spawn((SelfPlayer, Transform::from_xyz(0.0, 0.0, 0.0)));
+            let e = app
+                .world_mut()
+                .spawn(Transform::from_xyz(dist, 0.0, 0.0))
+                .id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(giver, e);
+            app.world_mut()
+                .resource_mut::<QuestGiver>()
+                .open(giver, detail(giver));
+            app.update();
+            (
+                app.world().resource::<QuestGiver>().is_open(),
+                rx.try_iter().collect(),
+            )
+        }
+
+        // A SHARE: 10 yd is past the NPC gate and well inside the player leash — 1733 would have
+        // kept this for the wrong reason, a plain revert would have closed it.
+        let (open, sent) = walk(SHARER, 10.0);
+        assert!(open, "a share is leashed at 14 yd, not 5.56");
+        assert!(sent.is_empty(), "still in range, nothing owed: {sent:?}");
+
+        // Past 14 yd it does close — and answers the sharer.
+        let (open, sent) = walk(SHARER, 15.0);
+        assert!(!open, "past the player leash the panel closes");
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientCommand::QuestPushResult {
+                    sharer: SHARER,
+                    msg: benilla_protocol::messages::QuestShareMsg::DECLINE_QUEST,
+                }]
+            ),
+            "walking away from a share still declines it: {sent:?}"
+        );
+
+        // An NPC at the same 10 yd is long gone — the leash did not follow the window.
+        let (open, sent) = walk(NPC, 10.0);
+        assert!(!open, "an NPC giver is still leashed at 5.56 yd");
+        assert!(
+            sent.is_empty(),
+            "the walk-away skips the giver re-open the button does: {sent:?}"
+        );
+
+        // Boundary-inclusive: exactly on the leash keeps the window (`dist² <= leash²`).
+        assert!(walk(SHARER, 14.0).0, "14.0 yd exactly is still in range");
     }
 
     /// The `"npc"` portrait token's resolver ([`feed_interact_npc`]): the open NPC session's guid,
@@ -227,7 +387,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<GuidIndex>()
             .0
-            .insert(0x42, npc);
+            .insert(VENDOR, npc);
 
         // No window open → no npc.
         app.update();
@@ -236,13 +396,13 @@ mod tests {
         // A merchant opens on the indexed NPC → resolves to its entity.
         app.world_mut()
             .resource_mut::<MerchantOpen>()
-            .open(0x42, vec![]);
+            .open(VENDOR, vec![]);
         app.update();
         assert_eq!(app.world().resource::<InteractNpc>().0, Some(npc));
 
         // Gossip carries the same guid (a browse-goods hop) and wins the priority chain — still the
         // one NPC's entity.
-        app.world_mut().resource_mut::<GossipState>().npc = Some(0x42);
+        app.world_mut().resource_mut::<GossipState>().npc = Some(VENDOR);
         app.update();
         assert_eq!(app.world().resource::<InteractNpc>().0, Some(npc));
 
@@ -261,7 +421,7 @@ mod tests {
         app.init_resource::<crate::ui_auction::AuctionOpen>();
         app.world_mut()
             .resource_mut::<crate::ui_auction::AuctionOpen>()
-            .open(0x42, 1);
+            .open(VENDOR, 1);
         app.update();
         assert_eq!(
             app.world().resource::<InteractNpc>().0,
@@ -283,7 +443,7 @@ mod tests {
         app.init_resource::<crate::ui_stable::StableOpen>();
         app.world_mut()
             .resource_mut::<crate::ui_stable::StableOpen>()
-            .open(0x42, 2, vec![]);
+            .open(VENDOR, 2, vec![]);
         app.update();
         assert_eq!(
             app.world().resource::<InteractNpc>().0,

@@ -4,12 +4,16 @@
 //! `SMSG_QUEST_QUERY_RESPONSE` (92/93), `CMSG_QUESTLOG_SWAP_QUEST`/`CMSG_QUESTLOG_REMOVE_QUEST`/
 //! `SMSG_QUESTLOG_FULL` (403-405), and the `SMSG_QUESTUPDATE_*` progress pushes (406-410). CMSG
 //! bodies from vmangos `Server/Packets/Quest.cpp:6-78`; SMSG layouts from the same file's
-//! `AppendBodyTo` writers (line citations inline in each submodule). Out of scope for both slices:
+//! `AppendBodyTo` writers (line citations inline in each submodule). The third slice — `share`,
 //! `CMSG_QUEST_CONFIRM_ACCEPT` / `SMSG_QUEST_CONFIRM_ACCEPT` / `CMSG_PUSHQUESTTOPARTY` /
-//! `MSG_QUEST_PUSH_RESULT` — the party quest-share flow, a separate solo slice.
+//! `MSG_QUEST_PUSH_RESULT` (411-413 + 630) — is the party quest-share flow (decision 1733). It is
+//! its own file and not `giver`'s, even though a shared quest lands on the giver's own DETAILS
+//! panel: what is new here is the *verdict* wire between sharer and receiver, and `giver` never
+//! learns that a share exists — it only ever sees a giver guid that happens to be a player.
 
 mod giver;
 mod log;
+mod share;
 
 pub use giver::{
     dialog_status, questgiver_accept_quest, questgiver_choose_reward, questgiver_complete_quest,
@@ -18,8 +22,12 @@ pub use giver::{
     QuestRequestItems, QuestRequiredItem, QuestRewardItem, QUEST_EMOTE_COUNT,
 };
 pub use log::{
-    quest_query, questlog_remove_quest, questlog_swap_quest, QuestObjective, QuestTemplate,
-    QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
+    quest_flags, quest_query, questlog_remove_quest, questlog_swap_quest, QuestObjective,
+    QuestTemplate, QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
+};
+pub use share::{
+    push_quest_to_party, quest_confirm_accept, quest_push_result, QuestConfirmAccept,
+    QuestPushResult, QuestShareMsg,
 };
 
 pub(super) use giver::{
@@ -31,3 +39,4 @@ pub(super) use log::{
     read_quest_query_response, read_quest_update_add_item, read_quest_update_add_kill,
     read_quest_update_complete, read_quest_update_failed, read_quest_update_failedtimer,
 };
+pub(super) use share::{read_quest_confirm_accept, read_quest_push_result};

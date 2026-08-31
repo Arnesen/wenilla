@@ -1266,7 +1266,7 @@ fn tombstoned_paths_never_fall_through_to_the_base_copy() {
 }
 
 /// The WMO **skybox** pair, against the shipped Stratholme files (`crate::models::wmo`,
-/// `benilla::wmo_sky`): a root's MOSB model and the per-group `0x40000` gate that asks for it.
+/// `benilla::skybox`): a root's MOSB model and the per-group `0x40000` gate that asks for it.
 ///
 /// The sibling roots are the whole point of the fixture. `Stratholme_B` is the burning **city** — it
 /// names `StratholmeSkybox.m2` *and* 61 of its 83 groups set the bit, which is why the reference's
@@ -1276,7 +1276,7 @@ fn tombstoned_paths_never_fall_through_to_the_base_copy() {
 /// halves going quiet, and the two together are what keeps the gate off the chunk alone — four 1.12
 /// roots name a skybox no group ever asks for (`benilla-extract skyboxscan`).
 #[test]
-fn reads_the_wmo_skybox_and_its_per_group_gate() {
+fn reads_the_skybox_and_its_per_group_gate() {
     let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
 
@@ -1408,4 +1408,48 @@ fn wmo_ground_type_is_a_terrain_type_id() {
         "the 5875 ground_type census"
     );
     assert_eq!(multi, 121, "roots authoring more than one surface");
+}
+
+/// The **ghost sky** — `LightParams.lightSkyboxID` → `LightSkybox.dbc` → a model the chain can
+/// actually read. Pins all three joints of a path that was parsed and then dropped on the floor:
+/// the field was named in the schema and had zero consumers, so nothing caught that the table it
+/// indexes was never loaded at all.
+///
+/// The reference reaches this table only through the ghost override (`0x6d26cb`, gated on
+/// `[0xce9bb0] != -1`; wow-re `lighting/scratch/wmo-skybox.md` §3 + `death-light.md`), and the
+/// shipped data matches that gate exactly: 5 of 426 `LightParams` rows carry a non-zero id, all of
+/// them 3 = `DeathClouds.mdx`, reached from param slot **4** of every one of the 374 `Light` rows.
+/// So the answer is the same everywhere, which is what the spread of positions below asserts —
+/// including Deeprun Tram, the shipped map with no `Light` row of its own (it must still find the
+/// sky through the zero-match fallback row, not come back bare).
+#[test]
+fn resolves_the_ghost_skybox_everywhere() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let cat = benilla_formats::LightCatalog::load(&mut chain).expect("load Light DBCs");
+
+    const DEATH_CLOUDS: &str = "environments\\stars\\deathclouds.m2";
+    for (map, pos, what) in [
+        (0u32, [-8949.95f32, -132.49, 83.5], "Northshire, Azeroth"),
+        (1, [1629.0, -4373.0, 31.0], "Orgrimmar, Kalimdor"),
+        (
+            369,
+            [0.0, 0.0, 0.0],
+            "Deeprun Tram — no Light row of its own",
+        ),
+    ] {
+        assert_eq!(
+            cat.ghost_skybox(map, pos),
+            Some(DEATH_CLOUDS),
+            "the ghost sky must resolve at {what}"
+        );
+    }
+
+    // The path is normalised to what the chain actually holds: the DBC authors `.mdx`, the archive
+    // ships `.m2`. Reading it here is the half that a name-only assert would miss — the render lane
+    // hands this exact string to `load_m2_mesh`.
+    let bytes = chain
+        .read_file(DEATH_CLOUDS)
+        .expect("the ghost sky model the DBC names must be readable from the chain");
+    assert_eq!(&bytes[..4], b"MD20", "DeathClouds is an M2");
 }

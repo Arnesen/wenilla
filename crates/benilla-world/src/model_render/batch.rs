@@ -102,7 +102,7 @@ impl M2BatchMaterials<'_> {
     }
 
     /// One material for a batch of a **WMO skybox** — the painted sky a building owns
-    /// ([`crate::wmo_sky`]), which is an ordinary M2 and is drawn as one (decision 1264).
+    /// ([`crate::skybox`]), which is an ordinary M2 and is drawn as one (decision 1264).
     ///
     /// Everything that makes it a *skybox* rather than a doodad is here, and it is only three
     /// things. Blend mode, sidedness, the UNLIT and UNFOGGED bits, the alpha-key reference, the

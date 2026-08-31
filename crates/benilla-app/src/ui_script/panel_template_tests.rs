@@ -343,7 +343,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
         (0.0, 0.0)
     );
     assert!(!s
-        .eval::<bool>("return MyScrollScrollBarScrollUpButton:IsEnabled()")
+        .eval::<bool>("return MyScrollScrollBarScrollUpButton:IsEnabled() ~= 0")
         .unwrap());
     assert_eq!(s.eval::<i64>("return MyScroll.offset").unwrap(), 0);
 
@@ -369,7 +369,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
         "192px of content in an 80px window — the bar's range is the overflow"
     );
     assert!(
-        s.eval::<bool>("return MyScrollScrollBarScrollDownButton:IsEnabled()")
+        s.eval::<bool>("return MyScrollScrollBarScrollDownButton:IsEnabled() ~= 0")
             .unwrap(),
         "there is somewhere to scroll to, so the down arrow woke"
     );
@@ -382,7 +382,7 @@ fn a_scroll_frame_from_the_template_wires_its_bar_two_parents_deep() {
         48.0
     );
     assert!(s
-        .eval::<bool>("return MyScrollScrollBarScrollUpButton:IsEnabled()")
+        .eval::<bool>("return MyScrollScrollBarScrollUpButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -174,7 +174,7 @@ impl WmoGroupVis {
 ///   one asymmetric arm: a rider outlives its building by the frame between the placement
 ///   despawning and the cascade reaching it, and one frame of an additive strip — or a torch —
 ///   hanging where a building used to be is a bright artefact, where one frame of a missing one is
-///   nothing at all. [`crate::wmo_sky`]'s skybox resolve refuses on the same asymmetry, and 1276 is
+///   nothing at all. [`crate::skybox`]'s skybox resolve refuses on the same asymmetry, and 1276 is
 ///   the general rule: an unknown with a testable answer must be tested, but where the error
 ///   directions are lopsided, take the cheap one.
 pub fn room_admits(room: Option<&WmoGroupVis>, instance: Option<&WmoPortalInstance>) -> bool {

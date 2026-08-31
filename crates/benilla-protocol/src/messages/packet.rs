@@ -14,12 +14,13 @@ use super::{
     LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
     MirrorTimerStart, MoveMode, Object, PartyKillLog, PartyMemberStatsInfo, PeriodicAuraLog,
     PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
-    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestDetails,
-    QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
-    ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog,
-    SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellInstaKillLog, SpellLogExecute,
-    SpellLogMiss, SpellOutcomeLog, SpellStart, StabledPet, TaxiMask, TradeStatus,
-    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept,
+    QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestPushResult,
+    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
+    SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog,
+    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart, StabledPet,
+    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem,
+    WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -145,6 +146,10 @@ pub enum ServerPacket {
         /// The path is a 3-D **flight** (`SPLINE_FLAG_FLYING` = `Mask_CatmullRom`): keep the spline's own Z.
         /// Clear ⇒ a ground walk whose Z the client re-derives from the terrain (the app terrain-clamps it).
         flying: bool,
+        /// The path's `SPLINEFLAG_RUNMODE` bit — and its **absence** is the load-bearing half: a
+        /// spline without it forces `MOVEFLAG_WALK_MODE` **on** for the unit it moves (see
+        /// [`super::monster_move`]'s `SPLINE_FLAG_RUNMODE`).
+        run_mode: bool,
     },
     /// A relayed *player* movement packet (`MSG_MOVE_*`, see [`super::parse::is_movement_relay`]): the mover's
     /// authoritative pose plus its live CMovement `moveFlags`. The app snaps the entity to `position`
@@ -268,6 +273,15 @@ pub enum ServerPacket {
     TalentWipeConfirm {
         trainer: u64,
         cost: u32,
+    },
+    /// `SMSG_SUMMON_REQUEST` — someone is *asking* to pull us to them (decision 1747): a
+    /// warlock's ritual, a meeting stone, a GM. The twin of [`Self::BinderConfirm`] in shape —
+    /// nothing moves until `CMSG_SUMMON_RESPONSE` goes back — and its opposite in teardown:
+    /// there is no decline opcode, so the question expires rather than being answered no.
+    SummonRequest {
+        summoner: u64,
+        zone: u32,
+        delay_ms: u32,
     },
     /// `SMSG_PLAYERBOUND` — the bind took: who bound us and the AreaTable id we are now bound in.
     /// Arrives beside [`Self::BindPoint`], which carries the same area id plus the position; this
@@ -468,6 +482,27 @@ pub enum ServerPacket {
     AreaTriggerMessage {
         text: String,
     },
+    /// `SMSG_SERVER_MESSAGE` — a shutdown/restart countdown or an operator broadcast: the
+    /// `ServerMessages.dbc` row id and the text that fills its `%s` (layout in
+    /// [`super::broadcast::read_server_message`]).
+    ServerMessage {
+        message_type: u32,
+        text: String,
+    },
+    /// `SMSG_ZONE_UNDER_ATTACK` — an area is under attack by enemy players; one `AreaTable.dbc` id
+    /// (layout in [`super::broadcast::read_zone_under_attack`]).
+    ZoneUnderAttack {
+        area_id: u32,
+    },
+    /// `SMSG_DEFENSE_MESSAGE` — a world-defense broadcast (the EPL tower captures): the zone it is
+    /// about and the server-composed text (layout in [`super::broadcast::read_defense_message`]).
+    DefenseMessage {
+        zone_id: u32,
+        text: String,
+    },
+    /// `SMSG_CHAT_RESTRICTED` — a trial account hit its whisper cap; empty body (vmangos
+    /// `Server/Packets/Chat.cpp:21-23`). The [`Self::ChatWrongFaction`] shape exactly.
+    ChatRestricted,
     /// `SMSG_PLAYED_TIME` — answers our `CMSG_PLAYED_TIME` (`/played`): total played time + time
     /// since the last level-up, both in seconds (layout in [`super::chat::read_played_time`]).
     PlayedTime {
@@ -747,6 +782,14 @@ pub enum ServerPacket {
     /// `SMSG_QUESTLOG_FULL` — the log has no free slot for a new quest; empty body (vmangos
     /// `Quest.cpp:87`).
     QuestLogFull,
+    /// `MSG_QUEST_PUSH_RESULT` — one party member's verdict on a quest we shared, relayed to the
+    /// SHARER (layout + the direction trap on [`QuestPushResult`], decision 1733). Arrives once per
+    /// member per push, and more than once per member: the server opens with `SHARING_QUEST` and
+    /// then sends the real outcome.
+    QuestPushResult(QuestPushResult),
+    /// `SMSG_QUEST_CONFIRM_ACCEPT` — a party member started a `QUEST_FLAGS_PARTY_ACCEPT` (escort)
+    /// quest and we are being asked whether to start it too (layout in [`QuestConfirmAccept`]).
+    QuestConfirmAccept(QuestConfirmAccept),
     /// `SMSG_QUESTUPDATE_COMPLETE` — every objective on this quest is now complete (vmangos
     /// `Quest.cpp:91`); the log slot's state byte gets `QUEST_STATE_COMPLETE`.
     QuestUpdateComplete {
@@ -1098,6 +1141,31 @@ pub enum ServerPacket {
     RaidInstanceInfo {
         entries: Vec<super::group::RaidInstanceEntry>,
     },
+    /// `SMSG_RAID_INSTANCE_MESSAGE` — a raid lockout's welcome/countdown line (decision 1748).
+    RaidInstanceMessage {
+        message: super::instance::RaidInstanceMessage,
+    },
+    /// `SMSG_INSTANCE_SAVE_CREATED` — "you are now saved to this instance". vmangos always sends
+    /// `0`; the flag is kept raw because the client's `== 1` arm is a different line.
+    InstanceSaveCreated {
+        flag: u32,
+    },
+    /// `SMSG_INSTANCE_RESET` — the reset took; the payload is the `Map.dbc` id that was reset.
+    InstanceReset {
+        map: u32,
+    },
+    /// `SMSG_INSTANCE_RESET_FAILED` — the reset was refused (decision 1748).
+    InstanceResetFailed {
+        failure: super::instance::InstanceResetFailed,
+    },
+    /// `SMSG_UPDATE_LAST_INSTANCE` — the `Map.dbc` id of the dungeon we were last in.
+    UpdateLastInstance {
+        map: u32,
+    },
+    /// `SMSG_UPDATE_INSTANCE_OWNERSHIP` — non-zero while we hold at least one permanent bind.
+    UpdateInstanceOwnership {
+        owns: u32,
+    },
     /// `SMSG_DUEL_REQUESTED` — a duel challenge. Sent to challenger and challenged alike; which
     /// one we are is `challenger == our guid` (decision 0633).
     DuelRequested {
@@ -1427,6 +1495,7 @@ impl ServerPacket {
             ServerPacket::GmTicketStatusUpdate { .. } => "SMSG_GM_TICKET_STATUS_UPDATE".into(),
             ServerPacket::BinderConfirm { .. } => "SMSG_BINDER_CONFIRM".into(),
             ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
+            ServerPacket::SummonRequest { .. } => "SMSG_SUMMON_REQUEST".into(),
             ServerPacket::TalentWipeConfirm { .. } => "MSG_TALENT_WIPE_CONFIRM".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
@@ -1456,6 +1525,10 @@ impl ServerPacket {
             ServerPacket::ChatWrongFaction => "SMSG_CHAT_WRONG_FACTION".into(),
             ServerPacket::Notification { .. } => "SMSG_NOTIFICATION".into(),
             ServerPacket::AreaTriggerMessage { .. } => "SMSG_AREA_TRIGGER_MESSAGE".into(),
+            ServerPacket::ServerMessage { .. } => "SMSG_SERVER_MESSAGE".into(),
+            ServerPacket::ZoneUnderAttack { .. } => "SMSG_ZONE_UNDER_ATTACK".into(),
+            ServerPacket::DefenseMessage { .. } => "SMSG_DEFENSE_MESSAGE".into(),
+            ServerPacket::ChatRestricted => "SMSG_CHAT_RESTRICTED".into(),
             ServerPacket::PlayedTime { .. } => "SMSG_PLAYED_TIME".into(),
             ServerPacket::RandomRoll { .. } => "MSG_RANDOM_ROLL".into(),
             ServerPacket::InitialSpells { .. } => "SMSG_INITIAL_SPELLS".into(),
@@ -1516,6 +1589,8 @@ impl ServerPacket {
             ServerPacket::QuestGiverFailed { .. } => "SMSG_QUESTGIVER_QUEST_FAILED".into(),
             ServerPacket::QuestQueryResponse(_) => "SMSG_QUEST_QUERY_RESPONSE".into(),
             ServerPacket::QuestLogFull => "SMSG_QUESTLOG_FULL".into(),
+            ServerPacket::QuestPushResult(_) => "MSG_QUEST_PUSH_RESULT".into(),
+            ServerPacket::QuestConfirmAccept(_) => "SMSG_QUEST_CONFIRM_ACCEPT".into(),
             ServerPacket::QuestUpdateComplete { .. } => "SMSG_QUESTUPDATE_COMPLETE".into(),
             ServerPacket::QuestUpdateFailed { .. } => "SMSG_QUESTUPDATE_FAILED".into(),
             ServerPacket::QuestUpdateFailedTimer { .. } => "SMSG_QUESTUPDATE_FAILEDTIMER".into(),
@@ -1592,6 +1667,12 @@ impl ServerPacket {
             }
             ServerPacket::RaidInstanceInfo { .. } => "SMSG_RAID_INSTANCE_INFO".into(),
             ServerPacket::DuelRequested { .. } => "SMSG_DUEL_REQUESTED".into(),
+            ServerPacket::RaidInstanceMessage { .. } => "SMSG_RAID_INSTANCE_MESSAGE".into(),
+            ServerPacket::InstanceSaveCreated { .. } => "SMSG_INSTANCE_SAVE_CREATED".into(),
+            ServerPacket::InstanceReset { .. } => "SMSG_INSTANCE_RESET".into(),
+            ServerPacket::InstanceResetFailed { .. } => "SMSG_INSTANCE_RESET_FAILED".into(),
+            ServerPacket::UpdateLastInstance { .. } => "SMSG_UPDATE_LAST_INSTANCE".into(),
+            ServerPacket::UpdateInstanceOwnership { .. } => "SMSG_UPDATE_INSTANCE_OWNERSHIP".into(),
             ServerPacket::DuelOutOfBounds => "SMSG_DUEL_OUTOFBOUNDS".into(),
             ServerPacket::DuelInBounds => "SMSG_DUEL_INBOUNDS".into(),
             ServerPacket::DuelComplete { .. } => "SMSG_DUEL_COMPLETE".into(),

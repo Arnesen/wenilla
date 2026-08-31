@@ -32,6 +32,17 @@ pub(crate) struct Spline {
     /// [`ground_clamp_creatures`] snaps this unit onto benilla's terrain. `false` for a flying path,
     /// which keeps the spline's own Z.
     pub(crate) grounded: bool,
+    /// The path's `SPLINEFLAG_RUNMODE` bit — **a run when set, a walk when clear**, and the clear
+    /// case is the one that does something: the real client's `SMSG_MONSTER_MOVE` commit
+    /// `0x7c6a50` feeds this bit to `CMovement::SetRunMode 0x7c71c0` (`0x7c6ac2 and edi,0x100`;
+    /// `0x7c6acb call`), whose argument is *run*, so **a spline without RUNMODE sets
+    /// `MOVEFLAG_WALK_MODE` on the unit it moves.** Every incoming spline re-authors the bit
+    /// (wow-re `collision/scratch/walk-mode-law.md` §5.2; decision 1758).
+    ///
+    /// Only the body **we drive** reads it ([`crate::player::server_ride`]) — a creature's own
+    /// gait is derived from [`Spline::speed`], the path's arc length over its duration, so its
+    /// walk bit would select nothing.
+    pub(crate) run_mode: bool,
 }
 
 /// **A spline the server ended by decree**, carrying the id the acknowledgement owes (decision
@@ -230,6 +241,7 @@ pub(in crate::net) fn monster_move_spline(
     stop: bool,
     duration_ms: u32,
     flying: bool,
+    run_mode: bool,
 ) -> Option<Spline> {
     if stop || duration_ms == 0 || path.len() < 2 {
         return None;
@@ -240,6 +252,7 @@ pub(in crate::net) fn monster_move_spline(
         duration: Duration::from_millis(u64::from(duration_ms)),
         id: spline_id,
         grounded: !flying,
+        run_mode,
     })
 }
 
@@ -273,6 +286,7 @@ pub(in crate::net) fn create_spline(spline: CreateSpline) -> Option<Spline> {
         duration: Duration::from_millis(u64::from(spline.duration_ms)),
         id: spline.id,
         grounded: !spline.flying,
+        run_mode: spline.run_mode,
     })
 }
 
@@ -927,6 +941,9 @@ mod under_floor {
     /// standing at the Z the server sent for it.
     fn half_arrived_world() -> (App, Entity) {
         let mut app = App::new();
+        // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767); the
+        // real one is initialised by the world plugins, which a headless harness does not run.
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,
@@ -1045,6 +1062,7 @@ mod tests {
             duration: Duration::from_secs(10),
             id: 7,
             grounded,
+            run_mode: true,
         };
         let now = Instant::now();
         (spline, now)
@@ -1140,6 +1158,7 @@ mod tests {
             duration_ms: 12_000,
             flying: false,
             cyclic: false,
+            run_mode: true,
         })
         .expect("a live walk");
         let (pos, facing, _) = s.sample(Instant::now());
@@ -1162,6 +1181,7 @@ mod tests {
             duration_ms,
             flying: false,
             cyclic: false,
+            run_mode: true,
         };
         let straight = vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]];
         assert!(create_spline(spline(5_000, 5_000, straight.clone())).is_none());

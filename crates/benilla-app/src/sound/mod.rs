@@ -248,16 +248,21 @@ pub(crate) struct SoundOutput {
     /// here rather than in a resource of its own so the kit player — which already holds `out` —
     /// can stamp every play on the capture's timeline with no new plumbing.
     pub(crate) probe: Option<probe::Probe>,
-    /// Live **stream** voices, reported by their owners each frame ([`zone`], [`glue`]).
+    /// Live **stream** voices, reported by their owners each frame ([`zone`], [`glue`],
+    /// [`cinematic`]).
     ///
     /// These count against the same ceiling as everything else ([`kit::SOFTWARE_CHANNELS`]): the
     /// reference's music, ambience and liquid loops all land on its uncapped bus 0 and occupy
-    /// FMOD channels exactly like a sword swing does. Two fields rather than one counter because
-    /// each owner **rewrites its own** every frame from its own live handles — a shared counter
-    /// with two writers drifts the first time a fade is interrupted, and a voice budget that
-    /// drifts is worse than none.
+    /// FMOD channels exactly like a sword swing does. A field per owner rather than one shared
+    /// counter because each owner **rewrites its own** every frame from its own live handles — a
+    /// shared counter with several writers drifts the first time a fade is interrupted, and a
+    /// voice budget that drifts is worse than none.
     pub(crate) zone_streams: usize,
     pub(crate) glue_streams: usize,
+    /// The cinematic narration's own stream — a third long-lived owner, and for a long time the
+    /// one the budget could not see (a 102-second race intro spent all of it one voice short of
+    /// the truth). Rewritten each frame by [`cinematic::drive_narration`], like its neighbours.
+    pub(crate) cinematic_streams: usize,
     /// One-shots that lost their slot to a louder newcomer, and plays refused because nothing
     /// live was quieter than them (decision 1557). Reported by the probe.
     pub(crate) voices_stolen: u64,
@@ -270,7 +275,7 @@ impl SoundOutput {
     /// Everything the device is currently mixing — kit channels plus the held streams. This is
     /// the number [`kit::SOFTWARE_CHANNELS`] bounds.
     pub(crate) fn live_voices(&self) -> usize {
-        self.channels.len() + self.zone_streams + self.glue_streams
+        self.channels.len() + self.zone_streams + self.glue_streams + self.cinematic_streams
     }
 }
 
@@ -413,6 +418,7 @@ impl Plugin for SoundPlugin {
             probe,
             zone_streams: 0,
             glue_streams: 0,
+            cinematic_streams: 0,
             voices_stolen: 0,
             voices_denied: 0,
             copies_dropped: 0,

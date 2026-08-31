@@ -127,6 +127,7 @@ impl Plugin for CharSelectPlugin {
                         // Before the list refresh, and before `select_input` reads a click that
                         // landed on the panel rather than the screen (decision 1196).
                         debug_select_addons,
+                        debug_select_walk,
                         addons::drive_addons_panel,
                         refresh::refresh_list,
                         refresh::refresh_banner_and_buttons,
@@ -142,6 +143,14 @@ impl Plugin for CharSelectPlugin {
                 )
                     .chain()
                     .after(benilla_world::schedule::WorldStage::Net),
+            )
+            // AFTER the cover's own stage, so the raise it reads is this frame's — see the
+            // system's doc for why the glue must yield the glass the moment the cover goes up.
+            .add_systems(
+                Update,
+                screen::hide_under_world_cover
+                    .after(benilla_world::schedule::WorldStage::Present)
+                    .run_if(in_state(ClientState::CharSelect)),
             );
     }
 }
@@ -425,10 +434,11 @@ fn apply_roster_policy(
                 }
                 None
             }
-            // `WOW_CHAR`, or the login smoke's optional third field (decision 1262): the smoke's
-            // seat exists because `WOW_CHAR` is also an *unattended* marker
-            // ([`crate::run_mode::unattended_login`]), so using it to reach the world would switch
-            // the very branch a session test is trying to exercise. Same fast path, no marker.
+            // `WOW_CHAR`, or the login smoke's optional third field (decision 1262): the seat
+            // exists because `WOW_CHAR` *was* also an unattended marker, so using it to reach the
+            // world switched the very branch a session test was trying to exercise. 1769 severed
+            // that — `WOW_CHAR` now only means "skip the click" — and the seat stays as the
+            // smoke's own way in. Same fast path either way.
             None => crate::webenv::var("WOW_CHAR").or_else(|| {
                 std::env::var("WOW_LOGIN_SMOKE")
                     .ok()
@@ -509,13 +519,14 @@ fn apply_roster_policy(
                 }
                 None => {
                     warn!("char select: WOW_CHAR={name} not on this account — showing roster");
-                    // A harness run (env creds, no smoke) can never pick a different row itself —
-                    // parked here it burns its whole wall-clock. Same marker the login arm uses,
-                    // same greppable verdict for leg.sh.
-                    if crate::run_mode::unattended_login()
-                        && std::env::var_os("WOW_LOGIN_SMOKE").is_none()
+                    // A driverless run can never pick a different row itself — parked here it
+                    // burns its whole wall-clock. Same home as the login arm's verdict, so the
+                    // marker leg.sh greps for is written in exactly one place (1371, 1769).
+                    if std::env::var_os("WOW_LOGIN_SMOKE").is_none()
+                        && crate::run_mode::fatal_when_driverless(&format!(
+                            "WOW_CHAR={name} is not on this account"
+                        ))
                     {
-                        error!("login: FATAL — WOW_CHAR={name} is not on this account; exiting");
                         exit.write(AppExit::error());
                     }
                 }
@@ -741,6 +752,83 @@ fn debug_logout_smoke(
             *phase = 6;
         }
         _ => {}
+    }
+}
+
+/// The select-screen **walk** instrument (`WOW_CHARSELECT_WALK=<period_s>[:<enter_after_s>]`) —
+/// the thing a headless run had no way to do at all: *click a row*. It steps the selection one row
+/// per `period_s` through the whole roster (the ref's arrow-key cycle, in code), starting from the
+/// row the screen opened on, and logs each step with its elapsed stamp — so a booth/scene timeline
+/// (`WOW_BOOTH_LOG=1`, `WOW_STREAM_TRACE`) is attributable to the selection that caused it. With
+/// `enter_after_s`, it then presses **Enter World** that long after the last step, which is the
+/// only headless way to land on the world-entry edge from a screen that was actually *used*
+/// (`WOW_CHAR`'s fast path answers the first roster and never renders a second selection).
+///
+/// Built for the two reports this file's booth feed owns — the cold-selection model swap and the
+/// entry-edge stall — and kept, because every future "what does the screen do when you click"
+/// question needs exactly this and nothing more. Inert without the env.
+fn debug_select_walk(
+    mut roster: ResMut<Roster>,
+    pick: Res<CharPick>,
+    time: Res<Time>,
+    mut plan: Local<Option<(f32, Option<f32>)>>,
+    mut next_at: Local<Option<f32>>,
+    mut row: Local<usize>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let (period, enter_after) = *plan.get_or_insert_with(|| {
+        let Ok(spec) = std::env::var("WOW_CHARSELECT_WALK") else {
+            return (f32::INFINITY, None);
+        };
+        let (p, e) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+        (
+            p.trim().parse::<f32>().unwrap_or(3.0),
+            e.trim().parse::<f32>().ok(),
+        )
+    });
+    if !period.is_finite() {
+        *done = true;
+        return;
+    }
+    if roster.chars.is_empty() {
+        return; // roster not in yet — the walk starts at the first real screen
+    }
+    let now = time.elapsed_secs();
+    let at = *next_at.get_or_insert(now + period);
+    if now < at {
+        return;
+    }
+    if *row < roster.chars.len() {
+        let i = *row;
+        *row += 1;
+        let c = &roster.chars[i];
+        info!(
+            "char select: WALK t={now:.3} → row {i} ({}, race {}, class {})",
+            c.name, c.race, c.class
+        );
+        roster.select(Some(i));
+        // The last row waits `enter_after` (not `period`) before the entry, so the screen the
+        // stall is measured from is a settled one.
+        *next_at = Some(
+            now + if *row == roster.chars.len() {
+                enter_after.unwrap_or(period)
+            } else {
+                period
+            },
+        );
+        return;
+    }
+    // The roster is walked. Either enter the world on the last selection, or stop.
+    *done = true;
+    if enter_after.is_none() {
+        return;
+    }
+    if let Some((guid, name)) = roster.selected_char().map(|c| (c.guid, c.name.clone())) {
+        info!("char select: WALK t={now:.3} → ENTER WORLD as {name}");
+        send_pick(&mut roster, &pick, guid);
     }
 }
 

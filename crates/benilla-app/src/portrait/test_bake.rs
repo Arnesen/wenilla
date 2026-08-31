@@ -7,7 +7,7 @@
 use benilla_assets::M2Model;
 use bevy::prelude::*;
 
-use super::booth::{spawn_booth_model, BoothMotion, BoothPart};
+use super::booth::{spawn_booth_model, BoothInstance, BoothMotion, BoothPart, BoothTwins};
 use super::framing::{body_frame, frame, head_anchor, PortraitAnchors};
 use super::{aim, test_mode, BoothCam, BoothLight, Booths, PaperDollBooth, PAPERDOLL_SLOT, SLOTS};
 use benilla_assets::m2_url;
@@ -130,6 +130,7 @@ fn bake_test(
                     // The harness parses submeshes straight off the model, so the authored alpha is
                     // right here — an eyeball bake should show the batch dimming the artist wrote.
                     alpha_anim: s.alpha_anim.clone(),
+                    twins: BoothTwins::default(),
                 })
                 .collect::<Vec<BoothPart>>()
         };
@@ -185,6 +186,7 @@ fn bake_test(
             BoothMotion::Frozen,
             [false, false], // the WOW_PORTRAIT_TEST bake dresses no weapons
             &[],            // …nor an eye-glow
+            BoothInstance::default(),
         )
         .finish(commands);
         aim(cams, token, &rig);
@@ -211,6 +213,7 @@ fn bake_test(
             BoothMotion::Frozen,
             [false, false], // the paper-doll still sheaths its weapons — no in-hand grip
             &[],            // eye-glow in the paper doll is the same follow-up (see above)
+            BoothInstance::default(),
         )
         .finish(commands);
         // The eyeball harness has no live UI publishing a pane, so it bakes square.

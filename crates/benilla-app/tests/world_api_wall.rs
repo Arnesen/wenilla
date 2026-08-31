@@ -65,6 +65,7 @@ const ENGINE_ROOTS: &[&str] = &[
     "schedule",
     "sky",
     "sky_order",
+    "skybox",
     "sun",
     "surface",
     "terrain",
@@ -74,7 +75,6 @@ const ENGINE_ROOTS: &[&str] = &[
     "wdl",
     "weather",
     "wmo_portal",
-    "wmo_sky",
     "world_census",
     "world_plugins",
     "world_point",
@@ -295,7 +295,44 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// decides where a weapon is drawn versus stowed. There is no engine-side way to know it: the
 /// engine sees a scene-graph child, and a child is not an attachment. The alternative was passing
 /// the game's attach-slot table down into the renderer to keep a count flat (decision 1609).
-const CEILING: usize = 163;
+/// And 163 → 164: `instance_tint::InstanceTintMirrors`, the twin of `rig_palette::RigPaletteMirrors`
+/// already through this door and registered at exactly the same site — an off-world `wow_light`
+/// buffer the engine must also fill with the per-instance tint region, because the shader reads
+/// that region out of whichever buffer the draw binds. Uploading a region to the buffers that
+/// carry it is machinery. *Which* off-world buffers carry it is policy, and it has to be: a
+/// portrait bake must NOT (the reference builds a fresh CM2 with colour `(1,1,1)`, so a ghost's
+/// portrait shows the living face — wow-re `ghost-death-visuals.md` §6, report B49, decision 1481)
+/// while the glue scene MUST (it is the screen itself, and its character component is the very
+/// instance the reference tints). The engine cannot tell those two render targets apart — both are
+/// a camera writing to an image — and encoding "a bake standing in for a UI model widget" inside
+/// the uploader is exactly the game opinion the wall exists to keep out. The alternative was
+/// mirroring the region into every registered buffer to keep the count flat, which re-opens B49 in
+/// the tint lane (decision 1731).
+/// And 164 → 165: `ffx_glow::GlueFfx`, a PUBLISH of the same shape as `rig_anim::AnimParked` and
+/// the two above — a resource the ENGINE reads and the GAME writes, and exactly ONE bit wide.
+/// Running an FFX pass pair is machinery; *which* pair a screen installs is the screen's own, and
+/// the reference says so by building two pairs (WorldFrame `0x481c46`, CGlueMgr `0x46a723`) and
+/// selecting between them at two different sites. The world's selector is already inside the
+/// engine's reach — `PLAYER_FLAGS_GHOST` on the live player — but the glue's is not and cannot be:
+/// it is the ghost bit of the **selected roster row** (`0x472fd9 test dh,0x20`), a character
+/// nobody is standing in, on a screen the engine has no concept of. The alternative was handing the
+/// renderer a roster to read to keep a count flat (decision 1731). Note the direction of travel:
+/// this replaced `FfxGlow::state_scale`, a float that let a bake inherit a player-state lane by
+/// arithmetic — the enum that took its place makes report B49's invariant structural.
+/// And 165 → 166: `collision::MoverTraceExclusions`, a PUBLISH in the same class as the two
+/// one-bit resources above — a resource the ENGINE reads and the GAME writes. The reference's
+/// world trace carries a per-trace mask, and the local mover's gains bit `0x8000` when the body it
+/// drives is a player in ghost form; the GameObject collision-candidacy virtual `0x5f85f0` reads
+/// it and drops every `GAMEOBJECT_TYPE_ID == 0` object, so a ghost walks through closed doors
+/// (decision 1767). The engine cannot compute that set — "a DOOR GameObject, while the player is a
+/// ghost" names two gameplay concepts, which is precisely what the wall pointing the other way
+/// forbids an engine file from knowing. The alternatives were both worse: dropping or re-laning
+/// the door's collider makes it stop existing for the particle snap, the precipitation probe, the
+/// mouse pick and the creature conform, none of which the binary touches; and threading a filter
+/// through `step`/`grounded_step`/`airborne_step` puts a gameplay argument into the movement
+/// core's signature. An `EntityHashSet` that is empty on every living frame is the smallest honest
+/// expression, and it makes the living player's query provably the one it always was.
+const CEILING: usize = 166;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it
