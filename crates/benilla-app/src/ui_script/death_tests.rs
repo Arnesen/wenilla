@@ -1,7 +1,7 @@
-//! The death-arc UI (decision 0308, DeathFrame.xml): the DEATH release popup's show/countdown/
-//! release flow, the resurrect-offer popup pick, and the spirit-healer XP_LOSS two-step — the Lua
-//! wiring between the engine's death events and the StaticPopup engine, driven exactly as
-//! `death.rs`'s feed does it (set_death → fire_event).
+//! The death-arc UI (decisions 0308/1746, DeathFrame.xml): the DEATH release popup's
+//! show/countdown/release flow, its self-resurrect button, the resurrect-offer popup pick, and
+//! the spirit-healer XP_LOSS two-step — the Lua wiring between the engine's death events and the
+//! StaticPopup engine, driven exactly as `death.rs`'s feed does it (set_death → fire_event).
 
 use benilla_ui::script::{DeathAction, DeathUiState, ScriptValue, UiScript};
 
@@ -86,6 +86,86 @@ fn death_popup_counts_down_and_release_queues_repop() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The self-resurrect leg (decision 1746): with `PLAYER_SELF_RES_SPELL` naming a spell, the DEATH
+/// popup grows its second button, the button wears the SPELL's name rather than the registry's
+/// "Reincarnate" default, and clicking it queues `UseSoulstone` — while button1 still releases.
+#[test]
+fn death_popup_offers_the_self_resurrect_and_spends_it() {
+    let mut s = setup();
+    s.set_death(DeathUiState {
+        release_remaining: Some(300.0),
+        self_res_label: Some("Use Soulstone".into()),
+        ..Default::default()
+    });
+    s.fire_event("PLAYER_DEAD", vec![]);
+    assert!(
+        s.eval::<bool>("return StaticPopup1Button2:IsShown()")
+            .unwrap(),
+        "a self-res owed ⇒ DisplayButton2 shows the second button"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Button2:GetText()")
+            .unwrap(),
+        "Use Soulstone",
+        "OnShow stamps the Spell.dbc name over the registry's vestigial \"Reincarnate\""
+    );
+    // Button1 is still the release, and it is NOT the self-res.
+    s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
+    assert_eq!(s.take_death_actions(), vec![DeathAction::Repop]);
+
+    // Button2 spends it. The dialog is raised again first, because clicking either button hides it.
+    s.fire_event("PLAYER_DEAD", vec![]);
+    s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
+    assert_eq!(s.take_death_actions(), vec![DeathAction::UseSoulstone]);
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "the self-res hides the dialog; the resurrection itself lands as descriptor deltas"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// A shaman's Reincarnation is the same path with a different name — and the button is decided by
+/// `HasSoulstone()` at SHOW time, so a self-res that arrives after the popup is up does not
+/// retro-fit a button onto it (the reference's own StaticPopup engine re-evaluates neither
+/// `DisplayButton2` nor `OnShow` per tick).
+#[test]
+fn death_popup_button2_is_decided_at_show_time() {
+    let mut s = setup();
+    s.set_death(DeathUiState {
+        release_remaining: Some(300.0),
+        ..Default::default()
+    });
+    s.fire_event("PLAYER_DEAD", vec![]);
+    assert!(!s
+        .eval::<bool>("return StaticPopup1Button2:IsShown()")
+        .unwrap());
+
+    // The field lands late: the standing dialog does not grow a button…
+    s.set_death(DeathUiState {
+        release_remaining: Some(300.0),
+        self_res_label: Some("Reincarnation".into()),
+        ..Default::default()
+    });
+    s.tick(0.05);
+    assert!(
+        !s.eval::<bool>("return StaticPopup1Button2:IsShown()")
+            .unwrap(),
+        "no per-tick re-evaluation — the button set is fixed at StaticPopup_Show"
+    );
+    // …but the OnCancel arm re-asks, so a click on a button that is not there cannot mis-route,
+    // and the next raise picks it up.
+    s.run("StaticPopup_Hide(\"DEATH\")").unwrap();
+    s.fire_event("PLAYER_DEAD", vec![]);
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Button2:GetText()")
+            .unwrap(),
+        "Reincarnation"
+    );
+    s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
+    assert_eq!(s.take_death_actions(), vec![DeathAction::UseSoulstone]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The no-timer variant: GetReleaseTimeRemaining() == −1 (an instanceable map) swaps in the
 /// DEATH_RELEASE_NOTIMER text and never counts down.
 #[test]
@@ -133,7 +213,7 @@ fn resurrect_request_picks_variant_and_answers() {
         "the offerer name formats into the no-sickness text"
     );
     assert!(s
-        .eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        .eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
         .unwrap());
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
     assert_eq!(s.take_death_actions(), vec![DeathAction::AcceptResurrect]);
@@ -341,7 +421,7 @@ fn corpse_range_events_drive_recover_corpse() {
         "RECOVER_CORPSE"
     );
     assert!(
-        !s.eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        !s.eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
             .unwrap(),
         "Accept is delay-gated"
     );
@@ -358,7 +438,7 @@ fn corpse_range_events_drive_recover_corpse() {
         "Resurrect now?"
     );
     assert!(s
-        .eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        .eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
         .unwrap());
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
     assert_eq!(s.take_death_actions(), vec![DeathAction::RetrieveCorpse]);

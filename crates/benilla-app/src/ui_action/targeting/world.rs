@@ -284,6 +284,7 @@ mod tests {
             target: Some(Entity::from_raw_u32(2).unwrap()),
             guid: Some(0x1234),
             distance: 4.0,
+            ..Hovered::default()
         };
         click(&mut world, id);
         assert!(rx.try_recv().is_err(), "a unit in front of the chest wins");

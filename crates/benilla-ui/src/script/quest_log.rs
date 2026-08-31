@@ -27,8 +27,13 @@
 //! from its OnUpdate without the log snapshot changing under it. [`seconds_left`] carries the
 //! reference's byte-verified formula and the ways a row has no timer to show (decision 1154).
 //!
-//! v1 scope (the deliberate `nil`/false stubs, each a later slice): party share
-//! (`GetQuestLogPushable`/`IsUnitOnQuest`), reward spells (`GetQuestLogRewardSpell`), and zone
+//! A fifth is the **share** (`GetQuestLogPushable`/`QuestLogPushQuest`, decision 1733): the
+//! pushable bit rides each entry (from the app's template cache) and the click resolves the
+//! selection to a quest id before it queues, so a log shuffle cannot retarget it.
+//!
+//! v1 scope (the deliberate `nil`/false stubs, each a later slice): the party quest-log tooltip
+//! (`IsUnitOnQuest` — it needs the party members' own logs, which is a different wire),
+//! reward spells (`GetQuestLogRewardSpell`), and zone
 //! **headers** ([`QuestLogEntryView::is_header`] is plumbed but the app pushes a flat list —
 //! headers need the QuestSort/AreaTable DBC join).
 
@@ -55,6 +60,13 @@ pub struct QuestLogEntryView {
     pub tag: Option<String>,
     /// A zone header row (the app synthesizes these from each quest's ZoneOrSort).
     pub is_header: bool,
+    /// Whether this quest may be SHARED with the party — `GetQuestLogPushable`'s answer for the
+    /// row (decision 1733). Computed app-side from the cached `SMSG_QUEST_QUERY_RESPONSE`
+    /// template's `QUEST_FLAGS_SHARABLE` (`0x8`), so a row whose template has not answered yet is
+    /// `false` and turns true when it lands — the reference's own shape, since it reads the same
+    /// cache. Never surfaced as a per-index Lua getter: the Era API asks only about the current
+    /// selection.
+    pub pushable: bool,
     /// A COLLAPSED header (`GetQuestLogTitle`'s isCollapsed; meaningless on quest rows). The app
     /// owns the collapse set and omits a collapsed header's quests from `entries` — the engine
     /// only reports the flag and drains the toggle intents ([`super::UiScript::take_quest_log_collapses`]).
@@ -166,6 +178,19 @@ impl super::UiScript {
     /// slot → `CMSG_QUESTLOG_REMOVE_QUEST`.
     pub fn take_quest_log_abandons(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().quest_log_abandons)
+    }
+
+    /// Drain the share intents: the quest ids `QuestLogPushQuest()` queued, already resolved from
+    /// the selection at click time. The app sends one `CMSG_PUSHQUESTTOPARTY` per id.
+    pub fn take_quest_log_pushes(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().quest_log_pushes)
+    }
+
+    /// Drain the escort-confirm answers: how many times `ConfirmAcceptQuest()` was called. A
+    /// count, because the verb carries no quest id (decision 1733) — the app answers the confirm
+    /// it is holding.
+    pub fn take_quest_confirms(&mut self) -> u32 {
+        std::mem::take(&mut self.model_mut().quest_confirms)
     }
 
     /// Drain the header collapse/expand intents: `(1-based entry index, collapse)` from
@@ -630,10 +655,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, ()| Ok(Value::Nil))?,
     )?;
     g.set(
-        "GetQuestLogPushable",
-        lua.create_function(|_, ()| Ok(false))?,
-    )?;
-    g.set(
         "IsUnitOnQuest",
         lua.create_function(|_, (_q, _unit): (Value, Value)| Ok(false))?,
     )?;
@@ -643,12 +664,61 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // indices; set_quest_log prunes watches whose quest left the log. MAX_WATCHABLE_QUESTS = 5
     // (ref QuestLogFrame.lua:494) — AddQuestWatch past the cap is a no-op (the Lua shows the
     // QUEST_WATCH_TOO_MANY error itself, mirroring the ref's guard order).
+    /// The entry the current selection points at — what every no-argument getter on this surface
+    /// reads (`GetQuestLogPushable`, and the C side of `QuestLogPushQuest`). `None` when nothing
+    /// is selected or the selection is out of range.
+    fn selected_quest(model: &Model) -> Option<&QuestLogEntryView> {
+        (model.quest_log_selection as usize)
+            .checked_sub(1)
+            .and_then(|n| model.quest_log.entries.get(n))
+    }
+
     fn watch_id_at(model: &Model, index: u32) -> Option<u32> {
         (index as usize)
             .checked_sub(1)
             .and_then(|n| model.quest_log.entries.get(n))
             .map(|e| e.quest_id)
     }
+    // ── The party share (decision 1733) — the ref's `QuestFramePushQuestButton`, whose enable
+    // predicate is `GetQuestLogPushable() and GetNumPartyMembers() > 0` (QuestLogFrame.lua:299-305)
+    // and whose OnClick is `QuestLogPushQuest()` (QuestLogFrame.xml:511-513). Both speak about the
+    // CURRENT SELECTION and take no argument, exactly as the reference declares them.
+    // `GetQuestLogPushable` returns `1` or **nil**, never `false` (`0x4e12b0` tail-calls
+    // `0x6f3810`/`0x6f37f0`, decision 1738). Both are falsy to the `and` in the reference's own
+    // predicate, so the button reads the same either way — but an addon testing `== nil` would
+    // not, and this is the Era idiom the rest of this surface already speaks (`GetPartyMember`).
+    g.set(
+        "GetQuestLogPushable",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match selected_quest(&model).is_some_and(|e| e.pushable) {
+                true => Value::Integer(1),
+                false => Value::Nil,
+            })
+        })?,
+    )?;
+    g.set(
+        "QuestLogPushQuest",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // The C verb re-tests everything the Lua predicate tests **and one thing it does not**:
+            // a party check of its own (`0x4e13a6`, decision 1738). The reference does not trust
+            // its own button — an addon or a macro can call this solo, and the send is refused
+            // here rather than reaching the server. Resolve the id HERE rather than queueing the
+            // index (see `Model::quest_log_pushes`); a HEADER row carries `quest_id` 0, so an
+            // unguarded resolve would queue a push for quest 0.
+            if model.party.members.is_empty() {
+                return Ok(());
+            }
+            let id = selected_quest(&model)
+                .filter(|e| !e.is_header && e.pushable)
+                .map(|e| e.quest_id);
+            if let Some(id) = id {
+                model.quest_log_pushes.push(id);
+            }
+            Ok(())
+        })?,
+    )?;
     g.set(
         "GetNumQuestWatches",
         lua.create_function(|lua, ()| {
@@ -1066,5 +1136,135 @@ mod tests {
         s.run("AddQuestWatch(1)").unwrap();
         assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 5);
         assert_eq!(s.quest_log_watched(), vec![1, 2, 3, 4, 5]);
+    }
+
+    /// `GetQuestLogPushable` answers about the SELECTION, and only about the selection — the Era
+    /// API has no per-index form (decision 1733). Selecting the other quest changes the answer.
+    #[test]
+    fn pushable_follows_the_selection() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        state.entries[0].pushable = true; // 783 is sharable, 7 is not
+        s.set_quest_log(state);
+
+        // `1` or nil, never true/false (`0x4e12b0`, decision 1738) — an addon testing `== nil`
+        // sees the reference's own shape.
+        assert_eq!(
+            s.eval::<Option<i64>>("return GetQuestLogPushable()")
+                .unwrap(),
+            None,
+            "no selection yet"
+        );
+        s.run("SelectQuestLogEntry(1)").unwrap();
+        assert_eq!(
+            s.eval::<Option<i64>>("return GetQuestLogPushable()")
+                .unwrap(),
+            Some(1)
+        );
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert_eq!(
+            s.eval::<Option<i64>>("return GetQuestLogPushable()")
+                .unwrap(),
+            None
+        );
+    }
+
+    /// `QuestLogPushQuest` queues the selected entry's **quest id**, resolved at click time — not
+    /// its index, so a log that reshuffles between the click and the app's drain cannot retarget
+    /// the push. (Contrast the abandon mark, which pins an index on purpose: its two-step confirm
+    /// is what makes the index the right thing to hold.)
+    /// A party of one other, so the C verb's own party check (below) passes.
+    fn in_a_party(s: &mut UiScript) {
+        s.set_party(crate::script::PartyState {
+            members: vec![crate::script::PartyMemberInfo {
+                name: "Mate".into(),
+                guid: 0x300,
+            }],
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn push_queues_the_selected_quest_id_not_its_index() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        state.entries[1].pushable = true; // quest id 7
+        s.set_quest_log(state);
+        in_a_party(&mut s);
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        s.run("QuestLogPushQuest()").unwrap();
+        assert_eq!(s.take_quest_log_pushes(), vec![7], "entry 2 is quest id 7");
+        assert!(s.take_quest_log_pushes().is_empty(), "drained");
+    }
+
+    /// A push with nothing selected is silently nothing — the window's button is disabled in that
+    /// state, so this is only reachable from a macro or an addon, and the client has no quest id
+    /// to send.
+    #[test]
+    fn push_without_a_selection_queues_nothing() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest_log(two_quests());
+        in_a_party(&mut s);
+        s.run("QuestLogPushQuest()").unwrap();
+        assert!(s.take_quest_log_pushes().is_empty());
+    }
+
+    /// **The C verb re-tests the party and the sharable bit itself** (`0x4e13a6`, decision 1738) —
+    /// the reference does not trust its own button, because a macro or an addon can call this with
+    /// the window shut. Each guard is moved alone, against an otherwise-valid push.
+    #[test]
+    fn push_refuses_solo_and_refuses_an_unsharable_quest() {
+        let sharable = || {
+            let mut state = two_quests();
+            state.entries[0].pushable = true; // quest id 783
+            state
+        };
+
+        // Solo: everything else is right and it still sends nothing.
+        let mut s = UiScript::new().unwrap();
+        s.set_quest_log(sharable());
+        s.run("SelectQuestLogEntry(1)").unwrap();
+        s.run("QuestLogPushQuest()").unwrap();
+        assert!(s.take_quest_log_pushes().is_empty(), "solo pushes nothing");
+
+        // In a party, the same call goes.
+        in_a_party(&mut s);
+        s.run("QuestLogPushQuest()").unwrap();
+        assert_eq!(s.take_quest_log_pushes(), vec![783]);
+
+        // In a party, on a quest without the sharable bit: nothing again.
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        s.run("QuestLogPushQuest()").unwrap();
+        assert!(
+            s.take_quest_log_pushes().is_empty(),
+            "an unsharable quest pushes nothing even in a party"
+        );
+    }
+
+    /// A HEADER row carries `quest_id` 0, so pushing one must queue nothing at all — an unguarded
+    /// id resolve would send `CMSG_PUSHQUESTTOPARTY{0}`. The window's button is disabled on a
+    /// header, so only a macro or an addon can get here.
+    #[test]
+    fn push_on_a_header_row_queues_nothing() {
+        let mut s = UiScript::new().unwrap();
+        in_a_party(&mut s);
+        let mut state = two_quests();
+        state.entries.insert(
+            0,
+            QuestLogEntryView {
+                quest_id: 0,
+                title: "Elwynn Forest".into(),
+                is_header: true,
+                pushable: true, // even if something wrongly marked it so
+                ..Default::default()
+            },
+        );
+        s.set_quest_log(state);
+        s.run("SelectQuestLogEntry(1)").unwrap();
+        s.run("QuestLogPushQuest()").unwrap();
+        assert!(
+            s.take_quest_log_pushes().is_empty(),
+            "a header is not a quest"
+        );
     }
 }

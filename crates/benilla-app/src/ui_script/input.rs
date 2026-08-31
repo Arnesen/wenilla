@@ -108,12 +108,14 @@ pub(super) fn feed_ui_input(
     );
     click_consumed.0 = false;
     let Some(mut script) = script else {
-        capture.0 = false;
+        capture.typing = false;
+        capture.arrows_fall_through = false;
         payload_held.0 = false;
         return;
     };
     let Ok((window, raw_handle)) = window.single() else {
-        capture.0 = false;
+        capture.typing = false;
+        capture.arrows_fall_through = false;
         payload_held.0 = false;
         return;
     };
@@ -221,7 +223,18 @@ pub(super) fn feed_ui_input(
     // ── Keyboard capture gate ── read AFTER the mouse feed (a LeftButton click may have just focused a
     // box) but BEFORE feeding keys (an Escape that clears focus is still "captured" this frame, so the
     // world doesn't also act on it). Gameplay/dev readers run after `UiInput` and see this value.
-    capture.0 = script.has_keyboard_focus();
+    capture.typing = script.has_keyboard_focus();
+    // ── The alt-arrow exemption (wow-re `ignorearrows-alt-arrow-gate.md`, §5 VERIFIED) ─────────
+    // A focused EditBox in alt-arrow mode (`ignoreArrows` in XML, `SetAltArrowKeyMode` in Lua)
+    // does NOT consume LEFT/UP/RIGHT/DOWN unless ALT is held: the reference's handler returns 0
+    // at `0x77b1c4` and the strata walk carries the key down to `CGWorldFrame`, which runs its
+    // binding. That is what lets you turn while the chat box has focus — and the reference's own
+    // chat box ships the flag, so this is the default experience, not an edge case.
+    //
+    // Both terms are whole-frame (one focused box; ALT off the same modifier mirror), so the
+    // exemption is too. Only the four arrows may use it: a focused box swallows every other key
+    // on every other path (`0x77b35e` returns 1).
+    capture.arrows_fall_through = !alt && script.editbox_alt_arrow_mode();
 
     // ── Keyboard → VM ── the three box-event keys route to `key_input` by name (and never also
     // as text, so Enter isn't a stray newline); every *editing* key goes through the per-OS
@@ -273,8 +286,32 @@ pub(super) fn feed_ui_input(
         };
         if let Some(name) = frame_named {
             if script.frame_key_input(name) {
-                capture.0 = true; // consumed by a frame: its binding must not also fire
+                capture.typing = true; // consumed by a frame: its binding must not also fire
                 continue;
+            }
+        }
+        // EVERY OTHER KEY reaches a keyboard frame by name too. The reference's key-down walk
+        // carries the whole key table — its `arg1` comes from the *same* table the keybinding
+        // chord uses (wow-re `frame-key-script-delivery.md` §4.2), which is [`chord::key_token`]
+        // here — and the frame's gate is EXISTENCE, not handling: a shown keyboard frame with an
+        // `OnKeyDown` swallows the key whatever its script does with it (§3, §3.1). This host used
+        // to feed only the ten names above, so `CinematicFrame` — fullscreen, keyboard-enabled, an
+        // `OnKeyDown` that answers ESCAPE — consumed ESC and let W straight through, and the player
+        // walked around underneath their own intro cinematic.
+        //
+        // The reference's own Lua is the proof this is the law and not an over-reading: that
+        // handler has to call `RunBinding("SCREENSHOT")` **by hand** to get one key back. It would
+        // not need to if unhandled keys fell through to their bindings.
+        //
+        // Consumption sets the capture gate and nothing else: it suppresses the binding and the
+        // world/gameplay readers, and deliberately does NOT suppress `char_input` below — `OnChar`
+        // is a separate channel off a separate dispatcher (`0x765df0`), which is exactly how the
+        // stack-split spinner receives a digit whose key-down its own `OnKeyDown` already ate.
+        else if named.is_none() {
+            if let Some(token) = crate::bindings::chord::key_token(ev.key_code) {
+                if script.frame_key_input(token) {
+                    capture.typing = true;
+                }
             }
         }
         if let Some(name) = named {
@@ -285,16 +322,31 @@ pub(super) fn feed_ui_input(
             // reads the capture gate written above, so a key a focused box consumed this frame
             // never also fires its binding — the real client's ESC precedence, table-wide.
             // Consumption suppresses the binding — a keyboard FRAME that took this key counts
-            // exactly as a focused box does (decision 1319; `capture.0` above already covers the
+            // exactly as a focused box does (decision 1319; `capture.typing` above already covers the
             // box case, and this adds the frame one).
             if script.key_input(name) {
-                capture.0 = true;
+                capture.typing = true;
             }
         } else if let Some(chord) = chord {
+            // The gate, on the KEY rather than the action: a gated arrow is not handed to the box
+            // at all, which is the reference's `return 0`. It must not be turned into an
+            // `EditAction` first — `Move { unit: Edge }` reaches the box from HOME/END as well as
+            // from an arrow, and only the arrow is declined.
+            let gated_arrow = capture.arrows_fall_through
+                && matches!(
+                    ev.key_code,
+                    KeyCode::ArrowLeft
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowDown
+                );
             match chord {
-                keymap::Chord::Edit(action) => {
+                keymap::Chord::Edit(action) if !gated_arrow => {
                     script.editbox_action(action);
                 }
+                // Declined: the key falls through to its binding, which `bindings.rs` allows
+                // because `arrows_fall_through` exempts exactly these four from the typing gate.
+                keymap::Chord::Edit(_) => {}
                 // The clipboard trio needs the OS pasteboard, so it resolves here against the held
                 // [`HostClipboard`]: copy/cut pull the selection out of the box (RF-0082 §4
                 // `0x77e1d0` — selection required; a password box yields its mask run, never the
@@ -325,7 +377,7 @@ pub(super) fn feed_ui_input(
                 // row IS a binding (the action buttons), so a digit typed into a keyboard frame —
                 // the stack-split spinner — must not also fire action button 3 (decision 1319).
                 if script.char_input(text) {
-                    capture.0 = true;
+                    capture.typing = true;
                 }
             }
         }

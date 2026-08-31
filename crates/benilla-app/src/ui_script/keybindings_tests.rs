@@ -101,12 +101,12 @@ fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
         "Unbind Key exists on this page"
     );
     assert!(
-        !s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled()")
+        !s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled() ~= 0")
             .unwrap(),
         "…disabled until a capsule is selected"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // The section tree: the registry's category tokens, first-appearance order — exactly
     // 1.12's file order — every section a COLLAPSED header row (the era default).
@@ -196,18 +196,22 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
         "a selected capsule arms the capture"
     );
     assert!(
-        s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled()")
+        s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled() ~= 0")
             .unwrap(),
         "Unbind arms with the selection"
     );
-    // The host hands back a canonical chord: F binds into slot 1, W's old seat; UP survives
+    // The host hands back a canonical chord: J binds into slot 1, W's old seat; UP survives
     // in slot 2; the capture disarms; the table is LIVE and the bind COMMITTED (Save queued —
     // 1008's live-commit law, where 0997 waited for Okay).
-    s.run(r#"KeyBindings_OnHostKey("F")"#).unwrap();
+    //
+    // **`J`, not `F`** — this leg is about the plain bind, so its key has to be one nothing else
+    // holds, and `F` stopped being one when 1745 registered `ASSISTTARGET` on its byte-real
+    // default. The steal path has its own leg below (`T`), which is where a taken key belongs.
+    s.run(r#"KeyBindings_OnHostKey("J")"#).unwrap();
     assert!(!s.bind_capture_armed(), "a completed bind disarms");
     assert!(s
         .eval::<bool>(
-            r#"local k1, k2 = GetBindingKey("MOVEFORWARD"); return k1 == "F" and k2 == "UP""#
+            r#"local k1, k2 = GetBindingKey("MOVEFORWARD"); return k1 == "J" and k2 == "UP""#
         )
         .unwrap());
     assert_eq!(
@@ -709,4 +713,35 @@ fn the_pet_lane_is_registered_under_the_action_bar_header() {
         "CTRL-1"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Every registry body is real Lua.** 167 rows carry a Lua chunk as a Rust string literal, and
+/// nothing compiled them: a typo in one shipped as a command that errors on its first press, in a
+/// file whose tests all live one layer up at the page. `loadstring` is the whole check — running
+/// them needs the FrameXML the harness deliberately does not load — and it is exactly the check
+/// that a hand-typed string wants.
+#[test]
+fn every_command_body_compiles() {
+    use crate::bindings::commands::Kind;
+
+    let s = UiScript::new().unwrap();
+    for spec in SPECS {
+        let bodies: Vec<&str> = match &spec.kind {
+            Kind::Held | Kind::Host => Vec::new(),
+            Kind::Edge(body) => vec![*body],
+            Kind::EdgeUpDown(down, up) => vec![*down, *up],
+        };
+        for body in bodies {
+            s.run(&format!(
+                "local f, err = loadstring({body:?});                  if not f then BenillaBodyError = {name:?} .. \": \" .. err end",
+                body = body,
+                name = spec.name
+            ))
+            .unwrap_or_else(|e| panic!("{}: {e}", spec.name));
+        }
+    }
+    let bad: Vec<String> = s.errors();
+    assert!(bad.is_empty(), "script errors: {bad:?}");
+    s.run("if BenillaBodyError then error(BenillaBodyError) end")
+        .unwrap_or_else(|e| panic!("a command body is not valid Lua: {e}"));
 }

@@ -14,6 +14,10 @@
 //! - the **five** refusals `0x145`-`0x149`, and `ERR_NO_GUILD_CHARTER` (`0x7c`), carry kind `2` →
 //!   `UI_ERROR_MESSAGE` (`0xe0`), the **red UIErrorsFrame line**.
 //!
+//! That sweep is no longer this module's to carry: since decision 1770 the whole registry ships as
+//! [`benilla_ui::messages`], and each line below asks it by key. The paragraphs above stay because
+//! they record *why* the split is not guessable — the reason a lookup was worth building.
+//!
 //! Two more facts from the same sweep that shape the tables below:
 //!
 //! - **`PETITION_SIGN_NEED_MORE` (4) has no user-visible message on the SIGN path at all.** It
@@ -32,45 +36,93 @@
 
 use benilla_protocol::messages::petition_result;
 
+use crate::ui_action::MsgKind;
+
+/// One message this module composes: the **catalog key**, which names both the row and — through
+/// [`benilla_ui::messages`] — the surface it goes to, and the 1.12 text.
+///
+/// The key rides beside the text rather than the surface doing so, because the surface is not this
+/// module's to know: it is the message record's `+0x04`, and reading it here from the catalog is
+/// what retired the hand-swept table this file used to carry (decision 1770). The five
+/// `ERR_GUILD_NAME_*` rows below were recorded as **INFERRED** for exactly that reason; the sweep
+/// confirms all five are kind 2, so the inference is now a lookup.
+#[derive(Debug, Clone, Copy)]
+struct Msg {
+    key: &'static str,
+    text: &'static str,
+}
+
+const fn msg(key: &'static str, text: &'static str) -> Msg {
+    Msg { key, text }
+}
+
 // ── The templates, quoted verbatim from the reference's own patch chain; the `GlobalStrings.lua`
 //    line is on each ──────────────────────────────────────────────────────────────────────────
-const ERR_PETITION_ALREADY_SIGNED: &str = "You have already signed that guild charter."; // :1762
-const ERR_PETITION_CREATOR: &str = "You can't sign your own guild charter."; // :1763
-const ERR_PETITION_DECLINED_S: &str = "%s has declined your guild invitation."; // :1764
-const ERR_PETITION_IN_GUILD: &str = "You are already in a guild."; // :1765
-const ERR_PETITION_NOT_ENOUGH_SIGNATURES: &str = "You need more signatures."; // :1766
-const ERR_PETITION_NOT_SAME_SERVER: &str = "That player is not from your server"; // :1767
-const ERR_PETITION_OFFERED_S: &str = "You have requested %s's signature."; // :1768
-const ERR_PETITION_SIGNED: &str = "Guild charter signed."; // :1769
-const ERR_PETITION_SIGNED_S: &str = "%s has signed your guild charter."; // :1770
-const ERR_NO_GUILD_CHARTER: &str = "You don't have a guild charter."; // :1745
+const ERR_PETITION_ALREADY_SIGNED: Msg = msg(
+    "ERR_PETITION_ALREADY_SIGNED",
+    "You have already signed that guild charter.",
+); // :1762
+const ERR_PETITION_CREATOR: Msg = msg(
+    "ERR_PETITION_CREATOR",
+    "You can't sign your own guild charter.",
+); // :1763
+const ERR_PETITION_DECLINED_S: Msg = msg(
+    "ERR_PETITION_DECLINED_S",
+    "%s has declined your guild invitation.",
+); // :1764
+const ERR_PETITION_IN_GUILD: Msg = msg("ERR_PETITION_IN_GUILD", "You are already in a guild."); // :1765
+const ERR_PETITION_NOT_ENOUGH_SIGNATURES: Msg = msg(
+    "ERR_PETITION_NOT_ENOUGH_SIGNATURES",
+    "You need more signatures.",
+); // :1766
+const ERR_PETITION_NOT_SAME_SERVER: Msg = msg(
+    "ERR_PETITION_NOT_SAME_SERVER",
+    "That player is not from your server",
+); // :1767
+const ERR_PETITION_OFFERED_S: Msg = msg(
+    "ERR_PETITION_OFFERED_S",
+    "You have requested %s's signature.",
+); // :1768
+const ERR_PETITION_SIGNED: Msg = msg("ERR_PETITION_SIGNED", "Guild charter signed."); // :1769
+const ERR_PETITION_SIGNED_S: Msg =
+    msg("ERR_PETITION_SIGNED_S", "%s has signed your guild charter."); // :1770
+const ERR_NO_GUILD_CHARTER: Msg = msg("ERR_NO_GUILD_CHARTER", "You don't have a guild charter."); // :1745
 
 // The guild-name validator's messages (`0x4f5160`'s seven arms). Only the three
 // `benilla_ui::script::validate_guild_name` implements can be produced; the rest are here so the
 // key→text map is complete and a later carve of `0x6c9b70` only has to add the branch.
-const ERR_GUILD_ENTER_NAME: &str = "Enter a name for your guild."; // :1603
-const ERR_GUILD_NAME_INVALID: &str = "That name contains invalid characters,  Enter a new name."; // :1616
-const ERR_GUILD_NAME_INVALID_SPACE: &str =
-    "Guild names cannot start or end with a space.  Enter a new name."; // :1617
-const ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES: &str =
-    "Consecutive spaces are not allowed.  Enter a new name."; // :1619
-const ERR_GUILD_NAME_TOO_SHORT: &str = "That name is too short.  Enter a new name."; // :1622
+const ERR_GUILD_ENTER_NAME: Msg = msg("ERR_GUILD_ENTER_NAME", "Enter a name for your guild."); // :1603
+const ERR_GUILD_NAME_INVALID: Msg = msg(
+    "ERR_GUILD_NAME_INVALID",
+    "That name contains invalid characters,  Enter a new name.",
+); // :1616
+const ERR_GUILD_NAME_INVALID_SPACE: Msg = msg(
+    "ERR_GUILD_NAME_INVALID_SPACE",
+    "Guild names cannot start or end with a space.  Enter a new name.",
+); // :1617
+const ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES: Msg = msg(
+    "ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES",
+    "Consecutive spaces are not allowed.  Enter a new name.",
+); // :1619
+const ERR_GUILD_NAME_TOO_SHORT: Msg = msg(
+    "ERR_GUILD_NAME_TOO_SHORT",
+    "That name is too short.  Enter a new name.",
+); // :1622
 
-/// Which of the client's two channels a line goes to — the `+4 kind` field, as a type.
-///
-/// Modelled rather than left implicit because the split does not follow the key names, and a
-/// `String` return would let a future edit put a refusal in the chat log without anything noticing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Line {
-    /// Kind `0` → the `CHAT_MSG_SYSTEM` chat line.
-    Chat(String),
-    /// Kind `2` → the red `UI_ERROR_MESSAGE` frame.
-    Error(String),
+/// One composed line: the surface its message record names, and the text.
+pub(super) type Line = (MsgKind, String);
+
+/// A line with nothing to fill.
+fn line(m: Msg) -> Line {
+    (benilla_ui::messages::kind_of(m.key), m.text.to_string())
 }
 
-/// One `%s` substitution.
-fn fill(template: &str, arg: &str) -> String {
-    template.replacen("%s", arg, 1)
+/// A line with one `%s` substitution.
+fn fill(m: Msg, arg: &str) -> Line {
+    (
+        benilla_ui::messages::kind_of(m.key),
+        m.text.replacen("%s", arg, 1),
+    )
 }
 
 /// The line one `SMSG_PETITION_SIGN_RESULTS` prints **when the signer is us** — the switch at
@@ -82,11 +134,11 @@ fn fill(template: &str, arg: &str) -> String {
 /// `NEED_MORE` and anything `>= 6` return `None` — the default arm reaches only the debug console.
 pub(super) fn my_sign_line(result: u32) -> Option<Line> {
     Some(match result {
-        petition_result::OK => Line::Chat(ERR_PETITION_SIGNED.to_string()),
-        petition_result::ALREADY_SIGNED => Line::Error(ERR_PETITION_ALREADY_SIGNED.to_string()),
-        petition_result::ALREADY_IN_GUILD => Line::Error(ERR_PETITION_IN_GUILD.to_string()),
-        petition_result::CANT_SIGN_OWN => Line::Error(ERR_PETITION_CREATOR.to_string()),
-        petition_result::NOT_SERVER => Line::Error(ERR_PETITION_NOT_SAME_SERVER.to_string()),
+        petition_result::OK => line(ERR_PETITION_SIGNED),
+        petition_result::ALREADY_SIGNED => line(ERR_PETITION_ALREADY_SIGNED),
+        petition_result::ALREADY_IN_GUILD => line(ERR_PETITION_IN_GUILD),
+        petition_result::CANT_SIGN_OWN => line(ERR_PETITION_CREATOR),
+        petition_result::NOT_SERVER => line(ERR_PETITION_NOT_SAME_SERVER),
         // `NEED_MORE` (4) and >= 6: the default arm, debug console only.
         _ => return None,
     })
@@ -96,15 +148,15 @@ pub(super) fn my_sign_line(result: u32) -> Option<Line> {
 /// emitted **only when the signer's name is already cached** (`0x4f42f6`); on a cache miss the
 /// client increments its pending-name counter instead and says nothing until the name lands.
 pub(super) fn signed_by_other(name: &str) -> Line {
-    Line::Chat(fill(ERR_PETITION_SIGNED_S, name))
+    fill(ERR_PETITION_SIGNED_S, name)
 }
 
 /// The line one `SMSG_TURN_IN_PETITION_RESULTS` prints. **Success prints nothing** — see the module
 /// doc; it is not an omission here.
 pub(super) fn turn_in_line(result: u32) -> Option<Line> {
     Some(match result {
-        petition_result::ALREADY_IN_GUILD => Line::Error(ERR_PETITION_IN_GUILD.to_string()),
-        petition_result::NEED_MORE => Line::Error(ERR_PETITION_NOT_ENOUGH_SIGNATURES.to_string()),
+        petition_result::ALREADY_IN_GUILD => line(ERR_PETITION_IN_GUILD),
+        petition_result::NEED_MORE => line(ERR_PETITION_NOT_ENOUGH_SIGNATURES),
         _ => return None,
     })
 }
@@ -113,47 +165,45 @@ pub(super) fn turn_in_line(result: u32) -> Option<Line> {
 /// **only if the declining player's name is already cached**. There is no query and no retry: an
 /// uncached name means the owner is told nothing at all (`0x5ef12a`/`0x5ef139`).
 pub(super) fn declined_line(name: &str) -> Line {
-    Line::Chat(fill(ERR_PETITION_DECLINED_S, name))
+    fill(ERR_PETITION_DECLINED_S, name)
 }
 
 /// The local echo for a charter we just offered — emitted **optimistically on the send**, with no
 /// server confirmation (`0x4f48fa`). Nothing comes back on success; the *target* is the one the
 /// server answers.
 pub(super) fn offered_line(name: &str) -> Line {
-    Line::Chat(fill(ERR_PETITION_OFFERED_S, name))
+    fill(ERR_PETITION_OFFERED_S, name)
 }
 
 /// Offering a charter to yourself — guard 6 of `OfferPetition`'s eight (`0x4f4839`), which emits
 /// `ERR_PETITION_CREATOR`, the same red line signing your own charter gets.
 pub(super) fn self_offer_line() -> Line {
-    Line::Error(ERR_PETITION_CREATOR.to_string())
+    line(ERR_PETITION_CREATOR)
 }
 
 /// The local refusal when `TurnInGuildCharter()`'s bag scan finds no charter — a **red** line
 /// (`0x5ef49a` emits id `0x7c`, kind 2), and no packet is built.
 pub(super) fn no_charter_line() -> Line {
-    Line::Error(ERR_NO_GUILD_CHARTER.to_string())
+    line(ERR_NO_GUILD_CHARTER)
 }
 
 /// The line for a name the client's own validator refused
-/// ([`benilla_ui::script::validate_guild_name`]) — a red line, by the class every other
-/// `ERR_GUILD_NAME_*` row in the catalog belongs to.
+/// ([`benilla_ui::script::validate_guild_name`]) — a red line.
 ///
-/// **The kind of these five rows is INFERRED**, unlike the nine petition rows above: that round
-/// swept the petition ids and `0x7c`, not the `0x75`-`0x7b` band. They are refusals, and every
-/// refusal in the swept set is kind 2. An unknown key falls back to the generic invalid-name text
-/// rather than showing a raw key.
+/// **These five rows were recorded here as INFERRED** — the sweep that settled the nine petition
+/// ids and `0x7c` never covered the `0x75`-`0x7b` band, so the kind was reasoned from the fact
+/// that every refusal in the swept set is kind 2. The full catalog (decision 1770) confirms all
+/// five: the inference was right, and it is a lookup now rather than a reason.
+///
+/// An unknown key falls back to the generic invalid-name text rather than showing a raw key.
 pub(super) fn name_refused_line(key: &str) -> Line {
-    Line::Error(
-        match key {
-            "ERR_GUILD_ENTER_NAME" => ERR_GUILD_ENTER_NAME,
-            "ERR_GUILD_NAME_INVALID_SPACE" => ERR_GUILD_NAME_INVALID_SPACE,
-            "ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES" => ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES,
-            "ERR_GUILD_NAME_TOO_SHORT" => ERR_GUILD_NAME_TOO_SHORT,
-            _ => ERR_GUILD_NAME_INVALID,
-        }
-        .to_string(),
-    )
+    line(match key {
+        "ERR_GUILD_ENTER_NAME" => ERR_GUILD_ENTER_NAME,
+        "ERR_GUILD_NAME_INVALID_SPACE" => ERR_GUILD_NAME_INVALID_SPACE,
+        "ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES" => ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES,
+        "ERR_GUILD_NAME_TOO_SHORT" => ERR_GUILD_NAME_TOO_SHORT,
+        _ => ERR_GUILD_NAME_INVALID,
+    })
 }
 
 #[cfg(test)]
@@ -167,19 +217,22 @@ mod tests {
     fn successes_go_to_chat_and_refusals_go_to_the_red_line() {
         assert_eq!(
             my_sign_line(petition_result::OK),
-            Some(Line::Chat("Guild charter signed.".into()))
+            Some((MsgKind::Chat, "Guild charter signed.".into()))
         );
         assert_eq!(
             signed_by_other("Bob"),
-            Line::Chat("Bob has signed your guild charter.".into())
+            (MsgKind::Chat, "Bob has signed your guild charter.".into())
         );
         assert_eq!(
             declined_line("Bob"),
-            Line::Chat("Bob has declined your guild invitation.".into())
+            (
+                MsgKind::Chat,
+                "Bob has declined your guild invitation.".into()
+            )
         );
         assert_eq!(
             offered_line("Bob"),
-            Line::Chat("You have requested Bob's signature.".into())
+            (MsgKind::Chat, "You have requested Bob's signature.".into())
         );
 
         for (code, text) in [
@@ -202,13 +255,13 @@ mod tests {
         ] {
             assert_eq!(
                 my_sign_line(code),
-                Some(Line::Error(text.into())),
+                Some((MsgKind::Error, text.into())),
                 "code {code} is a RED line"
             );
         }
         assert_eq!(
             no_charter_line(),
-            Line::Error("You don't have a guild charter.".into())
+            (MsgKind::Error, "You don't have a guild charter.".into())
         );
     }
 
@@ -224,7 +277,7 @@ mod tests {
         );
         assert_eq!(
             turn_in_line(petition_result::NEED_MORE),
-            Some(Line::Error("You need more signatures.".into()))
+            Some((MsgKind::Error, "You need more signatures.".into()))
         );
     }
 
@@ -262,30 +315,24 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{key} missing from GlobalStrings: {e}"))
         };
 
-        for (key, ours) in [
-            ("ERR_PETITION_ALREADY_SIGNED", ERR_PETITION_ALREADY_SIGNED),
-            ("ERR_PETITION_CREATOR", ERR_PETITION_CREATOR),
-            ("ERR_PETITION_DECLINED_S", ERR_PETITION_DECLINED_S),
-            ("ERR_PETITION_IN_GUILD", ERR_PETITION_IN_GUILD),
-            (
-                "ERR_PETITION_NOT_ENOUGH_SIGNATURES",
-                ERR_PETITION_NOT_ENOUGH_SIGNATURES,
-            ),
-            ("ERR_PETITION_NOT_SAME_SERVER", ERR_PETITION_NOT_SAME_SERVER),
-            ("ERR_PETITION_OFFERED_S", ERR_PETITION_OFFERED_S),
-            ("ERR_PETITION_SIGNED", ERR_PETITION_SIGNED),
-            ("ERR_PETITION_SIGNED_S", ERR_PETITION_SIGNED_S),
-            ("ERR_NO_GUILD_CHARTER", ERR_NO_GUILD_CHARTER),
-            ("ERR_GUILD_ENTER_NAME", ERR_GUILD_ENTER_NAME),
-            ("ERR_GUILD_NAME_INVALID", ERR_GUILD_NAME_INVALID),
-            ("ERR_GUILD_NAME_INVALID_SPACE", ERR_GUILD_NAME_INVALID_SPACE),
-            (
-                "ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES",
-                ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES,
-            ),
-            ("ERR_GUILD_NAME_TOO_SHORT", ERR_GUILD_NAME_TOO_SHORT),
+        for m in [
+            ERR_PETITION_ALREADY_SIGNED,
+            ERR_PETITION_CREATOR,
+            ERR_PETITION_DECLINED_S,
+            ERR_PETITION_IN_GUILD,
+            ERR_PETITION_NOT_ENOUGH_SIGNATURES,
+            ERR_PETITION_NOT_SAME_SERVER,
+            ERR_PETITION_OFFERED_S,
+            ERR_PETITION_SIGNED,
+            ERR_PETITION_SIGNED_S,
+            ERR_NO_GUILD_CHARTER,
+            ERR_GUILD_ENTER_NAME,
+            ERR_GUILD_NAME_INVALID,
+            ERR_GUILD_NAME_INVALID_SPACE,
+            ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES,
+            ERR_GUILD_NAME_TOO_SHORT,
         ] {
-            assert_eq!(g(key), ours, "{key} is not what the client says");
+            assert_eq!(g(m.key), m.text, "{} is not what the client says", m.key);
         }
     }
 
@@ -295,15 +342,21 @@ mod tests {
     fn refused_names_resolve_their_key_and_degrade_safely() {
         assert_eq!(
             name_refused_line("ERR_GUILD_ENTER_NAME"),
-            Line::Error("Enter a name for your guild.".into())
+            (MsgKind::Error, "Enter a name for your guild.".into())
         );
         assert_eq!(
             name_refused_line("ERR_GUILD_NAME_INVALID_SPACE"),
-            Line::Error("Guild names cannot start or end with a space.  Enter a new name.".into())
+            (
+                MsgKind::Error,
+                "Guild names cannot start or end with a space.  Enter a new name.".into()
+            )
         );
         assert_eq!(
             name_refused_line("ERR_SOMETHING_UNCARVED"),
-            Line::Error("That name contains invalid characters,  Enter a new name.".into()),
+            (
+                MsgKind::Error,
+                "That name contains invalid characters,  Enter a new name.".into()
+            ),
             "never a raw key on screen"
         );
     }

@@ -191,4 +191,33 @@ impl WorldWriter {
             &messages::move_flag_ack(guid, counter, &info, trailing),
         )
     }
+
+    /// **Acknowledge the knockback we are now flying** (`CMSG_MOVE_KNOCK_BACK_ACK`, decision 1702):
+    /// full guid + the echoed counter + our `MovementInfo` at the moment of launch, whose jump tail
+    /// is the server's own `launch` quad echoed back.
+    ///
+    /// The echo is not politeness — it is the server's whole validation. `flags` must carry
+    /// `MOVEFLAG_JUMPING`, and `launch` must be bit-for-bit what arrived (vmangos matches all four
+    /// floats within `0.01`); miss either and `FindPendingMovementKnockbackChange` fails, the ack is
+    /// logged as `OnWrongAckData`, and no observer ever sees the knockback — the server builds their
+    /// `MSG_MOVE_KNOCK_BACK` from the `MovementInfo` sent here. `fall_time` is the launch's fresh
+    /// clock (0).
+    pub fn knock_back_ack(
+        &mut self,
+        guid: u64,
+        counter: u32,
+        launch: JumpInfo,
+        flags: u32,
+        pose: ([f32; 3], f32),
+        transport: Option<TransportPose>,
+    ) -> Result<()> {
+        let mut info = movement_info(pose.0, pose.1, flags);
+        info.fall_time = 0;
+        info.jump = Some(launch);
+        info.transport = transport;
+        self.send(
+            opcode::CMSG_MOVE_KNOCK_BACK_ACK,
+            &messages::knock_back_ack(guid, counter, &info),
+        )
+    }
 }

@@ -559,13 +559,12 @@
             return getglobal(token)
         end
 
-        -- `Button:IsEnabled()` answers 1/0 in 1.12 and a BOOLEAN in this engine
-        -- (`benilla-ui/src/script/button.rs`), so the ref's own `IsEnabled() == 0` test would be
-        -- false forever here and the promote/demote pair would never hide. This reads both
-        -- spellings and is the only place in the file that needs to.
+        -- The ref's own `IsEnabled() == 0` (FriendsFrame.lua l.404), which works here again:
+        -- IsEnabled answers the NUMBER 1 or 0 (button.rs, wow-re button-enabled-state.md). This
+        -- used to read BOTH spellings because the engine returned a boolean, and the dual read
+        -- went with that divergence rather than outliving it as the workaround that hides it.
         local function guildButtonDisabled(button)
-            local enabled = button:IsEnabled()
-            return (not enabled) or (enabled == 0)
+            return button:IsEnabled() == 0
         end
 
         -- The page button and the view's squeezable column share one rule: a visible scroll bar
@@ -2043,7 +2042,7 @@
     </CheckButton>
 
     <!-- ── The window (ref l.506-607) ───────────────────────────────────────────────────────── -->
-    <Frame name="FriendsFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+    <Frame name="FriendsFrame" parent="UIParent" toplevel="true" movable="true" enableMouse="true" hidden="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-104"/></Offset></Anchor></Anchors>
         <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
@@ -2433,7 +2432,7 @@
                         </Scripts>
                     </Button>
 
-                    <EditBox name="WhoFrameEditBox" autoFocus="false" historyLines="32">
+                    <EditBox name="WhoFrameEditBox" frameStrata="HIGH" autoFocus="false" historyLines="32">
                         <Size><AbsDimension x="296" y="32"/></Size>
                         <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-20" y="100"/></Offset></Anchor></Anchors>
                         <Scripts>

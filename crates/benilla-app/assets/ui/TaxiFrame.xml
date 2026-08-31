@@ -406,7 +406,7 @@
         </HighlightTexture>
     </Button>
 
-    <Frame name="TaxiFrame" hidden="true">
+    <Frame name="TaxiFrame" enableMouse="true" toplevel="true" parent="UIParent" hidden="true">
         <!-- The real 384×512 window (ref l.34-36). No <Anchors> — ShowUIPanel/SetLeftFrame
              SetPoints this to the left slot on open, exactly like Gossip/Merchant/Trainer. -->
         <Size><AbsDimension x="384" y="512"/></Size>

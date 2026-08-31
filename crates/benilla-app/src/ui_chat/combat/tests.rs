@@ -30,12 +30,30 @@ fn declared_signature(family: Family, variant: Variant) -> Vec<char> {
         .slots
         .iter()
         .filter_map(|slot| match slot {
-            Slot::Attacker => variant.names_subject().then_some('s'),
-            Slot::Victim => variant.names_object().then_some('s'),
-            Slot::Spell | Slot::School | Slot::Power | Slot::Power2 => Some('s'),
+            Slot::Attacker => family.names_subject(variant).then_some('s'),
+            Slot::Victim => family.names_object(variant).then_some('s'),
+            Slot::Spell | Slot::School | Slot::Power | Slot::Power2 | Slot::Named => Some('s'),
             Slot::Amount | Slot::Amount2 => Some('d'),
         })
         .collect()
+}
+
+/// The variants a family can actually be asked for. A [`Keying::Quad`] family answers all four;
+/// a `Duo` one collapses to two distinct keys (both `…SELF*` variants give the `me` word), and a
+/// `Single` family has exactly one. Sweeping the quad list over a Duo family would check the same
+/// key twice and prove nothing extra — worse, it would let `every_family_has_the_three_core_keys`
+/// demand keys that do not exist.
+fn variants_of(family: Family) -> &'static [Variant] {
+    match family.keying {
+        Keying::Quad => &[
+            Variant::SelfOther,
+            Variant::OtherSelf,
+            Variant::OtherOther,
+            Variant::SelfSelf,
+        ],
+        Keying::Duo { .. } => &[Variant::SelfOther, Variant::OtherOther],
+        Keying::Single => &[Variant::OtherOther],
+    }
 }
 
 /// **The gate on the one thing this module authors.** Every family × every variant: if the install
@@ -66,16 +84,10 @@ fn every_family_matches_the_shipped_template() {
         .run(&String::from_utf8_lossy(&src))
         .expect("GlobalStrings runs clean");
 
-    let variants = [
-        Variant::SelfOther,
-        Variant::OtherSelf,
-        Variant::OtherOther,
-        Variant::SelfSelf,
-    ];
     let mut checked = 0usize;
     for &family in ALL_FAMILIES {
-        for variant in variants {
-            let key = format!("{}{}", family.stem, variant.suffix());
+        for &variant in variants_of(family) {
+            let key = family.key(variant);
             let Some(template) = global_string(&script, &key) else {
                 continue;
             };
@@ -91,13 +103,14 @@ fn every_family_matches_the_shipped_template() {
     // A stem typo'd across the board would make every lookup miss and leave this at zero, which
     // would otherwise pass silently.
     assert!(
-        checked >= ALL_FAMILIES.len() * 3,
+        checked >= ALL_FAMILIES.len(),
         "only {checked} keys resolved"
     );
 }
 
-/// Every family defines the three variants that are not `…SELFSELF`. Those three are the ones the
-/// reference's selectors always return a key for, so an absent one is a wrong stem, not a data
+/// Every family defines the variants that are not `…SELFSELF` — for a `Quad` family the other
+/// three, for a `Duo` one both of its keys, for a `Single` one its single key. Those are the ones
+/// the reference's selectors always return a key for, so an absent one is a wrong stem, not a data
 /// condition — the failure mode [`every_family_matches_the_shipped_template`] cannot see because
 /// it skips what it cannot find. Skips without client data.
 #[test]
@@ -113,8 +126,12 @@ fn every_family_has_the_three_core_keys() {
         .expect("GlobalStrings runs clean");
 
     for &family in ALL_FAMILIES {
-        for variant in [Variant::SelfOther, Variant::OtherSelf, Variant::OtherOther] {
-            let key = format!("{}{}", family.stem, variant.suffix());
+        let core: Vec<Variant> = match family.keying {
+            Keying::Quad => vec![Variant::SelfOther, Variant::OtherSelf, Variant::OtherOther],
+            _ => variants_of(family).to_vec(),
+        };
+        for variant in core {
+            let key = family.key(variant);
             assert!(
                 global_string(&script, &key).is_some(),
                 "{key} is not a GlobalString — wrong stem?"
@@ -180,6 +197,8 @@ fn the_reported_sentences_read_correctly() {
         amount: 120,
         amount2: 40,
         power2: Some(0),
+        named: "Copper Bar".into(),
+        trailers: None,
     };
     let line = |family, variant| compose_line(&script, family, variant, &fills).expect("composes");
 
@@ -382,6 +401,7 @@ fn an_unknown_endpoint_alone_does_not_drop_the_line() {
             (1, a),
             (2, b),
             f.clone(),
+            Named::Ready,
         )
     };
     assert!(

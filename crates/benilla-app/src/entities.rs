@@ -52,7 +52,7 @@ use carried_light::spawn_carried_lights;
 /// helm/shoulder resolution, all resolved from the unit descriptor + ItemDisplayInfo and spawned as
 /// children of the body's attach-point joints.
 mod equipment;
-use equipment::{attach_held_items, resolve_equipment};
+use equipment::{attach_held_items, resolve_corpse_equipment, resolve_equipment};
 
 /// Item / enchant glow effects (decision 0805): the `Spells\Enchantments\*.mdx` models an item's
 /// `ItemVisuals` id hangs on the item's OWN attachment points — the permanent weapon glows and
@@ -70,6 +70,11 @@ use mount::reseat_mounts;
 /// Live descriptor appearance (decision 0695): a `Values` delta moving the display id swaps the
 /// model in place (druid forms, GM morphs — ledger B69/F04) and one moving `SCALE_X` eases the
 /// render scale (the reference's 2 s cosine smoothstep); both restamp the collision height.
+/// The corpse OBJECT (decision 1706): a `TYPEID_CORPSE` create rendered as the dead body — the
+/// character-model chain dressed from the corpse's own `CORPSE_FIELD_*` snapshot, or the
+/// `<Race><Sex>DeathSkeleton` prop once the server has converted it to bones.
+pub(crate) mod corpse;
+
 mod live_display;
 pub(crate) use live_display::DisplaySwapped;
 use live_display::{refresh_live_display, tick_scale_ease};
@@ -471,6 +476,10 @@ pub(super) struct SkinKey {
     pub(super) hair_style: u8,
     pub(super) hair_color: u8,
     pub(super) equip: [u32; 8],
+    /// The wearer's guild tabard (decision 1704) — part of the key, not of `equip`, because two
+    /// guilds' members wear the *same* tabard display and must not share one atlas. Without it the
+    /// first guild to composite would lend its crest to every other guild on screen.
+    pub(super) emblem: Option<benilla_formats::GuildEmblem>,
 }
 
 /// Marks a net entity whose visual (model children or fallback cube) has been attached, so the attach
@@ -509,6 +518,9 @@ fn evict_display_caches(
     gos: Option<ResMut<GameObjects>>,
     items: Option<ResMut<equipment::ItemDisplays>>,
     glows: Option<ResMut<ItemGlows>>,
+    // The bone-pile bodies (decision 1706) — 16 at most, but they hold M2 handles like any other
+    // display cache and must die with the map for the same reason (the teleport asset leak).
+    mut bones: ResMut<corpse::BonesModels>,
 ) {
     if changes.is_empty() {
         return;
@@ -537,6 +549,7 @@ fn evict_display_caches(
     if let Some(mut g) = glows {
         g.models.clear();
     }
+    bones.0.clear();
 }
 
 /// Expire the streamed-entity dedups by **distance** (decision 0793) — the within-map half of
@@ -667,6 +680,9 @@ impl Plugin for EntitiesPlugin {
                 .before(benilla_world::schedule::WorldStage::Input),
         )
         .init_resource::<SkinComposites>()
+        // The 16 bone-pile body models (decision 1706), keyed (race, sex) rather than by a
+        // display id — a skeleton has no CreatureDisplayInfo row.
+        .init_resource::<corpse::BonesModels>()
         .init_resource::<spell_fx::SpellFx>()
         .init_resource::<spell_fx::FxTintAnims>()
         // The per-caster pending-projectile queues (the client's `unit+0xac` lists).
@@ -698,7 +714,10 @@ impl Plugin for EntitiesPlugin {
             (
                 // Equipment resolution first (decisions 0072/0074): it *creates* item
                 // DisplayModel entries, which update_display_models then builds the same frame.
-                resolve_equipment,
+                // The corpse's dress rides beside it (decision 1706, one nested unordered
+                // element — the outer tuple is at `chain()`'s 20-element ceiling): a disjoint
+                // entity set, the same item-model cache, the same must-be-before-the-build.
+                (resolve_equipment, resolve_corpse_equipment),
                 // Spell-effect resolution likewise creates its path-keyed entries (0099 P3),
                 // as does the missile launcher (P4) — both feed the same SpellFx model cache.
                 resolve_spell_fx,
@@ -756,10 +775,13 @@ impl Plugin for EntitiesPlugin {
                 // scan; both only read a player Bevy already advanced in `PreUpdate`, and both
                 // want to run after the attach passes so a fresh instance is covered at once.
                 (spell_fx::fire_fx_anim_events, spell_fx::advance_fx_anim),
-                // A gear change re-dresses the standing visual in place — a re-composited atlas
-                // on the same parts, the equipment geosets re-selected, every attachment left
-                // alone (decision 0835, the reference's own shape).
-                attach::redress_player_looks,
+                // One nested (unordered) element — the outer tuple is at `chain()`'s
+                // 20-element ceiling. Two independent post-attach touch-ups on a standing
+                // visual: a gear change re-dresses it in place — a re-composited atlas on the
+                // same parts, the equipment geosets re-selected, every attachment left alone
+                // (decision 0835, the reference's own shape) — and a freshly attached corpse
+                // arms its settled Dead/Drowned pose (decision 1706).
+                (attach::redress_player_looks, corpse::pose_corpses),
                 // A mount transition does the same, and for the same reason (B199): the
                 // field diff **re-seats** the standing rig — onto the mount's attachment-0
                 // joint, or back onto its own frame — where it used to tear the whole rider
@@ -1055,7 +1077,9 @@ fn setup_entities(
 /// per-submesh material, with creature skin slots filled from the display's variations).
 #[allow(clippy::too_many_arguments)]
 fn update_display_models(
-    entities: Query<&NetEntity>,
+    // `ObjectStore` rides along for the corpses: which cache holds a corpse's model is a
+    // descriptor question (`CORPSE_FLAG_BONES`), not a display-id one — decision 1706.
+    entities: Query<(&NetEntity, Option<&crate::net::ObjectStore>)>,
     mut creatures: Option<ResMut<Creatures>>,
     mut gameobjects: Option<ResMut<GameObjects>>,
     mut held: Option<ResMut<ItemDisplays>>,
@@ -1065,6 +1089,8 @@ fn update_display_models(
     mut forms: ResMut<benilla_world::model_forms::ModelForms>,
     asset_server: Res<AssetServer>,
     mut mats: benilla_world::model_render::M2BatchMaterials,
+    // The bone-pile display cache + the ChrRaces fileStrings its paths are built from (1706).
+    mut bones: ResMut<corpse::BonesModels>,
     // The glue-preview want (decisions 0423 + 0465): the glue screens' look's body displayId, so
     // its model builds with no wire entity (the screens run pre-world, where no NetEntity carries it).
     glue_preview: Option<Res<crate::portrait::GluePreview>>,
@@ -1082,7 +1108,30 @@ fn update_display_models(
     // The (kind, display) pairs live in the world this frame — cheap to collect.
     let mut actives: Vec<(EntityKind, u32)> = entities
         .iter()
-        .filter_map(|e| e.display_id.map(|d| (e.kind, d)))
+        // A **bone pile** is skipped here (decision 1706): it carries a perfectly valid display id
+        // — the server's corpse→bones conversion copies the field verbatim — and the client
+        // deliberately ignores it, so requesting the body it names would load and build a
+        // character model nothing will ever render. Its own model is collected below.
+        .filter(|(e, store)| {
+            !matches!(
+                corpse::corpse_model(e, *store),
+                Some(corpse::CorpseModel::Bones(..))
+            )
+        })
+        .filter_map(|(e, _)| e.display_id.map(|d| (e.kind, d)))
+        .collect();
+    // The bone piles want the OTHER cache (decision 1706): their model is keyed (race, sex), so
+    // they are collected separately and never enter the display-id want list above — a bone pile's
+    // display id is a live field the client deliberately ignores, and building the body it names
+    // would load a model nothing renders. Their FLESH siblings need nothing here: a corpse's
+    // display id IS a `CreatureDisplayInfo` id, so the `Corpse` arm below resolves it exactly like
+    // a unit's.
+    let bones_wanted: Vec<(u8, u8)> = entities
+        .iter()
+        .filter_map(|(e, store)| match corpse::corpse_model(e, store) {
+            Some(corpse::CorpseModel::Bones(race, sex)) => Some((race, sex)),
+            _ => None,
+        })
         .collect();
     // The glue-preview body (decisions 0423 + 0465): a want beside the NetEntity scan, so the
     // character on the glue stage has a model even though nothing streamed it in.
@@ -1116,7 +1165,10 @@ fn update_display_models(
         match kind {
             // Players resolve their body model through the very same creature chain (decision 0041):
             // displayId → CreatureDisplayInfo → CreatureModelData → a `Character\…\…\….mdx` body.
-            EntityKind::Unit | EntityKind::Player => {
+            // …and so does a **corpse** that is not a bone pile (decision 1706): its
+            // `CORPSE_FIELD_DISPLAY_ID` is the dead player's own body display, which is the
+            // reference's own lookup at `0x5d6759`.
+            EntityKind::Unit | EntityKind::Player | EntityKind::Corpse => {
                 let Some(cr) = creatures.as_deref_mut() else {
                     continue;
                 };
@@ -1161,6 +1213,29 @@ fn update_display_models(
                 }
             }
             _ => {}
+        }
+    }
+
+    // The bone piles (decision 1706): request each wanted `(race, sex)` skeleton once, then build
+    // its parts as the M2 lands — the same two-step as every other display, on its own tiny cache.
+    // Character-creation data is the source of the race fileString the path is built from, so a
+    // session that could not load it simply shows no skeletons rather than guessing at names.
+    if let Some(cc) = char_create.as_deref() {
+        for key in bones_wanted {
+            corpse::ensure_bones_display(&mut bones, &cc.0, key, &asset_server);
+            if let Some(dm) = bones.0.get_mut(&key) {
+                if dm.parts.is_none() {
+                    build_parts(
+                        dm,
+                        m2s,
+                        wmos,
+                        &mut forms,
+                        &asset_server,
+                        &mut mats,
+                        false, // gameobject: a prop body — unit lighting, no hull collider
+                    );
+                }
+            }
         }
     }
 

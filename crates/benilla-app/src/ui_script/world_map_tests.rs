@@ -20,6 +20,10 @@ fn harness() -> UiScript {
         "GameTooltip.xml",
         "UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
         "ScrollTemplates.xml",
+        // The blip templates, which WorldMapFrame.xml instantiates with inherits=. Not
+        // optional: an unknown template is a loader WARNING, not an error, so leaving this
+        // out loads clean and then hands every blip a sizeless, anchorless frame.
+        "WorldMapFrameTemplates.xml",
         "WorldMapFrame.xml",
     ] {
         let text = std::fs::read_to_string(
@@ -282,5 +286,69 @@ fn party_blips_sit_at_their_map_positions_and_hide_when_absent() {
     for i in 1..=4 {
         assert!(!shown(&s, i), "slot {i} hides when the party is gone");
     }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Opening the map must not hide the map's own furniture.** (Director report: the world showed
+/// through at the left and right of the sheet, where black bars had always been.)
+///
+/// `WorldMapFrame` is an `area = "full"` panel, so `ShowUIPanel` routes it to `SetFullScreenFrame`
+/// — which hides `UIParent` (decision 1734 restored that line). Anything the map needs *while it
+/// is up* therefore must not hang off `UIParent`, and the reference is emphatic about it in three
+/// places: `BlackoutWorld` is a texture inside `WorldMapFrame` itself, `WorldMapTooltip` is
+/// `parent="WorldMapFrame"` where the shared `GameTooltip` is `parent="UIParent"`, and the
+/// dropdown lists carry `toplevel="true"` with no parent at all.
+#[test]
+fn the_maps_own_furniture_survives_the_hide_that_showing_it_performs() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    let visible = |s: &UiScript, f: &str| {
+        s.eval::<i64>(&format!(
+            "local x = getglobal('{f}') if not x then return -1 end return x:IsVisible() and 1 or 0"
+        ))
+        .unwrap()
+    };
+
+    s.run("ShowUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+
+    assert_eq!(visible(&s, "WorldMapFrame"), 1, "the map itself is up");
+    assert_eq!(
+        visible(&s, "UIParent"),
+        0,
+        "and it took the screen from the HUD"
+    );
+    assert_eq!(
+        visible(&s, "BlackoutWorld"),
+        1,
+        "the blackout is up WITH it — it is what stops the 3D world showing through the margins \
+         beside the 4:3 sheet, and a blackout that hides when the map opens is no blackout"
+    );
+
+    // The map's own header carries two `UIDropDownMenu` pickers, and every menu in the game is
+    // seated on the shared `DropDownList1`. `ToggleDropDownMenu` ends in `listFrame:Show()`, so
+    // the property that decides whether a continent list can ever appear over the map is whether
+    // that Show survives — which is what a `parent="UIParent"` took away. Asserted at the Show
+    // rather than through `ToggleDropDownMenu` on purpose: the toggle bails early on an empty
+    // list (`numButtons == 0`), so driving it here would pass on a host with no continents
+    // pushed and prove nothing about the seat.
+    s.run("DropDownList1:Show()").unwrap();
+    s.resolve();
+    assert_eq!(
+        visible(&s, "DropDownList1"),
+        1,
+        "the shared dropdown list can open over a full-screen panel — the continent and zone \
+         pickers in the map's own header have no other seat"
+    );
+
+    s.run("CloseDropDownMenus()").unwrap();
+    s.run("HideUIPanel(WorldMapFrame)").unwrap();
+    s.resolve();
+    assert_eq!(visible(&s, "UIParent"), 1, "and the HUD comes back after");
+    assert_eq!(visible(&s, "BlackoutWorld"), 0, "with the blackout down");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

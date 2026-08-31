@@ -42,8 +42,9 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_ui::script::{
-    weapon_subclass_skill, InvSlotView, InventorySlots, ScriptValue, SkillEntry, SkillsState,
-    UiScript, UnitCombatStats, EQUIPMENT_BAG, SKILL_DEFENSE, SKILL_UNARMED,
+    weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, ScriptValue, SkillEntry,
+    SkillsState, UiScript, UnitCombatStats, BANK_BAG_SLOT_COUNT, EQUIPMENT_BAG, SKILL_DEFENSE,
+    SKILL_UNARMED,
 };
 
 use crate::entities::ItemDisplays;
@@ -78,7 +79,7 @@ fn fixed(v: f32) -> i64 {
 /// replaces the VM without despawning the avatar — re-pushes both snapshots and re-fires their
 /// events exactly as a fresh login does.
 #[derive(Resource, Default)]
-struct CharFeedState {
+pub(crate) struct CharFeedState {
     vm: crate::ui_script::VmMemo<CharFeedMemo>,
 }
 
@@ -87,6 +88,7 @@ struct CharFeedState {
 struct CharFeedMemo {
     last_stats: Option<UnitCombatStats>,
     last_inv: Option<InventorySlots>,
+    last_bank_bags: Option<BankBagSlots>,
     /// The gate's counter memories (1439) — the stores whose lazy resolves poison `is_changed`
     /// for this feed (the equipment templates' ask-once, the enchant-name creator lookups).
     items_objects: gate::Watch,
@@ -95,6 +97,12 @@ struct CharFeedMemo {
     /// `Items::enchant_display_epoch` — one step per displayable countdown change (the slot
     /// views read second-floored countdowns), including the last elapse's collapsing push.
     enchant_deadlines: gate::Watch,
+    /// `PendingItemOps::epoch` — one step per change to the in-flight lock set. Watched BESIDE
+    /// `!is_empty()` and not instead of it: `is_empty()` holds the gate open *while* an op is in
+    /// flight, and this catches the frame it goes away. Without it a clear that moves no object
+    /// (`SMSG_INVENTORY_CHANGE_FAILURE`) closes the gate on the same frame it unlocks, and the
+    /// last `locked: true` this feed pushed stands (1771).
+    pending_epoch: gate::Watch,
 }
 
 /// Adds the per-frame character-window feed. The bindings live in `benilla-ui`'s `char_stats`;
@@ -538,21 +546,28 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
 /// equip_slots from the ask-once template (icon `None` while the answer is in flight — the
 /// empty-slot art shows and the landing template flips the view, which fires
 /// `UNIT_INVENTORY_CHANGED`), `locked` from the app's `PendingItemOps` (decision 0208 phase 1b —
-/// the same feed `ui_items::feed_containers` reads for a bag slot's own `.locked`). `slot0` is
-/// the wire `EQUIPMENT_SLOT_*`/`INV_SLOT` index (0..22 — equipment 0..18, the four equipped-bag
-/// icons 19..22); the live-API id `slot_view` reports through is `slot0 + 1` either way.
+/// the same feed `ui_items::feed_containers` reads for a bag slot's own `.locked`).
+///
+/// Takes the item's **guid and its live-API id** rather than a wire slot index, because the two
+/// bands that use it resolve their guid out of two different descriptor arrays: the doll's
+/// `PLAYER_FIELD_INV_SLOT_*` (live id = wire slot + 1, so equipment 1..=19 and the four
+/// equipped-bag icons 20..=23) and the bank bags' own `PLAYER_FIELD_BANK_BAG_SLOT_*` (live ids
+/// 64..=69). Everything past the guid — template, enchants, durability, the pending lock — is
+/// identical for both, which is the whole reason there is one function here and not two.
 #[allow(clippy::too_many_arguments)] // the slot resolve's full read set — the bag feed's twin
 fn slot_view(
-    store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
-    slot0: u8,
+    // `ItemSubClass.dbc` — the count gate below reads its `DisplayFlags` bit 2. `None` (the DBC
+    // failed to load) leaves every bag at 0, which is the plain-bag answer and the safe one.
+    sub_classes: Option<&crate::ui_items::ItemSubClasses>,
+    guid: u64,
+    live_id: u32,
 ) -> Option<InvSlotView> {
-    let guid = store.0.player_inv_slot(slot0)?;
     // The temp-enchant countdowns, read before the object borrow (both live on `Items`) — the bag
     // feed's twin.
     let enchant_ms: [Option<u64>; 7] =
@@ -560,8 +575,12 @@ fn slot_view(
     let obj = items.object(guid)?;
     let entry = obj.object_entry()?;
     let count = obj.item_stack_count().unwrap_or(1).max(1);
-    // A worn ammo container's contents, collected while the bag object is borrowed — applied
-    // below once the template's class says quiver.
+    // `OBJECT_FIELD_TYPE & TYPEMASK_CONTAINER` — the fork `GetInventoryItemCount` takes first
+    // (`0x4c87a6`), read off the object exactly as the reference reads it rather than inferred
+    // from the template.
+    let is_container = obj.is_container();
+    // A worn container's contents, collected while the bag object is borrowed — summed below if
+    // its subclass row carries the count gate.
     let content_guids: Vec<u64> = {
         let slots = obj.container_num_slots().unwrap_or(0).min(36) as u8;
         (0..slots).filter_map(|s| obj.container_slot(s)).collect()
@@ -601,7 +620,7 @@ fn slot_view(
     // roll's enchants are already in the slots read just above.
     let roll = obj.item_random_properties_id();
     let t = items.template(entry, guid, commands);
-    let (name, quality, display, link, equip_slots, class, bar_placeable) = match t {
+    let (name, quality, display, link, equip_slots, kind, bar_placeable) = match t {
         Some(t) => {
             let name = rolls.name(&t.name, roll);
             (
@@ -612,34 +631,42 @@ fn slot_view(
                     entry, 0, roll, 0, &name, t.quality,
                 )),
                 find_equip_slot(t.inventory_type),
-                t.class,
+                (t.class, t.subclass),
                 t.placeable_on_action_bar(),
             )
         }
-        None => (None, 0, 0, None, Vec::new(), 0, false),
+        None => (None, 0, 0, None, Vec::new(), (0, 0), false),
     };
-    // The quiver's bag-bar count is what's INSIDE it: the ref's `GetInventoryItemCount("player",
-    // bagSlot)` returns the ammo left in a worn ammo container — the "162" on the bag bar — and
-    // the item's own stack (1) for any other bag, which the count text then hides. Gated on
-    // ITEM_CLASS_QUIVER 11 (INFERRED from the ref UI's observable behavior — regular bags never
-    // show a contents sum; named in the decision record).
-    let count = if class == 11 {
-        content_guids
-            .iter()
-            .filter_map(|&g| items.object(g))
-            .map(|o| o.item_stack_count().unwrap_or(1).max(1))
-            .sum()
-    } else {
-        count
-    };
+    // **A container's count is not its stack count** — `GetInventoryItemCount 0x4c8680` forks on
+    // the TYPEMASK bit and then on `ItemSubClass.dbc`'s `DisplayFlags & 0x4` (`0x4c881a`): set →
+    // `[CGContainer vtbl+0x10]` → `0x622130`, the sum of the contents' stack counts; clear → 0.
+    // In the shipped file that bit is on Soul Bag (1/1) and the Quiver class (11/0..3) only, so a
+    // quiver shows its arrows on the bag bar and an ordinary bag shows nothing at all.
+    //
+    // This REPLACES a `class == 11` guess whose own comment admitted it was inferred from what the
+    // reference UI looked like, and which was wrong twice over: it missed the soul bag, and it
+    // answered a plain bag's stack count (1) where the client answers 0 — the digit the director
+    // saw on `BankFrameBag1` after 1751's swap put a real `isBag` button in front of it.
+    let counts_contents = sub_classes.is_some_and(|c| c.0.display_flags(kind.0, kind.1) & 0x4 != 0);
+    let contents_count = is_container.then(|| {
+        if counts_contents {
+            content_guids
+                .iter()
+                .filter_map(|&g| items.object(g))
+                .map(|o| o.item_stack_count().unwrap_or(1).max(1))
+                .sum()
+        } else {
+            0
+        }
+    });
     let icon = icons
         .and_then(|i| i.catalog.get(display))
         .and_then(|d| d.icon.clone());
-    let live_id = u32::from(slot0) + 1;
     Some(InvSlotView {
         item_id: entry,
         icon,
         count,
+        contents_count,
         quality,
         name,
         link,
@@ -688,6 +715,7 @@ fn ammo_count(store: &ObjectStore, items: &Items, ammo_id: u32) -> u32 {
 /// the four equipped-bag icons (decision 0216 slice 2's bag bar — the bag ITEM occupying `INV_SLOT`
 /// 19..22, not its contents) — all the client's 1-based `GetInventorySlotInfo` ids over the
 /// 0-based inv-slot array.
+#[allow(clippy::too_many_arguments)] // [`slot_view`]'s read set, plus the descriptor it walks
 fn inventory_slots(
     store: &ObjectStore,
     items: &mut Items,
@@ -696,6 +724,7 @@ fn inventory_slots(
     commands: &NetCommands,
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
+    sub_classes: Option<&crate::ui_items::ItemSubClasses>,
 ) -> InventorySlots {
     let mut inv: InventorySlots = Default::default();
     let ammo_id = store.0.player_ammo_id().unwrap_or(0);
@@ -722,6 +751,9 @@ fn inventory_slots(
             item_id: ammo_id,
             icon,
             count: ammo_count(store, items, ammo_id),
+            // Ammo is not a container — slot 0 is `GetInventoryItemCount`'s own `PLAYER_AMMO_ID`
+            // leg, which never reaches the TYPEMASK fork.
+            contents_count: None,
             quality,
             name,
             link,
@@ -738,35 +770,71 @@ fn inventory_slots(
             enchants: Vec::new(),
         });
     }
-    for slot in 1..=19u8 {
-        inv[usize::from(slot)] = slot_view(
-            store,
+    // Equipment 1..=19, then Bag0Slot..Bag3Slot (ids 20..23, PaperDollItemFrame.dbc-verified) —
+    // the bag bar's icon source: the equipped bag ITEM at INV_SLOT 19..22 (BAG_SLOT_FIRST../
+    // SLOT_BAG_FIRST in the container feed's own numbering). One band: the doll's live id is its
+    // wire slot plus one across the whole range.
+    for live in 1..=23u32 {
+        let Some(guid) = store.0.player_inv_slot(live as u8 - 1).filter(|g| *g != 0) else {
+            continue;
+        };
+        inv[live as usize] = slot_view(
             items,
             icons,
             rolls,
             commands,
             pending,
             names,
-            slot - 1,
-        );
-    }
-    // Bag0Slot..Bag3Slot (ids 20..23, PaperDollItemFrame.dbc-verified) — the bag bar's icon
-    // source: the equipped bag ITEM at INV_SLOT 19..22 (BAG_SLOT_FIRST../SLOT_BAG_FIRST in the
-    // container feed's own numbering), same `slot_view` resolution as any equipment slot.
-    for (i, slot) in (20u8..=23).enumerate() {
-        inv[usize::from(slot)] = slot_view(
-            store,
-            items,
-            icons,
-            rolls,
-            commands,
-            pending,
-            names,
-            19 + i as u8,
+            sub_classes,
+            guid,
+            live,
         );
     }
     inv
 }
+
+/// The six bank-bag slots' views (live ids 64..=69) — the same [`slot_view`] resolution as any
+/// doll slot, off the descriptor's own `PLAYER_FIELD_BANK_BAG_SLOT_*` guids.
+///
+/// These are inventory slots, not bank-*window* state: the reference's bank paints and picks up a
+/// bank bag through `GetInventoryItemTexture`/`PickupBagFromSlot` at
+/// `BankButtonIDToInvSlotID(i, 1)` (BankFrame.lua:28-35, 194-198), and the guids stream in the
+/// player descriptor whether or not a banker is open. So they ride the inventory feed, beside the
+/// doll snapshot, rather than the `BankState` the bank window pushes.
+#[allow(clippy::too_many_arguments)] // [`slot_view`]'s read set, one band over
+fn bank_bag_slots(
+    store: &ObjectStore,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    rolls: crate::items::RollCatalogs,
+    commands: &NetCommands,
+    pending: &PendingItemOps,
+    names: &mut crate::names::NameCache,
+    sub_classes: Option<&crate::ui_items::ItemSubClasses>,
+) -> BankBagSlots {
+    let mut bags: BankBagSlots = Default::default();
+    for (i, bag) in bags.iter_mut().enumerate() {
+        let Some(guid) = store.0.player_bank_bag_slot(i as u8).filter(|g| *g != 0) else {
+            continue;
+        };
+        *bag = slot_view(
+            items,
+            icons,
+            rolls,
+            commands,
+            pending,
+            names,
+            sub_classes,
+            guid,
+            BANK_BAG_LIVE_FIRST + i as u32,
+        );
+    }
+    bags
+}
+
+/// `BankButtonIDToInvSlotID(1, isBag)` — the live-API id of the FIRST bank-bag slot. The band is
+/// six wide (`BANK_BAG_SLOT_COUNT`).
+const BANK_BAG_LIVE_FIRST: u32 = 64;
 
 /// Fire the paper doll's per-group repaint events for one unit's snapshot transition, `arg1 =
 /// token` — the [`crate::ui_unit::fire_transitions`] shape, for the combat-stats surface.
@@ -872,7 +940,7 @@ pub(crate) fn fire_stat_transitions(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn feed_char(
+pub(crate) fn feed_char(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
@@ -887,6 +955,8 @@ fn feed_char(
     mut booth: ResMut<PaperDollBooth>,
     pending: Res<PendingItemOps>,
     mut names: ResMut<crate::names::NameCache>,
+    // `ItemSubClass.dbc` — `GetInventoryItemCount`'s bag gate (`slot_view`'s own note).
+    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -949,6 +1019,7 @@ fn feed_char(
     let enchants_changed = enchants.as_ref().is_some_and(|r| r.is_changed())
         || props.as_ref().is_some_and(|r| r.is_changed());
     let pending_held = !pending.is_empty();
+    let pending_moved = memo.pending_epoch.moved(pending.epoch());
     gate::trace(
         "feed_char",
         &[
@@ -961,6 +1032,7 @@ fn feed_char(
             ("icons", icons_added),
             ("enchants", enchants_changed),
             ("pending", pending_held),
+            ("pending-epoch", pending_moved),
         ],
     );
     let gate = gate::Gate::new(
@@ -972,7 +1044,8 @@ fn feed_char(
             || self_changed
             || icons_added
             || enchants_changed
-            || pending_held,
+            || pending_held
+            || pending_moved,
     );
     if gate.skip() {
         return;
@@ -1001,15 +1074,80 @@ fn feed_char(
         &commands,
         &pending,
         &mut names,
+        sub_classes.as_deref(),
     );
-    if memo.last_inv.as_ref() != Some(&inv) {
+    let bank_bags = bank_bag_slots(
+        store,
+        &mut items,
+        icons.as_deref(),
+        crate::items::RollCatalogs {
+            enchants: enchants.as_deref(),
+            props: props.as_deref(),
+        },
+        &commands,
+        &pending,
+        &mut names,
+        sub_classes.as_deref(),
+    );
+    // One transition for both bands: they are the same descriptor read at two offsets, and
+    // `UNIT_INVENTORY_CHANGED` is the one repaint signal either has. Pushing them separately
+    // would fire it twice for a single wire update.
+    if memo.last_inv.as_ref() != Some(&inv) || memo.last_bank_bags.as_ref() != Some(&bank_bags) {
         gate.audit("feed_char", "the inventory snapshot");
+        // Read off the OLD memo, before the push replaces it.
+        let repainted: Vec<usize> = (0..BANK_BAG_SLOT_COUNT)
+            .filter(|&i| {
+                let was = memo.last_bank_bags.as_ref().and_then(|b| b[i].as_ref());
+                !same_item(was, bank_bags[i].as_ref())
+            })
+            .collect();
         script.set_inventory_slots(inv.clone());
+        script.set_bank_bag_slots(bank_bags.clone());
         script.fire_event(
             "UNIT_INVENTORY_CHANGED",
             vec![ScriptValue::Str("player".to_string())],
         );
+        // The six bank BAG buttons' only repaint signal (1771). `BankItemButtonTemplate`'s
+        // `<OnUpdate>` is `CursorOnUpdate()` — despite its name, `BankFrameItemButton_OnUpdate`
+        // (the icon/count/lock repaint) is reached ONLY from `BankFrameItemButton_OnEvent`, and
+        // only for `PLAYERBANKSLOTS_CHANGED` and `BANKFRAME_OPENED`. Without this the buttons
+        // showed whatever was true at the last unrelated vault-slot event: a bag dropped in never
+        // appeared, one moved between slots stayed drawn in its old one, and a lock left over from
+        // the drop stood greyed until the window was reopened.
+        //
+        // The VAULT band's copy of this event is `ui_items::feed_containers`' — each feed
+        // announces the band whose data it owns, and `feed_char` is ordered first, so both fire
+        // after their own push.
+        //
+        // **It carries NO arguments** (CARVED — wow-re `system/object-layer/scratch/
+        // bank-slot-event-law.md`). The descriptor watcher's fire site `0x5ddd6e` calls
+        // `FrameScript_SignalEvent 0x703e50`, which is `__fastcall(ecx = id)` with a plain `ret`
+        // and no vararg push at all — zero Lua values. (The image's only other fire site,
+        // `0x4c728d` in the item-GUID→slot notifier, pushes the literal string `"player"`, not a
+        // slot; nothing in FrameXML reads either, both consumers branching on `event` alone.) An
+        // event is fired per changed slot, as the watcher does — the slot travels in *how many*
+        // times it fires, never in an argument.
+        for _ in repainted {
+            script.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
+        }
         memo.last_inv = Some(inv);
+        memo.last_bank_bags = Some(bank_bags);
+    }
+}
+
+/// Whether two bank-bag views hold the same ITEM — everything but `locked`, which is
+/// `ITEM_LOCK_CHANGED`'s business and must not masquerade as a slot change.
+fn same_item(a: Option<&InvSlotView>, b: Option<&InvSlotView>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            let unlocked = |v: &InvSlotView| InvSlotView {
+                locked: false,
+                ..v.clone()
+            };
+            unlocked(a) == unlocked(b)
+        }
+        _ => false,
     }
 }
 
@@ -1047,4 +1185,164 @@ fn weapon_enchant(
         remaining_ms,
         charges: obj.item_enchant_charges(TEMP_ENCHANTMENT_SLOT),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_protocol::messages::ObjectFields;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// `PLAYER_FIELD_BANK_BAG_SLOT_1` — bank bag slot 0's guid pair (protocol test `bank.rs`).
+    const F_BANK_BAG_1: u16 = 612;
+    /// `OBJECT_FIELD_ENTRY` on the item object.
+    const F_OBJECT_ENTRY: u16 = 3;
+    /// "Traveler's Backpack" — any container entry; the feed only needs it to resolve.
+    const BAG_ENTRY: u32 = 4500;
+    const BAG: u64 = 0x4000_0000_0000_0abc;
+
+    /// A world with the player carrying `bag` (or nothing) in the FIRST bank bag slot, and a
+    /// recorder frame registered for the two events the reference's bank bag buttons repaint on.
+    fn world_with_bank_bag(bag: Option<u64>) -> App {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<CharFeedState>()
+            .init_resource::<PaperDollBooth>()
+            .init_resource::<PendingItemOps>()
+            .init_resource::<Items>()
+            .init_resource::<crate::names::NameCache>()
+            .insert_resource(NetCommands(tx));
+        let fields = match bag {
+            Some(g) => ObjectFields::from_pairs(&[
+                (F_BANK_BAG_1, g as u32),
+                (F_BANK_BAG_1 + 1, (g >> 32) as u32),
+            ]),
+            None => ObjectFields::from_pairs(&[(F_BANK_BAG_1, 0), (F_BANK_BAG_1 + 1, 0)]),
+        };
+        app.world_mut().spawn((SelfPlayer, ObjectStore(fields)));
+        if let Some(g) = bag {
+            let mut items = app.world_mut().resource_mut::<Items>();
+            items.insert_object(g, ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, BAG_ENTRY)]));
+            items.insert_template(
+                BAG_ENTRY,
+                Some(crate::items::test_template("Traveler's Backpack")),
+            );
+        }
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
+                f:RegisterEvent("UNIT_INVENTORY_CHANGED")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, event .. " " .. tostring(arg1))
+                end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app
+    }
+
+    fn seen(app: &mut App) -> Vec<String> {
+        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let out = script.eval::<Vec<String>>("return SEEN").unwrap();
+        script.run("SEEN = {}").unwrap();
+        out
+    }
+
+    /// **A bank bag slot's only repaint signal** (1771). `PLAYERBANKSLOTS_CHANGED` is the one
+    /// event that reaches `BankFrameItemButton_OnUpdate` for the six bag buttons —
+    /// `UNIT_INVENTORY_CHANGED`, which this feed already fired, is not registered by them at all,
+    /// and `ITEM_LOCK_CHANGED` repaints the desaturation without ever touching the icon. Without
+    /// this fire a bag dropped into the bank never appeared, and one moved between slots stayed
+    /// drawn where it had been.
+    #[test]
+    fn a_bank_bag_slot_filling_fires_playerbankslots_changed() {
+        let mut app = world_with_bank_bag(Some(BAG));
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let events = seen(&mut app);
+        assert!(
+            events.contains(&"PLAYERBANKSLOTS_CHANGED nil".to_string()),
+            "the repaint event, and it carries NO argument — `0x703e50` pushes none, and the \
+             recorder stringifies the absent arg1 as nil. Got {events:?}"
+        );
+        assert!(
+            events.contains(&"UNIT_INVENTORY_CHANGED player".to_string()),
+            "and the doll's, unchanged, got {events:?}"
+        );
+    }
+
+    /// The other half of the same rule: a LOCK flip is not a slot change. The reference has a
+    /// separate event for it (`ITEM_LOCK_CHANGED`, fired by `ui_items::feed_containers` off
+    /// `LockTransitions`), and firing the repaint event for it too would announce a change to the
+    /// item that did not happen.
+    #[test]
+    fn a_lock_flip_alone_does_not_fire_the_repaint_event() {
+        let mut app = world_with_bank_bag(Some(BAG));
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let _ = seen(&mut app);
+
+        // The same bag, now locked by an outbound move.
+        app.world_mut().resource_mut::<PendingItemOps>().add([(
+            EQUIPMENT_BAG,
+            BANK_BAG_LIVE_FIRST,
+            BAG,
+            1,
+        )]);
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let events = seen(&mut app);
+        assert!(
+            events.contains(&"UNIT_INVENTORY_CHANGED player".to_string()),
+            "the snapshot did move — `locked` is part of it, got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.starts_with("PLAYERBANKSLOTS_CHANGED")),
+            "…but the ITEM did not change, so the repaint event stays quiet, got {events:?}"
+        );
+    }
+
+    /// The gate hole behind the stuck grey: the frame an op's lock CLEARS, `!pending.is_empty()`
+    /// reads false and every "is anything in flight?" input closes — so a feed that had pushed
+    /// `locked: true` must have some other reason to run, or the stale lock stands forever.
+    /// [`PendingItemOps::epoch`] is that reason.
+    #[test]
+    fn the_frame_a_lock_clears_still_repushes_the_slot() {
+        let mut app = world_with_bank_bag(Some(BAG));
+        app.world_mut().resource_mut::<PendingItemOps>().add([(
+            EQUIPMENT_BAG,
+            BANK_BAG_LIVE_FIRST,
+            BAG,
+            1,
+        )]);
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let _ = seen(&mut app);
+        assert!(
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<bool>(r#"return IsInventoryItemLocked(64) and true or false"#)
+                .unwrap(),
+            "in flight, the slot reads locked"
+        );
+
+        // The server answers with a refusal: the lock clears without any object moving, which is
+        // exactly the case `!is_empty()` cannot see.
+        let cleared = app
+            .world_mut()
+            .resource_mut::<PendingItemOps>()
+            .clear_by_failure(BAG);
+        assert_eq!(cleared, vec![(EQUIPMENT_BAG, BANK_BAG_LIVE_FIRST)]);
+        app.world_mut().run_system_once(feed_char).unwrap();
+        assert!(
+            !app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<bool>(r#"return IsInventoryItemLocked(64) and true or false"#)
+                .unwrap(),
+            "the unlock has to reach the VM in the same frame it happened"
+        );
+    }
 }

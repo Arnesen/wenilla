@@ -173,6 +173,49 @@ pub(crate) fn key_token(k: KeyCode) -> Option<&'static str> {
         F10 => "F10",
         F11 => "F11",
         F12 => "F12",
+        // **On a Mac keyboard the print-screen key IS F13 — read out of the Mac binary now, not
+        // inferred.** The 1.12.1 Mac slice's key table `0x5bf320` maps Mac virtual keycode `0x69`
+        // (F13) to `0x212`, the same `PRINTSCREEN` the Windows table reaches from `VK_SNAPSHOT`.
+        // (This arm shipped as an inference off `KEY_PRINTSCREEN_MAC = "F13"`; wow-re's
+        // `keycode-origin-law.md` settled it at the bytes.) macOS has no PrintScreen keycode at
+        // all, so without this the byte-real `PRINTSCREEN SCREENSHOT` default is a dead key on
+        // every Mac — not fidelity, a broken key.
+        #[cfg(target_os = "macos")]
+        F13 => "PRINTSCREEN",
+        // **F13-F24: bindable strings, and `F16` a real reference code.**
+        // `IsValidBindingKeyString` arm 3 takes `F` + digits with no ceiling (`0x846c04`), and the
+        // Mac table really does reach `F16` — keycode `0x6A` → `0x30d`. Naming only F1-F12 meant
+        // `SetBinding("F16", …)` stored a chord this codec could never press: the key vanished
+        // into `unpressable chord` at the next seed.
+        //
+        // **Above F12 this is a benilla extension, deliberately.** The reference cannot reach
+        // them: Windows' fixed table stops at `VK_F12` and everything past it falls to
+        // `MapVirtualKeyA(vk, MAPVK_VK_TO_CHAR)`, which returns 0 for an F-key and drops the
+        // message outright. That is a 2004 lookup table's silence, not a rule about keys.
+        #[cfg(not(target_os = "macos"))]
+        F13 => "F13",
+        // **F14 and F15 are the Mac's ScrollLock and Pause, and those two are unbindable.** The
+        // Mac table sends keycode `0x6B` (F14) to `0x210` and `0x71` (F15) to `0x211` — the exact
+        // pair the namer calls `UNKNOWN` — so on a Mac they are refused for the same reason
+        // ScrollLock and Pause are refused below: they ARE those keys. (1.12's
+        // `KEY_SCROLLLOCK_MAC` / `KEY_PAUSE_MAC` are dead labels for the same reason; neither
+        // binary carries a `SCROLLLOCK` or `PAUSE` string at all.)
+        //
+        // The line that draws: a key the reference deliberately maps to `UNKNOWN` stays
+        // unbindable; a key it simply never mapped, we may name.
+        #[cfg(not(target_os = "macos"))]
+        F14 => "F14",
+        #[cfg(not(target_os = "macos"))]
+        F15 => "F15",
+        F16 => "F16",
+        F17 => "F17",
+        F18 => "F18",
+        F19 => "F19",
+        F20 => "F20",
+        F21 => "F21",
+        F22 => "F22",
+        F23 => "F23",
+        F24 => "F24",
         Space => "SPACE",
         Tab => "TAB",
         Enter | NumpadEnter => "ENTER",
@@ -203,20 +246,12 @@ pub(crate) fn key_token(k: KeyCode) -> Option<&'static str> {
         NumpadDivide => "NUMPADDIVIDE",
         NumpadMultiply => "NUMPADMULTIPLY",
         NumpadDecimal => "NUMPADDECIMAL",
+        // The Mac numeric keypad's `=` key. It is in the reference's namer (`0x30c`) and in
+        // `IsValidBindingKeyString`'s 26-name table, and it was in OUR validator too — but not
+        // here, so it was the one token `SetBinding` accepted and the dispatcher could not press.
+        NumpadEqual => "NUMPADEQUALS",
         NumLock => "NUMLOCK",
         PrintScreen => "PRINTSCREEN",
-        // **On a Mac keyboard the print-screen key IS F13, and the reference says so itself.**
-        // 1.12 ships `KEY_PRINTSCREEN_MAC = "F13"` beside a whole family of Mac key-label
-        // overrides (GlobalStrings.lua:2476-2526 — Backspace→Delete, Insert→Help, NumLock→Clear,
-        // Pause→F15, ScrollLock→F14), which is the Mac client mapping its physical keys onto the
-        // PC binding TOKENS and relabelling them for display. macOS has no PrintScreen keycode at
-        // all — a PC keyboard's PrtSc arrives as F13 — so without this the faithful `PRINTSCREEN`
-        // default is a dead binding on every Mac, which is not fidelity, it is a broken key.
-        // `_MAC` is a label table, so this is the mapping the reference implies rather than one it
-        // was read out of; the falsifier is cheap (bind F13 in the Keybindings page — it must
-        // write `PRINTSCREEN`, not `F13`).
-        #[cfg(target_os = "macos")]
-        F13 => "PRINTSCREEN",
         // ScrollLock and Pause are deliberately absent: the reference's namer calls their key
         // codes (`0x210`/`0x211`) `UNKNOWN`, so they are unbindable there (wow-re
         // `keybinding-dispatch-law.md` §2.3), and `IsValidBindingKeyString` would refuse the
@@ -263,9 +298,24 @@ pub(crate) fn mouse_token(b: MouseButton) -> Option<&'static str> {
         MouseButton::Middle => "BUTTON3",
         MouseButton::Forward => "BUTTON4",
         MouseButton::Back => "BUTTON5",
-        MouseButton::Other(_) => return None,
+        // **The extra buttons on a real mouse.** The reference names them the same way it names
+        // the first five and then some: `0x4b6aa0`'s fallback arm bit-scans from bit 3 upward and
+        // `sprintf("BUTTON%{d}", n)`, and `IsValidBindingKeyString` arm 3 takes `BUTTON` +
+        // digits with no ceiling — so `BUTTON6` was always a storable, listable, *unpressable*
+        // chord here. winit hands the platform's own button number through `Other(n)`, and on
+        // macOS that is `NSEvent.buttonNumber` — 0-4 already spoken for by the five named
+        // variants, so the sixth physical button arrives as `Other(5)` and is `BUTTON6`.
+        MouseButton::Other(n) => return EXTRA_BUTTONS.get(usize::from(n).wrapping_sub(5)).copied(),
     })
 }
+
+/// `BUTTON6`…`BUTTON20`, indexed by `Other(n) - 5`. A bounded table rather than a formatted
+/// string because these names are `&'static str` on both sides of the codec; twenty buttons is
+/// past every mouse anyone ships and the reference's own namer stops at the first gap too.
+const EXTRA_BUTTONS: &[&str] = &[
+    "BUTTON6", "BUTTON7", "BUTTON8", "BUTTON9", "BUTTON10", "BUTTON11", "BUTTON12", "BUTTON13",
+    "BUTTON14", "BUTTON15", "BUTTON16", "BUTTON17", "BUTTON18", "BUTTON19", "BUTTON20",
+];
 
 /// Token → base input (the parse side of [`key_token`]/[`mouse_token`], plus the wheel pair).
 fn token_key(t: &str) -> Option<BindKey> {
@@ -276,7 +326,11 @@ fn token_key(t: &str) -> Option<BindKey> {
         "BUTTON3" => Some(MouseButton::Middle),
         "BUTTON4" => Some(MouseButton::Forward),
         "BUTTON5" => Some(MouseButton::Back),
-        _ => None,
+        _ => EXTRA_BUTTONS
+            .iter()
+            .position(|n| *n == t)
+            .and_then(|i| u16::try_from(i + 5).ok())
+            .map(MouseButton::Other),
     } {
         return Some(BindKey::Mouse(b));
     }
@@ -334,6 +388,18 @@ fn token_key(t: &str) -> Option<BindKey> {
         "F10" => F10,
         "F11" => F11,
         "F12" => F12,
+        "F13" => F13,
+        "F14" => F14,
+        "F15" => F15,
+        "F16" => F16,
+        "F17" => F17,
+        "F18" => F18,
+        "F19" => F19,
+        "F20" => F20,
+        "F21" => F21,
+        "F22" => F22,
+        "F23" => F23,
+        "F24" => F24,
         "SPACE" => Space,
         "TAB" => Tab,
         "ENTER" => Enter,
@@ -364,6 +430,7 @@ fn token_key(t: &str) -> Option<BindKey> {
         "NUMPADDIVIDE" => NumpadDivide,
         "NUMPADMULTIPLY" => NumpadMultiply,
         "NUMPADDECIMAL" => NumpadDecimal,
+        "NUMPADEQUALS" => NumpadEqual,
         "NUMLOCK" => NumLock,
         "PRINTSCREEN" => PrintScreen,
         "CAPSLOCK" => CapsLock,
@@ -380,6 +447,22 @@ fn token_key(t: &str) -> Option<BindKey> {
         "`" => Backquote,
         _ => return None,
     };
+    // **Through the alias fold, and only if the namer agrees.** Two invariants, both of which
+    // this codec broke somewhere before 1745:
+    //
+    // 1. A chord parsed from a token must compare equal to the one a press BUILDS, and a press is
+    //    normalized ([`normalize_key`]) — so `ENTER` has to land on the same `KeyCode` the
+    //    numpad's Enter folds to.
+    // 2. A token this side accepts must be one [`key_token`] would produce, on THIS platform.
+    //    Otherwise the two tables drift: on a Mac `F13` is the print-screen key and `F14`/`F15`
+    //    are the unbindable ScrollLock/Pause pair, so parsing those strings to their raw
+    //    `KeyCode`s would make a chord the capture arm can never write and the window can never
+    //    show, reachable only by hand-editing the file. Asking the namer closes it structurally
+    //    rather than by remembering to cfg both sides.
+    let k = normalize_key(k);
+    if key_token(k) != Some(t) {
+        return None;
+    }
     Some(BindKey::Key(k))
 }
 
@@ -466,6 +549,84 @@ mod tests {
         // (`0x210`/`0x211`), so we must not name them either — nothing downstream could bind them.
         assert_eq!(key_token(KeyCode::ScrollLock), None);
         assert_eq!(key_token(KeyCode::Pause), None);
+    }
+
+    /// **And the way back — the direction that actually bit.** The test above walks the codec's
+    /// output into the validator; nothing walked the validator's *input space* back into the
+    /// codec, and three families lived in the gap: `NUMPADEQUALS` (in the reference's namer at
+    /// `0x30c`, in the 26-name table, in our validator — and nowhere here), `F13`-`F24`
+    /// (`IsValidBindingKeyString` arm 3 is `F` + digits with no ceiling), and `BUTTON6`+ (arm 3
+    /// again, and `0x4b6aa0`'s bit-scan fallback). Each was a key `SetBinding` accepted, the
+    /// window listed, the file saved — and the dispatcher could never press, so it came back as
+    /// `bindings: <cmd>: unpressable chord` and the player's key did nothing.
+    ///
+    /// The accept set is infinite (any single character, `F`/`NUMPAD`/`BUTTON` + any digits), so
+    /// this pins the families that name a key a real keyboard or mouse HAS. Past those — `F25`,
+    /// `BUTTON21`, `NUMPAD11` — the validator still accepts and the codec still refuses, which is
+    /// correct and deliberate: there is no physical key to press, and inventing a `KeyCode` for
+    /// one would be inventing hardware.
+    #[test]
+    fn every_token_setbinding_accepts_for_a_real_key_is_one_the_codec_can_press() {
+        use benilla_ui::script::keybind::normalize_binding_key;
+
+        let mut tokens: Vec<String> = Vec::new();
+        tokens.extend((1..=24).map(|n| format!("F{n}")));
+        // On a Mac those three are other keys: F13 IS print-screen (`0x5bf320`: keycode `0x69` →
+        // `0x212`) and F14/F15 are the unbindable ScrollLock/Pause pair (`0x210`/`0x211`). The
+        // codec refuses them there on purpose, so the list has to as well.
+        if cfg!(target_os = "macos") {
+            tokens.retain(|t| !matches!(t.as_str(), "F13" | "F14" | "F15"));
+        }
+        tokens.extend((0..=9).map(|n| format!("NUMPAD{n}")));
+        tokens.extend((1..=20).map(|n| format!("BUTTON{n}")));
+        tokens.extend(
+            [
+                "SPACE",
+                "NUMPADPLUS",
+                "NUMPADMINUS",
+                "NUMPADMULTIPLY",
+                "NUMPADDIVIDE",
+                "NUMPADDECIMAL",
+                "NUMPADEQUALS",
+                "ESCAPE",
+                "ENTER",
+                "BACKSPACE",
+                "TAB",
+                "LEFT",
+                "UP",
+                "RIGHT",
+                "DOWN",
+                "INSERT",
+                "DELETE",
+                "HOME",
+                "END",
+                "PAGEUP",
+                "PAGEDOWN",
+                "NUMLOCK",
+                "CAPSLOCK",
+                "PRINTSCREEN",
+                "MOUSEWHEELDOWN",
+                "MOUSEWHEELUP",
+            ]
+            .map(str::to_string),
+        );
+        tokens.extend(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-=[]\\;',./`"
+                .chars()
+                .map(String::from),
+        );
+
+        for token in tokens {
+            assert_eq!(
+                normalize_binding_key(&token).as_deref(),
+                Some(token.as_str()),
+                "the test's own list has a token SetBinding refuses: '{token}'"
+            );
+            assert!(
+                Chord::parse(&token).is_some(),
+                "'{token}' is a key SetBinding stores and this codec cannot press"
+            );
+        }
     }
 
     #[test]

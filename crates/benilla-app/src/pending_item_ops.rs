@@ -32,6 +32,11 @@ type PendingEntry = Vec<((i64, u32), (u64, u32))>;
 #[derive(Debug, Default, Resource)]
 pub(crate) struct PendingItemOps {
     entries: Vec<PendingEntry>,
+    /// One step per change to [`Self::entries`] — the gate input a feed needs to notice that a
+    /// lock **cleared**. `!is_empty()` alone cannot: the frame an op resolves, the set goes empty
+    /// and every "is anything in flight?" gate closes, so a feed that had pushed `locked: true`
+    /// never runs again to correct it. That is the stuck-dark bank bag button of 1771.
+    epoch: u64,
 }
 
 impl PendingItemOps {
@@ -39,6 +44,7 @@ impl PendingItemOps {
     /// count_at_send_time)` quadruples. Called once per outbound move/split/destroy send,
     /// covering every slot that send touches.
     pub(crate) fn add(&mut self, slots: impl IntoIterator<Item = (i64, u32, u64, u32)>) {
+        self.epoch += 1;
         self.entries.push(
             slots
                 .into_iter()
@@ -52,6 +58,12 @@ impl PendingItemOps {
     /// last resolve's own change tick already covered the final unlock.
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// [`Self::epoch`] — the "did the lock set move?" counter a feed's gate watches beside
+    /// `!is_empty()`.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Whether `(bag, slot)` is covered by any outstanding op — the container feed reads this
@@ -82,6 +94,9 @@ impl PendingItemOps {
         });
         unlocked.sort_unstable();
         unlocked.dedup();
+        if !unlocked.is_empty() {
+            self.epoch += 1;
+        }
         unlocked
     }
 
@@ -113,6 +128,9 @@ impl PendingItemOps {
         });
         unlocked.sort_unstable();
         unlocked.dedup();
+        if !unlocked.is_empty() {
+            self.epoch += 1;
+        }
         unlocked
     }
 
@@ -126,16 +144,28 @@ impl PendingItemOps {
             .collect();
         unlocked.sort_unstable();
         unlocked.dedup();
+        if !unlocked.is_empty() {
+            self.epoch += 1;
+        }
         unlocked
     }
 }
 
-/// `(bag, slot)` pairs whose app-lock cleared via a server failure this frame — queued here
-/// because the apply site (`net/apply/loot.rs::inventory_failure`, which owns the wire event) has
-/// no `UiScript` to fire `ITEM_LOCK_CHANGED` through; the container feed drains it and fires, the
+/// `(bag, slot)` pairs whose app-lock cleared this frame, from EITHER clear: the server failure
+/// (`net/apply/loot.rs::inventory_failure`, which owns the wire event but has no `UiScript` to
+/// fire `ITEM_LOCK_CHANGED` through) and the resolving field-update watch
+/// (`ui_items::feed::resolve_item_locks`, which runs ahead of every feed so that no feed can push
+/// a `locked` the clear has already invalidated). `feed_containers` drains this and fires — the
 /// exact shape `ui_items::EquipErrors` already uses for the same reason.
+///
+/// **Why the resolve is not just done inside the feed that fires** (1771): `feed_char` owns the
+/// doll's and the bank bags' `locked`, and is ordered `.before(feed_containers)` for an unrelated
+/// reason (Bagnon's `BAG_UPDATE` handlers read the inventory surface). With the resolve living in
+/// `feed_containers`, `feed_char` read a lock set that was about to be cleared *later in the same
+/// frame*, pushed `locked: true`, and then never ran again — leaving a bank bag button greyed
+/// until the window was reopened.
 #[derive(Resource, Default)]
-pub(crate) struct LockClearedByFailure(pub Vec<(i64, u32)>);
+pub(crate) struct LockTransitions(pub Vec<(i64, u32)>);
 
 #[cfg(test)]
 mod tests {

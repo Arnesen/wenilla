@@ -184,7 +184,21 @@ pub(crate) struct PlayerUiHover(pub(crate) Option<u32>);
 /// §1). One mechanism, written once here; every reader is ordered after `UiInput` so it sees this
 /// frame's value, not last frame's.
 #[derive(Resource, Default)]
-pub(crate) struct UiKeyboardCapture(pub(crate) bool);
+pub(crate) struct UiKeyboardCapture {
+    /// True while a focused EditBox is eating every key.
+    pub(crate) typing: bool,
+    /// **The four arrow keys are exempt this frame** — the focused box is in alt-arrow mode
+    /// (`ignoreArrows` / `SetAltArrowKeyMode`) and ALT is not held, so the reference's own key
+    /// handler declines LEFT/UP/RIGHT/DOWN at `0x77b1c4` and the strata walk carries them down to
+    /// `CGWorldFrame`, which runs their bindings. That is what lets you turn while the chat box
+    /// has focus (wow-re `ignorearrows-alt-arrow-gate.md`, §5 VERIFIED).
+    ///
+    /// It is a whole-frame flag rather than a per-key one because both of its terms are:
+    /// there is at most one focused box, and ALT is read off the same modifier mirror. Only the
+    /// four arrows may use it — every other key a focused box still swallows, since the
+    /// reference's handler returns 1 on every other path (`0x77b35e`).
+    pub(crate) arrows_fall_through: bool,
+}
 
 /// Set each frame by [`feed_ui_input`]: true for a LEFT press this frame that hit no frame but was
 /// consumed by the UI — the world-drop of a held cursor payload over EMPTY world (0216 §3,
@@ -443,6 +457,11 @@ fn arbitrate_pointer_over_ui(
     hover: Res<PlayerUiHover>,
     mut over: ResMut<PointerOverUi>,
 ) {
+    // A cinematic used to need a third term here, and no longer does — the deletion is the point
+    // of decision 1734. `CinematicFrame` is `setAllPoints` + `enableMouse="true"`, so while it is
+    // up it is the only mouse target the hit test can reach, because `UIParent:Hide()` has taken
+    // every other frame out of it. The hit test now arrives at that on its own, so
+    // [`PlayerUiHover`] carries it and the special case is gone.
     over.0 = egui.is_some_and(|e| e.0) || hover.0.is_some();
 }
 
@@ -751,6 +770,12 @@ impl benilla_ui::script::TextMeasure for FixedWidthFont {
 }
 
 #[cfg(test)]
+mod test_ui;
+
+#[cfg(test)]
+mod cinematic_tests;
+
+#[cfg(test)]
 mod cast_tests;
 
 #[cfg(test)]
@@ -890,12 +915,17 @@ mod options_tests;
 
 #[cfg(test)]
 mod delete_item_tests;
+#[cfg(test)]
+mod instance_tests;
 
 #[cfg(test)]
 mod static_popup_tests;
 
 #[cfg(test)]
 mod binder_tests;
+
+#[cfg(test)]
+mod summon_tests;
 
 #[cfg(test)]
 mod talent_wipe_tests;
@@ -912,6 +942,11 @@ mod enchant_confirm_tests;
 /// The shared reference-geometry diff (decision 0675) every transcribed window's test calls.
 #[cfg(test)]
 mod framexml_diff;
+
+/// Its FLAG twin (decision 1739): the whole-tree sweep for `toplevel`/mouse/`id` against the
+/// reference, read off the loaded engine rather than off our XML.
+#[cfg(test)]
+mod frame_flag_gate;
 
 #[cfg(test)]
 mod friends_tests;
@@ -939,6 +974,9 @@ mod petition_tests;
 /// friends list must not be in the business of.
 #[cfg(test)]
 mod raid_tests;
+
+#[cfg(test)]
+mod quest_share_tests;
 
 #[cfg(test)]
 mod quest_tests;

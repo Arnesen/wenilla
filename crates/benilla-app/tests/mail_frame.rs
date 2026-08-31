@@ -164,18 +164,18 @@ fn paging_math_enables_next_only_when_overflowing() {
 
     // Page 1: prev disabled, next enabled.
     assert!(!s
-        .eval::<bool>("return InboxPrevPageButton:IsEnabled()")
+        .eval::<bool>("return InboxPrevPageButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(s
-        .eval::<bool>("return InboxNextPageButton:IsEnabled()")
+        .eval::<bool>("return InboxNextPageButton:IsEnabled() ~= 0")
         .unwrap());
     // Turn the page: prev enabled, next disabled (only 2 mails on page 2).
     s.run("InboxNextPage()").unwrap();
     assert!(s
-        .eval::<bool>("return InboxPrevPageButton:IsEnabled()")
+        .eval::<bool>("return InboxPrevPageButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return InboxNextPageButton:IsEnabled()")
+        .eval::<bool>("return InboxNextPageButton:IsEnabled() ~= 0")
         .unwrap());
 }
 

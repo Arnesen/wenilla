@@ -189,9 +189,34 @@ pub(super) fn text_emote_event(
 
 /// The pending chat items the net/loot/quest feeds fill and [`feed_chat`] drains. Cleared on
 /// disconnect (a half-resolved line from a dead session must not leak into the next).
+///
+/// **Two queues, two drains.** [`Self::pending`] is the ordinary one. [`Self::broadcasts`] is the
+/// world broadcasts' ([`super::broadcast`]), and it is separate for one reason: their resolve needs
+/// the `AreaTable.dbc` catalog, the zone under the player and the joined-channel walk, which
+/// [`feed_chat`] does not hold and cannot grow to hold (it is at Bevy's `SystemParam` ceiling).
+/// `feed_broadcasts` drains this one a step earlier in the same schedule and pushes the resolved
+/// lines back onto [`Self::pending`], so a broadcast still lands on the frame it decodes.
 #[derive(Resource, Default)]
 pub(crate) struct ChatLog {
     pending: Vec<Pending>,
+    broadcasts: Vec<super::broadcast::Broadcast>,
+}
+
+impl ChatLog {
+    /// Queue one world broadcast for [`super::broadcast::feed_broadcasts`]'s resolve pass.
+    pub(crate) fn push_broadcast(&mut self, b: super::broadcast::Broadcast) {
+        self.broadcasts.push(b);
+    }
+
+    /// How many broadcasts are waiting — the drain's cheap early-out.
+    pub(crate) fn broadcasts_pending(&self) -> usize {
+        self.broadcasts.len()
+    }
+
+    /// Take the parked broadcasts, leaving the queue empty.
+    pub(crate) fn take_broadcasts(&mut self) -> Vec<super::broadcast::Broadcast> {
+        std::mem::take(&mut self.broadcasts)
+    }
 }
 
 impl ChatLog {
@@ -395,6 +420,21 @@ impl ChatLog {
                     distribution,
                     ..
                 } => Some((prefix.clone(), message.clone(), distribution.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The text of every parked line headed for a chat window, in order — test-only, the
+    /// text-shaped twin of [`Self::pending_len`]. A count proves a line was queued; only the text
+    /// proves it is the *right* line, which is the whole question for a composed one (decision
+    /// 1764's `ERR_TRADE_BLOCKED_S`, whose `%s` has to name the right player).
+    #[cfg(test)]
+    pub(crate) fn pending_texts(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Event(e) => Some(e.text.clone()),
                 _ => None,
             })
             .collect()
@@ -636,6 +676,10 @@ pub(super) fn feed_chat(
     states: Res<crate::world_state::WorldStates>,
     // The language gate (B262): the word pool + this character's fluency + the GM bit.
     langs: Res<super::language::ChatLanguages>,
+    // The combat log's item-name seam (1703): the four families whose sentence names an ITEM
+    // (`TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`) resolve it
+    // here, through the same ask-once cache the reference's own deferred queue re-runs against.
+    mut items: ResMut<crate::items::Items>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1051,6 +1095,27 @@ pub(super) fn feed_chat(
                         Some(name) if slot == 0 => line.fills.attacker = name,
                         Some(name) => line.fills.victim = name,
                         None => wait = true,
+                    }
+                }
+                // The `Named` slot, on the same terms as the endpoints. A cached NEGATIVE on an
+                // item (the server does not know the entry) is not something to wait on — it would
+                // pin the line for the whole `tries` budget and then drop it — so it composes with
+                // whatever the arm left in `named`, one level down the reference's own
+                // `"UKNOWNOBJECT"` degrade.
+                match line.named {
+                    super::combat::Named::Ready => {}
+                    super::combat::Named::Item(entry) => {
+                        match items.template(entry, 0, &commands).map(|t| t.name.clone()) {
+                            Some(name) => line.fills.named = name,
+                            None if !items.template_answered_unknown(entry) => wait = true,
+                            None => {}
+                        }
+                    }
+                    super::combat::Named::Unit(guid) => {
+                        match super::combat::object_name(guid, &mut names, &commands) {
+                            Some(name) => line.fills.named = name,
+                            None => wait = true,
+                        }
                     }
                 }
                 if wait {

@@ -44,6 +44,10 @@ pub(crate) struct DeathArc {
     /// ghost-clear check keys off this instead of either probe's own flag, so the two are decoupled.
     pub(crate) revive_initiated: bool,
     pub(crate) revived_seen: bool,
+    /// **Stop at dead-unreleased** — `--self-res` sets it, and nothing else does (decision 1746).
+    /// The soulstone button lives on the DEATH dialog, which only exists *before* the release; an
+    /// arc that repops on its own would walk straight past the state under test.
+    pub(crate) hold_release: bool,
 }
 
 /// Everything more than one probe reads, plus the session-keeping acks and the [`DeathArc`].
@@ -182,7 +186,7 @@ impl World {
             // --death: once we've hit 0 health AND the server has force-rooted us (the wire doesn't
             // guarantee which arrives first — see the MoveRoot/ObjectValues arms below), release the
             // spirit: the RELEASE SPIRIT button's `CMSG_REPOP_REQUEST` (decision 0308 §1).
-            if !arc.repop_sent && arc.died_at.is_some() && arc.rooted_seen {
+            if !arc.hold_release && !arc.repop_sent && arc.died_at.is_some() && arc.rooted_seen {
                 session.repop_request()?;
                 println!("sent CMSG_REPOP_REQUEST (release spirit)");
                 arc.repop_sent = true;
@@ -486,6 +490,7 @@ impl World {
                 stop,
                 duration_ms,
                 flying,
+                ..
             } => {
                 let mine = *guid == self.self_guid;
                 if mine {

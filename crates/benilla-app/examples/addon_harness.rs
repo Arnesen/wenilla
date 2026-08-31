@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cargo run -q -p benilla-app --example addon_harness -- <folder> [--verbose] [--why <substr>] [--deep [n]] [--status <file>] [--diff <file>]
+//!   or: ... -- <folder> --probe <Name> [--eval <lua>]...   (one addon, then ask its VM)
 //! ```
 //!
 //! The instrument decision 1188 phase 6 asks for: *"which addons work" is a number that can be
@@ -46,6 +47,19 @@ fn ranked(rows: Vec<(String, usize)>, take: usize) {
              `--why <name>` opens any row.",
             total - take
         );
+    }
+}
+
+/// One of the probe's two error lists, printed with its count — and printed even when EMPTY.
+///
+/// A silent absence and a list nobody asked for read identically, and the whole point of a probe
+/// run is to tell "this addon loaded clean and died in a handler" from "it never loaded at all".
+fn report_lines(label: &str, lines: &[String]) {
+    println!("  {label}: {}", lines.len());
+    for line in lines {
+        for (n, l) in line.lines().enumerate() {
+            println!("    {}{}", if n == 0 { "" } else { "  " }, l.trim_end());
+        }
     }
 }
 
@@ -175,7 +189,7 @@ fn surface_report(deep: bool, dump_path: Option<String>) {
     //
     // Split again on the `Benilla` prefix, which is the difference between a name that CAN collide
     // with an addon's expectations and one that cannot. Nothing in the 1.12 corpus feature-tests
-    // `BenillaBagSlot_OnClick`; our own namespace is safe by construction, and leaving 443 of those
+    // `BenillaPaperDollSlot_OnClick`; our own namespace is safe by construction, and leaving 443 of those
     // in the list would bury the ones that are not.
     if let Some(fns) = extra_by_kind.get("function") {
         let (ours_ns, unprefixed): (Vec<&&str>, Vec<&&str>) = fns
@@ -289,6 +303,42 @@ fn main() {
     });
     let _ = DEEP.set(deep);
     let root = std::path::PathBuf::from(root);
+
+    // `--probe <Name> [--eval <lua> ...]` — ONE addon, loaded the way the survey loads it, then
+    // asked. Handled before the survey because it is not one: it prints no column and it is not a
+    // measurement (an eval can mutate the VM), so mixing the two outputs would invite a probe
+    // number into a record. See `addon_harness::probe`'s header for what it is worth and where it
+    // deliberately stops — session start, before the render and use probes touch anything.
+    if let Some(name) = rest
+        .iter()
+        .position(|a| a == "--probe")
+        .and_then(|i| rest.get(i + 1))
+    {
+        let evals: Vec<String> = rest
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--eval")
+            .filter_map(|(i, _)| rest.get(i + 1).cloned())
+            .collect();
+        let Some(out) = addon_harness::probe::probe(&root, name, &evals) else {
+            eprintln!(
+                "no manifest under {}/{name} — is that an addon folder?",
+                root.display()
+            );
+            std::process::exit(1);
+        };
+        println!("\n{} — probed under {}", out.name, root.display());
+        report_lines("load errors", &out.load_errors);
+        report_lines("session errors", &out.session_errors);
+        if out.answers.is_empty() {
+            println!("  (no --eval given — load and session errors only)");
+        }
+        for (chunk, answer) in &out.answers {
+            println!("\n  {chunk}");
+            println!("    {answer}");
+        }
+        return;
+    }
 
     let reports = addon_harness::survey(&root);
     if reports.is_empty() {
@@ -530,6 +580,71 @@ fn main() {
     println!("\n  missing-global count per addon:");
     for (label, n) in ["0", "1-2", "3-5", "6-15", "16+"].iter().zip(buckets) {
         println!("    {label:>5}  {n:>4}  {}", "#".repeat(n.min(60)));
+    }
+
+    // **WHOSE package is incomplete** — printed immediately before the ranked blockers, because it
+    // is the line that stops a session hunting for a client bug that is not one. A `.toc` entry
+    // whose file the addon does not ship is the ADDON's defect, and the reference client's
+    // behaviour there is what ours already does: log `Couldn't open %s` and carry on
+    // (wow-re `ui/scratch/xml-toc-path-resolution.md` §4). Nothing is subtracted from the headline
+    // — 1213 — so both readings stay available.
+    let own: Vec<&addon_harness::AddonReport> = reports
+        .iter()
+        .filter(|r| !r.absent_own_files.is_empty())
+        .collect();
+    let foreign: Vec<&addon_harness::AddonReport> = reports
+        .iter()
+        .filter(|r| !r.absent_foreign_files.is_empty())
+        .collect();
+    // **"the WHOLE reason" is a claim, and it is checked before it is printed.** An addon can be
+    // short a file AND raise somewhere else; saying "this is why it fails" on the strength of
+    // `!loaded` alone would be the same overclaim this column exists to stop. It holds only when
+    // the absent entries account for every load error the addon has.
+    let sole_cause = |r: &addon_harness::AddonReport| {
+        !r.loaded && r.errors.len() == r.absent_own_files.len() + r.absent_foreign_files.len()
+    };
+    if !own.is_empty() || !foreign.is_empty() {
+        println!(
+            "\n  MANIFEST ENTRIES WITH NO FILE — counted in the numbers above, listed here so"
+        );
+        println!("  the reader can tell a broken package from a broken client:");
+        for r in &own {
+            println!(
+                "    {} — its own .toc lists {} file(s) the package does not contain{}",
+                r.name,
+                r.absent_own_files.len(),
+                if sole_cause(r) {
+                    "  [and that is its ONLY load error]"
+                } else {
+                    ""
+                }
+            );
+            for f in r.absent_own_files.iter().take(4) {
+                println!("        missing: {f}");
+            }
+        }
+        for r in &foreign {
+            println!(
+                "    {} — wants a folder that is not installed{}",
+                r.name,
+                if sole_cause(r) {
+                    "  [and that is its ONLY load error]"
+                } else {
+                    ""
+                }
+            );
+            for f in r.absent_foreign_files.iter().take(4) {
+                println!("        missing: {f}");
+            }
+        }
+        let theirs = own.iter().filter(|r| sole_cause(r)).count();
+        let ours = foreign.iter().filter(|r| sole_cause(r)).count();
+        println!(
+            "    ({} with an incomplete package of their own, {theirs} of which fail for that \
+             alone; {} wanting a neighbour, {ours} for that alone)",
+            own.len(),
+            foreign.len()
+        );
     }
 
     // What actually STOPPED them — the ranked first error. Read this before the demand list: a

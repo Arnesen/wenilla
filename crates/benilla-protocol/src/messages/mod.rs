@@ -22,6 +22,7 @@ mod attack;
 mod auction;
 mod bank;
 mod binder;
+mod broadcast;
 mod channel;
 mod chat;
 mod client;
@@ -33,6 +34,7 @@ mod gm_ticket;
 mod gossip;
 mod group;
 mod guild;
+mod instance;
 mod items;
 mod loot;
 mod mail;
@@ -57,6 +59,7 @@ mod social;
 mod spellbook;
 mod spells;
 mod stable;
+mod summon;
 mod taxi;
 mod trade;
 mod trainer;
@@ -95,13 +98,15 @@ pub use client::{
     auth_session, channel_announcements, channel_ban, channel_invite, channel_kick, channel_list,
     channel_moderate, channel_moderator, channel_mute, channel_owner, channel_password,
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
-    creature_query, force_speed_ack, full_guid, join_channel, leave_channel, messagechat,
-    messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack, move_spline_done,
-    movement, pet_name_query, ping, played_time, query_time, random_roll, teleport_ack, text_emote,
+    creature_query, force_speed_ack, full_guid, join_channel, knock_back_ack, leave_channel,
+    messagechat, messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack,
+    move_spline_done, movement, pet_name_query, ping, played_time, query_time, random_roll,
+    teleport_ack, text_emote,
 };
 pub use combat_log::{
-    DamageShield, EnvironmentalDamageLog, PeriodicAuraLog, PeriodicTick, SpellDamageLog,
-    SpellEnergizeLog, SpellHealLog, SpellLogMiss,
+    DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExecuteLog, PartyKillLog,
+    PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog,
+    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
 };
 pub use death::{
     reclaim_corpse, resurrect_response, spirit_healer_activate, CorpseLocation,
@@ -138,6 +143,10 @@ pub use guild::{
     GuildQueryResponse, GuildRoster, GuildRosterMember, GUILD_INFO_MAX_LENGTH,
     GUILD_MOTD_MAX_LENGTH, GUILD_NAME_MAX_LENGTH, GUILD_NOTE_MAX_LENGTH, GUILD_RANKS_MAX_COUNT,
     GUILD_RANKS_MIN_COUNT, GUILD_RANK_MAX_LENGTH, GUILD_RANK_RIGHT_ORDER,
+};
+pub use instance::{
+    reset_instances, InstanceResetFailed, InstanceResetFailure, RaidInstanceMessage,
+    RaidInstanceWarning,
 };
 pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
@@ -186,12 +195,13 @@ pub use progression::{
 };
 pub use pvp::{inspect_honor_stats, InspectHonorStats, PvpCredit};
 pub use quest::{
-    dialog_status, quest_query, questgiver_accept_quest, questgiver_choose_reward,
-    questgiver_complete_quest, questgiver_hello, questgiver_query_quest, questgiver_request_reward,
-    questgiver_status_query, questlog_remove_quest, questlog_swap_quest, QuestComplete,
-    QuestDetails, QuestGiverList, QuestListEntry, QuestObjective, QuestOfferReward,
-    QuestRequestItems, QuestRequiredItem, QuestRewardItem, QuestTemplate, QUEST_EMOTE_COUNT,
-    QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
+    dialog_status, push_quest_to_party, quest_confirm_accept, quest_flags, quest_push_result,
+    quest_query, questgiver_accept_quest, questgiver_choose_reward, questgiver_complete_quest,
+    questgiver_hello, questgiver_query_quest, questgiver_request_reward, questgiver_status_query,
+    questlog_remove_quest, questlog_swap_quest, QuestComplete, QuestConfirmAccept, QuestDetails,
+    QuestGiverList, QuestListEntry, QuestObjective, QuestOfferReward, QuestPushResult,
+    QuestRequestItems, QuestRequiredItem, QuestRewardItem, QuestShareMsg, QuestTemplate,
+    QUEST_EMOTE_COUNT, QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
 };
 pub use reputation::{
     set_faction_at_war, set_faction_inactive, set_watched_faction, WATCHED_FACTION_NONE,
@@ -218,6 +228,7 @@ pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
     StabledPet,
 };
+pub use summon::{summon_response, SummonRequest};
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,
     taxi_reply, TaxiMask,
@@ -229,10 +240,10 @@ pub use trade::{
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
 pub use update_object::{
-    quest_slot_state, CreateSpline, MovementBlock, Object, ObjectFields, ObjectType, OwnerFallback,
-    PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK,
-    FIELD_PLAYER_SKILL_INFO_1_1, PLAYER_EXPLORED_ZONES_SLOTS, PLAYER_QUEST_LOG_SLOTS,
-    PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
+    quest_slot_state, CorpseLook, CreateSpline, MovementBlock, Object, ObjectFields, ObjectType,
+    OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE,
+    AURA_FLAG_EFF_INDEX_MASK, FIELD_PLAYER_SKILL_INFO_1_1, PLAYER_EXPLORED_ZONES_SLOTS,
+    PLAYER_QUEST_LOG_SLOTS, PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };
 pub use vendor::{
     buy_item, buy_result, buyback_item, list_inventory, repair_item, sell_item, sell_result,

@@ -942,7 +942,7 @@ fn every_kind_is_in_all() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), before, "a kind is listed twice in ALL");
-    assert_eq!(before, 81, "81 kinds — update this when the kind set grows");
+    assert_eq!(before, 92, "92 kinds — update this when the kind set grows");
 }
 
 #[test]
@@ -1815,6 +1815,52 @@ fn an_addon_sees_the_combat_log_line_it_registers_for() {
     assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
 }
 
+/// **Every combat-log kind reaches an addon that registers it**, not just the one B297 named.
+///
+/// [`an_addon_sees_the_combat_log_line_it_registers_for`] pins the shape on `SPELL_SELF_DAMAGE`;
+/// this sweeps the whole block, which is what makes 1703's eleven new types a *fact* rather than a
+/// hope — a kind whose name is misspelled in `event_name`, or that the router drops, fires nothing
+/// and would otherwise be found by a player's damage meter months later.
+#[test]
+fn every_combat_log_kind_reaches_an_addon() {
+    for kind in K::ALL.iter().copied().filter(|k| k.is_combat_log()) {
+        let name = super::event::event_name(kind);
+        let mut s = chat_vm();
+        let mut windows = super::frames::ChatWindows::default();
+        s.run(SPY).unwrap();
+        s.run(&format!(r#"BenillaChatSpy:RegisterEvent("{name}")"#))
+            .unwrap();
+
+        let line = format!("a line for {name}");
+        super::frames::route(
+            &mut s,
+            &mut windows,
+            &ChatEvent::text_only(kind, line.clone()),
+        );
+
+        assert_eq!(
+            s.eval::<String>("return SpyEvent").unwrap(),
+            name,
+            "{name} did not fire under its own name"
+        );
+        assert_eq!(
+            s.eval::<i64>("return SpyN").unwrap(),
+            1,
+            "{name} fired more than once"
+        );
+        let seen: String = s.eval("return SpyLine").unwrap();
+        assert!(
+            seen.starts_with(&format!("{line}|")),
+            "{name}: arg1 must be the whole sentence — got {seen:?}"
+        );
+        assert!(
+            s.errors().is_empty(),
+            "{name} handler errors: {:?}",
+            s.errors()
+        );
+    }
+}
+
 /// The combat block is **verbatim**: the composer adds `arg1` and nothing else — no `[Name]` link,
 /// no `<AFK>` prefix, no language header. The reference says so by prefix
 /// (`ChatFrame_OnEvent` l.1397/1399, two arms that only `AddMessage(arg1, …)`), and the failure
@@ -1948,10 +1994,34 @@ fn the_combat_log_window_has_the_docks_rect() {
             "ChatFrame2:{get}() must equal ChatFrame1's — a docked window shares the dock's rect"
         );
     }
+    // **Three points, and which three is the assertion.** The XML authors two (TOPLEFT and
+    // BOTTOMRIGHT onto ChatFrame1) and `FCF_DockUpdate` then clears them and applies the
+    // reference's own three for a non-first dock member — TOPLEFT / BOTTOMLEFT / BOTTOMRIGHT,
+    // FloatingChatFrame.lua l.1059-1063. So `3` here means the dock seeding ran and this window is
+    // in `DOCKED_CHAT_FRAMES`; `2` would mean it never did and the rect is standing on the XML
+    // alone. Either way one alone cannot size the frame, which is what 1575 shipped.
     assert_eq!(
         s.eval::<i64>("return ChatFrame2:GetNumPoints()").unwrap(),
+        3,
+        "FCF_DockUpdate's three points — a 2 means the dock never seeded this window"
+    );
+    assert_eq!(
+        s.eval::<i64>("return table.getn(DOCKED_CHAT_FRAMES)")
+            .unwrap(),
         2,
-        "both authored anchors must survive — one alone cannot size the frame"
+        "the dock is ChatFrame1 + ChatFrame2, seeded from GetChatWindowInfo's stored positions"
+    );
+    assert_eq!(
+        s.eval::<String>("return SELECTED_DOCK_FRAME:GetName()")
+            .unwrap(),
+        "ChatFrame1"
+    );
+    assert!(
+        s.eval::<bool>(
+            "return ChatFrame1.isDocked and ChatFrame2.isDocked and not ChatFrame3.isDocked"
+        )
+        .unwrap(),
+        "FCF_DockFrame set the flag on the dock's two and nothing else"
     );
 }
 
@@ -2017,8 +2087,8 @@ fn both_dock_windows_carry_the_same_chrome() {
     );
 }
 
-/// **The two dock windows must come from ONE declaration.** The structural guard that ends the
-/// class (decision 1588).
+/// **All SEVEN chat windows must come from ONE declaration.** The structural guard that ends the
+/// class (decision 1588), widened to the whole set by 1712.
 ///
 /// Three rounds of the same bug: window 2 shipped with no tab (1575), then with no rect and no
 /// border art (1579), then with no `OnUpdate` and no scroll column (1588) — each time because it
@@ -2026,11 +2096,18 @@ fn both_dock_windows_carry_the_same_chrome() {
 /// tests each catch ONE missed part after someone notices it; this catches the mirroring itself,
 /// which is the only check that can fire before a part is missing.
 ///
-/// So: both windows inherit the same virtual template (the reference's own shape —
-/// `FloatingChatFrameTemplate`), and neither declares any content of its own beyond its seat. A
-/// `<Layers>`, `<Frames>` or `<Scripts>` block on either instance is the defect, whatever is in it.
+/// **Windows 3..7 were the fourth round of it**, and the longest-lived: they were not mirrored
+/// partially, they were declared bare — no tab, no background, no border art, no scroll column —
+/// on the argument that nothing reads a hidden, undocked window's furniture. pfUI reads all of it,
+/// for all seven, unguarded (`chat.lua:588`, `chat.lua:321-419`). This test covered exactly the two
+/// windows the argument had already exempted, so it could not fire; it now covers the set the
+/// reference declares.
+///
+/// So: every window inherits the same virtual template (the reference's own shape —
+/// `FloatingChatFrameTemplate`), and none declares any content of its own beyond its seat. A
+/// `<Layers>`, `<Frames>` or `<Scripts>` block on any instance is the defect, whatever is in it.
 #[test]
-fn the_two_dock_windows_are_one_declaration() {
+fn the_seven_chat_windows_are_one_declaration() {
     use benilla_ui::framexml::TopLevel;
     let xml = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/ChatFrame.xml"),
@@ -2046,27 +2123,28 @@ fn the_two_dock_windows_are_one_declaration() {
         let Some(name) = el.attr("name") else {
             continue;
         };
-        if name != "ChatFrame1" && name != "ChatFrame2" {
+        if !(1..=7).any(|i| name == format!("ChatFrame{i}")) {
             continue;
         }
         seen += 1;
         assert_eq!(
             el.attr("inherits"),
-            Some("BenillaDockedChatFrameTemplate"),
-            "{name} must inherit the dock template, not restate it"
+            Some("BenillaChatFrameTemplate"),
+            "{name} must inherit the window template, not restate it"
         );
         for child in &el.children {
             assert!(
                 matches!(child.tag.as_str(), "Size" | "Anchors"),
                 "{name} declares its own <{}> — that is the mirroring this test exists to stop; \
-                 it belongs in BenillaDockedChatFrameTemplate where BOTH windows get it",
+                 it belongs in BenillaChatFrameTemplate where EVERY window gets it",
                 child.tag
             );
         }
     }
     assert_eq!(
-        seen, 2,
-        "both dock windows must be declared in ChatFrame.xml"
+        seen,
+        7, // NUM_CHAT_WINDOWS — ChatFrame.lua:5
+        "all seven chat windows must be declared in ChatFrame.xml"
     );
 }
 

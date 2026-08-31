@@ -543,8 +543,10 @@ impl UnitTokens<'_, '_> {
         self.me.iter().next().map(|(e, g)| (e, g.0))
     }
 
-    /// The guid → entity map, when the net stack is present.
-    fn held(&self, guid: u64) -> Option<(Entity, u64)> {
+    /// The guid → entity map, when the net stack is present — `0x468460`'s lookup. `pub(crate)`
+    /// for the selection drain's `TargetLastEnemy` arm, which starts from a remembered **guid**
+    /// rather than a token and must land in the very same index every token arm below does.
+    pub(crate) fn held(&self, guid: u64) -> Option<(Entity, u64)> {
         Some((*self.index.as_ref()?.0.get(&guid)?, guid))
     }
 
@@ -692,6 +694,13 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
     let class = store.0.unit_class().and_then(class_names);
     UnitState {
         exists: true,
+        // **This function IS the reference's `0x468460` having succeeded.** It is only ever called
+        // with a live `ObjectStore`, so every snapshot it builds is a unit the object manager holds
+        // — which is the whole of `UnitIsVisible` (wow-re
+        // `ui/scratch/unitisvisible-object-presence.md`). Set here rather than at the call sites so
+        // a future feed cannot forget it: the roster-only legs build a `UnitState` literally and
+        // get `false` from `Default`, which is the correct out-of-range answer.
+        has_object: true,
         name,
         // The UI-facing health/power getters, not the raw fields (decision 1022): a unit carrying
         // `UNIT_DYNFLAG_DEAD` — a feigning hunter — answers 0 to `UnitHealth 0x5174d0` and
@@ -717,6 +726,15 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
         // `UnitIsCharmed 0x516cf0` — `UNIT_FIELD_CHARMEDBY != 0`, the same field `ui_aura`'s
         // charmed-unit buff leg already reads, so the two cannot disagree about who is charmed.
         charmed: store.0.unit_charmed_by().is_some(),
+        // The tapped pair — `UNIT_DYNAMIC_FLAGS` bits 0x4/0x8. Set here and only here, so the
+        // object-presence conjunct both predicates carry comes for free: a unit with no live
+        // descriptor never reaches this function and reads `false` from `Default`.
+        tapped: store.0.unit_tapped(),
+        tapped_by_player: store.0.unit_tapped_by_player(),
+        // `UnitIsPartyLeader`'s descriptor leg. Zero on a creature, which is what the reference's
+        // TYPEMASK_PLAYER restriction achieves there: a non-player has no PLAYER block at all, so
+        // the field simply reads absent.
+        group_leader: store.0.player_is_group_leader(),
         reaction,
         race: race.map(|(n, _)| n.to_string()),
         race_file: race.map(|(_, f)| f.to_string()),
@@ -1009,8 +1027,25 @@ pub(crate) fn fire_transitions(
     // icon law reads. Exactly the three frames that draw the icon register it in the reference
     // (player, target, party member) and nothing else does. Edge-fired, so the player frame's
     // `igPVPUpdate` sounds once per flag change rather than once per repaint.
+    //
+    // **And on the TAPPED bit, which is not a faction field and fires this event anyway.** The
+    // reference's `UNIT_DYNAMIC_FLAGS` watcher tests bit `0x4` and dispatches event id **29** —
+    // `UNIT_FACTION` — at `0x6005a1 test al,4` -> `0x6005b0 mov edx,0x1d` -> `0x515e50` (wow-re
+    // `ui/scratch/tapped-bits-and-unit-faction.md`, controlled across all 37 fire sites).
+    //
+    // This line is the whole reason `UnitIsTapped` is worth publishing. Without it both verbs
+    // answer CORRECTLY and no frame ever repaints: pfUI's grey-bar branch runs inside
+    // `RefreshUnit`, which is event-driven, so a mob that becomes someone else's tap would stay
+    // full-colour until something unrelated happened to refresh it. A passing unit test on the
+    // predicates would have said nothing about that — the mechanism existing is not the mechanism
+    // applying (`method.md` step 5).
+    //
+    // Bit `0x8` deliberately has NO arm here: the reference's watcher has none for it either
+    // (proven by enumerating all 122 instructions and 12 branches of `0x600440`). The pair is read
+    // together, and the `0x4` edge is what moves.
     if prev.is_none_or(|p| {
-        (p.pvp, p.is_pvp_ffa, &p.faction_group) != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group)
+        (p.pvp, p.is_pvp_ffa, &p.faction_group, p.tapped)
+            != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group, cur.tapped)
     }) {
         script.fire_event("UNIT_FACTION", vec![tok()]);
     }
@@ -1622,6 +1657,88 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The tapped bit fires `UNIT_FACTION`, and without this the verbs are decorative.**
+    ///
+    /// `UnitIsTapped` answering correctly is only half of it. pfUI's grey-bar branch lives inside
+    /// `RefreshUnit`, which is event-driven — so a mob that becomes someone else's tap would stay
+    /// full-colour until something unrelated happened to repaint the frame. The predicate would be
+    /// right and the screen would be wrong, which no test of the predicate can see (`method.md`
+    /// step 5: the mechanism existing is not the mechanism applying).
+    ///
+    /// The reference dispatches event id **29** — `UNIT_FACTION`, not a tapped-specific event —
+    /// from its `UNIT_DYNAMIC_FLAGS` watcher's bit-`0x4` arm (`0x6005a1 test al,4` ->
+    /// `0x6005b0 mov edx,0x1d` -> `0x515e50`; wow-re `ui/scratch/tapped-bits-and-unit-faction.md`,
+    /// controlled across all 37 fire sites image-wide). Reusing the faction event for a
+    /// non-faction field is not something anyone would invent, which is exactly why it is pinned.
+    ///
+    /// Bit `0x8` has **no** arm, in the reference or here — proven there by enumerating all 122
+    /// instructions and 12 branches of the watcher. The negative half is asserted too, because
+    /// "fire on both, it's cheaper" is the obvious wrong simplification.
+    #[test]
+    fn the_tapped_bit_fires_unit_faction_and_the_by_player_bit_fires_nothing() {
+        let fired = |prev: UnitState, cur: UnitState| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_FACTION")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(&mut s, "target", Some(&prev), &cur);
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        let base = UnitState {
+            exists: true,
+            has_object: true,
+            ..Default::default()
+        };
+
+        // The 0x4 edge fires it.
+        assert_eq!(
+            fired(
+                base.clone(),
+                UnitState {
+                    tapped: true,
+                    ..base.clone()
+                }
+            ),
+            vec!["UNIT_FACTION".to_string()],
+            "a unit becoming tapped must repaint the frames that draw it"
+        );
+        // ...and back the other way, when the tap is released.
+        assert_eq!(
+            fired(
+                UnitState {
+                    tapped: true,
+                    ..base.clone()
+                },
+                base.clone()
+            ),
+            vec!["UNIT_FACTION".to_string()],
+        );
+        // The 0x8 edge fires NOTHING — the reference's watcher has no arm for it.
+        assert!(
+            fired(
+                UnitState {
+                    tapped: true,
+                    ..base.clone()
+                },
+                UnitState {
+                    tapped: true,
+                    tapped_by_player: true,
+                    ..base.clone()
+                }
+            )
+            .is_empty(),
+            "bit 0x8 has no delta arm — firing on it would be an invention"
+        );
+        // Nothing moved: nothing fires. The control that stops this passing by firing always.
+        assert!(fired(base.clone(), base.clone()).is_empty());
+    }
 
     /// **Report B304 — Quiver's range indicator read Dead Zone on a far target.**
     ///

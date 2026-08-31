@@ -589,11 +589,15 @@ fn the_entry_load_waits_for_the_cover_to_present() {
     let mut world = booted_world();
     world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
     world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    world.insert_resource(crate::loading_screen::EntryCover::default());
     world.insert_resource(roster_named("Onehunter", 1));
     world.insert_resource(super::PendingEntryUiLoad::default());
 
     // Covered frames 1 and 2: the cover has not provably presented yet — no load.
     for frame in 1..=2 {
+        world
+            .resource_mut::<crate::loading_screen::EntryCover>()
+            .tick(true);
         super::lifecycle::run_pending_entry_load(&mut world);
         assert_eq!(
             probe_saw(&world),
@@ -606,6 +610,9 @@ fn the_entry_load_waits_for_the_cover_to_present() {
     // the latch stays up the whole way so the clear condition keeps waiting on it.
     let mut frames = 0;
     while world.get_resource::<super::PendingEntryUiLoad>().is_some() {
+        world
+            .resource_mut::<crate::loading_screen::EntryCover>()
+            .tick(true);
         super::lifecycle::run_pending_entry_load(&mut world);
         frames += 1;
         assert!(frames < 10_000, "the sliced entry load never finished");
@@ -679,8 +686,12 @@ fn leaving_inside_the_deferral_window_drops_the_load_and_writes_nothing() {
     world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
     world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
     world.insert_resource(roster_named("Onehunter", 1));
+    world.insert_resource(crate::loading_screen::EntryCover::default());
     world.insert_resource(super::PendingEntryUiLoad::default());
 
+    world
+        .resource_mut::<crate::loading_screen::EntryCover>()
+        .tick(true);
     super::lifecycle::run_pending_entry_load(&mut world); // covered frame 1 — still pending
     super::end_ui_session(&mut world);
 

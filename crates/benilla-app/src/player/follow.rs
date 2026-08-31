@@ -249,7 +249,7 @@ fn steer(face: f32, bearing: f32, dt: f32) -> f32 {
 /// Everything the cancel set reads. Bundled so [`steer_follow`]'s own parameter list stays about
 /// the motion.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct FollowInput<'w> {
+pub(super) struct FollowInput<'w, 's> {
     buttons: Res<'w, ButtonInput<MouseButton>>,
     /// The binding dispatch (0997) — the movement commands' press edges, wherever they are bound.
     /// It already carries the typing gate this struct used to hold `UiKeyboardCapture` for
@@ -259,9 +259,20 @@ pub(super) struct FollowInput<'w> {
     /// which is deliberate and harmless: the cancel then lands on the frame *after* the look
     /// begins, versus the reference's same-frame commit.
     rig: Res<'w, CameraControl>,
+    /// The **mover's** descriptor block, for the terms of the cancel set that are not inputs:
+    /// its health and its stun. See [`FollowInput::input_torn_down`].
+    mover: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::Embodied>>,
+    /// What the camera orbits ([`super::view_subject`]) — the resolved half of the shared
+    /// precondition's far-sight conjunct, which takes both predicates down and so reaches the
+    /// teardown leg on its own (decision 1761).
+    ///
+    /// Read possibly one frame behind, like `rig` above and for the same benign reason: the
+    /// publisher and this system are both merely `.before(control)` and are unordered against each
+    /// other, so a follow engaged and far-sighted on the very same frame ends on the next one.
+    view_subject: Res<'w, super::view_subject::ViewSubject>,
 }
 
-impl FollowInput<'_> {
+impl FollowInput<'_, '_> {
     /// The press edge of any movement command (0997: wherever the six are bound today). The turn
     /// pair are turn commands normally and strafe under mouse-look; either way they are a
     /// movement start and either way they cancel, so the distinction the controller draws does
@@ -278,6 +289,33 @@ impl FollowInput<'_> {
         ]
         .iter()
         .any(|&c| self.binds.just_pressed(c))
+    }
+
+    /// Has the input tick reached its **teardown leg** — the one that cancels click-to-move and the
+    /// follow and fires `AUTOFOLLOW_END` ([`super::state::MoverInput::torn_down`])? Not an input, but the
+    /// member of the cancel set that is a *state*, and the one benilla had wrong in both directions.
+    ///
+    /// `rf86-autofollow-cancel-set.md` §5 named the mechanism as the health test at `0x5144f8`, and
+    /// this file passed the **root** instead. wow-re's §6.3 sharpens it: `0x5146d6 call 0x60fb60`
+    /// is reached only when *both* predicates are down (`0x5146c3` and `0x5146ce` both not taken),
+    /// so a pure ROOT — which benilla cancelled on — does **not** end a follow in the reference, and
+    /// death — which benilla did not cancel on, so a follow taken into death kept steering the
+    /// corpse's facing every frame — does. Ice Block, root and stun together, ends it as well.
+    ///
+    /// **Far sight ends it too**, and for the same structural reason death does rather than as a
+    /// case of its own: the far-sight conjunct sits in the precondition the two predicates *share*,
+    /// so engaging it takes both down at once and lands on this leg.
+    fn input_torn_down(&self, rooted: bool, driving_own_body: bool) -> bool {
+        self.mover.single().is_ok_and(|s| {
+            super::state::MoverInput {
+                dead: s.0.unit_is_dead(),
+                view_is_out: super::state::view_is_out(
+                    driving_own_body,
+                    self.view_subject.remote.is_some(),
+                ),
+            }
+            .torn_down(rooted, s.0.unit_flags() & super::UNIT_FLAG_STUNNED != 0)
+        })
     }
 }
 
@@ -314,7 +352,12 @@ pub(super) fn steer_follow(
         input.buttons.just_pressed(MouseButton::Forward) && !player.autorun,
         both_engaged,
         input.rig.look == Some(LookButton::Right),
-        player.modes.rooted || player.server_riding(),
+        // The input tick on its teardown leg, or the body handed to a server spline. The ride term
+        // is benilla's own and predates this: it is not one of `0x5144e0`'s conjuncts (conjunct 4 is
+        // the Knockdown lockout, not a taxi test — wow-re §6.2), and nothing in this round bears on
+        // it either way, so it is left exactly as it stood.
+        input.input_torn_down(player.modes.rooted, player.foreign_mover.is_none())
+            || player.server_riding(),
     ) {
         info!("follow: cancelled by the player's own movement input");
         follow.stop();

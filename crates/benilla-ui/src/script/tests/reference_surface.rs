@@ -1447,6 +1447,15 @@ fn a_frames_type_chain_matches_the_roster() {
             &["GameTooltip", "Frame", "Region"],
         ),
         ("Minimap", "Minimap", &["Minimap", "Frame", "Region"]),
+        // **The roster's only 4-deep frame chain.** `PlayerModel` derives from `Model`, which is
+        // why `SetUnit` on a portrait pane finds `SetCamera` too (wow-re
+        // `ui/scratch/widget-type-identity.md` §6; the unbuilt `DressUpModel`/`TabardModel` hang
+        // off this one and make the roster's true maximum 5).
+        (
+            "PlayerModel",
+            "PlayerModel",
+            &["PlayerModel", "Model", "Frame", "Region"],
+        ),
         // **Our Era-shaped divergence reports what 1.12's cooldown IS**: a Model. 1.12.1 has no
         // `Cooldown` type name at all (the roster is 23 and none is that).
         ("Cooldown", "Model", &["Model", "Frame", "Region"]),
@@ -1540,5 +1549,76 @@ fn every_installed_region_method_lands_in_a_leaf() {
     assert!(
         orphans.is_empty(),
         "installed on the region table but in NO leaf list, so no region can call them: {orphans:?}"
+    );
+}
+
+/// **The four nameplate verbs take no argument and return nothing.**
+///
+/// `ShowNameplates 0x489450` / `HideNameplates 0x489460` / `ShowFriendNameplates 0x489470` /
+/// `HideFriendNameplates 0x489480` — four 10-byte bodies over two setters, differing only in an
+/// `or`/`and` mask (wow-re `ui/scratch/party-leader-and-nameplate-verbs.md`).
+///
+/// Both halves of the shape are asserted because both are easy to invent differently:
+///
+/// - **No argument is read.** `ShowNameplates(false)` still shows — there is no `lua_gettop` and
+///   no `lua_toboolean` in any of the four. That is *why* there are four verbs instead of two
+///   taking a flag, and a binding typed `fn(bool)` would reject a call the reference accepts.
+/// - **Zero return values, not nil.** `select('#', ...)` sees 0, which is observably different
+///   from one nil for a caller that counts.
+#[test]
+fn the_nameplate_verbs_ignore_their_arguments_and_return_nothing() {
+    let mut s = script();
+    s.register_cvars([
+        (crate::script::CVAR_NAMEPLATE_ENEMIES, "1"),
+        (crate::script::CVAR_NAMEPLATE_FRIENDS, "0"),
+    ]);
+
+    let get = |s: &crate::script::UiScript, n: &str| s.cvar(n);
+    assert_eq!(
+        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
+        Some("1")
+    );
+
+    // Each verb writes its own bit and leaves the other alone.
+    s.run("HideNameplates()").unwrap();
+    assert_eq!(
+        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        get(&s, crate::script::CVAR_NAMEPLATE_FRIENDS).as_deref(),
+        Some("0"),
+        "the friendly bit is a separate setter — hiding enemies must not touch it"
+    );
+    s.run("ShowFriendNameplates()").unwrap();
+    assert_eq!(
+        get(&s, crate::script::CVAR_NAMEPLATE_FRIENDS).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
+        Some("0"),
+        "...and back the other way"
+    );
+
+    // **An argument is accepted and IGNORED.** `ShowNameplates(false)` shows, which is the whole
+    // reason the reference ships four verbs rather than two taking a flag.
+    s.run("ShowNameplates(false)").unwrap();
+    assert_eq!(
+        get(&s, crate::script::CVAR_NAMEPLATE_ENEMIES).as_deref(),
+        Some("1"),
+        "the verb IS the value — a falsy argument does not invert it"
+    );
+    for call in ["HideNameplates(1, 2, 3)", "ShowFriendNameplates({})"] {
+        s.run(call)
+            .unwrap_or_else(|e| panic!("{call} must not raise: {e}"));
+    }
+
+    // ZERO return values, not one nil.
+    assert_eq!(
+        s.eval::<usize>("return select('#', ShowNameplates())")
+            .unwrap(),
+        0,
+        "zero values — observably different from nil for a caller that counts"
     );
 }

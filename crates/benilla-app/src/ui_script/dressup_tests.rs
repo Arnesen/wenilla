@@ -5,32 +5,42 @@
 //! wearing the item, SHIFT posts its link into an open chat edit box — and, at a bag slot, SHIFT
 //! with chat *closed* still opens the stack splitter it always did (the reference's own `else`,
 //! and the regression these two features could most easily cause).
+//!
+//! **The bag-slot fork is the REFERENCE's own code since 1751.** Both forks used to run through
+//! benilla's `BenillaBagSlot_OnClick`; the bag windows are the reference's recycled
+//! `ContainerFrame1..12` now and the handler is its `ContainerFrameItemButton_OnClick(button,
+//! ignoreModifiers)` — which takes the MOUSE button as its first argument and reads the frame from
+//! `this`, so a test cannot call it directly any more. These drive the mouse instead
+//! ([`super::test_ui::click`]), which is the stronger test regardless: it puts the template's own
+//! `RegisterForClicks("LeftButtonUp", "RightButtonUp")` and script wiring under test too. The doll
+//! slots below are still ours (`BenillaPaperDollSlot_OnClick`) and are still called directly.
 
 use benilla_ui::script::{
     ContainerSlot, ContainerState, DressUpIntent, InvSlotView, InventorySlots, SoundRequest,
     UiScript,
 };
 
+use super::test_ui::{bag_slot_button, click, load_ui as load_xml, BAG_UI};
+
 /// The jerky stack every bag fixture here uses — a real 1.12 link, quality white.
 const JERKY_LINK: &str = "|cffffffff|Hitem:117|h[Tough Jerky]|h|r";
 
-fn load_xml(s: &UiScript, file: &str) {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-}
+/// The room's own files, past whatever bag interface the caller wants — both loaders below end
+/// with these, in manifest order.
+const ROOM_UI: &[&str] = &[
+    "UIDropDownMenu.xml",
+    "UnitPopup.xml",
+    "ItemRef.xml",
+    "MerchantFrame.xml",
+    "StackSplit.xml",
+    "DressUpFrame.xml",
+    "ChatFrame.xml",
+];
 
-/// The shipped files the dressing room's click sites need, in manifest order.
+/// The shipped files the dressing room's click sites need, in manifest order — **with no bag
+/// window**, for the sites that never touch a container (a chat link, the room's own controls).
+/// Deliberately install-free: those tests run on a bare checkout, which [`load_room_with_bags`]
+/// cannot.
 fn load_room(s: &UiScript) {
     for file in [
         "Fonts.xml",
@@ -38,22 +48,43 @@ fn load_room(s: &UiScript) {
         "UiPanels.xml",
         "UIParent.xml",
         "GameTooltip.xml",
-        "UIDropDownMenu.xml",
-        "UnitPopup.xml",
-        "ItemRef.xml",
         "Cooldown.xml",
-        "MerchantFrame.xml",
         "BagFrame.xml",
-        "StackSplit.xml",
-        "DressUpFrame.xml",
-        "ChatFrame.xml",
     ] {
+        load_xml(s, file);
+    }
+    for file in ROOM_UI {
         load_xml(s, file);
     }
 }
 
-/// A backpack holding a 5-stack of Tough Jerky in slot 1, opened; returns that button's centre.
-fn backpack_with_jerky(s: &mut UiScript) -> (f32, f32) {
+/// [`load_room`] over the REFERENCE's bag windows (1751). `BAG_UI` is the ordered set a test needs
+/// before it can open one and it already carries the fonts, panels, tooltip, item-button template
+/// and bag bar the room wants, so only the room's own files follow it. `UIParent.xml` leads because
+/// it inherits nothing and every window below parents to it — `BAG_UI` has no line for it.
+///
+/// **Needs client data**: `BAG_UI` names a chain entry, so its callers open with
+/// `wow_data_or_skip!`.
+fn load_room_with_bags(s: &UiScript) {
+    load_xml(s, "UIParent.xml");
+    for file in BAG_UI {
+        load_xml(s, file);
+    }
+    for file in ROOM_UI {
+        load_xml(s, file);
+    }
+}
+
+/// A backpack holding a 5-stack of Tough Jerky in slot 1, opened; returns the NAME of the button
+/// showing that slot.
+///
+/// **Asked, never derived** (1751). The window is one of the reference's recycled
+/// `ContainerFrame1..12` — which one depends on what else is open — and its buttons are numbered
+/// BACKWARDS (`ContainerFrame_GenerateFrame`: `index = size - j + 1`, so `…Item1` is the bag's last
+/// slot), so [`bag_slot_button`] finds the button whose own `GetID()` is the slot. The old body
+/// scanned `BenillaBagSlot<N>` for a `.slot` field and handed back a centre; neither those frames
+/// nor that field exist, and the centre is [`click`]'s business now.
+fn backpack_with_jerky(s: &mut UiScript) -> String {
     s.set_money(0);
     let mut slots = std::collections::HashMap::new();
     slots.insert(
@@ -79,35 +110,29 @@ fn backpack_with_jerky(s: &mut UiScript) -> (f32, f32) {
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
     s.resolve();
-    s.run(
-        "BENILLA_TEST_BTN = nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 1 then BENILLA_TEST_BTN = b end\n\
-         end",
-    )
-    .unwrap();
-    s.eval(
-        "return (BENILLA_TEST_BTN:GetLeft() + BENILLA_TEST_BTN:GetRight()) / 2, \
-                (BENILLA_TEST_BTN:GetTop() + BENILLA_TEST_BTN:GetBottom()) / 2",
-    )
-    .unwrap()
+    bag_slot_button(s, 0, 1)
 }
 
 /// CTRL + left-click on a bag item opens the dressing room and puts that item on — the ref's
 /// `DressUpItemLink(GetContainerItemLink(...))` (ContainerFrame.lua:565-566). The two intents are
 /// ordered: `Dress` (the window was closed, so it re-dresses in the player's own gear first) then
 /// `TryOn` — reversed, the room would show the player's own gear and not the clicked item.
+///
+/// Since 1751 that arm is the reference's OWN `ContainerFrameItemButton_OnClick` rather than a
+/// transcription of it, so the cited line numbers are now the live code's.
 #[test]
 fn ctrl_click_on_a_bag_item_opens_the_room_wearing_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_room(&s);
-    let (x, y) = backpack_with_jerky(&mut s);
+    load_room_with_bags(&s);
+    let btn = backpack_with_jerky(&mut s);
     assert!(!s.eval::<bool>("return DressUpFrame:IsVisible()").unwrap());
 
+    // The modifier is pushed BEFORE the mouse, exactly as the app's input pass does it: the click
+    // handler's fork reads the state as of the click.
     s.set_modifiers(false, true, false);
-    s.mouse_button(x, y, "LeftButton", true);
-    s.mouse_button(x, y, "LeftButton", false);
+    click(&mut s, &btn, "LeftButton");
     s.set_modifiers(false, false, false);
 
     assert!(
@@ -130,17 +155,23 @@ fn ctrl_click_on_a_bag_item_opens_the_room_wearing_it() {
 /// opens the stack splitter when it is not — the reference's own if/else (ContainerFrame.lua:
 /// 567-577). Both halves in one test because it is the *fork* that matters: the split was the
 /// behaviour that already shipped, and the insert must not have eaten it.
+///
+/// Since 1751 the fork is the reference's own body and the splitter it opens is still ours
+/// (`OpenStackSplitFrame`, StackSplit.xml): the reference reaches it through the `this.SplitStack`
+/// closure `ContainerFrameItemButton_OnLoad` installs, so what this now also covers is that seam
+/// holding — a stack split confirmed from a bag slot still calls `SplitContainerItem` with the
+/// window's own bag id and the button's own slot id.
 #[test]
 fn shift_click_posts_the_link_with_chat_open_and_splits_with_it_closed() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_room(&s);
-    let (x, y) = backpack_with_jerky(&mut s);
+    load_room_with_bags(&s);
+    let btn = backpack_with_jerky(&mut s);
 
     // Chat closed → the splitter, exactly as before.
     s.set_modifiers(true, false, false);
-    s.mouse_button(x, y, "LeftButton", true);
-    s.mouse_button(x, y, "LeftButton", false);
+    click(&mut s, &btn, "LeftButton");
     s.set_modifiers(false, false, false);
     assert!(
         s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
@@ -151,8 +182,7 @@ fn shift_click_posts_the_link_with_chat_open_and_splits_with_it_closed() {
     // Chat open → the link, and no splitter.
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.set_modifiers(true, false, false);
-    s.mouse_button(x, y, "LeftButton", true);
-    s.mouse_button(x, y, "LeftButton", false);
+    click(&mut s, &btn, "LeftButton");
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")

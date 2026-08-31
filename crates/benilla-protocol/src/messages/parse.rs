@@ -11,11 +11,11 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, area_trigger, attack, auction, bank, binder, channel, chat, combat_log, death,
-    duel, gameobject, gm_ticket, gossip, group, guild, items, loot, mail, mirror_timer,
-    monster_move, movement, opcode, page_text, pet, petition, progression, pvp, quest, social,
-    spellbook, spells, stable, taxi, trade, trainer, update_object, vendor, world_state, Character,
-    CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
+    action_bar, area_trigger, attack, auction, bank, binder, broadcast, channel, chat, combat_log,
+    death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot, mail,
+    mirror_timer, monster_move, movement, opcode, page_text, pet, petition, progression, pvp,
+    quest, social, spellbook, spells, stable, summon, taxi, trade, trainer, update_object, vendor,
+    world_state, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -149,6 +149,11 @@ const fn is_movement_relay(o: u16) -> bool {
             | opcode::MSG_MOVE_SET_FACING
             | opcode::MSG_MOVE_SET_PITCH
             | opcode::MSG_MOVE_HEARTBEAT
+            // Somebody else was knocked back (decision 1702). It carries four extra floats after the
+            // `MovementInfo` — the launch quad — which this reader simply doesn't reach, and doesn't
+            // need to: the server built that `MovementInfo` from the victim's own ack, so its jump
+            // tail already IS the quad, and the arc replays from it like any other relayed jump.
+            | opcode::MSG_MOVE_KNOCK_BACK
     )
 }
 
@@ -343,6 +348,16 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_BINDER_CONFIRM => ServerPacket::BinderConfirm {
             binder: binder::read_binder_confirm(&mut r)?,
         },
+        // The summon question (decision 1747). Three fields, and the client's whole answer is
+        // the guid back — see `super::summon` for the byte pin on both bodies.
+        opcode::SMSG_SUMMON_REQUEST => {
+            let ask = summon::read_summon_request(&mut r)?;
+            ServerPacket::SummonRequest {
+                summoner: ask.summoner,
+                zone: ask.zone,
+                delay_ms: ask.delay_ms,
+            }
+        }
         // The talent twin of the confirm above, on a two-way `MSG_` opcode: this direction is the
         // question (guid + cost); the answer we send back carries the guid alone (decision 1580).
         opcode::MSG_TALENT_WIPE_CONFIRM => {
@@ -441,6 +456,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_AREA_TRIGGER_MESSAGE => ServerPacket::AreaTriggerMessage {
             text: area_trigger::read_area_trigger_message(&mut r)?,
         },
+        opcode::SMSG_SERVER_MESSAGE => {
+            let (message_type, text) = broadcast::read_server_message(&mut r)?;
+            ServerPacket::ServerMessage { message_type, text }
+        }
+        opcode::SMSG_ZONE_UNDER_ATTACK => ServerPacket::ZoneUnderAttack {
+            area_id: broadcast::read_zone_under_attack(&mut r)?,
+        },
+        opcode::SMSG_DEFENSE_MESSAGE => {
+            let (zone_id, text) = broadcast::read_defense_message(&mut r)?;
+            ServerPacket::DefenseMessage { zone_id, text }
+        }
+        opcode::SMSG_CHAT_RESTRICTED => ServerPacket::ChatRestricted,
         opcode::SMSG_PLAYED_TIME => {
             let (total, level) = chat::read_played_time(&mut r)?;
             ServerPacket::PlayedTime { total, level }
@@ -598,6 +625,31 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_SPELLLOGMISS => {
             ServerPacket::SpellLogMiss(combat_log::read_spell_log_miss(&mut r)?)
         }
+        opcode::SMSG_PARTYKILLLOG => {
+            ServerPacket::PartyKillLog(combat_log::read_party_kill_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLINSTAKILLLOG => {
+            ServerPacket::SpellInstaKillLog(combat_log::read_spell_insta_kill_log(&mut r)?)
+        }
+        // One body, two sentences — the arm is the only thing that tells them apart.
+        opcode::SMSG_PROCRESIST => {
+            ServerPacket::ProcResist(combat_log::read_spell_outcome_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLORDAMAGE_IMMUNE => {
+            ServerPacket::SpellOrDamageImmune(combat_log::read_spell_outcome_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLDISPELLOG => {
+            ServerPacket::SpellDispelLog(combat_log::read_spell_dispel_log(&mut r)?)
+        }
+        opcode::SMSG_DISPEL_FAILED => {
+            ServerPacket::DispelFailed(combat_log::read_dispel_failed(&mut r)?)
+        }
+        opcode::SMSG_ENCHANTMENTLOG => {
+            ServerPacket::EnchantmentLog(combat_log::read_enchantment_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLLOGEXECUTE => {
+            ServerPacket::SpellLogExecute(combat_log::read_spell_log_execute(&mut r)?)
+        }
         opcode::SMSG_LOG_XPGAIN => ServerPacket::XpGain(progression::read_xp_gain(&mut r)?),
         opcode::SMSG_EXPLORATION_EXPERIENCE => {
             ServerPacket::ExplorationXp(progression::read_exploration_xp(&mut r)?)
@@ -635,6 +687,12 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::QuestQueryResponse(Box::new(quest::read_quest_query_response(&mut r)?))
         }
         opcode::SMSG_QUESTLOG_FULL => ServerPacket::QuestLogFull,
+        opcode::MSG_QUEST_PUSH_RESULT => {
+            ServerPacket::QuestPushResult(quest::read_quest_push_result(&mut r)?)
+        }
+        opcode::SMSG_QUEST_CONFIRM_ACCEPT => {
+            ServerPacket::QuestConfirmAccept(quest::read_quest_confirm_accept(&mut r)?)
+        }
         opcode::SMSG_QUESTUPDATE_COMPLETE => ServerPacket::QuestUpdateComplete {
             quest_id: quest::read_quest_update_complete(&mut r)?,
         },
@@ -833,6 +891,30 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 apply,
             }
         }
+        // **The knockback the server aims at our mover** (decision 1702): `packed guid + u32
+        // counter`, then the launch quad `vcos, vsin, speedXY, speedZ` (VERIFIED vmangos
+        // `MovementPacketSender.cpp:261-277`, the `> CLIENT_BUILD_1_9_4` branch). The quad reads
+        // straight into a [`JumpInfo`] — it *is* the jump tail the ack must echo — but the wire
+        // order here is direction-first, where `JumpInfo`'s own serialization is `zspeed` first, so
+        // the four reads are named rather than delegated.
+        opcode::SMSG_MOVE_KNOCK_BACK => {
+            let guid = read_packed_guid(&mut r)?;
+            let counter = read_u32_le(&mut r)?;
+            let cos_angle = read_f32_le(&mut r)?;
+            let sin_angle = read_f32_le(&mut r)?;
+            let xy_speed = read_f32_le(&mut r)?;
+            let zspeed = read_f32_le(&mut r)?;
+            ServerPacket::KnockBack {
+                guid,
+                counter,
+                launch: JumpInfo {
+                    zspeed,
+                    cos_angle,
+                    sin_angle,
+                    xy_speed,
+                },
+            }
+        }
         opcode::SMSG_INITIALIZE_FACTIONS => {
             let count = read_u32_le(&mut r)?;
             let mut standings = Vec::with_capacity(count as usize);
@@ -1027,6 +1109,26 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             group::ReadyCheck::Answer { guid, ready } => {
                 ServerPacket::ReadyCheckAnswer { guid, ready }
             }
+        },
+        // The instance/raid lockout family (decision 1748; bodies in `instance`). Every one of
+        // these is read here in the client's own field order.
+        opcode::SMSG_RAID_INSTANCE_MESSAGE => ServerPacket::RaidInstanceMessage {
+            message: instance::read_raid_instance_message(&mut r)?,
+        },
+        opcode::SMSG_INSTANCE_SAVE_CREATED => ServerPacket::InstanceSaveCreated {
+            flag: instance::read_u32_body(&mut r)?,
+        },
+        opcode::SMSG_INSTANCE_RESET => ServerPacket::InstanceReset {
+            map: instance::read_u32_body(&mut r)?,
+        },
+        opcode::SMSG_INSTANCE_RESET_FAILED => ServerPacket::InstanceResetFailed {
+            failure: instance::read_instance_reset_failed(&mut r)?,
+        },
+        opcode::SMSG_UPDATE_LAST_INSTANCE => ServerPacket::UpdateLastInstance {
+            map: instance::read_u32_body(&mut r)?,
+        },
+        opcode::SMSG_UPDATE_INSTANCE_OWNERSHIP => ServerPacket::UpdateInstanceOwnership {
+            owns: instance::read_u32_body(&mut r)?,
         },
         // The duel family (decision 0633; bodies in `duel`). Both empty-body arms carry their
         // whole meaning in the opcode.

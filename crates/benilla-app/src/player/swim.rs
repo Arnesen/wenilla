@@ -270,6 +270,14 @@ pub(super) fn breach_step(
     capsule: &Collider,
 ) -> Outcome {
     player.vel_y = SWIM_JUMP_SPEED;
+    // The breach is a take-off like any other, so it records its launch speed for the arc
+    // bookkeeping to snapshot (decision 1740). Without this the jump tail would send `zspeed = 0`
+    // for every water exit and observers would replay the breach as a step-off rather than a hop.
+    player.launch_vz = SWIM_JUMP_SPEED;
+    // Leaving the water starts a fresh arc, and it starts it with the swim keys still down — the
+    // nibble seeds from them exactly as a ledge step-off does.
+    player.arc_dirs_set = player.horiz_vel.length_squared() > 0.0;
+    player.knock_arc = false;
     let half_h = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
     let out = world.slide_body(
         capsule,
@@ -284,6 +292,7 @@ pub(super) fn breach_step(
         held: false,
         grounded: false,
         jumped: true,
+        knocked: false,
         air_nudged: false,
         ground: None,
     }
@@ -469,6 +478,142 @@ pub(super) fn swim_step(
         grounded,
         surface_pitch,
     }
+}
+
+/// What one swim frame produced: the mover outcome the controller's other arms also return, and
+/// the **presented** pitch — the raw aim, except leveled by the 0499 surface redirect when the
+/// rest-line cap bit (the body swims flat along the surface, not pitched against it; the wire tail
+/// streams the same value).
+pub(super) struct SwimFrame {
+    pub outcome: Outcome,
+    pub pitch: f32,
+}
+
+/// Drive one swimming frame: the drunk porpoise, the pitched travel basis, the directional speed
+/// select, the stroke rate, and [`swim_step`] itself.
+///
+/// `basis` is the **level** facing pair `(forward, right)`; `amounts` the netted `(fwd, side)`
+/// swim translation ([`translate_amounts`]); `wobble` this frame's drunk angle, already zeroed by
+/// the caller when it must not apply (sober, stunned, or not translating).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn drive_step(
+    player: &mut Player,
+    time: &Time,
+    collide: &benilla_world::collision::WorldCollision<'_, '_>,
+    capsule: &Collider,
+    world: &WorldPoint,
+    surface_y: Option<f32>,
+    basis: (Vec3, Vec3),
+    amounts: (f32, f32),
+    speeds: Option<benilla_protocol::MoveSpeeds>,
+    move_speed: &super::MoveSpeed,
+    wobble: f32,
+) -> SwimFrame {
+    let (swim_fwd, swim_side) = amounts;
+    // The drunk porpoise (B210): while swimming and moving, the pitch increments by the
+    // wobble ×4.0 every frame (`0x60aabc–0x60ab0a`: flag `0x200000` → `pitch +
+    // wobble·[0x80306c]`, clamped, committed via the pitch pipeline `0x60de70`). Same
+    // wobble as the facing veer above, so the nose and the heading meander together.
+    // The clamp is the callee `0x60aba0`'s FIXED ±π/2 bounds (`0x808acc`/`0x80c5e4`),
+    // NOT the mouselook set's ±89° — the reference carries both (decision 1009 §C4).
+    if wobble != 0.0 {
+        player.mover_pitch = (player.mover_pitch + wobble * super::drunk::SWIM_PITCH_WOBBLE_SCALE)
+            .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+    }
+    let mut pitch = player.mover_pitch;
+    // The travel basis (`0x7c5880`, the client's swim velocity direction): the FORWARD axis
+    // is the facing pitched by the swim pitch — `(cosP·horiz-fwd + sinP·up)` — so holding W
+    // with the nose down dives (and aimed up, climbs — the smooth ascend, like the
+    // ref's PitchUp+Forward); the STRAFE axis stays level. There is no vertical
+    // thruster and Space adds nothing here (the verified basis has no separate vertical
+    // input; Space's whole swim role is the jump-exit above).
+    let (sp, cp) = player.mover_pitch.sin_cos();
+    let fwd_axis = basis.0 * cp + Vec3::Y * sp;
+    let v = fwd_axis * swim_fwd + basis.1 * swim_side;
+    let dir3 = v.normalize_or_zero();
+    // Whether the water owns our vertical at all this frame, and where its line sits — the
+    // one source both arms of the constraint read ([`rest_line`]; `None` is GM flight).
+    let rest_line = rest_line(player, surface_y);
+    // Directional swim speed — **VERIFIED** (`0x7c4c90`'s swim arm, the §5's TU-H):
+    // forward or strafe-only → swim; the backward bit `0x2` → `min(swimBack, swim)` —
+    // byte-identical in template to the run arm's `min(runBack, run)`. Vanilla defaults
+    // 4.722/2.5 (vmangos `baseMoveSpeed`).
+    let (swim_speed, swim_back_speed) = match speeds {
+        Some(s) if !move_speed.env_override => (s.swim, s.swim_back),
+        _ => (SWIM_SPEED, SWIM_BACK_SPEED),
+    };
+    let dir_speed = if swim_fwd < 0.0 {
+        swim_back_speed.min(swim_speed)
+    } else {
+        swim_speed
+    };
+    // The stroke's playback-rate numerator is the FLAG-scalar speed — the full
+    // directional speed regardless of pitch, 0 with no translation input — never a
+    // horizontal projection, which would starve a pitched stroke toward a freeze.
+    // **VERIFIED** (TU-I): `0x5fe2f0` divides GetCurrentSpeed (flags + static speed
+    // fields only) by the clip's moveSpeed, the same path for local and observed units.
+    player.swim_stroke_speed = if dir3 == Vec3::ZERO { 0.0 } else { dir_speed };
+    let out = swim_step(
+        player,
+        time,
+        collide,
+        capsule,
+        dir3 * dir_speed,
+        rest_line,
+        |feet| surface_over_feet(world, feet),
+    );
+    // The surface redirect (decisions 0499+0505 — a NAMED DIVERGENCE, see
+    // [`cap_redirect`]): when the rise capped at the rest line, the stroke went
+    // level at full speed — present the *effective* pitch (body pose + wire tail
+    // follow the motion, →0 pinned at the line), while the raw aim stays in
+    // `player.mover_pitch` so a later nose-down dives instantly.
+    if let Some(p) = out.surface_pitch {
+        pitch = p;
+    }
+    let outcome = Outcome {
+        held: false,
+        grounded: out.grounded,
+        jumped: false,
+        // A knockback never resolves here: it clears SWIMMING at the take-off site above
+        // (the reference's `StartFalling 0x7c61f0` clears the bit outright rather than
+        // testing it), so a knocked swimmer is flown by the land mover.
+        knocked: false,
+        air_nudged: false,
+        ground: None, // swimming detaches from any platform frame below
+    };
+    SwimFrame { outcome, pitch }
+}
+
+/// The swim translation amounts — read by [`drive_step`] AND the flag build, so the two can never
+/// disagree (decision 0056: the flags mirror the avatar's motion). W/S, strafe Q/E (+ mouselook
+/// A/D), and a root cuts both.
+pub(super) fn translate_amounts(
+    axes: &super::input::MoveAxes,
+    translate_gated: bool,
+) -> (f32, f32) {
+    // The translate predicate being down (`0x514560`: a root, or **death** through the precondition
+    // it shares with the turn gate — decision 1753) kills swim translation like the walk `dir` does
+    // (decision 0308's regime — the water arm reads its own axes, so it needs its own cut).
+    if translate_gated {
+        return (0.0, 0.0);
+    }
+    let swim_fwd = axes.fwd.signum() as f32;
+    let mut swim_side = 0.0_f32; // +right
+    if axes.strafe_right {
+        swim_side += 1.0;
+    }
+    if axes.strafe_left {
+        swim_side -= 1.0;
+    }
+    if axes.mouselook {
+        if axes.turn_right {
+            swim_side += 1.0;
+        }
+        if axes.turn_left {
+            swim_side -= 1.0;
+        }
+    }
+    (swim_fwd, swim_side)
 }
 
 #[cfg(test)]

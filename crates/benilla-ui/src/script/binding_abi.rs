@@ -63,6 +63,25 @@ pub(crate) fn number_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     }
 }
 
+/// **Shape C** — a numeric argument the binding reads with a bare `lua_tonumber 0x6f3620` and NO
+/// `lua_isnumber` guard, so it cannot fail: absent, `nil`, `true`, a table, a function, or an
+/// unparseable string all land on **`0.0`** and the binding completes.
+///
+/// This is the counterpart to [`number_arg`] (shape A, which raises `Usage:`), and which shape a
+/// given argument takes is **per binding, not a global law** — wow-re
+/// `scratch/numeric-arg-coercion-law.md`, which censused all 408 widget-registrar entries and
+/// found 110 gated positions against 64 ungated ones. The clustering is the useful part: C is the
+/// colour/coordinate tuples (`Set*Color`'s r/g/b, `SetTexCoord`, `SetPosition`), A is the single
+/// scalar setters (`SetAlpha`, `SetWidth`, `SetValue`, `SetID`). Do not reach for this one because
+/// an argument "looks optional" — check the census.
+///
+/// One instruction settles why nil and a table are not distinguished: `0x6f7c32 cmp ecx,4;
+/// jne 0x6f7c6a` refuses every non-string tag without inspecting the value.
+pub(crate) fn coerced_number(lua: &Lua, v: Option<Value>) -> f64 {
+    v.and_then(|v| lua.coerce_number(v).ok().flatten())
+        .unwrap_or(0.0)
+}
+
 /// `is-number-or-string` (`0x6f3510`) → `arg-as-C-string` (`0x6f3690`), with the binding's own
 /// `Usage:` string on the failure edge.
 ///
@@ -73,6 +92,38 @@ pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     match lua.coerce_string(v)? {
         Some(s) => Ok(s.to_str()?.to_owned()),
         None => Err(mlua::Error::RuntimeError(usage.into())),
+    }
+}
+
+/// **[`string_arg`]'s shape-C partner**: coerce like the reference, and treat everything else as
+/// **absent** rather than raising.
+///
+/// The pair is 1717's rule applied to string positions — *which* shape a position takes is settled
+/// per binding, never generalised — and the model-pane and region constructors are the two ends of
+/// it, verified together (wow-re `ui/scratch/xml-template-name-lookup.md` §5.2):
+///
+/// | position | fetch | a table there |
+/// |---|---|---|
+/// | `Model:SetModel` arg 1 | `0x6f3510` → `0x6f3690`, result **tested** | **raises** ([`string_arg`]) |
+/// | `CreateFontString`/`CreateTexture` `name`, `layer` | `0x6f3510` → `0x6f3690`, result **not** tested | absent — this fn |
+/// | `CreateFrame` `name`, `inherits` | `0x6f3690` **unguarded** | absent — this fn |
+///
+/// **The discriminator is not the argument's type; it is whether the binding TESTS its parser's
+/// return.** That is the sentence `numeric-arg-coercion-law.md` §6 had wrong ("an unrecognised
+/// string argument raises"), refuted by this round.
+///
+/// A **number** is accepted and stringified, exactly as `lua_tostring` coerces it — so
+/// `CreateFrame("Frame", 5)` names the frame `"5"`. Callers that must *not* coerce a number (the
+/// `lua_type(L,idx) == LUA_TSTRING` gate `CreateTexture`/`CreateFontString` put on their **fourth**
+/// argument, and only there) test the tag themselves before calling this.
+pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
+    match v {
+        Value::String(_) | Value::Number(_) | Value::Integer(_) => lua
+            .coerce_string(v.clone())
+            .ok()
+            .flatten()
+            .and_then(|s| s.to_str().ok().map(|t| t.to_owned())),
+        _ => None,
     }
 }
 

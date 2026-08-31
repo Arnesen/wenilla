@@ -293,7 +293,7 @@ the territory line is asked for on NEW_AREA alone.
          and its real trigger is Show, not a click, so "click-raise is meaningless on mouse-less
          splash text" was the wrong argument. What holds now: these are LOW-strata splash frames
          that overlap nothing in LOW, so the occlusion gate declines. One word to re-add.) -->
-    <Frame name="ZoneTextFrame" parent="UIParent" frameStrata="LOW">
+    <Frame name="ZoneTextFrame" toplevel="true" parent="UIParent" frameStrata="LOW">
         <Anchors>
             <Anchor point="BOTTOM">
                 <Offset>
@@ -336,7 +336,7 @@ the territory line is asked for on NEW_AREA alone.
             </OnUpdate>
         </Scripts>
     </Frame>
-    <Frame name="SubZoneTextFrame" parent="UIParent" frameStrata="LOW">
+    <Frame name="SubZoneTextFrame" toplevel="true" parent="UIParent" frameStrata="LOW">
         <Anchors>
             <Anchor point="BOTTOM">
                 <Offset>

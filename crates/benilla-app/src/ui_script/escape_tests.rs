@@ -1,23 +1,22 @@
+//! **The ESCAPE ladder** — `ToggleGameMenu`'s `elseif` chain (`UIParent.lua:1465-1497`) and the
+//! host-glue precedence around it (a focused EditBox eats the key before the binding ever runs).
+//!
+//! The window these tests park in the ladder's way is a BAG, and since decision 1751 that is the
+//! reference's own `ContainerFrame1..12`, executed off the player's installed patch chain — not
+//! `BenillaBagFrame`, which no longer exists. Two consequences run through the file:
+//!
+//! * a bag test loads [`BAG_UI`] and opens with `wow_data_or_skip!`, because a chain entry needs
+//!   client data; and
+//! * "is the bag open?" is asked of [`bag_open`] (the reference's own `IsBagOpen` scan), never of
+//!   a frame by name — the twelve windows are RECYCLED, so which one a bag lands in is a
+//!   coincidence and not a property.
+//!
+//! The ladder itself is unchanged by that swap: `CloseAllWindows` (ours, `UiPanels.xml`) sweeps
+//! `ContainerFrame1..NUM_CONTAINER_FRAMES` where it used to sweep our five named windows.
+
 use benilla_ui::script::{ContainerSlot, ContainerState, LootRow, LootState, UiScript};
 
-/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the panel/loot
-/// tests' loader, duplicated so this file is self-contained).
-fn load_xml(s: &UiScript, file: &str) -> usize {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/ui")
-            .join(file),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "{file}: loader errors: {:?}",
-        report.errors
-    );
-    report.frames
-}
+use super::test_ui::{bag_open, bag_slot_button, click, load_ui as load_xml, BAG_UI};
 
 /// A one-item backpack (slot 1 holds a resolved item, so it is pickable onto the cursor).
 fn one_item_backpack() -> ContainerState {
@@ -55,21 +54,23 @@ fn one_item_backpack() -> ContainerState {
 /// the left slot, and an item on the cursor, ESC closes the bag AND the panel slot, releases the
 /// loot (OnHide → CloseLoot), and drops the held cursor. Also asserts the host-glue precedence: no
 /// EditBox focused ⇒ `key_input("ESCAPE")` does not consume, so the app runs the binding.
+///
+/// The bag half is the reference's window now (1751), so what `CloseAllWindows` must sweep is a
+/// `ContainerFrame` — the same assertion, asked through `IsBagOpen` instead of a frame name.
 #[test]
 fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set, used by the bag's Update
-                                       // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize —
-                                       // the shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.64 vs 383).
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR, which the dropdown backdrop reads
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
+    // LootFrame.xml owns GroupLootDropDown, whose OnLoad calls UIDropDownMenu_Initialize — the
+    // shipped manifest loads the dropdown kit far ahead of it (benilla.toc l.110 vs 478), and the
+    // kit's backdrop reads TOOLTIP_DEFAULT_COLOR out of GameTooltip.xml (already in BAG_UI).
     load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "LootFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
+    load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set, BankFrame's purse helper
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
@@ -96,10 +97,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     // Pick up slot 1 onto the cursor.
     s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(s.cursor_item().is_some(), "cursor holds the picked item");
-    assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
-        "bag is open before ESC"
-    );
+    assert!(bag_open(&s, 0), "bag is open before ESC");
     assert!(
         s.eval::<bool>("return GetLeftFrame():GetName() == \"LootFrame\"")
             .unwrap(),
@@ -115,10 +113,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     // The escape binding (what the host runs on the unconsumed ESC).
     s.run("ToggleGameMenu()").unwrap();
 
-    assert!(
-        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
-        "ESC closed the bag"
-    );
+    assert!(!bag_open(&s, 0), "ESC closed the bag");
     assert!(
         s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
         "ESC vacated the panel slot"
@@ -141,16 +136,16 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
 /// clears the focus (chat_tests covers the box's submit/close contract itself).
 #[test]
 fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     load_xml(&s, "ChatFrame.xml");
     s.set_money(0);
+    s.set_container(0, Some(one_item_backpack()));
 
     s.run("BenillaBagToggle_OnClick()").unwrap();
     assert!(
@@ -164,7 +159,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     // The box's OnEscapePressed cleared its own focus, but the bag window is untouched.
     assert!(!s.has_keyboard_focus(), "the box cleared its focus");
     assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        bag_open(&s, 0),
         "the bag stays open (the escape binding never ran)"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -220,17 +215,22 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
 /// has no plain-frame keyboard capture (the real client's own `StackSplitFrame` OnKeyDown ESCAPE
 /// arm can't be driven), so the hook rides `ToggleGameMenu`'s shared chain instead — checked
 /// right after the confirm popup and before the world map, both similarly transient overlays.
+///
+/// The spinner is opened by the REFERENCE's own shift fork now (1751,
+/// `ContainerFrame.lua:567-577`), reached by a real SHIFT + left-click on a `ContainerFrame` item
+/// button — which is why `ChatFrame.xml` is loaded: that fork's first test is
+/// `ChatFrameEditBox:IsShown()` (a shift-click links the item into an open chat box instead of
+/// splitting it), and the reference indexes that global unguarded.
 #[test]
 fn escape_closes_an_open_stack_split_frame() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "GameTooltip.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
+    load_xml(&s, "MerchantFrame.xml"); // ContainerFrameItemButton_OnClick reads MerchantFrame
+    load_xml(&s, "ChatFrame.xml"); // …and ChatFrameEditBox, the shift fork's first test
     load_xml(&s, "StackSplit.xml");
     s.set_money(0);
 
@@ -265,19 +265,14 @@ fn escape_closes_an_open_stack_split_frame() {
         }),
     );
     s.run("BenillaBagToggle_OnClick()").unwrap();
-    s.resolve();
+    assert!(bag_open(&s, 0), "the backpack window is up");
 
-    // Open the spinner the same way bag_tests.rs's split tests do: SHIFT + left-click on slot 1
-    // (the reference fork, driven through the modifier mirror).
+    // Open the spinner with a real SHIFT + left-click on the button holding slot 1 — asked of the
+    // buttons' own `GetID()`, never by index (`ContainerFrame_GenerateFrame` numbers them
+    // backwards). The click goes through the engine because the reference's handler reads `this`.
+    let slot1 = bag_slot_button(&s, 0, 1);
     s.set_modifiers(true, false, false);
-    s.run(
-        "BENILLA_TEST_BTN = nil\n\
-         for i = 1, 16 do local b = getglobal(\"BenillaBagSlot\" .. i)\n\
-           if b and b.slot == 1 then BENILLA_TEST_BTN = b end\n\
-         end\n\
-         BenillaBagSlot_OnClick(BENILLA_TEST_BTN, \"LeftButton\")",
-    )
-    .unwrap();
+    click(&mut s, &slot1, "LeftButton");
     s.set_modifiers(false, false, false);
     assert!(s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap());
 
@@ -304,21 +299,21 @@ fn escape_closes_an_open_stack_split_frame() {
 fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     use benilla_ui::script::UnitState;
 
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
-    load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
-    load_xml(&s, "GameTooltip.xml"); // TOOLTIP_DEFAULT_COLOR — the menu backdrop's OnLoad reads it
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
+    // GameTooltip.xml (BAG_UI's, for the bag slots' tooltips) also carries TOOLTIP_DEFAULT_COLOR,
+    // which the dropdown backdrop's OnLoad reads — so the kit can load straight after it.
     load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
-    assert!(s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(bag_open(&s, 0));
     s.set_unit(
         "target",
         Some(UnitState {
@@ -342,7 +337,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
          CloseMenus sits before the cast rung)"
     );
     assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        bag_open(&s, 0),
         "the menu press must not close windows either"
     );
     assert!(!s.take_target_clear());
@@ -351,7 +346,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     s.set_casting(true);
     s.run("ToggleGameMenu()").unwrap();
     assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        bag_open(&s, 0),
         "ESC mid-cast is eaten by SpellStopCasting — the bag stays open"
     );
     assert!(
@@ -367,7 +362,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     s.set_casting(false);
     s.run("ToggleGameMenu()").unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        !bag_open(&s, 0),
         "idle ESC falls through SpellStopCasting's nil to CloseAllWindows"
     );
     assert!(!s.take_spell_stop(), "no stray stop request when idle");
@@ -401,19 +396,18 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
 /// rung's: an idle press must fall straight through both.
 #[test]
 fn escape_ladder_targeting_rung_after_cast_before_windows() {
+    let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Fonts.xml");
-    load_xml(&s, "MoneyFrame.xml");
-    load_xml(&s, "UiPanels.xml");
+    for file in BAG_UI {
+        load_xml(&s, file);
+    }
     load_xml(&s, "MerchantFrame.xml");
-    load_xml(&s, "Cooldown.xml");
-    load_xml(&s, "BagFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
-    assert!(s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(bag_open(&s, 0));
 
     // SpellIsTargeting() mirrors the pushed state — the PetFrame-family readers' predicate.
     assert!(!s.eval::<bool>("return SpellIsTargeting()").unwrap_or(false));
@@ -431,7 +425,7 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
         "the cast rung answered nil — nothing casting"
     );
     assert!(
-        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        bag_open(&s, 0),
         "ESC while targeting must NOT also close windows"
     );
 
@@ -452,7 +446,7 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
     s.run("ToggleGameMenu()").unwrap();
     assert!(!s.take_stop_targeting(), "no stray trigger when idle");
     assert!(
-        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        !bag_open(&s, 0),
         "the idle press falls through both spell rungs to CloseAllWindows"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

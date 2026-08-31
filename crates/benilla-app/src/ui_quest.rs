@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use benilla_protocol::messages::{
     QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems, QuestRewardItem,
+    QuestShareMsg,
 };
 use bevy::prelude::*;
 
@@ -27,9 +28,9 @@ use benilla_ui::script::{
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{ui_error_text, MsgSurface, UiError};
-use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_action::{show_messages, ui_error_text, MsgKind, UiError};
+use crate::ui_chat::ChatLog;
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
@@ -55,6 +56,12 @@ pub(crate) struct QuestGiver {
     pub(crate) npc: Option<u64>,
     /// The open panel's wire view.
     pub(crate) view: Option<QuestView>,
+    /// The trailing `u32` of the last `SMSG_QUESTGIVER_QUEST_DETAILS`
+    /// ([`benilla_protocol::messages::QuestDetails::auto_finish`]) — the reference's `0xbe0824`,
+    /// a **latch** written by the DETAILS handler rather than a field of the open view, because
+    /// that is the shape the binary has and because its one reader ([`end_quest_session`]) runs
+    /// whichever panel is up. Non-zero suppresses the giver re-open on close (decision 1738).
+    pub(crate) detail_flag: u32,
     /// Per-guid dialog status (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's value, stored for a
     /// later world-marker slice.
     statuses: HashMap<u64, u32>,
@@ -62,7 +69,7 @@ pub(crate) struct QuestGiver {
     /// reference's `DisplayError(msgId)` split into (surface, GlobalStrings key + fills), so the
     /// line comes from the VM's own strings and never from a hardcoded English literal
     /// (decision 0669).
-    messages: Vec<(MsgSurface, UiError)>,
+    messages: Vec<UiError>,
     /// The re-ask epoch — see [`Self::bump_reask`].
     reask: u32,
 }
@@ -156,13 +163,14 @@ impl QuestGiver {
     }
 
     /// Queue one client message for [`feed_quest`] to resolve and show — the net apply's half of
-    /// the reference's `DisplayError(msgId)` (decision 0669).
-    pub(crate) fn push_message(&mut self, surface: MsgSurface, msg: UiError) {
-        self.messages.push((surface, msg));
+    /// the reference's `DisplayError(msgId)` (decision 0669). The message carries its own surface
+    /// in its key; the caller does not choose one (decision 1770).
+    pub(crate) fn push_message(&mut self, msg: UiError) {
+        self.messages.push(msg);
     }
 
     /// Take the queued client messages (drained by [`feed_quest`], which owns the VM).
-    pub(crate) fn take_messages(&mut self) -> Vec<(MsgSurface, UiError)> {
+    pub(crate) fn take_messages(&mut self) -> Vec<UiError> {
         std::mem::take(&mut self.messages)
     }
 
@@ -242,6 +250,23 @@ impl NpcSession for QuestGiver {
     /// says there is none.
     fn npc(&self) -> Option<u64> {
         self.npc.filter(|g| !benilla_protocol::guid::is_item(*g))
+    }
+
+    /// Walking away from a party member's SHARED quest still owes them the decline
+    /// (decision 1741). The distance that triggers it is not this method's business — the guard
+    /// takes the leash from the giver's own type (`crate::ui_session::leash_sq`: 14.0 yd for a
+    /// player, the 5.56 yd service range for an NPC), which is what 1733 got wrong by exempting
+    /// the share panel outright.
+    ///
+    /// **The walk-away sends strictly LESS than the button does**, and that is the reference's,
+    /// not a simplification: its watchdog calls the session end directly (`0x4933da` → `0x501130`)
+    /// rather than going through `DeclineQuest`, so an NPC's panel closes silently here — no
+    /// giver re-open — while the button's path still re-opens it.
+    fn walk_away_send(&self, npc: u64) -> Option<ClientCommand> {
+        benilla_protocol::guid::is_player(npc).then_some(ClientCommand::QuestPushResult {
+            sharer: npc,
+            msg: QuestShareMsg::DECLINE_QUEST,
+        })
     }
 
     fn close(&mut self) {
@@ -441,27 +466,15 @@ fn feed_quest(
     // VM's own GlobalStrings first (immutable script), then show each on the surface its message
     // record names — decision 0669's `DisplayError` kind. Drained BEFORE the snapshot's early-out
     // so a refusal that also closes the panel still gets its line out this frame.
-    let lines: Vec<(MsgSurface, String)> = giver
+    let lines: Vec<(MsgKind, String)> = giver
         .take_messages()
         .into_iter()
-        .filter_map(|(surface, msg)| {
+        .filter_map(|msg| {
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-            ui_error_text(&msg, &get).map(|text| (surface, text))
+            ui_error_text(&msg, &get).map(|text| (msg.kind(), text))
         })
         .collect();
-    for (surface, text) in lines {
-        // The resolved line, greppable: the chat path has no log of its own, so without this a
-        // live probe can count lines but never read one (decision 0669's in-app leg).
-        debug!("ui_quest: message ({surface:?}) {text:?}");
-        match surface {
-            MsgSurface::Chat => {
-                chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
-            }
-            MsgSurface::Error => {
-                script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-            }
-        }
-    }
+    show_messages(&mut script, &mut chat, "ui_quest", lines);
     let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
     let fresh = snapshot(
         &giver,
@@ -518,10 +531,63 @@ fn feed_quest(
 /// Drain the Lua intents: the greeting-row selects (map to the row's quest id → QUERY_QUEST for an
 /// available quest, COMPLETE_QUEST for an active one) and the button actions (Accept/Continue/Reward
 /// → the matching CMSG; Close → a local clear, no packet).
+/// **The quest session's one end** — the reference's `0x501130`, which every way out of the
+/// questgiver window funnels through: `DeclineQuest()`, `CloseQuest()` (ESC, the window's own
+/// OnHide), the walk-away watchdog and the leave-world teardown are four of its eleven callers, and
+/// they all do the same thing. That is why benilla models one [`QuestAction::Close`] and not the
+/// `Decline`/`Close` pair 1733 briefly split it into: two Lua verbs, one routine (decision 1738,
+/// VERIFIED by the wow-re §5 dispatched for 1733).
+///
+/// It sends, and what it sends depends on **the giver's object type**, not on which button was
+/// pressed:
+///
+/// - **A player** — a party member whose shared quest we are turning down. The answer they are
+///   waiting on: `MSG_QUEST_PUSH_RESULT{sharerGuid, DECLINE_QUEST}`. This is the only verdict the
+///   client ever originates besides `BUSY`.
+/// - **A unit** — an ordinary questgiver, and the reference **re-opens its list**:
+///   `CMSG_GOSSIP_HELLO` for a gossip-flagged NPC, `CMSG_QUESTGIVER_HELLO` otherwise. Declining a
+///   quest putting you back in the NPC's menu is not a courtesy the server does; it is this send.
+///   benilla asserted the opposite in `QuestFrame.xml` ("vanilla's client-side decline sends no
+///   packet") from 0088 until 1738 refuted it at the bytes.
+///
+/// `detail_flag` suppresses the unit re-open when non-zero — the trailing `u32` of
+/// `SMSG_QUESTGIVER_QUEST_DETAILS` ([`QuestDetails::auto_finish`]), whose only reader in the whole
+/// image is this routine. `npc_flags` is `None` when the giver is not a streamed unit, which is
+/// also how an item giver (0664) and a player fall out of the unit branch.
+fn end_quest_session(npc: u64, detail_flag: u32, npc_flags: Option<u32>, commands: &NetCommands) {
+    if benilla_protocol::guid::is_player(npc) {
+        debug!("ui_quest: declining {npc:#x}'s shared quest");
+        let _ = commands.0.send(ClientCommand::QuestPushResult {
+            sharer: npc,
+            msg: QuestShareMsg::DECLINE_QUEST,
+        });
+        return;
+    }
+    let Some(flags) = npc_flags else {
+        // Not a streamed unit: an item giver, or an NPC that left view under the open window.
+        // Nothing to re-open and nobody to answer.
+        debug!("ui_quest: close on non-unit giver {npc:#x} (no packet)");
+        return;
+    };
+    if detail_flag != 0 {
+        debug!("ui_quest: close on {npc:#x} — detail flag {detail_flag} suppresses the re-open");
+        return;
+    }
+    if flags & crate::target::cursor_mode::npc_flags::GOSSIP != 0 {
+        debug!("ui_quest: close on {npc:#x} — re-opening the gossip menu");
+        let _ = commands.0.send(ClientCommand::GossipHello { guid: npc });
+    } else {
+        debug!("ui_quest: close on {npc:#x} — re-opening the quest list");
+        let _ = commands.0.send(ClientCommand::QuestgiverHello { npc });
+    }
+}
+
 fn drain_quest(
     script: Option<NonSendMut<UiScript>>,
     mut giver: ResMut<QuestGiver>,
     commands: Res<NetCommands>,
+    index: Res<GuidIndex>,
+    stores: Query<&ObjectStore>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -532,6 +598,13 @@ fn drain_quest(
         script.take_quest_actions();
         return;
     };
+    // The giver's live `UNIT_NPC_FLAGS`, for [`end_quest_session`]'s gossip/quest-list fork.
+    // `None` for anything that is not a streamed unit — an item giver, a player, a despawn.
+    let npc_flags = index
+        .0
+        .get(&npc)
+        .and_then(|e| stores.get(*e).ok())
+        .map(|s| s.0.unit_npc_flags());
 
     // Greeting-row selects: resolve the 1-based row to its quest id off the open greeting view.
     for sel in script.take_quest_selects() {
@@ -574,7 +647,7 @@ fn drain_quest(
     for action in script.take_quest_actions() {
         match action {
             QuestAction::Close => {
-                debug!("ui_quest: client-side close (no packet)");
+                end_quest_session(npc, giver.detail_flag, npc_flags, &commands);
                 giver.clear();
             }
             QuestAction::Accept => {
@@ -906,7 +979,6 @@ mod tests {
                     key: questgiver_failed_key(4),
                     fill_s: Some("A Threat Within".into()),
                     fill_d: None,
-                    info: false,
                 },
                 &g
             )
@@ -918,5 +990,123 @@ mod tests {
             ui_error_text(&UiError::key("ERR_QUEST_LOG_FULL"), &g).as_deref(),
             Some("Your quest log is full.")
         );
+    }
+
+    // ── The party share's one client-originated verdict (decision 1733) ──────────────────────────
+
+    /// Run `lua` against a quest window open on `giver`, and return what the drain sent.
+    /// `npc_flags` seats the giver as a streamed unit with those `UNIT_NPC_FLAGS`; `None` leaves it
+    /// unstreamed (an item giver, or an NPC that left view).
+    fn drain_after(
+        giver: u64,
+        npc_flags: Option<u32>,
+        detail_flag: u32,
+        lua: &str,
+    ) -> Vec<ClientCommand> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx));
+        app.init_resource::<GuidIndex>();
+        if let Some(flags) = npc_flags {
+            // 147 = `UNIT_NPC_FLAGS` (the descriptor index `unit_npc_flags()` reads).
+            let fields = benilla_protocol::ObjectFields::from_pairs(&[(147, flags)]);
+            let e = app.world_mut().spawn(ObjectStore(fields)).id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(giver, e);
+        }
+        let mut quest = QuestGiver {
+            detail_flag,
+            ..Default::default()
+        };
+        quest.open(
+            giver,
+            QuestView::Detail(QuestDetails {
+                npc: giver,
+                quest_id: 1,
+                title: "A Threat Within".into(),
+                details: String::new(),
+                objectives: String::new(),
+                auto_finish: detail_flag,
+                choices: Vec::new(),
+                rewards: Vec::new(),
+                money: 0,
+                reward_spell: 0,
+            }),
+        );
+        app.insert_resource(quest);
+        let script = UiScript::new().unwrap();
+        script.run(lua).unwrap();
+        app.insert_non_send_resource(script);
+        app.add_systems(Update, drain_quest);
+        app.update();
+        rx.try_iter().collect()
+    }
+
+    const SHARER: u64 = 0x0000_0000_0000_002A; // HIGHGUID_PLAYER: a zero high word
+    const NPC: u64 = 0xF130_0000_0000_0007; // HIGHGUID_UNIT
+
+    /// **Ending the session on a SHARED quest answers the sharer — and `CloseQuest` does it too.**
+    /// 1733 shipped these as two actions on the assumption that only `DeclineQuest` answered; the
+    /// §5 found both Lua verbs calling one routine (`0x501130`), so ESC-ing a share panel reports
+    /// the decline exactly as the button does. This test is the corrected form of 1733's
+    /// `closing_a_shared_quest_panel_is_not_a_decline`, which asserted the opposite.
+    #[test]
+    fn every_way_out_of_a_shared_quest_answers_the_sharer() {
+        for verb in ["DeclineQuest()", "CloseQuest()"] {
+            let sent = drain_after(SHARER, None, 0, verb);
+            assert!(
+                matches!(
+                    sent.as_slice(),
+                    [ClientCommand::QuestPushResult {
+                        sharer: SHARER,
+                        msg: QuestShareMsg::DECLINE_QUEST,
+                    }]
+                ),
+                "{verb} must answer the sharer: {sent:?}"
+            );
+        }
+    }
+
+    /// **Ending it on an NPC RE-OPENS the giver**, which benilla asserted for years that it did not
+    /// ("vanilla's client-side decline sends no packet"). The fork is on the NPC's own gossip flag:
+    /// `CMSG_GOSSIP_HELLO` for a gossip-flagged NPC, `CMSG_QUESTGIVER_HELLO` otherwise. This is the
+    /// mechanism behind the reference putting you back in the questgiver's menu after a decline.
+    #[test]
+    fn ending_the_session_on_an_npc_reopens_its_list() {
+        use crate::target::cursor_mode::npc_flags;
+
+        let sent = drain_after(NPC, Some(0), 0, "DeclineQuest()");
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientCommand::QuestgiverHello { npc: NPC }]
+            ),
+            "a plain questgiver gets QUESTGIVER_HELLO: {sent:?}"
+        );
+
+        let sent = drain_after(NPC, Some(npc_flags::GOSSIP), 0, "DeclineQuest()");
+        assert!(
+            matches!(sent.as_slice(), [ClientCommand::GossipHello { guid: NPC }]),
+            "a gossip-flagged NPC gets GOSSIP_HELLO: {sent:?}"
+        );
+    }
+
+    /// The DETAILS packet's trailing `u32` **suppresses** that re-open when non-zero — the field
+    /// benilla parsed and ignored until the §5 found its one reader. Ignoring it meant a
+    /// suppressed giver was re-opened anyway.
+    #[test]
+    fn a_non_zero_detail_flag_suppresses_the_reopen() {
+        let sent = drain_after(NPC, Some(0), 1, "DeclineQuest()");
+        assert!(sent.is_empty(), "flag 1 suppresses the re-open: {sent:?}");
+    }
+
+    /// A giver that is not a streamed unit sends nothing at all: an item giver (0664) has no list
+    /// to re-open, and neither does an NPC that walked out of view under the open window.
+    #[test]
+    fn an_unstreamed_giver_ends_the_session_silently() {
+        let sent = drain_after(NPC, None, 0, "CloseQuest()");
+        assert!(sent.is_empty(), "no unit, no re-open: {sent:?}");
     }
 }

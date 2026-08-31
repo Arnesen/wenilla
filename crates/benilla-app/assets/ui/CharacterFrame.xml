@@ -237,8 +237,8 @@
         -- verified this session), loaded before every window.
 
         -- ── This window's own constants (ref-PaperDollFrame.lua:1-4, Benilla-prefixed) ────────────
-        BENILLA_NUM_STATS = 5              -- NUM_STATS
-        BENILLA_NUM_RESISTANCE_TYPES = 5   -- NUM_RESISTANCE_TYPES
+        NUM_STATS = 5              -- NUM_STATS
+        NUM_RESISTANCE_TYPES = 5   -- NUM_RESISTANCE_TYPES
         ATTACK_POWER_MAGIC_NUMBER = 14 -- ATTACK_POWER_MAGIC_NUMBER
         -- MagicResFrame1..5's ref `id=` attrs (ref-PaperDollFrame.xml:654-759) — arcane/fire/nature/
         -- frost/shadow; Holy(1) never rides the paper doll (only 5 of the 6 schools show here).
@@ -366,7 +366,7 @@
             getglobal("CharacterNameText"):SetText(UnitName("player"))
             if ShowTextStatusBarText then -- engine tests load file subsets
                 ShowTextStatusBarText(PlayerFrameHealthBar)
-                ShowTextStatusBarText(PlayerFramePowerBar)
+                ShowTextStatusBarText(PlayerFrameManaBar)
                 ShowTextStatusBarText(MainMenuExpBar)
                 ShowTextStatusBarText(PetFrameHealthBar)
                 ShowTextStatusBarText(PetFrameManaBar)
@@ -380,13 +380,16 @@
         -- Hide-twin — UpdateMicroButtons live (MicroMenu.xml), the bar-text calls live too (1146),
         -- and the reputation one live since the watch bar started being driven. The subframe hide-loop is OUR OWN addition
         -- (decision 0437 phase 4): PaperDollFrame is a true engine child of this frame (its
-        -- own header comment) so it hides for free on the parent's Hide-cascade, but
-        -- SkillFrame is a SEPARATE top-level file — this engine has no cross-file `parent=`
-        -- attachment (grepped `benilla-ui/src/loader`: the XML `parent=` attribute is read nowhere,
-        -- unlike `relativeTo`, which resolves by name regardless of tree position — see
-        -- SkillFrame.xml's own header comment) — so nothing else would hide it when the WHOLE
-        -- character window closes (ESC, the close X, or another left-slot window bumping it via
-        -- UIPanel exclusivity). Looping every BENILLA_CHARACTERFRAME_SUBFRAMES entry here, once, is
+        -- own header comment) so it hides for free on the parent's Hide-cascade, while
+        -- SkillFrame is a SEPARATE top-level file, and when this loop was written nothing else
+        -- would have closed that page with the WHOLE character window (ESC, the close X, or another
+        -- left-slot window bumping it via UIPanel exclusivity) — the loader read no XML `parent=`
+        -- then. It reads one now: decision 1734 restored the attribute across the shipped tree, and
+        -- the loader resolves it by global name at load, winning over the enclosing element — so
+        -- SkillFrame's own `parent="CharacterFrame"`, and Pet's, Reputation's and Honor's, really do
+        -- attach to this frame. The loop is kept as it stands: it closes the same five entries by
+        -- name, and it is what the window was built and approved against.
+        -- Looping every BENILLA_CHARACTERFRAME_SUBFRAMES entry here, once, is
         -- what carried that correctness through every non-nested tab that followed — Pet,
         -- Reputation and now Honor, all four of the five pages that are separate files.
         function CharacterFrame_OnHide()
@@ -394,7 +397,7 @@
             PlaySound("igCharacterInfoClose")
             if HideTextStatusBarText then -- engine tests load file subsets
                 HideTextStatusBarText(PlayerFrameHealthBar)
-                HideTextStatusBarText(PlayerFramePowerBar)
+                HideTextStatusBarText(PlayerFrameManaBar)
                 HideTextStatusBarText(MainMenuExpBar)
                 HideTextStatusBarText(PetFrameHealthBar)
                 HideTextStatusBarText(PetFrameManaBar)
@@ -538,7 +541,7 @@
         -- ref PaperDollFrame_SetStats (l.131-174), including its per-refresh label SetText (l.140)
         -- — the labels' one source of text (see PaperDollFrame_OnLoad's header comment).
         function PaperDollFrame_SetStats()
-            for i = 1, BENILLA_NUM_STATS do
+            for i = 1, NUM_STATS do
                 local label = getglobal("CharacterStatFrame" .. i .. "Label")
                 local text = getglobal("CharacterStatFrame" .. i .. "StatText")
                 local frame = getglobal("CharacterStatFrame" .. i)
@@ -588,7 +591,7 @@
 
         -- ref PaperDollFrame_SetResistances (l.176-228).
         function PaperDollFrame_SetResistances()
-            for i = 1, BENILLA_NUM_RESISTANCE_TYPES do
+            for i = 1, NUM_RESISTANCE_TYPES do
                 local resistId = BENILLA_MAGICRES_IDS[i]
                 local text = getglobal("MagicResText" .. i)
                 local frame = getglobal("MagicResFrame" .. i)
@@ -1021,7 +1024,7 @@
                 -- reference (PaperDollFrame.xml:20-25 routes OnDragStart/OnReceiveDrag to the same
                 -- OnClick("LeftButton", ignoreModifiers=1) the plain click uses) — see
                 -- BenillaPaperDollSlot_OnClick below for the identical routing, the bag slots' own
-                -- precedent (BagFrame.xml's BenillaBagSlot_OnClick).
+                -- precedent (the reference's ContainerFrameItemButton_OnClick, sourced since 1751).
                 button:RegisterForDrag("LeftButton")
             else
                 button:RegisterForClicks("LeftButtonUp")
@@ -1092,7 +1095,7 @@
             button.broken = textureName and GetInventoryItemBroken("player", button.invSlotId)
             -- A locked slot (its item is up on the cursor, or a send is still pending
             -- server-side, decision 0216 §4/0218 §3) dims — the bag slots' own vertex-dim
-            -- convention (BagFrame.xml's BenillaBagSlot_Update), applied here instead of the
+            -- convention, applied here instead of the
             -- ref's separate SetItemButtonDesaturated call (no engine equivalent — header
             -- comment). The transient drag-dim outranks the broken red on the icon.
             if IsInventoryItemLocked(button.invSlotId) then
@@ -1269,7 +1272,7 @@
         The shared equipment-slot button (ref PaperDollItemSlotButtonTemplate inherits
         ItemButtonTemplate, ref-PaperDollFrame.xml:4-38 — ItemButtonTemplate's own XML isn't part of
         this session's extraction, so its shape is taken from this codebase's own prior
-        reconstruction of it, BagFrame.xml's BenillaBagSlotTemplate: 37x37, a BACKGROUND icon fill,
+        reconstruction of it (BagFrame.xml's since-retired BenillaBagSlotTemplate): 37x37, a BACKGROUND icon fill,
         an OVERLAY count, the 64x64 UI-Quickslot2 ring centered (0,-1), UI-Quickslot-Depress pushed,
         ButtonHilight-Square ADD highlight — duplicated here rather than cross-file inherited so this
         window's slot behavior (UNIT_INVENTORY_CHANGED refresh, tooltip) stays self-contained in one
@@ -1371,7 +1374,7 @@
         </Scripts>
     </Frame>
 
-    <Frame name="CharacterFrame" hidden="true">
+    <Frame name="CharacterFrame" toplevel="true" parent="UIParent" hidden="true">
         <!-- The real 384x512 window (ref-CharacterFrame.xml:5-7). No <Anchors> — ShowUIPanel/
              SetLeftFrame SetPoints this to the left slot on open (UiPanels.xml's own convention). -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -1449,23 +1452,23 @@
                  the loader resolves a key-shaped `text=` through the shipped strings, so the row is
                  localized like the reference's. (Tabs 1/4 carried the enUS literals from 0437;
                  same words either way in enUS, and now the same mechanism.) -->
-            <Button name="CharacterFrameTab1" inherits="CharacterFrameTabButtonTemplate" text="CHARACTER">
+            <Button name="CharacterFrameTab1" inherits="CharacterFrameTabButtonTemplate" id="1" text="CHARACTER">
                 <Anchors><Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="60" y="62"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(1)</OnClick></Scripts>
             </Button>
-            <Button name="CharacterFrameTab2" inherits="CharacterFrameTabButtonTemplate" text="PET" hidden="true">
+            <Button name="CharacterFrameTab2" inherits="CharacterFrameTabButtonTemplate" id="2" text="PET" hidden="true">
                 <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(2)</OnClick></Scripts>
             </Button>
-            <Button name="CharacterFrameTab3" inherits="CharacterFrameTabButtonTemplate" text="REPUTATION">
+            <Button name="CharacterFrameTab3" inherits="CharacterFrameTabButtonTemplate" id="3" text="REPUTATION">
                 <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab2" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(3)</OnClick></Scripts>
             </Button>
-            <Button name="CharacterFrameTab4" inherits="CharacterFrameTabButtonTemplate" text="SKILLS">
+            <Button name="CharacterFrameTab4" inherits="CharacterFrameTabButtonTemplate" id="4" text="SKILLS">
                 <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab3" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(4)</OnClick></Scripts>
             </Button>
-            <Button name="CharacterFrameTab5" inherits="CharacterFrameTabButtonTemplate" text="HONOR">
+            <Button name="CharacterFrameTab5" inherits="CharacterFrameTabButtonTemplate" id="5" text="HONOR">
                 <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab4" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(5)</OnClick></Scripts>
             </Button>
@@ -1474,7 +1477,7 @@
                  exactly fill the parent instead of the ref's setAllPoints="true" — the same effect
                  (see this file's header: frame-level setAllPoints was a no-op when this was written
                  and is wired now; the explicit size is equivalent, so it stays). -->
-            <Frame name="PaperDollFrame" id="1">
+            <Frame name="PaperDollFrame" enableMouse="true" parent="CharacterFrame" id="1">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                 <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
@@ -1632,7 +1635,7 @@
                                  filled from Lua exactly like the ref (PaperDollFrame_OnLoad /
                                  _SetStats — see the former's header comment); instances declare no
                                  regions of their own, same as the ref's. -->
-                            <Frame name="CharacterStatFrame1" inherits="BenillaStatRowTemplate">
+                            <Frame name="CharacterStatFrame1" inherits="BenillaStatRowTemplate" id="1">
                                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="-3"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
@@ -1640,7 +1643,7 @@
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="CharacterStatFrame2" inherits="BenillaStatRowTemplate">
+                            <Frame name="CharacterStatFrame2" inherits="BenillaStatRowTemplate" id="2">
                                 <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame1" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
@@ -1648,7 +1651,7 @@
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="CharacterStatFrame3" inherits="BenillaStatRowTemplate">
+                            <Frame name="CharacterStatFrame3" inherits="BenillaStatRowTemplate" id="3">
                                 <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame2" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
@@ -1656,7 +1659,7 @@
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="CharacterStatFrame4" inherits="BenillaStatRowTemplate">
+                            <Frame name="CharacterStatFrame4" inherits="BenillaStatRowTemplate" id="4">
                                 <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame3" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
@@ -1664,7 +1667,7 @@
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="CharacterStatFrame5" inherits="BenillaStatRowTemplate">
+                            <Frame name="CharacterStatFrame5" inherits="BenillaStatRowTemplate" id="5">
                                 <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame4" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
@@ -1778,7 +1781,7 @@
                             <Anchor point="TOPRIGHT" relativeTo="PaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="297" y="-77"/></Offset></Anchor>
                         </Anchors>
                         <Frames>
-                            <Frame name="MagicResFrame1" inherits="BenillaMagicResistanceFrameTemplate">
+                            <Frame name="MagicResFrame1" inherits="BenillaMagicResistanceFrameTemplate" id="6">
                                 <Anchors><Anchor point="TOP" relativeTo="CharacterResistanceFrame" relativePoint="TOP"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
@@ -1791,7 +1794,7 @@
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="MagicResFrame2" inherits="BenillaMagicResistanceFrameTemplate">
+                            <Frame name="MagicResFrame2" inherits="BenillaMagicResistanceFrameTemplate" id="2">
                                 <Anchors><Anchor point="TOP" relativeTo="MagicResFrame1" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
@@ -1804,7 +1807,7 @@
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="MagicResFrame3" inherits="BenillaMagicResistanceFrameTemplate">
+                            <Frame name="MagicResFrame3" inherits="BenillaMagicResistanceFrameTemplate" id="3">
                                 <Anchors><Anchor point="TOP" relativeTo="MagicResFrame2" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
@@ -1817,7 +1820,7 @@
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="MagicResFrame4" inherits="BenillaMagicResistanceFrameTemplate">
+                            <Frame name="MagicResFrame4" inherits="BenillaMagicResistanceFrameTemplate" id="4">
                                 <Anchors><Anchor point="TOP" relativeTo="MagicResFrame3" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
@@ -1830,7 +1833,7 @@
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="MagicResFrame5" inherits="BenillaMagicResistanceFrameTemplate">
+                            <Frame name="MagicResFrame5" inherits="BenillaMagicResistanceFrameTemplate" id="5">
                                 <Anchors><Anchor point="TOP" relativeTo="MagicResFrame4" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">

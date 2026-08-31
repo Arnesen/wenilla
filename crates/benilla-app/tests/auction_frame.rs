@@ -352,10 +352,10 @@ fn the_bid_and_buyout_gates_read_the_purse() {
 
     // Nothing selected: both shut.
     assert!(!s
-        .eval::<bool>("return BrowseBidButton:IsEnabled()")
+        .eval::<bool>("return BrowseBidButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BrowseBuyoutButton:IsEnabled()")
+        .eval::<bool>("return BrowseBuyoutButton:IsEnabled() ~= 0")
         .unwrap());
 
     // Select the affordable row: both open, and the bid box is seated at the required bid.
@@ -366,12 +366,12 @@ fn the_bid_and_buyout_gates_read_the_purse() {
         1
     );
     assert!(
-        s.eval::<bool>("return BrowseBidButton:IsEnabled()")
+        s.eval::<bool>("return BrowseBidButton:IsEnabled() ~= 0")
             .unwrap(),
         "10s is affordable on 2g"
     );
     assert!(
-        s.eval::<bool>("return BrowseBuyoutButton:IsEnabled()")
+        s.eval::<bool>("return BrowseBuyoutButton:IsEnabled() ~= 0")
             .unwrap(),
         "50s is affordable on 2g"
     );
@@ -390,12 +390,12 @@ fn the_bid_and_buyout_gates_read_the_purse() {
         2
     );
     assert!(
-        !s.eval::<bool>("return BrowseBidButton:IsEnabled()")
+        !s.eval::<bool>("return BrowseBidButton:IsEnabled() ~= 0")
             .unwrap(),
         "5g is not affordable on 2g"
     );
     assert!(
-        !s.eval::<bool>("return BrowseBuyoutButton:IsEnabled()")
+        !s.eval::<bool>("return BrowseBuyoutButton:IsEnabled() ~= 0")
             .unwrap(),
         "6g is not affordable on 2g"
     );
@@ -410,7 +410,7 @@ fn the_bid_and_buyout_gates_read_the_purse() {
     assert_eq!(bids[0].index, 1);
     assert_eq!(bids[0].amount, 1000);
     assert!(
-        !s.eval::<bool>("return BrowseBidButton:IsEnabled()")
+        !s.eval::<bool>("return BrowseBidButton:IsEnabled() ~= 0")
             .unwrap(),
         "the button disables itself so a second click cannot outrun the answer"
     );
@@ -437,13 +437,13 @@ fn you_cannot_bid_on_your_own_auction() {
 
     s.run("BrowseButton1:Click()").unwrap();
     assert!(
-        !s.eval::<bool>("return BrowseBidButton:IsEnabled()")
+        !s.eval::<bool>("return BrowseBidButton:IsEnabled() ~= 0")
             .unwrap(),
         "the row's owner is the player"
     );
     // The buyout gate has no such leg — the reference lets you buy out your own listing.
     assert!(s
-        .eval::<bool>("return BrowseBuyoutButton:IsEnabled()")
+        .eval::<bool>("return BrowseBuyoutButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(s.errors().is_empty());
 }
@@ -510,7 +510,7 @@ fn the_create_gate_and_the_deposit() {
 
     // Empty slot: shut, whatever the prices say.
     assert!(
-        !s.eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled()")
+        !s.eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled() ~= 0")
             .unwrap(),
         "no item in the sell slot"
     );
@@ -540,7 +540,7 @@ fn the_create_gate_and_the_deposit() {
         .unwrap();
     s.run("AuctionsFrameAuctions_ValidateAuction()").unwrap();
     assert!(!s
-        .eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled()")
+        .eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled() ~= 0")
         .unwrap());
     assert!(!s
         .eval::<bool>("return AuctionsBuyoutErrorText:IsShown()")
@@ -605,7 +605,7 @@ fn the_create_gate_and_the_deposit() {
         "a 50s buyout under a 1g start price is an error, and it is shown"
     );
     assert!(!s
-        .eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled()")
+        .eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled() ~= 0")
         .unwrap());
 
     // Clear the buyout and the form opens; pressing Create sends exactly what is on screen.
@@ -613,7 +613,7 @@ fn the_create_gate_and_the_deposit() {
         .unwrap();
     s.run("AuctionsFrameAuctions_ValidateAuction()").unwrap();
     assert!(
-        s.eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled()")
+        s.eval::<bool>("return AuctionsCreateAuctionButton:IsEnabled() ~= 0")
             .unwrap(),
         "an item, a 1g start price and no buyout is a valid auction"
     );

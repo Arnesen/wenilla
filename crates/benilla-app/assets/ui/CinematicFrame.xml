@@ -14,9 +14,11 @@
         frame; we draw them as Bevy UI nodes in crate::cinematic instead, because a cinematic hides
         the HUD through UiHidden — which kills both of ui_pass's quad lanes wholesale, and the
         FrameXML layer is one of them. Bars declared here would go dark along with the action bars
-        they exist to replace. The bar LAW is unchanged and still the reference's (only a screen
-        wider than 4:3 gets bars; the picture is cropped to 2:1, the remainder split evenly) — it
-        just lives where it can be drawn. See `drive_letterbox`.
+        they exist to replace. The bar LAW is unchanged and still the reference's — but it is BOTH
+        halves of it (decision 1701): the Lua's `if width/height > 4/3` guards a *recompute*, not
+        whether there are bars, and below it the XML's own `1024x128` textures stand on the native
+        1024x768 sheet, i.e. height/6 — which is the 2:1 crop evaluated at exactly 4:3. One
+        expression covers both: `min((h - min(w/2, h))/2, h/6)`. See `drive_letterbox`.
 
         So this frame draws nothing at all. It is kept rather than replaced with an engine-side key
         handler because the skip path IS a frame in the reference: keeping it means ESC works for

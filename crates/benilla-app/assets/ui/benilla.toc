@@ -13,6 +13,25 @@
 # The FIRST entry is the font-object registry, and the loader splits there: it alone loads at
 # startup, ahead of the glue screens that share our one glyph atlas, and everything after it
 # materializes on entering the world (decision 1051).
+#
+# ── TWO STORES, ONE LIST (decision 1751) ──────────────────────────────────────────────────────
+# A **bare filename** is a file we ship, from `assets/ui` (compiled into the binary, 1175).
+# A **path** — `Interface\FrameXML\ContainerFrame.xml` — is the reference's OWN file, executed off
+# the player's installed patch chain. Nothing of Blizzard's is copied here; the player runs the
+# file they already own, and it cannot drift from itself.
+#
+# That is the end state for this interface: the stock 1.12 FrameXML, off the player's chain, and
+# `assets/ui` is scaffolding that retires window by window. Migrating one is one line here changing
+# from ours to theirs, plus the deletion of our copy — which is why the two stores share ONE
+# ordered list instead of the reference getting a private "load everything first" pass. It could
+# not have that pass: stock `ContainerFrame.xml` inherits `ItemButtonTemplate`,
+# `CooldownFrameTemplate`, `SmallMoneyFrameTemplate` and `UIPanelCloseButton`, so it has to sit
+# after the files that declare them, exactly like any other entry.
+#
+# Order still decides every collision, in both directions. A reference file sourced ABOVE ours has
+# its colliding globals overwritten by ours (that is why `PaperDollFrame.lua` is where it is); a
+# reference file sourced AT the position of the window it replaces owns its names outright, which
+# is what migrating a window means. `ui_script::reference_ui` is the rule; this list is the order.
 
 ## Interface: 11200
 ## Title: benilla
@@ -20,11 +39,44 @@
 # The named virtual Font objects (decision 0084) — must load first so any FontString's
 # `inherits="GameFontNormal"` resolves against a registered object.
 Fonts.xml
+# ── A reference file sourced ABOVE ours, so OUR bodies win every collision ─────────────────────
+# This one is not a migrated window: it is here for one family of frame-agnostic globals that
+# addons call by name, while the window that file also drives is still ours. So it loads first and
+# our later files overwrite the names we own. (A migrated window is the other case, and sits at its
+# window's own position — `Interface\FrameXML\ContainerFrame.xml` below is the first of them.)
+#
+# PaperDollFrame.lua earns its place for ONE family: `PaperDollItemSlotButton_OnLoad`/`_OnEvent`/
+# `_OnClick`/`_Update`/`_UpdateLock`/`_OnEnter`/`_OnUpdate` — frame-agnostic in the same sense,
+# acting on `this`/`this:GetID()` through live APIs and never on a named reference window.
+# `PaperDollItemSlotButtonTemplate` and `BagSlotButtonTemplate` are declared over them
+# (ItemSlotButtonTemplates.xml), and pfUI builds its bag bar from the latter.
+#
+# Its top level is four constants (NUM_RESISTANCE_TYPES, NUM_STATS, NUM_SHOPPING_TOOLTIPS,
+# ATTACK_POWER_MAGIC_NUMBER) — nothing touches a frame at load, so sourcing it cannot raise. 18 of
+# its 29 functions collide with ours (the PaperDollFrame_Set* stat family, the two damage-frame
+# hovers, PaperDollFormatStat, PaperDollStatTooltip) and this position settles all of them the
+# documented way: CharacterFrame.xml loads far below and its bodies win. Not one of the seven
+# names we are here for is in that overlap, and our own doll slots keep calling
+# `BenillaPaperDollSlot_*`, untouched.
+Interface\FrameXML\PaperDollFrame.lua
 # The reference's own second file, in its own position: TEXT/message/_ERRORMESSAGE, the
 # ScriptErrors dialog, and the DialogBoxFrame + DialogButton*Texture kit it is built from.
 # Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
 # DialogButtonNormalText/HighlightText) and everything above it in FrameXML.toc is engine.
 BasicControls.xml
+# **UIParent itself, and it must come before every frame that declares `parent="UIParent"`** —
+# a parent name is resolved at LOAD, and a name that does not exist yet does not error: the loader
+# warns and silently falls back to the enclosing frame (`loader/mod.rs`, "names no frame"). With
+# this file at its old position below UiPanels.xml, `StaticPopup1`/`StaticPopup2` would have taken
+# that fallback and the reparent would have been a silent half-fix.
+#
+# This is the reference's own slot: FrameXML.toc has BasicControls.xml at l.6 and UIParent.xml at
+# l.8, above MoneyFrame.xml (l.10) and StaticPopup.xml (l.23). It needs nothing from the files it
+# now precedes — it declares only UIParent and WorldFrame, inherits no template, and its scripts
+# (UIPARENT_MANAGED_FRAME_POSITIONS + UIParent_ManageFramePositions, decision 0272, the ref
+# mechanism that re-anchors the cast bar / chat over the bottom bars) are called later, applied by
+# the loader's post-load bootstrap (ui_script/manifest.rs).
+UIParent.xml
 # The `SetItemButton*` family (ref ItemButtonTemplate.lua) — script-only, no frames and no
 # dependencies of its own, so it sits as early as it can be read. Every window that paints an item
 # slot calls these, ours and third-party alike: their absence is what left the director's Bagnon
@@ -45,12 +97,6 @@ MoneyFrame.xml
 # before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
 # when those frames' OnLoad/OnEvent reference them.
 UiPanels.xml
-# The managed bottom-stack positions (decision 0272): script-only —
-# UIPARENT_MANAGED_FRAME_POSITIONS + UIParent_ManageFramePositions, the ref
-# UIParent.lua mechanism that re-anchors the cast bar / chat over the bottom bars.
-# Loaded early so the stance bar's OnShow/OnHide can call it; applied once by the
-# loader's post-load bootstrap (ui_script/manifest.rs).
-UIParent.xml
 # The tooltip: a hover window the bag/merchant/loot/unit frames drive. Loaded before them so
 # `GameTooltip` + its verbs exist when their OnEnter handlers fire (runtime, so order
 # is not strictly required — but it keeps the dependency legible). It also declares the two
@@ -95,6 +141,10 @@ DeathFrame.xml
 # The two duel dialogs + their event driver (decision 0633): registry entries on the same
 # StaticPopup engine, and DUEL_OUTOFBOUNDS leans on its per-tick countdown branch.
 DuelFrame.xml
+# The escort-quest confirm + its event driver (decision 1733): one more registry entry on the same
+# StaticPopup engine. Not QuestFrame.xml's or QuestLogFrame.xml's — it belongs to no window, the
+# way the duel dialogs above belong to none.
+QuestShareFrame.xml
 # The two enchant-apply confirms + their event driver (decision 0928): the same StaticPopup
 # registry again. Not CraftFrame's — the gate that raises them is the generic item-target
 # bind, reached by a poison or a sharpening stone with no profession window open.
@@ -103,6 +153,12 @@ EnchantConfirm.xml
 # Not GossipFrame's, and the wire is why — the server closes the gossip menu BEFORE it asks, so
 # this dialog is free-standing by the time it shows. Needs only UiPanels.xml, far above.
 BinderConfirm.xml
+# The summon confirm + its event driver (decision 1747): the same StaticPopup registry once more.
+# Free-standing like the two around it, and for a stronger reason — a warlock's ritual, a meeting
+# stone and a GM `.summon` all raise it with nothing whatever on screen. The only entry here whose
+# event carries no arguments: the dialog reads the summoner, the destination and the clock back out
+# of the engine every tick, so it needs UiPanels.xml's countdown branch as well as its registry.
+ConfirmSummon.xml
 # The class trainer's respec confirm + its event driver (decision 1580): the binder confirm's twin
 # one line up, free-standing for the identical reason — the server closes the gossip menu before it
 # asks. The only entry in the registry that raises a money frame, so it needs MoneyFrame.xml (far
@@ -202,6 +258,9 @@ ColorPickerFrame.xml
 # The fullscreen world map (decision 0203 phase 2), over the worldmap host API
 # (`crate::ui_world_map` feeds it); the 'M' binding (ui_script/input.rs) calls its
 # ToggleWorldMap().
+# Its per-unit blip templates load FIRST: WorldMapFrame.xml instantiates WorldMapParty1..4 and
+# WorldMapRaid1..40 with inherits=, so the virtual Frames have to be registered before it.
+WorldMapFrameTemplates.xml
 WorldMapFrame.xml
 # The cast bar (decision 0137 phase 1) — the extracted 1.12 CastingBarFrame, driven by
 # the SPELLCAST_* events `crate::ui_cast` fires. Only needs Fonts before it.
@@ -224,22 +283,47 @@ BuffFrame.xml
 # MinimapCluster (its anchor) — loaded above.
 DurabilityFrame.xml
 ErrorsFrame.xml
+# ══ THE BAG WINDOWS — the reference's own, off the player's chain (decision 1751, window 1) ══
+# `ContainerFrame1..12`, `ContainerFrameTemplate`, `ContainerFrameItemButtonTemplate` and the whole
+# `ToggleBag`/`ToggleBackpack`/`OpenAllBags`/`IsBagOpen`/`ToggleKeyRing` verb family — the real
+# 1.12 file, running as the file, with `ContainerFrame.lua` arriving through its own
+# `<Script file=>`. Our `BagFrame.xml` used to build five windows here; it is the bag BAR only now,
+# and the bank's six popouts (BankFrame.xml) became ContainerFrames at ids 5..10, which is what the
+# reference does.
+#
+# THE POSITION IS THE REQUIREMENT, and it is why 1751 moved sourcing into this manifest at all:
+# this file's `inherits=` are resolved at LOAD and reach four templates above it —
+# `ItemButtonTemplate`, `SmallMoneyFrameTemplate` (MoneyFrame.xml), `CooldownFrameTemplate`
+# (Cooldown.xml), `UIPanelCloseButton` (UIPanelTemplates.xml) — plus `parent="UIParent"`. It
+# cannot load "first" the way a Lua-only sourcing had to.
+Interface\FrameXML\ContainerFrame.xml
+# The bag BAR: MainMenuBarBackpackButton / CharacterBag0..3Slot / KeyRingButton and the item-push
+# card — this client's stand-in for the reference's own MainMenuBarBagButtons.xml, which cannot be
+# sourced until `PutItemInBag`/`PickupBagFromSlot` are bound (the file says so at the site). After
+# ContainerFrame.xml for legibility, not necessity: every verb it calls resolves at click time. It
+# also owns `KEYRING_CONTAINER`, which is where the reference puts it and which the file above
+# reads — again a global resolved at call time, so the order does not bind.
 BagFrame.xml
-# The stack-split spinner (decision 0216 §6/slice 2): loaded beside BagFrame, whose slot
-# click handler (`BenillaBagSlot_OnClick`) calls `OpenStackSplitFrame`. Order between the
-# two doesn't matter for correctness (Lua globals resolve at call time, and neither file's
-# XML `inherits=` reaches into the other's templates) — kept adjacent for legibility.
+# The stack-split spinner (decision 0216 §6/slice 2): loaded beside the bag windows, whose slot
+# click handler (the reference's `ContainerFrameItemButton_OnClick`) calls `OpenStackSplitFrame`.
+# Order between the two doesn't matter for correctness (Lua globals resolve at call time, and
+# neither file's XML `inherits=` reaches into the other's templates) — adjacent for legibility.
 StackSplit.xml
-# Our ADAPTERS over the reference's own `Interface\\FrameXML\\ContainerFrame.lua`, which this
-# client EXECUTES off the patch chain rather than transcribing (`ui_script::reference_ui`) — see
-# that file's header for the rule. Must load AFTER the sourced reference file (every builtin does)
-# and after BagFrame/StackSplit, whose globals it leans on.
+# Our ADAPTERS over the reference's own container files — one wrapper, for the keyring tooltip
+# detour benilla answers differently (0765). Must load AFTER them, since it captures at load the
+# body it wraps; its own header says what it stopped needing to do when the XML became sourceable.
 ContainerFrameAdapters.xml
 # The character window (decision 0208 phase 1a): the C-key paper doll. Loaded after BagFrame
 # (needs nothing from it, but keeps player-state windows grouped) and before the NPC session
 # windows (Gossip/Merchant/Quest*) — it depends only on Fonts/UiPanels/GameTooltip, all
 # already loaded above.
 CharacterFrame.xml
+# The reference's item-SLOT button templates (PaperDollItemSlotButtonTemplate <-
+# BagSlotButtonTemplate), published for addons rather than used by our own windows. Here
+# rather than beside their subjects because the chain crosses BagFrame.xml (241) ->
+# CharacterFrame.xml (256) the wrong way; needs ItemButtonTemplate.xml (45) above it for the
+# base and Cooldown.xml (124) for the $parentCooldown the doll template carries.
+ItemSlotButtonTemplates.xml
 # The Pet tab (decision 1057): the same separate-top-level-file shape as SkillFrame below,
 # and ahead of it because it is the earlier tab. It leans on CharacterFrame.xml for real —
 # the `(unit, prefix)` stat setters, the `BenillaStatRow`/`BenillaMagicResistanceFrame`
@@ -261,9 +345,9 @@ PetPaperDollFrame.xml
 # "Show as Experience Bar" box.
 ReputationFrame.xml
 # The Skills tab (decision 0437 phase 4): a CharacterFrame child page, but a separate
-# top-level file (SkillFrame.xml's own header comment — this engine has no cross-file
-# `parent=` attachment, so it's positioned by name via `<Anchors relativeTo=
-# "CharacterFrame">` instead). Loaded after CharacterFrame.xml so it paints ON TOP of
+# top-level file — it declares `parent="CharacterFrame"`, which really attaches (1734), and
+# is positioned by name via `<Anchors relativeTo="CharacterFrame">`, the geometry it ships
+# with. Loaded after CharacterFrame.xml so it paints ON TOP of
 # it (later file = higher z) and so `CharacterFrame` already exists for that anchor to
 # resolve against — seated at the real client's own tab 4, between Reputation above and
 # Honor below.
@@ -342,16 +426,33 @@ ItemTextFrame.xml
 # v1 uses plain-text costs, not MerchantFrame's coin helpers) and before the other NPC
 # session windows below.
 TrainerFrame.xml
-# The bank window (decision 0604 phase 4): the vault, purchase ladder, and the 6 bank-bag
-# popouts, over the container feed already carrying container -1/5..10 (ui_items.rs) +
-# the bank Lua surface (benilla-ui/src/script/bank.rs) + crate::ui_bank's feed/drain.
-# Loaded AFTER MerchantFrame.xml (reuses its BenillaMoney_* coin helpers for the purchase
-# row + purse) and AFTER BagFrame.xml, already above (its BenillaBagSlotTemplate/
-# BenillaBagWindowTemplate + the BenillaBagSlot_*/BenillaBagFrame_* function family are
-# reused verbatim — the 24 generic slots and the 6 bank-bag popouts are, respectively, a
-# container-slot grid and ordinary container windows, exactly like the bag arc's own).
-# Kept in the "NPC session windows grouped" cluster beside Trainer/Taxi.
-BankFrame.xml
+# ══ THE BANK WINDOW — the reference's own, off the player's chain (decision 1751, window 2) ══
+# `BankFrame`, `BankFrameItem1..24`, `BankFrameBag1..6`, `BankFramePurchaseInfo` and the
+# `BANK_CONTAINER`/`NUM_BAG_SLOTS`/`NUM_BANKGENERIC_SLOTS`/`NUM_BANKBAGSLOTS` constants — the real
+# 1.12 file, running as the file, with `BankFrame.lua` arriving through its own `<Script file=>`.
+# Our own 890-line BankFrame.xml is gone with it, and so are its six popout windows: a bank bag is
+# an ordinary `ContainerFrame` at container id 5..10, which is what the reference always did.
+#
+# THE POSITION IS THE REQUIREMENT, as it was for ContainerFrame.xml. This file's `inherits=` reach
+# four templates above it — `ItemButtonTemplate`, `UIPanelCloseButton` (UIPanelTemplates.xml),
+# `UIPanelButtonTemplate` (same), `SmallMoneyFrameTemplate` (MoneyFrame.xml) — plus
+# `parent="UIParent"`, and its `OnHide` calls `updateContainerFrameAnchors` out of
+# ContainerFrame.lua. All are loaded above.
+#
+# What it needed from this client, all built for it: `PutItemInBag`/`PickupBagFromSlot` (the two
+# verbs its bag buttons ARE), the bank-bag inventory band at live ids 64..=69 that gives those
+# verbs an item to move, `GetInventorySlotInfo("Bag1".."Bag6")` for the empty-slot art, and
+# `StaticPopupDialogs["CONFIRM_BUY_BANK_SLOT"]` re-homed into UiPanels.xml (the reference keeps it
+# in StaticPopup.lua, which this client replaces).
+#
+# One reference quirk carried rather than fixed: `BankFramePurchaseButton` is declared
+# `virtual="true"` INSIDE `<Frames>`. Only a top-level element is ever a template — nested nodes
+# are materialized regardless (`framexml.rs`) — so the button exists and works, which is what the
+# real client does too. Classic Era's Vanilla BankFrame.xml still carries the same attribute on
+# the same button, and that button works there.
+#
+# Kept in the "NPC session windows grouped" cluster beside Trainer/Taxi, and after MerchantFrame.
+Interface\FrameXML\BankFrame.xml
 # The taxi-map window (decision 0484 phase 2): the flight-master session, driven by the
 # taxi engine seam (`benilla-ui/src/script/taxi.rs`) over `crate::ui_taxi`'s feed/drain.
 # Loaded right after TrainerFrame per the same "NPC session windows grouped" posture — it
@@ -455,7 +556,9 @@ ScriptLogFrame.xml
 # requirement rather than legibility is **after BuffFrame.xml**: the toast re-anchors
 # TemporaryEnchantFrame out of its own way, and that frame is declared there.
 HelpFrame.xml
-# The cinematic letterbox (the race-intro fly-by's two black bars, and the ESC that skips it).
+# The cinematic frame: the ESC that skips a fly-by, and the SCREENSHOT chord it hands back. It
+# draws NOTHING — the letterbox moved to Bevy UI nodes in `crate::cinematic` (decision 1699),
+# because the lane this frame paints into is dark for the whole shot.
 # Needs UiPanels.xml far above for ShowUIPanel/HideUIPanel and its own UIPanelWindows row; needs
 # nothing else, and nothing needs it — the engine reaches it purely by firing CINEMATIC_START.
 # Seated late because it is an outermost, screen-owning layer, like the two windows below it.

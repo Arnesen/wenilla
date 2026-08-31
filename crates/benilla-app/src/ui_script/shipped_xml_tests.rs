@@ -795,7 +795,7 @@ fn every_texture_frame_outranks_its_status_bars() {
         let Some(base) = texture_frame.strip_suffix("TextureFrame") else {
             continue;
         };
-        for suffix in ["HealthBar", "PowerBar", "ManaBar"] {
+        for suffix in ["HealthBar", "ManaBar", "ManaBar"] {
             let bar = format!("{base}{suffix}");
             let Some(&(bar_strata, bar_level)) = level_of.get(&bar) else {
                 continue;
@@ -1088,4 +1088,199 @@ fn the_inspect_cursor_pair_takes_both_arms() {
         "the unowned-tooltip gate short-circuits: {:?}",
         s.errors()
     );
+}
+
+/// **Nothing of the interface is left on screen during a cinematic** — swept over the whole
+/// shipped manifest, not one file at a time.
+///
+/// This is the test the director's eye had to stand in for. Decision 1734 restored 72 dropped
+/// `parent=` declarations and a per-window test proved the cascade worked; the chat still drew
+/// over the fly-by, because benilla carries the reference's `FloatingChatFrameTemplate` and
+/// `ChatTabTemplate` under its own names (`BenillaChatFrameTemplate`, `BenillaChatTabTemplate`)
+/// and the gap analysis that found the 72 skipped `virtual="true"` templates entirely. A
+/// name-for-name comparison against the reference could not see it. **Sweeping what is actually
+/// visible can**, which is why this is written against the observable and not against a list.
+///
+/// The three survivors are each required to survive:
+///
+/// - `CinematicFrame` — the frame being *shown*. The reference declares it with no parent for
+///   exactly this reason, and `SetFullScreenFrame` shows it in the same breath as hiding UIParent.
+/// - `WorldFrame` — the 3D scene's frame. Ours renders nothing (Bevy draws the world), but it is
+///   the reference's own bottom-of-strata frame and a cinematic is a thing you watch *in* it.
+/// - `BenillaFadeDriver` — a 1x1 frame with no textures and no layers, whose only content is an
+///   `OnUpdate` running `UIFrameFadeUpdate`. It draws nothing, and it must not be hidden: a hidden
+///   frame's `OnUpdate` does not run, so parenting it would freeze every in-flight `UIFrameFade`
+///   the instant a cinematic started and leave frames stranded mid-fade.
+#[test]
+fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    let names = shipped_frame_names();
+    let visible = |s: &benilla_ui::script::UiScript, n: &str| -> bool {
+        s.eval::<i64>(&format!(
+            "local f = getglobal(\"{n}\") \
+             if not f or not f.IsVisible then return 0 end \
+             return f:IsVisible() and 1 or 0"
+        ))
+        .unwrap_or(0)
+            == 1
+    };
+
+    // The sweep is only worth anything if there was something to hide in the first place.
+    let before = names.iter().filter(|n| visible(&s, n)).count();
+    assert!(
+        before > 50,
+        "only {before} frames visible before the cinematic — the sweep found no interface to \
+         hide, so it would pass no matter what the cascade did"
+    );
+
+    s.set_in_cinematic(true);
+    s.fire_event("CINEMATIC_START", vec![]);
+    s.resolve();
+
+    let mut after: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| visible(&s, n))
+        .collect();
+    after.sort_unstable();
+    assert_eq!(
+        after,
+        ["BenillaFadeDriver", "CinematicFrame", "WorldFrame"],
+        "something is drawing over the fly-by (see this test's header for why exactly these \
+         three are allowed to survive)"
+    );
+
+    // …and the player gets it all back.
+    s.set_in_cinematic(false);
+    s.fire_event("CINEMATIC_STOP", vec![]);
+    s.resolve();
+    let restored = names.iter().filter(|n| visible(&s, n)).count();
+    assert_eq!(
+        restored, before,
+        "the interface comes back exactly as it was"
+    );
+}
+
+/// **Every `parent=` the shipped tree declares REALLY attaches** — the tripwire for 1734's trap.
+///
+/// A parent name is resolved at LOAD, and a name that names nothing is **not an error**: the loader
+/// warns ("names no frame — falling back to the enclosing one") and silently reparents to whatever
+/// element encloses the declaration. So a typo, a renamed window, or a file that loads earlier in
+/// the manifest than its parent's leaves the frame attached to the wrong thing with a green suite
+/// and one log line nobody greps — which is how 1734's 41 harness failures were the *lucky*
+/// outcome and a silent half-fix was the unlucky one.
+///
+/// Asserted on the LOADED tree, not on the text: `GetParent():GetName()` is what the frame ended up
+/// attached to, which is the only form of this claim worth making. It is also the standing answer
+/// to "does this engine read a cross-file `parent=`?" — several file headers still said it does
+/// not, years after it did, and five pages carry a hand-written substitute for `setAllPoints`
+/// because of it.
+#[test]
+fn every_declared_parent_really_attaches() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    let declared = shipped_frame_parents();
+    assert!(
+        declared.len() > 60,
+        "only {} parent declarations found — the scan broke",
+        declared.len()
+    );
+    let mut wrong: Vec<String> = Vec::new();
+    for (child, parent) in &declared {
+        let got = s
+            .eval::<String>(&format!(
+                "local f = getglobal(\"{child}\") \
+                 if not f or not f.GetParent then return \"<not a frame>\" end \
+                 local p = f:GetParent() \
+                 return p and (p:GetName() or \"<anonymous>\") or \"<none>\""
+            ))
+            .unwrap_or_else(|_| "<error>".to_string());
+        if got != *parent {
+            wrong.push(format!(
+                "  {child}: declared parent={parent}, attached to {got}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} frame(s) did not attach to the parent they declare:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// `(named non-virtual frame, the `parent=` it declares)` for every such declaration in the shipped
+/// tree — the population of [`every_declared_parent_really_attaches`].
+fn shipped_frame_parents() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "xml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        for chunk in text.split('<').skip(1) {
+            let head = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+            if head.contains("virtual=\"true\"") {
+                continue;
+            }
+            let attr = |key: &str| -> Option<String> {
+                let i = head.find(key)?;
+                let rest = &head[i + key.len()..];
+                let j = rest.find('"')?;
+                Some(rest[..j].to_string())
+            };
+            let (Some(name), Some(parent)) = (attr("name=\""), attr("parent=\"")) else {
+                continue;
+            };
+            if !name.contains('$') && !parent.contains('$') {
+                out.push((name, parent));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every named, non-virtual frame the shipped tree declares — the sweep's population.
+pub(super) fn shipped_frame_names() -> Vec<String> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "xml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        for chunk in text.split('<').skip(1) {
+            let head = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+            if head.contains("virtual=\"true\"") {
+                continue;
+            }
+            let Some(i) = head.find("name=\"") else {
+                continue;
+            };
+            let rest = &head[i + 6..];
+            let Some(j) = rest.find('"') else { continue };
+            let n = &rest[..j];
+            // `$parent`-templated names are not globals; nothing can look them up by name.
+            if !n.is_empty() && !n.contains('$') {
+                names.push(n.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }

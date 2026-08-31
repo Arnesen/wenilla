@@ -81,7 +81,8 @@ fn button_state_textures_switch_with_interaction() {
     // Disabled: disabled texture only, and no highlight even under the cursor.
     s.run("StateBtn:Disable()").unwrap();
     assert_eq!(visible(&s), vec!["Interface\\D.blp".to_string()]);
-    assert!(!s.eval::<bool>("return StateBtn:IsEnabled()").unwrap());
+    // 0, not false, and not nil — the number the real client answers.
+    assert_eq!(s.eval::<i64>("return StateBtn:IsEnabled()").unwrap(), 0);
     s.run("StateBtn:Enable()").unwrap();
     assert_eq!(s.eval::<String>("return StateBtn:GetText()").unwrap(), "Go");
     assert!(s.errors().is_empty(), "{:?}", s.errors());

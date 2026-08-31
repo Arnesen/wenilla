@@ -23,10 +23,14 @@
         the action bar behind it, and an unguarded call would abort the rest of that OnShow. Same
         posture as UiPanels.xml's `CloseMenus and CloseMenus()` and the `if GameTooltip` guards.
 
-        Structure: the buttons are TOP-LEVEL frames anchored by name into MainMenuBarArtFrame
-        (this engine has no cross-file `parent=` attachment — SkillFrame.xml's header comment), then
-        seated one frame level above the art by BenillaActionBarArt_SeatAbove (ActionBar.xml) so the
-        bar plate doesn't paint over them. Same shape the bag bar next door already uses.
+        Structure: the buttons are declared at this file's top level and carry
+        `parent="MainMenuBarArtFrame"`, which really does attach them to the bar art — the loader
+        reads a cross-file `parent=`, resolving the name by global lookup at load (decision 1734),
+        so the art must already exist when this file loads, which the manifest order gives it. They
+        are anchored into it by name as well, and seated one frame level above it by
+        BenillaActionBarArt_SeatAbove (ActionBar.xml) so the bar plate doesn't paint over them —
+        both kept as they are, because that is the row the bar was built and approved against. Same
+        shape the bag bar next door already uses.
 
         SCOPE / real-client divergences (noted, not bugs):
         - EVERY button now opens something. Help was the last "art only, wired the day the panel
@@ -279,7 +283,7 @@
     <!-- ref CharacterMicroButton (l.20-63): the row's head, at the art frame's BOTTOMLEFT +(552,2).
          MicroButtonPortrait is the ref's own global name (not $parent-prefixed), 18x25 hung from the
          button's TOP -28. -->
-    <Button name="CharacterMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="CharacterMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="MainMenuBarArtFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="552" y="2"/></Offset></Anchor>
         </Anchors>
@@ -299,7 +303,7 @@
         </Scripts>
     </Button>
 
-    <Button name="SpellbookMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="SpellbookMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="CharacterMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
@@ -309,7 +313,7 @@
         </Scripts>
     </Button>
 
-    <Button name="TalentMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="TalentMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="SpellbookMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
@@ -320,7 +324,7 @@
         </Scripts>
     </Button>
 
-    <Button name="QuestLogMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="QuestLogMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="TalentMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
@@ -334,7 +338,7 @@
         </Scripts>
     </Button>
 
-    <Button name="SocialsMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="SocialsMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="QuestLogMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
@@ -344,7 +348,7 @@
         </Scripts>
     </Button>
 
-    <Button name="WorldMapMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="WorldMapMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="SocialsMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
@@ -357,7 +361,7 @@
     <!-- The game menu (decision 0674). `ToggleGameMenu(1)` is the ref's own OnClick — the argument
          is what makes a CLICK a plain toggle (close it, or close everything and open it) instead of
          the ESC key's one-eater-per-press ladder; UiPanels.xml has both halves. -->
-    <Button name="MainMenuMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="MainMenuMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="WorldMapMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
@@ -373,7 +377,7 @@
          so this button's pushed state follows it however the window was opened or closed.
          It takes no binding — 1.12 has no TOGGLEHELP action — so the tooltip shows the bare
          label, which is the ref's behaviour for this one too. -->
-    <Button name="HelpMicroButton" inherits="BenillaMicroButtonTemplate">
+    <Button name="HelpMicroButton" inherits="BenillaMicroButtonTemplate" parent="MainMenuBarArtFrame">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="MainMenuMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>

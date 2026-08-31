@@ -78,6 +78,87 @@ const WAIT_LOG_EVERY: f32 = 2.0;
 /// do; the reported case — `.tele` across a city — is 458 yd.
 const SNAP_LOAD_MIN_YD: f32 = 100.0;
 
+/// Consecutive covered+in-world frames before the cover counts as **on the glass**.
+///
+/// Renders are serial, so at 3 the two intermediate frames' renders have committed their
+/// presents. This was 0962's argument and its constant; it now lives beside the fact it defines
+/// rather than being restated in each consumer (it had already been copied twice, and the third
+/// consumer — the world camera — never got it at all).
+const COVER_PRESENT_FRAMES: u32 = 3;
+
+/// **Is the entry cover ON THE GLASS?** — the one fact 0962's rule is written in terms of, held
+/// in one place because restating it is exactly how it gets forgotten.
+///
+/// The world-entry raise happens in `Update`; the state flips a frame later, so the FIRST
+/// covered+in-world frame is also the first frame whose render can draw the cover. Anything
+/// synchronous on that frame holds the *previous* present — the character-select screen, frozen
+/// — for its whole duration. That is the director's report, three times now (0962, 1345, and the
+/// world camera below), and each time it was one consumer nobody had counted:
+///
+/// - the **pipeline-warm menagerie** (0962) — its own `covered_frames`, now this;
+/// - the **world-entry FrameXML load** (1345) — its own `covered_frames`, now this;
+/// - the **world camera and the booth wake** — never deferred at all, and measured (this record's
+///   round) as **57 of the flip frame's 60 ms**: the first render of a 3 000-entity world with
+///   cold pipelines, plus fifteen booth cameras woken by the warm pass, all on the one frame that
+///   owes the glass a loading screen.
+///
+/// Counted in `First` so a `PreUpdate` reader (the entry load, an exclusive system) and an
+/// `Update` reader (the warm pass, the camera gate) see the same frame's answer.
+#[derive(Resource, Default)]
+pub(crate) struct EntryCover {
+    /// Consecutive covered+in-world frames; reset the moment either goes false.
+    frames: u32,
+}
+
+impl EntryCover {
+    /// Has the cover had enough frames to reach the glass? **True whenever no cover is up** —
+    /// there is then no glass to protect, and a consumer that waited would wait forever (the
+    /// capture that boots straight in-world is exactly this case).
+    pub(crate) fn presented(&self) -> bool {
+        self.frames == 0 || self.frames >= COVER_PRESENT_FRAMES
+    }
+
+    /// Is a cover up and still owed its first present? The inverse of the arm above that a
+    /// *renderer* wants: "do not draw anything but the cover this frame".
+    pub(crate) fn owes_a_present(&self) -> bool {
+        self.frames > 0 && self.frames < COVER_PRESENT_FRAMES
+    }
+
+    /// **Is a world cover up right now?** — `LoadingScreen::covering()` ∧ in world, which is
+    /// the pair every cover consumer actually means, counted once here.
+    pub(crate) fn covering(&self) -> bool {
+        self.frames > 0
+    }
+
+    /// Covered frames so far — what the tests assert on.
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> u32 {
+        self.frames
+    }
+}
+
+impl EntryCover {
+    /// One frame's worth of counting — the whole rule, so the test seam and the system cannot
+    /// drift apart.
+    pub(crate) fn tick(&mut self, covered: bool) {
+        self.frames = if covered {
+            self.frames.saturating_add(1)
+        } else {
+            0
+        };
+    }
+}
+
+/// `First`: advance (or reset) the covered-frame count. One writer, read by every consumer.
+fn count_entry_cover(
+    screen: Res<LoadingScreen>,
+    state: Res<State<crate::char_select::ClientState>>,
+    mut cover: ResMut<EntryCover>,
+) {
+    let in_world = *state.get() == crate::char_select::ClientState::InWorld;
+    cover.tick(screen.covering() && in_world);
+}
+
 /// Bevy resource wrapper around the format-crate [`LoadingScreenCatalog`] (the `LoadingScreenID` → BLP
 /// path table). Paired with [`MapCatalogRes`] (the `mapId` → `LoadingScreenID` FK) to resolve art.
 #[derive(Resource)]
@@ -169,6 +250,9 @@ pub(crate) struct LoadingScreenPlugin;
 impl Plugin for LoadingScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LoadingScreen>()
+            .init_resource::<EntryCover>()
+            // `First`, ahead of every consumer in `PreUpdate` and `Update` — see [`EntryCover`].
+            .add_systems(First, count_entry_cover)
             .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
             // In `WorldStage::Present` (after Input + Stream): we read residency for the SAME frame's
             // player position — a teleport snaps in Input → the streamer recomputes focus in Stream →
@@ -309,7 +393,13 @@ fn setup_loading_screen(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_loading_screen(
     mut screen: ResMut<LoadingScreen>,
-    progress: Res<WorldLoadProgress>,
+    // The streamer's two published facts, bundled into one param (Bevy's 16-element system-param
+    // ceiling, the same squeeze `player::control` and `feed_ui_input` already pay): what is
+    // resident, and whether that residency is even ABOUT the player's own ground this frame.
+    stream: (
+        Res<WorldLoadProgress>,
+        Res<benilla_world::terrain_stream::ViewFocus>,
+    ),
     current_map: Option<Res<CurrentMap>>,
     maps: Option<Res<MapCatalogRes>>,
     screens: Option<Res<LoadingScreenCatalogRes>>,
@@ -359,6 +449,7 @@ fn drive_loading_screen(
         transfer,
         roster,
     ) = edges;
+    let (progress, focus) = (&stream.0, &stream.1);
     let now = time.elapsed_secs();
     let map_id = current_map.as_ref().map(|m| m.0);
     // The physics hold releases on the same residency signal that clears this screen (decision
@@ -443,8 +534,20 @@ fn drive_loading_screen(
     // an invisible screen up forever against residency that never arrives. The warm-up is not lost,
     // it MOVED: the world now loads under the cover this same function raises on world entry, which
     // is where a warm-up belongs. ---
+    //
+    // **And only while the focus IS the body** ([`ViewFocus::follows_body`]). The trigger's whole
+    // premise is "residency says the ground under the player is missing and no edge announced it,
+    // so a load must be happening". While the eye is deliberately elsewhere — a cinematic fly-by,
+    // a free-fly — residency describes the *camera's* tile, and reading it as a fact about the
+    // player is reading someone else's ground (decision 1336's lesson, one consumer over).
+    // Measured: every cinematic raised this cover the instant it started (`.debug play cinematic
+    // 41` → "loading screen: up (focus not resident, map None)" in the same millisecond as the
+    // shot), covering the opening seconds of the fly-by the deferred-start latch exists to protect
+    // — and, once the body took the settle hold for the same detachment, covering ALL of it,
+    // because this cover's clear waits on that hold and that hold waits on the focus coming home.
     if !screen.active
         && !progress.focus_resident
+        && focus.follows_body()
         && *state.get() == crate::char_select::ClientState::InWorld
     {
         screen.raise("focus not resident", false, None, now);
@@ -597,5 +700,51 @@ fn drive_loading_screen(
     let frac = screen.displayed;
     if let Ok(mut node) = fill.single_mut() {
         node.width = Val::Percent(frac * FILL_MAX_WIDTH * 100.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The one fact three consumers now share** ([`EntryCover`]). Two of them each kept their
+    /// own copy of this count (0962's menagerie, 1345's FrameXML load) and the third — the world
+    /// camera, which renders the whole arriving world on the same frame — never had one at all,
+    /// which is the freeze this round measured. The arithmetic is trivial; that it has exactly one
+    /// home is the point.
+    #[test]
+    fn the_cover_counts_frames_to_the_glass_and_resets_the_moment_it_drops() {
+        let mut cover = EntryCover::default();
+        assert!(
+            cover.presented(),
+            "no cover up: nothing is watching the previous present, so nothing waits"
+        );
+        assert!(!cover.owes_a_present(), "no cover owes no present");
+
+        cover.tick(true);
+        assert_eq!(cover.frames(), 1);
+        assert!(
+            !cover.presented(),
+            "the cover's own render has not committed yet"
+        );
+        assert!(cover.owes_a_present());
+
+        cover.tick(true);
+        assert!(!cover.presented(), "one render committed, not two");
+
+        cover.tick(true);
+        assert!(
+            cover.presented(),
+            "at COVER_PRESENT_FRAMES the cover is provably on the glass"
+        );
+        assert!(!cover.owes_a_present());
+
+        // A reveal (or leaving the world) drops it back to the uncovered arm in one frame — the
+        // next raise must not inherit the last one's credit.
+        cover.tick(false);
+        assert_eq!(cover.frames(), 0);
+        assert!(cover.presented());
+        cover.tick(true);
+        assert!(!cover.presented(), "the next raise starts its own count");
     }
 }

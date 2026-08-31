@@ -139,6 +139,22 @@ pub struct PartyState {
     /// The party leader, on the Lua `GetPartyLeaderIndex` scale: `0` the player leads, `1..=4` that
     /// `members` slot (1-based) leads.
     pub leader_index: u32,
+    /// **The cached group-leader GUID** — the reference's `[0xbc75f8]:[0xbc75fc]` pair, `0` when
+    /// ungrouped. Fed straight from the wire's leader GUID, not derived from
+    /// [`Self::leader_index`].
+    ///
+    /// It exists because `UnitIsPartyLeader`'s second leg is a GUID compare and an index cannot
+    /// stand in for it: the leg has to answer for a member whose object the client does **not**
+    /// hold — an out-of-range `party3`, any `raidN` — where there is no descriptor to read the
+    /// flag from, and it has to answer for the *resolved token's* GUID rather than for a slot.
+    ///
+    /// **Compared WITHOUT a zero guard**, which is the load-bearing part and reads like a bug:
+    /// `IsPartyLeader 0x4e9130` short-circuits on a `0:0` cached leader, and
+    /// `UnitIsPartyLeader 0x516210` does not. So an unresolvable-but-non-raising argument (none,
+    /// `nil`, `""`, `"target"` with no target) resolves to `0:0`, matches the zeroed leader, and
+    /// the reference answers **`1` while solo**. A client that answers `nil` there is not
+    /// reproducing 1.12 (wow-re `ui/scratch/party-leader-and-nameplate-verbs.md`).
+    pub leader_guid: u64,
     /// The **whole raid roster**, `GetRaidRosterInfo`'s 1-based array — empty outside a raid,
     /// and **including the player** (the reference's array does; it is why `UnitInRaid("player")`
     /// answers `1` in a raid and why this list is not `members`'s recipient-excluded shape).
@@ -763,6 +779,7 @@ mod tests {
                 },
             ],
             leader_index: 1, // Alice (party1) leads
+            leader_guid: 0xA11CE,
             raid: Vec::new(),
             loot_method: "group".into(),
             master_looter: None,

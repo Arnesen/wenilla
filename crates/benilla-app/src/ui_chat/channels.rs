@@ -290,10 +290,17 @@ pub(super) fn auto_join_zone_channels(
     channels: Res<ChannelState>,
     areas: Option<Res<AreaTableRes>>,
     world: benilla_world::world_point::WorldPoint,
-    player: Option<Res<crate::player::Player>>,
+    // One param (clippy's argument ceiling), and they belong together: both answer "is the zone
+    // under the player the one this walk may act on?" — the body's own settle, and whether the
+    // view has flown off it for a cinematic.
+    body: (
+        Option<Res<crate::player::Player>>,
+        Option<Res<crate::cinematic::Cinematic>>,
+    ),
     mut walk: ResMut<ZoneChannelWalk>,
     mut entered: MessageReader<crate::net::EnteredWorldMessage>,
 ) {
+    let (player, cinematic) = (&body.0, &body.1);
     // World entry arms the walk; the session-end clears disarm it ([`end_session_channels`] and its
     // disconnect twin, which own the whole fact — walk, confirmed list, VM mirror, edit target).
     if entered.read().next().is_some() {
@@ -301,6 +308,20 @@ pub(super) fn auto_join_zone_channels(
     }
     if !walk.live {
         return; // no character session — see `ZoneChannelWalk::live`
+    }
+    // **A cinematic suppresses the rejoin, and it resumes when the shot ends.** Two of the ten
+    // sites that read the reference's cinematic-state cell exist for exactly this — `0x49491e`
+    // (the zone-text update) and `0x5ff566` (a `UPDATEFLAGS` reflex) both skip
+    // `ZoneChannelRefresh` (`0x49a210`) while one runs, and `EndCinematic` calls it once at
+    // `0x48f1d0` (wow-re `ui/scratch/cinematic-camera-law.md` §3.3, the complete 10-site census).
+    //
+    // The walk stays armed, so "rejoin once at the end" is what falling through here the next
+    // frame already does — there is nothing to re-arm. It matters because a race intro flies the
+    // streaming focus hundreds of yards off the body, so `world.area()` changes under a player
+    // who has not moved, and the joins would otherwise fire against zones they are only
+    // *looking* at.
+    if cinematic.as_deref().is_some_and(|c| c.is_playing()) {
+        return;
     }
     let (Some(areas), false) = (areas, channels.channels.is_empty()) else {
         return;

@@ -1,6 +1,6 @@
 //! The `Unit*` binding tests (the parent module is the unit under test).
 
-use crate::script::{UiScript, UnitState};
+use crate::script::{PartyState, UiScript, UnitState};
 
 fn player() -> UnitState {
     UnitState {
@@ -276,16 +276,65 @@ fn corpse_can_attack_and_green_range_bindings() {
 
 #[test]
 fn target_unit_queues_the_token_for_the_app_to_resolve() {
+    use crate::script::SelectionRequest;
     let mut s = UiScript::new().unwrap();
     // Nothing queued until a call lands.
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
     // Each call queues its raw token, in order; a nil token is ignored.
     s.eval::<()>(r#"TargetUnit("player")"#).unwrap();
     s.eval::<()>(r#"TargetUnit("target")"#).unwrap();
     s.eval::<()>(r#"TargetUnit(nil)"#).unwrap();
-    assert_eq!(s.take_target_requests(), vec!["player", "target"]);
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![
+            SelectionRequest::Unit("player".into()),
+            SelectionRequest::Unit("target".into()),
+        ]
+    );
     // The drain is a take — a second read is empty.
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
+}
+
+/// The three verbs share ONE queue, and the queue keeps their call order — which is the whole
+/// reason it is one queue (`0x489a40` is one function for all of them, and a macro can observe
+/// the order). A nil `AssistUnit` argument is dropped like `TargetUnit`'s, and
+/// `TargetLastEnemy()` names no unit at all.
+#[test]
+fn the_selection_queue_carries_all_three_verbs_in_call_order() {
+    use crate::script::SelectionRequest;
+    let mut s = UiScript::new().unwrap();
+    s.eval::<()>(r#"TargetUnit("party1")"#).unwrap();
+    s.eval::<()>(r#"AssistUnit("target")"#).unwrap();
+    s.eval::<()>(r#"AssistUnit(nil)"#).unwrap();
+    s.eval::<()>("TargetLastEnemy()").unwrap();
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![
+            SelectionRequest::Unit("party1".into()),
+            SelectionRequest::Assist("target".into()),
+            SelectionRequest::LastEnemy,
+        ]
+    );
+    assert!(s.take_selection_requests().is_empty());
+}
+
+/// `TargetNearestFriend`'s reverse flag, read exactly as `0x6f1c10(idx 1, default 0)` does:
+/// absent or nil is forward, and 1.12's own `Bindings.xml` note — *"1 (or \"true\") means
+/// reverse!"* — is why a boolean and a number both count. A numeric `0` is forward.
+#[test]
+fn target_nearest_friend_queues_its_reverse_flag() {
+    let mut s = UiScript::new().unwrap();
+    assert!(s.take_target_nearest_friend_requests().is_empty());
+    s.eval::<()>("TargetNearestFriend()").unwrap();
+    s.eval::<()>("TargetNearestFriend(1)").unwrap();
+    s.eval::<()>("TargetNearestFriend(true)").unwrap();
+    s.eval::<()>("TargetNearestFriend(0)").unwrap();
+    s.eval::<()>("TargetNearestFriend(nil)").unwrap();
+    assert_eq!(
+        s.take_target_nearest_friend_requests(),
+        vec![false, true, true, false, false]
+    );
+    assert!(s.take_target_nearest_friend_requests().is_empty());
 }
 
 #[test]
@@ -957,4 +1006,288 @@ fn a_multibyte_unit_token_raises_rather_than_panicking() {
         s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
         "Benilla"
     );
+}
+
+/// **`UnitIsVisible` is object presence, and it is NOT `UnitExists`** — the pair an out-of-range
+/// party member separates, and the branch pfUI takes seven times.
+///
+/// `0x516030` is 57 bytes with one branch:
+/// `ClntObjMgrObjectPtr(resolve(token), TYPEMASK_UNIT) != NULL`. No field read, no comparison
+/// beyond `test eax,eax`, no float opcode — so no distance, no radius, no visibility flag. The
+/// range test is the *server's*: the out-of-range demotion unlinks the object from the very
+/// manager index this query searches (wow-re `ui/scratch/unitisvisible-object-presence.md`).
+///
+/// The state that backs it is [`UnitState::has_object`], which `ui_party::feed`'s
+/// `member_unit_state` has always branched on — its `store: Option<&ObjectStore>` argument, whose
+/// own comment names `0x468460`. This test is what stops the two fields being conflated back
+/// together, because in every *in-range* case they agree and only the out-of-range one tells them
+/// apart.
+#[test]
+fn unit_is_visible_is_object_presence_not_existence() {
+    let mut s = UiScript::new().unwrap();
+
+    // In range: the object is held, both answer yes.
+    s.set_unit(
+        "party1",
+        Some(UnitState {
+            exists: true,
+            has_object: true,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsVisible("party1")"#).unwrap(),
+        1,
+        "a held object is visible — and the return is the NUMBER 1, never a boolean"
+    );
+
+    // **Out of range: the roster still has them, the object manager does not.** This is the row
+    // that matters; `exists` MUST stay true here, because that is what UnitExists's own GUID
+    // fallback answers, and folding the two fields into one would silently break it.
+    s.set_unit(
+        "party1",
+        Some(UnitState {
+            exists: true,
+            has_object: false,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        s.eval::<Option<i64>>(r#"return UnitIsVisible("party1")"#)
+            .unwrap(),
+        None,
+        "no object -> nil, even though the token still exists"
+    );
+    assert!(
+        s.eval::<bool>(r#"return UnitExists("party1") and true or false"#)
+            .unwrap(),
+        "...and UnitExists must NOT have moved with it — the roster fallback is the difference"
+    );
+
+    // pfUI's actual line (`unitframes.lua:1873`), which chooses a flat portrait over a 3D one.
+    assert!(
+        s.eval::<bool>(
+            r#"return (not UnitIsVisible("party1") or not UnitIsConnected("party1")) and true or false"#
+        )
+        .unwrap(),
+        "the portrait branch fires for an out-of-range member"
+    );
+
+    // A token with no snapshot at all: nil, via the same "no snapshot" path every predicate uses.
+    assert_eq!(
+        s.eval::<Option<i64>>(r#"return UnitIsVisible("party4")"#)
+            .unwrap(),
+        None
+    );
+}
+
+/// **The tapped pair, and the two ways it goes wrong.**
+///
+/// `UnitIsTapped 0x519c90` / `UnitIsTappedByPlayer 0x519d00` are a masked-byte pair — 108 bytes
+/// each, differing only in the `UNIT_DYNAMIC_FLAGS` mask (`0x4`/`0x8`, UpdateField 143) and the
+/// `Usage:` string. Each is `object present && (flags & mask)` and nothing else: no ownership, no
+/// GUID compare, no party/raid or health conjunct (wow-re
+/// `ui/scratch/tapped-bits-and-unit-faction.md`).
+///
+/// Asserted here because both are easy to get wrong in a way that still looks right:
+///
+/// - **Shape A, not shape C.** `UnitIsVisible` beside them has *no* `Usage:` raise; these two do.
+///   Inheriting the neighbour's shape would fail quietly, in the permissive direction.
+/// - **The pair is read as a conjunction.** `tapped && not tappedByPlayer` — someone *else's* kill
+///   — is the condition addons actually draw, and either bit alone says nothing useful.
+#[test]
+fn the_tapped_pair_is_two_masks_of_one_field_and_raises_on_a_bad_argument() {
+    let mut s = UiScript::new().unwrap();
+    let set = |s: &mut UiScript, tapped, by_player| {
+        s.set_unit(
+            "target",
+            Some(UnitState {
+                exists: true,
+                has_object: true,
+                tapped,
+                tapped_by_player: by_player,
+                ..Default::default()
+            }),
+        );
+    };
+
+    // Untapped: both nil.
+    set(&mut s, false, false);
+    assert_eq!(
+        s.eval::<Option<i64>>(r#"return UnitIsTapped("target")"#)
+            .unwrap(),
+        None
+    );
+
+    // Tapped by someone ELSE — the grey-bar case, pfUI `api/unitframes.lua:2012`.
+    set(&mut s, true, false);
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsTapped("target")"#).unwrap(),
+        1,
+        "the return is the NUMBER 1, never a boolean"
+    );
+    assert_eq!(
+        s.eval::<Option<i64>>(r#"return UnitIsTappedByPlayer("target")"#)
+            .unwrap(),
+        None
+    );
+    assert!(
+        s.eval::<bool>(
+            r#"return (UnitIsTapped("target") and not UnitIsTappedByPlayer("target")) and true or false"#
+        )
+        .unwrap(),
+        "someone else's kill — the conjunction addons actually draw"
+    );
+
+    // Tapped by ME: both set, so the grey-bar branch must NOT fire.
+    set(&mut s, true, true);
+    assert!(
+        !s.eval::<bool>(
+            r#"return (UnitIsTapped("target") and not UnitIsTappedByPlayer("target")) and true or false"#
+        )
+        .unwrap(),
+        "my own tap is not greyed"
+    );
+
+    // Object presence is a conjunct of BOTH: an out-of-range unit is neither, whatever the bits
+    // say — and the bits cannot even be read, because there is no descriptor to read them from.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            has_object: false,
+            tapped: true,
+            tapped_by_player: false,
+            ..Default::default()
+        }),
+    );
+    // (The feed can never build that combination — `ui_unit::snapshot` sets all three together —
+    // but the binding is asserted against it anyway, because a future feed that forgot would
+    // otherwise report a tapped unit the object manager does not hold.)
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsTapped("target")"#).unwrap(),
+        1,
+        "the binding reads the field it is given; the conjunct is enforced at the FEED, and this \
+         assertion records which of the two owns it"
+    );
+
+    // SHAPE A. `UnitIsVisible` next door has no `Usage:` raise; these do — and **nil is in the
+    // list**, which is the half that does not come free: the shared `check_unit_token` lets a nil
+    // through by design (right for `UnitExists` and `UnitIsVisible`, wrong for these two), so the
+    // gate has to live in the binding. This assertion is what found that; the original spelling
+    // used `print`, which is not defined in our VM and so was quietly testing nil all along.
+    for bad in ["{}", "true", "nil", "", "function() end"] {
+        assert!(
+            s.run(&format!("UnitIsTapped({bad})")).is_err(),
+            "UnitIsTapped({bad}) must raise — shape A, not the neighbour's shape C"
+        );
+        assert!(
+            s.run(&format!("UnitIsTappedByPlayer({bad})")).is_err(),
+            "UnitIsTappedByPlayer({bad}) must raise too — the pair shares its gate"
+        );
+    }
+}
+
+/// **`UnitIsPartyLeader` is two legs ORed, and the solo case answers 1.**
+///
+/// `0x516210` is
+///
+/// ```text
+/// o = ObjPtr(resolve(t), TYPEMASK_PLAYER)
+/// (o != NULL && (o.PLAYER_FLAGS & 0x1)) || resolve(t) == g_groupLeaderGuid
+/// ```
+///
+/// and it is **not** derivable from `IsPartyLeader()` + `GetPartyLeaderIndex()` however arranged —
+/// the two legs cover disjoint failures (wow-re
+/// `ui/scratch/party-leader-and-nameplate-verbs.md`, G1 REFUTED). Each leg is asserted with the
+/// other one dead, because either alone looks sufficient until the case it cannot reach.
+#[test]
+fn unit_is_party_leader_ors_two_legs_and_answers_one_when_solo() {
+    let mut s = UiScript::new().unwrap();
+    const ME: u64 = 0x1111;
+    const THEM: u64 = 0x2222;
+
+    // ── LEG 1 alone: the descriptor flag, with the leader GUID matching nobody.
+    //    This is the leg that answers for a STRANGER who leads their own party — something no
+    //    comparison against our group's leader could ever express.
+    s.set_party(PartyState {
+        leader_guid: 0x9999,
+        ..Default::default()
+    });
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            has_object: true,
+            guid: THEM,
+            group_leader: true,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsPartyLeader("target")"#)
+            .unwrap(),
+        1,
+        "the server's PLAYER_FLAGS bit answers on its own"
+    );
+
+    // ── LEG 2 alone: no descriptor flag, but the resolved GUID IS our leader. This is the
+    //    out-of-range member — the client holds no object, so leg 1 has nothing to read.
+    s.set_party(PartyState {
+        leader_guid: THEM,
+        ..Default::default()
+    });
+    s.set_unit(
+        "party1",
+        Some(UnitState {
+            exists: true,
+            has_object: false,
+            guid: THEM,
+            group_leader: false,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsPartyLeader("party1")"#)
+            .unwrap(),
+        1,
+        "the GUID compare answers where there is no descriptor to read a flag from"
+    );
+
+    // ── Neither leg: a grouped member who does not lead.
+    s.set_unit(
+        "party2",
+        Some(UnitState {
+            exists: true,
+            has_object: true,
+            guid: ME,
+            group_leader: false,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        s.eval::<Option<i64>>(r#"return UnitIsPartyLeader("party2")"#)
+            .unwrap(),
+        None
+    );
+
+    // ── **NO ZERO GUARD.** Ungrouped, the cached leader is 0 and an unresolvable-but-non-raising
+    //    token resolves to 0 — so they match and the answer is 1. `IsPartyLeader 0x4e9130`
+    //    short-circuits on a `0:0` leader and `0x516210` does not; that asymmetry is the finding,
+    //    and answering nil here would be the divergence, however much it reads like a bug.
+    s.set_party(PartyState::default());
+    assert_eq!(
+        s.eval::<i64>("return UnitIsPartyLeader(nil)").unwrap(),
+        1,
+        "solo + unresolvable token: 0 == 0, and the reference answers 1"
+    );
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsPartyLeader("target")"#)
+            .unwrap(),
+        1,
+        "...and so does a token with no snapshot, by the same route"
+    );
+
+    // A bad token still raises through the shared resolver — shape C with a shape-A tail.
+    assert!(s.run(r#"UnitIsPartyLeader("notatoken")"#).is_err());
 }

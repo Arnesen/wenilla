@@ -91,12 +91,12 @@ fn a_fresh_faux_frame_loads_at_the_top_with_no_range() {
         .unwrap();
     assert_eq!((lo, hi), (0.0, 0.0));
     assert!(
-        !s.eval::<bool>("return TestScrollScrollBarScrollUpButton:IsEnabled()")
+        !s.eval::<bool>("return TestScrollScrollBarScrollUpButton:IsEnabled() ~= 0")
             .unwrap(),
         "up arrow greyed at load (ref UIPanelTemplates.lua l.245-246)"
     );
     assert!(!s
-        .eval::<bool>("return TestScrollScrollBarScrollDownButton:IsEnabled()")
+        .eval::<bool>("return TestScrollScrollBarScrollDownButton:IsEnabled() ~= 0")
         .unwrap());
 }
 
@@ -132,12 +132,12 @@ fn more_rows_than_fit_raise_the_bar_over_the_overflow_range() {
         "the frame itself too — the ref's own frame:Show(), which is what an addon reads back"
     );
     assert!(
-        !s.eval::<bool>("return TestScrollScrollBarScrollUpButton:IsEnabled()")
+        !s.eval::<bool>("return TestScrollScrollBarScrollUpButton:IsEnabled() ~= 0")
             .unwrap(),
         "at the top: up greyed"
     );
     assert!(s
-        .eval::<bool>("return TestScrollScrollBarScrollDownButton:IsEnabled()")
+        .eval::<bool>("return TestScrollScrollBarScrollDownButton:IsEnabled() ~= 0")
         .unwrap());
 }
 

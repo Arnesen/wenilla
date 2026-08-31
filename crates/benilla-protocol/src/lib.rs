@@ -19,9 +19,9 @@ pub use events::{
     SessionEvent,
 };
 pub use messages::{
-    CharCreateReq, CharEnumItem, Character, CreateSpline, ItemInfo, JumpInfo, MonsterMoveFacing,
-    MoveMode, ObjectFields, OwnerFallback, ServerPacket, SpeedKind, TransportPose,
-    CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM,
+    CharCreateReq, CharEnumItem, Character, CorpseLook, CreateSpline, ItemInfo, JumpInfo,
+    MonsterMoveFacing, MoveMode, ObjectFields, OwnerFallback, ServerPacket, SpeedKind,
+    TransportPose, CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM,
     CHARACTER_FLAG_RENAME,
 };
 pub use world::{

@@ -50,6 +50,38 @@ pub struct QuestObjective {
     pub text: String,
 }
 
+/// `QuestFlags` (vmangos `QuestDef.h:145-160`) — the [`QuestTemplate::flags`] word, which is the
+/// only place the client learns a quest's *kind* (the giver panels carry text and rewards, never
+/// flags). Two of these are load-bearing for the party share (decision 1733) and the rest are
+/// pinned beside them so the word is documented once:
+///
+/// - [`PARTY_ACCEPT`] — an escort quest. When a party member accepts one, every other eligible
+///   member gets `SMSG_QUEST_CONFIRM_ACCEPT`.
+/// - [`SHARABLE`] — the quest log's *Share Quest* button. **The client owns this test**: the
+///   server's `HandlePushQuestToParty` does not check the bit at all, it only re-tests it when the
+///   receiver accepts (`Player::CanShareQuest`, `Player.cpp:13959`).
+/// - [`HIDDEN_REWARDS`] documents a wire shape this parser already survives (see the module's
+///   uniform-rewards note): the rewards block is written as three zero `u32`s rather than omitted.
+pub mod quest_flags {
+    /// Not used by 1.12 data.
+    pub const STAY_ALIVE: u32 = 0x0000_0001;
+    /// Escort: accepting it asks the rest of the party whether they want it too.
+    pub const PARTY_ACCEPT: u32 = 0x0000_0002;
+    /// Not used by 1.12 data.
+    pub const EXPLORATION: u32 = 0x0000_0004;
+    /// The quest may be shared with the party.
+    pub const SHARABLE: u32 = 0x0000_0008;
+    /// Not used by 1.12 data.
+    pub const EPIC: u32 = 0x0000_0020;
+    /// Not used by 1.12 data.
+    pub const RAID: u32 = 0x0000_0040;
+    /// Rewards ship only in `SMSG_QUESTGIVER_OFFER_REWARD` — the DETAILS panel and this template
+    /// write an empty rewards block instead.
+    pub const HIDDEN_REWARDS: u32 = 0x0000_0200;
+    /// Granted and completed in one step; never appears in the client's quest log.
+    pub const AUTO_REWARDED: u32 = 0x0000_0400;
+}
+
 /// `SMSG_QUEST_QUERY_RESPONSE` (vmangos `Quest.cpp:393-528`, the `>1_9_4` branch — live on 5875):
 /// the full quest template, answering `CMSG_QUEST_QUERY` and feeding the quest log's detail view.
 /// Unlike the giver panels this carries **fixed-count** reward/choice/objective arrays (no count

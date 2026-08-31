@@ -479,7 +479,6 @@ pub(super) fn script_target_by_name_requests(
 pub(super) fn assist_requests(
     mut requests: MessageReader<AssistRequest>,
     scan_params: ByNameScan,
-    index: Res<GuidIndex>,
     mut commit: SelectCommit,
 ) {
     for request in requests.read() {
@@ -496,32 +495,11 @@ pub(super) fn assist_requests(
             None => commit.selection.target,
         };
         let Some(basis) = basis else {
-            info!("by-name: /assist — no basis unit; nothing to assist");
+            info!("assist (/assist): no basis unit; nothing to assist");
             continue;
         };
-        // Its own target. A zero/absent guid is the silent no-op — the reference's shared tail
-        // bails here before any send.
-        let Some(guid) = commit
-            .stores
-            .get(basis)
-            .ok()
-            .and_then(|s| s.0.unit_target())
-            .filter(|g| *g != 0)
-        else {
-            info!("by-name: /assist — the basis unit is targeting nothing; silent no-op");
-            continue;
-        };
-        // "Select if it resolves" (`0x489a40`): only a streamed unit can be selected — the
-        // reference's group-roster fallback for an unstreamed guid needs the guid-only selection
-        // benilla does not have yet (see the module header).
-        let Some(entity) = index.0.get(&guid).copied() else {
-            info!(
-                "by-name: /assist — the basis is targeting guid {guid:#x}, which is not streamed"
-            );
-            continue;
-        };
-        info!("by-name: /assist -> the basis unit's target, guid {guid:#x}");
-        commit.commit(entity, guid);
+        // Everything from here is `AssistUnit`'s tail too — one function, as in the reference.
+        commit.assist(basis, "/assist");
     }
 }
 
@@ -627,11 +605,49 @@ pub(crate) struct SelectCommit<'w, 's> {
         With<SelfPlayer>,
     >,
     pub(super) stores: Query<'w, 's, &'static ObjectStore>,
+    /// The guid → entity map — `0x489a40`'s own `0x468460` lookup, which every one of this tail's
+    /// callers needs and none of them should re-derive.
+    index: Res<'w, GuidIndex>,
     factions: Option<Res<'w, super::Factions>>,
     reputations: Res<'w, crate::net::Reputations>,
 }
 
 impl SelectCommit<'_, '_> {
+    /// **The shared assist tail** (`0x489bb2`–`0x489c07`, byte-identical to `AssistByName`'s
+    /// `0x489cae`–`0x489d07`): read the basis unit's `UNIT_FIELD_TARGET` (`[[obj+0x110]+0x28]`),
+    /// bail **silently** on zero, then select it if it resolves.
+    ///
+    /// One function because the reference has one — the two Assist bindings differ only in how the
+    /// *basis* is found (a name through the resolver, a unit token through `0x515940`, or the
+    /// current selection for the bare form), never in what happens after. Three ways to no-op, all
+    /// of them silent and none of them a deselect: no basis, a basis targeting nothing, and a
+    /// target guid that is not streamed (`0x489a40`'s arm 3 is a bare `ret`).
+    ///
+    /// The `assistAttack` swing leg is correctly absent — the CVar's registered default is `"0"`
+    /// (VERIFIED at `0x48fc50`), so stock assist selects and does not swing. See the drain below.
+    pub(super) fn assist(&mut self, basis: Entity, how: &str) {
+        let Some(guid) = self
+            .stores
+            .get(basis)
+            .ok()
+            .and_then(|s| s.0.unit_target())
+            .filter(|g| *g != 0)
+        else {
+            info!("assist ({how}): the basis unit is targeting nothing; silent no-op");
+            return;
+        };
+        // "Select if it resolves" (`0x489a40`): only a streamed unit can be selected — the
+        // reference's group-roster fallback for an unstreamed guid needs the guid-only selection
+        // benilla does not have yet (see the module header).
+        let Some(entity) = self.index.0.get(&guid).copied() else {
+            info!("assist ({how}): the basis is targeting guid {guid:#x}, which is not streamed");
+            return;
+        };
+        info!("assist ({how}) -> the basis unit's target, guid {guid:#x}");
+        self.commit(entity, guid);
+    }
+
+    /// Select a guid that is already resolved — `0x489a40`'s arm 1, plus [`scan::commit`]'s law.
     pub(super) fn commit(&mut self, entity: Entity, guid: u64) {
         let me = self.me.single().ok();
         // The new-target classification `scan::commit` expects from its callers (it does not

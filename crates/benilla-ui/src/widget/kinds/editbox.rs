@@ -19,7 +19,7 @@ pub enum EditUnit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditAction {
     /// Move the caret one `unit` back/forward; `extend` drags the selection from its fixed
-    /// anchor (the Shift family). `Char` moves honor `ignoreArrows` (consumed but inert — the
+    /// anchor (the Shift family). (The alt-arrow gate is upstream, on the key — the
     /// ref guard `0x77b18e`; arrows are the only chord source of `Char` moves).
     Move {
         unit: EditUnit,
@@ -92,18 +92,65 @@ pub struct EditBoxState {
     /// `password` (bit3): the display string is one `'*'` per *character* (the mask, `E+0x334`); the
     /// real text is untouched.
     pub password: bool,
-    /// `ignoreArrows` (bit4): LEFT/RIGHT (and UP/DOWN) are consumed but do nothing unless Ctrl is
-    /// held (RF-0082 §4, guard `0x77b18e`).
-    pub ignore_arrows: bool,
+    /// **Alt-arrow mode** (bit4) — the XML attribute spells it `ignoreArrows`, the Lua surface
+    /// spells it `SetAltArrowKeyMode`/`GetAltArrowKeyMode` (`0x7996e0`/`0x799790`), and there is
+    /// exactly one flag behind both names. `SetIgnoreArrows` does **not** exist in 5875: the
+    /// 48-entry EditBox method table `[0x87bb68, 0x87bce8)` carries the Alt pair at 46/47 and no
+    /// entry whose name contains "Ignore" (wow-re `ignorearrows-alt-arrow-gate.md`, §5 VERIFIED).
+    ///
+    /// **What it does, and it is not what "ignore" suggests.** With the flag set, the four arrow
+    /// keys (`0x204` LEFT / `0x205` UP / `0x206` RIGHT / `0x207` DOWN) are **not consumed by the
+    /// box at all** unless ALT is held — the guard `0x77b18e` returns 0, the strata walk carries
+    /// on down to `CGWorldFrame`, and the key reaches its binding (`TURNLEFT`, `MOVEFORWARD`).
+    /// That is the whole point: it is what lets you turn while the chat box has focus. With Alt
+    /// held the guard falls through to ordinary handling and the caret moves.
+    ///
+    /// A focused box otherwise consumes **everything** (the handler's shared tail `0x77b35e`
+    /// returns 1), so these four keys are the only ones it ever lets past.
+    ///
+    /// benilla read this as "consumed but inert, unless Ctrl" for two rounds — the modifier was
+    /// wrong (a wow-re note said `0x41f8f0(2)` was Ctrl; it is ALT, and five other notes already
+    /// said so) and so was the consumption. Both corrected by the §5.
+    pub alt_arrow_key_mode: bool,
     /// `maxLetters` (`E+0x340`, 0 = unlimited): after each insert, trim from the end while the
     /// *letter* (char) count exceeds this (RF-0082 §3).
     pub max_letters: usize,
     /// `maxBytes` (`E+0x33c`; the client's `-1` sentinel = unlimited → `None` here): trim from the
     /// end while the byte length exceeds this, applied before `maxLetters`.
     pub max_bytes: Option<usize>,
-    /// The implicit FontString the text renders through (`E+0x324`, the EditBox's analogue of
-    /// ButtonText) — created lazily on first text mutation, or wired from a declared `<FontString>`.
+    /// The implicit FontString the text renders through (`E+0x328`, the EditBox's analogue of
+    /// ButtonText). **Built by the ctor**, not lazily: `0x779bee` constructs it from allocator
+    /// `0xcf4d10` with tag `0x846544` = `".?AVCSimpleFontString@@"` via `0x770d30(E, 2, 1)`, and
+    /// that is the FIRST of the five regions a `CSimpleEditBox` is born with (wow-re
+    /// `system/ui/scratch/rf85-editbox-caret.md` §1). Creation order is what `GetRegions` hands
+    /// Lua — one flat creation-ordered list off `[frame+0x1b8]`, oldest first, no filter
+    /// (`scratch/widget-list-bindings.md`) — so these five precede every `<Layers>` region.
+    ///
+    /// **DEFERRED, and named rather than silently taken:** the ctor's draw layer is 2 sub 1
+    /// (ARTWORK), while this region is still created at OVERLAY sub 0 — what ships today and what
+    /// the director has looked at. Moving it is a draw-order change to every EditBox in the client
+    /// with nothing asking for it, so it is a separate change, not a rider on this one.
     pub text_region: Option<RegionHandle>,
+    /// The **three selection-highlight quads** (`E+0x350`/`0x354`/`0x358`), built by the ctor loop
+    /// `0x779c41–0x779c72` as `CSimpleTexture`s via `0x76fc40(E, 2, 0)` — allocator `0xcf4ce0`, tag
+    /// `0x846588` = `".?AVCSimpleTexture@@"`, class-identical to the caret (RF-0085 §1). They are
+    /// members of the frame's region list like any other region (`0x76fc40`→`0x77f640`→`0x77fd10`,
+    /// the single linker into `[frame+0x1b8]`), which is why they are built here.
+    ///
+    /// **They carry no art of their own and paint nothing.** benilla draws the selection highlight
+    /// host-side, from [`sel_start`](Self::sel_start)/[`sel_end`](Self::sel_end) through the seam —
+    /// so these are the real regions the client has, not yet the regions the highlight rides.
+    /// Routing the paint through them is a separate, larger change (the host would have to read a
+    /// region rect instead of a seam field); this is stated, not stubbed.
+    pub selection_regions: [Option<RegionHandle>; 3],
+    /// The **caret** (`E+0x368`), the ctor's fifth and last region: a `CSimpleTexture` built at
+    /// `0x779c86–0x779cac` via `0x76fc40(E, 3, 1)` — a solid vertex-coloured quad, never a glyph
+    /// (no texture path is ever assigned to `E+0x368`, band-wide census; RF-0085 §1). Layer 3 over
+    /// the text's 2 is why the caret draws above the text and the selection quads below it.
+    ///
+    /// Same standing as [`selection_regions`](Self::selection_regions): the region is real and in
+    /// the list, the *painting* is still host-side off [`caret_shown`](Self::caret_shown).
+    pub caret_region: Option<RegionHandle>,
     /// The submitted-line history (`AddHistoryLine`; the XML `historyLines` cap) — oldest first,
     /// newest last; UP recalls older from the end, DOWN newer. The exact recall keys + draft
     /// model are INFERRED (wow-re's rf82 flags the 1.12 history controller as an untraced
@@ -254,7 +301,7 @@ impl Default for EditBoxState {
             multi_line: false,
             numeric: false,
             password: false,
-            ignore_arrows: false,
+            alt_arrow_key_mode: false,
             max_letters: 0,
             max_bytes: None,
             text_region: None,
@@ -272,6 +319,10 @@ impl Default for EditBoxState {
             blink_period: 0.5,
             blink_accum: 0.0,
             caret_shown: true,
+            // Filled by `Arena::create`'s ctor pass — `Default` cannot reach the arena, and a
+            // handle-less default is what a not-yet-created box has.
+            selection_regions: [None; 3],
+            caret_region: None,
             highlight_color: [96.0 / 255.0, 96.0 / 255.0, 96.0 / 255.0, 1.0],
             // The EditBox ctor's `0x211` minus the unread bit 0x200 — `LEFT | MIDDLE`. LEFT, not
             // the generic font default CENTER: `0x779be4` overrides the H axis at construction.
@@ -590,13 +641,12 @@ impl EditBoxState {
         match action {
             EditAction::Move { unit, back, extend } => {
                 match unit {
-                    // `ignoreArrows`: consumed but inert (guard `0x77b18e`). Arrows are the only
-                    // chord source of a Char move, and the ref's Ctrl bypass maps to Word.
-                    EditUnit::Char => {
-                        if !self.ignore_arrows {
-                            self.move_by_char(!back, extend);
-                        }
-                    }
+                    // No flag test here any more. The alt-arrow gate is on the KEY, not on the
+                    // action — with the flag set the box never sees the arrow at all, because the
+                    // host declines it before the chord is dispatched (`UiScript::
+                    // editbox_alt_arrow_fallthrough`). Anything that reaches this far was either
+                    // Alt-held or not an arrow, and both move the caret normally.
+                    EditUnit::Char => self.move_by_char(!back, extend),
                     EditUnit::Word => self.move_by_word(!back, extend),
                     EditUnit::Edge => self.move_to_edge(!back, extend),
                 }

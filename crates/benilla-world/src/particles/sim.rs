@@ -7,7 +7,9 @@ use bevy::prelude::*;
 
 use crate::view::WorldCamera;
 
-use super::buffer::{EffectDrawSpec, EffectFog, EffectLightOverride, EffectQuads};
+use super::buffer::{
+    EffectDrawSpec, EffectFog, EffectLightOverride, EffectLighting, EffectQuads, EffectVertex,
+};
 use super::quads::{expand_quads, CamBasis, DrawFrame};
 use super::{
     accumulate_emission, emit_local, next_u32, rand01, rand_s11, ChildDraw, ChildEmitter,
@@ -450,9 +452,8 @@ pub(super) fn simulate_particles(
     // The ground-snap probe (file 0x2000 births): terrain + WMO/doodad geometry, the walking
     // collision audience.
     spatial: SpatialQuery,
-    // The per-model render alpha an entity-owned cloud is multiplied by (decision 0827), composed
-    // along the attached-model chain (0833).
-    model_alphas: crate::model_fade::ModelAlphas,
+    // The two per-MODEL multipliers a cloud carries out of its owner (see [`OwnerMultipliers`]).
+    owner_mul: OwnerMultipliers,
     // `Without<WorldCamera>`: the `&mut GlobalTransform` must be provably disjoint from the
     // camera read above too (an emitter never rides the camera entity).
     mut emitters: Query<
@@ -464,6 +465,7 @@ pub(super) fn simulate_particles(
             Option<&EmitterFade>,
             Option<&RenderLayers>,
             Option<&EffectLightOverride>,
+            Option<&crate::interior::EmitterLitBy>,
         ),
         Without<WorldCamera>,
     >,
@@ -520,8 +522,16 @@ pub(super) fn simulate_particles(
     // `$WOW_EMIT_DUMP`: is this a dump tick? Decided once per frame, for the whole walk.
     let emit_dump = dumps.emit.due(time.elapsed_secs());
 
-    for (entity, mut emitter, mut entity_tf, mut entity_global, fade, layers, light_override) in
-        &mut emitters
+    for (
+        entity,
+        mut emitter,
+        mut entity_tf,
+        mut entity_global,
+        fade,
+        layers,
+        light_override,
+        lit_by,
+    ) in &mut emitters
     {
         // The camera this emitter's quads face + its emission-LOD distance origin — and, in the
         // shared lane, the view its draw record targets: a booth-layered emitter uses its
@@ -699,6 +709,7 @@ pub(super) fn simulate_particles(
             water_bound,
             texture,
             recursion: _,
+            light_node: _,
             children,
             geometry: _,
             model_instances,
@@ -780,7 +791,7 @@ pub(super) fn simulate_particles(
         // chain, so a weapon glow's reaches the item's and the item's the wearer's — 0833), and a
         // placed doodad's takes its own distance fade, whose cutoff the draw-set gate above
         // already applies as a hard stop.
-        *alpha = alpha_src.map_or(1.0, |e| model_alphas.get(e))
+        *alpha = alpha_src.map_or(1.0, |e| owner_mul.alpha(e))
             * fade.map_or(1.0, |f| f.distance_alpha(cam_pos));
         // The cloud anchor (see the field doc): the model's live translation, or the last-known
         // one while the pool drains. A whole-model owner keeps anchor == owner — identical math.
@@ -1261,6 +1272,11 @@ pub(super) fn simulate_particles(
                 },
             );
         }
+        // The model's own committed light, if it has one. Resolved once per emitter and shared by
+        // the parent draw and every child draw: they are all batches of ONE model, and the
+        // reference has one light node per model.
+        let committed = owner_mul.committed_light(lit_by);
+        let lighting = fold_committed_light(&mut quads.verts[start as usize..], def.lit, committed);
         quads.commit_quads(
             start,
             EffectDrawSpec {
@@ -1268,7 +1284,7 @@ pub(super) fn simulate_particles(
                 texture: texture.id(),
                 blend: def.blend.into(),
                 fog: EffectFog::for_blend(def.flags, def.blend),
-                lit: def.lit,
+                lighting,
                 anchor,
                 bias,
                 raster_bias: 0,
@@ -1293,6 +1309,11 @@ pub(super) fn simulate_particles(
                 &cam,
                 &mut quads.verts,
             );
+            let child_lighting = fold_committed_light(
+                &mut quads.verts[cstart as usize..],
+                child.def.lit,
+                committed,
+            );
             quads.commit_quads(
                 cstart,
                 EffectDrawSpec {
@@ -1303,7 +1324,8 @@ pub(super) fn simulate_particles(
                     // A child emitter is a whole emitter record of the recursion model, with its
                     // own flag word and blend field — so it takes its OWN lighting verdict, never
                     // the parent's (the same rule its texture/blend/fog identity follows above).
-                    lit: child.def.lit,
+                    // The NODE is the parent's: one light node per model, children included.
+                    lighting: child_lighting,
                     anchor,
                     bias,
                     raster_bias: 0,
@@ -1316,13 +1338,124 @@ pub(super) fn simulate_particles(
     }
 }
 
+/// The two per-MODEL multipliers a cloud carries out of its owner — its render alpha and its
+/// committed light.
+///
+/// Bundled because they are the same shape: one lookup from the emitter's owning model, multiplied
+/// into the cloud. (And because [`simulate_particles`] sits at bevy's 16-parameter ceiling — but
+/// that is the forcing function, not the reason.)
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct OwnerMultipliers<'w, 's> {
+    /// The per-model render alpha (decision 0827), composed along the attached-model chain (0833).
+    alphas: crate::model_fade::ModelAlphas<'w, 's>,
+    /// The light node a LIT emitter shades under when its model stands in a WMO room: the
+    /// reference lights the object from its OWN node, never from the day/night sun (wow-re
+    /// `part-lit-normal-space.md` §6.7). Absent = the exterior lane, which the shader applies
+    /// per view by itself.
+    lights: Query<'w, 's, &'static crate::interior::ParticleLight>,
+}
+
+impl OwnerMultipliers<'_, '_> {
+    /// `instance`'s composed render alpha.
+    fn alpha(&self, instance: Entity) -> f32 {
+        self.alphas.get(instance)
+    }
+
+    /// The committed light of the node this emitter registered under, if it has one.
+    fn committed_light(&self, lit_by: Option<&crate::interior::EmitterLitBy>) -> Option<[f32; 3]> {
+        self.lights.get(lit_by?.0).ok().map(|l| l.0)
+    }
+}
+
+/// Fold a model's **committed** light into the vertices this draw just pushed, and name what the
+/// draw's colour has met — the producer's half of [`EffectLighting::Committed`].
+///
+/// An emitter that clears the file's unlit bit is lit by its model's light NODE, and indoors that
+/// node is the room's, not the sky's (wow-re `part-lit-normal-space.md` §6.7). A particle quad
+/// carries exactly one normal, so the node collapses to one RGB per draw
+/// ([`crate::interior::ParticleLight`]) — and a per-draw constant on a lane whose whole design is
+/// one shared vertex buffer belongs in the vertices. The multiply is per-channel, constant over
+/// the draw and in the same gamma space the shader's own scene term uses, so it lands on exactly
+/// the value the fragment would have computed.
+///
+/// With no committed light the emitter is on the exterior lane and the shader applies the scene's
+/// term per view — which is also what a booth's own light buffer overrides, so that path must stay
+/// in the shader.
+fn fold_committed_light(
+    verts: &mut [EffectVertex],
+    lit: bool,
+    committed: Option<[f32; 3]>,
+) -> EffectLighting {
+    match (lit, committed) {
+        (false, _) => EffectLighting::None,
+        (true, None) => EffectLighting::Scene,
+        (true, Some(mul)) => {
+            for v in verts {
+                for (c, m) in v.color.iter_mut().zip(mul) {
+                    // Clamped on the PRODUCT, never on the multiplier: the reference's committed
+                    // light is unclamped arithmetic (`0x71c2f0`'s reconstruction has no saturate —
+                    // `0x4549a0` is three dword moves and a `ret`) and it is GL that clamps the
+                    // LIT VERTEX COLOUR at the end. Clamping the term instead would cap a bright
+                    // room's multiplier at 1 and quietly lose the brightening a dim emitter is
+                    // authored to receive (decision 1709).
+                    *c = (*c * m).clamp(0.0, 1.0);
+                }
+            }
+            EffectLighting::Committed
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        booth_frozen, follow_fraction, inherit_trigger, integrate_particle, is_above, ChildEmitter,
-        Particle, StepEnv, Vec3,
+        booth_frozen, fold_committed_light, follow_fraction, inherit_trigger, integrate_particle,
+        is_above, ChildEmitter, EffectLighting, EffectVertex, Particle, StepEnv, Vec3,
     };
     use bevy::prelude::{Quat, Transform};
+
+    fn one_quad() -> Vec<EffectVertex> {
+        vec![
+            EffectVertex {
+                pos: [0.0; 3],
+                uv: [0.0; 2],
+                color: [0.8, 0.4, 0.2, 0.5],
+            };
+            4
+        ]
+    }
+
+    /// The three lighting verdicts a draw can take, and what each does to the vertices the
+    /// producer just pushed. The one that matters is the third: a model standing in a WMO room
+    /// carries its OWN committed light, which for a particle is a per-draw constant — folded in
+    /// here, leaving the shader nothing to do. **Alpha is never touched**: it is the blend weight,
+    /// not a colour, and the additive fold `rgb·α` downstream would square the light if it were.
+    #[test]
+    fn a_committed_light_folds_into_the_rgb_and_leaves_the_blend_weight_alone() {
+        let mut verts = one_quad();
+        assert_eq!(
+            fold_committed_light(&mut verts, false, Some([0.5, 0.5, 0.5])),
+            EffectLighting::None,
+            "an UNLIT emitter takes no light at all, committed or not"
+        );
+        assert_eq!(verts[0].color, [0.8, 0.4, 0.2, 0.5]);
+
+        assert_eq!(
+            fold_committed_light(&mut verts, true, None),
+            EffectLighting::Scene,
+            "lit with no node of its own is the exterior lane — the shader's, per view"
+        );
+        assert_eq!(verts[0].color, [0.8, 0.4, 0.2, 0.5], "and it folds nothing");
+
+        assert_eq!(
+            fold_committed_light(&mut verts, true, Some([0.5, 0.25, 0.0])),
+            EffectLighting::Committed,
+            "lit under a light node folds that node's constant in"
+        );
+        for v in &verts {
+            assert_eq!(v.color, [0.4, 0.1, 0.0, 0.5]);
+        }
+    }
 
     /// The membership law (`0x7084cf`): `above ⇔ d ≥ −r` — the tie at `d == −r` lands ABOVE
     /// (the reference's `jp` keeps it), NaN lands BELOW (unordered → the below push), and with

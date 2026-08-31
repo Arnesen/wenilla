@@ -66,18 +66,20 @@ mod reticle;
 pub(crate) mod ring;
 mod scan;
 
-pub(crate) use cursor_mode::{CursorKind, WorldCursor, GO_TYPE_GENERIC, SERVICE_RANGE_SQ};
+pub(crate) use cursor_mode::{
+    corpse_mouseover_eligible, CursorKind, WorldCursor, GO_TYPE_GENERIC, SERVICE_RANGE_SQ,
+};
 /// `GO_FLAG_LOCKED` — the wire bit the lock chain and the GO tooltip's "Locked" line both read.
 pub(crate) use lock::GO_FLAG_LOCKED;
 // This frame's combat-flash verdict — read by the ring's material pick (in `ring`) and by the
 // nameplate colour gate (`crate::nameplates`), the flash's only two consumers (byte-verified).
 pub(crate) use flash::CombatFlash;
 // The action layer's "attack pressed with no target" request — the nearest-enemy auto-acquire
-// (`scan`) answers it with the same core TAB uses. `attack_order_target` + `EnemyScan` are that
+// (`scan`) answers it with the same core TAB uses. `attack_order_target` + `TargetScan` are that
 // same core called *synchronously*, by the pet bar's ATTACK arm: the pet's order has to leave in
 // the frame it was pressed carrying the acquired guid, so it cannot go round through a request.
 pub(crate) use relations::{can_assist, can_attack, can_interact};
-pub(crate) use scan::{attack_order_target, AttackNearestRequest, EnemyScan};
+pub(crate) use scan::{attack_order_target, AttackNearestRequest, TargetScan};
 // The chat layer's by-name selection asks (`/target`, `/assist` — decision 0886), answered by the
 // shared resolver the reference parameterises per caller.
 pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
@@ -96,17 +98,45 @@ pub(crate) struct Selection {
     pub(crate) guid: Option<u64>,
 }
 
-/// The unit under the cursor this frame (the net entity + its guid), or `None`. Recomputed every frame
-/// by [`hover::update_hover`] (plate rects first, then the posed-mesh pick); a click selects it, and
-/// the mouseover highlight — the model emissive + the plate glow — reads it.
+/// The **character-model pick** this frame — the one ray pass over every skinned body in the scene,
+/// published by kind. Recomputed every frame by [`hover::update_hover`] (plate rects first, then the
+/// posed-mesh pick).
+///
+/// **Two slots, and at most one of them is ever set**, because there is one pick: [`Self::target`]
+/// when the winner is a unit or another player, [`Self::corpse`] when it is a corpse object. That
+/// split is the reference's own shape — it makes a single pick over all CGObjects and switches on
+/// **type** at the end (`0x480df0` → `0x7089c0`), and `CGCorpse_C` is a type that pick can land on
+/// while being neither selectable nor a GameObject. Keeping the corpse out of `target` is what
+/// keeps every existing consumer — selection, the plates, the unit tooltip, the mouseover
+/// highlight, the `mouseover` unit token — correct without knowing corpses exist: a corpse is not
+/// a unit and must never answer as one.
 #[derive(Resource, Default, Clone, Copy)]
 pub(crate) struct Hovered {
+    /// The hovered **unit or player** — the selectable one. `None` when the pick found a corpse,
+    /// or nothing.
     pub(crate) target: Option<Entity>,
     pub(crate) guid: Option<u64>,
     /// World-space ray distance to the picked mesh (a plate-rect hover is `0.0` — UI wins any tie).
-    /// Meaningless when `target` is `None`. Lets the cursor/interact pick the **nearer** of a hovered
-    /// unit vs. a hovered GameObject ([`go_is_nearest`]), the reference's single nearest-CGObject pick.
+    /// Meaningless when neither slot is set. Covers **whichever** slot won, so the cursor/interact
+    /// arbiter picks the nearer of the character pick vs. a hovered GameObject ([`go_is_nearest`]),
+    /// the reference's single nearest-CGObject pick.
     pub(crate) distance: f32,
+    /// The hovered **corpse object** (decision 1723) — a streamed body with a guid and a character
+    /// model that is nonetheless not a unit: the reference's `CGCorpse_C` fills the interact slot
+    /// `+0x60` with its own `0x5d6bf0`, never `SetTarget`. Read by the cursor classifier's corpse
+    /// leg and the right-click corpse route; deliberately invisible to everything that means
+    /// "unit".
+    pub(crate) corpse: Option<Entity>,
+    /// The hovered corpse's guid — `CMSG_LOOT` / `CMSG_RECLAIM_CORPSE` carry it.
+    pub(crate) corpse_guid: Option<u64>,
+}
+
+impl Hovered {
+    /// The picked entity whichever slot holds it — the "did the ray hit a character model at all?"
+    /// question the GameObject arbiter asks.
+    pub(crate) fn any(&self) -> Option<Entity> {
+        self.target.or(self.corpse)
+    }
 }
 
 /// The **GameObject** under the cursor this frame — the interaction arc's separate hover authority
@@ -211,14 +241,20 @@ pub(crate) fn latch_press_pick(
     };
 }
 
-/// Which of the two hovered CGObjects — the unit [`Hovered`] or the [`HoveredObject`] — is the
-/// nearer thing under the cursor, and so the one a click acts on. The reference makes one pick over
-/// all CGObjects and switches on type; benilla runs the two picks separately, then chooses the
-/// nearer here. A GameObject wins only when it is strictly closer than a hovered unit (so a mailbox
-/// in front of a distant NPC takes the click; an NPC in front of a chest keeps it).
-pub(crate) fn go_is_nearest(unit: &Hovered, go: &HoveredObject) -> bool {
-    match (unit.target, go.target) {
-        (Some(_), Some(_)) => go.distance < unit.distance,
+/// Which of the two hovered CGObjects — the character-model [`Hovered`] or the [`HoveredObject`] —
+/// is the nearer thing under the cursor, and so the one a click acts on. The reference makes one
+/// pick over all CGObjects and switches on type; benilla runs the character and GameObject picks
+/// separately, then chooses the nearer here. A GameObject wins only when it is strictly closer
+/// than the character pick (so a mailbox in front of a distant NPC takes the click; an NPC in
+/// front of a chest keeps it).
+///
+/// **Either slot of [`Hovered`] counts** ([`Hovered::any`]): a hovered *corpse* holds the ground
+/// against a farther GameObject exactly as a unit does. Reading only `target` here — as this did
+/// before corpses could be picked — would have handed the click, the cursor, the tooltip and the
+/// highlight to any GameObject on screen the instant the ray landed on a body instead of a unit.
+pub(crate) fn go_is_nearest(character: &Hovered, go: &HoveredObject) -> bool {
+    match (character.any(), go.target) {
+        (Some(_), Some(_)) => go.distance < character.distance,
         (None, Some(_)) => true,
         _ => false,
     }
@@ -273,6 +309,7 @@ impl Plugin for TargetPlugin {
             .init_resource::<WorldCursor>()
             .init_resource::<CombatFlash>()
             .init_resource::<scan::TabHistory>()
+            .init_resource::<scan::LastEnemy>()
             .add_message::<AttackNearestRequest>()
             .add_message::<TargetByNameRequest>()
             .add_message::<AssistRequest>()
@@ -323,11 +360,13 @@ impl Plugin for TargetPlugin {
                     click::act_on_right_click,
                     click::clear_target_requests,
                     // The two unit-token drains, grouped as one element (the outer chain is at
-                    // Bevy's 20-tuple limit): `TargetUnit`'s selection commit, and
-                    // `DropItemOnUnit`'s pet-leg feed (decision 1055). Independent of each other —
-                    // one writes `Selection`, the other sends a cast — so they need no order.
+                    // Bevy's 20-tuple limit): the selection asks' commit (`TargetUnit`,
+                    // `AssistUnit`, `TargetLastEnemy` — one queue, one drain, as the reference has
+                    // one `0x489a40`), and `DropItemOnUnit`'s pet-leg feed (decision 1055).
+                    // Independent of each other — one writes `Selection`, the other sends a cast —
+                    // so they need no order.
                     (
-                        click::target_unit_requests,
+                        click::selection_requests,
                         crate::ui_action::drop_item::drop_item_on_unit,
                     ),
                     // The chat layer's by-name asks (decision 0886), beside the UI's token asks:
@@ -348,10 +387,17 @@ impl Plugin for TargetPlugin {
                     )
                         .chain(),
                     scan::auto_acquire_attacker,
-                    scan::tab_target,
+                    // The two sides of the one cycler (`0x493f60`, mode 1 / mode 2), grouped as
+                    // one element (the outer chain is at Bevy's 20-tuple limit) and chained
+                    // because they share `TabHistory`, whose side switch clears it.
+                    (scan::tab_target, scan::target_nearest_friend_requests).chain(),
                     scan::acquire_and_attack,
                     flash::drive_flash,
-                    ring::update_ring,
+                    // `TargetLastEnemy`'s stamp, then the ring. The order is load-bearing: the
+                    // ring's death-clear drops the selection, and a hostile that dies while
+                    // selected must still be remembered (the reference's shim has no liveness
+                    // gate — re-targeting the corpse is faithful).
+                    (scan::remember_last_enemy, ring::update_ring).chain(),
                 )
                     .chain()
                     .in_set(TargetUpdate)
@@ -377,8 +423,14 @@ mod tests {
     fn gameobject_wins_the_click_only_when_the_nearer_object() {
         let hov = |t: bool, d: f32| Hovered {
             target: t.then_some(Entity::PLACEHOLDER),
-            guid: None,
             distance: d,
+            ..Hovered::default()
+        };
+        // The same hover, landed on a CORPSE instead of a unit — the other slot of the one pick.
+        let corpse = |t: bool, d: f32| Hovered {
+            corpse: t.then_some(Entity::PLACEHOLDER),
+            distance: d,
+            ..Hovered::default()
         };
         let obj = |t: bool, d: f32| HoveredObject {
             target: t.then_some(Entity::PLACEHOLDER),
@@ -395,6 +447,13 @@ mod tests {
         assert!(go_is_nearest(&hov(true, 10.0), &obj(true, 4.0)));
         assert!(!go_is_nearest(&hov(true, 4.0), &obj(true, 10.0)));
         assert!(!go_is_nearest(&hov(true, 5.0), &obj(true, 5.0)));
+        // A hovered CORPSE competes on exactly the same terms as a unit (decision 1723): it is the
+        // other slot of the same pick, so it keeps the click from a farther or tied GameObject and
+        // yields only to a strictly nearer one.
+        assert!(!go_is_nearest(&corpse(true, 5.0), &obj(false, 0.0)));
+        assert!(!go_is_nearest(&corpse(true, 4.0), &obj(true, 10.0)));
+        assert!(!go_is_nearest(&corpse(true, 5.0), &obj(true, 5.0)));
+        assert!(go_is_nearest(&corpse(true, 10.0), &obj(true, 4.0)));
     }
 
     /// The latch survives the hover being cleared — which is the whole reason it exists.

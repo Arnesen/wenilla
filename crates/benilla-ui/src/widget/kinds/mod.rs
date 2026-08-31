@@ -27,6 +27,31 @@ pub enum FrameKind {
     Slider,
     ScrollFrame,
     Model,
+    /// `CGCharacterModelBase` (`0x505680`, size `0x3f8`) — the **unit-showing** model pane, and a
+    /// registered `CreateFrame` type in its own right: pair `("PlayerModel" @0x84343c, factory
+    /// 0x495bd0)` at registration site `0x49597f`, one of the eight the game client registers
+    /// through `0x495940` (wow-re `ui/scratch/model-pane-method-tables.md` §1).
+    ///
+    /// **It extends [`FrameKind::Model`] and adds exactly three verbs** — `SetUnit`, `RefreshUnit`,
+    /// `SetRotation` (table `0x84f1fc`, 3 entries). Its Lua surface is those three *plus* all 23 of
+    /// `Model`'s, and it gets them by **chaining, not repetition**: `CGCharacterModelBase`'s method
+    /// lookup `0x506260` probes its own 3-entry map and, on a miss, tail-calls `0x506290 call
+    /// 0x76f870` — `CSimpleModel`'s. Our `__index` already walks a *slice* of registry keys, so the
+    /// chain is `&[PLAYERMODEL, MODEL]` and nothing is duplicated.
+    ///
+    /// **The direction is derived → base only.** A plain `<Model>` does *not* acquire `SetUnit`/
+    /// `RefreshUnit`/`SetRotation`: nothing chains from `0x76f870` down into `0x506260`. benilla
+    /// published all three on `Model` until 2026-08-30 — a `strings WoW.exe` hit read as ownership,
+    /// which it cannot be (`SetUnit`'s pooled string `0x84f22c` is referenced by **two** table
+    /// entries, `PlayerModel 0x84f1fc` and `GameTooltip 0x854290`, and by no `Model` entry).
+    ///
+    /// Same posture as its base: the engine core holds the scene the Lua API reads and writes
+    /// ([`KindState::Model`], shared with [`FrameKind::Model`]); the pixels are the app renderer's.
+    /// `CGCharacterModelBase` adds `0x1c` bytes of members over `CSimpleModel` — the turn-animation
+    /// flag/expiry at `+0x3e8`/`+0x3ec` that `SetRotation` arms — and those are **not modeled**:
+    /// no getter reads them, and they drive a shuffle animation on a renderer we have not built.
+    /// `script::modelframe`'s `SetRotation` carries the addresses.
+    PlayerModel,
     /// `CSimpleMessageFrame` — the non-scrolling message frame (`UIErrorsFrame`'s class, and the
     /// one `CreateFrame("MessageFrame")` makes). Its behaviour (the display lines, the per-line
     /// fade, `insertMode`) is modeled in [`KindState::Message`]. Sibling of
@@ -123,6 +148,11 @@ pub enum KindState {
     /// `<ColorWheelTexture>`/`<ColorValueTexture>` elements carry no `file=`), so this state is the
     /// widget's whole modeled behavior here; see [`crate::script::colorselect`].
     ColorSelect(ColorSelectState),
+    /// The `Model` widget's scene state — the 3D pane an addon or a FrameXML frame parks a model
+    /// in. **The same split as [`KindState::Minimap`] and [`KindState::Cooldown`]**: the engine
+    /// core carries exactly what the Lua API reads and writes, and the pixels are the app
+    /// renderer's job. See [`ModelState`].
+    Model(ModelState),
     /// The `<Minimap>` widget's zoom state (decision 0203). The engine core carries only what the
     /// Lua API reads/writes (`GetZoom`/`SetZoom`/`GetZoomLevels`); the tile/blip render is app-side.
     Minimap(MinimapState),
@@ -289,6 +319,96 @@ impl CooldownState {
     }
 }
 
+/// The model-pane scene state — **shared by [`FrameKind::Model`] and [`FrameKind::PlayerModel`]**,
+/// because the client's `CGCharacterModelBase` (`0x505680`) *extends* `CSimpleModel` (`0x76c8e0`)
+/// rather than replacing it: every field below is a `CSimpleModel` member both classes carry.
+///
+/// **What this is and is not.** The 1.12 `Model` widget is a viewport that draws one M2 in a
+/// little scene of its own — the character pane, the tabard designer, the minimap ping, the pet
+/// bar's autocast shine, and every addon that wants a 3D thing in a frame. The engine core holds
+/// exactly the scene an addon can read back or write; **the render is the app's**, the same
+/// contract [`MinimapState`] and [`CooldownState`] already run under, and the reason both of those
+/// exist as state-only kinds here.
+///
+/// **Every field is a 1.12 binding's storage, and which binding is read off the registrar, not off
+/// a string scan.** wow-re enumerated the whole family at the pair bytes on 2026-08-30
+/// (`ui/scratch/model-pane-method-tables.md`): `Model`'s table is `0x878948` with **23** entries,
+/// `PlayerModel`'s is `0x84f1fc` with **3**, and the derived table never repeats its base's. The
+/// earlier justification for these fields — "the names are in the binary as isolated strings" — is
+/// the mistake that round corrected: a `strings` hit answers *whether a name exists*, never *which
+/// table owns it*, and `SetUnit`'s single pooled string `0x84f22c` is referenced by two entries in
+/// two different tables. Ownership now comes from a dword-reference count over the name's VA.
+///
+/// **Seven of `Model`'s 23 are not published yet** — `AdvanceTime 0x76eca0`,
+/// `ReplaceIconTexture 0x76ed70`, `SetFogNear 0x76f1e0`, `GetFogNear 0x76f2d0`,
+/// `SetFogFar 0x76f390`, `GetFogFar 0x76f480`, `ClearFog 0x76f540` — named here rather than
+/// stubbed (decision 1134 §4). They have no corpus caller and their bodies are uncarved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelState {
+    /// The M2/MDX path last given to `SetModel`, or `None` after `ClearModel` / before any set.
+    /// Stored **as written** — the client's own path space is `Interface\...\Foo.mdx`, and the
+    /// app's loader is what maps `.mdx` to the `.m2` that actually ships.
+    pub path: Option<String>,
+    /// `PlayerModel:SetUnit(unit)` — the *other* way a pane gets its content, used by the dress-up
+    /// and paper-doll frames. Mutually exclusive with [`Self::path`] in practice: whichever was set
+    /// last is what the pane shows, so each setter clears the other.
+    ///
+    /// The field lives on every pane because it is a `CSimpleModel` member; the **setter** does
+    /// not — `SetUnit` is [`FrameKind::PlayerModel`]'s (`0x84f1fc[0]` → `0x505d70`), and a plain
+    /// `<Model>` has no way to reach it.
+    pub unit: Option<String>,
+    /// `SetSequence(n)` — the animation index the pane plays.
+    pub sequence: i32,
+    /// `SetSequenceTime(sequence, ms)` — the scrub point, as `(sequence, milliseconds)`. The
+    /// cooldown indicator's whole mechanism is this pair driven per frame, which is why it is
+    /// stored rather than folded into [`Self::sequence`].
+    pub sequence_time: Option<(i32, i32)>,
+    /// The pane's yaw in radians — `CSimpleModel+0x39c`. **One slot, written by two verbs on two
+    /// different classes**: `Model:SetFacing` (`0x76dce0`) and `PlayerModel:SetRotation`
+    /// (`0x505f00` → `0x505bb0`, whose last act is `0x505c44 mov [esi+0x39c], eax` — literally the
+    /// same field). That is why the reference's rotate buttons can drive a paper-doll pane through
+    /// `SetRotation` and `GetFacing` reads it back.
+    pub facing: f32,
+    /// `SetModelScale` — the model's own scale within the pane, default 1.
+    pub scale: f32,
+    /// `SetCamera(index)` — which of the model's baked camera setups to view it through.
+    pub camera: i32,
+    /// `SetPosition(x, y, z)` — the model's offset within the pane's scene.
+    pub position: (f32, f32, f32),
+    /// `SetLight(...)` — the scene's light, stored verbatim as the 14-number tuple the binding
+    /// takes (`enabled, omni, dirX, dirY, dirZ, ambIntensity, ambR, ambG, ambB, dirIntensity,
+    /// dirR, dirG, dirB` plus the leading `enabled`). Opaque here on purpose: the engine core has
+    /// no lighting model, and inventing a typed one would be asserting a scene semantics we have
+    /// not verified.
+    pub light: Option<Vec<f32>>,
+    /// `SetFogColor(r, g, b)` — `None` until set. The client's fog surface is seven verbs, not two:
+    /// this pair plus `SetFogNear`/`GetFogNear`/`SetFogFar`/`GetFogFar`/`ClearFog`, which the
+    /// struct doc names as unbuilt.
+    pub fog_color: Option<(f32, f32, f32)>,
+}
+
+/// A fresh `Model` pane: no content, sequence 0, unrotated, unit scale, camera 0, at the origin.
+///
+/// `scale` is the one field whose zero value would be wrong — a model at scale 0 is invisible, and
+/// the widget's documented default is 1 — so [`ModelState`] cannot use a derived `Default` for it
+/// and this impl exists to say why.
+impl Default for ModelState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            unit: None,
+            sequence: 0,
+            sequence_time: None,
+            facing: 0.0,
+            scale: 1.0,
+            camera: 0,
+            position: (0.0, 0.0, 0.0),
+            light: None,
+            fog_color: None,
+        }
+    }
+}
+
 /// The Minimap widget's modeled state — the client keeps **two independent zoom indices**, chosen by
 /// whether the player is inside a WMO (wow-re minimap node, `wmo-interior-minimap.md` finding 2 Q7
 /// CORRECTION): the inside flag `0xceaa60` routes the outdoor index `0x86f698` (CVar `minimapZoom`,
@@ -310,6 +430,21 @@ pub struct MinimapState {
     /// Is the player inside a WMO interior (the client's `0xceaa60`)? Selects which index the Lua
     /// zoom API reads and writes. Pushed down by the app, which owns the WMO containment test.
     pub inside: bool,
+    /// The mask art the disc is cut to — `Minimap:SetMaskTexture(path)`, a real 1.12 method (the
+    /// name is in the 5875 image; there is no `GetMaskTexture` beside it, so this is write-only
+    /// from Lua). `None` = the engine default, [`MINIMAP_DEFAULT_MASK`].
+    ///
+    /// State-only here, pixels app-side, like the zoom index (0203): the app already masks the
+    /// disc through its own `UiQuadMask`, and this only decides which texture it loads. It is what
+    /// makes a **square minimap** possible, which is the single most recognisable thing pfUI does
+    /// to the default UI (`modules/minimap.lua:27`).
+    pub mask_texture: Option<String>,
+    /// The **player-arrow** `Model` — the client's `[Minimap+0x338]`, ninth and last of the nine
+    /// engine children the ctor builds ([`MINIMAP_ENGINE_CHILDREN`]). An explicit slot because that
+    /// is the shape the client keeps: `CMinimap::SetPlayerFacing 0x4eb8e0` reaches the arrow through
+    /// this field, never by counting children; "it is also `GetChildren()[9]`" is a *consequence* of
+    /// the ctor's order, not the definition.
+    pub player_arrow: Option<FrameHandle>,
 }
 
 /// Both minimap zoom CVars register with the default `"3"` — **not** 0 (wow-re, VERIFIED at the
@@ -327,6 +462,10 @@ impl Default for MinimapState {
             zoom: MINIMAP_DEFAULT_ZOOM,
             inside_zoom: MINIMAP_DEFAULT_ZOOM,
             inside: false,
+            mask_texture: None,
+            // Filled by the arena the moment the widget is inserted — the nine are ctor-time, so a
+            // Minimap is never observably without them (`WidgetArena::create`).
+            player_arrow: None,
         }
     }
 }
@@ -353,6 +492,44 @@ impl MinimapState {
 
 /// The client's minimap zoom-level count (`get_zoom_levels` `0x6da9a0` returns the constant 6).
 pub const MINIMAP_ZOOM_LEVELS: u8 = 6;
+
+/// The engine's own minimap mask — the circle `Minimap:SetMaskTexture` replaces. benilla's
+/// renderer has loaded this path since the minimap existed; naming it here is what lets the Lua
+/// setter override it.
+pub const MINIMAP_DEFAULT_MASK: &str = "Textures\\MinimapMask";
+
+/// **Nine `Model` children, built by the `CMinimap` ctor before anything else sees the widget** —
+/// wow-re `ui/scratch/widget-list-bindings.md` §5 / `ui/ui.md`, VERIFIED. The ctor `0x4edbc0`
+/// (TU `Ui\MinimapFrame.cpp`) allocates `CSimpleModel` (`0x76c8e0`) nine times with the Minimap as
+/// parent, in three source-ordered groups whose `__LINE__` arguments give the order directly:
+///
+/// | # | stored at | `__LINE__` | what it is |
+/// |---|---|---|---|
+/// | 1–5 | `[Minimap+0x320 + 4k]` | 1424 | the rim/party arrows (`minimapArrowModel`) |
+/// | 6–8 | `[Minimap+0x314 + 4k]` | 1438 | the three POI direction arrows (`minimapArrowModel`) |
+/// | 9 | `[Minimap+0x338]` | 1450 | **the player arrow** (`minimapPlayerModel`) |
+///
+/// **Why the engine core carries them at all**, when the app draws every one of these arrows itself
+/// from its own art (`benilla-app`'s `minimap::blips`): because they are *structure the Lua API can
+/// see*, and two of the most-installed 1.12 addons read it. `Questie`'s `QuestieArrow.lua`
+/// `GetPlayerFacing()` is `({Minimap:GetChildren()})[9]:GetFacing()`, and pfQuest's
+/// `compat/client.lua` does the same — the ctor runs before the XML `<Frames>` descent
+/// (`0x6ee408` before `0x6ee4ea`) and both linkers append at the tail, so on a stock client the
+/// tuple is these nine then `Minimap.xml`'s six, and index 9 is the arrow. Without them that read
+/// is `nil` and the addon dies calling a method on it.
+///
+/// The count is fixed and unconditional: an unloadable model file only skips the *file* assignment
+/// (`0x4ee286` returns early), never the child.
+pub const MINIMAP_ENGINE_CHILDREN: usize = 9;
+
+/// The engine default for `<Minimap minimapArrowModel=…>` — the string at `0x84c768`, applied by
+/// `0x4ee170` to engine children 1–8. (`Minimap.xml:97` sets the attribute explicitly, in the `.mdl`
+/// spelling; the loader rewrites the extension either way.)
+pub const MINIMAP_DEFAULT_ARROW_MODEL: &str = "Interface\\Minimap\\Rotating-MinimapArrow.mdx";
+
+/// The engine default for `<Minimap minimapPlayerModel=…>` — the string at `0x8453c0`, applied by
+/// `0x4ee260` to engine child 9 **alone**.
+pub const MINIMAP_DEFAULT_PLAYER_MODEL: &str = "Interface\\Minimap\\MinimapArrow.mdx";
 
 /// A `CSimpleScrollFrame`'s runtime state: the frame whose anchors are overridden to track the
 /// scroll offset ([`crate::script::UiScript::resolve`]'s scroll-child override), and the current

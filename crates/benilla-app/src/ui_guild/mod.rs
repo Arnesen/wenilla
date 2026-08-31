@@ -37,6 +37,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use benilla_formats::GuildEmblem;
 use benilla_protocol::messages::{
     guild_event, GuildCommandResult, GuildEventNotice, GuildQueryResponse, GuildRoster,
     GuildRosterMember, GUILD_RANKS_MAX_COUNT,
@@ -68,6 +69,11 @@ struct Identity {
     name: String,
     /// The ten rank names, index 0 = guild master; empty past the guild's real rank count.
     rank_names: [String; GUILD_RANKS_MAX_COUNT],
+    /// The guild's tabard — the five emblem indices, which are what the **body composite** paints
+    /// onto a member's guild tabard (decision 1704). This is the second consumer of the identity
+    /// cache and the reason it is not a UI-only structure: the reference reads the same cached
+    /// record from the character compositor (`0x6d6d20` → `0x47a610`) and from `GetGuildInfo`.
+    emblem: GuildEmblem,
 }
 
 impl Identity {
@@ -281,6 +287,13 @@ impl GuildState {
             Identity {
                 name: response.name,
                 rank_names: response.rank_names,
+                emblem: GuildEmblem {
+                    emblem_style: response.emblem_style,
+                    emblem_color: response.emblem_color,
+                    border_style: response.border_style,
+                    border_color: response.border_color,
+                    background_color: response.background_color,
+                },
             },
         );
         self.identity_generation = self.identity_generation.wrapping_add(1);
@@ -510,6 +523,58 @@ pub(crate) fn unit_guild(
     })
 }
 
+/// A unit's guild **tabard**, for the body composite — the emblem five of `SMSG_GUILD_QUERY_RESPONSE`,
+/// joined off the unit's own PUBLIC `PLAYER_GUILDID` and asking for the identity if we do not hold
+/// it, exactly like [`unit_guild`].
+///
+/// `None` — no crest painted, so a Guild Tabard keeps its own `Tabard_A_05Default` art — covers
+/// **four** cases, and the reference reaches the same nil on all four (wow-re
+/// `rf89-guild-tabard-emblem-install.md` §Q1/§Q6):
+///
+/// 1. a guildless wearer — `0x560e30` returns NULL at `0x560e3f` before it even queries;
+/// 2. a creature, which has no player block at all;
+/// 3. **the query has not answered yet** — the same NULL leg, which is also what *sends* the query.
+///    Transient and self-healing: the response bumps [`GuildState::identity_generation`], and the
+///    equipment resolver's gate re-runs on that counter, so the tabard re-composites the frame the
+///    answer lands. The reference does not even poll for it — `0x5e0650` is a registered arrival
+///    callback that re-runs the install;
+/// 4. **a guild that has never designed a tabard**, i.e. the `-1` sentinel
+///    ([`GuildEmblem::is_designed`]) — the case this must not paint through, because painting it
+///    would take cell 4 from the garment and then resolve to no file, leaving a blank tabard.
+///
+/// All four end in `0x47a610` never being entered, which is exactly why "no crest" and "the
+/// garment's own art" are the same outcome: the clear of the three cells lives *inside* the install.
+pub(crate) fn unit_guild_emblem(
+    fields: &ObjectFields,
+    guild: &mut GuildState,
+    commands: &NetCommands,
+) -> Option<GuildEmblem> {
+    guild_emblem(fields.player_guild_id(), guild, commands)
+}
+
+/// The same crest for a **corpse**, whose guild id is its own snapshot
+/// ([`ObjectFields::corpse_guild`]) rather than the living `PLAYER_GUILDID` — the reference reads
+/// `CORPSE_FIELD_GUILD` at `0x5d6edf` and runs the identical name-cache lookup before installing
+/// the emblem (`0x5d6ec0`; wow-re `corpse-decal-and-loot-sparkle.md` §6b). All four `None` cases
+/// above hold unchanged: a guildless owner, a query still in flight, an undesigned crest.
+pub(crate) fn corpse_guild_emblem(
+    fields: &ObjectFields,
+    guild: &mut GuildState,
+    commands: &NetCommands,
+) -> Option<GuildEmblem> {
+    guild_emblem(fields.corpse_guild(), guild, commands)
+}
+
+/// The shared body of the two above — one lazy `CMSG_GUILD_QUERY` idiom, one `is_designed` gate.
+fn guild_emblem(
+    guild_id: u32,
+    guild: &mut GuildState,
+    commands: &NetCommands,
+) -> Option<GuildEmblem> {
+    let emblem = guild.resolve_identity(guild_id, commands)?.emblem;
+    emblem.is_designed().then_some(emblem)
+}
+
 /// The net drain's `SessionEvent::Guild*` arms, factored here so the wire laws live beside the
 /// state they drive ([`crate::ui_social::apply`]'s shape). The ones that owe chat lines push what
 /// [`lines`] composed, the way `crate::net::apply`'s group shims do.
@@ -658,6 +723,7 @@ mod tests {
         Identity {
             name: name.to_string(),
             rank_names,
+            emblem: GuildEmblem::default(),
         }
     }
 

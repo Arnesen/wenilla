@@ -34,16 +34,34 @@ pub(super) fn apply_highlight(
     hovered: Res<Hovered>,
     hovered_go: Res<HoveredObject>,
     selection: Res<Selection>,
+    // The hovered corpse's descriptor — the mouseover-eligibility gate below is a field read.
+    stores: Query<&crate::net::ObjectStore>,
     children: Query<&Children>,
     mut tags: Query<&mut MeshTag>,
     mut was_lit: Local<Vec<Entity>>,
 ) {
+    // [`Hovered::any`], not `target`: a hovered **corpse** is a pick too (decision 1723), so it
+    // holds the brighten off a farther GameObject exactly as a unit does.
     let go = hovered_go
         .target
-        .filter(|_| hovered.target.is_none() || go_is_nearest(&hovered, &hovered_go));
+        .filter(|_| hovered.any().is_none() || go_is_nearest(&hovered, &hovered_go));
     let unit_hover = hovered.target.filter(|_| go.is_none());
+    // **And the corpse body brightens too** (1729, byte-verified): the mouseover brighten
+    // `0x49295e → 0x4945e0` runs *before* the publisher's type switch and tests nothing but
+    // "has a model, has an object" — reason bit 1 is mouseover, and it applies to a corpse
+    // exactly as to a unit or a signpost. (Bit 0 is the target brighten, which a corpse can
+    // never take: `SetSelection` refuses it.) Gated by the same mouseover eligibility that
+    // decides whether it gets a name plate — a bone pile with nothing to take publishes no
+    // mouseover, so it neither lights nor labels.
+    let corpse_hover = hovered
+        .corpse
+        .filter(|_| go.is_none())
+        .filter(|e| stores.get(*e).is_ok_and(super::corpse_mouseover_eligible));
     let mut want: Vec<Entity> = Vec::new();
-    for root in [unit_hover, go, selection.target].into_iter().flatten() {
+    for root in [unit_hover, corpse_hover, go, selection.target]
+        .into_iter()
+        .flatten()
+    {
         if !want.contains(&root) {
             want.push(root);
         }

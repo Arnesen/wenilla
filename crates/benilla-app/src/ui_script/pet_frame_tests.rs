@@ -5,7 +5,9 @@
 //! of these test: `UNIT_PET` names the OWNER (`arg1 == "player"`, wow-re §9), every other `UNIT_*`
 //! names the pet itself, and a frame that mixes the two repaints off the player's health.
 
-use benilla_ui::script::{AuraState, QuadContent, ScriptValue, UiScript, UnitState};
+use benilla_ui::script::{
+    AuraState, QuadContent, ScriptValue, SelectionRequest, UiScript, UnitState,
+};
 
 /// Load one shipped `assets/ui/<file>`, panicking on any loader error (the unit-frame tests'
 /// loader).
@@ -144,7 +146,7 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
             local _, hmax = hb:GetMinMaxValues()
             local _, mmax = mb:GetMinMaxValues()
             return PetFrame:IsVisible()
-               and PetFrameTextureFrameName:GetText() == "Grimjaw"
+               and PetName:GetText() == "Grimjaw"
                and hb:GetValue() == 72 and hmax == 100
                and mb:GetValue() == 45 and mmax == 80 and mb:IsVisible()
             "#,
@@ -242,12 +244,12 @@ fn the_attack_overlay_follows_its_own_two_events() {
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(!s
-        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetAttackModeTexture:IsVisible()")
         .unwrap());
 
     s.fire_event("PET_ATTACK_START", vec![]);
     assert!(s
-        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetAttackModeTexture:IsVisible()")
         .unwrap());
 
     // The ref's OnUpdate ramps the overlay's tint alpha down from 1 on the opening (sign −1) leg.
@@ -269,7 +271,7 @@ fn the_attack_overlay_follows_its_own_two_events() {
 
     s.fire_event("PET_ATTACK_STOP", vec![]);
     assert!(!s
-        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetAttackModeTexture:IsVisible()")
         .unwrap());
 }
 
@@ -322,11 +324,14 @@ fn left_clicking_the_pet_frame_targets_it() {
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
 
     s.run("PetFrame_OnClick(\"LeftButton\")").unwrap();
-    assert_eq!(s.take_target_requests(), vec!["pet".to_string()]);
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![SelectionRequest::Unit("pet".into())]
+    );
 
     // The right button is the deferred PET menu — it must do nothing at all, not target.
     s.run("PetFrame_OnClick(\"RightButton\")").unwrap();
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
 }
 
 /// **All three legs of `PetFrame_OnClick` survive the click** — B208's "dropping food from the bag
@@ -394,7 +399,7 @@ fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
         "a held item + a pet click queues the drop"
     );
     // …and it is the DROP leg, not the target leg — the reference's if/elseif is exclusive.
-    assert!(s.take_target_requests().is_empty());
+    assert!(s.take_selection_requests().is_empty());
 }
 
 /// The GlobalStrings the happiness tooltip resolves by key. Loaded from the MPQ in production; the

@@ -114,16 +114,45 @@ impl Loader<'_> {
             let rname: Option<String> = region
                 .name()
                 .map(|raw| framexml::resolve_name(raw, parent_name));
-            let region_wrapper: Table = match wrapper
-                .call_method("CreateFontString", (rname, Some("OVERLAY".to_string())))
-            {
-                Ok(w) => w,
-                Err(e) => {
-                    self.report
-                        .errors
-                        .push(format!("{dbg}: CreateFontString (special): {e}"));
-                    continue;
+            // **An EditBox's direct-child `<FontString>` creates NOTHING.** RF-0028
+            // (`scratch/rf28-typed-widget-loadxml.md`, "EditBox — LoadXML `0x779fb0`") lists it as
+            // the *embedded* font string, and its one attribute (`bytes`) writes the box's own
+            // `maxBytes` at `E+0x33c` — it is the declaration of the object the ctor already built
+            // at `0x779bee`, exactly as a `<SimpleHTML>`'s `<FontString>` declares that widget's
+            // element font (the guard at the top of this function). Creating a second region here
+            // would put an orphan on the frame AND push the authored `<Layers>` regions one place
+            // down the list `GetRegions` hands Lua.
+            let existing_text = el
+                .tag
+                .eq_ignore_ascii_case("EditBox")
+                .then(|| crate::script::editbox_text_region_wrapper(self.lua(), wrapper))
+                .flatten();
+            let region_wrapper: Table = match existing_text {
+                Some(w) => {
+                    // The embedded string is nameless in the client's own chain; an authored
+                    // `name=` still publishes both ways, exactly like a setter-created sub-texture
+                    // (`apply_slider`'s thumb).
+                    if let Some(n) = rname {
+                        crate::script::region::publish_region_name(self.lua(), &n, &w);
+                        if let Err(e) = self.lua().globals().set(n.clone(), w.clone()) {
+                            self.report
+                                .warnings
+                                .push(format!("{dbg}: embedded FontString global '{n}': {e}"));
+                        }
+                    }
+                    w
                 }
+                None => match wrapper
+                    .call_method("CreateFontString", (rname, Some("OVERLAY".to_string())))
+                {
+                    Ok(w) => w,
+                    Err(e) => {
+                        self.report
+                            .errors
+                            .push(format!("{dbg}: CreateFontString (special): {e}"));
+                        continue;
+                    }
+                },
             };
             self.apply_region_layout(region, &region_wrapper, parent_name, dbg);
             self.apply_fontstring_font(region, &region_wrapper, dbg);

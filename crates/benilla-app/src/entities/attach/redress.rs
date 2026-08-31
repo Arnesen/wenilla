@@ -153,6 +153,7 @@ pub(in crate::entities) fn redress_player_looks(
                 l,
                 worn.bodyslots,
                 worn.cloak,
+                worn.emblem,
                 displays.as_deref(),
                 sections.as_deref(),
                 world_assets.as_deref(),

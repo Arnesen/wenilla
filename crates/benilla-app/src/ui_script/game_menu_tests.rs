@@ -8,10 +8,18 @@
 //! else); the micro button's `clicked` toggle; the native-center rule that makes the menu take
 //! the screen (windows close on the way in, and nothing opens while it is up); and the camp/quit
 //! countdown dialogs end to end. The Options button's own click path is options_tests'.
+//!
+//! The **window** most of these park in the menu's way is a bag, and since decision 1751 that is
+//! the reference's own `ContainerFrame1..12` off the player's installed patch chain — so those
+//! tests take [`bag_harness_with`], gate on `wow_data_or_skip!`, and ask [`bag_open`] rather than
+//! naming a frame (the twelve windows are recycled). The bag BAR the greying test measures —
+//! `MainMenuBarBackpackButton` and `CharacterBag0Slot`..`3Slot` — is still ours, unchanged.
 
 use benilla_ui::script::{
     ContainerSlot, ContainerState, LootRow, LootState, SessionRequest, SoundRequest, UiScript,
 };
+
+use super::test_ui::{bag_open, load_ui as load_xml, BAG_UI};
 
 /// The engine the menu needs behind it: fonts, the panel manager + popup engine, the shared widget
 /// kit, and the menu. `extra` adds the files a given test wants in the way (a bag, a loot window).
@@ -20,11 +28,19 @@ use benilla_ui::script::{
 /// lives there (the reference's own file for it) since the colour picker needed it from above
 /// GameMenuFrame.xml's deliberately-LAST seat in the manifest. Without it every rung comes out
 /// sizeless and the ladder geometry below reads nil — which is exactly how the move was caught.
+///
+/// **`extra` is DEDUPED against this base list**, and that is what lets a caller hand it
+/// [`BAG_UI`] whole (which names `Fonts.xml`, `MoneyFrame.xml`, `UiPanels.xml` and
+/// `UIPanelTemplates.xml` for its own reasons) without loading a file — and re-running its
+/// OnLoads — twice. Order is still the caller's: the first mention of a file is where it lands.
 fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     let files: Vec<&str> = [
         "Fonts.xml",
+        // `GameMenuFrame` and the panels it opens declare `parent="UIParent"`, resolved at LOAD
+        // (decision 1734) — UIParent must already be there, as it is in the manifest.
+        "UIParent.xml",
         "MoneyFrame.xml",
         "UiPanels.xml",
         "UIPanelTemplates.xml",
@@ -33,20 +49,11 @@ fn harness_with(extra: &[&str]) -> UiScript {
     .chain(extra.iter().copied())
     .chain(std::iter::once("GameMenuFrame.xml"))
     .collect();
+    let mut loaded = std::collections::HashSet::new();
     for file in files {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
+        if loaded.insert(file) {
+            load_xml(&s, file);
+        }
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
@@ -54,6 +61,24 @@ fn harness_with(extra: &[&str]) -> UiScript {
 
 fn harness() -> UiScript {
     harness_with(&[])
+}
+
+/// [`harness_with`], with the reference's bag stack folded in — the harness for every test below
+/// that parks a BAG in the menu's way. Since decision 1751 those windows are the reference's own
+/// `ContainerFrame1..12`, executed off the player's installed patch chain, so `BAG_UI` names
+/// `Interface\FrameXML\ContainerFrame.xml` and every caller opens with `wow_data_or_skip!`.
+///
+/// `before` loads AHEAD of the stack, for the one file that has to: `ActionBar.xml` declares
+/// `MainMenuBarArtFrame`, which `BagFrame.xml`'s bag bar anchors into and seats itself above.
+/// `after` is the ordinary tail (a merchant, a loot window).
+fn bag_harness_with(before: &[&str], after: &[&str]) -> UiScript {
+    let files: Vec<&str> = before
+        .iter()
+        .copied()
+        .chain(BAG_UI.iter().copied())
+        .chain(after.iter().copied())
+        .collect();
+    harness_with(&files)
 }
 
 /// The seven buttons, top to bottom — the ERA ladder, its own shape (the director's call on the
@@ -128,7 +153,7 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
 
     for name in ["GameMenuButtonEditMode", "GameMenuButtonSupport"] {
         assert!(
-            !s.eval::<bool>(&format!("return {name}:IsEnabled()"))
+            !s.eval::<bool>(&format!("return {name}:IsEnabled() ~= 0"))
                 .unwrap(),
             "{name} has no panel behind it and must read that way"
         );
@@ -141,7 +166,7 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
         "GameMenuButtonContinue",
     ] {
         assert!(
-            s.eval::<bool>(&format!("return {name}:IsEnabled()"))
+            s.eval::<bool>(&format!("return {name}:IsEnabled() ~= 0"))
                 .unwrap(),
             "{name} is live"
         );
@@ -173,7 +198,8 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
 /// (igMainMenuQuit — the reference's own choice of kit) without reaching any rung below.
 #[test]
 fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_it() {
-    let mut s = harness_with(&["MerchantFrame.xml", "Cooldown.xml", "BagFrame.xml"]);
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = bag_harness_with(&[], &["MerchantFrame.xml"]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
 
@@ -181,10 +207,7 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
     s.run("BenillaBagToggle_OnClick()").unwrap();
     let _ = s.take_sounds();
     s.run("ToggleGameMenu()").unwrap();
-    assert!(
-        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
-        "the press closed the bag"
-    );
+    assert!(!bag_open(&s, 0), "the press closed the bag");
     assert!(
         !s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
         "and did NOT also open the menu — one eater per press"
@@ -212,17 +235,15 @@ fn escape_opens_the_menu_only_when_nothing_else_wants_the_press_and_then_closes_
 /// rule is the ESC key's, not the button's.
 #[test]
 fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
-    let mut s = harness_with(&["MerchantFrame.xml", "Cooldown.xml", "BagFrame.xml"]);
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = bag_harness_with(&[], &["MerchantFrame.xml"]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("BenillaBagToggle_OnClick()").unwrap();
-    assert!(s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(bag_open(&s, 0));
 
     s.run("ToggleGameMenu(1)").unwrap();
-    assert!(
-        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
-        "the click closed the bag"
-    );
+    assert!(!bag_open(&s, 0), "the click closed the bag");
     assert!(
         s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
         "…and opened the menu in the SAME click"
@@ -238,16 +259,17 @@ fn the_clicked_form_closes_everything_and_opens_the_menu_in_one_go() {
 /// "you can't open your bags with the ESC menu up" true rather than merely greyed.
 #[test]
 fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
-    let mut s = harness_with(&[
-        "MerchantFrame.xml",
-        // LootFrame.xml owns GroupLootDropDown, whose OnLoad needs the dropdown kit — which in
-        // turn reads TOOLTIP_DEFAULT_COLOR from GameTooltip.xml. Shipped toc order.
-        "GameTooltip.xml",
-        "UIDropDownMenu.xml",
-        "LootFrame.xml",
-        "Cooldown.xml",
-        "BagFrame.xml",
-    ]);
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = bag_harness_with(
+        &[],
+        &[
+            "MerchantFrame.xml",
+            // LootFrame.xml owns GroupLootDropDown, whose OnLoad needs the dropdown kit — which
+            // in turn reads TOOLTIP_DEFAULT_COLOR from GameTooltip.xml (BAG_UI's, ahead of this).
+            "UIDropDownMenu.xml",
+            "LootFrame.xml",
+        ],
+    );
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("BenillaBagToggle_OnClick()").unwrap();
@@ -275,10 +297,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
         s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
         "the panel slot vacated on the way in"
     );
-    assert!(
-        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
-        "and the bags closed (CloseAllBags)"
-    );
+    assert!(!bag_open(&s, 0), "and the bags closed (CloseAllBags)");
     assert!(
         s.eval::<bool>("return GetCenterFrame():GetName() == \"GameMenuFrame\"")
             .unwrap(),
@@ -465,12 +484,12 @@ fn logout_and_exit_read_disabled_while_a_countdown_runs() {
     s.fire_event("PLAYER_CAMPING", vec![]);
     s.run("ToggleGameMenu(1)").unwrap();
     assert!(
-        !s.eval::<bool>("return GameMenuButtonLogout:IsEnabled()")
+        !s.eval::<bool>("return GameMenuButtonLogout:IsEnabled() ~= 0")
             .unwrap(),
         "Logout is dead while the camp timer runs"
     );
     assert!(!s
-        .eval::<bool>("return GameMenuButtonQuit:IsEnabled()")
+        .eval::<bool>("return GameMenuButtonQuit:IsEnabled() ~= 0")
         .unwrap());
 
     // With the countdown gone, a re-opened menu has them back.
@@ -478,7 +497,7 @@ fn logout_and_exit_read_disabled_while_a_countdown_runs() {
     s.fire_event("LOGOUT_CANCEL", vec![]);
     s.run("ToggleGameMenu(1)").unwrap();
     assert!(s
-        .eval::<bool>("return GameMenuButtonLogout:IsEnabled()")
+        .eval::<bool>("return GameMenuButtonLogout:IsEnabled() ~= 0")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -607,12 +626,11 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
 /// one is tinted grey. And on the way back out, tinted white again.
 #[test]
 fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
-    let mut s = harness_with(&[
-        "MerchantFrame.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-        "BagFrame.xml",
-    ]);
+    let _data = benilla_formats::wow_data_or_skip!();
+    // ActionBar.xml goes AHEAD of the bag stack: it declares MainMenuBarArtFrame, which the bag
+    // bar anchors into and seats itself above (`BenillaActionBarArt_SeatAbove`, nil-guarded in
+    // BagFrame.xml precisely because most harnesses load no bar).
+    let mut s = bag_harness_with(&["Cooldown.xml", "ActionBar.xml"], &["MerchantFrame.xml"]);
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.resolve();
@@ -687,7 +705,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
         "closing the menu restores full colour: {toggle:?}"
     );
     assert!(
-        s.eval::<bool>("return MainMenuBarBackpackButton:IsEnabled()")
+        s.eval::<bool>("return MainMenuBarBackpackButton:IsEnabled() ~= 0")
             .unwrap(),
         "…and the button works again"
     );

@@ -12,8 +12,8 @@
 //!
 //! **A session that is lost is over** (decision 1262): the reference's `GlueParent.lua` answers
 //! `DISCONNECTED_FROM_SERVER` with `SetGlueScreen("login")` + `GlueDialog_Show("DISCONNECTED")`,
-//! and so does this. 0065's seamless reconnect survives only where nobody is here to type — an
-//! unattended run ([`crate::run_mode::unattended_login`]) — because a client that
+//! and so does this. 0065's seamless reconnect survives only where the run has *declared* that
+//! nobody is here ([`crate::run_mode::unattended`], decision 1769) — because a client that
 //! re-authenticates on its own takes the account back off whoever just displaced it.
 //!
 //! Module split: this file (state, policy, input, dialogs, the saved-account persistence),
@@ -456,16 +456,10 @@ fn drive_policy(
     // Those failures exit non-zero instead, on one greppable marker — "login: FATAL" — that
     // leg.sh keys on (decision 1371).
     //
-    // **"May" is the whole correction.** This flag is derived from the environment
-    // ([`crate::run_mode::unattended_login`] — any of `$WOW_USER`/`$WOW_PASS`/`$WOW_CHAR`), and
-    // the environment cannot see who is in the room. The director keeps `$WOW_CHAR` set to skip
-    // character select, which made every one of their sessions "a harness" — so a **typed**
-    // password with a typo killed the process instead of showing the dialog the reference shows.
-    // The env fact is the right answer to "should the client log in without waiting for someone
-    // to type?" and the wrong answer to "is there anybody here?"; it was answering both. Whether
-    // an *attempt* was typed is not an inference at all — see `announced` at the use sites.
-    let harness_env =
-        crate::run_mode::unattended_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none();
+    // **Nobody is here only if the run says so** (decision 1769). Whether the client may end the
+    // run itself is [`crate::run_mode::fatal_when_driverless`]'s to answer; the two facts this
+    // scope adds are local ones. The smoke owns its own verdict, so it is never ours to end.
+    let smoke = std::env::var_os("WOW_LOGIN_SMOKE").is_some();
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
 
@@ -474,10 +468,9 @@ fn drive_policy(
     // The login smoke drives its own credentials instead.
     if !attempt.intent.env_read {
         attempt.intent.env_read = true;
-        // The same fact a lost session asks about (decision 1262) — read from the one place that
-        // owns it, so "the harness logs in for us" and "the harness logs back in for us" can never
-        // be two different answers.
-        if crate::run_mode::unattended_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
+        // Purely "are the credentials in the environment?" (decision 1769) — whether anybody is
+        // here to *react* is a different fact with a different home, `run_mode::unattended`.
+        if crate::run_mode::env_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
             let user = crate::webenv::var("WOW_USER").unwrap_or_else(|| "one".into());
             let pass = crate::webenv::var("WOW_PASS").unwrap_or_else(|| "pone".into());
             // The account guard (decision 0649): a vmangos login KICKS whoever holds the account,
@@ -500,8 +493,11 @@ fn drive_policy(
                     dialog.open_error(&why);
                     // The refusal is deterministic — the slot is baked into the binary — so the
                     // run can never get past this screen (the 1371 legs burned 3 × timeout on it).
-                    error!("login: FATAL — account guard refused the only credentials this run has; exiting");
-                    exit.write(AppExit::error());
+                    if crate::run_mode::fatal_when_driverless(
+                        "the account guard refused the only credentials this run has",
+                    ) {
+                        exit.write(AppExit::error());
+                    }
                 }
             }
         }
@@ -550,13 +546,17 @@ fn drive_policy(
         // by definition, and an attended failure gets the reference's answer: the dialog, and
         // another go. Only an attempt nobody typed may kill the process.
         let typed = attempt.intent.announced;
-        let fatal = harness_env && !typed;
+        let may_end_the_run = !typed && !smoke;
         if msg.terminal {
             warn!("login: {}", msg.reason);
             attempt.intent.clear();
             dialog.open_error(&msg.reason);
-            if fatal {
-                error!("login: FATAL — terminal login failure with nobody at the keyboard ({}); exiting", msg.reason);
+            if may_end_the_run
+                && crate::run_mode::fatal_when_driverless(&format!(
+                    "terminal login failure with nobody at the keyboard ({})",
+                    msg.reason
+                ))
+            {
                 exit.write(AppExit::error());
             }
             continue;
@@ -569,8 +569,11 @@ fn drive_policy(
                 warn!("login: refused ({refusal:?}, {byte:#04x}) — {}", msg.reason);
                 attempt.intent.clear();
                 dialog.open_error(&fail_text(strings, Some(refusal), None));
-                if fatal {
-                    error!("login: FATAL — refused ({refusal:?}, {byte:#04x}) and no resubmit can change it; exiting");
+                if may_end_the_run
+                    && crate::run_mode::fatal_when_driverless(&format!(
+                        "refused ({refusal:?}, {byte:#04x}) and no resubmit can change it"
+                    ))
+                {
                     exit.write(AppExit::error());
                 }
             }
@@ -1652,31 +1655,46 @@ mod tests {
         exited(&mut app, &mut cursor)
     }
 
-    /// **A typo must not kill the client.**
+    /// **A typo must not kill the client**, and **env credentials alone must not either.**
     ///
     /// The reported crash: `login: FATAL — refused (code 0x04) … exiting`, on a password typed at
-    /// the screen. `$WOW_CHAR` was set — the director keeps it to skip character select — which
-    /// makes [`crate::run_mode::unattended_login`] true and therefore made *every* session "a
-    /// harness", so a refusal took `AppExit::error()` instead of the reference's dialog. The
-    /// environment cannot see who is in the room; `announced` can, because only the screen's own
-    /// submit sets it.
+    /// the screen, because `$WOW_CHAR` was set and the old predicate read any env credential as
+    /// "a harness". Two answers, both here, because they close the hole from both ends: whether
+    /// an *attempt* was typed is direct evidence (`announced`, set by the screen's own submit and
+    /// by nothing else), and whether the *run* is driverless is a declaration the run makes
+    /// (`WOW_UNATTENDED`, decision 1769) — never an inference off credentials the director's own
+    /// launch line carries.
     #[test]
     fn a_typed_password_refusal_never_exits() {
         let _lock = crate::local_state::test_env::ENV_LOCK.lock();
-        // The harness environment the director actually runs with.
-        let _char = crate::local_state::test_env::EnvGuard::set("WOW_CHAR", "Somebody");
         let _smoke = crate::local_state::test_env::EnvGuard::unset("WOW_LOGIN_SMOKE");
+
+        // 1 · The director's actual launch line, verbatim from `.cargo/config.toml`'s example.
+        //     Nothing here says anybody is absent, so nothing may end the run — typed or not.
+        let _user = crate::local_state::test_env::EnvGuard::set("WOW_USER", "one");
+        let _pass = crate::local_state::test_env::EnvGuard::set("WOW_PASS", "pone");
+        let _char = crate::local_state::test_env::EnvGuard::set("WOW_CHAR", "One");
+        let _decl = crate::local_state::test_env::EnvGuard::unset("WOW_UNATTENDED");
+        let _cap = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _rig = crate::local_state::test_env::EnvGuard::unset("WOW_RIG");
         assert!(
-            crate::run_mode::unattended_login(),
-            "the fixture must reproduce the env that made this fatal",
+            crate::run_mode::env_login() && !crate::run_mode::unattended(),
+            "the fixture must be the env the director plays in: credentials, nobody declared away",
+        );
+        assert!(
+            !refusal_exits(false),
+            "an env-credentialled run with a person in it shows the dialog, it does not exit",
+        );
+
+        // 2 · A run that declares itself driverless keeps decision 1371's leg guarantee.
+        let _decl = crate::local_state::test_env::EnvGuard::set("WOW_UNATTENDED", "1");
+        assert!(
+            refusal_exits(false),
+            "an attempt nobody typed, in a run nobody is in, still exits non-zero",
         );
         assert!(
             !refusal_exits(true),
-            "a password typed at the screen is attended by definition — dialog, then another go",
-        );
-        assert!(
-            refusal_exits(false),
-            "an attempt nobody typed still exits non-zero: decision 1371's leg guarantee",
+            "a password typed at the screen is attended by direct evidence — dialog, another go",
         );
     }
 

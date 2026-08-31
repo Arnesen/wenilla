@@ -515,3 +515,177 @@ fn starting_a_move_raises_the_dragged_window() {
     s.run("Dialog:StopMovingOrSizing()").unwrap();
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+// ── The mouse-DOWN trigger ──────────────────────────────────────────────────────────────────────
+
+/// The centre of `name`'s resolved rect, in the coordinate space [`UiScript::mouse_button`] takes.
+fn centre(s: &UiScript, name: &str) -> (f32, f32) {
+    let (x, y) = s
+        .eval::<(f64, f64)>(&format!(
+            "return ({name}:GetLeft() + {name}:GetRight()) / 2, \
+                    ({name}:GetBottom() + {name}:GetTop()) / 2"
+        ))
+        .unwrap();
+    (x as f32, y as f32)
+}
+
+/// **A press brings the window forward** — the trigger at `0x766392` in the mouse-down handler
+/// `0x7662c0`, the last of the six census sites to be wired (wow-re ledger `0x7662c0`).
+///
+/// Without it `toplevel` gives only half the behaviour a player reads as "windows": a window you
+/// *open* comes to the front, and a window you *click* stays buried under whatever is on top of it.
+#[test]
+fn pressing_a_toplevel_window_brings_it_to_the_front() {
+    let mut s = board_and_dialog();
+    s.run(
+        r#"
+        Dialog:SetToplevel(true)
+        Dialog:EnableMouse(true)
+        Dialog:Show()
+        Board:SetFrameLevel(9)          -- put the dialog back underneath
+        Dialog:SetFrameLevel(0)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(level(&mut s, "Dialog") < level(&mut s, "Board"));
+
+    // A point inside Dialog and clear of Board, so the hit is unambiguous.
+    let (x, y) = centre(&s, "Dialog");
+    assert_eq!(s.hit_test_name(x, y).as_deref(), Some("Dialog"));
+    s.mouse_button(x, y, "LeftButton", true);
+    assert!(
+        level(&mut s, "Dialog") > level(&mut s, "Board"),
+        "the press brought it to the front"
+    );
+    s.mouse_button(x, y, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The trigger is **UNGUARDED** — there is no toplevel test at the call site. The worker resolves
+/// the nearest toplevel *self-or-ancestor*, so pressing a plain child raises the window that owns
+/// it. This is the clause that makes clicking a window's button, tab or background art work at all;
+/// with a guard out here, only a press landing on the window frame itself would raise.
+#[test]
+fn pressing_a_child_of_a_toplevel_window_raises_the_window() {
+    let mut s = board_and_dialog();
+    s.run(
+        r#"
+        Dialog:SetToplevel(true)
+        Dialog:Show()
+        Knob = CreateFrame("Frame", "Knob", Dialog)
+        Knob:SetPoint("CENTER", Dialog, "CENTER")
+        Knob:SetSize(40, 40)
+        Knob:EnableMouse(true)
+        Board:SetFrameLevel(9)
+        Dialog:SetFrameLevel(0)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(level(&mut s, "Dialog") < level(&mut s, "Board"));
+
+    let (x, y) = centre(&s, "Knob");
+    assert_eq!(s.hit_test_name(x, y).as_deref(), Some("Knob"));
+    s.mouse_button(x, y, "LeftButton", true);
+    assert!(
+        level(&mut s, "Dialog") > level(&mut s, "Board"),
+        "pressing the child raised its toplevel ancestor"
+    );
+    s.mouse_button(x, y, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **The RELEASE never raises.** The sibling category-`0xe` handler `0x766420` has no `Raise` call
+/// anywhere in it; only the down edge does. A raise on the release would be invisible in the
+/// ordinary case and wrong in the one that matters — a press that started a drag elsewhere.
+#[test]
+fn releasing_over_a_toplevel_window_does_not_raise_it() {
+    let mut s = board_and_dialog();
+    s.run(
+        r#"
+        Dialog:SetToplevel(true)
+        Dialog:EnableMouse(true)
+        Dialog:Show()
+        Board:SetFrameLevel(9)
+        Dialog:SetFrameLevel(0)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    let (x, y) = centre(&s, "Dialog");
+    let before = level(&mut s, "Dialog");
+    // A release with no press before it: the down edge never ran, so nothing may move.
+    s.mouse_button(x, y, "LeftButton", false);
+    assert_eq!(
+        level(&mut s, "Dialog"),
+        before,
+        "the release raised nothing"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **Capture else hover.** The handler resolves `root+0x80` (the existing capture) *before* falling
+/// back to `root+0x7c` (the frame under the cursor), so a second button pressed while the first is
+/// still held raises the frame being HELD, not whatever the pointer has wandered onto. The capture
+/// clears only when the last button comes up (`0x7664bb`, gated on the post-event mask), so the
+/// next press after that resolves to the hover again.
+#[test]
+fn a_chorded_press_raises_the_held_frame_not_the_one_under_the_cursor() {
+    let mut s = board_and_dialog();
+    s.run(
+        r#"
+        Dialog:SetToplevel(true)
+        Dialog:EnableMouse(true)
+        Dialog:Show()
+
+        -- A second window well clear of the first, with something of its own to raise over: the
+        -- gate is occlusion, so a frame overlapping nothing would decline whatever we press.
+        Other = CreateFrame("Frame", "Other")
+        Other:SetPoint("BOTTOMLEFT", 500, 100)
+        Other:SetSize(200, 200)
+        Other:EnableMouse(true)
+        Other:SetToplevel(true)
+        Tile = CreateFrame("Frame", "Tile")
+        Tile:SetPoint("BOTTOMLEFT", 660, 260)     -- clips Other's far corner only
+        Tile:SetSize(60, 60)
+        Tile:SetFrameLevel(9)
+
+        Board:SetFrameLevel(9)
+        Dialog:SetFrameLevel(0)
+        Other:SetFrameLevel(0)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // Hold the left button on Dialog…
+    let (dx, dy) = centre(&s, "Dialog");
+    s.mouse_button(dx, dy, "LeftButton", true);
+    let dialog_held = level(&mut s, "Dialog");
+    let other_before = level(&mut s, "Other");
+
+    // …then press the right button away over Other. The capture is still Dialog's, so Other is not
+    // the raise target even though it is what the cursor is on.
+    let (ox, oy) = centre(&s, "Other");
+    assert_eq!(s.hit_test_name(ox, oy).as_deref(), Some("Other"));
+    s.mouse_button(ox, oy, "RightButton", true);
+    assert_eq!(
+        level(&mut s, "Other"),
+        other_before,
+        "the frame under the cursor is not the raise target while a capture is held"
+    );
+    assert_eq!(level(&mut s, "Dialog"), dialog_held);
+
+    // Both buttons up — only now does the capture clear.
+    s.mouse_button(ox, oy, "LeftButton", false);
+    s.mouse_button(ox, oy, "RightButton", false);
+    let other_now = level(&mut s, "Other");
+    s.mouse_button(ox, oy, "LeftButton", true);
+    assert!(
+        level(&mut s, "Other") > other_now,
+        "with no capture held the press raises what the cursor is over"
+    );
+    s.mouse_button(ox, oy, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

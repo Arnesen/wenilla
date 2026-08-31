@@ -340,7 +340,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GameTooltip:SetInventoryItem(unit, slot) → hasItem, hasCooldown — the equipped-slot hover
+    // GameTooltip:SetInventoryItem(unit, slot) → hasItem, hasCooldown, repairCost — the equipped-slot hover
     // (paperdoll slots, buff-frame weapon enchants) and the shopping-compare listener's render
     // (ref PaperDollFrame.lua:626). **Unit-keyed** through `Model::inv_slot`, the same router the
     // `GetInventoryItem*` getters use: `"player"` from the self feed, the inspected token from the
@@ -350,6 +350,25 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // tooltip this renders the byte law's compare shape; the arm is consumed either way.
     // hasCooldown is nil INTERIM (no equipped-cooldown feed yet — its truthiness gates the ref's
     // re-poll only).
+    //
+    // **THREE returns, not two.** The reference's own `PaperDollFrame.lua:741` reads
+    // `local hasItem, hasCooldown, repairCost = GameTooltip:SetInventoryItem("player", this:GetID())`
+    // — Blizzard's file, out of the shipped `patch.MPQ`, and its very next use is
+    // `if ( InRepairMode() and repairCost and (repairCost > 0) ) then ... SetTooltipMoney(...)`.
+    // (l.632 in the same file reads only two, which is a caller not needing the third, not a
+    // different contract.) We pushed two, so pfUI's durability scan died on
+    // `panel.lua:499: attempt to perform arithmetic on local 'repCost' (a nil value)`.
+    //
+    // `repairCost` is **0 INTERIM**, the same posture and the same reason as `SetBagItem`'s below:
+    // the per-item repair feed is the paper-doll arc's and does not exist yet. Zero rather than nil
+    // because the reference **always pushes a number** there — wow-re `tooltip-money.md` §return-2
+    // reads `fild [ebp-0x30]; call 0x6f3810` on `SetBagItem`'s unconditional leg — and an
+    // undamaged item's cost genuinely is 0, so the interim value is a *real* value of the domain
+    // rather than a stand-in. Every reference consumer guards on `> 0`.
+    //
+    // Arity provenance, stated because it differs from the rest of this module: the *three* is the
+    // reference's own consumer, not a byte-read `mov eax, 3`. `SetBagItem`'s two IS byte-verified
+    // (`mov eax,2` @0x534985). A carve of `0x532ee0`'s tail would upgrade this line.
     m.set(
         "SetInventoryItem",
         lua.create_function(|lua, (this, unit, slot): (Table, String, usize)| {
@@ -394,7 +413,19 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     });
                 match view {
                     Some((id, name, q, inst)) => (id, name, q, inst, armed),
-                    None => return Ok(MultiValue::from_vec(vec![Value::Nil])),
+                    // An EMPTY slot answers `nil` for hasItem — and still pushes the other two,
+                    // because the reference's own caller destructures all three unconditionally
+                    // and only then tests `hasItem`. Answering one value here would hand
+                    // `PaperDollItemSlotButton_OnEnter` a nil `repairCost` on every empty slot,
+                    // which its `repairCost and (repairCost > 0)` guard survives but pfUI's bare
+                    // `totalRep + repCost` does not.
+                    None => {
+                        return Ok(MultiValue::from_vec(vec![
+                            Value::Nil,
+                            Value::Nil,
+                            Value::Integer(0),
+                        ]))
+                    }
                 }
             };
             {
@@ -421,7 +452,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 }
             }
             show_or_hide_empty(lua, h);
-            Ok(MultiValue::from_vec(vec![Value::Integer(1), Value::Nil]))
+            Ok(MultiValue::from_vec(vec![
+                Value::Integer(1),
+                Value::Nil,
+                Value::Integer(0),
+            ]))
         })?,
     )?;
 

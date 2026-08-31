@@ -43,9 +43,12 @@ mod auction;
 mod aura;
 mod backdrop;
 mod bank;
+mod bind_confirm;
 mod binder;
 mod binding_abi;
+// The five camera views + FlipCameraYaw — the reference's `UIUtil\Camera.cpp` Lua surface.
 mod button;
+mod camera_view;
 mod channel;
 mod char_stats;
 mod chat_send;
@@ -59,7 +62,8 @@ mod cursor;
 mod death;
 pub mod diagnostics;
 mod editbox;
-pub(crate) use editbox::adopt_text_region;
+pub mod instance;
+pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
 pub(crate) mod addon;
 pub mod addon_gate;
 mod client;
@@ -94,6 +98,7 @@ mod merchant;
 mod messageframe;
 mod minimap;
 mod model;
+mod modelframe;
 mod net_stats;
 mod object;
 mod party;
@@ -122,6 +127,7 @@ mod spellbook;
 mod stable;
 mod statusbar;
 mod stdlib;
+mod summon;
 mod talent;
 mod taxi;
 mod tick;
@@ -141,7 +147,7 @@ mod worldmap;
 mod worldstate;
 mod worn_display;
 
-pub use action::{ActionSlot, ActionState};
+pub use action::{ActionSlot, ActionState, ActionUse};
 pub use addon::AddOnInfo;
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
@@ -151,14 +157,16 @@ pub use auction::{
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
+pub use bind_confirm::PendingEquipAnswer;
+pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use char_stats::{
-    weapon_subclass_skill, InvSlotView, InventorySlots, UnitCombatStats, INVENTORY_SLOT_COUNT,
-    SKILL_DEFENSE, SKILL_UNARMED,
+    weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
+    BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_send::ChatSend;
 pub use chat_window::ChatWindowLook;
 pub use container::{
-    ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
+    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PetitionSlotView,
     RandomPropertyView, UiCursorMode,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
@@ -166,7 +174,7 @@ pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
     CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
-pub use cvars::MultisampleFormat;
+pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
@@ -192,6 +200,7 @@ pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NA
 pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
+pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
 pub use model::{TextureProbe, TextureSizeProbe};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
@@ -214,6 +223,7 @@ pub use spellbook::{
     resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
+pub use summon::SummonConfirmUiState;
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_spell::SpellTooltipView;
@@ -229,7 +239,9 @@ pub use types::{
     ScriptValue, TexCoords,
 };
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
-pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
+pub use unit::{
+    grey_band, level_reads_unknown, power_token, unit_is_grey, SelectionRequest, UnitState,
+};
 pub use weapon_enchant::WeaponEnchant;
 pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
@@ -275,9 +287,12 @@ const REG_DEFAULT_ERRORHANDLER: &str = "__benilla_default_errorhandler";
 /// Names on **both** region leaves — and each leaf registers its own copy, so these are NOT on the
 /// Region map and must not be hoisted into it (wow-re
 /// `system/ui/scratch/texture-fontstring-method-split.md`, stated there as a trap in as many words).
-/// `GetDrawLayer` is in the client's pair and absent here; absent is absent.
-pub(crate) const REGION_LEAF_SHARED: [&str; 8] = [
+/// `GetDrawLayer` is the setter's pair on both leaves (Texture `0x79a6c0`, FontString `0x79c660`)
+/// and is here now — it was carved as absent, which was true and was a gap, not a decision; pfUI's
+/// `GetNoNameObject` reads it off every child of a frame it reskins.
+pub(crate) const REGION_LEAF_SHARED: [&str; 9] = [
     "SetDrawLayer",
+    "GetDrawLayer",
     "SetVertexColor",
     "SetAlpha",
     "GetAlpha",
@@ -553,9 +568,13 @@ impl UiScript {
         guild::install(&lua)?;
         petition::install(&lua)?;
         binder::install(&lua)?;
+        summon::install(&lua)?;
+        bind_confirm::install(&lua)?;
+        instance::install(&lua)?;
         gm_ticket::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;
+        camera_view::install(&lua)?;
         session::install(&lua)?;
         pvp::install(&lua)?;
         worn_display::install(&lua)?;
@@ -605,6 +624,7 @@ impl UiScript {
         slider::install(&lua)?;
         colorselect::install(&lua)?;
         minimap::install(&lua)?;
+        modelframe::install(&lua)?;
         cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
@@ -758,9 +778,51 @@ impl UiScript {
     /// moved (a widget born after the last transition still gets told, without paying the arena
     /// walk every frame).
     pub fn set_minimap_inside(&mut self, inside: bool) {
-        for (_, frame) in self.model_mut().arena.iter_frames_mut() {
-            if let KindState::Minimap(m) = &mut frame.kind_state {
-                m.inside = inside;
+        self.for_each_minimap(|m| m.inside = inside);
+    }
+
+    /// Run `f` over every live Minimap widget's state. Goes through the arena's Minimap registry
+    /// rather than a full `iter_frames_mut`, for the reason that registry exists: a corpus UI is
+    /// three to four thousand frames and there is normally exactly one Minimap, and one of these
+    /// feeds ([`Self::set_minimap_player_facing`]) runs every frame.
+    fn for_each_minimap(&mut self, mut f: impl FnMut(&mut crate::widget::MinimapState)) {
+        let mut model = self.model_mut();
+        for h in model.arena.minimap_kinds().to_vec() {
+            if let Some(frame) = model.arena.frame_mut(h) {
+                if let KindState::Minimap(m) = &mut frame.kind_state {
+                    f(m);
+                }
+            }
+        }
+    }
+
+    /// Push the player's world facing (radians) onto every Minimap's **player-arrow** `Model` —
+    /// the client's `CMinimap::SetPlayerFacing 0x4eb8e0`, whose whole 34-byte body is
+    /// `[minimap+0x33c] = arg` then, guarded on non-null, `[[minimap+0x338]+0x39c] = arg`: a raw
+    /// dword copy into the same field `Model:SetFacing 0x76dce0` writes, with **no negation, offset
+    /// or unit change**. Its one caller (`0x4eb0a4`–`0x4eb0b1`) feeds it the player's `GetFacing()`
+    /// straight off the FPU stack, so what an addon reads back is the unit's orientation exactly.
+    ///
+    /// This is what makes `({Minimap:GetChildren()})[9]:GetFacing()` — Questie's `GetPlayerFacing`,
+    /// and pfQuest's `compat/client.lua` — return the truth rather than the ctor default `0`, which
+    /// is the difference between a waypoint arrow that points at the waypoint and one aimed
+    /// permanently north. Called every frame by the app, which owns the player.
+    pub fn set_minimap_player_facing(&mut self, facing: f32) {
+        let mut model = self.model_mut();
+        let arrows: Vec<crate::widget::FrameHandle> = model
+            .arena
+            .minimap_kinds()
+            .iter()
+            .filter_map(|&h| match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Minimap(m)) => m.player_arrow,
+                _ => None,
+            })
+            .collect();
+        for h in arrows {
+            if let Some(frame) = model.arena.frame_mut(h) {
+                if let KindState::Model(state) = &mut frame.kind_state {
+                    state.facing = facing;
+                }
             }
         }
     }
@@ -784,6 +846,23 @@ impl UiScript {
         self.model_mut().minimap_ping_request.take()
     }
 
+    /// The mask art the Minimap widget asks its renderer for — `Minimap:SetMaskTexture`'s value,
+    /// or `None` while no widget has set one (the app then keeps
+    /// [`crate::widget::MINIMAP_DEFAULT_MASK`]).
+    ///
+    /// The **first** Minimap in the registry answers, not every one: the mask is a property of the
+    /// map the app draws, and the app draws one. (Everything else in `MinimapState` is per widget
+    /// because the Lua API reads it back per widget; this has no getter in 1.12 to read back.)
+    pub fn minimap_mask_texture(&self) -> Option<String> {
+        let model = self.model_ref();
+        model.arena.minimap_kinds().iter().find_map(|&h| {
+            match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Minimap(m)) => m.mask_texture.clone(),
+                _ => None,
+            }
+        })
+    }
+
     /// Monotonic count of Minimap widgets ever created in this VM — the O(1) signal that a new
     /// one exists and needs the containment state pushed.
     pub fn minimap_widgets_created(&self) -> u64 {
@@ -801,12 +880,10 @@ impl UiScript {
     pub fn set_minimap_zoom(&mut self, zoom: u8, inside_zoom: u8) {
         let top = crate::widget::MINIMAP_ZOOM_LEVELS - 1;
         let (zoom, inside_zoom) = (zoom.min(top), inside_zoom.min(top));
-        for (_, frame) in self.model_mut().arena.iter_frames_mut() {
-            if let KindState::Minimap(m) = &mut frame.kind_state {
-                m.zoom = zoom;
-                m.inside_zoom = inside_zoom;
-            }
-        }
+        self.for_each_minimap(|m| {
+            m.zoom = zoom;
+            m.inside_zoom = inside_zoom;
+        });
     }
 
     /// Load and run a Lua chunk (text-only; the sandbox rejects bytecode). Errors propagate to the
@@ -1104,6 +1181,9 @@ impl UiScript {
         }
         let mut model = self.model_mut();
         model.mouse_down_on.clear();
+        // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
+        // behind would aim the next press's raise at whatever the pointer was last holding.
+        model.mouse_capture = None;
         // [`Model::last_click`] is deliberately NOT cleared here. It looks like it belongs in this
         // list, and the binary says otherwise: `[CButton+0x334]` has exactly three writers
         // image-wide (the ctor, the fired-double zero, the fired-single stamp) and none of them is
@@ -1171,6 +1251,29 @@ impl UiScript {
     /// Returns `true` if consumed.
     pub fn editbox_action(&mut self, action: EditAction) -> bool {
         editbox::action(&self.lua, action)
+    }
+
+    /// Is the focused EditBox in **alt-arrow mode** — the flag the XML spells `ignoreArrows` and
+    /// the Lua surface spells `SetAltArrowKeyMode` (`[editbox+0x318] & 0x10`)?
+    ///
+    /// The host asks this to decide whether an arrow key reaches the box at all. With the flag set
+    /// and ALT not held, the reference's key handler returns 0 at `0x77b1c4` for the four arrow
+    /// codes — **not consumed** — and the strata walk carries down to `CGWorldFrame`, which runs
+    /// the key's binding. That is what lets you turn while the chat box has focus, and it is why
+    /// the gate is on the key rather than on the [`EditAction`]: `Move { unit: Edge }` reaches the
+    /// box from HOME/END as well as from an arrow, and only the arrow is gated.
+    ///
+    /// `false` when nothing is focused, which is the same answer as an unflagged box: neither
+    /// declines the key.
+    pub fn editbox_alt_arrow_mode(&self) -> bool {
+        let model = self.model_ref();
+        model.focused_editbox.is_some_and(|h| {
+            model.arena.frame(h).is_some_and(|f| {
+                f.effective_visible
+                    && matches!(&f.kind_state,
+                        crate::widget::KindState::EditBox(eb) if eb.alt_arrow_key_mode)
+            })
+        })
     }
 
     /// Whether an EditBox currently holds keyboard focus (and is effectively visible) — the app gates
@@ -1281,6 +1384,7 @@ impl UiScript {
                 crate::widget::FrameKind::Slider => "Slider",
                 crate::widget::FrameKind::ScrollFrame => "ScrollFrame",
                 crate::widget::FrameKind::Model => "Model",
+                crate::widget::FrameKind::PlayerModel => "PlayerModel",
                 crate::widget::FrameKind::MessageFrame => "MessageFrame",
                 crate::widget::FrameKind::ScrollingMessageFrame => "ScrollingMessageFrame",
                 crate::widget::FrameKind::ColorSelect => "ColorSelect",

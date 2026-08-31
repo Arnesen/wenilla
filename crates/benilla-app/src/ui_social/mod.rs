@@ -140,6 +140,13 @@ impl SocialState {
         self.friends_dirty = true;
     }
 
+    /// Seat the ignore list directly — test-only, for the neighbours that consult it rather than
+    /// build it (decision 1764's trade-request ladder, whose leg 2 answers on its own opcode).
+    #[cfg(test)]
+    pub(crate) fn set_ignores_for_test(&mut self, guids: Vec<u64>) {
+        self.apply_ignore_list(guids);
+    }
+
     /// `SMSG_IGNORE_LIST` — likewise.
     fn apply_ignore_list(&mut self, guids: Vec<u64>) {
         self.ignores = guids;

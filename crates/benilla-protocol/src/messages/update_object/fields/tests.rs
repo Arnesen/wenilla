@@ -283,6 +283,27 @@ fn player_ammo_id_reads_the_field() {
 }
 
 #[test]
+fn player_self_res_spell_collapses_absent_and_zero() {
+    // 1224 sits one past PLAYER_AMMO_ID(1223), which is one past PLAYER_FIELD_BYTES(1222) — the
+    // run this test pins by neighbour so a mis-derived index shows up as a wrong reading, not a
+    // silent None. A rank-1 soulstone's effect spell is 3026 (decision 1746).
+    let f = ObjectFields::from_pairs(&[(1222, 0), (1223, 0), (1224, 3026)]);
+    assert_eq!(f.player_self_res_spell(), Some(3026));
+    assert_eq!(
+        f.player_ammo_id(),
+        Some(0),
+        "the neighbour is not disturbed"
+    );
+    // "No self-res" reaches us two ways — the field never streamed, or the server zeroed it on a
+    // resurrection by another means — and they are the same fact, so both read None.
+    assert_eq!(ObjectFields::default().player_self_res_spell(), None);
+    assert_eq!(
+        ObjectFields::from_pairs(&[(1224, 0)]).player_self_res_spell(),
+        None
+    );
+}
+
+#[test]
 fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     // flags=0x01 / combo=0x02 / actionBars=0x03 / highestHonorRank=5 packed little-endian: the
     // dword's three live readers take bytes 1, 2 and 3 without bleeding into each other. The
@@ -577,6 +598,74 @@ fn created_store_reads_absent_fields_as_zero_a_delta_as_none() {
     // A guid slot keeps present-iff-low-half semantics even on a created store (consumers
     // already treat a sent-empty `Some(0)` as no-guid; the fallback would only blur the two).
     assert_eq!(create.corpse_owner(), None);
+}
+
+/// The `TYPEID_CORPSE` descriptor's field indices and its two packed words (decision 1706). Every
+/// number here is a *position*, and a position is exactly what a doc comment cannot check: an
+/// off-by-one on `CORPSE_FIELD_ITEM`'s base would read the display id as a shoulder and dress a
+/// body in a helm's row, silently.
+#[test]
+fn corpse_descriptor_indices_and_packing() {
+    // `OBJECT_END + 0x6 = 12` display · `+0x7 = 13` item[0] · `+0x1A/0x1B = 32/33` bytes ·
+    // `+0x1D = 35` flags · `+0x1E = 36` dynamic flags (vmangos `UpdateFields_1_12_1.h:338-350`).
+    let corpse = ObjectFields::from_pairs(&[
+        (12, 49),
+        // Slot 4 (chest): DisplayInfoID 902 | InventoryType 5 << 24 (`Player.cpp:4821`).
+        (13 + 4, 902 | (5 << 24)),
+        // BYTES_1: (0) | race<<8 | gender<<16 | skin<<24 (`Corpse.cpp:228`).
+        (32, (6 << 8) | (1 << 16) | (3 << 24)),
+        // BYTES_2: face | hairstyle<<8 | haircolor<<16 | facialhair<<24 (`Corpse.cpp:229`).
+        (33, 7 | (2 << 8) | (4 << 16) | (5 << 24)),
+        (35, 0x04 | 0x08),
+        (36, 0x01),
+    ])
+    .into_created(ObjectType::Corpse);
+
+    assert_eq!(corpse.corpse_display_id(), Some(49));
+    assert_eq!(
+        corpse.corpse_item(4),
+        Some((902, 5)),
+        "display | invType<<24"
+    );
+    assert_eq!(
+        corpse.corpse_item(3),
+        None,
+        "an empty slot is absent, not (0, 0)"
+    );
+
+    let look = corpse.corpse_look().expect("both BYTES words present");
+    assert_eq!(
+        (
+            look.race,
+            look.sex,
+            look.skin,
+            look.face,
+            look.hair_style,
+            look.hair_color,
+            look.facial_hair
+        ),
+        (6, 1, 3, 7, 2, 4, 5),
+        "the seven bytes the reference loads at [descr+0x69..+0x6f], in that order"
+    );
+
+    // The flags are three independent bits on one field — and BONES is the model fork, so a
+    // mis-read here swaps a dressed body for a skeleton.
+    assert!(!corpse.corpse_is_bones(), "0x01 clear");
+    assert!(corpse.corpse_hides_helm(), "0x08 set");
+    assert!(!corpse.corpse_hides_cloak(), "0x10 clear");
+    assert!(
+        corpse.corpse_lootable(),
+        "DYNAMIC_FLAGS bit 0 — a different field"
+    );
+
+    // …and CORPSE_END = 38, so a created corpse answers 0 (not None) for every field below it.
+    let bare = ObjectFields::from_pairs(&[(12, 49)]).into_created(ObjectType::Corpse);
+    assert_eq!(bare.corpse_flags(), 0);
+    assert!(
+        bare.corpse_look().is_some(),
+        "absent BYTES read as the zero default"
+    );
+    assert!(!bare.corpse_lootable());
 }
 
 /// …and "absent = 0" stops at the end of the object's OWN descriptor (decision 1081). A creature

@@ -204,6 +204,18 @@ fn value_to_string(v: &Value) -> Option<String> {
 }
 
 /// Register the `GetCVar`/`SetCVar`/`GetCVarDefault`/`RegisterCVar` globals.
+/// The two nameplate toggles' registered CVar names — **defined here, in the crate that publishes
+/// the four verbs that write them**, so the binding and the name cannot drift apart. The app reads
+/// these consts rather than re-spelling the strings, and welds them to its registered table with
+/// its own test.
+///
+/// They are the LATER era's names: 1.12 registers no nameplate CVar at all (censused — see
+/// [`install_nameplate_verbs`]), so benilla's persistence takes the era spelling rather than
+/// inventing one, the same posture as `autoLootDefault`.
+pub const CVAR_NAMEPLATE_ENEMIES: &str = "nameplateShowEnemies";
+/// The friendly-plate half of [`CVAR_NAMEPLATE_ENEMIES`].
+pub const CVAR_NAMEPLATE_FRIENDS: &str = "nameplateShowFriends";
+
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `RegisterCVar(name, value)` — declare a CVar the client does not ship (decision 1195).
     //
@@ -378,7 +390,68 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             Ok(())
         })?,
-    )
+    )?;
+
+    install_nameplate_verbs(lua)
+}
+
+/// **The four nameplate verbs** — `ShowNameplates 0x489450`, `HideNameplates 0x489460`,
+/// `ShowFriendNameplates 0x489470`, `HideFriendNameplates 0x489480` (wow-re
+/// `ui/scratch/party-leader-and-nameplate-verbs.md`, §5 four-worker round).
+///
+/// Each is a **10-byte body** over one of two setters, and the reference's shape is worth stating
+/// because two obvious readings are wrong:
+///
+/// - **They read NO argument.** `ShowNameplates(false)` still shows. There is no `lua_gettop`, no
+///   `lua_toboolean`, nothing — the verb *is* the value, which is why there are four of them
+///   rather than two taking a flag.
+/// - **They return ZERO Lua values** — not `nil`, nothing. (`eax` at the `ret` is the return
+///   count, read off the VM's own C arm `0x6f61a8`.)
+/// - They are **four separate bodies**, not a masked pair like `UnitIsTapped`/`ByPlayer`:
+///   `0x489450` and `0x489470` are literally identical byte strings, rel32 included, over setters
+///   that differ only in their `or`/`and` masks.
+///
+/// The engine state is bits `0x1` (enemy) and `0x8` (friend) of one runtime dword `[0xc4da34]`.
+/// **There is no getter** — 15 references image-wide, all `.text`, and the 1153 `{name, fn}`
+/// records across all 54 registrar tables intersect the readers in the empty set — so an addon can
+/// set the state and never read it back, and neither can we.
+///
+/// **Where benilla diverges, deliberately and now knowingly.** 1.12 registers no nameplate CVar
+/// (censused: `0x63db90`'s 214 sites, 207 literal names, zero matching `/plate/i`), and the engine
+/// clears **both bits on every `EnterWorld`** — not once at boot. FrameXML replays them from its
+/// own `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` saved variables. Our two CVars reproduce *FrameXML's
+/// replay*, not the engine's state model: a benilla player's plates survive a zone-in because the
+/// CVar store outlives it. That is a divergence in favour of the player, recorded here rather than
+/// mistaken for fidelity.
+fn install_nameplate_verbs(lua: &Lua) -> mlua::Result<()> {
+    let g = lua.globals();
+    for (name, cvar, on) in [
+        ("ShowNameplates", CVAR_NAMEPLATE_ENEMIES, true),
+        ("HideNameplates", CVAR_NAMEPLATE_ENEMIES, false),
+        ("ShowFriendNameplates", CVAR_NAMEPLATE_FRIENDS, true),
+        ("HideFriendNameplates", CVAR_NAMEPLATE_FRIENDS, false),
+    ] {
+        g.set(
+            name,
+            // `MultiValue` and not `()`: mlua would otherwise reject a call that passes anything,
+            // and the reference accepts and ignores every argument. Returning `MultiValue::new()`
+            // is the zero-value return, which is NOT the same as pushing nil.
+            lua.create_function(move |lua, _: mlua::MultiValue| {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let key = cvar.to_ascii_lowercase();
+                if let Some(slot) = model.cvars.get_mut(&key) {
+                    let value = if on { "1" } else { "0" };
+                    if slot.value != value {
+                        slot.value = value.to_string();
+                        let reg_name = slot.name.clone();
+                        model.cvar_changes.push((reg_name, value.to_string()));
+                    }
+                }
+                Ok(mlua::MultiValue::new())
+            })?,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

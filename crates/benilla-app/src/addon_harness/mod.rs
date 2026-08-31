@@ -70,6 +70,12 @@ use std::path::{Path, PathBuf};
 use benilla_ui::script::UiScript;
 use benilla_ui::toc::Toc;
 
+/// The read-back — *why is this global nil?* One addon, loaded the way the survey loads it, then
+/// arbitrary Lua evaluated against the VM that is left standing. A debugger, not a column; its
+/// header says what it is worth and where it deliberately stops.
+pub mod probe;
+#[cfg(test)]
+mod probe_tests;
 /// The render column — the one question every column here was blind to: *did this addon put
 /// anything on screen?* Its own module because it is its own concern (and this file is well over
 /// the size budget); its header is the design and the honest bounds.
@@ -103,6 +109,30 @@ pub struct AddonReport {
     pub loaded: bool,
     /// Load errors, verbatim, tagged by file.
     pub errors: Vec<String>,
+    /// **Manifest entries the addon's own package does not contain.** Already counted in
+    /// [`Self::errors`], and deliberately not removed from it — 1213's rule for the fifth time:
+    /// a new question gets a new column, because silently shrinking `errors` would move `loaded`
+    /// and make every number in every past decision record incomparable.
+    ///
+    /// The question it asks that no other column can: **whose fault is this row?** Five of the
+    /// corpus's failures are one addon family shipping a `.toc` that lists files it does not
+    /// contain — `DPSMate_CureDisease.toc` names eight files and the folder holds six, because the
+    /// three `*Received*` ones were split into a sibling addon and the manifest was never updated.
+    /// The client is behaving correctly there (the reference logs `Couldn't open %s` and carries
+    /// on, which is what our loader does), and a headline that cannot say so invites a session to
+    /// go hunting for a bug that is not ours. The director's own AtlasLoot copy is the same shape.
+    pub absent_own_files: Vec<String>,
+    /// **Manifest entries resolving OUTSIDE the addon's folder, into one that is not installed** —
+    /// resolved paths, not the raw entry, because the `..` collapse is the interesting half.
+    ///
+    /// A different question from [`Self::absent_own_files`] and kept apart from it: this addon's
+    /// package is fine, it wants a neighbour. The corpus's two are Auctioneer and BeanCounter
+    /// reaching `..\Blizzard_AuctionUI\Blizzard_AuctionUITemplates.xml` — which wow-re records as
+    /// **RESOLVING** in the real client (`ui/scratch/xml-toc-path-resolution.md` §5 case 2, by
+    /// name), because there the file layer can see `Blizzard_AuctionUI` inside `patch.MPQ`. Ours
+    /// reads the AddOns directory only, so it misses. That one IS ours, and the split is what
+    /// makes it visible instead of averaging with the row above.
+    pub absent_foreign_files: Vec<String>,
     /// Names it calls that the VM does not have — see the module doc on what this is worth.
     pub missing_globals: Vec<String>,
     /// Dependencies named in its `.toc` that are not in the folder.
@@ -290,6 +320,34 @@ pub struct AddonReport {
 /// `root` is an AddOns folder — one subfolder per addon, each with a `<Name>.toc`. Anything else
 /// is skipped in silence, exactly as discovery does, because a stray `Backup/` is the common case.
 pub fn survey(root: &Path) -> Vec<AddonReport> {
+    let (names, installed, registry) = corpus(root);
+
+    // Folder → the method names its source DEFINES, memoised across the whole survey.
+    //
+    // A dependency's definitions have to be read once per *folder*, not once per dependent: the
+    // corpus's library folders are declared by dozens of addons each (83 declare `FuBar`), and
+    // re-scanning `FuBar`'s source 83 times is the survey's runtime for nothing.
+    let mut defined_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    names
+        .iter()
+        .map(|n| survey_one(root, n, &installed, &registry, &mut defined_methods))
+        .collect()
+}
+
+/// **The corpus as every VM must see it** — the folders that carry a manifest, the case-folded
+/// installed set dependency resolution consults, and the AddOn registry each VM is seated with.
+///
+/// Its own function because [`probe`] needs the IDENTICAL environment for a single addon, and a
+/// probe built against a registry of one would answer a different question from the row it exists
+/// to explain (see [`probe`]'s header). The installed set is a property of the FOLDER, never of
+/// the selection.
+fn corpus(
+    root: &Path,
+) -> (
+    Vec<String>,
+    BTreeSet<String>,
+    Vec<benilla_ui::script::AddOnInfo>,
+) {
     let mut names: Vec<String> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -328,16 +386,7 @@ pub fn survey(root: &Path) -> Vec<AddonReport> {
         })
         .collect();
 
-    // Folder → the method names its source DEFINES, memoised across the whole survey.
-    //
-    // A dependency's definitions have to be read once per *folder*, not once per dependent: the
-    // corpus's library folders are declared by dozens of addons each (83 declare `FuBar`), and
-    // re-scanning `FuBar`'s source 83 times is the survey's runtime for nothing.
-    let mut defined_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    names
-        .iter()
-        .map(|n| survey_one(root, n, &installed, &registry, &mut defined_methods))
-        .collect()
+    (names, installed, registry)
 }
 
 /// The method names one addon folder's source **defines** — `function T:N`, `function T.N`,
@@ -495,7 +544,7 @@ fn survey_one(
     // consumer — the same rule `load_dependencies` applies to errors.
     let baseline = RenderBaseline::of(&script);
 
-    let errors = load_addon_files(&script, root, name, &toc);
+    let (errors, absent) = load_addon_files(&script, root, name, &toc);
     let wants = missing_calls(root, name, &toc, &known, &dep_methods);
     // AFTER the addon's files: a template it declares in its OWN XML is registered by then, so it
     // is not missing. The check asks the VM's live registry, not a name list.
@@ -543,6 +592,8 @@ fn survey_one(
         interface: toc.interface_versions(),
         loaded: errors.is_empty(),
         errors,
+        absent_own_files: absent.own,
+        absent_foreign_files: absent.foreign,
         missing_globals: wants.missing_globals,
         missing_deps,
         missing_templates,
@@ -1065,16 +1116,85 @@ fn load_dependencies(
 /// Template names the addon passes to `CreateFrame` that the VM cannot resolve.
 ///
 /// Scanned rather than traced, for `missing_globals`' reason: the calls overwhelmingly happen in
-/// handlers a load-time survey never fires. The pattern is narrow — a **string literal** in the
-/// fourth argument position — so `CreateFrame(t, n, p, someVariable)` is invisible here, which is
-/// the honest under-report to make. It is also not comment-stripped: a `CreateFrame` inside a
+/// handlers a load-time survey never fires. It is not comment-stripped: a `CreateFrame` inside a
 /// comment counts, and that over-report is the cheaper error of the two.
+///
+/// **A string literal in the fourth argument, OR a local bound to one in the same file.** The
+/// literal-only form was the honest under-report this doc used to name — and then a decision was
+/// made on the number it produced. `assets/ui/ItemButtonTemplate.xml` declined to build
+/// `ItemButtonTemplate` citing "the harness's template demand ranks it at zero on both axes"; the
+/// zero was real, and pfUI wanted `ContainerFrameItemButtonTemplate` (which inherits it) the whole
+/// time, through
+///
+/// ```lua
+/// local tpl = "ContainerFrameItemButtonTemplate"
+/// if bag == -1 then tpl = "BankItemButtonGenericTemplate" end
+/// CreateFrame("Button", "pfBag" .. bag .. "item" .. slot, pfUI.bags[bag], tpl)
+/// ```
+///
+/// The instrument was not lying — it said what it could not see, right here. But a bound that is
+/// stated at the function and forgotten at the call site is only half a guard, so the cheap half
+/// of the gap is closed: one pass collects `x = "literal"` bindings per file, and a bare
+/// identifier in the fourth argument resolves through it.
+///
+/// Still invisible, and still stated: a name built by concatenation, one passed in as a function
+/// argument, one read from a table, and one bound in another file. Those are real and this does
+/// not pretend otherwise — what it fixes is the single commonest shape, measured.
 fn missing_templates(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Vec<String> {
     let mut wanted: BTreeSet<String> = BTreeSet::new();
     for path in source_files(root, name, toc) {
         let Some(text) = read_text(root, &path) else {
             continue;
         };
+        // `ident = "literal"` bindings in this file, for the fourth-argument lookup below. A name
+        // rebound to several literals keeps ALL of them (pfUI's `tpl` is two), because the census
+        // asks "could this call want that template", and both branches genuinely can.
+        let mut bound: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (i, _) in text.match_indices('=') {
+            // Not `==`, `~=`, `<=`, `>=`.
+            if text[i + 1..].starts_with('=')
+                || text[..i].ends_with(['=', '~', '<', '>'])
+                || text[i + 1..].trim_start().is_empty()
+            {
+                continue;
+            }
+            let lhs = text[..i].trim_end();
+            let lhs = lhs.rsplit(['\n', ';', ' ', '\t']).next().unwrap_or("");
+            if !is_ident(lhs) {
+                continue;
+            }
+            let rhs = text[i + 1..].trim_start();
+            let Some(q) = rhs.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let Some(end) = rhs[1..].find(q) else {
+                continue;
+            };
+            let lit = &rhs[1..end + 1];
+            // **Disqualify on an OPERATOR, not on a terminator.** The defect this closes is a
+            // fragment: `local built = "A" .. "B"` binding `built` to `"A"` — a name nobody asked
+            // for entering the demand ranking, which is not an under-report but the fiction this
+            // table has opened with three times (1210/1218/1227).
+            //
+            // Written first as "the tail must be a statement end", which is the wrong shape: Lua's
+            // terminators are open-ended (`end`, `then`, `else`, `until`, …) and chasing that list
+            // is endless — `tpl = "X" end` was missed for exactly that reason. What actually makes
+            // a literal part of a larger expression is a binary operator after it, and on a STRING
+            // in Lua that is `..` almost exclusively. So the test names the operators and lets
+            // everything else through, which also keeps this scanner's standing posture: over-
+            // report rather than under-report, the cheaper error of the two.
+            let tail = rhs[end + 2..].trim_start_matches([' ', '\t']);
+            let part_of_expression = tail.starts_with("..")
+                || tail.starts_with(['+', '-', '*', '/', '%', '^', '<', '>'])
+                || tail.starts_with("==")
+                || tail.starts_with("~=")
+                || tail.starts_with("and ")
+                || tail.starts_with("or ");
+            let whole = !part_of_expression;
+            if !lit.is_empty() && whole {
+                bound.entry(lhs).or_default().push(lit);
+            }
+        }
         for (i, _) in text.match_indices("CreateFrame") {
             let rest = &text[i + "CreateFrame".len()..];
             let Some(open) = rest.find('(') else { continue };
@@ -1123,6 +1243,9 @@ fn missing_templates(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> V
                 .or_else(|| f.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
             if let Some(lit) = lit.filter(|s| !s.is_empty()) {
                 wanted.insert(lit.to_string());
+            } else if let Some(lits) = bound.get(f) {
+                // A bare identifier bound to a literal in this file — pfUI's `tpl`.
+                wanted.extend(lits.iter().map(|s| (*s).to_string()));
             }
         }
     }
@@ -1610,15 +1733,47 @@ fn globals_of(script: &UiScript) -> BTreeSet<String> {
         .collect()
 }
 
+/// What a manifest entry that does not resolve actually is — see [`AddonReport::absent_own_files`].
+#[derive(Debug, Default)]
+pub struct AbsentFiles {
+    /// Entries under the addon's **own** folder that the package does not contain.
+    pub own: Vec<String>,
+    /// Entries resolving **outside** it, into a folder that is not installed.
+    pub foreign: Vec<String>,
+}
+
 /// Run the addon's manifest through the same two arms the real loader uses — `.lua` as a chunk,
 /// anything else as FrameXML — with the AddOns root as the provider's path space (decision 1186).
-fn load_addon_files(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Vec<String> {
+///
+/// Returns the errors **and**, beside them, the split of which entries did not resolve. The
+/// absent ones are still in `errors` — 1213's rule, for the fifth time: this asks a new question
+/// and gets a new column, it does not quietly shrink an old one.
+fn load_addon_files(
+    script: &UiScript,
+    root: &Path,
+    name: &str,
+    toc: &Toc,
+) -> (Vec<String>, AbsentFiles) {
     let provider = |req: &str| -> Option<Vec<u8>> { read_under(root, req) };
     let mut errors = Vec::new();
+    let mut absent = AbsentFiles::default();
     for file in &toc.files {
         let path = benilla_ui::loader::join_ref(name, file);
         let Some(bytes) = read_under(root, &path) else {
             errors.push(format!("{file}: not found"));
+            // WHOSE package is incomplete. `join_ref` has already collapsed the `..`s the way the
+            // client does (wow-re `ui/scratch/xml-toc-path-resolution.md` §2), so the resolved
+            // path is what the real file layer would be handed — and an entry that still points
+            // inside the addon's own folder is the addon shipping a manifest it does not satisfy,
+            // while one pointing out of it wants a neighbour that is not installed.
+            let own = path
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('/'));
+            if own {
+                absent.own.push(file.clone());
+            } else {
+                absent.foreign.push(path.clone());
+            }
             continue;
         };
         if is_lua(file) {
@@ -1640,7 +1795,7 @@ fn load_addon_files(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Ve
             Err(e) => errors.push(format!("{file}: {e}")),
         }
     }
-    errors
+    (errors, absent)
 }
 
 fn is_lua(entry: &str) -> bool {
@@ -1922,6 +2077,7 @@ const PROBE_FRAME_KINDS: &[&str] = &[
     "Slider",
     "ScrollFrame",
     "Model",
+    "PlayerModel",
     "MessageFrame",
     "ScrollingMessageFrame",
     "ColorSelect",
@@ -3397,6 +3553,174 @@ mod dependency_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// **A manifest entry with no file is split by WHOSE package is short** — the column that
+    /// stops a session hunting for a client bug that is not one.
+    ///
+    /// Both rows below are load failures and stay load failures: nothing is subtracted from
+    /// `loaded` or from `errors` (1213's rule, for the fifth time). What the split adds is the
+    /// attribution, and the two cases genuinely differ:
+    ///
+    /// - **`own`** — the addon ships a `.toc` listing a file it does not contain. Five corpus rows
+    ///   are this, all one family: `DPSMate_CureDisease.toc` names eight files and the folder
+    ///   holds six, because the three `*Received*` ones were split into a sibling addon and the
+    ///   manifest was never updated. Our loader is behaving correctly (the reference logs
+    ///   `Couldn't open %s` and carries on — wow-re `ui/scratch/xml-toc-path-resolution.md` §4).
+    /// - **`foreign`** — the entry escapes the addon's folder with `..`, which the client supports
+    ///   and `join_ref` reproduces, into a folder that is not installed. The corpus's two are
+    ///   Auctioneer and BeanCounter reaching `..\Blizzard_AuctionUI\...`, which wow-re records as
+    ///   **RESOLVING** in the real client (§5 case 2, by name) because its file layer can see that
+    ///   folder inside `patch.MPQ`. That one IS ours.
+    ///
+    /// The assertion that matters is that the two never merge: a single "files not found" count
+    /// would average a broken package with a real client gap and read as one number.
+    /// **A template named through a local resolves; the shapes that still cannot are asserted too.**
+    ///
+    /// The literal-only scan was an honest under-report — stated at `missing_templates` — and a
+    /// decision was then made on the number it produced: `assets/ui/ItemButtonTemplate.xml`
+    /// declined to build `ItemButtonTemplate` citing a demand of zero "on both axes". The zero was
+    /// real and the demand was not: pfUI binds `local tpl = "ContainerFrameItemButtonTemplate"`
+    /// and passes the variable, so the one addon that wanted it was invisible to the ranking.
+    ///
+    /// Both halves are asserted, because a scanner that quietly widened would be the worse fix:
+    /// the shape it now sees, AND the shapes it still does not, so the next decision quoting this
+    /// number can read its bound from a test rather than from a comment.
+    ///
+    /// **The exact-set form earned itself immediately.** Written first as a few absence checks it
+    /// PASSED, while the collector was binding `built` to `"Unseen"` out of
+    /// `local built = "Unseen" .. "ByConcat"` — a fragment entering the demand ranking as a
+    /// template name nobody asked for. That is not an under-report, it is the fiction this table
+    /// has opened with three times before (1210/1218/1227). Hence the whole-right-hand-side rule
+    /// in `missing_templates`, and hence asserting the set rather than sampling it.
+    #[test]
+    fn the_template_census_resolves_a_local_and_says_what_it_still_cannot_see() {
+        let tmp = std::env::temp_dir().join(format!("benilla-harness-tpl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("TplUser");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("TplUser.toc"), "## Interface: 11200\nuse.lua\n").unwrap();
+        // Every shape in one file. Only the first three are meant to be seen.
+        std::fs::write(
+            dir.join("use.lua"),
+            r#"
+            local tpl = "SeenViaLocal"
+            if bag == -1 then tpl = "SeenViaRebind" end
+            CreateFrame("Button", "a", nil, tpl)
+            CreateFrame("Button", "b", nil, "SeenAsLiteral")
+
+            -- Still invisible, deliberately: built by concatenation, read from a table, and
+            -- passed in as a parameter. Naming them here is the bound.
+            local built = "Unseen" .. "ByConcat"
+            CreateFrame("Button", "c", nil, built)
+            CreateFrame("Button", "d", nil, cfg.template)
+            function f(passed) CreateFrame("Button", "e", nil, passed) end
+            "#,
+        )
+        .unwrap();
+
+        let reports = survey(&tmp);
+        let r = reports.iter().find(|r| r.name == "TplUser").unwrap();
+        let got: BTreeSet<&str> = r.missing_templates.iter().map(String::as_str).collect();
+
+        for want in ["SeenViaLocal", "SeenViaRebind", "SeenAsLiteral"] {
+            assert!(got.contains(want), "{want} must be seen — got {got:?}");
+        }
+        // A name rebound to two literals keeps BOTH: the census asks "could this call want that
+        // template", and each branch genuinely can.
+        assert!(
+            got.contains("SeenViaLocal") && got.contains("SeenViaRebind"),
+            "a rebound local keeps every literal it was bound to"
+        );
+        // **The stated bound, asserted as an EXACT set** so it cannot rot into a claim of
+        // completeness. The file also asks for a concatenated name, a table field
+        // (`cfg.template`) and a parameter (`passed`); none may appear, and pinning the whole set
+        // rather than a few absences is what makes a future widening announce itself here.
+        let want: BTreeSet<&str> = ["SeenViaLocal", "SeenViaRebind", "SeenAsLiteral"]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, want,
+            "the census sees exactly these three shapes — concatenation, a table field and a \
+             parameter stay invisible, and that bound lives here rather than only in a doc comment"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_absent_manifest_entry_is_attributed_to_whose_package_is_short() {
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-harness-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let write = |name: &str, toc: &str, files: &[(&str, &str)]| {
+            let dir = tmp.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.toc")), toc).unwrap();
+            for (f, body) in files {
+                std::fs::write(dir.join(f), body).unwrap();
+            }
+        };
+        // Ships one of the two files its own manifest lists — DPSMate_CureDisease's exact shape.
+        write(
+            "ShortPackage",
+            "## Interface: 11200\nhere.lua\ngone.lua\n",
+            &[("here.lua", "ShortPackageRan = 1\n")],
+        );
+        // Reaches a neighbour that is not installed — Auctioneer's exact shape, `..` and all.
+        write(
+            "WantsNeighbour",
+            "## Interface: 11200\nown.lua\n..\\NotInstalled\\templates.xml\n",
+            &[("own.lua", "WantsNeighbourRan = 1\n")],
+        );
+
+        let reports = survey(&tmp);
+        let of = |n: &str| reports.iter().find(|r| r.name == n).unwrap();
+
+        let short = of("ShortPackage");
+        assert_eq!(
+            short.absent_own_files,
+            vec!["gone.lua".to_string()],
+            "the entry inside its own folder is the addon's own package being short"
+        );
+        assert!(
+            short.absent_foreign_files.is_empty(),
+            "and it is NOT a missing neighbour: {:?}",
+            short.absent_foreign_files
+        );
+
+        let wants = of("WantsNeighbour");
+        assert_eq!(
+            wants.absent_foreign_files,
+            vec!["NotInstalled/templates.xml".to_string()],
+            "`..` is collapsed the way the client collapses it, and the RESOLVED path is what is \
+             reported — the collapse is the interesting half"
+        );
+        assert!(
+            wants.absent_own_files.is_empty(),
+            "its own package is complete: {:?}",
+            wants.absent_own_files
+        );
+
+        // NOTHING is subtracted. Both are still load failures, still in `errors`, still counted
+        // in every headline — the split is a new column beside them, never a quieter old one.
+        for r in [short, wants] {
+            assert!(!r.loaded, "{}: still a load failure", r.name);
+            assert!(
+                r.errors.iter().any(|e| e.contains("not found")),
+                "{}: the error is still there verbatim: {:?}",
+                r.name,
+                r.errors
+            );
+        }
+        // ...and the file that DID exist ran, because a missing entry does not abort the manifest.
+        assert!(
+            !short.errors.iter().any(|e| e.contains("here.lua")),
+            "the surviving file loads: {:?}",
+            short.errors
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn a_sibling_addons_embedded_library_is_invisible() {
         let tmp =
@@ -4162,12 +4486,50 @@ mod dependency_tests {
     /// Without this, a probe arm that is simply broken would charge its own failure to all 218
     /// addons — the mis-attribution 1209 exists about, arriving through the instrument instead of
     /// through a claim.
+    ///
+    /// **"Silent" has to mean "ran and said nothing", never "had nothing to run"** — the same
+    /// distinction the hover-arm test above is built around ("found nothing" vs "ran nothing"),
+    /// and decision 1751 put this test one step from the wrong side of it: `ToggleBackpack`, the
+    /// probe's first and most-hooked entry point, is defined in the reference's own
+    /// `ContainerFrame.lua` now, which `load_default_ui` reads off the PLAYER'S INSTALL. On a
+    /// machine without one the global is simply absent, `drive_ui_probe`'s `try` guard skips it,
+    /// and an empty error list would mean the probe drove nothing at all. So the entry points are
+    /// asserted to EXIST before the silence is asserted, and the test gates on client data like
+    /// every other reader of the chain.
+    ///
+    /// What is deliberately NOT asserted here is `load_default_ui`'s own failure list. It is not
+    /// empty on a seated session today — `TargetFrame`'s OnLoad reaches
+    /// `BenillaTargetAuras_Update` (UnitFrames.xml:956), which indexes `TargetofTargetFrame`
+    /// ~1150 lines before that frame is declared (UnitFrames.xml:2103), so a seated TARGET raises
+    /// there at load. That is a real bug in that file and a separate one from anything this test
+    /// measures; pinning it here would make the probe's gate hostage to it. Recorded rather than
+    /// worked around.
     #[test]
     fn the_ui_probe_is_silent_on_a_clean_vm() {
+        let _data = benilla_formats::wow_data_or_skip!();
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
         seat_a_session(&mut script);
         let _ = crate::ui_script::load_default_ui(&script);
+        // The probe's entry points are here to be driven. Each is `try`-guarded inside
+        // `drive_ui_probe`, so a missing one is silent — which would make the assertion below
+        // pass by having done nothing.
+        for entry in [
+            "ToggleBackpack",
+            "UnitFrame_OnEnter",
+            "UnitFrame_OnLeave",
+            "ActionButton_Update",
+            "GameTooltip_SetDefaultAnchor",
+        ] {
+            assert_eq!(
+                script
+                    .eval::<String>(&format!("return type({entry})"))
+                    .unwrap(),
+                "function",
+                "{entry} is not in the VM, so the probe would skip it and this test would pass \
+                 without driving anything"
+            );
+        }
 
         let errs = drive_ui_probe(&mut script);
         assert!(

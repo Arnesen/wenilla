@@ -74,7 +74,7 @@
 /// Stars — the first celestial draw (`0x6d4a3f`): everything else in the sky paints over them, so
 /// theirs is the ladder's LOWEST rung (see the sign law above).
 pub(crate) const STARS_BIAS: f32 = -1.0e6;
-/// **The WMO skybox** ([`crate::wmo_sky`]) — the building-owned painted sky, which replaces this
+/// **The WMO skybox** ([`crate::skybox`]) — the building-owned painted sky, which replaces this
 /// whole ladder while it draws, so its rung never competes with one above. It needs a rung at all
 /// because a skybox is **an ordinary M2 and not an opaque backdrop**, which is what this module
 /// asserted until decision 1264: `CavernsOfTimeSky.m2` is 21 batches across four blend modes — a

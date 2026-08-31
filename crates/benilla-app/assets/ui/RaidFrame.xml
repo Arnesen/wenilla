@@ -42,7 +42,10 @@
         `PromoteToAssistant`, `DemoteAssistant`, `DoReadyCheck`, `ConfirmReadyCheck`,
         `RequestRaidInfo`, `GetNumSavedInstances`, `GetSavedInstanceInfo`,
         `SetRaidRosterSelection`/`GetRaidRosterSelection` — all in `benilla-ui/src/script/party.rs`
-        beside `GetRaidRosterInfo`, which already existed. The events are `RAID_ROSTER_UPDATE`,
+        beside `GetRaidRosterInfo`, which already existed. Decision 1748 added the lockout family's
+        own three (`IsInInstance`, `CanShowResetInstances`, `ResetInstances`) in
+        `benilla-ui/src/script/instance.rs`; the CONFIRM_RESET_INSTANCES dialog at the foot of this
+        file is their one caller, raised by UnitPopup's SELF menu. The events are `RAID_ROSTER_UPDATE`,
         `READY_CHECK` and `UPDATE_INSTANCE_INFO`, fired by `ui_party::feed`; the `raid1`..`raid40`
         unit tokens the rows target and hover are fed there too.
     -->
@@ -69,6 +72,10 @@
         GROUP = GROUP or "Group"                                                       -- l.2029
         EMPTY = EMPTY or "Empty"                                                       -- l.1433
         UNKNOWN = UNKNOWN or "Unknown"                                                 -- l.4443
+        CONFIRM_RESET_INSTANCES = CONFIRM_RESET_INSTANCES
+            or "Do you really want to reset all of your instances?"                    -- l.851
+        YES = YES or "Yes"                                                             -- l.5463
+        NO = NO or "No"                                                                -- l.2794
 
         -- ── The counts (ref RaidFrame.lua l.2-5) ────────────────────────────────────────────────
         -- Published globals, not local constants: `MAX_RAID_MEMBERS` alone is named by a large
@@ -613,6 +620,29 @@
             EditBoxOnEnterPressed = function()
                 InviteByName(getglobal("StaticPopup1EditBox"):GetText())
                 StaticPopup_Hide("ADD_RAIDMEMBER")
+            end,
+        }
+
+        -- ── "Reset all instances" (ref StaticPopup.lua l.23-33; decision 1748) ──────────────────
+        -- Raised by UnitPopup's SELF menu, and registered HERE because this file is the instance
+        -- house — the same rule that keeps the pet dialogs in PetActionBar.xml. `ResetInstances()`
+        -- is the only call in the client that sends `CMSG_RESET_INSTANCES`; everything else in the
+        -- lockout family is the server talking.
+        --
+        -- The answer is per instance rather than one verdict, and it arrives as CHAT_MSG_SYSTEM
+        -- lines the engine composes: an `SMSG_INSTANCE_RESET` per dungeon that reset, and — on
+        -- the group path only — an `SMSG_INSTANCE_RESET_FAILED` per dungeon that would not.
+        -- Nothing back at all is the ordinary answer for a character with nothing resettable. So
+        -- there is nothing to show here and no result to wait for.
+        StaticPopupDialogs["CONFIRM_RESET_INSTANCES"] = {
+            text = CONFIRM_RESET_INSTANCES,
+            button1 = YES,
+            button2 = NO,
+            timeout = 0,
+            whileDead = 1,
+            hideOnEscape = 1,
+            OnAccept = function()
+                ResetInstances()
             end,
         }
     ]]></Script>

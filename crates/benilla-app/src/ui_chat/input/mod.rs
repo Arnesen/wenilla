@@ -1066,6 +1066,8 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
         amount,
         amount2: amount / 3,
         power2: power,
+        named: "Copper Bar".into(),
+        trailers: None,
     };
     let line = |kind: K, family: Family, variant: Variant, f: Fills| PendingCombat {
         kind,
@@ -1073,6 +1075,7 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
         variant,
         subject: 0,
         object: 0,
+        named: super::combat::Named::Ready,
         fills: f,
         tries: 0,
     };
@@ -1200,6 +1203,141 @@ fn combat_log_battery(log: &mut super::feed::ChatLog) {
             combat::SPELLPOWERLEECH,
             Variant::SelfOther,
             fills(150, None, Some(0)),
+        ),
+        // ── the completeness block (1703) ────────────────────────────────────────────────
+        // One line per family that was absent until now, in the order a player meets them.
+        // The `Named` slot's text is already in the fills, so these drive the same drain the
+        // wire does with the same composer — only the resolve hops are short-circuited.
+        line(
+            K::CombatHostileDeath,
+            combat::UNITDIES,
+            Variant::OtherOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::CombatHostileDeath,
+            combat::SELFKILLOTHER,
+            Variant::OtherOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::CombatFriendlyDeath,
+            combat::UNITDESTROYEDOTHER,
+            Variant::OtherOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellPeriodicSelfDamage,
+            combat::AURAADDED_HARMFUL,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellPeriodicSelfBuffs,
+            combat::AURAADDED_HELPFUL,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellPeriodicSelfDamage,
+            combat::AURAAPPLICATIONADDED_HARMFUL,
+            Variant::SelfOther,
+            fills(3, None, None),
+        ),
+        line(
+            K::SpellAuraGoneSelf,
+            combat::AURAREMOVED,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellBreakAura,
+            combat::AURADISPEL,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellItemEnchantments,
+            combat::ITEMENCHANTMENTADD,
+            Variant::SelfSelf,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellTradeskills,
+            combat::TRADESKILL_LOG,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellSelfDamage,
+            combat::SPELLINTERRUPT,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::SpellSelfDamage,
+            combat::SPELLEXTRAATTACKS_SINGULAR,
+            Variant::SelfOther,
+            fills(1, None, None),
+        ),
+        line(
+            K::SpellSelfDamage,
+            combat::SPELLSPLITDAMAGE,
+            Variant::SelfOther,
+            fills(66, None, None),
+        ),
+        line(
+            K::SpellSelfDamage,
+            combat::PROCRESIST,
+            Variant::SelfOther,
+            fills(0, None, None),
+        ),
+        line(
+            K::CombatCreatureVsSelfHits,
+            combat::VSENV_FALLING,
+            Variant::SelfOther,
+            fills(94, None, None),
+        ),
+        line(
+            K::CombatMiscInfo,
+            combat::DURABILITYDAMAGE_DEATH,
+            Variant::OtherOther,
+            fills(0, None, None),
+        ),
+        // The two families whose `Named` slot is not an item name: a faction and a failure
+        // reason. Overridden here so the battery reads as the sentences a player will see.
+        line(
+            K::CombatFactionChange,
+            combat::FACTION_STANDING_INCREASED,
+            Variant::OtherOther,
+            Fills {
+                named: "Stormwind".into(),
+                ..fills(250, None, None)
+            },
+        ),
+        line(
+            K::SpellFailedLocalPlayer,
+            combat::SPELLFAILCAST,
+            Variant::SelfOther,
+            Fills {
+                named: "Not enough mana".into(),
+                ..fills(0, None, None)
+            },
+        ),
+        // The trailer pass, on the one family that can show all six.
+        line(
+            K::CombatSelfHits,
+            combat::COMBATHIT,
+            Variant::SelfOther,
+            Fills {
+                trailers: Some(combat::Trailers {
+                    absorbed: 12,
+                    resisted: 7,
+                    blocked: 30,
+                    hit_info: 0x4000,
+                }),
+                ..fills(210, None, None)
+            },
         ),
     ];
     for l in battery {

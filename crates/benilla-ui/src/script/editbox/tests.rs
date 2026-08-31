@@ -468,20 +468,83 @@ fn multiline_enter_inserts_a_newline_without_onspacepressed() {
     assert_eq!(s.eval::<i64>("return spaces").unwrap(), 0);
 }
 
+/// **Alt-arrow mode: the two real verbs, and the flag they share with the XML attribute.**
+///
+/// The §5 (`ignorearrows-alt-arrow-gate.md`) settled four things this pins:
+///
+///  · 5875 has **no `SetIgnoreArrows`** — the 48-entry EditBox method table
+///    `[0x87bb68, 0x87bce8)` carries `SetAltArrowKeyMode`/`GetAltArrowKeyMode` at 46/47 and no
+///    entry whose name contains "Ignore". benilla published the invented name for two rounds and
+///    was missing both real ones.
+///  · The XML attribute `ignoreArrows` and the Lua verbs drive **one** flag (`[E+0x318] & 0x10`).
+///  · The setter's argument is `GetBoolOrDefault(L, 2, default = 1)` (`0x6f1c10`), not Lua
+///    truthiness — an **absent** argument ENABLES, `""` ENABLES, `0` and `"0"` disable.
+///  · The getter answers the **number 1 or nil**, never a boolean.
+///
+/// And the negative that matters: the engine core no longer swallows anything. The gate is on the
+/// KEY and lives in the host (`UiKeyboardCapture::arrows_fall_through`), so an `EditAction` that
+/// arrives here moves the caret whatever the flag says — it only ever arrives when ALT was held or
+/// the key was not an arrow.
 #[test]
-fn ignore_arrows_swallows_char_moves_but_not_word_or_edge() {
+fn alt_arrow_key_mode_is_the_flag_and_the_engine_core_no_longer_swallows_moves() {
     let mut s = script();
     s.run(
         r#"
         E = CreateFrame("EditBox", "E")
-        E:SetIgnoreArrows(true)
         E:SetText("abc")
         E:SetFocus()
     "#,
     )
     .unwrap();
-    // ignoreArrows: a Char move (a plain arrow) is consumed but inert; the cursor stays put — a
-    // subsequent BACKSPACE removes the char before end-of-text ('c'), proving it didn't move.
+
+    // The invented name is gone.
+    assert!(
+        s.eval::<bool>("return E.SetIgnoreArrows == nil").unwrap(),
+        "5875 has no SetIgnoreArrows — publishing it was decision 1189's error"
+    );
+
+    // The getter: a number or nil, never a boolean.
+    assert_eq!(
+        s.eval::<Option<i64>>("return E:GetAltArrowKeyMode()")
+            .unwrap(),
+        None
+    );
+    s.run("E:SetAltArrowKeyMode(1)").unwrap();
+    assert_eq!(
+        s.eval::<Option<i64>>("return E:GetAltArrowKeyMode()")
+            .unwrap(),
+        Some(1)
+    );
+    assert!(
+        s.eval::<bool>("return type(E:GetAltArrowKeyMode()) == 'number'")
+            .unwrap(),
+        "the set arm pushes the double 1.0 (0x6f3810), not a boolean"
+    );
+
+    // `GetBoolOrDefault(default = 1)`, arm by arm — three of these are backwards under Lua
+    // truthiness, which is why the coercion has its own helper.
+    for (arg, want) in [
+        ("", Some(1)),      // ABSENT -> the default 1 -> enabled
+        ("nil", None),      // nil -> 0
+        ("0", None),        // __ftol(0) -> false
+        ("-1", Some(1)),    // __ftol(-1) != 0 -> true
+        (r#""0""#, None),   // the string "0" -> false
+        (r#""""#, Some(1)), // "" matches no arm -> the default -> enabled
+    ] {
+        s.run("E:SetAltArrowKeyMode(nil)").unwrap();
+        s.run(&format!("E:SetAltArrowKeyMode({arg})")).unwrap();
+        assert_eq!(
+            s.eval::<Option<i64>>("return E:GetAltArrowKeyMode()")
+                .unwrap(),
+            want,
+            "SetAltArrowKeyMode({arg})"
+        );
+    }
+
+    // The engine core does NOT swallow a Char move any more — the gate is on the key, upstream.
+    // `SetText` leaves the caret at the end, so one back-Char move puts it between 'b' and 'c'.
+    s.run(r#"E:SetAltArrowKeyMode(1) E:SetText("abc")"#)
+        .unwrap();
     assert!(s.editbox_action(EditAction::Move {
         unit: EditUnit::Char,
         back: true,
@@ -491,21 +554,24 @@ fn ignore_arrows_swallows_char_moves_but_not_word_or_edge() {
         unit: EditUnit::Char,
         back: true
     }));
-    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "ab");
-    // The ref's Ctrl bypass (guard 0x77b18e) maps to Word — which passes the gate; Edge too.
-    s.editbox_action(EditAction::Move {
-        unit: EditUnit::Word,
-        back: true,
-        extend: false,
-    });
-    assert!(s.editbox_action(EditAction::Delete {
-        unit: EditUnit::Char,
-        back: false
-    }));
     assert_eq!(
         s.eval::<String>("return E:GetText()").unwrap(),
-        "b",
-        "the word move must have reached text start"
+        "ac",
+        "the caret moved, so BACKSPACE took 'b' — a flagged box that is handed the action acts on it"
+    );
+}
+
+/// The XML attribute is the same flag under its other name (`ignoreArrows` occurs once in the
+/// image, at `0x879b78`, with one xref: the attribute push at `0x77a13a`).
+#[test]
+fn the_ignore_arrows_xml_attribute_is_alt_arrow_key_mode() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    s.run("E:SetAltArrowKeyMode(1)").unwrap();
+    assert_eq!(
+        s.eval::<Option<i64>>("return E:GetAltArrowKeyMode()")
+            .unwrap(),
+        Some(1)
     );
 }
 
@@ -1253,4 +1319,134 @@ fn creating_a_box_does_not_focus_it_the_way_showing_one_does() {
     );
     assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **`SetMaxLetters` gates the COUNT and not the type** — one of four widget bindings in the whole
+/// registrar that calls `lua_gettop`, and its gate is exact (`cmp eax,2`), while the value goes
+/// through a bare `lua_tonumber` with no `isnumber` guard (wow-re `numeric-arg-coercion-law.md`
+/// Q1/Q3, VERIFIED).
+///
+/// That pairing is the opposite of the usual one, which is why it earns a test: benilla typed the
+/// argument `i64` and so raised on `SetMaxLetters(nil)` — aux-addon's `gui/core.lua:288` writes
+/// exactly that, and died at load on it — while accepting the wrong *number* of arguments
+/// silently.
+///
+/// And `0` is **no limit**, not "no letters".
+#[test]
+fn set_max_letters_gates_the_argument_count_and_coerces_the_value() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E") E:SetFocus()"#)
+        .unwrap();
+    let max = |s: &UiScript| s.eval::<i64>("return E:GetMaxLetters()").unwrap();
+
+    s.run("E:SetMaxLetters(12)").unwrap();
+    assert_eq!(max(&s), 12);
+
+    // nil is 0 is UNLIMITED — the call completes, which is the whole point.
+    s.run("E:SetMaxLetters(nil)").unwrap();
+    assert_eq!(max(&s), 0);
+    s.run(r#"E:SetMaxLetters(5) E:SetText("abcdefgh")"#)
+        .unwrap();
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap().len(), 5);
+    s.run(r#"E:SetMaxLetters(nil) E:SetText("abcdefgh")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return E:GetText()").unwrap(),
+        "abcdefgh",
+        "0 skips the trim block whole (0x77c085) — it is no limit, not no letters"
+    );
+
+    // A numeric string coerces; anything else is 0.
+    s.run(r#"E:SetMaxLetters("12")"#).unwrap();
+    assert_eq!(max(&s), 12);
+    s.run("E:SetMaxLetters({})").unwrap();
+    assert_eq!(max(&s), 0);
+
+    // The COUNT is exact — too few AND too many both raise.
+    assert!(s.run("E:SetMaxLetters()").is_err(), "too few raises");
+    assert!(
+        s.run("E:SetMaxLetters(50, 60)").is_err(),
+        "too many raises too"
+    );
+}
+
+/// **A `CSimpleEditBox` is born with FIVE regions, and `GetRegions` hands them to Lua before any
+/// authored one.** wow-re `scratch/rf85-editbox-caret.md` §1: the ctor builds the text FontString
+/// (`E+0x328`, `0x779bee`), three selection-highlight `CSimpleTexture`s (`E+0x350/0x354/0x358`,
+/// loop `0x779c41`–`0x779c72`) and the caret (`E+0x368`, `0x779c86`) — in that order. `GetRegions
+/// 0x773f60` walks `[frame+0x1b8]`, one flat creation-ordered list, oldest first, no filter
+/// (`scratch/widget-list-bindings.md`), and insertion is at the TAIL. So the authored `<Layers>`
+/// regions start at index 6.
+///
+/// The report is pfUI's `skins/blizzard/friends.lua` l.379 —
+/// `local _,_,_,_,_,left,right = GuildControlPopupFrameEditBox:GetRegions()` — which skips exactly
+/// those five and takes the box's two border textures. It died on a nil `left` for as long as
+/// benilla returned only the authored regions.
+#[test]
+fn an_editbox_is_born_with_the_ctors_five_regions_ahead_of_its_authored_ones() {
+    let s = script();
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+            <EditBox name="Box">
+                <Size><AbsDimension x="120" y="20"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="BoxLeft" file="Interface\Left"/>
+                        <Texture name="BoxRight" file="Interface\Right"/>
+                    </Layer>
+                </Layers>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+    // Five engine regions, then the two authored textures — and NOT a sixth from the embedded
+    // `<FontString>`, which declares the ctor's object rather than adding one (RF-0028).
+    assert_eq!(
+        s.eval::<i64>("return Box:GetNumRegions()").unwrap(),
+        7,
+        "5 ctor regions + 2 authored textures, and the <FontString> adds none"
+    );
+    assert_eq!(
+        s.eval::<i64>("return select('#', Box:GetRegions())")
+            .unwrap(),
+        7,
+        "GetNumRegions is exactly the length GetRegions enumerates"
+    );
+
+    // pfUI's own read, verbatim in shape: skip five, take the authored pair.
+    let (left, right) = s
+        .eval::<(String, String)>(
+            "local _,_,_,_,_,l,r = Box:GetRegions() return l:GetTexture(), r:GetTexture()",
+        )
+        .unwrap();
+    assert_eq!(
+        left, r"Interface\Left",
+        "region 6 is the first authored one"
+    );
+    assert_eq!(right, r"Interface\Right", "region 7 is the second");
+
+    // The first is the text FontString the box actually types into.
+    s.run(r#"Box:SetText("typed")"#).unwrap();
+    assert_eq!(
+        s.eval::<String>("local t = Box:GetRegions() return t:GetText()")
+            .unwrap(),
+        "typed",
+        "region 1 is the ctor's embedded text FontString"
+    );
+    // 2..5 are the three selection quads and the caret: real regions, carrying no art of their own
+    // (benilla paints both host-side — the gap named on EditBoxState).
+    assert!(
+        s.eval::<bool>(
+            "local a,b,c,d,e = Box:GetRegions() \
+             return b:GetTexture() == nil and c:GetTexture() == nil \
+                and d:GetTexture() == nil and e:GetTexture() == nil"
+        )
+        .unwrap(),
+        "the selection trio and the caret are blank quads"
+    );
 }

@@ -29,7 +29,7 @@
 //! composed at apply time and fired here.
 
 use benilla_ui::script::{
-    PetitionRecordView, PetitionRequest, PetitionState as VmPetition, ScriptValue, UiScript,
+    PetitionRecordView, PetitionRequest, PetitionState as VmPetition, UiScript,
     PETITION_TYPE_CHARTER, PETITION_TYPE_PETITION,
 };
 use bevy::prelude::*;
@@ -37,7 +37,7 @@ use bevy::prelude::*;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
-use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_chat::ChatLog;
 use crate::ui_items::{find_item, ItemSearch};
 use crate::ui_session::{npc_switched, NpcSession};
 
@@ -76,18 +76,10 @@ pub(super) fn feed_petition(
     };
     let fed = fed.get(&script);
 
-    // The composed lines, onto their two channels. Drained before the snapshot so a refusal shows
-    // in the same frame as the state change that caused it.
-    for line in std::mem::take(&mut petition.lines) {
-        match line {
-            lines::Line::Chat(text) => {
-                chat_log.push_event(ChatEvent::text_only(ChatEventKind::System, text));
-            }
-            lines::Line::Error(text) => {
-                script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-            }
-        }
-    }
+    // The composed lines, each onto the surface its message record names. Drained before the
+    // snapshot so a refusal shows in the same frame as the state change that caused it.
+    let composed = std::mem::take(&mut petition.lines);
+    crate::ui_action::show_messages(&mut script, &mut chat_log, "ui_petition", composed);
 
     // **Rebuilt every frame, deliberately.** Half of what this window shows arrives from a CACHE,
     // not a packet, and reading that cache is what ISSUES its query (decision 0660's law). So a

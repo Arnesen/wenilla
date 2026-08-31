@@ -64,6 +64,10 @@ fn num_f32(v: &Value) -> f32 {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
+    // The justify quartet, shared with the sibling class — see [`super::install_justify`] for the
+    // method-table bytes that put all four on BOTH tables.
+    super::install_justify(lua, &m, "MessageFrame")?;
+
     // AddMessage(text [, r, g, b [, a]]) — binding 0x795590.
     //
     // r/g/b are required **as a trio** (three presence checks ANDed at 0x7956xx); absent ⇒ hard

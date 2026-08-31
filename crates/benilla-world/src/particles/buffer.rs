@@ -187,6 +187,42 @@ impl EffectFog {
     }
 }
 
+/// Where one draw's light comes from — the lane's third per-draw identity axis, beside
+/// [`EffectBlend`] and [`EffectFog`].
+///
+/// The reference has no particle material: it synthesizes an `M2Material` from the emitter's file
+/// record every draw and runs the ordinary per-batch state producer over it, so `GL_LIGHTING`
+/// lands on a particle quad exactly as it does on a mesh submesh — and the light it lands with is
+/// the **model's own light node**, not the scene's (wow-re `part-lit-normal-space.md` §5/§6). Which
+/// node the model is on is what these three variants name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum EffectLighting {
+    /// The authored colour burns as it is. The lane's default, and every family but one: ribbons,
+    /// decals, the rings/reticle and precipitation are all authored to burn at their own colour,
+    /// as is an M2 emitter that SETS the file's unlit bit 0x1 (the fire and spell corpus, which is
+    /// why it stays bright at night).
+    #[default]
+    None,
+    /// The **scene's** light, applied per view in the fragment shader against the world up axis —
+    /// the outdoor lane, and the one a booth's own light buffer overrides. 400 of the corpus's
+    /// 7792 emitters clear the unlit bit and land here, nearly all of them `World\` environment
+    /// sheets: waterfall spray, chimney smoke, blown dust, snow, which read as full-white cutouts
+    /// against shaded terrain when the term is missing (the Zul'Gurub waterfall foam).
+    /// [`EffectDraw::lit`] is this variant and only this variant.
+    Scene,
+    /// The emitter's model carries its **own committed light**: it stands inside a WMO room, where
+    /// the reference lights the object from its light node's footprint-MOCV words on a fixed axis
+    /// plus the room's MOLT points, and never from the day/night sun (`part-lit-normal-space.md`
+    /// §6.7, the WENTITY provider `0x6a7300`'s interior leg).
+    ///
+    /// A particle quad carries exactly one normal, so that whole node collapses to three floats
+    /// ([`crate::interior::ParticleLight`]) and the producer has **already folded them into this
+    /// draw's vertex colours** — which is why this shares a pipeline with [`Self::None`]: there is
+    /// nothing left for the shader to do. Per-draw constants belong in the vertex stream on a lane
+    /// whose whole design is one shared buffer of them.
+    Committed,
+}
+
 /// A per-emitter light-buffer override: this emitter's fragment reads THIS `WowLight` blob
 /// instead of the world's shared one. The glue-scene booths are the one author (decision 0539
 /// §5 — their braziers are fogged by the SCENE's own light buffer, the ModelFFX fog that
@@ -206,7 +242,10 @@ pub struct EffectDraw {
     pub(crate) blend: EffectBlend,
     pub(crate) topology: EffectTopology,
     pub(crate) fog: EffectFog,
-    /// Does the scene's light multiply this draw's RGB? See [`EffectDrawSpec::lit`].
+    /// Does the SHADER multiply this draw's RGB by the scene's light? True for
+    /// [`EffectLighting::Scene`] alone — a pipeline-key axis, so the merge walk separates lit from
+    /// unlit runs through the pipeline id. A [`EffectLighting::Committed`] draw is `false`: its
+    /// light is already in the vertices.
     pub lit: bool,
     /// The cloud's sort point — the emitter anchor / ribbon head node / decal center, exactly
     /// the sort point the material path used.
@@ -276,23 +315,15 @@ pub struct EffectDrawSpec {
     pub texture: AssetId<Image>,
     pub blend: EffectBlend,
     pub fog: EffectFog,
-    /// Multiply this draw's RGB by the scene's matte light — `clamp(ambient + diffuse·max(N·L,0))`
-    /// against the **world up axis**, the same term `wow_model.wgsl` applies to a mesh. The
-    /// reference's quad writer uploads one constant normal for the whole draw — world +Z carried
-    /// into eye space, against a light carried into the same frame, so the product is the
-    /// view-invariant `worldUp · worldLightDir` (wow-re `part-lit-normal-space.md`; decision 1696
-    /// supersedes 0975's camera-facing reading).
-    ///
-    /// The lane is unlit by default and every family but one passes `false`: ribbons, decals, the
-    /// rings/reticle and precipitation are all authored to burn at their own colour. **M2 particle
-    /// emitters are the exception** — the reference has no particle material, it synthesizes an
-    /// `M2Material` from the emitter's file record every draw and runs the ordinary batch state
-    /// producer over it, so `GL_LIGHTING` lands on a particle exactly as on a mesh
-    /// ([`benilla_formats::ParticleEmitterDef::lit`], byte law there). 400 of the corpus's 7792
-    /// emitters clear the unlit bit, nearly all of them `World\` environment sheets — waterfall
-    /// spray, chimney smoke, blown dust, snow — which read as full-white cutouts against shaded
-    /// terrain when the term is missing (the Zul'Gurub waterfall foam).
-    pub lit: bool,
+    /// Which light this draw's authored colour meets — see [`EffectLighting`]. The scene's term is
+    /// `clamp(ambient + diffuse·max(N·L,0))` against the **world up axis**, the same shape
+    /// `wow_model.wgsl` applies to a mesh: the reference's quad writer uploads one constant normal
+    /// for the whole draw — world +Z carried into eye space, against a light carried into the same
+    /// frame, so the product is the view-invariant `worldUp · worldLightDir` (wow-re
+    /// `part-lit-normal-space.md`; decision 1696 supersedes 0975's camera-facing reading). The
+    /// gate on whether an emitter takes any of it is the file's unlit bit
+    /// ([`benilla_formats::ParticleEmitterDef::lit`], byte law there).
+    pub lighting: EffectLighting,
     pub anchor: Vec3,
     pub bias: f32,
     pub raster_bias: i32,
@@ -356,7 +387,7 @@ impl EffectQuads {
                 blend: spec.blend,
                 topology,
                 fog: spec.fog,
-                lit: spec.lit,
+                lit: spec.lighting == EffectLighting::Scene,
                 anchor: spec.anchor,
                 bias: spec.bias,
                 raster_bias: spec.raster_bias,
@@ -470,7 +501,7 @@ mod tests {
                     texture: AssetId::default(),
                     blend: EffectBlend::Add,
                     fog: EffectFog::Off,
-                    lit: false,
+                    lighting: EffectLighting::None,
                     anchor: Vec3::ZERO,
                     bias: 0.0,
                     raster_bias: 0,
@@ -543,7 +574,7 @@ mod tests {
 ///
 /// Six lanes push into this buffer and every one of them wrote the same eleven-field
 /// [`EffectDrawSpec`] literal, of which three fields are the same value at every gameplay site
-/// (`lit: false`, `cam_relative: false`, `light: None` — the exceptions are all engine-internal:
+/// (`lighting: None`, `cam_relative: false`, `light: None` — the exceptions are all engine-internal:
 /// M2 emitters light, the snow slab writes camera-relative, the booths bind their own buffer).
 /// A caller was choosing eight things and restating three.
 ///
@@ -567,7 +598,7 @@ impl<'w> WorldEffectDraw<'w> {
                 texture,
                 blend: EffectBlend::Alpha,
                 fog: EffectFog::Off,
-                lit: false,
+                lighting: EffectLighting::None,
                 anchor: Vec3::ZERO,
                 bias: 0.0,
                 raster_bias: 0,

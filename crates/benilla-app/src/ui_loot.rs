@@ -49,6 +49,17 @@ use crate::ui_script::UiInput;
 const COIN_ICON_GOLD: &str = "Interface\\Icons\\INV_Misc_Coin_01";
 const COIN_ICON_SILVER: &str = "Interface\\Icons\\INV_Misc_Coin_03";
 const COIN_ICON_COPPER: &str = "Interface\\Icons\\INV_Misc_Coin_05";
+/// `item_template.bonding == BIND_WHEN_PICKED_UP` — the first of the two conjuncts that defer a
+/// loot take behind the LOOT_BIND confirm (VERIFIED vmangos `ItemPrototype.h`'s `ItemBondingType`:
+/// `NO_BIND` 0, `BIND_WHEN_PICKED_UP` 1, `BIND_WHEN_EQUIPPED` 2, `BIND_WHEN_USE` 3, `QUEST_ITEM` 4;
+/// the client reads the same field at `item_template + 0x194` and compares it against `1`).
+const BIND_WHEN_PICKED_UP: u32 = 1;
+
+/// The second conjunct: quality **>= 2** (uncommon or better), `cmp [tmpl+0x1c], 2 / jb` at
+/// `0x4c28fb`. Below it a bind-on-pickup row is simply taken — the confirm exists to stop a player
+/// soulbinding something they meant to pass to a groupmate, and nobody passes a white.
+const BIND_CONFIRM_MIN_QUALITY: u32 = 2;
+
 /// The fixed quality of the synthesized coin row (common/white — the money text reads as plain).
 const COIN_QUALITY: u32 = 1;
 /// The 1.12 coin-denomination words, QUOTED from `Interface\FrameXML\GlobalStrings.lua` (verified
@@ -179,6 +190,13 @@ pub(crate) struct LootState {
     /// the guids `GiveMasterLoot`'s 1-based candidate index resolves against (decision 1675).
     /// Empty under every other loot method.
     master_candidates: Vec<u64>,
+    /// The row a `LOOT_BIND_CONFIRM` is currently open for — 1-based, display-side, the number the
+    /// event carried out and the number `LootSlot` must carry back (decision 1744). This is the
+    /// reference's `[0x847cec]`, whose `-1` is our `None`: `0x4c2790`'s click arm writes it instead
+    /// of sending, and its continuation arm sends only for a slot that equals it, then clears it
+    /// (`0x4c281a mov [0x847cec], 0xffffffff`). Reset with the window (`0x4c1df5`, in the
+    /// `SMSG_LOOT_RESPONSE` copier) so a confirm cannot survive into the next corpse.
+    pending_bind_confirm: Option<u32>,
     /// The candidate list that arrived but has no window yet. `SMSG_LOOT_MASTER_LIST` is sent from
     /// *inside* `Player::SendLoot` (`Player.cpp:8077-8081`), so it lands **before** the
     /// `SMSG_LOOT_RESPONSE` it belongs to; [`LootState::open`] takes it from here. Staging it
@@ -201,6 +219,9 @@ enum LootAction {
     Item {
         wire_slot: u8,
         display_id: u32,
+        /// The template entry — the key the bind-on-pickup deferral reads `bonding` and `quality`
+        /// off (decision 1744).
+        item_id: u32,
         /// The wire's per-row [`slot_type`]. `MASTER` diverts the click to the master-loot
         /// dropdown instead of a take (decision 1675).
         slot_type: u8,
@@ -218,6 +239,7 @@ impl LootState {
         self.items = items;
         self.taken.clear();
         self.auto_release = false; // empty-at-open stays open — only a removal auto-closes
+        self.pending_bind_confirm = None; // ref `0x4c1df5`: the copier resets the stash to -1
         self.fishing = loot_type == benilla_protocol::messages::loot_type::FISHING;
         // The master-loot candidate list arrives just AHEAD of this response (the server sends it
         // from inside `SendLoot`), so the window claims whatever was staged and leaves the staging
@@ -300,6 +322,7 @@ impl LootState {
         self.taken.clear();
         self.auto_release = false;
         self.fishing = false;
+        self.pending_bind_confirm = None;
         self.master_candidates.clear();
         self.pending_master_candidates.clear();
     }
@@ -348,6 +371,7 @@ impl LootState {
         (!self.taken.contains(&it.slot)).then_some(LootAction::Item {
             wire_slot: it.slot,
             display_id: it.display_info_id,
+            item_id: it.item_id,
             slot_type: it.slot_type,
         })
     }
@@ -955,6 +979,7 @@ fn feed_loot(
             // the existing last-row auto-release.
             let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
             if cfg.auto_loot != shift {
+                let mut bind_confirm_fired = false;
                 for index in 1..=snap.rows.len() as u32 {
                     match loot.action_at(index) {
                         Some(LootAction::Money) => {
@@ -969,8 +994,27 @@ fn feed_loot(
                         Some(LootAction::Item {
                             wire_slot,
                             display_id,
+                            item_id,
                             slot_type,
                         }) if slot_type == slot_type::ALLOW_LOOT => {
+                            // The sweep carries the same bind gate as a hand click, plus a
+                            // ONE-SHOT latch (`0x4c21c2 test ebx,ebx; jne` → the loop's continue,
+                            // `0x4c21e2 mov ebx,1`; decision 1744): the first bind-on-pickup row
+                            // raises the confirm, and every later one in the same sweep is left
+                            // in the window untouched — not taken, not asked about. Otherwise a
+                            // three-blue corpse would stack three dialogs over one pending slot.
+                            if bind_confirm_required(&mut items, &commands, item_id) {
+                                if bind_confirm_fired {
+                                    continue;
+                                }
+                                loot.pending_bind_confirm = Some(index);
+                                script.fire_event(
+                                    "LOOT_BIND_CONFIRM",
+                                    vec![ScriptValue::Int(i64::from(index))],
+                                );
+                                bind_confirm_fired = true;
+                                continue;
+                            }
                             let _ = commands
                                 .0
                                 .send(ClientCommand::AutostoreLootItem { slot: wire_slot });
@@ -1001,12 +1045,30 @@ fn feed_loot(
     *last = fresh;
 }
 
+/// Whether taking this row must first raise `LOOT_BIND_CONFIRM` — the reference's two-conjunct
+/// gate at `0x4c28f2`/`0x4c28fb` (decision 1744). An unresolved template answers **false**: the
+/// reference peeks its own item cache here and cannot ask, and a row whose template has not landed
+/// has no name on it either, so it is not a row anyone has clicked. Asking (rather than peeking)
+/// costs nothing — the entry is already in flight from the snapshot — and keeps the answer right
+/// for the next click if one somehow arrives first.
+fn bind_confirm_required(items: &mut Items, commands: &NetCommands, item_id: u32) -> bool {
+    items
+        .template(item_id, 0, commands)
+        .is_some_and(|t| t.bonding == BIND_WHEN_PICKED_UP && t.quality >= BIND_CONFIRM_MIN_QUALITY)
+}
+
 /// Drain the Lua intents: a picked row → coin (`CMSG_LOOT_MONEY`) or the item's wire slot
 /// (`CMSG_AUTOSTORE_LOOT_ITEM`); a close → `CMSG_LOOT_RELEASE` + a client-authoritative local clear
 /// (the window is already hidden by its `OnHide`; the release is fire-and-forget, and the server's
 /// `SMSG_LOOT_RELEASE_RESPONSE` clears again idempotently). Also fires the **last-row auto-close**
 /// ([`LootState::auto_release`]): the client, not the server, releases when a removal empties the
 /// window — vmangos only ever releases in answer to our `CMSG_LOOT_RELEASE`.
+///
+/// **This function is the reference's take dispatcher `0x4c2790(slot, flag)`** (decision 1744), and
+/// the two Lua verbs are its two flags: `BenillaTakeLootSlot` is the row click (`flag == 0`, the C
+/// `CLootButton`'s arm) and `LootSlot` is the LOOT_BIND confirmation continuation (`flag == 1`,
+/// which sends only for the pending slot). Keeping them apart is what makes a second click on a
+/// bind-on-pickup row re-raise the confirm instead of looting behind it.
 fn drain_loot(
     script: Option<NonSendMut<UiScript>>,
     mut loot: ResMut<LootState>,
@@ -1015,6 +1077,10 @@ fn drain_loot(
     mut pickup: MessageWriter<crate::sound::LootPickupSound>,
     // The candidate placement is raid-shaped, so resolving a clicked menu index needs the roster.
     group: Res<GroupState>,
+    // The bind-on-pickup deferral reads the row's template (`bonding`, `quality`). Already cached
+    // by then in every reachable case — the snapshot asks for it to put a NAME on the row, and a
+    // row with no name is a row nobody has clicked.
+    mut items: ResMut<Items>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1042,8 +1108,24 @@ fn drain_loot(
             Some(LootAction::Item {
                 wire_slot,
                 display_id,
+                item_id,
                 ..
             }) => {
+                // The bind-on-pickup deferral (`0x4c28f2`-`0x4c2920`, decision 1744). Two
+                // conjuncts and no others: the template's `bonding == BIND_WHEN_PICKED_UP` AND its
+                // `quality >= 2` (uncommon or better) — a grey or white BoP row is taken with no
+                // confirm at all, which is why picking up a quest trinket never asks. The event
+                // carries the row out, the row is stashed, and NOTHING is sent; not even the
+                // pickup sound, which the reference plays only on the arm that actually sends.
+                if bind_confirm_required(&mut items, &commands, item_id) {
+                    debug!("ui_loot: row {index} (wire {wire_slot}) binds on pickup — confirming");
+                    loot.pending_bind_confirm = Some(index);
+                    script.fire_event(
+                        "LOOT_BIND_CONFIRM",
+                        vec![ScriptValue::Int(i64::from(index))],
+                    );
+                    continue;
+                }
                 debug!("ui_loot: autostore row {index} (wire slot {wire_slot})");
                 let _ = commands
                     .0
@@ -1052,8 +1134,39 @@ fn drain_loot(
                 // `acquire-spend-sounds.md`): looting an item plays its ItemGroupSounds kit[0].
                 pickup.write(crate::sound::LootPickupSound { display_id });
             }
-            None => debug!("ui_loot: LootSlot({index}) out of range — ignored"),
+            None => debug!("ui_loot: BenillaTakeLootSlot({index}) out of range — ignored"),
         }
+    }
+
+    // `LootSlot(slot)` — the confirm continuation (`0x4c2790`'s `flag != 0` arm, `0x4c27c0`). It
+    // sends for exactly one slot: the one the pending confirm names. Anything else is dropped in
+    // silence, which is what the reference does with an addon that calls `LootSlot` on an ordinary
+    // row. The stash clears on the send (`0x4c281a`), so a doubled OnAccept cannot loot twice.
+    for index in script.take_loot_confirms() {
+        if loot.pending_bind_confirm != Some(index) {
+            debug!("ui_loot: LootSlot({index}) is not the pending bind confirm — ignored");
+            continue;
+        }
+        let Some(LootAction::Item {
+            wire_slot,
+            display_id,
+            ..
+        }) = loot.action_at(index)
+        else {
+            // The row went away under the open dialog (someone else took it, the window turned
+            // over). The reference bails the same way — its continuation re-reads the record and
+            // returns on an empty itemId (`0x4c27d7`) — and, like it, WITHOUT clearing the stash:
+            // the clear is on the send path alone (`0x4c281a`), and the window turning over is
+            // what drops a stash that never completed.
+            debug!("ui_loot: bind confirm for row {index} — the row is gone, nothing sent");
+            continue;
+        };
+        loot.pending_bind_confirm = None;
+        debug!("ui_loot: bind-confirmed row {index} (wire slot {wire_slot})");
+        let _ = commands
+            .0
+            .send(ClientCommand::AutostoreLootItem { slot: wire_slot });
+        pickup.write(crate::sound::LootPickupSound { display_id });
     }
     // The master looter's assignments (`GiveMasterLoot(slot, candidateIndex)`): the Lua hands two
     // 1-based display numbers, the app turns them into the wire slot and the recipient guid. Both
@@ -1121,8 +1234,10 @@ mod tests {
     use super::*;
     use benilla_protocol::messages::loot_type;
     use benilla_protocol::messages::GroupMemberEntry;
+    use benilla_protocol::messages::ItemInfo;
     use benilla_protocol::messages::ObjectFields;
     use benilla_protocol::EntityKind;
+    use bevy::ecs::system::RunSystemOnce;
 
     /// An empty group + name cache — what every loot test that is not about master loot wants:
     /// no candidates resolve, and a snapshot's `master_candidates` comes out empty. Master-loot
@@ -1205,6 +1320,341 @@ mod tests {
             .add_systems(Update, resolve_loot_kneel);
         app.update();
         assert!(!app.world().resource::<LootKneel>().0);
+    }
+
+    // ── The soulbind confirm (decision 1744) ──────────────────────────────────────────────────
+    //
+    // Real 1.12 `item_template` rows, read from the running vmangos rather than invented, so the
+    // two conjuncts are exercised against numbers the server actually ships:
+    //   12590 Felstriker    quality 4, bonding 1  — BoP epic: confirms
+    //     871 Flurry Axe    quality 4, bonding 2  — BoE epic: takes, the bonding control
+    //     117 Tough Jerky   quality 1, bonding 0  — plain white: takes
+    // and one synthetic that the database has no clean example of at this quality:
+    //    9999 a white BoP   quality 1, bonding 1  — the QUALITY control, which takes.
+    const FELSTRIKER: u32 = 12590;
+    const FLURRY_AXE: u32 = 871;
+    const TOUGH_JERKY: u32 = 117;
+    const WHITE_BOP: u32 = 9999;
+    /// A second BoP epic, for the auto-loot sweep's one-dialog latch (18832 Brutality Blade).
+    const SECOND_BOP: u32 = 18832;
+
+    /// A world with `rows` open on a corpse, every template already landed, and `lua` run against
+    /// the loot bindings. Returns the app and the wire's receiver so a test can read what was
+    /// actually sent — the whole point of the arc being that a confirm sends **nothing**.
+    fn drain_with(
+        gold: u32,
+        rows: Vec<LootItem>,
+        lua: &str,
+    ) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_message::<crate::sound::LootPickupSound>()
+            .init_resource::<LootState>()
+            .init_resource::<LootLatch>()
+            .init_resource::<GroupState>()
+            .init_resource::<Items>()
+            .insert_resource(NetCommands(tx));
+
+        let mut items = app.world_mut().resource_mut::<Items>();
+        let mut tmpl = |entry: u32, name: &str, quality: u32, bonding: u32| {
+            items.insert_template(
+                entry,
+                Some(ItemInfo {
+                    quality,
+                    bonding,
+                    ..crate::items::test_template(name)
+                }),
+            );
+        };
+        tmpl(FELSTRIKER, "Felstriker", 4, 1);
+        tmpl(FLURRY_AXE, "Flurry Axe", 4, 2);
+        tmpl(TOUGH_JERKY, "Tough Jerky", 1, 0);
+        tmpl(WHITE_BOP, "A White Soulbound Thing", 1, 1);
+
+        app.world_mut()
+            .resource_mut::<LootState>()
+            .open(0x42, loot_type::CORPSE, gold, rows);
+
+        let script = UiScript::new().unwrap();
+        // A listener, so the event is observed where the real dialog driver sits rather than
+        // through a test-only back door.
+        script
+            .run(
+                "BIND_CONFIRMS = {}\n\
+                 local f = CreateFrame(\"Frame\")\n\
+                 f:RegisterEvent(\"LOOT_BIND_CONFIRM\")\n\
+                 f:SetScript(\"OnEvent\", function() tinsert(BIND_CONFIRMS, arg1) end)",
+            )
+            .unwrap();
+        script.run(lua).unwrap();
+        app.insert_non_send_resource(script);
+        app.world_mut().run_system_once(drain_loot).unwrap();
+        (app, rx)
+    }
+
+    /// The rows `LOOT_BIND_CONFIRM` has named so far, in order.
+    fn confirms(app: &mut App) -> Vec<i64> {
+        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let n = script.eval::<i64>("return getn(BIND_CONFIRMS)").unwrap();
+        (1..=n)
+            .map(|i| {
+                script
+                    .eval::<i64>(&format!("return BIND_CONFIRMS[{i}]"))
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    /// Everything the wire saw, in order.
+    fn sent(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<ClientCommand> {
+        rx.try_iter().collect()
+    }
+
+    /// Which row the app is holding a confirm open for.
+    fn pending_confirm(app: &App) -> Option<u32> {
+        app.world().resource::<LootState>().pending_bind_confirm
+    }
+
+    /// The click arm's deferral (`0x4c28f2`-`0x4c2920`): a BoP uncommon-or-better row fires
+    /// `LOOT_BIND_CONFIRM` with its row, stashes the row, and sends **nothing** — not the
+    /// autostore, and not the pickup sound either, which the reference plays only on the arm that
+    /// sends.
+    #[test]
+    fn a_bop_row_confirms_instead_of_sending() {
+        let (mut app, rx) = drain_with(0, vec![item(0, FELSTRIKER, 1)], "BenillaTakeLootSlot(1)");
+        assert!(sent(&rx).is_empty(), "the deferred take sends nothing");
+        assert_eq!(pending_confirm(&app), Some(1), "and stashes the row");
+
+        assert_eq!(
+            confirms(&mut app),
+            vec![1],
+            "the event carries the row out, 1-based and display-side"
+        );
+    }
+
+    /// The confirm arm (`0x4c27c0`): `LootSlot` on the pending row sends the autostore for that
+    /// row's WIRE slot and clears the stash — so a doubled OnAccept cannot loot twice.
+    #[test]
+    fn loot_slot_completes_the_pending_confirm_exactly_once() {
+        let (mut app, rx) = drain_with(
+            0,
+            vec![item(7, FELSTRIKER, 1)],
+            "BenillaTakeLootSlot(1) LootSlot(1)",
+        );
+        assert!(
+            matches!(
+                sent(&rx)[..],
+                [ClientCommand::AutostoreLootItem { slot: 7 }]
+            ),
+            "the accept sends the row's wire slot, once"
+        );
+        assert_eq!(pending_confirm(&app), None, "and the stash clears");
+
+        // A second accept over the same dialog: nothing left to complete.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("LootSlot(1)")
+            .unwrap();
+        app.world_mut().run_system_once(drain_loot).unwrap();
+        assert!(sent(&rx).is_empty(), "a second accept sends nothing");
+    }
+
+    /// `LootSlot` on any row that is NOT the pending confirm does nothing at all — which is
+    /// exactly what it does on the real client, where the flag-1 arm opens `cmp edi,[0x847cec]`.
+    /// This is the property that makes the two-verb split worth having.
+    #[test]
+    fn loot_slot_on_an_ordinary_row_sends_nothing() {
+        let (_app, rx) = drain_with(
+            0,
+            vec![item(0, TOUGH_JERKY, 1), item(1, FLURRY_AXE, 1)],
+            "LootSlot(1) LootSlot(2)",
+        );
+        assert!(
+            sent(&rx).is_empty(),
+            "no confirm is pending, so neither call reaches the wire"
+        );
+    }
+
+    /// Both conjuncts are load-bearing, and each fails alone. A bind-on-EQUIP epic and a
+    /// bind-on-pickup WHITE are both taken outright, with no dialog — the second is why looting a
+    /// grey quest trinket never asks.
+    #[test]
+    fn the_bind_gate_needs_both_conjuncts() {
+        for (entry, why) in [
+            (FLURRY_AXE, "bind-on-equip is not bind-on-pickup"),
+            (WHITE_BOP, "quality 1 is below the floor of 2"),
+            (TOUGH_JERKY, "neither"),
+        ] {
+            let (app, rx) = drain_with(0, vec![item(3, entry, 1)], "BenillaTakeLootSlot(1)");
+            assert!(
+                matches!(
+                    sent(&rx)[..],
+                    [ClientCommand::AutostoreLootItem { slot: 3 }]
+                ),
+                "entry {entry} should be taken outright: {why}"
+            );
+            assert_eq!(
+                pending_confirm(&app),
+                None,
+                "entry {entry}: no confirm ({why})"
+            );
+        }
+    }
+
+    /// The stash is display-side and coin-aware. The reference's own event argument is the item
+    /// ARRAY index plus one — it is written after the coin-row shift (`0x4c2885 dec edi`) and never
+    /// shifted back — so on a corpse with gold its `arg1` is one below the display row. benilla
+    /// speaks the display row on both halves of the round trip instead (1744), which is what makes
+    /// `GetLootSlotInfo(arg1)` mean what it looks like it means.
+    #[test]
+    fn the_coin_row_does_not_shift_the_confirm_out_from_under_itself() {
+        let (mut app, rx) = drain_with(
+            120, // gold, so display row 1 is the coin and the item is row 2
+            vec![item(4, FELSTRIKER, 1)],
+            "BenillaTakeLootSlot(2)",
+        );
+        assert_eq!(
+            pending_confirm(&app),
+            Some(2),
+            "the DISPLAY row, coin included"
+        );
+        assert_eq!(confirms(&mut app), vec![2]);
+        assert!(sent(&rx).is_empty());
+
+        // And the accept, with the same number, reaches the right WIRE slot.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("LootSlot(2)")
+            .unwrap();
+        app.world_mut().run_system_once(drain_loot).unwrap();
+        assert!(matches!(
+            sent(&rx)[..],
+            [ClientCommand::AutostoreLootItem { slot: 4 }]
+        ));
+    }
+
+    /// The row vanishes under the open dialog — someone else in the group took it while the
+    /// confirm sat there. The accept sends nothing (`0x4c27d7`: the continuation re-reads the
+    /// record and returns on an empty itemId) and, like the reference, leaves the stash alone: the
+    /// clear lives on the send path only (`0x4c281a`).
+    #[test]
+    fn an_accept_for_a_row_that_was_taken_away_sends_nothing() {
+        let (mut app, rx) = drain_with(0, vec![item(2, FELSTRIKER, 1)], "BenillaTakeLootSlot(1)");
+        assert_eq!(pending_confirm(&app), Some(1));
+
+        // SMSG_LOOT_REMOVED for that wire slot: the row becomes a gap.
+        app.world_mut().resource_mut::<LootState>().remove_slot(2);
+        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.run("LootSlot(1)").unwrap();
+        app.world_mut().run_system_once(drain_loot).unwrap();
+
+        assert!(
+            sent(&rx)
+                .iter()
+                .all(|c| !matches!(c, ClientCommand::AutostoreLootItem { .. })),
+            "nothing is autostored for a row that is gone"
+        );
+    }
+
+    /// A pending confirm dies with the window that raised it (`0x4c1df5`: the `SMSG_LOOT_RESPONSE`
+    /// copier resets the stash to -1). Its row number would name a slot in the NEXT corpse.
+    #[test]
+    fn a_pending_confirm_does_not_survive_the_window() {
+        let (mut app, _rx) = drain_with(0, vec![item(0, FELSTRIKER, 1)], "BenillaTakeLootSlot(1)");
+        assert_eq!(pending_confirm(&app), Some(1));
+
+        app.world_mut().resource_mut::<LootState>().clear();
+        assert_eq!(pending_confirm(&app), None, "the close drops it");
+
+        app.world_mut().resource_mut::<LootState>().open(
+            0x43,
+            loot_type::CORPSE,
+            0,
+            vec![item(0, TOUGH_JERKY, 1)],
+        );
+        assert_eq!(
+            pending_confirm(&app),
+            None,
+            "and a fresh window opens with none"
+        );
+    }
+
+    /// **The auto-loot sweep's one-shot latch** (`0x4c21c2 test ebx,ebx; jne` → the loop's
+    /// continue, `0x4c21e2 mov ebx,1`; decision 1744). A corpse with two bind-on-pickup blues and
+    /// a white: the sweep takes the white, raises ONE dialog for the first blue, and leaves the
+    /// second blue in the window untouched — not taken, not asked about. Without the latch it
+    /// would stack two dialogs over a single pending slot, and the second would name a row the
+    /// stash no longer holds.
+    #[test]
+    fn the_auto_loot_sweep_raises_exactly_one_bind_confirm() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_message::<crate::sound::LootPickupSound>()
+            .init_resource::<LootState>()
+            .init_resource::<LootErrors>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<GroupState>()
+            .init_resource::<NameCache>()
+            .init_resource::<Items>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(LootConfig {
+                auto_loot: true,
+                ..LootConfig::default()
+            })
+            .insert_resource(NetCommands(tx));
+
+        let mut items = app.world_mut().resource_mut::<Items>();
+        for (entry, name, quality, bonding) in [
+            (FELSTRIKER, "Felstriker", 4, 1),
+            (SECOND_BOP, "Brutality Blade", 4, 1),
+            (TOUGH_JERKY, "Tough Jerky", 1, 0),
+        ] {
+            items.insert_template(
+                entry,
+                Some(ItemInfo {
+                    quality,
+                    bonding,
+                    ..crate::items::test_template(name)
+                }),
+            );
+        }
+
+        // Wire slots 5/6/7 in display order: BoP epic, BoP epic, white.
+        app.world_mut().resource_mut::<LootState>().open(
+            0x42,
+            loot_type::CORPSE,
+            0,
+            vec![
+                item(5, FELSTRIKER, 1),
+                item(6, SECOND_BOP, 1),
+                item(7, TOUGH_JERKY, 1),
+            ],
+        );
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                "BIND_CONFIRMS = {}\n\
+                 local f = CreateFrame(\"Frame\")\n\
+                 f:RegisterEvent(\"LOOT_BIND_CONFIRM\")\n\
+                 f:SetScript(\"OnEvent\", function() tinsert(BIND_CONFIRMS, arg1) end)",
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app.world_mut().run_system_once(feed_loot).unwrap();
+
+        assert_eq!(
+            confirms(&mut app),
+            vec![1],
+            "one dialog, for the FIRST bind-on-pickup row only"
+        );
+        assert_eq!(pending_confirm(&app), Some(1));
+        assert!(
+            matches!(
+                sent(&rx)[..],
+                [ClientCommand::AutostoreLootItem { slot: 7 }]
+            ),
+            "the white is swept; neither blue is sent"
+        );
     }
 
     fn item(slot: u8, entry: u32, count: u32) -> LootItem {

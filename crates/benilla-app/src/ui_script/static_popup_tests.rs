@@ -83,7 +83,7 @@ fn start_delay_gates_button1_then_swaps_the_text_in() {
     .unwrap();
     assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
     assert!(
-        !s.eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        !s.eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
             .unwrap(),
         "button1 starts disabled under StartDelay"
     );
@@ -102,7 +102,7 @@ fn start_delay_gates_button1_then_swaps_the_text_in() {
         "delay expiry swaps the real text in"
     );
     assert!(
-        s.eval::<bool>("return StaticPopup1Button1:IsEnabled()")
+        s.eval::<bool>("return StaticPopup1Button1:IsEnabled() ~= 0")
             .unwrap(),
         "delay expiry enables button1"
     );

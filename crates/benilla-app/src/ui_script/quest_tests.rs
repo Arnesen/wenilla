@@ -100,10 +100,10 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     load_xml(&s, "QuestFrame.xml");
 
     let panels = [
-        "QuestGreetingPanel",
-        "QuestDetailPanel",
-        "QuestProgressPanel",
-        "QuestRewardPanel",
+        "QuestFrameGreetingPanel",
+        "QuestFrameDetailPanel",
+        "QuestFrameProgressPanel",
+        "QuestFrameRewardPanel",
     ];
     let is_shown =
         |s: &UiScript, name: &str| s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap();
@@ -122,12 +122,12 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     for name in panels {
         assert_eq!(
             is_shown(&s, name),
-            name == "QuestGreetingPanel",
+            name == "QuestFrameGreetingPanel",
             "only the greeting panel is shown after QUEST_GREETING"
         );
     }
     assert_eq!(
-        s.eval::<String>("return QuestNpcNameText:GetText()")
+        s.eval::<String>("return QuestFrameNpcNameText:GetText()")
             .unwrap(),
         "Deputy Willem"
     );
@@ -148,7 +148,7 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     for name in panels {
         assert_eq!(
             is_shown(&s, name),
-            name == "QuestDetailPanel",
+            name == "QuestFrameDetailPanel",
             "only the detail panel is shown after QUEST_DETAIL"
         );
     }
@@ -158,10 +158,13 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     );
 }
 
-/// The reward/choice grid, ported from the ref's shared `QuestFrameItems_Update` (the SAME idiom the
-/// quest log's own reward rows already prove out) — now on REAL per-panel widgets
-/// (`QuestDetailChoice*`/`QuestDetailReward*`), exercised on the Detail panel with the
-/// fixture shape the task's capture drives: 2 choices + 1 fixed reward + money.
+/// The reward grid, ported from the ref's shared `QuestFrameItems_Update` — on ONE numbered pool
+/// per panel (`QuestDetailItem1..10`), the reference's own shape: choices first, then the
+/// reward-spell row, then fixed rewards, each positioned at runtime. The fixture is the one the
+/// task's capture drives — 2 choices + 1 fixed reward + money — so the pool reads
+/// `Item1`/`Item2` = the choices, `Item3` = the fixed reward, `Item4`+ unused. It used to run on
+/// two 6-deep pools named `QuestDetailChoice*`/`QuestDetailReward*`, names the reference does not
+/// have and a split the ref's own function cannot be written against.
 #[test]
 fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     let mut s = UiScript::new().unwrap();
@@ -198,17 +201,11 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    assert!(s
-        .eval::<bool>("return QuestDetailChoice1:IsShown()")
-        .unwrap());
-    assert!(s
-        .eval::<bool>("return QuestDetailChoice2:IsShown()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return QuestDetailChoice3:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return QuestDetailItem1:IsShown()").unwrap());
+    assert!(s.eval::<bool>("return QuestDetailItem2:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return QuestDetailItem4:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return QuestDetailChoice1Name:GetText()")
+        s.eval::<String>("return QuestDetailItem1Name:GetText()")
             .unwrap(),
         "Worn Sword"
     );
@@ -223,14 +220,10 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
         "You will also receive:",
         "choices present -> the ref's \"also\" wording (QuestFrame.lua:461-462)"
     );
-    assert!(s
-        .eval::<bool>("return QuestDetailReward1:IsShown()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return QuestDetailReward2:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return QuestDetailItem3:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return QuestDetailItem4:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return QuestDetailReward1Name:GetText()")
+        s.eval::<String>("return QuestDetailItem3Name:GetText()")
             .unwrap(),
         "Militia Hammer"
     );
@@ -244,7 +237,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     // select). They DO carry an OnClick now (`QuestItem_OnClick`, the ref's own
     // QuestItemTemplate script — the ctrl/shift fork, decisions 1059/1060), but it has no select
     // arm at all: an unmodified click must not raise and must not set an itemChoice.
-    s.run("QuestDetailChoice1:Click()").ok();
+    s.run("QuestDetailItem1:Click()").ok();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<i64>("return QuestFrame.itemChoice").unwrap(),
@@ -289,26 +282,26 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(
-        !s.eval::<bool>("return QuestRewardChoiceHighlight:IsShown()")
+        !s.eval::<bool>("return QuestRewardItemHighlight:IsShown()")
             .unwrap(),
         "no row picked yet"
     );
     // Completing without a choice picked is a no-op (ref: QuestChooseRewardError guard).
-    s.run("QuestRewardCompleteButton:Click()").unwrap();
+    s.run("QuestFrameCompleteQuestButton:Click()").unwrap();
     assert!(
         s.take_quest_actions().is_empty(),
         "must pick a choice first"
     );
 
-    s.run("QuestRewardChoice2:Click()").unwrap();
+    s.run("QuestRewardItem2:Click()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.eval::<bool>("return QuestRewardChoiceHighlight:IsShown()")
+        s.eval::<bool>("return QuestRewardItemHighlight:IsShown()")
             .unwrap(),
         "picking a choice row shows the highlight"
     );
 
-    s.run("QuestRewardCompleteButton:Click()").unwrap();
+    s.run("QuestFrameCompleteQuestButton:Click()").unwrap();
     assert_eq!(
         s.take_quest_actions(),
         vec![benilla_ui::script::QuestAction::Reward(1)],
@@ -341,7 +334,7 @@ fn greeting_goodbye_button_closes_the_window() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(s.eval::<bool>("return QuestFrame:IsVisible()").unwrap());
 
-    s.run("QuestGreetingGoodbyeButton:Click()").unwrap();
+    s.run("QuestFrameGreetingGoodbyeButton:Click()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
         !s.eval::<bool>("return QuestFrame:IsVisible()").unwrap(),
@@ -375,10 +368,10 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(s
-        .eval::<bool>("return QuestAcceptButton:IsShown()")
+        .eval::<bool>("return QuestFrameAcceptButton:IsShown()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return QuestDeclineButton:IsShown()")
+        .eval::<bool>("return QuestFrameDeclineButton:IsShown()")
         .unwrap());
 
     s.resolve();
@@ -434,10 +427,10 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
         "instant text keeps the writing sound: one scratch on the wake tick"
     );
     assert!(s
-        .eval::<bool>("return QuestAcceptButton:IsEnabled()")
+        .eval::<bool>("return QuestFrameAcceptButton:IsEnabled() ~= 0")
         .unwrap());
     assert_eq!(
-        s.eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
+        s.eval::<f32>("return TextAlphaDependentFrame:GetAlpha()")
             .unwrap(),
         1.0,
         "the block snaps straight to opaque — no QUESTINFO_FADE_IN ramp in instant mode"
@@ -494,7 +487,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
         "the write-on scratches the WriteQuest quill each tick"
     );
     assert!(!s
-        .eval::<bool>("return QuestAcceptButton:IsEnabled()")
+        .eval::<bool>("return QuestFrameAcceptButton:IsEnabled() ~= 0")
         .unwrap());
 
     // Half a second more runs the 13-char gradient off (40 chars/s): Accept wakes and the block
@@ -502,10 +495,10 @@ fn write_on_still_fades_when_instant_text_is_off() {
     s.tick(0.5);
     assert!(s.errors().is_empty(), "tick errors: {:?}", s.errors());
     assert!(s
-        .eval::<bool>("return QuestAcceptButton:IsEnabled()")
+        .eval::<bool>("return QuestFrameAcceptButton:IsEnabled() ~= 0")
         .unwrap());
     let alpha = s
-        .eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
+        .eval::<f32>("return TextAlphaDependentFrame:GetAlpha()")
         .unwrap();
     assert!(
         alpha < 1.0,
@@ -513,7 +506,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
     );
     s.tick(1.1);
     assert_eq!(
-        s.eval::<f32>("return QuestDetailTextAlphaFrame:GetAlpha()")
+        s.eval::<f32>("return TextAlphaDependentFrame:GetAlpha()")
             .unwrap(),
         1.0,
         "the fade completes at opaque"
@@ -546,7 +539,7 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
-        s.eval::<String>("return getglobal('QuestNpcNameText'):GetText() or ''")
+        s.eval::<String>("return getglobal('QuestFrameNpcNameText'):GetText() or ''")
             .unwrap(),
         "Marshal McBride",
         "the panel-open event's arg1 lands in the title bar"
@@ -568,13 +561,14 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     );
 
     // The late-name path: open with an empty name, the refresh brings it.
-    s.run("getglobal('QuestNpcNameText'):SetText('')").unwrap();
+    s.run("getglobal('QuestFrameNpcNameText'):SetText('')")
+        .unwrap();
     s.fire_event(
         "QUEST_ITEM_UPDATE",
         vec![ScriptValue::Str("Marshal McBride".into())],
     );
     assert_eq!(
-        s.eval::<String>("return getglobal('QuestNpcNameText'):GetText() or ''")
+        s.eval::<String>("return getglobal('QuestFrameNpcNameText'):GetText() or ''")
             .unwrap(),
         "Marshal McBride",
         "the QUEST_ITEM_UPDATE refresh also carries the name"
@@ -718,14 +712,14 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
     // The regression this fork could break: a PLAIN click still picks the choice (the ref's third
     // arm). Row 2 is picked here so the modified clicks below — aimed at row 1 — would visibly
     // move it if they leaked into the select arm.
-    s.run("QuestRewardChoice2:Click()").unwrap();
+    s.run("QuestRewardItem2:Click()").unwrap();
     assert_eq!(
         s.eval::<i64>("return QuestFrame.itemChoice").unwrap(),
         2,
         "a plain click still selects the reward choice"
     );
     assert!(s
-        .eval::<bool>("return QuestRewardChoiceHighlight:IsShown()")
+        .eval::<bool>("return QuestRewardItemHighlight:IsShown()")
         .unwrap());
     assert!(
         s.take_dressup_intents().is_empty(),
@@ -735,7 +729,7 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
     // SHIFT + chat open → the row's full escaped link, and the selection is untouched.
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.set_modifiers(true, false, false);
-    s.run("QuestRewardChoice1:Click()").unwrap();
+    s.run("QuestRewardItem1:Click()").unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
@@ -749,10 +743,11 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
         "the shift arm returns — it must NOT also select the clicked choice"
     );
 
-    // A FIXED reward row (plain QuestItemTemplate → QuestItem_OnClick) posts too.
+    // A FIXED reward row posts too — same pool, same template now, and the select arm is gated
+    // by `button.kind == "choice"` rather than by which pool the row came from.
     s.run("ChatFrameEditBox:SetText(\"\")").unwrap();
     s.set_modifiers(true, false, false);
-    s.run("QuestRewardReward1:Click()").unwrap();
+    s.run("QuestRewardItem3:Click()").unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
@@ -763,7 +758,7 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
     // CTRL → the dressing room wearing the clicked reward, and STILL no reselect. The intent pair
     // is ordered: Dress (the room was closed, so it re-dresses in the player's own gear) then TryOn.
     s.set_modifiers(false, true, false);
-    s.run("QuestRewardChoice1:Click()").unwrap();
+    s.run("QuestRewardItem1:Click()").unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.take_dressup_intents(),

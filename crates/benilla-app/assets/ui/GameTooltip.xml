@@ -455,7 +455,7 @@
         </Scripts>
     </GameTooltip>
 
-    <GameTooltip name="GameTooltip" inherits="GameTooltipTemplate" frameStrata="TOOLTIP" hidden="true">
+    <GameTooltip name="GameTooltip" inherits="GameTooltipTemplate" parent="UIParent" frameStrata="TOOLTIP" hidden="true">
         <!-- A default size so the plate resolves the first frame it is shown; the engine's
              auto-size pass takes over once the lines are measured (one frame's latency). NO
              load-time anchor (the ref instance carries none): every show path seats the plate
@@ -610,6 +610,6 @@
     <!-- The shopping-compare pair (ref GameTooltip.xml l.24-25, quoted down to the one-line shape):
          two more GameTooltip widgets the engine seats on the paperdoll slot when
          SHOW_COMPARE_TOOLTIP fires (CharacterFrame.xml's listener). -->
-    <GameTooltip name="ShoppingTooltip1" inherits="ShoppingTooltipTemplate" frameStrata="TOOLTIP" hidden="true"/>
-    <GameTooltip name="ShoppingTooltip2" inherits="ShoppingTooltipTemplate" frameStrata="TOOLTIP" hidden="true"/>
+    <GameTooltip name="ShoppingTooltip1" inherits="ShoppingTooltipTemplate" parent="UIParent" frameStrata="TOOLTIP" hidden="true"/>
+    <GameTooltip name="ShoppingTooltip2" inherits="ShoppingTooltipTemplate" parent="UIParent" frameStrata="TOOLTIP" hidden="true"/>
 </Ui>

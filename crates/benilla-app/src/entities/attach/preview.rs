@@ -30,12 +30,15 @@
 //! the same [`ItemDisplays`] want the world path uses.
 
 use benilla_formats::CharSkinSlot;
-use benilla_protocol::{CharEnumItem, CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM};
+use benilla_protocol::{
+    CharEnumItem, CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM,
+};
 use bevy::prelude::*;
 
 use crate::portrait::{
-    DressUpBake, DressUpLook, DressUpPreview, GlueLook, GluePetBake, GluePreview, GluePreviewBake,
-    PetLook, PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider,
+    BoothTwins, DressUpBake, DressUpLook, DressUpPreview, GhostKit, GlueLook, GluePetBake,
+    GluePreview, GluePreviewBake, PetLook, PreviewBillboard, PreviewEffects, PreviewPart,
+    PreviewRider,
 };
 use benilla_assets::materials::WowModelMaterial;
 use benilla_assets::WorldAssets;
@@ -104,6 +107,8 @@ pub(in crate::entities) struct PreviewSpec {
     /// Worn **ItemDisplayInfo** ids by equipment slot (`EQUIPMENT_SLOT_*`) — no template hop; the
     /// caller has already resolved entries to displays.
     pub(in crate::entities) equipment: [CharEnumItem; 19],
+    /// The wearer's guild tabard (decision 1704), or `None` for no crest.
+    pub(in crate::entities) emblem: Option<benilla_formats::GuildEmblem>,
     /// `CHARACTER_FLAG_*` bits; only hide-helm / hide-cloak are read here.
     pub(in crate::entities) flags: u32,
     /// **Whose held law this look follows** (decision 1076) — the one place the two previews
@@ -171,6 +176,12 @@ pub(in crate::entities) fn build_glue_preview(
     mut skin_composites: ResMut<SkinComposites>,
     asset_server: Res<AssetServer>,
     mut mats: benilla_world::model_render::M2BatchMaterials,
+    // The ghost kit (wow-re `glue-select-model.md` §A2): the `SpellVisualKit` catalog the row is
+    // read from, and the path-keyed spell-effect model cache its attached models load through —
+    // the same one the world's kit plays use, so `Spells\Ghost_state.mdx` is loaded once per
+    // session whichever screen wants it first.
+    visuals: Option<Res<crate::creature_anim::SpellVisuals>>,
+    mut fx: Option<ResMut<super::super::spell_fx::SpellFx>>,
     // Change tracking: the look we last emitted a bake for, and whether that bake succeeded (so a
     // look whose models weren't ready yet keeps retrying until they build).
     mut state: Local<PreviewState>,
@@ -247,6 +258,11 @@ pub(in crate::entities) fn build_glue_preview(
         hair_color,
         facial_hair,
         equipment,
+        // No crest at character select (decision 1704). `SMSG_CHAR_ENUM` carries a `guildId` but
+        // not the five emblem indices, and there is no world session to `CMSG_GUILD_QUERY` with —
+        // so a Guild Tabard on the mannequin wears its own `Tabard_A_05Default` art, which is what
+        // the reference's own empty guild cache leaves it with too.
+        emblem: None,
         flags,
         // The mannequin's own law: the select build skips EQUIPMENT_SLOT_RANGED (0x472bfe).
         ranged_in_hand: false,
@@ -267,6 +283,37 @@ pub(in crate::entities) fn build_glue_preview(
         },
     ) else {
         return; // a model (body, item, or glow) is still loading — retry next frame
+    };
+
+    // The ghost kit — a **Select** look only, and only when the roster record carries the bit
+    // (`CHARSELECT+0xfc & 0x2000`). A create look never can: the character does not exist yet, and
+    // the create screen builds its flags as `0` above. The kit's attached models join the ordinary
+    // lists; what the body renders with rides the bake.
+    let mut a = a;
+    let ghost = match look {
+        GlueLook::Select(l) if l.flags & CHARACTER_FLAG_GHOST != 0 => {
+            let mut pending = false;
+            let arm = (|| {
+                let body = creatures.models.get(&display_id)?;
+                glue_ghost_arm(
+                    body,
+                    &visuals.as_deref()?.0,
+                    fx.as_deref_mut()?,
+                    &asset_server,
+                    &mut pending,
+                )
+            })();
+            if pending {
+                return; // an effect model is still loading — retry, don't bake a half ghost
+            }
+            arm.map(|arm| {
+                a.riders.extend(arm.riders);
+                a.billboards.extend(arm.billboards);
+                a.effects.extend(arm.effects);
+                arm.kit
+            })
+        }
+        _ => None,
     };
 
     debug!(
@@ -293,6 +340,7 @@ pub(in crate::entities) fn build_glue_preview(
         effects: a.effects,
         billboards: a.billboards,
         grip: a.grip,
+        ghost,
         revision: bake.revision + 1,
     };
     state.built = true;
@@ -353,6 +401,7 @@ pub(in crate::entities) fn build_dressup_preview(
         hair_color: look.hair_color,
         facial_hair: look.facial_hair,
         equipment: look.equipment,
+        emblem: look.emblem,
         // **No hide flags here, because the hiding already happened upstream** (decision 1472).
         // The dressing room DOES honour show-helm/show-cloak — byte-verified: `SetUnit 0x476cb0`
         // clones the live player's per-bodyslot display pointers, so a suppressed piece is not in
@@ -414,6 +463,134 @@ pub(in crate::entities) fn build_dressup_preview(
 /// `None` means **not ready**: the body model, an item model, or a glow model is still loading.
 /// A caller must treat that as "retry next frame" and leave its bake untouched, never as an empty
 /// look — a geared character popping in piecewise would flicker on every change.
+/// The `SpellVisualKit` row the character-select ghost is, **hard-coded exactly as the reference
+/// hard-codes it**: `0x47280f` loads `idmap[989]` behind the guard `0x4727f6 cmp ds:0xc0d750,0x3dd`
+/// (wow-re `glue-select-model.md` §A2). The id is the constant; every value behind it is DBC data,
+/// read below. 989 is `SpellVisual` 886's state kit — the visual of spell 8326 "Ghost", which is
+/// also what a released ghost in the WORLD rides, so the two paths share one row by construction
+/// (wow-re `ghost-death-visuals.md` §5a).
+const GLUE_GHOST_KIT: u32 = 989;
+
+/// What the ghost kit contributes to a select bake: the body's own render properties, plus the
+/// kit's attached effect models already reduced to the booth's ordinary seat shapes.
+struct GhostArm {
+    kit: GhostKit,
+    riders: Vec<PreviewRider>,
+    billboards: Vec<PreviewBillboard>,
+    effects: Vec<PreviewEffects>,
+}
+
+/// Resolve [`GLUE_GHOST_KIT`] against the live `SpellVisualKit` catalog and the body's attachment
+/// table. `None` means **not ready** — either a DBC is absent (nothing to show, the caller stops
+/// retrying) or one of the kit's effect models is still loading (the caller retries), which the
+/// `pending` out-flag distinguishes.
+///
+/// The tint and alpha go through [`crate::aura_visual::node_for`] — the one dispatch point, the ECS
+/// twin of the client's `0x60dbfc` jump table — rather than a second decode here: the select screen
+/// and the world aura reach the same row, and a proc type newly given a mechanism must light up on
+/// both at once. What the select path does NOT share is the world's 1000 ms `StartAlphaFade` ramp:
+/// `0x4727f0` writes the instance fields straight through `0x710cb0`/`0x710cf0`, so this is instant.
+fn glue_ghost_arm(
+    body: &super::super::DisplayModel,
+    visuals: &benilla_formats::SpellVisualCatalog,
+    fx: &mut super::super::spell_fx::SpellFx,
+    asset_server: &AssetServer,
+    pending: &mut bool,
+) -> Option<GhostArm> {
+    let kit_row = visuals.kit(GLUE_GHOST_KIT)?;
+    let (mut tint, mut alpha) = (None, None);
+    for node in kit_row
+        .char_procs()
+        .filter_map(crate::aura_visual::node_for)
+    {
+        match node {
+            crate::aura_visual::AuraNode::Tint(rgb) => tint = Some(rgb),
+            crate::aura_visual::AuraNode::Alpha(a) => alpha = Some(a),
+            // Every other proc type the row could carry belongs to a mechanism the select path has
+            // no equivalent for (the anim-rate freeze writes bone clocks on a world unit). 989
+            // carries only these two; a patched row that carries more is ignored, not guessed at.
+            _ => {}
+        }
+    }
+    let kit = GhostKit {
+        tint: tint?,
+        alpha: alpha.unwrap_or(1.0),
+    };
+
+    // The kit's attached effect models, at the body's own attachment points. `Spells\Ghost_state.mdx`
+    // (slot tag 0x13, Base) is the only populated slot on the shipped row and is emitter-only — but
+    // the row is data, so geometry and camera-facing cards are carried too, split exactly the way the
+    // item-glow arm below splits an item's own model.
+    let (mut riders, mut billboards, mut effects) = (Vec::new(), Vec::new(), Vec::new());
+    for (tag, effect_id) in kit_row.effects() {
+        // The world-plant sentinel names no attachment point; the select build hangs models on the
+        // character alone (`0x472780` → `0x712f70`), so there is nowhere for it to go.
+        if tag == benilla_formats::WORLD_EFFECT_TAG {
+            continue;
+        }
+        let Some(path) = visuals.effect_path(effect_id) else {
+            continue;
+        };
+        let path = path.to_string();
+        // `0x472780`'s `test esi,esi; jl 0x4727dd` rejects a `-1` attach id, and a body with no such
+        // point hangs nothing — the world path's rule, and the reference's.
+        let Some(point) = body.attachments.iter().find(|a| a.id == tag) else {
+            continue;
+        };
+        let dm =
+            fx.models
+                .entry(path.clone())
+                .or_insert_with(|| super::super::display::DisplayModel {
+                    handle: super::super::display::ModelHandle::M2(
+                        asset_server.load(benilla_assets::m2_url(&path)),
+                    ),
+                    ..super::super::display::empty_shell()
+                });
+        let Some(parts) = dm.parts.as_deref() else {
+            *pending = true; // still loading — the caller retries rather than baking half a ghost
+            continue;
+        };
+        for part in parts {
+            match &part.billboard {
+                Some(info) => billboards.push(PreviewBillboard {
+                    mesh: part.mesh.clone(),
+                    material: part.material.clone(),
+                    bone: point.bone,
+                    offset: point.offset + info.pivot,
+                    kind: info.kind,
+                    twins: BoothTwins {
+                        blend: part.fade_blend.clone(),
+                        zfill: part.zfill.clone(),
+                    },
+                }),
+                None => riders.push(PreviewRider {
+                    mesh: part.mesh.clone(),
+                    material: part.material.clone(),
+                    bone: point.bone,
+                    offset: point.offset,
+                    twins: BoothTwins {
+                        blend: part.fade_blend.clone(),
+                        zfill: part.zfill.clone(),
+                    },
+                }),
+            }
+        }
+        if !dm.emitters.is_empty() {
+            effects.push(PreviewEffects {
+                bone: point.bone,
+                offset: point.offset,
+                emitters: dm.emitters.clone(),
+            });
+        }
+    }
+    Some(GhostArm {
+        kit,
+        riders,
+        billboards,
+        effects,
+    })
+}
+
 fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assembled> {
     let PreviewSpec {
         display_id,
@@ -508,6 +685,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
         &char_look,
         bodyslots,
         cloak,
+        spec.emblem,
         ctx.displays.as_deref(),
         ctx.sections,
         ctx.world_assets,
@@ -531,6 +709,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
             static_mesh: p.mesh.clone(),
             skinned_mesh: p.skinned_mesh.clone(),
             material: steady_material(p, &char_mats).unwrap_or_else(|| p.material.clone()),
+            twins: part_twins(p, &char_mats),
             // `None` — decision 0807's named gap, deliberately still open: a character batch with
             // an authored dimming constant previews at 1.0. The select body's look is signed off
             // as it stands, so closing it is its own change, not a rider on the pet's.
@@ -556,6 +735,10 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
                 bone: info.bone,
                 offset: Vec3::ZERO,
                 kind: info.kind,
+                twins: BoothTwins {
+                    blend: p.fade_blend.clone(),
+                    zfill: p.zfill.clone(),
+                },
             })
         })
         .collect();
@@ -603,12 +786,20 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
                         bone: point.bone,
                         offset: point.offset + info.pivot,
                         kind: info.kind,
+                        twins: BoothTwins {
+                            blend: p.fade_blend.clone(),
+                            zfill: p.zfill.clone(),
+                        },
                     }),
                     None => riders.push(PreviewRider {
                         mesh: p.mesh.clone(),
                         material: p.material.clone(),
                         bone: point.bone,
                         offset: point.offset,
+                        twins: BoothTwins {
+                            blend: p.fade_blend.clone(),
+                            zfill: p.zfill.clone(),
+                        },
                     }),
                 }
             }
@@ -658,12 +849,20 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
                             bone: point.bone,
                             offset: offset + info.pivot,
                             kind: info.kind,
+                            twins: BoothTwins {
+                                blend: p.fade_blend.clone(),
+                                zfill: p.zfill.clone(),
+                            },
                         }),
                         None => riders.push(PreviewRider {
                             mesh: p.mesh.clone(),
                             material: p.material.clone(),
                             bone: point.bone,
                             offset,
+                            twins: BoothTwins {
+                                blend: p.fade_blend.clone(),
+                                zfill: p.zfill.clone(),
+                            },
                         }),
                     }
                 }
@@ -773,6 +972,48 @@ fn held_wants(
         });
     }
     wants
+}
+
+/// A batch's translucency twins ([`BoothTwins`]) as the preview carries them — the `AlphaMode::Blend`
+/// twin and the depth-prime twin, both already built beside the steady material by
+/// `M2BatchMaterials` (an `EntityPart` carries its own pair; a character composite's are the quint's
+/// third and sixth members). `char_mats` supplies them for a **character** batch, whose steady
+/// material is the composited atlas rather than the part's own built one; every other part answers
+/// from itself.
+///
+/// Only a bake whose instance alpha is below 1 ever draws through them (the ghost select), but they
+/// are collected unconditionally: they cost two handle clones on a bake that happens once per
+/// selection, and a look that resolves them *conditionally* would have to re-assemble on the ghost
+/// edge, which is exactly the sort of second code path the one-alpha law exists to prevent.
+fn part_twins(part: &EntityPart, char_mats: &super::char_skin::CharSkinMaterials) -> BoothTwins {
+    // The same slot walk [`steady_material`] does, kept beside it so the pair can never disagree
+    // about which quint a batch reads.
+    let quint = (|| match part.char_slot {
+        Some(CharSkinSlot::Body) => {
+            let (single, two) = char_mats.0.as_ref()?;
+            Some(if part.two_sided { two } else { single })
+        }
+        Some(CharSkinSlot::Hair) => char_mats.1.as_ref(),
+        Some(CharSkinSlot::Object) => char_mats.2.as_ref(),
+        Some(CharSkinSlot::SkinExtra) => {
+            let (single, two) = &char_mats.3;
+            (if part.two_sided { two } else { single }).as_ref()
+        }
+        None => None,
+    })();
+    match quint {
+        // The quint's order is the engine's variant set: (steady, interior, fade_blend,
+        // interior_bake, interior_bake_blend, zfill) — `char_skin::build_char_skin_materials`.
+        Some(q) => BoothTwins {
+            blend: Some(q.2.clone()),
+            zfill: q.5.clone(),
+        },
+        // A non-character batch keeps its own built material, so it keeps its own twins.
+        None => BoothTwins {
+            blend: part.fade_blend.clone(),
+            zfill: part.zfill.clone(),
+        },
+    }
 }
 
 /// The steady, world-lit material a character part wears — the body atlas (at the part's sidedness),
@@ -892,6 +1133,14 @@ fn assemble_pet(
                 skinned_mesh: p.skinned_mesh.clone(),
                 material: p.material.clone(),
                 alpha_anim: p.alpha_anim.clone(),
+                // The pet is its own CM2 instance, chained to the SCENE (attachment 1), never to
+                // the character (wow-re `glue-select-model.md` §B1) — so it composes onto nothing
+                // and is never ghosted with its owner. The twins ride anyway, for the same reason
+                // the body's do: they are a property of the batch.
+                twins: BoothTwins {
+                    blend: p.fade_blend.clone(),
+                    zfill: p.zfill.clone(),
+                },
             })
             .collect(),
         billboards: billboard_parts
@@ -906,6 +1155,10 @@ fn assemble_pet(
                     // the pivot (the 0130 rig identity) — the same seat the body's eye-glow takes.
                     offset: Vec3::ZERO,
                     kind: info.kind,
+                    twins: BoothTwins {
+                        blend: p.fade_blend.clone(),
+                        zfill: p.zfill.clone(),
+                    },
                 })
             })
             .collect(),
@@ -949,6 +1202,61 @@ pub(in crate::entities) struct DressUpState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GOLDEN, against the **real shipped 5875 `SpellVisualKit.dbc`** — the one row the reference
+    /// hard-codes for the character-select ghost, decoded through the same dispatch point the world
+    /// aura uses.
+    ///
+    /// Every number here is byte-VERIFIED in wow-re at the record itself
+    /// (`ghost-death-visuals.md` §5a: row 989's `+0x3c` reads
+    /// `01 00 00 00  0e 00 00 00  ff ff ff ff  ff ff ff ff  fd b9 0c 4b  00 00 00 3f`), and the
+    /// note records a §5 derivation that got `0x4B0CB53D → (140,181,61)` and was refuted at those
+    /// bytes. That is exactly the failure this test exists to catch: a tint transcribed one nibble
+    /// wrong is still a plausible pale blue, and nothing but the shipped row can tell them apart.
+    ///
+    /// It also pins the *shape* the select path depends on — one populated effect slot, at
+    /// attachment `0x13` (Base) — because "nine ghost sub-models" was this note's own earlier
+    /// reading (benilla decision 0469 §6 carried it), corrected 2026-08-21 when `0x472780`'s
+    /// `test esi,esi; jl` was seen rejecting the eight `-1`s.
+    #[test]
+    fn the_shipped_ghost_kit_decodes_to_the_verified_row() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open the install's MPQ chain");
+        let catalog = benilla_formats::load_spell_visual_catalog(&mut chain)
+            .expect("SpellVisual/SpellVisualKit");
+        let kit = catalog
+            .kit(GLUE_GHOST_KIT)
+            .expect("the reference hard-codes kit 989; the shipped table has it");
+
+        let nodes: Vec<_> = kit
+            .char_procs()
+            .filter_map(crate::aura_visual::node_for)
+            .collect();
+        assert!(
+            nodes.contains(&crate::aura_visual::AuraNode::Tint([140, 185, 253])),
+            "kit 989's CharProc 1 is 9222653.0 → 0x8CB9FD → RGB (140,185,253); got {nodes:?}"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| matches!(n, crate::aura_visual::AuraNode::Alpha(a) if *a == 0.5)),
+            "kit 989's CharProc 14 is 0.5; got {nodes:?}"
+        );
+
+        // Exactly ONE populated slot, and it is the Base attach point — not nine.
+        let effects: Vec<_> = kit.effects().collect();
+        assert_eq!(effects.len(), 1, "kit 989 fills one slot, got {effects:?}");
+        let (tag, effect_id) = effects[0];
+        assert_eq!(tag, 0x13, "the Base attachment (KIT_SLOT_TAGS[2])");
+        let path = catalog
+            .effect_path(effect_id)
+            .expect("SpellVisualEffectName row for the ghost state model")
+            .to_ascii_lowercase();
+        assert!(
+            path.replace('\\', "/").ends_with("spells/ghost_state.mdx"),
+            "the ghost state model, got {path:?}"
+        );
+    }
 
     /// **The bug the imp filed** (decision 1539): a pet is a *creature* display, and creature models
     /// routinely author their own particle emitters — the Imp's three flame jets, the Voidwalker's

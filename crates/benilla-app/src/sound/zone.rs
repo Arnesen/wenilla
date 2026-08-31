@@ -79,6 +79,11 @@ pub(crate) struct ExplorationSounds(pub(crate) benilla_formats::ExplorationSound
 
 /// Day iff 05:30 ≤ clock < 21:00 (module docs — the client's hard step, B4-verified).
 /// Index into the `[day, night]` DBC pairs.
+/// How long after a cinematic ends before the zone track comes back — the reference's
+/// `[0x836400] = tick + 0xbb8` at `0x4603b0(0)`, i.e. **3.000 s**. Its own number: not the `-1`
+/// immediate sentinel a zone change arms, and not the randomized `SilenceInterval`.
+const CINEMATIC_MUSIC_RESUME_SECS: f64 = 3.0;
+
 fn phase(clock: &GameClock) -> usize {
     if (330..1260).contains(&clock.minute) {
         0
@@ -164,6 +169,8 @@ pub(super) struct ZoneAudio {
     /// When the next zone track starts (Time::elapsed_secs_f64; None = a track is playing or
     /// no music in this zone).
     next_track_at: Option<f64>,
+    /// Last frame's [`SoundConfig::music_suppressed`] — the edge this module acts on.
+    music_suppressed: bool,
     /// The looping ambience kit currently up (0 = none) + its handle and base volume. A static
     /// loop, not a stream ([`mixer::loop_from_bytes`] — streaming loop beds die at EOF).
     ambience_kit: u32,
@@ -192,6 +199,7 @@ impl Default for ZoneAudio {
             music_kit: 0,
             music_kit_vol: 1.0,
             next_track_at: None,
+            music_suppressed: false,
             ambience_kit: 0,
             ambience: None,
             ambience_kit_vol: 1.0,
@@ -279,6 +287,27 @@ fn zone_audio(
     let phase = phase(&clock);
     let zone = &mut *zone;
 
+    // ---- the cinematic's music stop (wow-re `sound/scratch/cinematic-audio-law.md`, VERIFIED) ----
+    // The flag itself is [`SoundConfig::music_suppressed`], whose doc carries the mechanism. Here
+    // are its two edges, and both are byte-shaped rather than chosen:
+    //
+    // * **Down: a CUT, not a fade.** The disable edge runs `0x7a5700`, stop-and-destroy, which
+    //   takes no duration argument at all — there is nothing to fade with. Not the 4.0 s
+    //   zone-change fade, not the 250 ms teardown declick.
+    // * **Up: +3.000 s, then full volume.** Re-enabling at the stop (`0x4603b0(0)`) sets
+    //   `[0x836400] = tick + 0xbb8` — **neither** the `-1` immediate sentinel a zone change or a
+    //   world entry arms, **nor** [`next_track_time`]'s randomized `SilenceInterval`. A third
+    //   number, and the only place it appears.
+    //
+    // Ambience is untouched on both edges, deliberately — see the flag's doc for why that is a
+    // finding and not an omission.
+    apply_music_suppression(zone, config.music_suppressed, now);
+
+    // **Ahead of the cover's hold arm below, which returns.** The flag has to track the cinematic
+    // whether or not a loading screen happens to be up, or the edge is deferred until the cover
+    // clears — measured at 1.8 s late on a shot far enough to unload the body's ground. Under a
+    // cover the work itself is a no-op (the teardown already took the slot), so this is about the
+    // flag staying honest, not about the stream.
     // The cover's audio hold ([`SoundConfig::world_hold`]): the raise kills the world
     // soundscape — the reference's loading screen sits over a torn-down world, so a departure
     // zone's bed playing under the destination's cover is a sound it cannot make. Resetting
@@ -419,7 +448,10 @@ fn zone_audio(
             zone.next_track_at = next_track_time(zone, &areas.0, zm, phase, now);
         }
     }
-    // Silence elapsed → start the next track (same-zone cycle, or the cold-start first track).
+    // Silence elapsed → start the next track (same-zone cycle, the cold-start first track, or the
+    // 3.0 s resume after a cinematic). The pump is dead while suppressed, which is the reference's
+    // own shape — `0x460040` bails at its first instruction on the flag, so no track is selected,
+    // opened or scheduled for the duration.
     if zone.next_track_at.is_some_and(|t| now >= t) && zone.music.is_none() {
         zone.next_track_at = None;
         if let Some(m) = zone_music_row(&areas.0, zone.zone_music) {
@@ -459,6 +491,29 @@ fn zone_audio(
             ),
             mixer::glide(),
         );
+    }
+}
+
+/// The two edges of [`SoundConfig::music_suppressed`] on the music slot — split out so the two
+/// byte-shaped numbers in it (a cut with no fade; a resume at exactly +3.000 s) can be asserted
+/// without standing up the whole soundscape.
+fn apply_music_suppression(zone: &mut ZoneAudio, suppressed: bool, now: f64) {
+    if suppressed == zone.music_suppressed {
+        return;
+    }
+    zone.music_suppressed = suppressed;
+    if suppressed {
+        if let Some(mut h) = zone.music.take() {
+            h.stop(mixer::fade(0));
+            info!("zone music: cut for a cinematic");
+        }
+        // The next login's first track starts at position 0, far behind this one's baseline — the
+        // same reason `stop_world_soundscape` resets it (1109).
+        zone.music_watch.reset();
+        zone.next_track_at = None;
+    } else {
+        zone.next_track_at = Some(now + CINEMATIC_MUSIC_RESUME_SECS);
+        info!("zone music: resumes in {CINEMATIC_MUSIC_RESUME_SECS:.1}s");
     }
 }
 
@@ -514,6 +569,19 @@ fn start_music_stream(
     config: &SoundConfig,
     kit_id: u32,
 ) -> bool {
+    // **Nothing opens the music slot while a cinematic is running** — and the guard belongs here,
+    // at the slot, not at each caller. The reference's music pump dies at its own first
+    // instruction (`0x460040 mov al,[0xb06cc8]; test al,al; jne 0x4600f8`), so suppression is a
+    // property of the slot whatever asked for it. benilla gated two of this function's four
+    // callers, which left the zone **intro fanfare** and `SMSG_PLAY_MUSIC` free to start a track
+    // over a cinematic's narration and play it to the end — a cut only ever happens on the
+    // suppression *edge*, so anything that starts after that edge is never cut. The fanfare was
+    // the worse half: it stamped itself as played on success, so it was consumed for
+    // `MinDelayMinutes` by a shot the player could not hear it under. Refusing here means the
+    // stamp never happens, because it is gated on this returning `true`.
+    if config.music_suppressed {
+        return false;
+    }
     let Some(mixer_ref) = out.mixer.as_mut() else {
         return false;
     };
@@ -742,6 +810,11 @@ fn stop_world_soundscape(zone: &mut ZoneAudio, reason: &str) {
     zone.area = None;
     zone.interior = None;
     zone.was_underwater = false;
+    // The cinematic latch is scheduler state like the rest of this list, and leaving it set was
+    // the one field that survived a world transition. It only ever self-corrected by luck of
+    // ordering: leave the world mid-cinematic and the next entry saw a falling edge that belonged
+    // to the *previous* session, logging a resume for a world that had had no cinematic in it.
+    zone.music_suppressed = false;
     if had {
         info!("sound: world soundscape stopped ({reason})");
     }
@@ -782,8 +855,49 @@ pub(super) fn plugin(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::slot_holds;
+    use super::{apply_music_suppression, slot_holds, ZoneAudio, CINEMATIC_MUSIC_RESUME_SECS};
     use kira::sound::PlaybackState;
+
+    /// **The cinematic's music stop, both edges** — wow-re `cinematic-audio-law.md`, VERIFIED.
+    /// Down is a CUT: `0x7a5700` is stop-and-destroy and takes no duration argument, so there is
+    /// nothing to fade with — not the 4.0 s zone-change fade, not the 250 ms teardown declick.
+    /// Up is `[0x836400] = tick + 0xbb8` = **3.000 s**, which is a third number, neither the `-1`
+    /// immediate sentinel a zone change arms nor the randomized `SilenceInterval`.
+    #[test]
+    fn a_cinematic_cuts_the_music_and_brings_it_back_three_seconds_later() {
+        let mut zone = ZoneAudio {
+            zone_music: 42,
+            next_track_at: Some(100.0),
+            ..ZoneAudio::default()
+        };
+
+        // Down: the pending track is dropped and nothing is scheduled — the pump is dead, not
+        // waiting.
+        apply_music_suppression(&mut zone, true, 10.0);
+        assert!(zone.music_suppressed);
+        assert_eq!(
+            zone.next_track_at, None,
+            "a suppressed pump must schedule nothing"
+        );
+
+        // Held: no edge, no rescheduling, however long the intro runs.
+        apply_music_suppression(&mut zone, true, 90.0);
+        assert_eq!(zone.next_track_at, None);
+
+        // Up: exactly +3.000 s from the release, and the zone row is still remembered so the
+        // resume plays THIS zone's track rather than re-resolving from nothing.
+        apply_music_suppression(&mut zone, false, 112.5);
+        assert!(!zone.music_suppressed);
+        assert_eq!(zone.next_track_at, Some(115.5));
+        assert_eq!(zone.zone_music, 42);
+    }
+
+    /// The resume is its own number and must not be confused with the two neighbours it sits
+    /// between — a zone change's immediate start, and the natural-end silence interval.
+    #[test]
+    fn the_resume_delay_is_the_references_own_third_number() {
+        assert!((CINEMATIC_MUSIC_RESUME_SECS - 3.0).abs() < f64::EPSILON);
+    }
 
     /// The repeat-push guard. The server keeps an event track looping by re-pushing its id every
     /// few seconds (the Darkmoon Faire emitter: `SMSG_PLAY_MUSIC` 8440 every 5 s), so a push for

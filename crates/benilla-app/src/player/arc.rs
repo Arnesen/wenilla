@@ -61,11 +61,21 @@ impl Player {
         let new_arc = airborne && (!was_airborne || jumped);
         if new_arc {
             self.airborne_since = Some(now);
-            self.jump_zspeed = if jumped { self.vel_y } else { 0.0 };
+            // From `launch_vz`, NOT `vel_y` (decision 1740): the mover now integrates gravity on
+            // the take-off frame too, so `vel_y` has already moved `g·dt` down the parabola by the
+            // time this runs and would seat the arc's launch speed a step short — visible on the
+            // wire, where the jump tail sends this value on every packet of the arc, and in the
+            // FALLINGFAR leg split. The reference writes `+0xa0` once, in `StartFalling`.
+            self.jump_zspeed = if jumped { self.launch_vz } else { 0.0 };
             self.fall_start_y = launch_y;
             self.fall_far = false;
         } else if !airborne {
             self.airborne_since = None;
+            // The arc is over: its direction nibble and its knockback provenance go with it, so
+            // the next standstill jump gets its one steer back and the wire stops planting FORWARD
+            // (decision 1740). The reference's `StopFalling` is the same edge.
+            self.arc_dirs_set = false;
+            self.knock_arc = false;
         }
         if airborne {
             let far = if self.jump_zspeed != 0.0 {
@@ -125,6 +135,10 @@ mod tests {
     fn grounded_at(ground: f32) -> Player {
         Player {
             vel_y: JUMP_SPEED,
+            // The mover records this the instant the take-off is decided, and the arc snapshot
+            // reads it rather than `vel_y` (decision 1740) — by the time the bookkeeping runs, the
+            // real mover has already stepped `vel_y` one `g·dt` down the parabola.
+            launch_vz: JUMP_SPEED,
             pos: Vec3::new(0.0, ground, 0.0),
             ..Default::default()
         }
@@ -138,6 +152,46 @@ mod tests {
         assert!(edges.new_arc, "the takeoff frame begins a new arc");
         p.pos.y = ground + TAKEOFF_RISE; // the post-step position the mover would have left
         p
+    }
+
+    /// **The launch speed on the wire is the LAUNCH's, not the post-step velocity** (decision
+    /// 1740). The mover integrates gravity on the take-off frame too, so `vel_y` is already
+    /// `g·dt` down by the time the arc bookkeeping runs; reading it would send observers a jump
+    /// tail one step short (0.32 yd/s at 60 fps, 0.64 at 30 — and frame-rate dependent, so two
+    /// clients watching the same jump would disagree). The reference writes `+0xa0` once, in
+    /// `StartFalling`, and never touches it again for the arc.
+    #[test]
+    fn the_arc_snapshots_the_launch_speed_not_the_already_integrated_one() {
+        let mut p = grounded_at(100.0);
+        // What the mover leaves behind on the take-off frame: the launch recorded, `vel_y` already
+        // advanced one step by the exact fall step.
+        let dt = 1.0 / 60.0;
+        p.vel_y = super::super::mover::fall_step(JUMP_SPEED, dt, 60.148_003).0;
+        assert!(
+            p.vel_y < JUMP_SPEED,
+            "the take-off frame really did integrate"
+        );
+        let edges = p.advance_airborne_arc(true, true, 0.0, 100.0);
+        assert!(edges.new_arc);
+        assert_eq!(
+            p.jump_zspeed, JUMP_SPEED,
+            "the wire tail carries the launch speed for the whole arc, not this frame's velocity"
+        );
+    }
+
+    /// The arc's direction nibble and its knockback provenance are **arc-scoped**: a landing
+    /// clears both, so the next standstill jump gets its one steer back and the wire stops
+    /// planting FORWARD (decision 1740 — the reference's `StopFalling` edge).
+    #[test]
+    fn landing_clears_the_arc_nibble_and_the_knockback_provenance() {
+        let mut p = grounded_at(100.0);
+        p.advance_airborne_arc(true, true, 0.0, 100.0);
+        p.arc_dirs_set = true;
+        p.knock_arc = true;
+        let edges = p.advance_airborne_arc(false, false, 0.5, 100.0);
+        assert!(edges.landed, "the arc closed");
+        assert!(!p.arc_dirs_set, "the nibble goes with the arc");
+        assert!(!p.knock_arc, "so does the knockback provenance");
     }
 
     #[test]

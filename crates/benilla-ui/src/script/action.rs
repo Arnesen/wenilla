@@ -95,6 +95,21 @@ pub(crate) struct StoredActionState {
     pub(crate) cooldown: Option<(f64, f64, bool)>,
 }
 
+/// One queued `UseAction` press — the action id, and whether it carried the **self-cast
+/// modifier**.
+///
+/// A struct rather than a `(u32, bool)` because a bare bool in a tuple is exactly the argument
+/// that gets swapped silently; the neighbouring `take_action_sets` pairs two `u32`s, where the
+/// positions are self-describing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActionUse {
+    /// The 1-based Lua action id, as `UseAction` was given it.
+    pub action: u32,
+    /// `UseAction`'s third argument — 1.12's `SELFACTIONBUTTON1`-`12` (`ALT-1`…`ALT-=`) reach the
+    /// bar through `ActionButtonUp(id, 1)`, and every other caller passes nothing.
+    pub on_self: bool,
+}
+
 impl super::UiScript {
     /// Push (or clear) one action slot, keyed by Lua action id (1..120).
     pub fn set_action(&mut self, action: u32, slot: Option<ActionSlot>) {
@@ -140,8 +155,8 @@ impl super::UiScript {
         self.model_mut().bonus_bar_offset = offset;
     }
 
-    /// Drain the action ids queued by `UseAction` since the last call.
-    pub fn take_action_uses(&mut self) -> Vec<u32> {
+    /// Drain the presses queued by `UseAction` since the last call.
+    pub fn take_action_uses(&mut self) -> Vec<ActionUse> {
         std::mem::take(&mut self.model_mut().action_uses)
     }
 
@@ -257,8 +272,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UseAction(action [, checkCursor [, onSelf]]) — `onSelf` is accepted and ignored (the
-    // self-cast modifier isn't modeled yet). `checkCursor` TRUTHY (numeric nonzero — the
+    // UseAction(action [, checkCursor [, onSelf]]). **`onSelf` is the self-cast modifier** — the
+    // third argument `ActionBar.xml`'s `ActionButtonUp(id, onSelf)` has always forwarded and this
+    // host used to drop on the floor, which is why 1.12's twelve `SELFACTIONBUTTON` bindings
+    // (`ALT-1`…`ALT-=`) had no home. It rides out on [`ActionUse::on_self`] and the app's cast
+    // resolver reads it. `checkCursor` TRUTHY (numeric nonzero — the
     // reference's own convention, not Lua's: `0` reads falsy here even though Lua truthiness
     // would call it true) AND a payload is held routes to [`cursor::place_action`] instead of
     // queuing the use (decision 0216 §7's INTERIM: the reference passes 1 from a mouse click and
@@ -270,11 +288,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "UseAction",
         lua.create_function(|lua, (action, rest): (u32, MultiValue)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let check_cursor = rest.front().is_some_and(truthy_nonzero);
+            let mut rest = rest.iter();
+            let check_cursor = rest.next().is_some_and(truthy_nonzero);
+            // `onSelf` reads with the SAME truthiness as `checkCursor` — numeric-nonzero, the
+            // reference's convention rather than Lua's — because it arrives from the same
+            // callers by the same route. `ActionButtonUp(id, 1)` is the only shipped caller
+            // that passes it.
+            let on_self = rest.next().is_some_and(truthy_nonzero);
             if check_cursor && model.cursor.is_some() {
                 super::cursor::place_action(&mut model, action);
             } else {
-                model.action_uses.push(action);
+                model.action_uses.push(ActionUse { action, on_self });
             }
             Ok(())
         })?,
@@ -410,6 +434,37 @@ mod tests {
     use super::ActionSlot;
     use crate::script::UiScript;
 
+    /// `(action, on_self)` pairs, which is what these assertions are actually about.
+    fn uses(s: &mut UiScript) -> Vec<(u32, bool)> {
+        s.take_action_uses()
+            .into_iter()
+            .map(|u| (u.action, u.on_self))
+            .collect()
+    }
+
+    /// **`UseAction`'s third argument is the self-cast modifier** (1745) — 1.12's twelve
+    /// `SELFACTIONBUTTON` bindings (`ALT-1`…`ALT-=`) reach the bar as `ActionButtonUp(id, 1)`,
+    /// and this host dropped it on the floor until the day those bindings needed a home.
+    ///
+    /// It reads with `checkCursor`'s truthiness, not Lua's — **numeric-nonzero** — because it
+    /// arrives from the same callers by the same route. That is the assertion worth having: Lua
+    /// would call `0` true, and a bar where `ActionButtonUp(id, 0)` self-cast would be worse than
+    /// one where nothing did.
+    #[test]
+    fn use_actions_third_argument_is_the_self_cast_modifier() {
+        let mut s = UiScript::new().unwrap();
+        s.run("UseAction(1)").unwrap();
+        s.run("UseAction(2, 0)").unwrap();
+        s.run("UseAction(3, 0, 0)").unwrap();
+        s.run("UseAction(4, 0, 1)").unwrap();
+        s.run("UseAction(5, nil, 1)").unwrap();
+        assert_eq!(
+            uses(&mut s),
+            vec![(1, false), (2, false), (3, false), (4, true), (5, true)],
+            "only a numeric-nonzero third argument is the modifier"
+        );
+    }
+
     #[test]
     fn action_snapshot_reads_and_use_queues() {
         let mut s = UiScript::new().unwrap();
@@ -438,8 +493,8 @@ mod tests {
         assert_eq!(s.eval::<i64>("return GetBonusBarOffset()").unwrap(), 1);
 
         s.run("UseAction(73)").unwrap();
-        s.run("UseAction(74, 0, 1)").unwrap(); // extras accepted, ignored
-        assert_eq!(s.take_action_uses(), vec![73, 74]);
+        s.run("UseAction(74, 0, 1)").unwrap(); // the self-cast modifier rides out
+        assert_eq!(uses(&mut s), vec![(73, false), (74, true)]);
         assert!(s.take_action_uses().is_empty());
 
         s.set_action(73, None);
@@ -480,7 +535,7 @@ mod tests {
 
         // checkCursor 0 (a keybind's own convention): queues the use, cursor untouched.
         s.run("UseAction(9, 0)").unwrap();
-        assert_eq!(s.take_action_uses(), vec![9]);
+        assert_eq!(uses(&mut s), vec![(9, false)]);
         assert!(s.cursor_payload().is_some(), "checkCursor 0 never places");
 
         // checkCursor 1 (a mouse click) with a payload held: places instead of queuing.
@@ -491,7 +546,7 @@ mod tests {
 
         // checkCursor 1 with an EMPTY cursor: the ordinary use (nothing to place).
         s.run("UseAction(10, 1)").unwrap();
-        assert_eq!(s.take_action_uses(), vec![10]);
+        assert_eq!(uses(&mut s), vec![(10, false)]);
     }
 
     // ── `GetActionText` (wow-re `bag-language-combat-action-bindings.md` §4) ────────────────────

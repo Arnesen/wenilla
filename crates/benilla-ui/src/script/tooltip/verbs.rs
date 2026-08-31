@@ -13,7 +13,8 @@ use crate::widget::{KindState, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
 
 use super::{
     append_line, bool_arg, cancel_fade, clear_content, fire_cleared, hide_tooltip, now,
-    parse_line_color, parse_line_tail, set_shown, text_of, tip_mut, with_tip, REG_TOOLTIP_METHODS,
+    parse_line_color, parse_line_tail, set_shown, text_of, tip_mut, with_tip, write_cell,
+    REG_TOOLTIP_METHODS,
 };
 
 pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -178,6 +179,49 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             fire_cleared(lua, h);
             append_line(lua, &this, (text, [r, g, b, a]), None, wrap)?;
             set_shown(lua, h, true);
+            Ok(())
+        })?,
+    )?;
+    // AppendText(text) — `0x531e30`. The reference's bag/bar tooltips build a title with SetText
+    // and then hang the keybinding on the end of that same line rather than adding a second one:
+    //
+    //     GameTooltip:SetText(TEXT(BACKPACK_TOOLTIP), 1.0, 1.0, 1.0);
+    //     if ( GetBindingKey("TOGGLEBACKPACK") ) then
+    //         GameTooltip:AppendText(" "..NORMAL_FONT_COLOR_CODE.."("..key..")"..FONT_COLOR_CODE_CLOSE)
+    //     end
+    //
+    // — ContainerFrame.xml l.188-206 (the bag window's portrait button, one arm per bag id) and
+    // MainMenuBarBagButtons.xml l.96 / .lua l.91 (the bar's). Both files run off the player's own
+    // chain (1751), so those are live call sites in this VM, not transcriptions we could adjust.
+    //
+    // LINE 1's left cell, appended in place, keeping its colour: the escape codes in the argument
+    // are what colour the suffix, which only works if it lands INSIDE an existing line. A tooltip
+    // with no lines yet is a no-op rather than a raise — the reference's own callers always
+    // SetText first, and nothing is carved about the empty case.
+    //
+    // INFERRED, pending the byte carve of `0x531e30`: that it is line 1 rather than the last line
+    // added. Every attested call site sets exactly one line before appending, so the two readings
+    // are indistinguishable from the corpus alone; line 1 is chosen because the reference's own
+    // name for the target is `GameTooltipTextLeft1`. Re-measure is unconditional either way.
+    m.set(
+        "AppendText",
+        lua.create_function(|lua, (this, text): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            let extra = text_of(Some(&text));
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let lh = match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Tooltip(t)) if t.num_lines > 0 => t.left_lines[0],
+                Some(KindState::Tooltip(_)) => return Ok(()),
+                _ => return Err(mlua::Error::runtime("not a GameTooltip")),
+            };
+            let (current, color) = match model.region_data.get(&lh) {
+                Some(d) => (
+                    d.text.clone().unwrap_or_default(),
+                    d.vertex_color.unwrap_or([1.0, 1.0, 1.0, 1.0]),
+                ),
+                None => (String::new(), [1.0, 1.0, 1.0, 1.0]),
+            };
+            write_cell(&mut model, lh, &(current + &extra), color);
             Ok(())
         })?,
     )?;

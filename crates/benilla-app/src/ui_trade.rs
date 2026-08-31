@@ -14,6 +14,24 @@
 //! intents (`InitiateTrade`/`AcceptTrade`/`CancelTradeAccept`/`CloseTrade`) back out into the trade
 //! `CMSG`s.
 //!
+//! **An incoming request is answered here, not on the wire** (decision 1764).
+//! `SMSG_TRADE_STATUS(BEGIN_TRADE)` only *records* the request; [`answer_trade_request`] walks the
+//! reference's own eight-leg ladder (`0x4bf736`) and either refuses it — on one of three different
+//! opcodes, or with no packet at all — or accepts it, which is what the client did unconditionally
+//! before. The split is what makes the ladder possible: it reads the ignore list, the cinematic
+//! state, player control, the auction house, the initiator's descriptor, an outbound initiate of
+//! ours and the [`BlockTrades`] CVar, none of which can reach `apply_net_updates` at Bevy's
+//! 16-`SystemParam` ceiling — and its answer may span frames, which a wire decoder cannot do at
+//! all. Decision 1725 left the cinematic leg unbuilt for exactly that reason and said so; this is
+//! the seam that makes it, and the seven beside it, ordinary.
+//!
+//! **There is no consent prompt, and that is faithful rather than missing.** 1.12.1 registers a
+//! `TRADE_REQUEST` event and signals it from nowhere, so the `TRADE` StaticPopup that would have
+//! asked is dead code in the real client (§5 cross-checked — wow-re
+//! `ui/scratch/incoming-trade-request-law.md` §3). benilla wired that dialog up and took it back
+//! out (decision 1764): the reference's answer to an unwanted trade is the ignore list and the
+//! *Block Trades* checkbox, both of which are legs of the ladder below.
+//!
 //! **The partner's portrait** rides the shared `"npc"` booth token: [`TradeSession`] implements
 //! [`NpcSession`] so [`crate::ui_session::feed_interact_npc`] points the `"npc"` portrait at the
 //! partner's live entity while the window is open — the partner is a nearby player (within
@@ -36,7 +54,7 @@ use benilla_ui::script::{ScriptValue, TradeSideState, TradeSlotItem, TradeState,
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_party::GroupState;
 use crate::ui_script::UiInput;
@@ -59,12 +77,35 @@ struct TradeOffer {
 ///
 /// `partner` is set the moment the trade begins (the initiator records its target at
 /// `CMSG_INITIATE_TRADE` time, since the later `OPEN_WINDOW` carries no guid; the target records it
-/// from `BEGIN_TRADE`); `open` flips on `OPEN_WINDOW`. `npc()` is gated on `open` so the `"npc"`
-/// portrait bakes only while the window is up.
+/// when the ladder *accepts* the request — see `request`); `open` flips on `OPEN_WINDOW`. `npc()`
+/// is gated on `open` so the `"npc"` portrait bakes only while the window is up.
 #[derive(Resource, Default)]
 pub(crate) struct TradeSession {
-    /// The trade partner's guid; `Some` from the initiate/begin onward, `None` = no trade.
+    /// The trade partner's guid; `Some` from the initiate/accept onward, `None` = no trade.
     partner: Option<u64>,
+    /// An incoming `BEGIN_TRADE` **this client has not answered yet** (decision 1764) — the
+    /// initiator's guid. Set by [`Self::request`] and cleared the moment
+    /// [`answer_trade_request`] resolves it, either by promoting it to `partner`
+    /// ([`Self::begin`]) or by refusing ([`Self::refuse_request`]). Mutually exclusive with
+    /// `partner`: a request that has not been answered is not yet a trade.
+    request: Option<u64>,
+    /// **An outbound `CMSG_INITIATE_TRADE` of ours is live** — the reference's `[0xc4bec8]`, and
+    /// leg 1 of [`answer_trade_request`]'s ladder, where it drops an incoming request without a
+    /// reply of any kind.
+    ///
+    /// Its own field rather than `partner.is_some()` because the two are different sets, and the
+    /// binary is explicit about which — a complete 5-site census of `[0xc4bec8]`: set at
+    /// `0x5d4021` as `CMSG_INITIATE_TRADE` goes out, zeroed at module init (`0x5d478e`) and in the
+    /// status handler's common tail (`0x5d4931`), read twice. So a trade we did not start has it
+    /// clear for its whole life, while `partner` is set the moment we accept one.
+    ///
+    /// **It survives `OPEN_WINDOW`**, which is the half that is easy to get wrong and was worth
+    /// asking about: the tail only clears on the statuses that set `esi`, and 1, 2 (`OPEN_WINDOW`),
+    /// 4, 7, 9 and 22 do not — so the latch stands for the whole life of a trade *we* opened, and
+    /// leg 1 drops an incoming request throughout it. Modelling it as "we asked and no window has
+    /// opened yet" would have been strictly narrower, and wrong in exactly the window where it
+    /// matters. Ours is cleared by the session reset, which is the same moment.
+    initiated: bool,
     /// The window is up (`OPEN_WINDOW` arrived). `partner` can be `Some` before this (an initiate in
     /// flight the server hasn't opened yet).
     open: bool,
@@ -86,12 +127,40 @@ impl TradeSession {
     pub(crate) fn initiate(&mut self, target: u64) {
         *self = TradeSession {
             partner: Some(target),
+            initiated: true,
             ..Default::default()
         };
     }
 
-    /// `BEGIN_TRADE(initiator guid)` — the target learns the partner and (via the drain-adjacent
-    /// bridge) auto-answers `CMSG_BEGIN_TRADE`. Resets any stale prior offer.
+    /// `BEGIN_TRADE(initiator guid)` — record the incoming request, **unanswered**. Nothing goes
+    /// on the wire here (decision 1764): [`answer_trade_request`] owns the reply.
+    ///
+    /// Records it *beside* whatever session already exists rather than resetting — a request is
+    /// not a trade, and a request arriving over a live one must not destroy it. That reset is
+    /// [`Self::begin`]'s, at the moment the request is accepted and there really is a fresh trade.
+    /// Leaving it here would also have made the "already trading" refusal leg dead code, since
+    /// the ladder reads the very fields the reset had just cleared.
+    pub(crate) fn request(&mut self, initiator: u64) {
+        self.request = Some(initiator);
+    }
+
+    /// The incoming request awaiting an answer, if any.
+    pub(crate) fn pending_request(&self) -> Option<u64> {
+        self.request
+    }
+
+    /// Spend the pending request **without touching the rest of the session** — the refusal path's
+    /// counterpart to [`Self::begin`]. It clears only the request for the same reason
+    /// [`Self::request`] sets only the request: refusing an offer is not cancelling the trade you
+    /// are in, and on a fresh session the two are indistinguishable anyway (there is nothing else
+    /// to clear). The server's own `TRADE_STATUS_BUSY` reply closes what needs closing.
+    pub(crate) fn refuse_request(&mut self) {
+        self.request = None;
+    }
+
+    /// Accept the pending request: the initiator becomes the partner and the request is spent. The
+    /// caller sends `CMSG_BEGIN_TRADE` in the same breath; the server answers both sides
+    /// `OPEN_WINDOW`.
     pub(crate) fn begin(&mut self, partner: u64) {
         *self = TradeSession {
             partner: Some(partner),
@@ -215,19 +284,211 @@ pub(crate) struct UiTradePlugin;
 
 impl Plugin for UiTradePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TradeSession>().add_systems(
-            Update,
-            (
-                // Feed before the input pass so an open/close/mirror is on screen the same frame;
-                // drain after it so a click's intent (initiate, accept, close) goes out the same
-                // frame (the ui_mail ordering exactly). After the UnitFeed set so the resolved
-                // item-template store is landed. No range-guard registration — a trade's cancel is
-                // server-driven (the module doc).
-                feed_trade.after(crate::ui_unit::UnitFeed).before(UiInput),
-                drain_trade.after(UiInput),
-            ),
-        );
+        app.init_resource::<TradeSession>()
+            .init_resource::<BlockTrades>()
+            .add_systems(
+                Update,
+                (
+                    // Feed before the input pass so an open/close/mirror is on screen the same
+                    // frame; drain after it so a click's intent (initiate, accept, close) goes out
+                    // the same frame (the ui_mail ordering exactly). After the UnitFeed set so the
+                    // resolved item-template store is landed. No range-guard registration — a
+                    // trade's cancel is server-driven (the module doc).
+                    feed_trade.after(crate::ui_unit::UnitFeed).before(UiInput),
+                    // The incoming request's answer needs no VM at all — it is wire policy over
+                    // engine state — so it sits ahead of the feed, and an accepted request's
+                    // `partner` is on screen the same frame the window opens.
+                    answer_trade_request.before(feed_trade),
+                    drain_trade.after(UiInput),
+                ),
+            );
     }
+}
+
+/// **Block Trades** — 1.12's own `BlockTrades` CVar (`0x842fbc`), the *Block Trades* checkbox in
+/// Basic Options' General box (`UIOptionsFrame.lua` l.11: `UIOptionsFrameCheckButtons`
+/// `["BLOCK_TRADES"] = { index = 14, cvar = "BlockTrades" }`, tooltip
+/// `OPTION_TOOLTIP_BLOCK_TRADES` = "Block all incoming trade requests.").
+///
+/// A knob resource rather than a field on [`TradeSession`], for the same reason
+/// [`crate::ui_guild::GuildMemberNotify`] is one: it is a *setting*, and `TradeSession` is cleared
+/// on every disconnect.
+///
+/// Its one reader is [`answer_trade_request`]'s last refusal leg — the only leg of that ladder
+/// that speaks, which is why the silent ones are ordered ahead of it.
+#[derive(Resource, Default)]
+pub(crate) struct BlockTrades(pub(crate) bool);
+
+/// `ERR_TRADE_BLOCKED_S` (`GlobalStrings.lua` l.1889) — the line the *Block Trades* refusal prints,
+/// naming the would-be partner. Two spaces after the full stop, as shipped.
+const ERR_TRADE_BLOCKED_S: &str = "%s has requested to trade.  You have refused.";
+
+/// **Answer an incoming trade request** — the arm the reference keeps inside `CGTradeInfo`'s
+/// dispatcher (`0x4bf736`, case 1 of the 23-case `0x4bf720`), lifted out to where its inputs live.
+///
+/// The net drain only *records* the request ([`TradeSession::request`]); this system decides. The
+/// split is the point: the decision reads the ignore list, the cinematic state, player control, the
+/// auction house, the initiator's own descriptor, an outbound initiate of ours and a CVar, and none
+/// of those can reach `apply_net_updates`, whose signature is at Bevy's 16-`SystemParam` ceiling.
+/// That ceiling is exactly why decision 1725 left the cinematic leg unbuilt and said so; it is not
+/// a ceiling this side of the seam has. The answer can also **span frames**, which a wire decoder
+/// cannot do at all: the `BlockTrades` line names the initiator, and that name may need a
+/// `CMSG_NAME_QUERY` first.
+///
+/// **The ladder is the reference's, in its order** — eight legs, walked contiguously over
+/// `[0x4bf736, 0x4bf7f8)` and cross-checked by four independent derivations (wow-re
+/// `ui/scratch/incoming-trade-request-law.md` §2). Three answer with something other than "busy",
+/// which is why this is a ladder and not a boolean:
+///
+/// | # | condition | benilla reads | answer |
+/// |---|---|---|---|
+/// | 1 | our own `CMSG_INITIATE_TRADE` is in flight (`[0xc4bec8]`) | [`TradeSession::initiated`] | **nothing at all** |
+/// | 2 | the initiator is on our **ignore list** (`0x5ae5a0`, by guid, cap 25) | [`crate::ui_social::SocialState::is_ignored`] | **`CMSG_IGNORE_TRADE`**, silent |
+/// | 3 | the initiator resolves to no streamed **player** object (`0x468460(TYPEMASK_PLAYER)`) | [`GuidIndex`] + [`ObjectStore`] | **nothing at all** |
+/// | 4 | the initiator is dead or a ghost (`0x605f30`) | raw health ≤ 0, or `PLAYER_FLAGS` ghost | `CMSG_BUSY_TRADE`, silent |
+/// | 5 | a cinematic is playing (`[0xb4e310]`) | [`crate::cinematic::Cinematic`] | `CMSG_BUSY_TRADE`, silent |
+/// | 6 | we have lost **player control** (`[0xb4b3e4]`) | `Player::control_lost` | `CMSG_BUSY_TRADE`, silent |
+/// | 7 | an **auction house** window is open (`[0xb725f8]`/`[0xb725fc]`) | [`crate::ui_auction::AuctionOpen`] | `CMSG_BUSY_TRADE`, silent |
+/// | 8 | the `BlockTrades` CVar is set (`0x842fbc`) | [`BlockTrades`] | `CMSG_BUSY_TRADE` **+ the one chat line** |
+/// | — | nothing refuses it | — | **`CMSG_BEGIN_TRADE`**, and the server opens both windows |
+///
+/// Only leg 8 speaks, so the **order is behaviour**, not taste: a request during a cinematic is
+/// refused silently because that leg returns before the message.
+///
+/// **There is no consent step, and that is the reference's answer, not an omission.** The 5875
+/// client registers a `TRADE_REQUEST` event (id `0x11d`) and signals it from nowhere — a
+/// whole-image census — so `StaticPopupDialogs["TRADE"]`, its `TRADE_WITH_QUESTION` text and its
+/// `BeginTrade`/`CancelTrade` verbs are dead code there, and an incoming trade that survives the
+/// ladder opens the window unasked. benilla briefly wired that dialog up and then took it back out
+/// (decision 1764): a popup the real client never shows is a divergence every addon and every
+/// player would feel, and the reference's own answer to an unwanted trade is leg 2 and leg 8 —
+/// ignore them, or tick *Block Trades*.
+///
+/// Three legs were wrong in wow-re's earlier five-condition gloss and were corrected by the round
+/// that produced the note above — `[0xb4b3e4]` is player *control*, not "in world"; `[0xb725f8]` is
+/// the auction house, not a pending trade; and the ignore leg was missing entirely. This is why the
+/// gloss was not built from.
+#[allow(clippy::too_many_arguments)]
+fn answer_trade_request(
+    mut trade: ResMut<TradeSession>,
+    commands: Res<NetCommands>,
+    mut names: ResMut<NameCache>,
+    mut chat_log: ResMut<crate::ui_chat::ChatLog>,
+    social: Res<crate::ui_social::SocialState>,
+    cinematic: Res<crate::cinematic::Cinematic>,
+    player: Res<crate::player::Player>,
+    auction: Res<crate::ui_auction::AuctionOpen>,
+    block_trades: Res<BlockTrades>,
+    index: Res<GuidIndex>,
+    stores: Query<&ObjectStore>,
+) {
+    let Some(initiator) = trade.pending_request() else {
+        return;
+    };
+
+    // ── Legs 1 and 3: the two that send NOTHING ─────────────────────────────────────────────────
+    //
+    // Leg 1 — our own `CMSG_INITIATE_TRADE` is in flight. See [`TradeSession::initiated`]: the
+    // latch is "we asked somebody", it survives `OPEN_WINDOW`, and it is never set by a trade we
+    // did not start.
+    //
+    // Leg 3 — the initiator does not resolve to a streamed **player**. The reference asks
+    // `0x468460(TYPEMASK_PLAYER)` and returns on NULL; ours is the guid index plus the store, and
+    // it fails in exactly the case the reference's does (nothing of that guid in the world).
+    let initiator_store = index
+        .0
+        .get(&initiator)
+        .and_then(|e| stores.get(*e).ok())
+        .filter(|_| benilla_protocol::guid::is_player(initiator));
+    if trade.initiated || initiator_store.is_none() {
+        info!(
+            target: "trade",
+            "BEGIN_TRADE from {initiator:#x} dropped without a reply (own initiate in flight: {}, \
+             initiator resolved: {})",
+            trade.initiated,
+            initiator_store.is_some(),
+        );
+        trade.refuse_request();
+        return;
+    }
+
+    // ── Leg 2: the ignore list, and the ONLY leg that answers on a different opcode ─────────────
+    //
+    // The server has no ignore check for trade at all (vmangos `HandleInitiateTradeOpcode` reads
+    // no social list), so this refusal is entirely the client's — the same shape as the duel
+    // challenge's (decision 0668). `CMSG_IGNORE_TRADE` rather than busy is what makes the
+    // initiator read "… is ignoring you" instead of "… is busy", and it is a single call site
+    // image-wide (`0x4bf759` → `0x5d41c0`). Both sides key on the guid, and both cap at 25.
+    if social.is_ignored(initiator) {
+        info!(target: "trade", "BEGIN_TRADE from an ignored {initiator:#x}; sending CMSG_IGNORE_TRADE");
+        let _ = commands.0.send(ClientCommand::IgnoreTrade);
+        trade.refuse_request();
+        return;
+    }
+
+    // ── Legs 4-7: the silent "busy" refusals. None needs a name, so none waits for one ──────────
+    //
+    // Leg 4 — the initiator is dead or a ghost. `0x605f30` is **raw** health ≤ 0 or the
+    // `PLAYER_FLAGS` ghost bit; deliberately NOT `unit_reads_dead()`, which also takes the
+    // dead-looking dynflag and would refuse a feigning hunter the reference trades with.
+    // Leg 5 — a cinematic (`[0xb4e310]`): decision 1725 named this exact hole and left it for want
+    // of a param slot here.
+    // Leg 6 — player control lost (`[0xb4b3e4]`): NOT an in-world flag. The cell is written by
+    // `0x4958e0`, which signals `PLAYER_CONTROL_GAINED`/`LOST` — the same wire fact
+    // `SMSG_CLIENT_CONTROL_UPDATE` gives `Player::control_lost`.
+    // Leg 7 — an auction house is open (`[0xb725f8]`/`[0xb725fc]`, one auctioneer guid split
+    // across two cells, set and cleared with the AH window).
+    let dead_or_ghost = initiator_store
+        .is_some_and(|s| s.0.unit_health().is_some_and(|hp| hp == 0) || s.0.player_is_ghost());
+    if dead_or_ghost
+        || cinematic.is_playing()
+        || player.control_lost
+        || auction.auctioneer.is_some()
+    {
+        info!(target: "trade", "BEGIN_TRADE from {initiator:#x} refused silently; sending CMSG_BUSY_TRADE");
+        let _ = commands.0.send(ClientCommand::BusyTrade);
+        trade.refuse_request();
+        return;
+    }
+
+    // ── Leg 8 is the only one that names the initiator, so only it waits for the name cache ─────
+    //
+    // The reference reads it straight off the initiator's live `CGUnit` (`0x609210`) and does not
+    // have to wait; benilla may need a `CMSG_NAME_QUERY` round trip first. Leg 3 above has already
+    // established the initiator is streamed, which is exactly the case the reference has the name
+    // for free, so in practice there is nothing to wait for.
+    //
+    // **The wait needs no timer, because the server already bounds it.** The only way a name never
+    // arrives is a player the server can no longer find — and that is precisely the case where
+    // vmangos's `CleanupsBeforeDelete` sends US `TRADE_STATUS_TRADE_CANCELED` regardless of the
+    // leaver's own `sendback`, which clears the request through `close`. `NameCache` asks once per
+    // guid per connection, so the frames spent here cost one query, not one per frame.
+    //
+    // It is also the one leg that could not live in the net drain even with a param to spare: the
+    // answer may land a frame or two after the packet did.
+    if block_trades.0 {
+        let Some(name) = names.resolve(initiator, &commands).map(str::to_string) else {
+            return;
+        };
+        info!(target: "trade", "BEGIN_TRADE from {name} refused by BlockTrades; sending CMSG_BUSY_TRADE");
+        let _ = commands.0.send(ClientCommand::BusyTrade);
+        trade.refuse_request();
+        // `0x496720(0xbb, 0x609210(initiator))` — and catalog row `0xbb` carries `kind = 0`, chat
+        // type `0xa`, no sound cue. So this is a **system chat line**, not the red
+        // `UI_ERROR_MESSAGE` (`kind = 2`). All three trade rows are chat rows; `crate::ui_duel`'s
+        // note that benilla models `DisplayError` as the red toast is true of its own two ids and
+        // not of these.
+        chat_log.push_event(crate::ui_chat::ChatEvent::text_only(
+            crate::ui_chat::ChatEventKind::System,
+            ERR_TRADE_BLOCKED_S.replacen("%s", &name, 1),
+        ));
+        return;
+    }
+
+    // Nothing refuses it: accept, exactly as the reference does at the bottom of the same ladder.
+    info!(target: "trade", "BEGIN_TRADE from {initiator:#x} accepted; sending CMSG_BEGIN_TRADE");
+    trade.begin(initiator);
+    let _ = commands.0.send(ClientCommand::BeginTrade);
 }
 
 /// Resolve one wire [`TradeItem`] into the Lua-facing [`TradeSlotItem`]: name/quality through the
@@ -557,12 +818,61 @@ mod tests {
         assert_eq!(s.npc(), None);
     }
 
+    /// An incoming `BEGIN_TRADE` is a *request*, not a trade: nothing is a partner until it is
+    /// answered, so the "npc" portrait, the snapshot and the already-in-a-trade refusal leg all
+    /// read the same "no trade here" they read before it arrived (decision 1764).
     #[test]
-    fn begin_records_partner_for_the_target_side() {
+    fn an_incoming_request_is_not_yet_a_trade() {
         let mut s = TradeSession::default();
+        s.request(0xABCD);
+        assert_eq!(s.pending_request(), Some(0xABCD));
+        assert_eq!(s.partner, None, "an unanswered request has no partner");
+        assert!(!s.is_open(), "BEGIN_TRADE does not itself open the window");
+        assert_eq!(s.npc(), None);
+    }
+
+    /// Accepting the request promotes the initiator to partner and spends the request — the exact
+    /// state the initiator's own side reaches through `initiate`.
+    #[test]
+    fn accepting_a_request_promotes_the_initiator_to_partner() {
+        let mut s = TradeSession::default();
+        s.request(0xABCD);
         s.begin(0xABCD);
         assert_eq!(s.partner, Some(0xABCD));
-        assert!(!s.is_open(), "BEGIN_TRADE does not itself open the window");
+        assert_eq!(s.pending_request(), None, "the request is spent");
+        assert!(!s.is_open(), "the window waits for OPEN_WINDOW");
+    }
+
+    /// Refusing (or any close) clears the request with everything else, so a refusal in flight can
+    /// never be answered twice.
+    #[test]
+    fn closing_clears_a_pending_request() {
+        let mut s = TradeSession::default();
+        s.request(0xABCD);
+        s.close();
+        assert_eq!(s.pending_request(), None);
+    }
+
+    /// A `BEGIN_TRADE` arriving over a **live** trade leaves that trade completely alone — and so
+    /// does refusing it. This is what makes the "already trading" leg of the ladder readable at
+    /// all: it reads the fields a reset would have cleared a line earlier.
+    #[test]
+    fn a_request_leaves_a_live_trade_alone() {
+        let mut s = TradeSession::default();
+        s.initiate(0x1);
+        s.open_window();
+        s.partner_accepted();
+
+        s.request(0x2);
+        assert_eq!(s.pending_request(), Some(0x2));
+        assert_eq!(s.partner, Some(0x1), "the live trade is untouched");
+        assert!(s.is_open());
+        assert!(s.their_accept);
+
+        s.refuse_request();
+        assert_eq!(s.pending_request(), None);
+        assert_eq!(s.partner, Some(0x1), "refusing an offer is not cancelling");
+        assert!(s.is_open());
     }
 
     #[test]
@@ -701,6 +1011,243 @@ mod tests {
             Some(0x7),
             "the initiator records the partner so OPEN_WINDOW can name it"
         );
+    }
+
+    /// A request that survives every leg is **accepted unasked** — the bottom of the reference's
+    /// own ladder, and the behaviour benilla briefly replaced with a consent dialog before taking
+    /// it back out (decision 1764). The 5875 client never asks: it registers `TRADE_REQUEST` and
+    /// signals it from nowhere.
+    #[test]
+    fn a_request_that_survives_the_ladder_is_accepted() {
+        let (mut app, rx) = request_app(false, false, true);
+        app.world_mut().resource_mut::<TradeSession>().request(0x7);
+        app.update();
+
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::BeginTrade)),
+            "nothing refused it, so the client answers — the server opens both windows"
+        );
+        let trade = app.world().resource::<TradeSession>();
+        assert_eq!(trade.partner, Some(0x7));
+        assert_eq!(trade.pending_request(), None, "the request is spent");
+        assert!(
+            !trade.initiated,
+            "a trade we did not start never sets the initiate latch"
+        );
+        assert!(
+            app.world()
+                .resource::<crate::ui_chat::ChatLog>()
+                .pending_texts()
+                .is_empty(),
+            "and an accepted request says nothing — only leg 8 speaks"
+        );
+    }
+
+    /// **Block Trades** refuses without asking, and it is the one refusal that speaks: the
+    /// `ERR_TRADE_BLOCKED_S` line naming the initiator (`0x496720(0xbb, …)`). Catalog row `0xbb`
+    /// is `kind = 0` — the **chat frame**, chat type `0xa` — so this is a system chat line and
+    /// **not** the red `UI_ERROR_MESSAGE`, which is `kind = 2`. That correction is the RE's.
+    #[test]
+    fn block_trades_refuses_and_says_so() {
+        let (mut app, rx) = request_app(true, false, true);
+        app.world_mut().resource_mut::<TradeSession>().request(0x7);
+        app.update();
+
+        assert!(matches!(rx.try_recv(), Ok(ClientCommand::BusyTrade)));
+        assert_eq!(
+            app.world()
+                .resource::<crate::ui_chat::ChatLog>()
+                .pending_texts(),
+            vec!["Grubbis has requested to trade.  You have refused.".to_string()],
+        );
+    }
+
+    /// Legs 5 and 6 — a cinematic (decision 1725's named hole) and lost player control — refuse
+    /// with **no** line. Only leg 8 reaches the message, which is why the ladder's order is
+    /// behaviour and not taste.
+    #[test]
+    fn the_silent_legs_refuse_without_a_word() {
+        for (cinematic, controlled) in [(true, true), (false, false)] {
+            let (mut app, rx) = request_app(false, cinematic, controlled);
+            app.world_mut().resource_mut::<TradeSession>().request(0x7);
+            app.update();
+            assert!(
+                matches!(rx.try_recv(), Ok(ClientCommand::BusyTrade)),
+                "cinematic={cinematic} controlled={controlled}: refused as busy"
+            );
+            assert!(
+                app.world()
+                    .resource::<crate::ui_chat::ChatLog>()
+                    .pending_texts()
+                    .is_empty(),
+                "cinematic={cinematic} controlled={controlled}: a silent leg says nothing"
+            );
+        }
+    }
+
+    /// Leg 7 — an open auction house refuses the request. `[0xb725f8]`/`[0xb725fc]` is the open
+    /// auctioneer's guid, which the old five-condition gloss had mislabelled as "a trade is
+    /// already pending". benilla was one commit from building that wrong leg.
+    #[test]
+    fn an_open_auction_house_refuses_the_request() {
+        let (mut app, rx) = request_app(false, false, true);
+        app.world_mut()
+            .resource_mut::<crate::ui_auction::AuctionOpen>()
+            .auctioneer = Some(0x1234);
+        app.world_mut().resource_mut::<TradeSession>().request(0x7);
+        app.update();
+        assert!(matches!(rx.try_recv(), Ok(ClientCommand::BusyTrade)));
+    }
+
+    /// Leg 2 — an ignored initiator is refused on a **different opcode**, silently. The server has
+    /// no ignore check for trade at all (vmangos's `HandleInitiateTradeOpcode` reads no social
+    /// list), so this refusal is entirely the client's; `IGNORE_TRADE` rather than `BUSY_TRADE` is
+    /// what makes the initiator read "is ignoring you" instead of "is busy".
+    #[test]
+    fn an_ignored_initiator_is_refused_as_ignored() {
+        let (mut app, rx) = request_app(false, false, true);
+        app.world_mut()
+            .resource_mut::<crate::ui_social::SocialState>()
+            .set_ignores_for_test(vec![0x7]);
+        app.world_mut().resource_mut::<TradeSession>().request(0x7);
+        app.update();
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::IgnoreTrade)),
+            "the ignore leg does NOT answer busy"
+        );
+        assert!(app
+            .world()
+            .resource::<crate::ui_chat::ChatLog>()
+            .pending_texts()
+            .is_empty());
+    }
+
+    /// Leg 4 — a dead or ghost initiator is refused as busy. The predicate is the reference's
+    /// `0x605f30`: **raw** health ≤ 0, or the `PLAYER_FLAGS` ghost bit. Deliberately not
+    /// `unit_reads_dead()` (`UnitIsDead 0x517ac0`), which also takes the dead-looking dynflag and
+    /// would refuse a feigning hunter the reference trades with quite happily.
+    #[test]
+    fn a_dead_or_ghost_initiator_is_refused() {
+        // `UNIT_FIELD_HEALTH` and `PLAYER_FLAGS`, spelled here the way `ui_unit`'s tests spell
+        // their field ids — the protocol crate keeps them private.
+        const HEALTH: u16 = 22;
+        const PLAYER_FLAGS: u16 = 190;
+        const GHOST: u32 = 0x10;
+        for (label, fields) in [
+            ("dead", vec![(HEALTH, 0u32)]),
+            ("ghost", vec![(HEALTH, 1u32), (PLAYER_FLAGS, GHOST)]),
+        ] {
+            let (mut app, rx) = request_app(false, false, true);
+            let entity = app.world().resource::<GuidIndex>().0[&0x7];
+            app.world_mut().entity_mut(entity).insert(ObjectStore(
+                benilla_protocol::messages::ObjectFields::from_pairs(&fields),
+            ));
+            app.world_mut().resource_mut::<TradeSession>().request(0x7);
+            app.update();
+            assert!(
+                matches!(rx.try_recv(), Ok(ClientCommand::BusyTrade)),
+                "{label}: refused as busy"
+            );
+        }
+    }
+
+    /// Legs 1 and 3 — the two that answer with **nothing at all**: our own initiate in flight
+    /// (`[0xc4bec8]`), and an initiator that resolves to no streamed player object. Both drop the
+    /// request without a packet, which is the reference's behaviour and not an oversight — it has
+    /// nothing to say to a trade it cannot see. Leg 1 is also what replaced the "already trading"
+    /// leg the old gloss claimed: the latch is set by the initiate sender and never by
+    /// `OPEN_WINDOW`, so it is "we asked somebody", not "a window is up".
+    #[test]
+    fn two_legs_answer_with_no_packet_at_all() {
+        let answered = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
+            rx.try_iter().any(|c| {
+                matches!(
+                    c,
+                    ClientCommand::BusyTrade
+                        | ClientCommand::IgnoreTrade
+                        | ClientCommand::BeginTrade
+                        | ClientCommand::CancelTrade
+                )
+            })
+        };
+
+        // Leg 1: we asked somebody else first, and the request arrives over it.
+        let (mut app, rx) = request_app(false, false, true);
+        {
+            let mut trade = app.world_mut().resource_mut::<TradeSession>();
+            trade.initiate(0x9);
+            trade.request(0x7);
+        }
+        app.update();
+        assert!(
+            !answered(&rx),
+            "an initiate of our own in flight drops the request in silence"
+        );
+        let trade = app.world().resource::<TradeSession>();
+        assert_eq!(
+            trade.pending_request(),
+            None,
+            "…and spends it, so it is not retried every frame"
+        );
+        assert_eq!(trade.partner, Some(0x9), "…and our own trade survives it");
+
+        // Leg 3: nothing of that guid is streamed.
+        let (mut app, rx) = request_app(false, false, true);
+        app.world_mut().resource_mut::<GuidIndex>().0.remove(&0x7);
+        app.world_mut().resource_mut::<TradeSession>().request(0x7);
+        app.update();
+        assert!(
+            !answered(&rx),
+            "an unresolvable initiator drops the request in silence"
+        );
+    }
+
+    /// The harness for [`answer_trade_request`]: an app carrying the eight pieces of state the
+    /// ladder reads, and two streamed player objects to be asked by. **No VM** — the system needs
+    /// none, which is the shape it settled into once the consent dialog came back out (decision
+    /// 1764): the answer is wire policy over engine state, and the only reason it is not in the
+    /// net drain is the parameter ceiling there.
+    fn request_app(
+        block_trades: bool,
+        cinematic: bool,
+        controlled: bool,
+    ) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        let mut names = NameCache::default();
+        // Two names, because several of these tests need a SECOND asker — and an unresolved name
+        // parks leg 8 before it reaches the line, which would let a test pass for the wrong
+        // reason (it did, once).
+        names.insert_player(0x7, "Grubbis".to_string(), None);
+        names.insert_player(0x8, "Skarrid".to_string(), None);
+        app.init_resource::<TradeSession>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::ui_social::SocialState>()
+            .init_resource::<crate::ui_auction::AuctionOpen>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<crate::player::Player>()
+            .insert_resource(names)
+            .insert_resource(NetCommands(tx))
+            .insert_resource(BlockTrades(block_trades))
+            .insert_resource(if cinematic {
+                crate::cinematic::Cinematic::playing_for_test()
+            } else {
+                crate::cinematic::Cinematic::default()
+            });
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = !controlled;
+        // The two askers are streamed player objects — leg 3 drops a request from a guid that
+        // resolves to nothing, so every test that expects to reach the ladder needs them present.
+        for guid in [0x7u64, 0x8] {
+            let e = app.world_mut().spawn(ObjectStore::default()).id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+        }
+        app.add_systems(Update, answer_trade_request);
+        (app, rx)
     }
 
     /// Draining a `SetTradeMoney` offer ships `CMSG_SET_TRADE_GOLD` — but only while the window is

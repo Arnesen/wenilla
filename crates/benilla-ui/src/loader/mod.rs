@@ -295,6 +295,36 @@ pub fn join_ref(base: &str, path: &str) -> String {
     out.join("/")
 }
 
+/// The frame KIND an element materializes as — its tag, with one substitution.
+///
+/// **A `<Model>` playing the cooldown indicator IS this engine's `<Cooldown>` widget.** The
+/// reference draws a cooldown sweep as a `Model` running
+/// `Interface\Cooldown\UI-Cooldown-Indicator.mdx` — that is what `CooldownFrameTemplate` is, and
+/// every consumer writes `<Model … inherits="CooldownFrameTemplate"/>`: the reference's own
+/// `ContainerFrameItemButtonTemplate` (ContainerFrame.xml l.13), its action buttons, and three
+/// corpus addons. benilla renders no FrameXML models at all, and it does not need to for this one:
+/// decision 0263 put the whole scrub/finish-flash machine inside a NATIVE `Cooldown` widget, which
+/// is the same picture by a different route.
+///
+/// So the mapping is on the MODEL FILE, not on the template name — the file is the thing's
+/// identity, an addon may reach the same art without inheriting the template, and a template name
+/// is a string anyone can shadow. Anything else keeps its tag and stays an inert `Model`.
+///
+/// Without this, decision 1751's bag swap silently loses the bag-slot cooldown sweep: our own
+/// `BenillaBagSlotTemplate` carried a real `<Cooldown>` child, the reference's carries a `<Model>`,
+/// and `CooldownFrame_SetTimer`'s Model branch shows and hides the frame and nothing more.
+fn frame_kind_of(el: &Element) -> String {
+    const COOLDOWN_MODEL: &str = "ui-cooldown-indicator.mdx";
+    if el.tag.eq_ignore_ascii_case("Model")
+        && el
+            .attr("file")
+            .is_some_and(|f| f.to_ascii_lowercase().ends_with(COOLDOWN_MODEL))
+    {
+        return "Cooldown".to_string();
+    }
+    el.tag.clone()
+}
+
 /// The `.lua` test `0x6ede10` opens with: `strrchr(path, '.')` on the **whole resolved path**,
 /// then a **case-insensitive** compare against `".lua"` (`0x8710c8`, through `0x64a4c0`).
 ///
@@ -726,7 +756,7 @@ impl Loader<'_> {
             }
         };
         let wrapper: Table =
-            match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
+            match create.call((frame_kind_of(el), resolved_name.clone(), parent.cloned())) {
                 Ok(w) => w,
                 Err(e) => {
                     self.report.errors.push(format!(
@@ -802,6 +832,7 @@ impl Loader<'_> {
         self.apply_editbox(el, wrapper, dbg_name);
         self.apply_messageframe(el, wrapper, dbg_name);
         self.apply_simplehtml(el, wrapper, dbg_name);
+        self.apply_minimap(el, wrapper, dbg_name);
         // 6 · <Scripts> handlers (rf24 `0x769ef0`); OnLoad is captured to fire bottom-up below.
         let onload = self.apply_scripts(el, wrapper, dbg_name);
 
@@ -888,6 +919,25 @@ pub(super) fn children_named<'a>(
     el.children
         .iter()
         .filter(move |c| c.tag.eq_ignore_ascii_case(tag))
+}
+
+/// Iterate an element's direct children whose tag matches ANY of `tags` (case-insensitively), in
+/// document order.
+///
+/// **Two spellings, one pass.** A 1.12 `<Button>` answers to two names for its label
+/// (`<ButtonText>` and `<NormalText>`) and two for each of its three state fonts
+/// (`<NormalFont>`/`<NormalText>`, `<HighlightFont>`/`<HighlightText>`,
+/// `<DisabledFont>`/`<DisabledText>` — `CSimpleButton::LoadXML 0x7788c0`'s tag-compare chain,
+/// wow-re `scratch/fontstring-loadxml-font-attrs.md` §7). Walking one spelling and then the other
+/// would apply them in tag order instead of document order, and every one of these slots is
+/// last-wins — so the alternatives have to be a single filtered walk, not two.
+pub(super) fn children_named_any<'a>(
+    el: &'a Element,
+    tags: &'a [&'a str],
+) -> impl Iterator<Item = &'a Element> {
+    el.children
+        .iter()
+        .filter(move |c| tags.iter().any(|t| c.tag.eq_ignore_ascii_case(t)))
 }
 
 /// Does this `text=` value LOOK like a GlobalStrings key? `SCREAMING_SNAKE`, two characters or more —

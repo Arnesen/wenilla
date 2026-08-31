@@ -280,6 +280,18 @@ pub const SMSG_PERIODICAURALOG: u16 = 0x024E; // 590
 pub const SMSG_SPELLDAMAGESHIELD: u16 = 0x024F; // 591
 pub const SMSG_SPELLNONMELEEDAMAGELOG: u16 = 0x0250; // 592
 
+// The combat log's remaining wire (VERIFIED vmangos `Opcodes_1_12_1.h`; decision 1703 — the
+// families 1571 §5 named as "deliberately out because their wire sources are undecoded"). Bodies
+// in [`super::combat_log`].
+pub const SMSG_ENCHANTMENTLOG: u16 = 0x01D7; // 471
+pub const SMSG_PARTYKILLLOG: u16 = 0x01F5; // 501
+pub const SMSG_SPELLLOGEXECUTE: u16 = 0x024C; // 588
+pub const SMSG_PROCRESIST: u16 = 0x0260; // 608
+pub const SMSG_DISPEL_FAILED: u16 = 0x0262; // 610
+pub const SMSG_SPELLORDAMAGE_IMMUNE: u16 = 0x0263; // 611
+pub const SMSG_SPELLDISPELLOG: u16 = 0x027B; // 635
+pub const SMSG_SPELLINSTAKILLLOG: u16 = 0x032F; // 815
+
 // The heal/energize pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 336/337) — the center combat
 // text's HEAL / power-gain feed (decision 0578). Bodies in [`super::spells`].
 pub const SMSG_SPELLHEALLOG: u16 = 0x0150; // 336
@@ -435,6 +447,32 @@ pub const SMSG_FISH_ESCAPED: u16 = 0x01C9; // 457
 /// `Opcodes_1_12_1.h`: 459): one cstring (`WorldSession::SendNotification`,
 /// `Server/WorldSession.cpp:900-915`) — "You do not know that language", trade refusals, and kin.
 pub const SMSG_NOTIFICATION: u16 = 0x01CB; // 459
+
+// The **world broadcasts** — sent to everyone, or to everyone in a zone, rather than to one player
+// about their own doing. Bodies and the client's own handlers: [`super::broadcast`].
+/// An area is under attack by enemy players (VERIFIED vmangos `Opcodes_1_12_1.h`: 596): one `u32`
+/// `AreaTable.dbc` id (`WorldPackets::Misc::ZoneUnderAttack::AppendBodyTo`,
+/// `Server/Packets/Misc.cpp:451-454`). The client (`0x49dcc0`) formats FrameXML's
+/// `ZONE_UNDER_ATTACK` global string with the area's name and delivers it as `CHAT_MSG_CHANNEL` on
+/// the joined defense channels — **not** as a system line.
+pub const SMSG_ZONE_UNDER_ATTACK: u16 = 0x0254; // 596
+/// A shutdown/restart countdown or an operator's broadcast (VERIFIED vmangos `Opcodes_1_12_1.h`:
+/// 657): `u32 messageType` + one cstring (`WorldPackets::Misc::ServerMessage::AppendBodyTo`,
+/// `Server/Packets/Misc.cpp:341-345`; layout in [`super::broadcast::read_server_message`]). The
+/// type indexes `ServerMessages.dbc`, whose text is the format string the packet's text fills; the
+/// client (`0x49df80`) shows the result as `CHAT_MSG_SYSTEM`.
+pub const SMSG_SERVER_MESSAGE: u16 = 0x0291; // 657
+/// A trial account hit its whisper cap (VERIFIED vmangos `Opcodes_1_12_1.h`: 765); **empty body**
+/// (`WorldPackets::Chat::ChatRestricted::AppendBodyTo`, `Server/Packets/Chat.cpp:21-23`), and the
+/// client's arm (`0x5e4a09`) reads none — it is three instructions, `DisplayError(0x1c3)`.
+pub const SMSG_CHAT_RESTRICTED: u16 = 0x02FD; // 765
+/// A world-defense broadcast — the Eastern Plaguelands tower captures (VERIFIED vmangos
+/// `Opcodes_1_12_1.h`: 827): `u32 zoneId`, `u32 length`, then the text (`Map::SendDefenseMessage`,
+/// `src/game/Maps/Map.cpp:1868-1884`, built raw rather than through a packet class and
+/// **1.12-only**). Same destination as [`SMSG_ZONE_UNDER_ATTACK`] and the same handler shape
+/// (`0x49de30`), but the text rides the wire instead of a global string.
+pub const SMSG_DEFENSE_MESSAGE: u16 = 0x033B; // 827
+
 /// `/played` (VERIFIED vmangos `Opcodes_1_12_1.h`: 460/461): empty CMSG body
 /// (`NullClientPacket`), SMSG body `u32 total + u32 level` seconds
 /// (`WorldPackets::Misc::PlayedTime::AppendBodyTo`, `Server/Packets/Misc.cpp:278-282`; layout in
@@ -677,6 +715,15 @@ pub const SMSG_QUESTUPDATE_COMPLETE: u16 = 0x0198; // 408
 pub const SMSG_QUESTUPDATE_ADD_KILL: u16 = 0x0199; // 409
 pub const SMSG_QUESTUPDATE_ADD_ITEM: u16 = 0x019A; // 410
 
+// The party quest-**share** set (VERIFIED vmangos `Opcodes_1_12_1.h`: 411-413 + 630) — decision
+// 1733. `MSG_QUEST_PUSH_RESULT` is the one bidirectional opcode of the quest family: the receiver
+// sends its own verdict up, the server relays every verdict (its own and the receiver's) back down
+// to the SHARER. Bodies in [`super::quest`]'s `share` submodule.
+pub const CMSG_QUEST_CONFIRM_ACCEPT: u16 = 0x019B; // 411
+pub const SMSG_QUEST_CONFIRM_ACCEPT: u16 = 0x019C; // 412
+pub const CMSG_PUSHQUESTTOPARTY: u16 = 0x019D; // 413
+pub const MSG_QUEST_PUSH_RESULT: u16 = 0x0276; // 630
+
 pub const CMSG_LIST_INVENTORY: u16 = 0x019E; // 414
 pub const SMSG_LIST_INVENTORY: u16 = 0x019F; // 415
 pub const CMSG_SELL_ITEM: u16 = 0x01A0; // 416
@@ -825,6 +872,18 @@ pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 /// leg puts the *latched* trainer guid on the wire. Bodies in [`super::progression`].
 pub const MSG_TALENT_WIPE_CONFIRM: u16 = 0x02AA; // 682
 
+/// The player-summon pair — the question and the accept (VERIFIED vmangos `Opcodes_1_12_1.h`:
+/// 683/684 + `Opcodes.cpp`'s `HandleSummonResponseOpcode` registration; decision 1747). A
+/// warlock's Ritual of Summoning, a meeting stone and a GM `.summon` all arrive as the same
+/// inbound question, and the client answers only to say **yes**: there is no decline opcode and no
+/// accept flag in the body, so a declined summon is silence and the server's own two-minute timer.
+///
+/// Byte-verified client-side as well as against vmangos (wow-re: the `0x5ab650` registration site
+/// maps `0x2ab` to handler `0x5e6140`, and the `ConfirmSummon` binding `0x48b770` writes `0x2ac`).
+/// Bodies in [`super::summon`].
+pub const SMSG_SUMMON_REQUEST: u16 = 0x02AB; // 683
+pub const CMSG_SUMMON_RESPONSE: u16 = 0x02AC; // 684
+
 /// Unlearn (abandon) a whole skill line — the skills pane's red circle-slash (VERIFIED vmangos
 /// `Opcodes.cpp` handler registration + `Opcodes_1_9_4.h`: 514). Body in
 /// [`super::skills::unlearn_skill`]; no ack — the removal returns as a `PLAYER_SKILL_INFO`
@@ -895,6 +954,12 @@ pub const MSG_CORPSE_QUERY: u16 = 0x0216; // 534
 pub const CMSG_SPIRIT_HEALER_ACTIVATE: u16 = 0x021C; // 540
 pub const SMSG_SPIRIT_HEALER_CONFIRM: u16 = 0x0222; // 546
 pub const SMSG_CORPSE_RECLAIM_DELAY: u16 = 0x0269; // 617
+/// Self-resurrect — the DEATH popup's soulstone/Reincarnation button (`UseSoulstone()`, decision
+/// 1746). **EMPTY body** (VERIFIED vmangos `Opcodes_1_12_1.h:692` = 691, handler
+/// `WorldSession::HandleSelfResOpcode(NullClientPacket const&)`, `SpellHandler.cpp:461`): the
+/// server casts whatever `PLAYER_SELF_RES_SPELL` holds on us and zeroes the field. There is no
+/// answer packet — the resurrection arrives as ordinary descriptor deltas, exactly like a reclaim.
+pub const CMSG_SELF_RES: u16 = 0x02B3; // 691
 /// Sent with the 10% durability loss a natural (non-PvP) death applies (VERIFIED vmangos
 /// `Opcodes_1_12_1.h` 701 + `Unit.cpp:1170-1182` — an EMPTY body; the client's cue for the red
 /// "Your equipped items suffer a 10%% durability loss." error line).
@@ -928,6 +993,43 @@ pub const SMSG_MOVE_SET_HOVER: u16 = 0x00F4; // 244
 pub const SMSG_MOVE_UNSET_HOVER: u16 = 0x00F5; // 245
 pub const CMSG_MOVE_HOVER_ACK: u16 = 0x00F6; // 246
 pub const CMSG_MOVE_FEATHER_FALL_ACK: u16 = 0x02CF; // 719
+
+// **The knockback handshake** — the server aims a launch at our own mover, the mover flies it, and
+// the ack is what the server relays onward (decision 1702). Numbers VERIFIED vmangos
+// `Opcodes_1_11_2.h:242-244` (unchanged into 1.12.1) and cross-checked against the client's own name
+// table ([`super::opcode_names`]).
+//
+// **The shape.** `SMSG_MOVE_KNOCK_BACK` carries `packed guid + u32 counter + f32 vcos + f32 vsin +
+// f32 speedXY + f32 speedZ` (vmangos `MovementPacketSender::SendKnockBackToController`, the
+// `> CLIENT_BUILD_1_9_4` branch that carries the counter). Those last four floats are a
+// [`super::JumpInfo`] in a different field order — the same launch quad, and that is not a
+// coincidence: the ack must echo them back as the `MovementInfo` **jump tail**, which is why
+// `speedZ` rides the jump tail's **down-positive** convention (vmangos negates the caller's
+// upward `verticalSpeed` on the way out, with the source comment "!! notice the - sign in front of
+// speedZ !!").
+//
+// **The ack is mandatory and checked value-by-value.** `CMSG_MOVE_KNOCK_BACK_ACK` is
+// `full u64 guid + u32 counter + MovementInfo` (`Server/Packets/Movement.cpp:61-68` — the same
+// shape as the movement-mode family's ack minus its trailing `apply` dword), and
+// `Unit::FindPendingMovementKnockbackChange` refuses it unless the counter matches **and** all four
+// jump-tail floats are within `0.01` of what was sent — so `MOVEFLAG_JUMPING` must be set and the
+// tail must be the launch quad. A mismatched ack is `OnWrongAckData`; a missing one is
+// `OnFailedToAckChange` (a knockback is the one pending change the server will not re-send,
+// `Unit.cpp:6887`). The ack is also the observers' packet: the server answers it with
+// `MSG_MOVE_KNOCK_BACK` built from the `MovementInfo` we sent.
+pub const SMSG_MOVE_KNOCK_BACK: u16 = 0x00EF; // 239
+pub const CMSG_MOVE_KNOCK_BACK_ACK: u16 = 0x00F0; // 240
+                                                  //
+                                                  // **And the observers hear it — `MSG_MOVE_KNOCK_BACK` is NOT dead** (decision 1702, correcting
+                                                  // decision 0277's "no observer-side knockback signal exists in 1.12 at all"). The reference
+                                                  // registers `0xF1` at its own dispatch entry `0x603bb0`, which reaches `CGUnit_C::OnKnockBack`
+                                                  // `0x6026f0` — it reads the four floats *after* a full `MovementInfo` and re-launches the unit
+                                                  // locally through the very same `0x6179c0` the controller's own knockback uses, acking nothing.
+                                                  // That body (`packed guid + MovementInfo + vcos + vsin + speedXY + speedZ`) is exactly what vmangos
+                                                  // sends (`SendKnockBackToObservers`), and its leading `[packed guid][MovementInfo]` is the ordinary
+                                                  // relay shape — the launch quad also rides that `MovementInfo`'s own jump tail, so a receiver that
+                                                  // replays the relayed arc reproduces the re-launch without reading the trailing four.
+pub const MSG_MOVE_KNOCK_BACK: u16 = 0x00F1; // 241
 
 // The social family — the friend list, the ignore list, and `/who` (VERIFIED vmangos
 // `Opcodes_1_12_1.h` + `Server/Packets/Social.{h,cpp}`, `Handlers/MiscHandler.cpp`,
@@ -1167,3 +1269,33 @@ pub const SMSG_AUCTION_REMOVED_NOTIFICATION: u16 = 0x028D; // 653
 // later.
 pub const SMSG_INIT_WORLD_STATES: u16 = 0x02C2; // 706
 pub const SMSG_UPDATE_WORLD_STATE: u16 = 0x02C3; // 707
+
+// ── The instance/raid lockout family (decision 1748) ──────────────────────────────────────────
+//
+// The five inbound handlers WoW.exe registers together at `0x498680`-`0x4986cf`, plus the
+// save-created one registered apart at `0x4e7e48`, plus the one thing the player can ask for.
+// Bodies (and the client's own read order) in [`super::instance`]; server side VERIFIED vmangos
+// `Server/Packets/Misc.{h,cpp}` + `Maps/Map.cpp`.
+
+/// "You are now saved to this instance" (`u32` flag; handler `0x4e7e60`). vmangos always sends
+/// `0`; the client's `== 1` arm wraps the same string in a `"(Debug-Only Lock Notice) %s"`
+/// literal, and anything ≥ 2 prints an uninitialized buffer (a real 1.12 bug — we print nothing).
+pub const SMSG_INSTANCE_SAVE_CREATED: u16 = 0x02CB; // 715
+/// The raid-lockout welcome/countdown line: `u32 type`, `u32 mapId`, `u32 secondsUntilReset`
+/// (handler `0x49e1c0`; the four types in [`super::instance::RaidInstanceWarning`]).
+pub const SMSG_RAID_INSTANCE_MESSAGE: u16 = 0x02FA; // 762
+/// "Reset all instances" — empty body (the `ResetInstances` binding `0x48a6b0`; vmangos
+/// `HandleResetInstancesOpcode`).
+pub const CMSG_RESET_INSTANCES: u16 = 0x031D; // 797
+/// "%s has been reset." — `u32 mapId` (handler `0x49e470`, which also clears the last-instance
+/// latch `0x495d00` *before* reading the body).
+pub const SMSG_INSTANCE_RESET: u16 = 0x031E; // 798
+/// The reset refusal: `u32 reason`, `u32 mapId` (handler `0x49e540`; the three reasons in
+/// [`super::instance::InstanceResetFailure`]).
+pub const SMSG_INSTANCE_RESET_FAILED: u16 = 0x031F; // 799
+/// The dungeon we were last in: `u32 mapId` (handler `0x49e670` → `0x495d10`). Shows no line —
+/// it is half of what `CanShowResetInstances()` reads.
+pub const SMSG_UPDATE_LAST_INSTANCE: u16 = 0x0320; // 800
+/// Whether we hold any permanent bind: `u32` flag (handler `0x49e6c0` → `0x495d50`). The other
+/// half of `CanShowResetInstances()`.
+pub const SMSG_UPDATE_INSTANCE_OWNERSHIP: u16 = 0x032B; // 811

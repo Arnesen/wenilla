@@ -7,7 +7,7 @@ use mlua::{Lua, Value};
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
-    power_token, with_unit,
+    power_token, with_unit, SelectionRequest,
 };
 
 /// The two class ids `GetComboPoints 0x51a190` accepts — the literals `4` and `0xb` it compares
@@ -29,6 +29,123 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitExists",
         lua.create_function(|lua, token: Option<String>| {
             with_unit(lua, &token, false, |u| u.exists)
+        })?,
+    )?;
+
+    // `UnitIsVisible(unit)` — `0x516030`, and it is **object presence, nothing else**:
+    // `ClntObjMgrObjectPtr(resolve(token), TYPEMASK_UNIT) != NULL`. 57 bytes, one branch, no field
+    // read and no comparison beyond `test eax,eax`.
+    //
+    // **Not a synonym for `UnitExists`, and neither implies the other.** An out-of-range party
+    // member has a roster entry and no object: `UnitExists` = 1 through its GUID fallback,
+    // `UnitIsVisible` = nil. That pair is the branch pfUI takes seven times — most visibly
+    // `if not UnitIsVisible(unitstr) or not UnitIsConnected(unitstr)`, which chooses between a 3D
+    // portrait and a flat one.
+    //
+    // **The return is the NUMBER 1, never a boolean** — `0x6f3810` writes tag 3 with the operands
+    // of `1.0` on the true leg, `lua_pushnil` on the false one. `UnitExists` above answers a Rust
+    // `bool` and so hands Lua `true`/`false`; that is its own pre-existing question, and matching
+    // it here would have been the wrong kind of consistency.
+    g.set(
+        "UnitIsVisible",
+        lua.create_function(|lua, token: Option<String>| {
+            Ok(if with_unit(lua, &token, false, |u| u.has_object)? {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+
+    // `UnitIsTapped(unit)` / `UnitIsTappedByPlayer(unit)` — `0x519c90` / `0x519d00`, a masked-byte
+    // pair (108 bytes each; only the mask and the `Usage:` string differ). Each is
+    // `object present && (UNIT_DYNAMIC_FLAGS & mask)` and nothing else: no ownership, no GUID
+    // compare, no party/raid or health conjunct anywhere in either body.
+    //
+    // **Shape A, unlike `UnitIsVisible` directly above** — these two carry an `lua_isstring` gate
+    // and a `Usage:` `luaL_error`, where their neighbour has none. Two adjacent verbs in one
+    // family with opposite argument shapes is exactly why 1717's taxonomy is settled per binding;
+    // inheriting the sibling's shape here would have been wrong in the quiet direction.
+    //
+    // The reference raises TWO different messages — `Usage:` for a non-string/non-number, and the
+    // resolver's `"Unknown unit name: %s"` for a bad token (and for any NUMBER, since the
+    // `lua_isstring` gate admits tag 3 and hands the resolver `"5"`). `check_unit_token` inside
+    // `with_unit` is the second of those; the first is the `?` on the argument type below.
+    // The gate is the BINDING's, not `with_unit`'s: `check_unit_token` lets a nil through by
+    // design, because that is right for `UnitExists`, `UnitIsVisible` and most of this family. It
+    // is wrong for exactly these two, so the shape-A test happens here, before the shared path.
+    for (name, usage, by_player) in [
+        ("UnitIsTapped", r#"Usage: UnitIsTapped("unit")"#, false),
+        (
+            "UnitIsTappedByPlayer",
+            r#"Usage: UnitIsTappedByPlayer("unit")"#,
+            true,
+        ),
+    ] {
+        g.set(
+            name,
+            lua.create_function(move |lua, token: Value| {
+                // Shape A: a string OR a number passes (`lua_isstring` admits tag 3, and the
+                // client hands the resolver `"5"` — which then raises `Unknown unit name: 5`,
+                // the family's SECOND message). Everything else — nil, absent, boolean, table,
+                // function — is the `Usage:` raise.
+                let token = Some(crate::script::binding_abi::string_arg(lua, token, usage)?);
+                let hit = with_unit(lua, &token, false, |u| {
+                    if by_player {
+                        u.tapped_by_player
+                    } else {
+                        u.tapped
+                    }
+                })?;
+                // One value, and it is the NUMBER 1 or nil — never a boolean, the same shape the
+                // rest of this family answers in.
+                Ok(if hit { Value::Integer(1) } else { Value::Nil })
+            })?,
+        )?;
+    }
+
+    // `UnitIsPartyLeader(unit)` — `0x516210`. **Two legs, ORed, covering disjoint failures:**
+    //
+    //     o = ObjPtr(resolve(token), TYPEMASK_PLAYER)          -- 0x10, not this family's 8
+    //     (o != NULL && (o.PLAYER_FLAGS & 0x1)) || resolve(token) == g_groupLeaderGuid
+    //
+    // The descriptor leg answers for any held player — including a stranger who leads their OWN
+    // party, which a comparison against our group's leader can never express. The GUID leg answers
+    // for a group member whose object the client does not hold (an out-of-range `party3`, any
+    // `raidN`), where there is no descriptor to read. Neither is sufficient alone, which is why
+    // this is not derivable from `IsPartyLeader()` + `GetPartyLeaderIndex()` however it is
+    // arranged (wow-re `ui/scratch/party-leader-and-nameplate-verbs.md`, G1 REFUTED).
+    //
+    // **No zero guard, and that is deliberate.** `IsPartyLeader 0x4e9130` short-circuits on a
+    // `0:0` cached leader; this one does not. An unresolvable-but-non-raising token resolves to
+    // `0:0`, which equals the zeroed leader while ungrouped — so `UnitIsPartyLeader(nil)` answers
+    // **1 solo**. It reads like a bug and it is the behaviour; answering nil there would be the
+    // divergence.
+    //
+    // Shape C with a shape-A tail: no `lua_isstring` gate and no `Usage:` of its own, but a bad
+    // token — and any Lua NUMBER, which the resolver stringifies first — raises
+    // `"Unknown unit name: %s"` from `check_unit_token`. One value on both legs, the number 1 or
+    // nil, never a boolean.
+    g.set(
+        "UnitIsPartyLeader",
+        lua.create_function(|lua, token: Option<String>| {
+            check_unit_token(&token)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let by_flag = token
+                .as_ref()
+                .and_then(|t| model.unit(t))
+                .is_some_and(|u| u.group_leader);
+            // The GUID leg. A token with no snapshot resolves to GUID 0 — the reference's `0:0` —
+            // and 0 == the zeroed leader is exactly the solo case above.
+            let guid = token
+                .as_ref()
+                .and_then(|t| model.unit(t))
+                .map_or(0, |u| u.guid);
+            Ok(if by_flag || guid == model.party.leader_guid {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
         })?,
     )?;
 
@@ -772,8 +889,90 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, token: Option<String>| {
             if let Some(token) = token {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.target_requests.push(token);
+                model.selection_requests.push(SelectionRequest::Unit(token));
             }
+            Ok(())
+        })?,
+    )?;
+
+    // AssistUnit(unit) — select the *token's own* target (`0x489b80`; wow-re
+    // `object-layer/scratch/targeting-by-name.md` PART C, §5-cross-checked). The ASSISTTARGET
+    // binding's body is `AssistUnit("target")`, and `/assist`'s bare form is the same call.
+    //
+    // The shared assist tail (`0x489bb2`–`0x489c07`, byte-identical to `AssistByName`'s) is three
+    // steps and no more: read `UNIT_FIELD_TARGET` off the basis (`[[obj+0x110]+0x28]`), bail
+    // **silently** if it is zero, then hand the guid to the select-if-resolves helper `0x489a40`.
+    // Four things it deliberately is not:
+    //
+    //  * **not gated by `CanAssist`** — a whole-binary census of the 25 `call 0x6066f0` sites puts
+    //    none of them on this path (VERIFIED negative), so `AssistUnit("target")` on a hostile
+    //    creature assists it, and that is the common case in play.
+    //  * **not players-only** — unlike `AssistByName`'s typemask `0x10`, the token resolver takes
+    //    whatever the token names.
+    //  * **not a deselect on failure** — an unresolvable token, a basis with no target, and a
+    //    target that is not streamed all leave the current selection exactly where it was
+    //    (`0x489a40`'s arm 3 is a bare `ret`).
+    //  * **not an attack** — the tail's swing leg is gated on the `assistAttack` CVar, whose
+    //    registered default is `"0"` (VERIFIED at the registration bytes `0x48fc50`). Stock assist
+    //    selects and does not swing; the leg becomes reachable only if benilla grows the CVar.
+    //
+    // A nil/absent unit is ignored here rather than queued, like `TargetUnit`'s: the reference
+    // emits game-message `0xb8` for the token it cannot parse, and that id→string table is
+    // runtime-populated BSS wow-re could not statically recover — the same known deviation
+    // `TargetByName` already carries, and silence is better than an invented line.
+    g.set(
+        "AssistUnit",
+        lua.create_function(|lua, token: Option<String>| {
+            if let Some(token) = token {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model
+                    .selection_requests
+                    .push(SelectionRequest::Assist(token));
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // TargetLastEnemy() — re-select the last **attackable** unit that was targeted (`0x489b45`
+    // reads the pair `[0xb4e2e8]/[0xb4e2ec]`, which `SetSelection 0x493540` stamps at `0x49377d`
+    // alongside the plain last-target pair `TargetLastTarget` reads). The TARGETLASTHOSTILE
+    // binding (default `G`) is its only shipped caller.
+    //
+    // Takes no argument and routes through the same select-if-resolves helper, so a remembered
+    // guid whose unit has since streamed out is a silent no-op rather than a deselect. The app
+    // owns the memory itself (`crate::target::scan`'s `LastEnemy`) — the VM holds no guids.
+    g.set(
+        "TargetLastEnemy",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.selection_requests.push(SelectionRequest::LastEnemy);
+            Ok(())
+        })?,
+    )?;
+
+    // TargetNearestFriend([reverse]) — the friendly half of the TAB scan. `0x489aa0` is
+    // byte-for-byte `TargetNearestEnemy`'s shim with one changed immediate: both fetch the
+    // optional Lua arg #1 as the reverse flag (`0x6f1c10`, default 0) and call the one cycler
+    // `0x493f60(ecx = reverse, edx = mode)` — `edx = 1` for enemy, **`2` for friend** (3 and 4 are
+    // the party and raid siblings). Everything downstream is the same code; only the
+    // per-candidate filter `0x493e40` forks on the mode, and mode 2's arm (`0x493eca`) is
+    // `CanAssist(player, cand)` then `UNIT_FIELD_HEALTH > 0`.
+    //
+    // TARGETNEARESTFRIEND (`CTRL-TAB`) calls it bare; TARGETPREVIOUSFRIEND (`CTRL-SHIFT-TAB`)
+    // calls `TargetNearestFriend(1)` — 1.12's own `Bindings.xml` comments the argument
+    // `-- 1 (or "true") means reverse!`, so the truthiness test below takes a number OR a boolean.
+    // A numeric 0 is forward, matching `0x6f1c10`'s "absent == 0" reading.
+    g.set(
+        "TargetNearestFriend",
+        lua.create_function(|lua, reverse: Option<Value>| {
+            let reverse = match reverse {
+                None | Some(Value::Nil) | Some(Value::Boolean(false)) => false,
+                Some(Value::Integer(n)) => n != 0,
+                Some(Value::Number(n)) => n != 0.0,
+                Some(_) => true,
+            };
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.target_nearest_friend_requests.push(reverse);
             Ok(())
         })?,
     )?;

@@ -39,8 +39,8 @@ use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use super::errors::{first_missing_totem, first_short_reagent, mount_result_key};
 use super::weapon_icon::{auto_attack_icon, substitutes_weapon_icon};
 use super::{
-    cast_fail, ui_error_text, CastErrors, MountErrors, PlayerActions, Spells, UiError, UiErrorKeys,
-    UiErrorTexts,
+    cast_fail, show_messages, ui_error_text, CastErrors, MountErrors, MsgKind, PlayerActions,
+    Spells, UiError, UiErrorKeys, UiErrorTexts,
 };
 
 /// What an ITEM action shows when its icon cannot be resolved — the reference's own hardcoded
@@ -94,6 +94,9 @@ pub(super) fn feed_actions(
     areas: Option<Res<crate::area::AreaTableRes>>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
+    // The combat log's own record of a failed cast (1703) — a different frame, a different
+    // sentence, and the reference emits both from the one routine (`0x6e1a00`).
+    mut chat_log: ResMut<crate::ui_chat::ChatLog>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -114,12 +117,17 @@ pub(super) fn feed_actions(
     // are filled inside [`cast_fail`] itself, off the wire's argument word.
     let self_store = self_q.iter().next();
     let mut await_template: Vec<crate::ui_action::CastFail> = Vec::new();
+    // The same failures, worded for the combat log. Collected beside the red line rather than
+    // instead of it: `0x6e1a00` calls `0x62c360` AND `DisplayError`, and they say different
+    // things — "Not enough mana." on the screen, "You fail to cast Frostbolt: Not enough mana."
+    // in the log.
+    let mut fail_lines: Vec<crate::ui_chat::combat::PendingCombat> = Vec::new();
     let fail_args = cast_fail::FailArgs {
         arg: None,
         focus: spell_focus.as_deref().map(|f| &f.catalog),
         areas: areas.as_deref().map(|a| &a.0),
     };
-    let texts: Vec<String> = cast_errors
+    let texts: Vec<cast_fail::CastFailLine> = cast_errors
         .0
         .drain(..)
         .filter_map(|fail| {
@@ -148,7 +156,7 @@ pub(super) fn feed_actions(
                     let key = cast_fail::CAST_FAIL_KEYS[reason as usize];
                     return get(key)
                         .filter(|s| !s.is_empty())
-                        .map(|t| t.replace("%s", &name));
+                        .map(|t| cast_fail::CastFailLine::passthrough(t.replace("%s", &name)));
                 }
             }
             if reason == 0x78 || reason == 0x5c {
@@ -183,7 +191,46 @@ pub(super) fn feed_actions(
                 };
                 return get(key)
                     .filter(|s| !s.is_empty())
-                    .map(|t| t.replace("%s", &name));
+                    .map(|t| cast_fail::CastFailLine::passthrough(t.replace("%s", &name)));
+            }
+            // The combat-log twin. **Only the `…SELF` half is reachable here**: `SMSG_CAST_FAILED`
+            // is addressed to the caster alone, so benilla never learns that somebody *else's*
+            // cast failed — the `…OTHER` keys exist and stay unproduced, exactly as the reference
+            // leaves its own two unreachable `…SELFSTART` keys.
+            //
+            // The reason `%s` is the FIRST-layer string — `GetText("SPELL_FAILED_<name>")`, which
+            // is what `0x6e1a00` holds when it calls the formatter — not the errorId-substituted
+            // message the red line shows. An empty one drops the line rather than printing a
+            // sentence with a hole, the same rule every other family here follows.
+            if let Some(display) = d {
+                // `0x62aff0`: `Attributes` bit 4 marks an ABILITY, which "performs" rather than
+                // "casts".
+                const ATTR_IS_ABILITY: u32 = 0x10;
+                let family = if display.attributes & ATTR_IS_ABILITY != 0 {
+                    crate::ui_chat::combat::SPELLFAILPERFORM
+                } else {
+                    crate::ui_chat::combat::SPELLFAILCAST
+                };
+                let why = cast_fail::CAST_FAIL_KEYS
+                    .get(usize::from(reason))
+                    .and_then(|k| get(k))
+                    .filter(|t| !t.is_empty());
+                if let (Some(why), false) = (why, display.name.is_empty()) {
+                    fail_lines.push(crate::ui_chat::combat::PendingCombat {
+                        kind: crate::ui_chat::ChatEventKind::SpellFailedLocalPlayer,
+                        family,
+                        variant: crate::ui_chat::combat::Variant::SelfOther,
+                        subject: 0,
+                        object: 0,
+                        fills: crate::ui_chat::combat::Fills {
+                            spell: display.name.clone(),
+                            named: why,
+                            ..Default::default()
+                        },
+                        named: crate::ui_chat::combat::Named::Ready,
+                        tries: 0,
+                    });
+                }
             }
             let text = cast_fail::cast_fail_text(
                 reason,
@@ -207,56 +254,59 @@ pub(super) fn feed_actions(
         })
         .collect();
     cast_errors.0.extend(await_template);
-    for text in texts {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+    for line in fail_lines {
+        chat_log.push_combat(line);
     }
+    show_messages(
+        &mut script,
+        &mut chat_log,
+        "ui_action",
+        texts
+            .into_iter()
+            .map(|l| (benilla_ui::messages::kind_of(l.key), l.text)),
+    );
 
-    // (Dis)mount refusals ride the same red line, keyed straight into GlobalStrings
+    // (Dis)mount refusals ride the same route, keyed straight into GlobalStrings
     // ([`mount_result_key`] — no format arguments in any of these strings).
-    let mount_texts: Vec<String> = mount_errors
+    let mount_texts: Vec<(&'static str, String)> = mount_errors
         .0
         .drain(..)
         .filter_map(|(mount, code)| {
             let key = mount_result_key(mount, code)?;
-            script.lua().globals().get::<String>(key).ok()
+            Some((key, script.lua().globals().get::<String>(key).ok()?))
         })
         .collect();
-    for text in mount_texts {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-    }
+    show_messages(
+        &mut script,
+        &mut chat_log,
+        "ui_action",
+        mount_texts
+            .into_iter()
+            .map(|(key, text)| (benilla_ui::messages::kind_of(key), text)),
+    );
 
     // Client-local by-key refusals (the `DisplayError` route — [`UiErrorKeys`]); the key IS the
-    // GlobalStrings lookup, no code table between. The entry's type arm picks the line: type 1
-    // (`UiError::info`) is the yellow `UI_INFO_MESSAGE`, type 2 the red `UI_ERROR_MESSAGE` —
-    // the reference's one pipeline forking on the registry type (wow-re `fish-msg-handlers.md`;
-    // the fishing verdicts are the yellow tenants).
-    let key_texts: Vec<(String, bool)> = ui_error_keys
+    // GlobalStrings lookup, no code table between, and the key is also what names the surface:
+    // [`UiError::kind`] reads the message record straight out of the catalog instead of the queue
+    // carrying a hand-set flag alongside every push (decision 1770).
+    let key_lines: Vec<(MsgKind, String)> = ui_error_keys
         .0
         .drain(..)
         .filter_map(|e| {
             ui_error_text(&e, &|key| script.lua().globals().get::<String>(key).ok())
-                .map(|t| (t, e.info))
+                .map(|t| (e.kind(), t))
         })
         .collect();
-    for (text, info) in key_texts {
-        let event = if info {
-            "UI_INFO_MESSAGE"
-        } else {
-            "UI_ERROR_MESSAGE"
-        };
-        script.fire_event(event, vec![ScriptValue::Str(text)]);
-    }
+    show_messages(&mut script, &mut chat_log, "ui_action", key_lines);
 
-    // Already-resolved lines ([`UiErrorTexts`]) — the wire's own text, no key to look up. Same
-    // frame, same two events; the queued bool IS the reference's `0x4945b0` flag.
-    for (text, info) in ui_error_texts.0.drain(..) {
-        let event = if info {
-            "UI_INFO_MESSAGE"
-        } else {
-            "UI_ERROR_MESSAGE"
-        };
-        script.fire_event(event, vec![ScriptValue::Str(text)]);
-    }
+    // Already-resolved lines ([`UiErrorTexts`]) — the wire's own text, no key to look up and no
+    // record behind it; the queued kind IS the reference's `0x4945b0` flag.
+    let resolved: Vec<(MsgKind, String)> = ui_error_texts
+        .0
+        .drain(..)
+        .map(|(text, kind)| (kind, text))
+        .collect();
+    show_messages(&mut script, &mut chat_log, "ui_action", resolved);
 
     // The ENGINE's own by-key refusals ride the very same line. `benilla_ui` is engine-free and
     // cannot reach [`UiErrorKeys`], so a refusal raised inside the script crate (today: dropping a
@@ -265,17 +315,15 @@ pub(super) fn feed_actions(
     // frame late by construction (the refusal happens during the input pass this feed precedes),
     // which is invisible on a toast.
     let engine_keys = script.take_ui_errors();
-    let engine_texts: Vec<String> = engine_keys
+    let engine_lines: Vec<(MsgKind, String)> = engine_keys
         .into_iter()
         .filter_map(|key| {
-            ui_error_text(&UiError::key(key), &|k| {
-                script.lua().globals().get::<String>(k).ok()
-            })
+            let e = UiError::key(key);
+            ui_error_text(&e, &|k| script.lua().globals().get::<String>(k).ok())
+                .map(|t| (e.kind(), t))
         })
         .collect();
-    for text in engine_texts {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
-    }
+    show_messages(&mut script, &mut chat_log, "ui_action", engine_lines);
 
     let store = self_q.iter().next();
 

@@ -83,7 +83,7 @@ impl Plugin for CloudsPlugin {
                     // or one frame draws both (the ordering `crate::sky`'s gate already takes) —
                     // and after the submersion verdict, for the same one-frame-agreement reason.
                     layer::apply_cloud_visibility
-                        .after(crate::wmo_sky::WmoSkyResolve)
+                        .after(crate::skybox::SkyboxResolve)
                         .after(crate::liquid::SubmersionVerdict),
                 ),
             )

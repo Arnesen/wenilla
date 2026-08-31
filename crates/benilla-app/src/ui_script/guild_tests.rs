@@ -273,7 +273,7 @@ fn visible(s: &UiScript, frame: &str) -> bool {
 }
 
 fn enabled(s: &UiScript, button: &str) -> bool {
-    s.eval::<bool>(&format!("return {button}:IsEnabled()"))
+    s.eval::<bool>(&format!("return {button}:IsEnabled() ~= 0"))
         .unwrap_or_else(|e| panic!("{button}:IsEnabled() — {e}"))
 }
 

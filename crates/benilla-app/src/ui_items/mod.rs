@@ -43,7 +43,7 @@ use bevy::prelude::*;
 
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore};
-use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
+use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -51,9 +51,10 @@ mod drain;
 mod equip_error;
 pub(crate) mod feed;
 
+pub(crate) use drain::send_auto_equip;
 use drain::{
-    drain_container_autoequips, drain_container_destroys, drain_container_moves,
-    drain_container_uses, drain_inventory_uses,
+    drain_bag_autostores, drain_container_autoequips, drain_container_destroys,
+    drain_container_moves, drain_container_uses, drain_inventory_uses,
 };
 use feed::{
     feed_containers, feed_item_sets, feed_item_stats, feed_player_req, feed_random_properties,
@@ -519,6 +520,27 @@ pub(crate) fn find_item(
     })
 }
 
+/// Every occupied slot `scope` reaches, **in the walker's own order** — [`walk_inventory`]'s visit
+/// sequence collected rather than searched.
+///
+/// It exists because some predicates need the item's TEMPLATE, and the template lookup wants
+/// [`Items`] mutably (it is ask-once: a miss fires the query) while the walk holds it immutably.
+/// `has_key` solved that by hand-listing the slots it wanted; this keeps the one real walker and
+/// its load-bearing order (decisions 0666/1158) and just defers the judging by one step.
+pub(crate) fn collect_inventory(
+    store: &ObjectFields,
+    items: &Items,
+    scope: InventoryScope,
+) -> Vec<(u8, u8, u64)> {
+    let mut out = Vec::new();
+    // `None` throughout — the walk is never stopped, so every slot in scope lands in `out`.
+    walk_inventory(store, items, scope, |bag, slot, guid| {
+        out.push((bag, slot, guid));
+        None::<()>
+    });
+    out
+}
+
 /// The reference's **`HasKey()`** (`0x48ae90`) — "does this player own a key at all?", the one
 /// gate that decides whether the keyring exists in the UI (decision 0765). Byte-read: it fetches
 /// the active player, then runs the same inventory walker `find_item` transcribes
@@ -751,6 +773,9 @@ pub(crate) fn send_item_use(
     it: ItemUse,
     ctx: &crate::ui_action::cast_target::CastContext,
     ladder: &mut crate::ui_action::CastLadder,
+    script: &mut benilla_ui::script::UiScript,
+    gate: &mut crate::ui_bind_confirm::BindGate,
+    suppress: bool,
 ) -> bool {
     // The toggle predicate, resolved once against the caster's live aura slots. Both inputs are
     // already here: the spell's ActiveIconID column and the caster's descriptor.
@@ -784,6 +809,27 @@ pub(crate) fn send_item_use(
                 .0
                 .send(crate::net::ClientCommand::PetitionShowSignatures { item });
             true
+        }
+        // **The bind-on-use deferral** (`0x5d91d3`-`0x5d91f2`, decision 1750), and its POSITION is
+        // half the law. The reference's bind arm is the last rung of `0x5d8d00`: every arm above —
+        // the gift, the quest offer, the petition, the readable, the charge/slot rungs and the aura
+        // toggle — has already claimed the click and exited before a bind question can be asked, so
+        // re-pressing a bind-on-use trinket to cancel its aura must NOT ask you to bind it.
+        //
+        // **But it covers `Nothing` as well as `Cast`, and that is not an accident.** `0x5d91d3`
+        // has five predecessors and four of them are on-use-spell lookup *failures* (`5d9166`
+        // id < 0, `5d916e` id past the table, `5d917a` no Spell.dbc row, `5d9184` no ActiveIconID);
+        // the reference asks the bind question even when the item has no usable on-use spell at
+        // all. Gating this on `Cast(spell)` alone — which is where it was first written — would be
+        // narrower than the reference, and wow-re said so in as many words.
+        ItemUseRoute::Nothing | ItemUseRoute::Cast(_)
+            if !suppress
+                && it
+                    .guid
+                    .is_some_and(|g| gate.use_binds(&mut ladder.items, &ladder.commands, g)) =>
+        {
+            gate.defer_use(script, it);
+            false
         }
         ItemUseRoute::Nothing => {
             debug!(
@@ -1024,7 +1070,11 @@ impl Plugin for UiItemsPlugin {
         // renderer already loads (one parse serves the world and the bags).
         app.init_resource::<EquipErrors>()
             .init_resource::<PendingItemOps>()
-            .init_resource::<LockClearedByFailure>()
+            // The soulbind confirmations' pending records (decision 1750) — the client's own
+            // pending-equip array and its one bind-on-use cell.
+            .init_resource::<crate::ui_bind_confirm::PendingEquips>()
+            .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
+            .init_resource::<LockTransitions>()
             // AFTER the chain opens — a bare Startup slot raced AssetSet::Open and, when it
             // won, silently skipped every item DBC (no ItemSets/ItemSubClasses resource for the
             // whole session: set tooltips lost their SET block, the crafting book its headers).
@@ -1036,6 +1086,11 @@ impl Plugin for UiItemsPlugin {
             .add_systems(
                 Update,
                 (
+                    // The pending-lock resolving clear, ahead of BOTH feeds that read the lock
+                    // set into a pushed `locked` (1771 — its own doc has the why).
+                    feed::resolve_item_locks
+                        .before(feed_containers)
+                        .before(crate::ui_char::feed_char),
                     // `.before(CooldownEvents)`: the slot cooldown triples must be in the VM
                     // before `feed_action_state`'s synchronous `BAG_UPDATE_COOLDOWN` makes the
                     // bag handlers re-read them (the set's own doc — else a fresh cooldown's
@@ -1062,9 +1117,17 @@ impl Plugin for UiItemsPlugin {
                     drain_container_destroys.after(UiInput),
                     // AutoEquipCursorItem's queue (decision 0208 phase 1b) → CMSG_AUTOEQUIP_ITEM.
                     drain_container_autoequips.after(UiInput),
+                    drain_bag_autostores.after(UiInput),
                     // UseInventoryItem's queue (decision 0208 phase 1b) → CMSG_USE_ITEM against
                     // the equipped position.
                     drain_inventory_uses.after(UiInput),
+                    // EquipPendingItem/CancelPendingEquip/ConfirmBindOnUse — the soulbind
+                    // confirmations' answers (decision 1750). After the input pass like every
+                    // other drain, and after the drains whose deferrals it answers: a dialog
+                    // raised this frame is answered in a LATER one, so the order between them is
+                    // not load-bearing, but keeping it last matches the flow.
+                    drain::drain_bind_confirm_answers.after(UiInput),
+                    drain::drain_bind_on_use_confirms.after(UiInput),
                 ),
             );
     }

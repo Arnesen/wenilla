@@ -162,6 +162,16 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::AreaTriggerMessage { text } => {
             vec![SessionEvent::AreaTriggerMessage { text }]
         }
+        ServerPacket::ServerMessage { message_type, text } => {
+            vec![SessionEvent::ServerMessage { message_type, text }]
+        }
+        ServerPacket::ZoneUnderAttack { area_id } => {
+            vec![SessionEvent::ZoneUnderAttack { area_id }]
+        }
+        ServerPacket::DefenseMessage { zone_id, text } => {
+            vec![SessionEvent::DefenseMessage { zone_id, text }]
+        }
+        ServerPacket::ChatRestricted => vec![SessionEvent::ChatRestricted],
         ServerPacket::PlayedTime { total, level } => {
             vec![SessionEvent::PlayedTime { total, level }]
         }
@@ -286,6 +296,14 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::DamageShield(s) => vec![SessionEvent::DamageShield(s)],
         ServerPacket::EnvironmentalDamageLog(s) => vec![SessionEvent::EnvironmentalDamageLog(s)],
         ServerPacket::SpellLogMiss(s) => vec![SessionEvent::SpellLogMiss(s)],
+        ServerPacket::PartyKillLog(s) => vec![SessionEvent::PartyKillLog(s)],
+        ServerPacket::SpellInstaKillLog(s) => vec![SessionEvent::SpellInstaKillLog(s)],
+        ServerPacket::ProcResist(s) => vec![SessionEvent::ProcResist(s)],
+        ServerPacket::SpellOrDamageImmune(s) => vec![SessionEvent::SpellOrDamageImmune(s)],
+        ServerPacket::SpellDispelLog(s) => vec![SessionEvent::SpellDispelLog(s)],
+        ServerPacket::DispelFailed(s) => vec![SessionEvent::DispelFailed(s)],
+        ServerPacket::EnchantmentLog(s) => vec![SessionEvent::EnchantmentLog(s)],
+        ServerPacket::SpellLogExecute(s) => vec![SessionEvent::SpellLogExecute(s)],
         ServerPacket::XpGain(s) => vec![SessionEvent::XpGain(s)],
         ServerPacket::ExplorationXp(s) => vec![SessionEvent::ExplorationXp(s)],
         ServerPacket::LevelUp(l) => vec![SessionEvent::LevelUp(l)],
@@ -339,6 +357,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             timed: true,
         }],
         ServerPacket::QuestLogFull => vec![SessionEvent::QuestLogFull],
+        ServerPacket::QuestPushResult(r) => vec![SessionEvent::QuestPushResult {
+            member: r.member,
+            msg: r.msg,
+        }],
+        ServerPacket::QuestConfirmAccept(c) => vec![SessionEvent::QuestConfirmAccept(c)],
         ServerPacket::QuestGiverInvalid { msg } => {
             vec![SessionEvent::QuestGiverInvalid { reason: msg }]
         }
@@ -478,6 +501,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             mode,
             apply,
         }],
+        ServerPacket::KnockBack {
+            guid,
+            counter,
+            launch,
+        } => vec![SessionEvent::KnockBack {
+            guid,
+            counter,
+            launch,
+        }],
         ServerPacket::GroupInvite { inviter } => vec![SessionEvent::GroupInvite { inviter }],
         ServerPacket::GroupDecline { name } => vec![SessionEvent::GroupDecline { name }],
         ServerPacket::GroupUninvited => vec![SessionEvent::GroupUninvited],
@@ -533,6 +565,22 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             arbiter,
             challenger,
         }],
+        // The instance/raid lockout family (decision 1748) — straight relays; the ownership flag
+        // is narrowed to a bool here because the reference's own reader is a `test eax,eax`.
+        ServerPacket::RaidInstanceMessage { message } => {
+            vec![SessionEvent::RaidInstanceMessage { message }]
+        }
+        ServerPacket::InstanceSaveCreated { flag } => {
+            vec![SessionEvent::InstanceSaveCreated { flag }]
+        }
+        ServerPacket::InstanceReset { map } => vec![SessionEvent::InstanceReset { map }],
+        ServerPacket::InstanceResetFailed { failure } => {
+            vec![SessionEvent::InstanceResetFailed { failure }]
+        }
+        ServerPacket::UpdateLastInstance { map } => vec![SessionEvent::UpdateLastInstance { map }],
+        ServerPacket::UpdateInstanceOwnership { owns } => {
+            vec![SessionEvent::UpdateInstanceOwnership { owns: owns != 0 }]
+        }
         ServerPacket::DuelOutOfBounds => vec![SessionEvent::DuelOutOfBounds],
         ServerPacket::DuelInBounds => vec![SessionEvent::DuelInBounds],
         ServerPacket::DuelComplete { started } => vec![SessionEvent::DuelComplete { started }],
@@ -598,6 +646,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             stop,
             duration_ms,
             flying,
+            run_mode,
         } => vec![SessionEvent::MonsterMove {
             guid,
             start: v3(start),
@@ -607,6 +656,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             stop,
             duration_ms,
             flying,
+            run_mode,
         }],
         ServerPacket::PlayerMove {
             guid,
@@ -701,6 +751,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::GmTicketStatusUpdate { status }]
         }
         ServerPacket::BinderConfirm { binder } => vec![SessionEvent::BinderConfirm { binder }],
+        ServerPacket::SummonRequest {
+            summoner,
+            zone,
+            delay_ms,
+        } => vec![SessionEvent::SummonRequest {
+            summoner,
+            zone,
+            delay_ms,
+        }],
         ServerPacket::TalentWipeConfirm { trainer, cost } => {
             vec![SessionEvent::TalentWipeConfirm { trainer, cost }]
         }
@@ -1081,22 +1140,38 @@ fn entity_kind(t: ObjectType) -> EntityKind {
         ObjectType::Unit => EntityKind::Unit,
         ObjectType::GameObject => EntityKind::GameObject,
         ObjectType::DynamicObject => EntityKind::DynamicObject,
+        ObjectType::Corpse => EntityKind::Corpse,
         _ => EntityKind::Other,
     }
 }
 
-/// The display id from a create packet — units, **players**, and GameObjects all carry one. A player's
-/// body model resolves through the same CreatureDisplayInfo→CreatureModelData chain as a creature's:
-/// the 1.12 client has no race/sex→path resolver, CGPlayer inherits CGUnit's displayId model-build
-/// (decision 0041), so we route `Player` alongside `Unit`. Cast from the wire `i32`; `0`/absent →
-/// `None`.
+/// The display id from a create packet — units, **players**, GameObjects **and corpses** all carry
+/// one. A player's body model resolves through the same CreatureDisplayInfo→CreatureModelData chain
+/// as a creature's: the 1.12 client has no race/sex→path resolver, CGPlayer inherits CGUnit's
+/// displayId model-build (decision 0041), so we route `Player` alongside `Unit`. A corpse's
+/// `CORPSE_FIELD_DISPLAY_ID` is the dead player's own body display (vmangos writes
+/// `GetNativeDisplayId()` straight in), so it resolves down that identical chain — the reference's
+/// `0x5d6700` does exactly this lookup (decision 1706).
+///
+/// **A bone pile's display id is deliberately still reported here.** The client ignores it (it
+/// builds `<Race><Sex>DeathSkeleton` from the BYTES instead), but that is a *model-resolution* law,
+/// not a wire fact — the field is present and it is what it is, and the fork lives where models are
+/// resolved (`entities::corpse`). Reporting `None` here would also blind the live-display differ to
+/// a flesh→bones flag flip, which the reference reacts to with a full model reload.
+///
+/// Cast from the wire `i32`; `0`/absent → `None`.
 fn display_id(t: ObjectType, mask: &ObjectFields) -> Option<u32> {
-    let raw = match t {
-        ObjectType::Unit | ObjectType::Player => mask.unit_displayid(),
-        ObjectType::GameObject => mask.gameobject_displayid(),
+    match t {
+        ObjectType::Unit | ObjectType::Player => {
+            mask.unit_displayid().filter(|&d| d > 0).map(|d| d as u32)
+        }
+        ObjectType::GameObject => mask
+            .gameobject_displayid()
+            .filter(|&d| d > 0)
+            .map(|d| d as u32),
+        ObjectType::Corpse => mask.corpse_display_id(),
         _ => None,
-    }?;
-    (raw > 0).then_some(raw as u32)
+    }
 }
 
 /// The per-object scale (`OBJECT_FIELD_SCALE_X`) units/players/GameObjects carry — the *complete*
@@ -1107,7 +1182,12 @@ fn display_id(t: ObjectType, mask: &ObjectFields) -> Option<u32> {
 /// sends a positive value on create).
 fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
     let raw = match t {
-        ObjectType::Unit | ObjectType::Player | ObjectType::GameObject => mask.object_scale_x(),
+        // A corpse joins them: `OBJECT_FIELD_SCALE_X` is an OBJECT-block field and vmangos sets it
+        // (`Corpse::Create` → `SetObjectScale(DEFAULT_OBJECT_SCALE)`), so the same one-field law
+        // sizes it (decision 1706).
+        ObjectType::Unit | ObjectType::Player | ObjectType::GameObject | ObjectType::Corpse => {
+            mask.object_scale_x()
+        }
         _ => None,
     };
     raw.filter(|s| *s > 0.0).unwrap_or(1.0)

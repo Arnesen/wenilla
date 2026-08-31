@@ -130,6 +130,11 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "Cooldown.xml");
     load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_* — QuestLogDetail's reward money row
+                                       // ScrollTemplates.xml (the faux kit the list rides) + UIPanelTemplates.xml (the detail
+                                       // pane's UIPanelScrollFrameTemplate). A MISSING template is a loader *warning*, so an
+                                       // under-loaded list passes and then dies on the first FauxScrollFrame_Update.
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "QuestLogFrame.xml");
 
     // A left-slot panel open, and the toast raised after it — the order that must not decide.

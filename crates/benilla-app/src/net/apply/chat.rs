@@ -11,7 +11,7 @@ use benilla_protocol::messages::{ChatMessage, CHAT_MSG_WHISPER};
 use bevy::prelude::*;
 
 use crate::ui_action::UiErrorTexts;
-use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_chat::{Broadcast, ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_social::SocialState;
 
 use super::super::{ClientCommand, NetCommands, ServerSaidMessage};
@@ -212,6 +212,23 @@ pub(super) fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
     errors.info(text);
 }
 
+/// The four **world broadcasts** — parked on [`ChatLog`]'s broadcast queue for
+/// [`crate::ui_chat`]'s resolve pass, which holds the AreaTable/ServerMessages catalogs and the
+/// joined-channel walk this site does not (`ui_chat::broadcast` carries the whole mechanism).
+///
+/// Only the parking happens here, deliberately: half-resolving at the packet — naming the area
+/// here and picking the channels there — would put one mechanism in two files.
+///
+/// They are logged at `info!` for the same reason [`notification`] is, and more so: three of the
+/// four are things the *world* did, so "the server is restarting in 15 minutes" and "nothing
+/// arrived" have to be distinguishable in a log afterwards. A defense broadcast that reaches a
+/// character in neither defense channel prints nothing on screen and is faithful in doing so — the
+/// log line is the only trace it happened at all.
+pub(super) fn broadcast(b: Broadcast, chat_log: &mut ChatLog) {
+    info!("net: world broadcast — {b:?}");
+    chat_log.push_broadcast(b);
+}
+
 /// The `/played` answer (`SMSG_PLAYED_TIME`) — TIME_PLAYED_TOTAL/LEVEL over
 /// TIME_DAYHOURMINUTESECOND (GlobalStrings:4243-4247; the ref's
 /// ChatFrame_DisplayTimePlayed breakdown).
@@ -385,7 +402,10 @@ mod tests {
         notification("GM mode is ON".to_string(), &mut errors);
         assert_eq!(
             errors.0,
-            [("GM mode is ON".to_string(), false)],
+            [(
+                "GM mode is ON".to_string(),
+                crate::ui_action::MsgKind::Error
+            )],
             "the SendNotification half is the RED toast (0x4945b0's flag 1), never a second line"
         );
     }
@@ -403,7 +423,10 @@ mod tests {
         );
         assert_eq!(
             errors.0,
-            [("You must be at least level 58 to enter.".to_string(), true)]
+            [(
+                "You must be at least level 58 to enter.".to_string(),
+                crate::ui_action::MsgKind::Info
+            )]
         );
     }
 }

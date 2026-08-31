@@ -190,6 +190,12 @@ pub struct ParticleEmitter {
     /// `None` = sort at the spawn placement (a placed doodad whose emitter rides a joint sorts at
     /// the doodad, not the bone).
     anchor: Option<Entity>,
+    /// The object's **light node** — the entity whose [`crate::interior::ParticleLight`] this
+    /// cloud takes when it is LIT and standing in a WMO room. Held so a recursion CHILD that
+    /// wires up lit under an unlit parent can still register the edge
+    /// ([`wire_child_emitters`]); the [`crate::interior::EmitterLitBy`] component on this entity
+    /// is what the classifier actually walks.
+    light_node: Option<Entity>,
     /// The anchor's last-known world translation (kept when the entity vanishes so the pool
     /// drains in place; init = the spawn placement's translation).
     anchor_pos: Vec3,
@@ -327,6 +333,13 @@ pub struct EmitterFrames {
     /// The MODEL INSTANCE whose render alpha multiplies these particles
     /// ([`ParticleEmitter::alpha_src`]).
     pub alpha: Option<Entity>,
+    /// The **light node** this cloud shades under ([`ParticleEmitter::light_node`]): the net
+    /// entity root for a creature/GameObject, the WEARER for an equipped item (one node per
+    /// object — the reference aliases the wearer's collector into each attached model). `None`
+    /// for a lane with no entity light node of its own: a placed doodad or a WMO prop, whose
+    /// provider is the CMapDoodadDef twin rather than the WENTITY, and a booth, whose light is
+    /// its own buffer.
+    pub light_node: Option<Entity>,
     /// What losing `owner` means ([`OwnerLoss`]).
     pub on_owner_loss: OwnerLoss,
 }
@@ -635,45 +648,51 @@ pub fn spawn_emitter(
     let rng = (t.x.to_bits() ^ t.y.to_bits().rotate_left(11) ^ t.z.to_bits().rotate_left(22))
         .wrapping_mul(0x9E37_79B9)
         | 1;
-    Some(
-        commands
-            .spawn((
-                // The sim writes the anchor here each frame — the census/phase instruments'
-                // read point (the draw's own sort key rides the draw record instead).
-                Transform::IDENTITY,
-                ParticleEmitter {
-                    def,
-                    placement,
-                    ride: crate::ride_frame::StoredFrame::default(),
-                    owner,
-                    on_owner_loss: frames.on_owner_loss,
-                    draining: false,
-                    alpha_src: frames.alpha,
-                    alpha: 1.0,
-                    anchor: frames.anchor,
-                    anchor_pos: placement.translation,
-                    particles: Vec::new(),
-                    accumulator: 0.0,
-                    emitter_prev: None,
-                    inherit_accum: 0.0,
-                    inherit_vel: Vec3::ZERO,
-                    gate_prev: false,
-                    age: 0.0,
-                    host,
-                    seq,
-                    rng,
-                    owner_reach,
-                    water_bound: emitter.water_bound,
-                    texture,
-                    gated: false,
-                    recursion: emitter.recursion.clone(),
-                    children: Vec::new(),
-                    geometry: emitter.geometry.clone(),
-                    model_instances: Vec::new(),
-                },
-            ))
-            .id(),
-    )
+    // A LIT emitter is a consumer of its object's light node, exactly as a lit mesh batch is —
+    // and it is frequently the ONLY one (all five of the Onyxia lava trap's mesh batches are
+    // unlit). Registering the edge here is what puts the object in front of the interior
+    // classifier at all; see [`crate::interior::EmitterLitBy`].
+    let lit_node = frames.light_node.filter(|_| def.lit);
+    let mut spawned = commands.spawn((
+        // The sim writes the anchor here each frame — the census/phase instruments'
+        // read point (the draw's own sort key rides the draw record instead).
+        Transform::IDENTITY,
+        ParticleEmitter {
+            def,
+            placement,
+            ride: crate::ride_frame::StoredFrame::default(),
+            owner,
+            on_owner_loss: frames.on_owner_loss,
+            draining: false,
+            alpha_src: frames.alpha,
+            alpha: 1.0,
+            anchor: frames.anchor,
+            light_node: frames.light_node,
+            anchor_pos: placement.translation,
+            particles: Vec::new(),
+            accumulator: 0.0,
+            emitter_prev: None,
+            inherit_accum: 0.0,
+            inherit_vel: Vec3::ZERO,
+            gate_prev: false,
+            age: 0.0,
+            host,
+            seq,
+            rng,
+            owner_reach,
+            water_bound: emitter.water_bound,
+            texture,
+            gated: false,
+            recursion: emitter.recursion.clone(),
+            children: Vec::new(),
+            geometry: emitter.geometry.clone(),
+            model_instances: Vec::new(),
+        },
+    ));
+    if let Some(node) = lit_node {
+        spawned.insert(crate::interior::EmitterLitBy(node));
+    }
+    Some(spawned.id())
 }
 
 /// The **owner-last** draw-order rung: how far to bias one of a model's EFFECTS past that model's
@@ -719,10 +738,15 @@ pub(crate) fn owner_last_bias(reach: f32) -> f32 {
 /// (`0x7b5dd0`); this system is that completion hook. A child never self-emits ambiently — its
 /// only particle source is the per-parent-particle drive in the sim.
 pub(crate) fn wire_child_emitters(
+    mut commands: Commands,
     models: Res<Assets<benilla_assets::M2Model>>,
-    mut emitters: Query<&mut ParticleEmitter>,
+    mut emitters: Query<(
+        Entity,
+        &mut ParticleEmitter,
+        Has<crate::interior::EmitterLitBy>,
+    )>,
 ) {
-    for mut emitter in &mut emitters {
+    for (entity, mut emitter, registered) in &mut emitters {
         let Some(model) = emitter.recursion.as_ref().and_then(|h| models.get(h)) else {
             continue;
         };
@@ -751,6 +775,18 @@ pub(crate) fn wire_child_emitters(
             .collect();
         emitter.recursion = None;
         emitter.children = children;
+        // A child emitter is a whole emitter record of the recursion model with its own flag word,
+        // so it takes its own lighting verdict (the same rule its texture/blend/fog identity
+        // follows). A LIT child under an UNLIT parent is therefore a light-node consumer whose
+        // edge nothing registered at spawn — the parent's `def.lit` was false and the child did
+        // not exist yet. This is that late registration.
+        if !registered && emitter.children.iter().any(|c| c.def.lit) {
+            if let Some(node) = emitter.light_node {
+                commands
+                    .entity(entity)
+                    .insert(crate::interior::EmitterLitBy(node));
+            }
+        }
     }
 }
 

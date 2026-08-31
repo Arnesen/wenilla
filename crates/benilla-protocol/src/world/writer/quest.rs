@@ -16,6 +16,17 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
+    /// Greet a questgiver (`CMSG_QUESTGIVER_HELLO`, layout in [`messages::questgiver_hello`]) —
+    /// answered with `SMSG_QUESTGIVER_QUEST_LIST` (or the gossip menu, server's choice). Sent by
+    /// the *end* of a quest session on a non-gossip NPC, which is how the reference puts the
+    /// player back in the giver's list after a decline (decision 1738).
+    pub fn questgiver_hello(&mut self, npc: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_HELLO,
+            &messages::questgiver_hello(npc),
+        )
+    }
+
     /// Ask a quest's detail panel (`CMSG_QUESTGIVER_QUERY_QUEST`, layout in
     /// [`messages::questgiver_query_quest`]) — the click a greeting/gossip quest row makes.
     /// Answered by `SMSG_QUESTGIVER_QUEST_DETAILS` (a `QuestDetail` event).
@@ -92,6 +103,40 @@ impl WorldWriter {
         self.send(
             opcode::CMSG_QUESTLOG_REMOVE_QUEST,
             &messages::questlog_remove_quest(slot),
+        )
+    }
+
+    /// Share the quest with the party (`CMSG_PUSHQUESTTOPARTY`, layout in
+    /// [`messages::push_quest_to_party`]) — the quest log's *Share Quest* button (decision 1733).
+    /// No member guid: the server walks the group itself and answers with one
+    /// `MSG_QUEST_PUSH_RESULT` per member (often two — the `SHARING_QUEST` opener, then the
+    /// outcome).
+    pub fn push_quest_to_party(&mut self, quest_id: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_PUSHQUESTTOPARTY,
+            &messages::push_quest_to_party(quest_id),
+        )
+    }
+
+    /// Answer the escort confirm with Yes (`CMSG_QUEST_CONFIRM_ACCEPT`, layout in
+    /// [`messages::quest_confirm_accept`]) — a `QUEST_FLAGS_PARTY_ACCEPT` quest a party member
+    /// started. Saying **No** sends nothing at all, so there is no counterpart method.
+    pub fn quest_confirm_accept(&mut self, quest_id: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUEST_CONFIRM_ACCEPT,
+            &messages::quest_confirm_accept(quest_id),
+        )
+    }
+
+    /// Report our verdict on a quest a party member shared with us (`MSG_QUEST_PUSH_RESULT`,
+    /// layout in [`messages::quest_push_result`]) — the receiver's leg of the share, relayed by the
+    /// server to the sharer. `sharer` is the giver guid the shared
+    /// `SMSG_QUESTGIVER_QUEST_DETAILS` arrived under (a *player* guid, which is what makes that
+    /// panel a share).
+    pub fn quest_push_result(&mut self, sharer: u64, msg: messages::QuestShareMsg) -> Result<()> {
+        self.send(
+            opcode::MSG_QUEST_PUSH_RESULT,
+            &messages::quest_push_result(sharer, msg),
         )
     }
 }

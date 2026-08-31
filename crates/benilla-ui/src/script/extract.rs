@@ -140,6 +140,15 @@ impl UiScript {
                     let region = model.arena.region(rh);
                     let owner = region.map(|r| r.owner);
                     let owner_frame = owner.and_then(|o| model.arena.frame(o));
+                    // A draw layer switched off with `Frame:DisableDrawLayer` hides every region
+                    // the frame owns in it. Skipped HERE rather than by touching the regions
+                    // themselves, so each one keeps its own shown state and re-enabling the layer
+                    // restores exactly what was visible before.
+                    if let (Some(r), Some(f)) = (region, owner_frame) {
+                        if f.disabled_layers & (1 << r.draw_layer.index()) != 0 {
+                            continue;
+                        }
+                    }
                     // Regions clip with their owner frame (decision 0112 §4).
                     let clip = owner.and_then(|o| effective_clip(&model, &scroll_sources, o));
                     let mut rect = owner.and_then(|o| model.resolved.get(&o).copied());

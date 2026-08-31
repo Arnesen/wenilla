@@ -1096,3 +1096,107 @@ fn a_textures_getters_report_its_texel_span_on_an_unsized_axis() {
     .unwrap();
     assert!(s.take_errors().is_empty());
 }
+
+/// **The three constructors' string arguments are FOUR different shapes, not one rule.**
+///
+/// Verified together in wow-re `ui/scratch/xml-template-name-lookup.md` §5.2 (§5 pair, orchestrator
+/// byte-arbitration). The discriminator is **not** the argument's type — it is whether the binding
+/// *tests* its parser's return, which is the sentence `numeric-arg-coercion-law.md` §6 had wrong:
+///
+/// | position | fetch | a table there | a number there |
+/// |---|---|---|---|
+/// | `CreateFontString`/`CreateTexture` `name`, `layer` | `0x6f3510` → `0x6f3690`, untested | absent | **accepted, stringified** |
+/// | `CreateFontString`/`CreateTexture` `inherits` | raw `lua_type == LUA_TSTRING`, no coercion | ignored | **ignored** |
+/// | `CreateFrame` `name`, `inherits` | `0x6f3690` **unguarded** | absent | **accepted, stringified** |
+/// | `CreateFrame` `kind` | `0x6f3510`, tested | **raises** | accepted |
+///
+/// The last two rows are the same value taking opposite paths from argument order alone:
+/// `CreateFrame` coerces at `0x70613f` *before* its `cmp 4`, and `0x6f7cb1` retags the number's
+/// stack slot **in place**, so a number arrives at the gate already a string.
+#[test]
+fn the_constructors_string_arguments_are_four_shapes_not_one() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"host = CreateFrame("Frame", "ArgHost", UIParent)"#)
+        .unwrap();
+
+    // ── pfUI's line, verbatim. `f.buffs[i]:CreateFontString(nil, "OVERLAY", f.buffs[i])` passes
+    //    the BUTTON as `inheritsFrom`. The real client constructs it, ignores the argument, and
+    //    logs nothing — this raised `bad argument #4` until 2026-08-30 and stopped pfUI, and with
+    //    it pfQuest, pfQuest-turtle and ShaguDPS.
+    s.run(r#"fs = ArgHost:CreateFontString(nil, "OVERLAY", ArgHost)"#)
+        .unwrap_or_else(|e| panic!("a table in `inherits` must be ignored, not raise: {e}"));
+    assert_eq!(
+        s.eval::<String>("return type(fs)").unwrap(),
+        "table",
+        "...and the FontString is really constructed"
+    );
+    // Every other non-string in every region-constructor position: also silent, also constructed.
+    for pos in ["{}, \"OVERLAY\"", "nil, {}", "true, false"] {
+        for ctor in ["CreateFontString", "CreateTexture"] {
+            s.run(&format!("r = ArgHost:{ctor}({pos})"))
+                .unwrap_or_else(|e| panic!("{ctor}({pos}) must not raise: {e}"));
+            assert_eq!(s.eval::<String>("return type(r)").unwrap(), "table");
+        }
+    }
+
+    // ── A NUMBER is a string to `lua_isstring` — so it NAMES the region.
+    s.run("named = ArgHost:CreateTexture(4242)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return named:GetName()").unwrap(),
+        "4242",
+        "a number in `name` is stringified, not dropped"
+    );
+    // ...but NOT in `inherits`, whose gate reads the raw tag and never coerces. A number there is
+    // ignored, where the same number in CreateFrame's fourth argument would raise.
+    s.run("ArgHost:CreateTexture(nil, nil, 5)")
+        .unwrap_or_else(|e| panic!("a number in a region ctor's `inherits` is ignored: {e}"));
+
+    // ── CreateFrame: `name` coerces the same way.
+    s.run("nf = CreateFrame(\"Frame\", 77)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return nf:GetName()").unwrap(),
+        "77",
+        "CreateFrame reads `name` through an UNGUARDED lua_tostring"
+    );
+    // ...and an unresolvable `inherits` still raises, which is the pre-existing contract and the
+    // control for the changes above: loosening the OTHER positions must not have loosened this.
+    assert!(
+        s.run(r#"CreateFrame("Frame", nil, nil, "NoSuchTemplateAnywhere")"#)
+            .is_err(),
+        "an unresolvable template name still raises — the miss branch is luaL_error"
+    );
+
+    // ── The layer argument is PERMISSIVE, and an unrecognised one is ARTWORK, not an error.
+    //    `0x6f18b0` returns 0 with its out-param unwritten and neither constructor reads the
+    //    result, so the pre-staged ARTWORK (2) stands. Matching is case-insensitive.
+    s.run(r#"lay = ArgHost:CreateTexture(nil, "not-a-layer")"#)
+        .unwrap_or_else(|e| panic!("an unrecognised layer must not raise: {e}"));
+    // Read off the arena — 1.12 publishes no `GetDrawLayer`, so there is no Lua getter to ask,
+    // the same reason the sequence scrub is read this way in `modelframe`'s tests.
+    let layer_of = |s: &UiScript, name: &str| {
+        let lua = s.lua();
+        let model = lua.app_data_ref::<crate::script::Model>().expect("model");
+        let id = *model.region_names.get(name).expect("published region");
+        let rh = *model.id_to_region.get(&id).expect("live region");
+        model.arena.region(rh).expect("region").draw_layer
+    };
+    s.run(r#"ArgHost:CreateTexture("LayLower", "overlay")"#)
+        .unwrap();
+    s.run(r#"ArgHost:CreateTexture("LayUpper", "OVERLAY")"#)
+        .unwrap();
+    s.run(r#"ArgHost:CreateTexture("LayJunk", "not-a-layer")"#)
+        .unwrap();
+    assert_eq!(
+        layer_of(&s, "LayLower"),
+        layer_of(&s, "LayUpper"),
+        "layer matching is case-insensitive (SStrCmpI 0x64a4c0)"
+    );
+    assert_eq!(
+        layer_of(&s, "LayJunk"),
+        crate::order::DrawLayer::Artwork,
+        "an unrecognised layer leaves the PRE-STAGED default standing — ARTWORK (2), not an error \
+         and not BACKGROUND: `0x6f18b0` returns 0 with its out-param unwritten and neither \
+         constructor reads the result"
+    );
+}

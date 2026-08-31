@@ -122,6 +122,35 @@ pub(crate) struct SoundConfig {
     /// (1109) ride under the entry cover exactly as the real client's does: its amp is applied
     /// once at start, and a playing stream never passes back through the kit starters.
     pub world_hold: bool,
+    /// **The cinematic's music stop** — NOT a CVar, a per-frame live bit fed from
+    /// [`crate::cinematic::Cinematic`] by [`feed_music_suppression`], and the exact runtime
+    /// counterpart of the reference's `[0xb06cc8]` (wow-re `sound/scratch/cinematic-audio-law.md`,
+    /// §5, VERIFIED).
+    ///
+    /// A cinematic asserts precisely what `/console EnableMusic 0` asserts: both reach the same
+    /// setter `0x4603b0` — the CVar handler at `0x4574a4`, the cinematic's own start at `0x48ed83`
+    /// — and on the disable edge that setter runs `0x7a5700`, which is **stop-and-destroy and
+    /// takes no duration**. So the zone track is CUT, never faded, and the per-tick music pump
+    /// bails at its first instruction (`0x460040`: `mov al,[0xb06cc8]; test al,al; jne`) for as
+    /// long as the flag is set.
+    ///
+    /// **Separate from [`Self::music_enabled`] on purpose.** The cinematic writes the runtime
+    /// flag, never the CVar — and neither do we, because benilla persists a CVar *diff* to
+    /// `config.toml`: asserting `EnableMusic` here would save a player's music off for good if
+    /// they quit during a 102-second intro.
+    ///
+    /// **Ambience is deliberately untouched**, and that is verified rather than assumed: ambience
+    /// has the analogous suppress flag (`[0x836424]`, written only from `EnableAmbience`) and the
+    /// cinematic never writes it.
+    ///
+    /// **One thing of the reference's we deliberately do not carry: its restore latch.** It records
+    /// at the start whether music was already off (`[0xb4e278] = (flag == 0)`) and re-enables at
+    /// the stop only if it was the one that disabled it — because there the flag and the player's
+    /// `EnableMusic` CVar are the *same* bit, so restoring blindly would switch a player's music
+    /// back on. Here they are two: this is a separate runtime bit, and a player who set
+    /// `EnableMusic 0` is still silenced by [`Self::category_amp`] whatever this says. The latch
+    /// would guard against nothing, so it is left out rather than transcribed for its own sake.
+    pub music_suppressed: bool,
     /// The **output limiter** — benilla's own `SoundOutputLimiter` CVar (decision 1551), default
     /// **on**. Not a 1.12 CVar: the reference has no such DSP and does not need one, because it
     /// hands its whole audible mix to FMOD 3 and carries its headroom elsewhere (the SFX-bus
@@ -160,6 +189,7 @@ impl Default for SoundConfig {
             ambience_enabled: true,
             reverb: false,
             world_hold: false,
+            music_suppressed: false,
             limiter: true,
         }
     }
@@ -181,6 +211,31 @@ fn feed_world_hold(
     }
 }
 
+/// Copy the cinematic's music stop into [`SoundConfig::music_suppressed`], once per frame.
+///
+/// **Ordered `WorldStage::Stream`, not `PreUpdate` beside [`feed_world_hold`]** — the two look
+/// alike and are not. The cover `feed_world_hold` reads is a state that lasts seconds, so reading
+/// last frame's answer costs nothing; the cinematic's music cut is a one-frame *edge*, and
+/// `crate::cinematic`'s driver asserts it in `WorldStage::Input` — after `PreUpdate` has already
+/// run. Read there, [`zone::zone_audio`] (`WorldStage::Present`) saw a stale `false` on exactly
+/// the frame a cinematic started: on a first-login race intro that is the first uncovered frame,
+/// where the zone's own area-change block starts a track — or, worse, the zone's *intro fanfare*,
+/// which is then stamped as played and does not come back for `MinDelayMinutes`. One frame later
+/// the suppression cut it again, so the symptom was a click and a consumed fanfare rather than
+/// anything you could hear as music. `Stream` sits between the two (`Net → Input → Stream →
+/// Present`), so the flag the pump reads is always this frame's.
+fn feed_music_suppression(
+    mut config: ResMut<SoundConfig>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
+) {
+    let playing = cinematic
+        .as_deref()
+        .is_some_and(crate::cinematic::Cinematic::is_playing);
+    if config.music_suppressed != playing {
+        config.music_suppressed = playing;
+    }
+}
+
 /// The backend output. `mixer` is `None` when no audio device exists (headless/CI) or
 /// `$WOW_NOSOUND` is set — every consumer tolerates silence. A **non-Send** resource: the
 /// backend's device stream is not `Send` on every platform, so all audio systems run on the
@@ -193,16 +248,21 @@ pub(crate) struct SoundOutput {
     /// here rather than in a resource of its own so the kit player — which already holds `out` —
     /// can stamp every play on the capture's timeline with no new plumbing.
     pub(crate) probe: Option<probe::Probe>,
-    /// Live **stream** voices, reported by their owners each frame ([`zone`], [`glue`]).
+    /// Live **stream** voices, reported by their owners each frame ([`zone`], [`glue`],
+    /// [`cinematic`]).
     ///
     /// These count against the same ceiling as everything else ([`kit::SOFTWARE_CHANNELS`]): the
     /// reference's music, ambience and liquid loops all land on its uncapped bus 0 and occupy
-    /// FMOD channels exactly like a sword swing does. Two fields rather than one counter because
-    /// each owner **rewrites its own** every frame from its own live handles — a shared counter
-    /// with two writers drifts the first time a fade is interrupted, and a voice budget that
-    /// drifts is worse than none.
+    /// FMOD channels exactly like a sword swing does. A field per owner rather than one shared
+    /// counter because each owner **rewrites its own** every frame from its own live handles — a
+    /// shared counter with several writers drifts the first time a fade is interrupted, and a
+    /// voice budget that drifts is worse than none.
     pub(crate) zone_streams: usize,
     pub(crate) glue_streams: usize,
+    /// The cinematic narration's own stream — a third long-lived owner, and for a long time the
+    /// one the budget could not see (a 102-second race intro spent all of it one voice short of
+    /// the truth). Rewritten each frame by [`cinematic::drive_narration`], like its neighbours.
+    pub(crate) cinematic_streams: usize,
     /// One-shots that lost their slot to a louder newcomer, and plays refused because nothing
     /// live was quieter than them (decision 1557). Reported by the probe.
     pub(crate) voices_stolen: u64,
@@ -215,7 +275,7 @@ impl SoundOutput {
     /// Everything the device is currently mixing — kit channels plus the held streams. This is
     /// the number [`kit::SOFTWARE_CHANNELS`] bounds.
     pub(crate) fn live_voices(&self) -> usize {
-        self.channels.len() + self.zone_streams + self.glue_streams
+        self.channels.len() + self.zone_streams + self.glue_streams + self.cinematic_streams
     }
 }
 
@@ -358,6 +418,7 @@ impl Plugin for SoundPlugin {
             probe,
             zone_streams: 0,
             glue_streams: 0,
+            cinematic_streams: 0,
             voices_stolen: 0,
             voices_denied: 0,
             copies_dropped: 0,
@@ -374,6 +435,10 @@ impl Plugin for SoundPlugin {
         // The cover's audio hold (see [`SoundConfig::world_hold`]): fed in PreUpdate so every
         // trigger system this frame — whatever stage it runs in — reads one answer.
         .add_systems(PreUpdate, feed_world_hold)
+        .add_systems(
+            Update,
+            feed_music_suppression.in_set(benilla_world::schedule::WorldStage::Stream),
+        )
         .add_systems(
             Update,
             (
@@ -421,12 +486,25 @@ fn update_audio_listener(
     mut listener: ResMut<AudioListener>,
     mut out: NonSendMut<SoundOutput>,
     player: Res<Player>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
     self_av: Query<(&Transform, Option<&CameraPivot>), With<Embodied>>,
     cam: Query<&Transform, (With<WorldCamera>, Without<Embodied>)>,
 ) {
+    // **A cinematic takes the listener to the camera, and it OVERRIDES the CVar** — wow-re
+    // `sound/scratch/cinematic-audio-law.md` (VERIFIED; it also promoted `benilla-pins.md` B14's
+    // `camera+0x50` label from INFERRED to VERIFIED). `0x483112 jne 0x4831f0` takes the camera
+    // branch whenever `camera+0x50 != 0`, ahead of and regardless of `SoundListenerAtCharacter`;
+    // the flag is armed from the cinematic's own start path (`0x48ee55` → `0x50c870` → `0x50c9f2`
+    // → `0x50c740`) and cleared only by `0x50ca50` at the stop.
+    //
+    // The narration itself is 2D, so what this actually moves is every *other* 3D sound during a
+    // fly-by that can travel 1741 yards from the body.
+    let flying = cinematic
+        .as_deref()
+        .is_some_and(crate::cinematic::Cinematic::is_playing);
     // At-character (the default). `player.pos` is the feet; the head offset is the shared
     // model-derived pivot height, and the facing is the aim yaw about world-up (world +Y).
-    if player.active && !player.detached {
+    if player.active && !player.detached && !flying {
         if let Ok((t, pivot)) = self_av.single() {
             listener.pos = player.pos + Vec3::Y * head_height(pivot, t.scale.x);
             listener.rot = Quat::from_rotation_y(player.facing());
@@ -436,7 +514,7 @@ fn update_audio_listener(
             return;
         }
     }
-    // At-camera fallback (the `SoundListenerAtCharacter=0` path).
+    // At-camera (the `SoundListenerAtCharacter=0` path, and the cinematic override above).
     if let Ok(t) = cam.single() {
         listener.pos = t.translation;
         listener.rot = t.rotation;

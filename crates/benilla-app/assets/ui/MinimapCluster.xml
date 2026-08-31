@@ -437,13 +437,45 @@
                         <Anchors>
                             <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="13" y="-13"/></Offset></Anchor>
                         </Anchors>
+                        <!-- **All THREE of the reference's regions, on the reference's layers**
+                             (ref-Minimap.xml l.311-349). This block used to carry only the icon,
+                             which was the same half-step the note above warns against: "an addon
+                             that moves a frame expects its named children to exist" is right, and
+                             then one of the three was declared. pfUI's `modules/minimap.lua:80` is
+                             `MiniMapBattlefieldBorder:Hide()`, unguarded — it hides the ring so the
+                             icon sits flush on its square minimap — and pfQuest, pfQuest-turtle and
+                             ShaguDPS all embed that module.
+
+                             The LAYERS are the reference's too, and they are not decoration: the
+                             icon is BACKGROUND and the border ARTWORK above it, which is the order
+                             a ring around an icon has to draw in. Ours had the icon on ARTWORK, so
+                             adding the border there would have raced it. -->
                         <Layers>
-                            <Layer level="ARTWORK">
+                            <Layer level="BACKGROUND">
                                 <Texture name="MiniMapBattlefieldIcon" file="Interface\BattlefieldFrame\UI-Battlefield-Icon">
                                     <Size><AbsDimension x="32" y="32"/></Size>
                                     <Anchors>
                                         <Anchor point="CENTER"><Offset><AbsDimension x="-1" y="0"/></Offset></Anchor>
                                     </Anchors>
+                                </Texture>
+                            </Layer>
+                            <Layer level="ARTWORK">
+                                <Texture name="MiniMapBattlefieldBorder" file="Interface\Minimap\MiniMap-TrackingBorder">
+                                    <Size><AbsDimension x="52" y="52"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                                </Texture>
+                            </Layer>
+                            <Layer level="BORDER">
+                                <!-- The queue-ready pulse. Nothing here drives it (benilla has no
+                                     battleground queue), and it is declared for the same reason its
+                                     two siblings are: `BattlegroundShine` is a global an addon can
+                                     read, and its absence is a nil rather than a missing effect. -->
+                                <Texture name="BattlegroundShine" file="Interface\ComboFrame\ComboPoint" alphaMode="ADD">
+                                    <Size><AbsDimension x="32" y="32"/></Size>
+                                    <Anchors>
+                                        <Anchor point="CENTER"><Offset><AbsDimension x="3" y="3"/></Offset></Anchor>
+                                    </Anchors>
+                                    <TexCoords left="0.5625" right="1" top="0" bottom="1"/>
                                 </Texture>
                             </Layer>
                         </Layers>

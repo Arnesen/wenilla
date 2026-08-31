@@ -10,13 +10,22 @@ use bevy::prelude::*;
 
 use crate::death::{CorpsePoint, DeathNet, ResurrectOffer};
 use crate::net::MoveModeMessage;
-use crate::ui_action::UiErrorTexts;
 
 use super::super::SelfGuid;
 
 /// OUR corpse streaming into range (a `TYPEID_CORPSE` create whose owner is us): remember its guid
-/// for the reclaim send (decision 0308 §5). Corpses classify as [`EntityKind::Other`], and the
-/// owner field is corpse-only, so the filter is exact. Rides the `ObjectCreate` arm.
+/// for the reclaim send (decision 0308 §5). The kind is exact ([`EntityKind::Corpse`] since 1706 —
+/// it was `Other` while nothing rendered a corpse), and the owner field is corpse-only, so nothing
+/// else can match. Rides the `ObjectCreate` arm.
+///
+/// **Two gates, not one** (wow-re `corpse-click-and-reclaim.md`, §5 cross-checked): the reference's
+/// reclaim guid `[0xb4e328/32c]` has exactly one writer, `0x4920d0`, called from three sites in the
+/// CGCorpse translation unit — and every one of them is gated on `CORPSE_FIELD_OWNER == me`
+/// **and `CORPSE_FIELD_FLAGS` bit 0 clear**, i.e. a real body and not a bone pile. So the latch is
+/// a property of the streamed corpse OBJECT, not of the `MSG_CORPSE_QUERY` answer, and a pile of
+/// bones never arms it. That matters because `RetrieveCorpse` itself carries **no guard of any
+/// kind** — whatever is in the latch is what goes out on `CMSG_RECLAIM_CORPSE`. The bones gate is
+/// the only thing standing between a converted corpse and a reclaim send naming it.
 pub(super) fn note_corpse(
     guid: u64,
     kind: EntityKind,
@@ -24,7 +33,44 @@ pub(super) fn note_corpse(
     self_guid: &SelfGuid,
     death_net: &mut DeathNet,
 ) {
-    if kind == EntityKind::Other && fields.corpse_owner() == self_guid.0 {
+    if kind == EntityKind::Corpse
+        && fields.corpse_owner() == self_guid.0
+        && !fields.corpse_is_bones()
+    {
+        death_net.corpse_guid = Some(guid);
+    }
+}
+
+/// The same latch, re-evaluated when a corpse's **`CORPSE_FIELD_FLAGS` changes under a live guid**.
+///
+/// [`forget_corpse`] covers the conversion shape where the server destroys the corpse object and
+/// creates the bone pile as a new one. It does not cover an in-place flip — the same guid gaining
+/// `CORPSE_FLAG_BONES` through a values delta — and the reference is immune to that shape by
+/// construction: its three latch writers include the `FLAGS` mirror handler `0x5d6d60`, so the
+/// gate is re-asked on every change of the very field that carries the bones bit. Ours asks it
+/// here, on the same edge. Rides the `ObjectValues` arm.
+pub(super) fn recheck_corpse(
+    guid: u64,
+    fields: &ObjectFields,
+    self_guid: &SelfGuid,
+    death_net: &mut DeathNet,
+) {
+    // A values delta carries only what changed: an untouched FLAGS field reads absent, and absent
+    // must not be read as "bit clear" (that is the `ObjectFields` create-vs-delta seam). So act
+    // only when the field is actually present in this delta.
+    let Some(flags) = fields.corpse_flags_present() else {
+        return;
+    };
+    let mine = fields.corpse_owner() == self_guid.0 || death_net.corpse_guid == Some(guid);
+    if !mine {
+        return;
+    }
+    if flags & 0x01 != 0 {
+        // Converted to bones under our own guid — drop it before a reclaim can name it.
+        if death_net.corpse_guid == Some(guid) {
+            death_net.corpse_guid = None;
+        }
+    } else if fields.corpse_owner() == self_guid.0 {
         death_net.corpse_guid = Some(guid);
     }
 }
@@ -87,10 +133,25 @@ pub(super) fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
     death_net.confirm_generation = death_net.confirm_generation.wrapping_add(1);
 }
 
-/// `SMSG_DURABILITY_DAMAGE_DEATH` — the red line, verbatim GlobalStrings `DURABILITYDAMAGE_DEATH`
-/// (the `%%` unescaped).
-pub(super) fn durability_damage_death(errors: &mut UiErrorTexts) {
-    errors.error("Your equipped items suffer a 10% durability loss.".to_string());
+/// `SMSG_DURABILITY_DAMAGE_DEATH` — the 10% death durability loss.
+///
+/// **It is a combat-log line, not a red error** (1703, correcting the shape 0308 shipped):
+/// `0x628e60` is itself the packet's handler and it emits at the literal chat type `0x19`
+/// `COMBAT_MISC_INFO`, with **zero arguments** — the packet's body is empty and both of vmangos's
+/// fields are ignored. Routing it to `UIErrorsFrame` put it in the wrong frame and, worse, meant
+/// hard-coding Blizzard's English sentence in our source; as a combat-log family it resolves
+/// `DURABILITYDAMAGE_DEATH` out of the player's own `GlobalStrings.lua` like every other line.
+pub(super) fn durability_damage_death(log: &mut crate::ui_chat::ChatLog) {
+    log.push_combat(crate::ui_chat::combat::PendingCombat {
+        kind: crate::ui_chat::ChatEventKind::CombatMiscInfo,
+        family: crate::ui_chat::combat::DURABILITYDAMAGE_DEATH,
+        variant: crate::ui_chat::combat::Variant::OtherOther,
+        subject: 0,
+        object: 0,
+        fills: crate::ui_chat::combat::Fills::default(),
+        named: crate::ui_chat::combat::Named::Ready,
+        tries: 0,
+    });
 }
 
 /// **The ack'd movement-mode family** (decision 0866) — root, water-walk, feather-fall, hover. The

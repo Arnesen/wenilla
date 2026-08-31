@@ -137,13 +137,11 @@ pub(super) fn action(lua: &Lua, a: EditAction) -> bool {
     };
     match a {
         EditAction::Move { unit, back, extend } => match unit {
-            // ignoreArrows: consumed but inert (guard `0x77b18e`) — arrows are the only chord
-            // source of Char moves, and the ref's Ctrl bypass maps to Word, which passes.
-            EditUnit::Char => {
-                if !with_eb(lua, h, |eb| eb.ignore_arrows).unwrap_or(false) {
-                    move_horizontal(lua, h, !back, extend);
-                }
-            }
+            // No alt-arrow test here: the gate is on the KEY and lives in the host, which declines
+            // the four arrow codes before the chord is ever built (`editbox_alt_arrow_mode`).
+            // Anything reaching this arm was Alt-held or was not an arrow, and the reference moves
+            // the caret for both.
+            EditUnit::Char => move_horizontal(lua, h, !back, extend),
             // Ctrl/Option picks the word-granular cursor helper (RF-0082 §4: "char- vs
             // word-granular by the Ctrl check").
             EditUnit::Word => interact::move_word(lua, h, !back, extend),
@@ -159,8 +157,11 @@ pub(super) fn action(lua: &Lua, a: EditAction) -> bool {
         // restored past the newest. Single-line only (benilla's multiLine box has no vertical
         // caret nav — survey gap — a multiLine box consumes the step inert). The recall chords
         // are the host keymap's plain Up/Down (rf82's history controller is untraced; decision
-        // 0301) — `ignoreArrows` does not gate them: the ref chat box ships BOTH ignoreArrows and
-        // historyLines, so arrows-as-history is exactly what that combination leaves.
+        // 0301). The alt-arrow gate DOES cover them, upstream: UP and DOWN are two of the four
+        // codes it declines, so on a flagged box — which the reference's own chat box is —
+        // history recall is **Alt**+Up/Down and a plain Up/Down turns the camera. This file used
+        // to say the opposite ("`ignoreArrows` does not gate them"), which followed from reading
+        // the flag as consume-but-inert; the §5 corrected both halves.
         EditAction::HistoryPrev | EditAction::HistoryNext => {
             if !with_eb(lua, h, |eb| eb.multi_line).unwrap_or(false) {
                 history_step_key(lua, h, a == EditAction::HistoryPrev);
@@ -471,6 +472,24 @@ fn write_inset_anchors(lua: &Lua, h: FrameHandle, rh: RegionHandle, [l, r, t, b]
     }
 }
 
+/// The wrapper for an EditBox's **embedded** text FontString — the region its ctor built at
+/// `0x779bee` (`Arena::build_editbox_engine_regions`). `None` when `frame` is not a live EditBox.
+///
+/// The loader's special-`<FontString>` pass uses this instead of `CreateFontString`: RF-0028 lists
+/// `<FontString>` as the EditBox's *embedded* font string (its `bytes` attr writes the box's own
+/// `maxBytes`), so the element DECLARES the ctor's object rather than adding a region. Creating a
+/// second one would leave an orphan on the frame and push the authored `<Layers>` regions one place
+/// down the creation-ordered list `GetRegions` walks.
+pub(crate) fn editbox_text_region_wrapper(lua: &Lua, frame: &Table) -> Option<Table> {
+    let h = frame_handle_of(lua, frame).ok()?;
+    let rh = ensure_text_region(lua, h)?;
+    let id = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        model.region_id(rh)
+    };
+    super::region::region_wrapper(lua, id).ok()
+}
+
 /// The loader's special-`<FontString>` slot assignment: adopt `region` as `frame`'s text region,
 /// anchored by the current insets. The engine ASSIGNS an EditBox's font string at LoadXML — it
 /// never searches the region list (a find-first here once grabbed a `<Layers>` FontString, the
@@ -503,20 +522,28 @@ pub(super) fn ensure_text_region(lua: &Lua, h: FrameHandle) -> Option<RegionHand
         Some(KindState::EditBox(eb)) => (eb.text_region, eb.multi_line),
         _ => return None,
     };
-    if existing.is_some() {
-        return existing;
-    }
-    let rh = model
-        .arena
-        .create_region(h, RegionKind::FontString, DrawLayer::Overlay, 0)?;
-    let mut data = RegionData {
-        // Some("") from birth — the empty box still emits its Text quad for the host caret.
-        text: Some(String::new()),
-        ..RegionData::default()
+    // The ctor already built it (`Arena::build_editbox_engine_regions` — the client's own
+    // `0x779bee`, the first of the five regions a CSimpleEditBox is born with). The REGION exists
+    // from birth; its `RegionData` does not, because the arena has no access to it — so seed that
+    // here, once, on whichever call arrives first.
+    let rh = match existing {
+        Some(rh) => rh,
+        // A box whose ctor pass could not run (a dead handle, or a non-EditBox that slipped the
+        // guard above) still gets a region rather than silently rendering nothing.
+        None => model
+            .arena
+            .create_region(h, RegionKind::FontString, DrawLayer::Overlay, 0)?,
     };
-    apply_text_region_justify(&mut data, multi_line);
-    model.region_data.insert(rh, data);
-    model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
+    if let std::collections::hash_map::Entry::Vacant(slot) = model.region_data.entry(rh) {
+        let mut data = RegionData {
+            // Some("") from birth — the empty box still emits its Text quad for the host caret.
+            text: Some(String::new()),
+            ..RegionData::default()
+        };
+        apply_text_region_justify(&mut data, multi_line);
+        slot.insert(data);
+        model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
+    }
     if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         eb.text_region = Some(rh);
     }

@@ -70,10 +70,16 @@ pub struct AddonBindingBody {
 
 /// A host request queued by Lua: persist the live table as set `1`/`2` (`Save`), on which the
 /// app writes `benilla-config/bindings/…` — and, for `Save(1)` issued while the character set was
-/// active, deletes the character file (the reference's confirmed delete-on-switch).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// active, deletes the character file (the reference's confirmed delete-on-switch); or fire a
+/// named binding's action outright (`Run`).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeybindRequest {
     Save(u32),
+    /// `RunBinding("SCREENSHOT")` — run the command's action as if its chord had been pressed.
+    /// It is a *request* rather than something the VM can do itself because a host command's
+    /// action is engine-side by construction (see this module's header): the VM holds the command
+    /// name and its chords, never its body.
+    Run(String),
 }
 
 /// The reference's key-string gate — the whole of `SetBinding`'s refusal (decision 1295), in its
@@ -367,8 +373,19 @@ impl KeybindState {
     fn register_addon(&mut self, addon: &str, bindings: &[AddonBinding]) {
         let mut section = addon.to_string();
         for b in bindings {
-            // Before the skip: a duplicate name still *closes* a section the same way, because the
-            // header is a property of the file's order, not of the row that survived it.
+            // **`platform` skips the whole NODE, header and all** — `0x4b70c3`-`0x4b70e5` bails
+            // out of the element before anything on it is read. It matters here and nowhere else:
+            // `header="ITUNES_REMOTE"` rides on `ITUNES_PLAYPAUSE`, the first of the five
+            // `platform="mac"` rows, so on a build that is not the Mac one that category does not
+            // merely come up empty — it never exists. Keeping the header of a skipped row would
+            // leave its section open over whatever followed.
+            if b.platform.as_deref().is_some_and(|p| p != THIS_PLATFORM) {
+                continue;
+            }
+            // Before the duplicate skip below: a duplicate name still *closes* a section the same
+            // way, because the header is a property of the file's order, not of the row that
+            // survived it. (Not the platform case above — a duplicate is a node the loader read
+            // and rejected; a foreign-platform node it never read at all.)
             if let Some(h) = &b.header {
                 section = format!("BINDING_HEADER_{h}");
             }
@@ -404,6 +421,17 @@ impl KeybindState {
         self.generation += 1;
     }
 }
+
+/// What `platform="…"` has to equal for a binding to register here — the reference's own two
+/// spellings, read out of both binaries: the Windows build compares against `"windows"`
+/// (`0x846f98`, tested at `0x4b70c3`-`0x4b70e5`) and the Mac slice against `"mac"` (`0x4e28f8`).
+/// Every other OS benilla runs on takes the `"windows"` name rather than inventing a third — the
+/// only thing this attribute has ever distinguished is a 2006 Carbon app from everything else.
+const THIS_PLATFORM: &str = if cfg!(target_os = "macos") {
+    "mac"
+} else {
+    "windows"
+};
 
 impl super::UiScript {
     /// Register the host-implemented commands (boot-time, order = the 1.12 `Bindings.xml`
@@ -603,6 +631,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let ok = model.keybinds.set_binding(&key, command.as_deref());
             Ok(if ok { Some(1) } else { None })
+        })?,
+    )?;
+    // `RunBinding(command)` — the reference's own passthrough verb. Its live caller is
+    // `CinematicFrame`'s `OnKeyDown`, which hands the SCREENSHOT chord back to its binding while
+    // swallowing every other key, so a player can still photograph a fly-by. Anything the VM
+    // holds a body for it could run itself; a host command's action is engine-side, so this
+    // queues and the app fires it in the same frame.
+    lua.globals().set(
+        "RunBinding",
+        lua.create_function(|lua, command: String| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let name = command.to_ascii_uppercase();
+            if model.keybinds.by_name.contains_key(&name) {
+                model.keybinds.requests.push(KeybindRequest::Run(name));
+            }
+            Ok(())
         })?,
     )?;
     lua.globals().set(
@@ -962,6 +1006,40 @@ mod tests {
         assert!(bodies[0].body.contains(r#"keystate == "down""#));
     }
 
+    /// **The file's own OS gate.** `platform="mac"` is 1.12's one OS-specific device in
+    /// `Bindings.xml` — five `ITUNES_REMOTE` rows in the Mac build and nowhere else — and a row
+    /// for the other build is not registered at all. Not hidden, not registered-and-inert:
+    /// registering it would list a command in the Key Bindings window whose body calls functions
+    /// this build does not have, and let the player spend a key on it.
+    #[test]
+    fn a_binding_for_another_platform_does_not_register() {
+        let mut s = script();
+        let parsed = crate::bindings_xml::parse(
+            r#"<Bindings>
+                <Binding name="PROBEHERE" platform="THIS">Here();</Binding>
+                <Binding name="PROBEELSEWHERE" platform="elsewhere">Elsewhere();</Binding>
+                <Binding name="PROBEANYWHERE">Anywhere();</Binding>
+            </Bindings>"#
+                .replace("THIS", super::THIS_PLATFORM)
+                .as_str(),
+        )
+        .unwrap();
+        s.register_addon_bindings("Probe", &parsed);
+
+        let names: Vec<String> = s.keybind_snapshot().into_iter().map(|(n, _)| n).collect();
+        assert!(names.iter().any(|n| n == "PROBEHERE"), "{names:?}");
+        assert!(names.iter().any(|n| n == "PROBEANYWHERE"), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n == "PROBEELSEWHERE"),
+            "a foreign-platform row registered: {names:?}"
+        );
+        // …and it is not merely hidden from the window either: nothing can bind it.
+        assert!(!s
+            .addon_binding_bodies()
+            .iter()
+            .any(|b| b.name == "PROBEELSEWHERE"));
+    }
+
     #[test]
     fn host_seeding_feeds_load_and_the_capture_arm_reads_back() {
         let mut s = script();
@@ -1000,6 +1078,7 @@ mod addon_persistence_tests {
             header: None,
             run_on_up: false,
             hidden: false,
+            platform: None,
             body: "AddonBindingRan = true".into(),
         }
     }

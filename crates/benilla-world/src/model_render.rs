@@ -111,7 +111,7 @@ pub struct MatKey {
     /// z-write on, drawn before its model's colour batches. Its own key axis so a twin can never
     /// dedupe onto a colour material.
     zfill: bool,
-    /// This batch is part of a **WMO skybox** ([`crate::wmo_sky`]) — the building-owned painted sky,
+    /// This batch is part of a **WMO skybox** ([`crate::skybox`]) — the building-owned painted sky,
     /// drawn on this lane like any other M2 since decision 1264. Its own key axis because the lane
     /// changes pipeline state ([`SKY_DEPTH_MARKER`]: forced far depth, no early-Z) and sort rung
     /// ([`skybox_sort_bias`]), so a skybox batch must never dedupe onto the identical-looking world

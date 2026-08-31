@@ -124,6 +124,18 @@ pub struct GroundDecalSurface;
 #[derive(Component)]
 pub struct PickOccluder;
 
+/// **Colliders this frame's local mover must not see** — the game's half of the reference's
+/// per-trace collision mask.
+///
+/// The engine cannot compute this: "a GameObject whose type is DOOR, while the player is a ghost"
+/// names two gameplay concepts, and the engine names nothing of the game (this crate's other API
+/// wall). So the game publishes the entity set and [`WorldCollision::cast_mover`] applies it.
+///
+/// Empty on every ordinary frame, which is what makes the living player's query provably the one it
+/// always was.
+#[derive(Resource, Default)]
+pub struct MoverTraceExclusions(pub bevy::ecs::entity::EntityHashSet);
+
 /// **Trace a body through the world** — the engine's movement-collision face.
 ///
 /// Every one of the four one-sided casts took the same two leading arguments (avian's
@@ -143,6 +155,7 @@ pub struct PickOccluder;
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct WorldCollision<'w, 's> {
     ms: MoveAndSlide<'w, 's>,
+    exclusions: bevy::ecs::system::Res<'w, MoverTraceExclusions>,
 }
 
 impl WorldCollision<'_, '_> {
@@ -175,14 +188,30 @@ impl WorldCollision<'_, '_> {
         movement: Vec3,
         skin_width: f32,
     ) -> Option<MoveHitData> {
-        one_sided::cast_move(
-            &self.ms,
-            shape,
-            from,
-            movement,
-            skin_width,
-            &Self::body_filter(),
-        )
+        self.cast_body_with(shape, from, movement, skin_width, &Self::body_filter())
+    }
+
+    /// [`cast_body`](Self::cast_body) against a **caller-supplied** filter.
+    ///
+    /// It exists for one caller and one reason: the reference's world trace carries a per-trace
+    /// mask, and a GHOST's mask drops DOOR GameObjects from the gather — a ghost walks through
+    /// closed doors (wow-re `collision/scratch/ghost-door-tracemask.md`). That is a property of
+    /// *this mover's trace*, not of the door, so it cannot be expressed by re-laning the collider:
+    /// [`body_filter`](Self::body_filter) is shared with the particle snap, the precipitation
+    /// probe, the mouse pick and the creature conform, none of which may lose a door because the
+    /// local player happens to be dead.
+    ///
+    /// The living case passes [`body_filter`](Self::body_filter) itself, so it is the same query it
+    /// always was — byte for byte, by construction rather than by inspection.
+    fn cast_body_with(
+        &self,
+        shape: &Collider,
+        from: Vec3,
+        movement: Vec3,
+        skin_width: f32,
+        filter: &SpatialQueryFilter,
+    ) -> Option<MoveHitData> {
+        one_sided::cast_move(&self.ms, shape, from, movement, skin_width, filter)
     }
 
     /// Sweep the **camera boom** against the camera's world.
@@ -224,8 +253,7 @@ impl WorldCollision<'_, '_> {
         config: &MoveAndSlideConfig,
         on_hit: impl FnMut(MoveAndSlideHitData) -> MoveAndSlideHitResponse,
     ) -> MoveAndSlideOutput {
-        one_sided::move_and_slide(
-            &self.ms,
+        self.slide_body_with(
             shape,
             shape_position,
             velocity,
@@ -234,6 +262,88 @@ impl WorldCollision<'_, '_> {
             &Self::body_filter(),
             on_hit,
         )
+    }
+
+    /// [`slide_body`](Self::slide_body) against a caller-supplied filter — the ghost's door
+    /// exclusion, for the reason spelled out on [`cast_body_with`](Self::cast_body_with).
+    #[allow(clippy::too_many_arguments)] // `slide_body`'s list, plus the filter it defaults
+    fn slide_body_with(
+        &self,
+        shape: &Collider,
+        shape_position: Vec3,
+        velocity: Vec3,
+        delta_time: std::time::Duration,
+        config: &MoveAndSlideConfig,
+        filter: &SpatialQueryFilter,
+        on_hit: impl FnMut(MoveAndSlideHitData) -> MoveAndSlideHitResponse,
+    ) -> MoveAndSlideOutput {
+        one_sided::move_and_slide(
+            &self.ms,
+            shape,
+            shape_position,
+            velocity,
+            delta_time,
+            config,
+            filter,
+            on_hit,
+        )
+    }
+
+    /// Sweep the **local mover's own body** — [`cast_body`](Self::cast_body) with this frame's
+    /// [`MoverTraceExclusions`] applied.
+    ///
+    /// The reference's world trace carries a per-trace mask, and the local mover's mask gains bit
+    /// `0x8000` when the body it is driving is a player **in ghost form** (`0x631658`); the
+    /// GameObject collision-candidacy virtual `0x5f85f0` reads that bit and drops every
+    /// `GAMEOBJECT_TYPE_ID == 0` (DOOR) object from the gather. So a ghost walks through closed
+    /// doors, and nothing else about its collision differs (wow-re
+    /// `collision/scratch/ghost-door-tracemask.md`).
+    ///
+    /// **Why the exclusion rides the trace and not the collider.** It is tempting to drop the
+    /// door's collider, or re-lane it — both are wrong, because the fact is about *whose trace this
+    /// is*. [`body_filter`](Self::body_filter) is shared with the particle snap, the precipitation
+    /// probe, the mouse pick, the taxi probe and the creature ground conform; a door that stopped
+    /// existing for all of them because the local player happened to be dead would be a much larger
+    /// claim than the binary makes. Only the mover's own sweeps take the exclusion.
+    ///
+    /// With the set empty — every living frame — this is [`cast_body`](Self::cast_body) exactly.
+    pub fn cast_mover(
+        &self,
+        shape: &Collider,
+        from: Vec3,
+        movement: Vec3,
+        skin_width: f32,
+    ) -> Option<MoveHitData> {
+        self.cast_body_with(shape, from, movement, skin_width, &self.mover_filter())
+    }
+
+    /// [`slide_body`](Self::slide_body) for the local mover — see [`cast_mover`](Self::cast_mover).
+    pub fn slide_mover(
+        &self,
+        shape: &Collider,
+        shape_position: Vec3,
+        velocity: Vec3,
+        delta_time: std::time::Duration,
+        config: &MoveAndSlideConfig,
+        on_hit: impl FnMut(MoveAndSlideHitData) -> MoveAndSlideHitResponse,
+    ) -> MoveAndSlideOutput {
+        self.slide_body_with(
+            shape,
+            shape_position,
+            velocity,
+            delta_time,
+            config,
+            &self.mover_filter(),
+            on_hit,
+        )
+    }
+
+    /// [`body_filter`](Self::body_filter), plus whatever this frame's mover must not see.
+    ///
+    /// Allocation-free while the set is empty (`EntityHashSet::default()` allocates nothing), which
+    /// is every frame the player is alive.
+    fn mover_filter(&self) -> SpatialQueryFilter {
+        Self::body_filter().with_excluded_entities(self.exclusions.0.iter().copied())
     }
 
     /// Every front-facing triangle in a box around `at` — the step probe's face gather.

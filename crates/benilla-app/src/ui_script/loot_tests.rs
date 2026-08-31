@@ -979,3 +979,122 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
         "title + two occupied groups, out of eight blocks"
     );
 }
+
+/// **The soulbind confirm's Lua half** (decision 1744, ref `StaticPopup.lua:601-611` +
+/// `UIParent.lua:317-323` + `LootFrame.lua:53-54`). `LOOT_BIND_CONFIRM` raises `LOOT_BIND` with the
+/// real `LOOT_NO_DROP` text and Okay/Cancel; the row rides on `dialog.data`, and Okay hands it back
+/// through `LootSlot` — the continuation verb, which is the only thing that can complete a deferred
+/// take. Cancel sends nothing at all, and `LOOT_CLOSED` takes the dialog down with the window.
+#[test]
+fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "LootFrame.xml");
+    s.set_loot(Some(coin_and_two_items()));
+    s.fire_event("LOOT_OPENED", vec![]);
+    let _ = s.take_loot_picks();
+
+    // The app defers row 2 and says so.
+    s.fire_event(
+        "LOOT_BIND_CONFIRM",
+        vec![benilla_ui::script::ScriptValue::Int(2)],
+    );
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "LOOT_BIND_CONFIRM raises the dialog"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1.which").unwrap(),
+        "LOOT_BIND"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Text:GetText()")
+            .unwrap(),
+        "Looting this item will bind it to you.",
+        "the real GlobalStrings LOOT_NO_DROP, which carries no format specifier"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Button1:GetText()")
+            .unwrap(),
+        "Okay"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Button2:GetText()")
+            .unwrap(),
+        "Cancel"
+    );
+    assert_eq!(
+        s.eval::<i64>("return StaticPopup1.data").unwrap(),
+        2,
+        "the row rides on dialog.data, not in the text"
+    );
+
+    // Cancel: no continuation, and nothing reaches either queue.
+    s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
+    assert!(!s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
+    assert!(
+        s.take_loot_confirms().is_empty(),
+        "Cancel completes nothing"
+    );
+    assert!(s.take_loot_picks().is_empty(), "and takes nothing either");
+
+    // Okay: the row goes back out through LootSlot, the continuation verb.
+    s.fire_event(
+        "LOOT_BIND_CONFIRM",
+        vec![benilla_ui::script::ScriptValue::Int(2)],
+    );
+    s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
+    assert!(!s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
+    assert_eq!(s.take_loot_confirms(), vec![2]);
+    assert!(
+        s.take_loot_picks().is_empty(),
+        "the accept is a continuation, never a fresh take"
+    );
+
+    // The window closing takes an open dialog with it (ref LootFrame.lua l.53-54) — its row number
+    // would name a slot in the next corpse.
+    s.fire_event(
+        "LOOT_BIND_CONFIRM",
+        vec![benilla_ui::script::ScriptValue::Int(2)],
+    );
+    assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
+    s.fire_event("LOOT_CLOSED", vec![]);
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "LOOT_CLOSED hides the confirm"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The row click is `BenillaTakeLootSlot`, not `LootSlot` — a real mouse click on a row must land
+/// in the TAKE queue, or every loot would be a continuation nothing is pending for and the window
+/// would sit there doing nothing (decision 1744).
+#[test]
+fn a_row_click_takes_rather_than_continues() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "MoneyFrame.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "LootFrame.xml");
+    s.set_loot(Some(coin_and_two_items()));
+    s.fire_event("LOOT_OPENED", vec![]);
+    let quads = s.extract();
+
+    let (ix, iy) = icon_center(&quads, "INV_Fabric_Wool_01");
+    s.mouse_button(ix, iy, "LeftButton", true);
+    s.mouse_button(ix, iy, "LeftButton", false);
+    assert_eq!(s.take_loot_picks(), vec![2], "the click is a TAKE");
+    assert!(
+        s.take_loot_confirms().is_empty(),
+        "and never a continuation"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

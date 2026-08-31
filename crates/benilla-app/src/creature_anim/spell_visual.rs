@@ -1229,11 +1229,15 @@ pub(crate) fn arm_aura_state_fx(
     armed.retain(|e, _| units.contains(*e));
 }
 
-/// Arm/reap the **lootable-corpse sparkle** (wow-re `loot-corpse-effect.md`, §5 cross-checked):
-/// a DEAD unit carrying `UNIT_DYNFLAG_LOOTABLE` wears the `SpellVisualEffectName` row named
+/// Arm/reap the **lootable sparkle** on both things that can wear it (wow-re
+/// `loot-corpse-effect.md` + `corpse-decal-and-loot-sparkle.md` §Q2, both §5 cross-checked):
+/// a DEAD unit carrying `UNIT_DYNFLAG_LOOTABLE`, **and a corpse object carrying
+/// `CORPSE_FIELD_DYNAMIC_FLAGS` bit 0** (decision 1723 — a battleground body's insignia). Each
+/// wears the `SpellVisualEffectName` row named
 /// `"HARDCODED Loot Art"` (5875: `Particles\LootFX.mdl` — a golden flare + three star-twinkle
 /// emitters; cadence/size/color/blend all authored in the asset, the client sets none of them)
-/// attached at `0x13`, its own first sequence looping. The real client is edge-driven off the
+/// attached at `0x13` — the unit's looping its own first sequence, the corpse's arming no sequence
+/// at all (the divergence is named at the `stage` line below). The real client is edge-driven off the
 /// descriptor apply (watcher `0x600440`) with **no viewer/tap/distance/loot-window logic** — the
 /// server already strips the flag per viewer (vmangos's "hide lootable animation for unallowed
 /// players"). The falling edge (looted empty, rights lost) reaps with no fade (`0x600680`);
@@ -1243,9 +1247,12 @@ pub(crate) fn arm_aura_state_fx(
 pub(super) fn arm_loot_fx(
     // Dead+lootable is a pure function of store fields — the same `Changed<ObjectStore>` gate as
     // `arm_level_up_fx` below and `arm_aura_state_fx` above, with the same one-shot full sweep
-    // when the DBC resource lands after units already streamed in.
-    units: Query<(Entity, &ObjectStore)>,
-    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
+    // when the DBC resource lands after units already streamed in. `NetEntity` splits the two
+    // predicates: a **unit** answers `UNIT_DYNFLAG_LOOTABLE`, a **corpse object** answers its own
+    // `CORPSE_FIELD_DYNAMIC_FLAGS` bit 0 (decision 1723) — different fields at different indices,
+    // and a corpse descriptor has no UNIT block to ask at all.
+    units: Query<(Entity, &ObjectStore, &crate::net::NetEntity)>,
+    changed: Query<(Entity, &ObjectStore, &crate::net::NetEntity), Changed<ObjectStore>>,
     visuals: Option<Res<SpellVisuals>>,
     mut fx: MessageWriter<SpellKitFx>,
     mut armed: Local<EntityHashSet>,
@@ -1259,8 +1266,16 @@ pub(super) fn arm_loot_fx(
     } else {
         changed.iter().collect::<Vec<_>>()
     };
-    for (entity, store) in scan {
-        let lootable = store.0.unit_is_dead() && store.0.unit_lootable();
+    for (entity, store, net) in scan {
+        // The **corpse object**'s own sparkle (wow-re `corpse-decal-and-loot-sparkle.md` §Q2, §5
+        // cross-checked): `0x5d6de0` watches `CORPSE_FIELD_DYNAMIC_FLAGS`, and bit 0 rising calls
+        // `0x5d6e30` → the same `"HARDCODED Loot Art"` row at the same attachment `0x13`. Same
+        // asset, same tag — so it shares this body rather than growing a second one.
+        let lootable = if net.kind == benilla_protocol::EntityKind::Corpse {
+            store.0.corpse_lootable()
+        } else {
+            store.0.unit_is_dead() && store.0.unit_lootable()
+        };
         if lootable && armed.insert(entity) {
             fx.write(SpellKitFx::Begin {
                 entity,
@@ -1272,7 +1287,20 @@ pub(super) fn arm_loot_fx(
                 // loot art is "its own first sequence, LOOPING" — which is precisely what
                 // [`FxStage::Relive`] renders, and unlike a bare loop-flag arm it holds even if the
                 // art model's sequence were clamp-flagged.
-                stage: FxStage::Relive,
+                // **The one place the two paths differ, and it is a real divergence.** The unit's
+                // loot art is an `Effect_C` node with a clip-end re-arm loop — "its own first
+                // sequence, LOOPING", which is what `Relive` renders. The corpse's is a **bare
+                // model instance**: `0x5d6e30` arms no sequence and registers no callback at all
+                // (`[model+0x80]` stays `-1`), so the `.m2`'s emitters are the entire look and
+                // nothing re-arms them. `OneShot` + `persistent` is the nearest shape this
+                // plumbing expresses — no watcher, no re-arm, and it lives until the flag falls.
+                // Named rather than smoothed over: if a lootable bone pile is ever seen sparkling
+                // on a loop where the reference's plays out and stops, this is the line.
+                stage: if net.kind == benilla_protocol::EntityKind::Corpse {
+                    FxStage::OneShot
+                } else {
+                    FxStage::Relive
+                },
                 effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
             });
         } else if !lootable && armed.remove(&entity) {

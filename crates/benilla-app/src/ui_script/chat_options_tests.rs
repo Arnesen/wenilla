@@ -415,6 +415,7 @@ fn the_restore_event_repaints_the_window_from_the_store() {
             a: 255,
             font_size: 18,
             locked: true,
+            docked: Some(1),
         },
     )]);
     s.fire_event("UPDATE_CHAT_WINDOWS", vec![]);

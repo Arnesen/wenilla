@@ -207,7 +207,7 @@ impl Plugin for BindingsPlugin {
                         .before(benilla_world::schedule::WorldStage::Input)
                         .run_if(in_state(ClientState::InWorld)),
                     load_character_bindings.run_if(in_state(ClientState::InWorld)),
-                    save_bindings.after(load_character_bindings),
+                    drain_binding_requests.after(load_character_bindings),
                 ),
             );
     }
@@ -247,7 +247,15 @@ fn seed_bindings(
         script.seed_binding_set(1, Some(store::resolve(&[])));
     }
     script.load_binding_set(1);
-    info!("bindings: {} commands registered", SPECS.len());
+    // The pair, not just the first half: `SPECS` ∪ `ABSENT` is the client's whole 1.12 command
+    // surface, and a log line that says only how many landed cannot say how much is left
+    // (decision 1745).
+    info!(
+        "bindings: {} of {} 1.12 commands registered ({} recorded absent)",
+        SPECS.len(),
+        SPECS.len() + commands::ABSENT.len(),
+        commands::ABSENT.len()
+    );
 }
 
 /// Read + parse one diff file; `None` when absent/unreadable (defaults).
@@ -300,12 +308,36 @@ fn load_character_bindings(
     }
 }
 
-/// Persist on the window's SaveBindings (Okay): write the set's diff; saving account while a
-/// character file exists deletes it — the confirmed permanent delete.
-fn save_bindings(script: Option<NonSendMut<UiScript>>, files: Res<BindingFiles>) {
+/// Drain the VM's queued binding requests.
+///
+/// Two of them. `Save` persists on the window's SaveBindings (Okay): write the set's diff; saving
+/// account while a character file exists deletes it — the confirmed permanent delete. `Run` fires
+/// a named command's action outright, which is `RunBinding(name)` — the reference's own
+/// passthrough verb, whose one shipped caller is `CinematicFrame`'s `OnKeyDown` handing the
+/// SCREENSHOT chord back to its binding while it swallows every other key (decision 1724).
+fn drain_binding_requests(script: Option<NonSendMut<UiScript>>, files: Res<BindingFiles>) {
     let Some(mut script) = script else { return };
     for req in script.take_keybind_requests() {
-        let KeybindRequest::Save(which) = req;
+        // `RunBinding(name)` — fire the named command's action as if its chord had been pressed.
+        // Only the two Lua-bodied kinds can be run this way: a `Held`/`Host` command's action is a
+        // bit in the movement word, which a Lua call has no frame to assert for. The one shipped
+        // caller is `CinematicFrame`'s SCREENSHOT passthrough, and `SCREENSHOT` is `Kind::Edge`.
+        let which = match req {
+            KeybindRequest::Save(which) => which,
+            KeybindRequest::Run(name) => {
+                match SPECS.iter().find(|s| s.name == name).map(|s| &s.kind) {
+                    Some(Kind::Edge(lua)) | Some(Kind::EdgeUpDown(lua, _)) => {
+                        let lua = *lua;
+                        if let Err(e) = script.run(lua) {
+                            warn!("bindings(RunBinding {name}): {e}");
+                        }
+                    }
+                    Some(_) => warn!("RunBinding({name}): a held/engine action has no body to run"),
+                    None => warn!("RunBinding({name}): no such command"),
+                }
+                continue;
+            }
+        };
         let snapshot = script.keybind_snapshot();
         let text = store::to_diff(&snapshot);
         let path = match which {
@@ -360,6 +392,19 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
     }
     for (name, keys) in script.keybind_snapshot() {
         let Some(&bound) = by_name.get(name.as_str()) else {
+            // A name with no home: either an uninstalled addon's row (1201 keeps those on
+            // purpose) or a 1.12 command this client does not implement. The second case is the
+            // one that used to mystify — a player carrying their own bindings over presses the
+            // key they have always pressed and nothing happens, with nothing anywhere saying
+            // why. `ABSENT` knows why, so say it (decision 1745).
+            if let Some(absent) = commands::ABSENT.iter().find(|a| a.name == name) {
+                if !keys.is_empty() {
+                    warn!(
+                        "bindings: {name} is bound to {keys:?} but benilla does not implement it \u{2014} {}",
+                        absent.why
+                    );
+                }
+            }
             continue;
         };
         for key in keys {
@@ -477,7 +522,7 @@ fn latch_and_dispatch(
     // releases every direction bit, `0x514490`): Held latches clear once on the rising edge;
     // EdgeUpDown latches stay armed — their release half still fires (the reference delivers
     // the up of a pressed binding regardless).
-    let typing = capture.0;
+    let typing = capture.typing;
     if typing && !state.was_typing {
         state.latched.retain(|&(_, b)| match b {
             Bound::Spec(c) => !matches!(SPECS[c.0 as usize].kind, Kind::Held),
@@ -494,7 +539,19 @@ fn latch_and_dispatch(
         let key = chord::normalize_key(ev.key_code);
         match ev.state {
             ButtonState::Pressed => {
-                if armed || typing || sup || ev.repeat {
+                // The alt-arrow exemption: a focused box in alt-arrow mode declines the four
+                // arrows, so their bindings DO fire even while typing — which is the whole
+                // point of the flag (turn the camera with the chat box open). Every other key
+                // a focused box still swallows. See `UiKeyboardCapture::arrows_fall_through`.
+                let arrow_exempt = capture.arrows_fall_through
+                    && matches!(
+                        ev.key_code,
+                        KeyCode::ArrowLeft
+                            | KeyCode::ArrowRight
+                            | KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                    );
+                if armed || (typing && !arrow_exempt) || sup || ev.repeat {
                     continue;
                 }
                 if state.latched.iter().any(|&(k, _)| k == BindKey::Key(key)) {
@@ -971,6 +1028,54 @@ mod tests {
     /// same pair wearing one chunk, so it must follow the same rule — dropped on the focus edge,
     /// it would leave whatever its down half started running forever, with no key left to press
     /// to stop it.
+    /// **The alt-arrow exemption: you can turn while the chat box has focus.**
+    ///
+    /// A focused EditBox swallows every key — that is the reference's own handler returning 1 on
+    /// every path (`0x77b35e`) and our `UiKeyboardCapture::typing` gate. The four arrow codes are
+    /// the single exception: with the box in alt-arrow mode (`ignoreArrows` in XML,
+    /// `SetAltArrowKeyMode` in Lua) and ALT not held, the handler returns 0 at `0x77b1c4`, the
+    /// strata walk carries the key down to `CGWorldFrame`, and `ExecuteBinding` runs `TURNLEFT`.
+    /// The reference's own chat box ships the flag, so this is the default experience.
+    ///
+    /// benilla read the flag as "consumed but inert, unless Ctrl" until the §5
+    /// (`ignorearrows-alt-arrow-gate.md`) corrected both halves — the modifier is ALT, and the key
+    /// is not consumed at all. Under the old reading, holding LEFT with the chat box open did
+    /// nothing whatever.
+    #[test]
+    fn a_flagged_editbox_lets_the_arrow_keys_through_to_their_bindings() {
+        let mut app = harness();
+
+        // Typing with no exemption: the arrow is swallowed, exactly like every other key.
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
+        press_key(&mut app, KeyCode::ArrowLeft);
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::TURN_LEFT),
+            "an unflagged focused box eats the arrow"
+        );
+        release_key(&mut app, KeyCode::ArrowLeft);
+        app.update();
+
+        // Same key, same focus, exemption armed: the binding fires.
+        app.world_mut()
+            .resource_mut::<UiKeyboardCapture>()
+            .arrows_fall_through = true;
+        press_key(&mut app, KeyCode::ArrowLeft);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::TURN_LEFT),
+            "a flagged box declines the arrow, so TURNLEFT runs"
+        );
+
+        // And the exemption is FOUR KEYS, not a hole in the typing gate: W is still swallowed.
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            !state(&app).pressed(cmd::MOVE_FORWARD),
+            "only the arrows are exempt — every other key a focused box still eats"
+        );
+    }
+
     #[test]
     fn a_run_on_up_addon_latch_survives_the_typing_edge_and_still_releases() {
         let mut script = UiScript::new().expect("VM");
@@ -989,7 +1094,7 @@ mod tests {
         assert_eq!(lua_count(&app, "PROBE_DOWN"), 1);
 
         // A box takes focus: movement stops, the addon's latch stays.
-        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = true;
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
         assert!(!state(&app).pressed(cmd::MOVE_FORWARD));
         assert_eq!(
@@ -1348,7 +1453,7 @@ mod tests {
         assert!(state(&app).pressed(cmd::MOVE_FORWARD));
         // A box takes focus: movement stops (the reference's focus handler releases the
         // direction bits), and new presses do nothing.
-        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = true;
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
         assert!(
             !state(&app).pressed(cmd::MOVE_FORWARD),
@@ -1362,7 +1467,7 @@ mod tests {
         );
         // Focus drops; keys work again.
         release_key(&mut app, KeyCode::KeyX);
-        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = false;
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = false;
         app.update();
         press_key(&mut app, KeyCode::KeyX);
         app.update();
@@ -1444,32 +1549,33 @@ mod tests {
     /// globals directly, so they could not see that BOTH chords were registered on one command;
     /// the registry tests read the table, so they could not see what the bodies do. Only pressing
     /// the key joins the two.
+    ///
+    /// **The windows on the far end are the reference's own now** (1751). `BenillaBagFrame`/
+    /// `BenillaBagFrame2` were five static frames our `BagFrame.xml` declared, so this test could
+    /// name them and load six files by hand; the live windows are `ContainerFrame1..12`, generated
+    /// on demand off the player's chain and RECYCLED across containers, so the question is
+    /// `IsBagOpen(id)` and never a frame name. Two consequences, both deliberate:
+    ///   * the interface is loaded with the app's own [`crate::ui_script::load_default_ui`] rather
+    ///     than a hand-listed six, because the chain half of the manifest is what makes the bag
+    ///     windows exist at all and a private six-file reader cannot express it — which also makes
+    ///     this test the load order the player gets;
+    ///   * it needs client data, like every test that touches a chain entry.
     #[test]
     fn b_opens_the_backpack_and_shift_b_opens_every_bag() {
+        let _data = benilla_formats::wow_data_or_skip!();
         let mut script = UiScript::new().expect("VM");
         script.register_bindings(&registry_commands());
         script.set_screen_size(1024.0, 768.0);
-        for file in [
-            "Fonts.xml",
-            "MoneyFrame.xml",
-            "UiPanels.xml",
-            "MerchantFrame.xml",
-            "Cooldown.xml",
-            "BagFrame.xml",
-        ] {
-            let text = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("assets/ui")
-                    .join(file),
-            )
-            .expect("shipped asset");
-            let doc = benilla_ui::framexml::parse(&text).expect("parse");
-            let report = benilla_ui::loader::load(&script, &doc, &|_| None);
-            assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
-        }
+        let failures = crate::ui_script::load_default_ui(&script);
+        assert!(
+            failures.is_empty(),
+            "default UI failed to load: {failures:?}"
+        );
         script.set_money(0);
         // The backpack, plus one equipped bag in slot 2 — so "all bags" is two windows and
-        // "the backpack alone" is visibly different from it.
+        // "the backpack alone" is visibly different from it. Fed BEFORE any key: the reference
+        // builds a window only for a container that exists (`OpenBag`'s `size > 0` gate), where
+        // our own `BenillaBagFrame*` were static frames that showed regardless.
         script.set_container(
             0,
             Some(benilla_ui::script::ContainerState {
@@ -1487,10 +1593,12 @@ mod tests {
             }),
         );
         let mut app = vm_harness(script);
-        let shown = |app: &App, name: &str| {
+        // `IsBagOpen(id)` — the reference's own scan over `ContainerFrame1..12`, and the only
+        // honest way to ask: which window a bag lands in depends on what else is open.
+        let open = |app: &App, id: i64| {
             app.world()
                 .non_send_resource::<UiScript>()
-                .eval::<bool>(&format!("return {name}:IsShown()"))
+                .eval::<bool>(&format!("return IsBagOpen({id}) ~= nil"))
                 .expect("eval")
         };
 
@@ -1499,9 +1607,9 @@ mod tests {
         app.update();
         release_key(&mut app, KeyCode::KeyB);
         app.update();
-        assert!(shown(&app, "BenillaBagFrame"), "B opens the backpack");
+        assert!(open(&app, 0), "B opens the backpack");
         assert!(
-            !shown(&app, "BenillaBagFrame2"),
+            !open(&app, 2),
             "B does NOT open the equipped bag — this is the bug 1494 fixes"
         );
 
@@ -1510,7 +1618,7 @@ mod tests {
         app.update();
         release_key(&mut app, KeyCode::KeyB);
         app.update();
-        assert!(!shown(&app, "BenillaBagFrame"), "B again shuts it");
+        assert!(!open(&app, 0), "B again shuts it");
 
         // SHIFT-B — OPENALLBAGS' shipped default, a DIFFERENT command with a different body.
         press_key(&mut app, KeyCode::ShiftLeft);
@@ -1518,10 +1626,7 @@ mod tests {
         app.update();
         release_key(&mut app, KeyCode::KeyB);
         app.update();
-        assert!(
-            shown(&app, "BenillaBagFrame") && shown(&app, "BenillaBagFrame2"),
-            "SHIFT-B opens every bag"
-        );
+        assert!(open(&app, 0) && open(&app, 2), "SHIFT-B opens every bag");
 
         // …and closes them again, the count now reading all-open.
         press_key(&mut app, KeyCode::KeyB);
@@ -1530,7 +1635,7 @@ mod tests {
         release_key(&mut app, KeyCode::ShiftLeft);
         app.update();
         assert!(
-            !shown(&app, "BenillaBagFrame") && !shown(&app, "BenillaBagFrame2"),
+            !open(&app, 0) && !open(&app, 2),
             "SHIFT-B again shuts them all"
         );
     }

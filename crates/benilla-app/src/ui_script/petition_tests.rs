@@ -255,7 +255,7 @@ fn request_signature_disables_at_the_wires_requirement_not_at_nine() {
     .unwrap();
     show_petition(&mut s);
     assert!(
-        s.eval::<bool>("return PetitionFrameRequestButton:IsEnabled() and true or false")
+        s.eval::<bool>("return PetitionFrameRequestButton:IsEnabled() ~= 0")
             .unwrap(),
         "three of four signatures — still asking"
     );
@@ -264,7 +264,7 @@ fn request_signature_disables_at_the_wires_requirement_not_at_nine() {
         .unwrap();
     show_petition(&mut s);
     assert!(
-        !s.eval::<bool>("return PetitionFrameRequestButton:IsEnabled() and true or false")
+        !s.eval::<bool>("return PetitionFrameRequestButton:IsEnabled() ~= 0")
             .unwrap(),
         "four of four — the charter is full, though only four of nine rows are used"
     );
@@ -282,13 +282,13 @@ fn the_sign_button_follows_can_sign_petition() {
     let mut s = setup();
     show_petition(&mut s);
     assert!(s
-        .eval::<bool>("return PetitionFrameSignButton:IsEnabled() and true or false")
+        .eval::<bool>("return PetitionFrameSignButton:IsEnabled() ~= 0")
         .unwrap());
 
     s.run("BenillaPetitionFixture.canSign = nil").unwrap();
     show_petition(&mut s);
     assert!(
-        !s.eval::<bool>("return PetitionFrameSignButton:IsEnabled() and true or false")
+        !s.eval::<bool>("return PetitionFrameSignButton:IsEnabled() ~= 0")
             .unwrap(),
         "nil, the era false, disables it"
     );

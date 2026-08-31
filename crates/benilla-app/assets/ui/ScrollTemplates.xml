@@ -385,7 +385,13 @@
         -- every-frame write would fight the resolver).
         function BenillaScroll_ResizeChild(scrollName, widgets)
             local sf = getglobal(scrollName)
-            local child = getglobal(scrollName .. "Child")
+            -- ASK THE FRAME, don't guess a name. This used to be
+            -- `getglobal(scrollName .. "Child")`, which only ever worked because every caller wore
+            -- a private name in that exact shape — the reference's own convention is
+            -- `<X>ScrollFrame` / `<X>ScrollChildFrame`, not a suffix, so the derivation broke the
+            -- moment QuestFrame took the reference's names. A ScrollFrame knows its own child.
+            local child = sf:GetScrollChild()
+            if not child then return false end
             local top = child:GetTop()
             if not top then return false end
             local bottom = nil

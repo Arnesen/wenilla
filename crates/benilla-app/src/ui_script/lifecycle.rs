@@ -138,11 +138,12 @@ fn ui_wanted(world: &World) -> bool {
 /// reference sourcing + 55 files + addons + saved vars + `PLAYER_LOGIN` → 48.83) — the
 /// director's "frozen char for 1 sec" at every Enter World.
 ///
-/// The counter counts covered+in-world frames, exactly like the warm pass: renders are serial,
-/// so at [`ENTRY_LOAD_COVER_FRAMES`] the two intermediate frames' renders — which draw the
-/// cover — have committed their presents before this frame's stall begins. The loading screen
-/// folds this resource's existence into its clear condition, so a reveal can never precede the
-/// UI it is supposed to reveal.
+/// The wait itself is [`crate::loading_screen::EntryCover`]'s — one count of covered+in-world
+/// frames for the whole client (upstream folded the warm pass's, this latch's and the world
+/// camera's identical counters into it). So the latch here marks *is the entry UI still owed?*
+/// and, since the slicing, *where the load is*; the timing question is answered in one place.
+/// The loading screen folds this resource's existence into its clear condition, so a reveal can
+/// never precede the UI it is supposed to reveal.
 ///
 /// **Since the world-entry slicing (2026-08-31) the load is a resumable state machine, not one
 /// burst.** Measured on the page: the whole edge — reference sourcing, ~55 FrameXML/Lua files
@@ -156,7 +157,6 @@ fn ui_wanted(world: &World) -> bool {
 /// clears only after it is gone.
 #[derive(Resource, Default)]
 pub(crate) struct PendingEntryUiLoad {
-    covered_frames: u32,
     stage: EntryStage,
     /// Steps done / total, for the loading bar. `total` is known after the first step.
     done: usize,
@@ -202,10 +202,6 @@ enum EntryStage {
     Finish,
 }
 
-/// Covered+in-world frames before the entry load runs — the same present proxy, and the same
-/// value, as `pipe_warm::WARM_COVER_PRESENT_FRAMES` (0962's argument, restated there).
-const ENTRY_LOAD_COVER_FRAMES: u32 = 3;
-
 /// How much of one frame the entry load may spend before yielding to the next. At least one
 /// step always runs, so a single slow file still makes progress; the budget only decides
 /// whether a *second* step starts. Small on purpose: the frames it yields to are the loading
@@ -230,7 +226,7 @@ pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
 /// the frames built moments later do their first paint with no first paint. That is not a
 /// hypothetical ordering — it is a RACE against the wire, which is why it took some logins and not
 /// others, and why the symptom moved between characters. The self descriptor arriving inside the
-/// [`ENTRY_LOAD_COVER_FRAMES`] deferral window is all it takes.
+/// deferral window is all it takes.
 ///
 /// The reference has no such window: `UI_Init 0x48fbf0` loads all of FrameXML and *then* fires the
 /// world-enter cascade (`PLAYER_LOGIN` at `0x49094b`, `PLAYER_ENTERING_WORLD` at `0x490965`) from
@@ -266,12 +262,16 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     let covering = world
         .get_resource::<crate::loading_screen::LoadingScreen>()
         .is_some_and(|s| s.covering());
-    if covering && world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed {
-        let mut pending = world.resource_mut::<PendingEntryUiLoad>();
-        pending.covered_frames += 1;
-        if pending.covered_frames < ENTRY_LOAD_COVER_FRAMES {
-            return;
-        }
+    // The wait is [`crate::loading_screen::EntryCover`]'s, not a second count of the same frames
+    // (upstream's fold; `presented()` is already true with no cover up, which is the "nothing
+    // watching the previous present, load now" arm). Only the first step waits: once the sliced
+    // load is under way the cover is on the glass by construction.
+    if world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed
+        && !world
+            .get_resource::<crate::loading_screen::EntryCover>()
+            .is_none_or(|c| c.presented())
+    {
+        return;
     }
     // One frame's slice: steps until the budget is spent (at least one), then yield. The VM
     // leaves the world for the slice and comes back at its end, so every other system sees it
@@ -298,9 +298,11 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 pending.version_check = version_check;
                 pending.covering = covering;
                 pending.started = Some(frame_start);
-                // sourced (done above) + files after index 0 + positions + addons + finish
-                pending.total = 1 + files.len().saturating_sub(1) + 3;
-                pending.done = 1;
+                // manifest entries after index 0 (the font registry, loaded at boot) + positions
+                // + addons + finish. The reference's own files are manifest entries too (1751),
+                // so they slice like ours.
+                pending.total = files.len().saturating_sub(1) + 3;
+                pending.done = 0;
                 pending.files = files;
                 pending.stage = EntryStage::Builtin { next: 1 };
             }
@@ -310,7 +312,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                     let file = &pending.files[next..next + 1];
                     // Errors are logged by the loader itself and retained for `/errors`; the
                     // one-shot path discards them too.
-                    let _ = Addon::builtin().load_files(&script, file);
+                    let _ = super::manifest::load_manifest(&script, file);
                     let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                     pending.done += 1;
                     pending.stage = EntryStage::Builtin { next: next + 1 };
@@ -362,7 +364,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
 }
 
 /// The entry load's opening: the identity the addons see, the realm and player the file scopes
-/// read, the instruction bound, and the reference FrameXML sourced off the chain. Shared by the
+/// read, and the instruction bound (the reference FrameXML is a manifest entry now). Shared by the
 /// sliced entry load and the one-shot [`load_ingame_ui_on_world_entry`]; the *why* of each line
 /// lives on the one-shot below.
 fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, String)>, bool) {
@@ -389,7 +391,6 @@ fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, S
                 .is_none_or(crate::cvars::CvarPersist::addon_version_check)
         });
     script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
-    super::reference_ui::load_sourced(script);
     (identity, version_check)
 }
 
@@ -675,7 +676,8 @@ pub(crate) fn end_ui_session(world: &mut World) {
         hover.0 = None;
     }
     if let Some(mut keys) = world.get_resource_mut::<UiKeyboardCapture>() {
-        keys.0 = false;
+        keys.typing = false;
+        keys.arrows_fall_through = false;
     }
     if let Some(mut held) = world.get_resource_mut::<CursorPayloadHeld>() {
         *held = CursorPayloadHeld::default();

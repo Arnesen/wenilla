@@ -2,7 +2,7 @@
 
 use super::common::script;
 use crate::script::*;
-use crate::widget::{MINIMAP_DEFAULT_ZOOM, MINIMAP_ZOOM_LEVELS};
+use crate::widget::{MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN, MINIMAP_ZOOM_LEVELS};
 
 /// A `<Minimap>`-kind frame carries its zoom out through extraction as [`QuadContent::Minimap`]
 /// at the frame's own draw slot, and the zoom API clamps like the client's `set_zoom` (0..=5).
@@ -188,4 +188,108 @@ fn zooming_without_a_registered_cvar_table_is_silent() {
         s.take_warnings().is_empty(),
         "no warning for an engine write"
     );
+}
+
+/// **The nine engine-created `Model` children, and why `[9]` is the player arrow.**
+///
+/// The `CMinimap` ctor `0x4edbc0` builds nine `CSimpleModel` children parented to the Minimap
+/// before anything else touches the widget, in three source-ordered groups (`__LINE__` 1424 / 1438
+/// / 1450 — wow-re `ui/scratch/widget-list-bindings.md` §5, VERIFIED), the last being
+/// `[Minimap+0x338]`, the player arrow. Because both linkers append at the tail and the ctor runs
+/// before the XML `<Frames>` descent, `({Minimap:GetChildren()})[9]` is that arrow on a stock
+/// client — which is exactly what Questie's `QuestieArrow.lua` and pfQuest's `compat/client.lua`
+/// index, unguarded, to read the player's heading.
+///
+/// This test is written the way those addons read it, not the way we store it.
+#[test]
+fn a_minimap_is_born_with_nine_model_children_and_the_ninth_is_the_player_arrow() {
+    let mut s = script();
+    s.run(r#"m = CreateFrame("Minimap", "TestMinimap")"#)
+        .unwrap();
+
+    assert_eq!(
+        s.eval::<usize>("return m:GetNumChildren()").unwrap(),
+        MINIMAP_ENGINE_CHILDREN,
+        "a fresh Minimap has the ctor's nine and nothing else"
+    );
+    assert_eq!(
+        s.eval::<String>("return ({m:GetChildren()})[9]:GetObjectType()")
+            .unwrap(),
+        "Model",
+        "all nine are Models — index 9 included"
+    );
+    assert!(s
+        .eval::<bool>(
+            "local n = 0 for _, c in ipairs({m:GetChildren()}) do \
+             if c:GetObjectType() == 'Model' then n = n + 1 end end return n == 9"
+        )
+        .unwrap());
+
+    // Questie's `GetPlayerFacing()`, verbatim. It is `0` until the app pushes, which is the
+    // client's own ctor default (`[frame+0x39c] = 0` at `0x76c92d`) — not nil, and not an error.
+    s.run("function GetPlayerFacing() return ({Minimap:GetChildren()})[9]:GetFacing() end")
+        .unwrap();
+    s.run(r#"Minimap = m"#).unwrap();
+    assert_eq!(s.eval::<f32>("return GetPlayerFacing()").unwrap(), 0.0);
+
+    // `SetPlayerFacing 0x4eb8e0` writes the argument into `[[minimap+0x338]+0x39c]` VERBATIM — no
+    // negation, no offset, no unit change (a `mov [ecx+0x39c],edx` of the dword it was handed).
+    s.set_minimap_player_facing(2.5);
+    assert_eq!(s.eval::<f32>("return GetPlayerFacing()").unwrap(), 2.5);
+
+    // It reaches the arrow through the Minimap's own slot, so an addon appending its own child
+    // cannot displace it: a later `CreateFrame(_, _, Minimap)` lands at index 10.
+    s.run(r#"extra = CreateFrame("Frame", nil, m)"#).unwrap();
+    s.set_minimap_player_facing(-1.25);
+    assert_eq!(s.eval::<f32>("return GetPlayerFacing()").unwrap(), -1.25);
+    assert_eq!(
+        s.eval::<usize>("return m:GetNumChildren()").unwrap(),
+        MINIMAP_ENGINE_CHILDREN + 1
+    );
+    assert_eq!(
+        s.eval::<String>("return ({m:GetChildren()})[10]:GetObjectType()")
+            .unwrap(),
+        "Frame"
+    );
+
+    // The ctor only *constructs* them; the model files are `CMinimap::LoadXML 0x4ee2b0`'s to
+    // assign, so a Lua-built Minimap with no XML behind it has nine file-less Models — exactly as
+    // the reference does.
+    assert!(s
+        .eval::<Option<String>>("return ({m:GetChildren()})[9]:GetModel()")
+        .unwrap()
+        .is_none_or(|p| p.is_empty()));
+}
+
+/// **`Minimap:SetMaskTexture` is state, and an empty path restores the default rather than
+/// unmasking the map.**
+///
+/// A real 1.12 method (the name is in the 5875 image) with no getter beside it, so the readback
+/// here is through the arena — the same shape `simplehtml`'s and `modelframe`'s tests use for a
+/// write-only verb. pfUI's `modules/minimap.lua:27` is the caller that matters: swapping this art
+/// is how its square minimap becomes square.
+#[test]
+fn set_mask_texture_is_state_and_empty_restores_the_default() {
+    let s = script();
+    s.run(r#"m = CreateFrame("Minimap", "TestMinimap")"#)
+        .unwrap();
+    assert_eq!(s.minimap_mask_texture(), None, "fresh = the engine default");
+
+    s.run(r#"m:SetMaskTexture("Interface\\AddOns\\pfUI\\img\\minimap")"#)
+        .unwrap();
+    assert_eq!(
+        s.minimap_mask_texture().as_deref(),
+        Some("Interface\\AddOns\\pfUI\\img\\minimap")
+    );
+
+    // Empty and nil both mean "back to the engine's circle" — never "no mask at all". A
+    // nil-means-unmasked reading would hand every mistyped path a silently square minimap.
+    s.run(r#"m:SetMaskTexture("")"#).unwrap();
+    assert_eq!(s.minimap_mask_texture(), None);
+    s.run(r#"m:SetMaskTexture("Interface\\Foo") m:SetMaskTexture(nil)"#)
+        .unwrap();
+    assert_eq!(s.minimap_mask_texture(), None);
+
+    // There is no getter in 1.12, and we do not invent one (decision 1189).
+    assert!(s.eval::<bool>("return m.GetMaskTexture == nil").unwrap());
 }

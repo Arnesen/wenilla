@@ -33,9 +33,9 @@ pub use install::{candidates, wow_data};
 pub mod web;
 mod characters;
 pub use characters::{
-    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile,
-    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EquipBlit, EquipGeosets,
-    StartOutfitItem,
+    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, BlitSource,
+    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer, EquipBlit,
+    EquipGeosets, GuildEmblem, StartOutfitItem,
 };
 mod camera_shakes;
 mod cinematics;
@@ -288,6 +288,8 @@ mod chat_channels;
 pub use chat_channels::{
     flags as chat_channel_flags, load_chat_channels_catalog, ChatChannelRow, ChatChannelsCatalog,
 };
+mod server_messages;
+pub use server_messages::{load_server_messages_catalog, ServerMessagesCatalog};
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
 mod zone_map;

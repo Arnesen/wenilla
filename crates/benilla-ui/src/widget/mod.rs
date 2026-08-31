@@ -175,10 +175,11 @@ mod kinds;
 pub use kinds::{
     slider_fraction, slider_grab, ButtonFont, ButtonState, ColorSelectState, CooldownState,
     EditAction, EditBoxState, EditOutcome, EditUnit, FrameKind, InsertMode, KindState,
-    MessageFrameState, MessageLine, MinimapState, RegionKind, ScrollFrameState,
+    MessageFrameState, MessageLine, MinimapState, ModelState, RegionKind, ScrollFrameState,
     ScrollingMessageState, SliderState, StatusBarState, TooltipState, COOLDOWN_FLASH_SECS,
-    MINIMAP_DEFAULT_ZOOM, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS,
-    TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
+    MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK, MINIMAP_DEFAULT_PLAYER_MODEL,
+    MINIMAP_DEFAULT_ZOOM, MINIMAP_ENGINE_CHILDREN, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP,
+    TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -197,6 +198,19 @@ pub use kinds::{
 pub struct Frame {
     /// The widget subtype.
     pub kind: FrameKind,
+    /// Draw layers switched OFF on this frame — bit `n` = [`DrawLayer::index`] `n`.
+    ///
+    /// `Frame:EnableDrawLayer(layer)` / `DisableDrawLayer(layer)`, VERIFIED present on the Frame
+    /// method table `0x878ec0` at `0x7755b0` / `0x775680`, sitting between `IsToplevel` and `Show`.
+    /// (Read off the `{const char*, void*}` pair bytes; the same walk reproduces wow-re's recorded
+    /// Button table at `0x879d00` exactly.)
+    ///
+    /// A disabled layer hides every region the frame owns in it, and the region's own `Show`/`Hide`
+    /// is untouched underneath — re-enabling the layer brings back exactly what was showing before,
+    /// which is why this is a frame-level mask rather than a sweep over the regions. Both corpus
+    /// consumers (pfUI, MoveAnything) use it to strip Blizzard artwork off a frame they are
+    /// reskinning without disturbing what the owner does to its own regions.
+    pub disabled_layers: u8,
     /// The frame's name (its global identifier), if any. See [`WidgetArena::lookup`] for the
     /// non-overwriting publish rule.
     pub name: Option<String>,
@@ -418,6 +432,13 @@ pub struct WidgetArena {
     /// corpus UI, to reach the two or three that exist. Appended at creation (kinds never change);
     /// `destroy` removes its own handle, so the list never carries dead entries.
     tooltip_kinds: Vec<FrameHandle>,
+    /// Every live **Minimap**, same registry shape as [`Self::ticked_kinds`] and for the same
+    /// reason: three state feeds (containment, the two zoom indices, and the player-arrow facing)
+    /// all begin "find the Minimaps", and the facing is *per frame*. The ping's own lesson
+    /// (decision 1596) was that a per-widget push must not walk the ~3–4k-frame arena every frame
+    /// to reach the one widget that exists. Appended at creation (kinds never change); `destroy`
+    /// removes its own handle.
+    minimap_kinds: Vec<FrameHandle>,
 }
 
 impl Default for WidgetArena {
@@ -437,6 +458,7 @@ impl WidgetArena {
             minimap_created: 0,
             ticked_kinds: Vec::new(),
             tooltip_kinds: Vec::new(),
+            minimap_kinds: Vec::new(),
         }
     }
 
@@ -453,6 +475,11 @@ impl WidgetArena {
     /// The live GameTooltip frames (see the field note).
     pub fn tooltip_kinds(&self) -> &[FrameHandle] {
         &self.tooltip_kinds
+    }
+
+    /// The live Minimap frames (see the field note).
+    pub fn minimap_kinds(&self) -> &[FrameHandle] {
+        &self.minimap_kinds
     }
 
     // ── Read access ────────────────────────────────────────────────────────────────────────────
@@ -562,6 +589,7 @@ impl WidgetArena {
         let effective_alpha = alpha;
 
         let frame = Frame {
+            disabled_layers: 0,
             kind,
             name: name.clone(),
             parent,
@@ -645,6 +673,12 @@ impl WidgetArena {
                 FrameKind::ColorSelect => {
                     KindState::ColorSelect(kinds::ColorSelectState::default())
                 }
+                // Both model panes share one state: `CGCharacterModelBase` EXTENDS `CSimpleModel`,
+                // so a `<PlayerModel>` carries every `CSimpleModel` member and adds only the
+                // turn-animation pair we do not model (`ModelState`'s doc).
+                FrameKind::Model | FrameKind::PlayerModel => {
+                    KindState::Model(kinds::ModelState::default())
+                }
                 FrameKind::Minimap => KindState::Minimap(kinds::MinimapState::default()),
                 FrameKind::Cooldown => KindState::Cooldown(kinds::CooldownState::default()),
                 FrameKind::GameTooltip => KindState::Tooltip(kinds::TooltipState::default()),
@@ -668,7 +702,6 @@ impl WidgetArena {
         if matches!(kind, FrameKind::GameTooltip) {
             self.tooltip_kinds.push(handle);
         }
-
         if let Some(p) = parent {
             self.frame_mut(p)
                 .expect("live parent")
@@ -679,7 +712,77 @@ impl WidgetArena {
             // Non-overwriting: first writer wins.
             self.names.entry(n).or_insert(handle);
         }
+        if matches!(kind, FrameKind::EditBox) {
+            self.build_editbox_engine_regions(handle);
+        }
+        if matches!(kind, FrameKind::Minimap) {
+            self.minimap_kinds.push(handle);
+            // The `CMinimap` ctor's own last act, so no observer ever sees a Minimap without its
+            // nine (see [`MINIMAP_ENGINE_CHILDREN`]). It sits here rather than in the loader
+            // because the client builds them in the *element factory* — `CreateFrame("Minimap")`
+            // from Lua gets them too, and gets them before its OnLoad runs.
+            self.build_minimap_engine_children(handle);
+        }
         handle
+    }
+
+    /// Build the **five engine-owned regions of a fresh EditBox**, in the ctor's own order — the
+    /// same posture as [`Self::build_minimap_engine_children`] below, and for the same reason: the
+    /// client builds them in `CSimpleEditBox`'s ctor, so a `CreateFrame("EditBox")` with no XML
+    /// behind it has them too, before its OnLoad runs.
+    ///
+    /// wow-re `system/ui/scratch/rf85-editbox-caret.md` §1, all VERIFIED off bytes:
+    ///
+    /// | # | region | ctor site | built by |
+    /// |---|---|---|---|
+    /// | 1 | text FontString `E+0x328` | `0x779bee` | `0x770d30(E, 2, 1)` |
+    /// | 2-4 | selection-highlight quads `E+0x350/0x354/0x358` | `0x779c41`–`0x779c72` | `0x76fc40(E, 2, 0)` |
+    /// | 5 | caret `E+0x368` | `0x779c86`–`0x779cac` | `0x76fc40(E, 3, 1)` |
+    ///
+    /// **Why the ORDER is the whole point.** `GetRegions 0x773f60` walks `[frame+0x1b8]` — one flat
+    /// creation-ordered list, oldest first, with **no filter** (hidden regions are returned and
+    /// counted), and insertion is at the TAIL (`scratch/widget-list-bindings.md`). All five reach
+    /// that list through `0x77fd10`, the single linker. So on a real client the authored `<Layers>`
+    /// regions start at index **6**, and an addon may index them there.
+    ///
+    /// pfUI's `skins/blizzard/friends.lua` l.379 is the report:
+    /// `local _,_,_,_,_,left,right = GuildControlPopupFrameEditBox:GetRegions()` — it skips five and
+    /// takes the box's two `UI-ChatInputBorder` textures. Before this, benilla returned only the
+    /// authored regions, so `left` was nil and the whole guild-control skin died on it.
+    ///
+    /// The four quads are created blank — no texture, no fill — so they emit nothing; benilla's
+    /// caret and selection highlight are still painted host-side. That gap is named on the
+    /// [`EditBoxState`](kinds::EditBoxState) fields rather than papered over.
+    fn build_editbox_engine_regions(&mut self, eb: FrameHandle) {
+        // The text region keeps the OVERLAY/0 layer it has always shipped with; the ctor's own
+        // 2/1 is recorded on the field and deferred there (a draw-order change to every EditBox
+        // is not a rider on a region-list fix).
+        let text = self.create_region(eb, RegionKind::FontString, DrawLayer::Overlay, 0);
+        let mut selection = [None; 3];
+        for slot in &mut selection {
+            *slot = self.create_region(eb, RegionKind::Texture, DrawLayer::Artwork, 0);
+        }
+        let caret = self.create_region(eb, RegionKind::Texture, DrawLayer::Overlay, 1);
+        if let Some(KindState::EditBox(s)) = self.frame_mut(eb).map(|f| &mut f.kind_state) {
+            s.text_region = text;
+            s.selection_regions = selection;
+            s.caret_region = caret;
+        }
+    }
+
+    /// Build the nine engine-owned `Model` children of a fresh Minimap and remember the ninth as
+    /// its player arrow. They are created **anonymous and file-less**: the ctor only constructs
+    /// them, and the model paths are `CMinimap::LoadXML 0x4ee2b0`'s to assign from the two
+    /// attributes (the loader's minimap pass) — which is why a `CreateFrame("Minimap")` with no XML
+    /// behind it has nine blank Models here, exactly as the reference does.
+    fn build_minimap_engine_children(&mut self, minimap: FrameHandle) {
+        let mut ninth = None;
+        for _ in 0..kinds::MINIMAP_ENGINE_CHILDREN {
+            ninth = Some(self.create(FrameKind::Model, None, Some(minimap)));
+        }
+        if let Some(KindState::Minimap(m)) = self.frame_mut(minimap).map(|f| &mut f.kind_state) {
+            m.player_arrow = ninth;
+        }
     }
 
     /// Destroy a frame and its whole subtree (child frames and all regions), unpublishing any names
@@ -695,6 +798,7 @@ impl WidgetArena {
         // Each (recursive) destroy removes its own handle — the tick registry stays dead-free.
         self.ticked_kinds.retain(|&t| t != h);
         self.tooltip_kinds.retain(|&t| t != h);
+        self.minimap_kinds.retain(|&t| t != h);
 
         for c in children {
             self.destroy(c);

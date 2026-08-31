@@ -165,13 +165,22 @@ fn shipped_multibars_drive_end_to_end() {
     // a bonus page is active (the ref's fork: only the main bar re-pages).
     s.mouse_button(26.0, 75.0, "LeftButton", true);
     s.mouse_button(26.0, 75.0, "LeftButton", false);
-    assert_eq!(s.take_action_uses(), vec![61]);
+    assert_eq!(
+        s.take_action_uses()
+            .into_iter()
+            .map(|u| u.action)
+            .collect::<Vec<_>>(),
+        vec![61]
+    );
     s.set_bonus_bar_offset(1);
     s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
     s.mouse_button(26.0, 75.0, "LeftButton", true);
     s.mouse_button(26.0, 75.0, "LeftButton", false);
     assert_eq!(
-        s.take_action_uses(),
+        s.take_action_uses()
+            .into_iter()
+            .map(|u| u.action)
+            .collect::<Vec<_>>(),
         vec![61],
         "a bonus page never re-pages a multibar"
     );

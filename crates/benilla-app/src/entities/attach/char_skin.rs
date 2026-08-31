@@ -80,6 +80,24 @@ pub(super) fn resolve_char_look(
             },
         });
     }
+    // A **corpse** that is not a bone pile (decision 1706): its look is its own
+    // `CORPSE_FIELD_BYTES_1/_2` snapshot, taken at death — not the owner's live `PLAYER_BYTES`,
+    // which the corpse cannot see and which may belong to a player who has since logged out. This
+    // is the reference's own source: `0x5d6260` reads `[[corpse+0x110]+0x69..+0x6f]` into the
+    // corpse's own `CCharacterComponent`. A bone pile builds no component and reads `None` here,
+    // which is exactly `0x5d6291`'s early skip.
+    if net.kind == EntityKind::Corpse && d.is_character_body {
+        let look = super::super::corpse::corpse_char_look(stores.get(entity).ok())?;
+        return Some(CharLook {
+            race: look.race,
+            sex: look.sex,
+            skin: look.skin,
+            hair_style: look.hair_style,
+            hair_color: look.hair_color,
+            facial_hair: look.facial_hair,
+            body: BodySkin::Composite { face: look.face },
+        });
+    }
     if net.kind == EntityKind::Player && d.is_character_body {
         // A player wearing a character body. Race/sex come from `UNIT_FIELD_BYTES_0`; the
         // `PLAYER_BYTES` / `PLAYER_BYTES_2` customization is *optional on the wire* — vmangos omits an
@@ -131,6 +149,11 @@ pub(super) struct WornEquip {
     pub(super) bodyslots: [u32; 8],
     pub(super) cloak: u32,
     pub(super) helm: u32,
+    /// The wearer's guild tabard (decision 1704) — a **player's** only, off their resolved
+    /// [`super::Equipment`]. A character-model NPC has no guild: CreatureDisplayInfoExtra carries
+    /// no guild column, and a display-driven body never joins one, so this stays `None` there and a
+    /// tabard in an NPC's bodyslot-9 column keeps its own art.
+    pub(super) emblem: Option<benilla_formats::GuildEmblem>,
 }
 
 pub(super) fn resolve_worn_equip(
@@ -139,11 +162,16 @@ pub(super) fn resolve_worn_equip(
     dm: Option<&DisplayModel>,
 ) -> WornEquip {
     match net.kind {
-        EntityKind::Player => equipment
+        // A **corpse** rides the player arm (decision 1706): its `Equipment` is resolved from the
+        // 19 `CORPSE_FIELD_ITEM` slots, which are already ItemDisplayInfo ids — the same values a
+        // player's items resolve to, so the geoset + region-composite law downstream is literally
+        // the same law, on a different source.
+        EntityKind::Player | EntityKind::Corpse => equipment
             .map(|e| WornEquip {
                 bodyslots: e.bodyslots,
                 cloak: e.cloak,
                 helm: e.helm,
+                emblem: e.emblem,
             })
             .unwrap_or_default(),
         // A character-model NPC's worn gear ships in its display's CreatureDisplayInfoExtra columns
@@ -155,6 +183,7 @@ pub(super) fn resolve_worn_equip(
                 bodyslots: std::array::from_fn(|i| npc.equipment[i + 2]),
                 cloak: 0,
                 helm: npc.equipment[0],
+                emblem: None,
             })
             .unwrap_or_default(),
         _ => WornEquip::default(),
@@ -238,6 +267,10 @@ pub(super) fn build_char_skin_materials(
     // equip ids don't paint here — they drive the geosets only. `[0; 8]`/`0`/`None` = the naked body.
     equip: [u32; 8],
     cloak: u32,
+    // The wearer's guild tabard (decision 1704), painted over the torso layers of a tabard whose
+    // display asks for it. `None` = no guild, or its identity has not arrived; both leave the
+    // tabard garment showing its own art.
+    emblem: Option<benilla_formats::GuildEmblem>,
     displays: Option<&super::super::ItemDisplays>,
     sections: Option<&SkinSections>,
     world_assets: Option<&WorldAssets>,
@@ -279,6 +312,7 @@ pub(super) fn build_char_skin_materials(
                 hair_style: look.hair_style,
                 hair_color: look.hair_color,
                 equip,
+                emblem,
             };
             match skin_cache.fetch(&key) {
                 Some(handle) => Some(handle),
@@ -307,6 +341,7 @@ pub(super) fn build_char_skin_materials(
                             key.hair_style,
                             key.hair_color,
                             worn,
+                            key.emblem,
                         )
                         .ok()??;
                     // Through the upload gate like every other texture: a composite is

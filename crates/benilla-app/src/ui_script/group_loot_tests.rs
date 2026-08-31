@@ -239,7 +239,25 @@ fn start_loot_roll_claims_frames_in_order_and_paints_the_roll() {
     // proof loot_tests.rs runs for LootSlot. Roll 7 is BIND-ON-PICKUP, so the seam's gate holds
     // the vote back and asks instead (decision 0594): nothing on the wire until the popup is
     // accepted.
-    let (nx, ny) = quad_center(&quads, "UI-GroupLoot-Dice-Up");
+    //
+    // Taken BY NAME, not by painter order. This used to be
+    // `quad_center(&quads, "UI-GroupLoot-Dice-Up")` — the first dice quad — which silently assumed
+    // declaration order is draw order among the four roll frames. `toplevel="true"` (decision
+    // 1739) ends that: the frame a roll claims raises above its siblings on Show, so the first
+    // dice belonged to frame 2 and the click landed on the BoE roll, which has no confirm gate and
+    // went straight to the wire. The proxy was the fixture, never the assertion.
+    let (nx, ny) = s
+        .eval::<(f64, f64)>(
+            "return (GroupLootFrame1RollButton:GetLeft() + GroupLootFrame1RollButton:GetRight()) \
+             / 2, (GroupLootFrame1RollButton:GetBottom() + GroupLootFrame1RollButton:GetTop()) / 2",
+        )
+        .unwrap();
+    let (nx, ny) = (nx as f32, ny as f32);
+    assert_eq!(
+        s.hit_test_name(nx, ny).as_deref(),
+        Some("GroupLootFrame1RollButton"),
+        "the click has to land on frame 1's Need button for the rest of this to mean anything"
+    );
     s.mouse_button(nx, ny, "LeftButton", true);
     s.mouse_button(nx, ny, "LeftButton", false);
     assert!(

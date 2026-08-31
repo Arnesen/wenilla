@@ -162,12 +162,25 @@ pub(super) fn setup_player(
 /// This gate stays deliberately WIDER than [`benilla_world::schedule::world_is_live`], which decides
 /// whether the world is *loaded* at all (decision 0777): the camera must also render while the
 /// cover is up, which is exactly the window in which the world is streaming in.
+///
+/// **…but not on the frame the cover owes the glass.** 0962's rule, third consumer: on world
+/// entry the state flips a frame after the raise, so the flip frame is the first whose render can
+/// draw the loading screen — and this gate turned the world camera on for that exact frame, which
+/// then rendered a three-thousand-entity world with every pipeline cold *before* it could present
+/// the cover. Measured: 57 of that frame's 60 ms, and what stayed on the glass throughout was the
+/// character-select screen, frozen (the director's report). Held off until
+/// [`EntryCover::presented`], the camera loses three frames of warm-up out of the seconds it gets
+/// and the cover reaches the glass on the frame it was drawn for. Nothing is *shown* by the
+/// deferral — the loading root is an unconditional fullscreen black node, so a frame with no
+/// world camera is the same picture the cover would have drawn over anyway.
 pub(super) fn gate_world_camera(
     state: Res<State<crate::char_select::ClientState>>,
     loading: Res<crate::loading_screen::LoadingScreen>,
+    cover: Res<crate::loading_screen::EntryCover>,
     mut cams: Query<&mut Camera, With<WorldCamera>>,
 ) {
-    let active = *state.get() == crate::char_select::ClientState::InWorld || loading.covering();
+    let active = (*state.get() == crate::char_select::ClientState::InWorld || loading.covering())
+        && !cover.owes_a_present();
     for mut cam in &mut cams {
         if cam.is_active != active {
             cam.is_active = active;

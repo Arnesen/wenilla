@@ -93,6 +93,7 @@ mod quest_markers;
 mod raid_marks;
 mod realmlist;
 mod run_mode;
+mod screen_fade;
 mod screenshot;
 mod shaders;
 
@@ -109,6 +110,7 @@ mod ui_action;
 mod ui_auction;
 mod ui_aura;
 mod ui_bank;
+mod ui_bind_confirm;
 mod ui_binder;
 mod ui_cast;
 mod ui_char;
@@ -124,6 +126,7 @@ mod ui_guild;
 mod ui_hide;
 mod ui_honor;
 mod ui_inspect;
+mod ui_instance;
 mod ui_item_text;
 mod ui_items;
 mod ui_layout;
@@ -144,6 +147,7 @@ mod ui_pet_stats;
 mod ui_petition;
 mod ui_quest;
 mod ui_quest_log;
+mod ui_quest_share;
 mod ui_reputation;
 mod ui_saved;
 mod ui_script;
@@ -152,6 +156,7 @@ mod ui_shapeshift;
 mod ui_social;
 mod ui_spellbook;
 mod ui_stable;
+mod ui_summon;
 mod ui_talent;
 mod ui_talent_wipe;
 mod ui_taxi;
@@ -208,6 +213,7 @@ use ui_follow::UiFollowPlugin;
 use ui_gm_ticket::UiGmTicketPlugin;
 use ui_gossip::UiGossipPlugin;
 use ui_guild::UiGuildPlugin;
+use ui_instance::UiInstancePlugin;
 use ui_item_text::UiItemTextPlugin;
 use ui_items::UiItemsPlugin;
 use ui_layout::UiLayoutPlugin;
@@ -227,12 +233,14 @@ use ui_pet_stats::UiPetStatsPlugin;
 use ui_petition::UiPetitionPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
+use ui_quest_share::QuestSharePlugin;
 use ui_saved::UiSavedPlugin;
 use ui_script::UiScriptPlugin;
 use ui_shapeshift::UiShapeshiftPlugin;
 use ui_social::UiSocialPlugin;
 use ui_spellbook::UiSpellbookPlugin;
 use ui_stable::UiStablePlugin;
+use ui_summon::UiSummonPlugin;
 use ui_talent::UiTalentPlugin;
 use ui_talent_wipe::UiTalentWipePlugin;
 use ui_taxi::UiTaxiPlugin;
@@ -526,6 +534,7 @@ pub fn run(build: BuildId) -> AppExit {
     // Cinematic fly-bys (`SMSG_TRIGGER_CINEMATIC`): the race intro a first login plays, and the
     // GameObject cameras. Takes the world camera for the duration — hence after PlayerPlugin,
     // whose `control` it overrides within the same stage (decision 0196's deferred arc).
+    .add_plugins(crate::screen_fade::ScreenFadePlugin)
     .add_plugins(CinematicPlugin)
     // The real client's hardware mouse cursor (native NSCursor on macOS).
     .add_plugins(CursorPlugin)
@@ -617,6 +626,10 @@ pub fn run(build: BuildId) -> AppExit {
     // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
     // packet in the flow that actually binds anything.
     .add_plugins(UiBinderPlugin)
+    // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
+    // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
+    // server-asked question whose only wire answer is yes — and here for that reason.
+    .add_plugins(UiSummonPlugin)
     // The GM trouble-ticket flow (decision 1673): the Help window's five sends, the UPDATE_TICKET
     // answer ticket behind its 10-minute poll, and the GMTicketCategory.dbc list its "page a GM"
     // rows are built from. Beside the binder because it is the same feed/drain shape, and after it
@@ -625,6 +638,11 @@ pub fn run(build: BuildId) -> AppExit {
     // Auto-follow's UI seam: the popup's Follow row + `FollowUnit`/`FollowByName` inbound, and
     // the AUTOFOLLOW_BEGIN/END pair that drives the centre-screen status line outbound.
     .add_plugins(UiFollowPlugin)
+    // Instance/raid lockouts (decision 1748): the four CHAT_MSG_SYSTEM lines the client composes
+    // itself out of GlobalStrings, the last-dungeon/ownership bookkeeping behind
+    // `CanShowResetInstances()`, and the SELF menu's one send. Beside the binder family for the
+    // same feed/drain shape; it needs the map catalog, which is up long before Update runs.
+    .add_plugins(UiInstancePlugin)
     // Leaving (decision 0674): the game menu's Logout/Exit Game — the request, the server's
     // 20-second answer narrated as the CAMP/QUIT countdown, and the process exit.
     .add_plugins(UiLogoutPlugin)
@@ -768,6 +786,10 @@ pub fn run(build: BuildId) -> AppExit {
     // PLAYER_QUEST_LOG descriptor slots + the SMSG_QUEST_QUERY_RESPONSE template cache, and drives
     // QuestLogFrame.xml over the Era quest-log API.
     .add_plugins(UiQuestLogPlugin)
+    // The party quest-share (decision 1733): the verdict lines on a quest we pushed, and the
+    // escort-quest confirm. Neither is bound to a window, so it is its own plugin rather than a
+    // lodger in either quest plugin above.
+    .add_plugins(QuestSharePlugin)
     .add_plugins(UiChatPlugin)
     // The layout cache: the geometry of every window the player has dragged or resized, restored
     // at world entry and written back a quiet second after the last drag

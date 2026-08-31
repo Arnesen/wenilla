@@ -15,6 +15,7 @@ use mlua::{Lua, Value};
 
 use super::{Model, ScriptValue};
 
+mod bag_verbs;
 mod bar;
 mod doll;
 mod drag;
@@ -639,6 +640,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     doll::install(lua)?;
+    bag_verbs::install(lua)?;
     bar::install(lua)?;
     pet::install(lua)?;
 

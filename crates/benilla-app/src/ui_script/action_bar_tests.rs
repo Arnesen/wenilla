@@ -1,5 +1,11 @@
 use benilla_ui::script::{ActionSlot, QuadContent, ScriptValue, UiScript};
 
+/// The queued action ids alone — `take_action_uses` carries `UseAction`'s self-cast modifier
+/// beside the id since 1745, and every assertion in this file is about the id.
+fn action_ids(s: &mut UiScript) -> Vec<u32> {
+    s.take_action_uses().into_iter().map(|u| u.action).collect()
+}
+
 /// Load the real `assets/ui/ActionBar.xml` (the shipped default bar) into a bare engine and
 /// drive it with a synthetic action snapshot — the slice-1 chain minus Bevy: template
 /// expansion over 12 instances, the vanilla bonus-page formula, icon paint on events, empty
@@ -95,7 +101,7 @@ fn shipped_action_bar_drives_end_to_end() {
     // center is (8+18, 4+18) = (26, 22).
     s.mouse_button(26.0, 22.0, "LeftButton", true);
     s.mouse_button(26.0, 22.0, "LeftButton", false);
-    assert_eq!(s.take_action_uses(), vec![73]);
+    assert_eq!(action_ids(&mut s), vec![73]);
 
     // The keybinding entry (the app's key feed runs `ActionButtonDown/Up(i)` on the two
     // key edges — the ref's ACTIONBUTTONn binding, ActionButton.lua:15-45): UP fires UseAction
@@ -123,7 +129,7 @@ fn shipped_action_bar_drives_end_to_end() {
         "PUSHED"
     );
     s.run("ActionButtonUp(2)").unwrap();
-    assert_eq!(s.take_action_uses(), vec![74], "key '2' fires action 74");
+    assert_eq!(action_ids(&mut s), vec![74], "key '2' fires action 74");
     assert_eq!(depressed(&s), 0, "key UP restores the normal state");
 
     // Stance drops (offset 0): the bar re-pages to actions 1..12 — all empty here, icons clear.
@@ -335,7 +341,7 @@ fn a_right_click_on_an_action_button_uses_the_action() {
     s.mouse_button(26.0, 22.0, "RightButton", true);
     s.mouse_button(26.0, 22.0, "RightButton", false);
     assert_eq!(
-        s.take_action_uses(),
+        action_ids(&mut s),
         vec![1],
         "right-click queues the same UseAction a left-click does"
     );
@@ -735,77 +741,60 @@ fn macro_name_line_follows_get_action_text_through_the_xml() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The shipped **bag BAR** — `assets/ui/BagFrame.xml` — materialized frame for frame, and then
+/// driven end to end: the bar's own backpack toggle opens the backpack window, the fed stack
+/// paints in its slot's well, the slot's clicks queue the right intents, and the toggle shuts it
+/// again. It lives in this file because the bar seats on `MainMenuBarArtFrame` (ActionBar.xml) —
+/// the toggle's anchor arithmetic below is the reason.
+///
+/// **What decision 1751 changed.** This asserted `report.frames == 259` over a breakdown that
+/// counted five bag WINDOWS and a keyring window (37 + 4×42 + 42, plus the bar's own handful).
+/// Those windows are gone from this file: the live ones are the reference's `ContainerFrame1..12`,
+/// executed off the player's own patch chain, and `BagFrame.xml` is the BAR and nothing else —
+/// this client's stand-in for the reference's `MainMenuBarBagButtons.xml`. So the count is
+/// recounted from what the file declares today, and the drive reaches the reference's window
+/// through the bar's own button rather than showing one of ours by name.
 #[test]
 fn shipped_bag_frame_drives_end_to_end() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    use super::test_ui::{bag_open, bag_slot_button, centre_of, load_ui, BAG_UI};
     use benilla_ui::script::{ContainerSlot, ContainerState};
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    // The bag toggle now seats on the main action bar (MainMenuBarArtFrame, ActionBar.xml);
-    // load the bar FIRST so the toggle's cross-file relativeTo resolves to the real art frame at
-    // SetPoint time. The app loads ActionBar before BagFrame (load_default_ui order); without it the
-    // anchor would silently fall back to the screen root (it only lands right here by the 1024-wide
-    // coincidence — screen BOTTOMRIGHT == the full-width bar's art-frame BOTTOMRIGHT).
-    for file in ["Cooldown.xml", "ActionBar.xml"] {
-        let abtext = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let abdoc = benilla_ui::framexml::parse(&abtext).unwrap();
-        benilla_ui::loader::load(&s, &abdoc, &|_| None);
+    // [`BAG_UI`] is `benilla.toc`'s own order for everything a bag window needs. Three files join
+    // it at the positions the manifest gives them:
+    //   * ActionBar.xml straight after Cooldown.xml — the bag bar is anchored INTO
+    //     MainMenuBarArtFrame, so the bar must exist before BagFrame.xml loads or the toggle's
+    //     cross-file `relativeTo` silently falls back to the screen root (which would land in the
+    //     right place here anyway, by the 1024-wide coincidence: screen BOTTOMRIGHT == the
+    //     full-width bar's art-frame BOTTOMRIGHT — so the failure would be invisible);
+    //   * StackSplit.xml and MerchantFrame.xml after the bags — the reference's
+    //     `ContainerFrameItemButton_OnClick` reads `StackSplitFrame` on both arms and
+    //     `MerchantFrame:IsShown()` on the right one, so a slot click raises without them. That
+    //     dependency is the reference's, not ours; MerchantFrame.xml is additionally the home of
+    //     the `BenillaMoney_*` coin rig this chain's windows call.
+    let mut bar_frames = 0;
+    for file in BAG_UI {
+        let frames = load_ui(&s, file);
+        if *file == "Cooldown.xml" {
+            load_ui(&s, "ActionBar.xml");
+        }
+        if *file == "BagFrame.xml" {
+            bar_frames = frames;
+        }
     }
-    // UiPanels.xml before the bag file: `ToggleBackpack` calls the GLOBAL `CloseAllBags`, which
-    // lives there (homed in the panel glue rather than the bag's own file, deliberately — see its
-    // comment). Production loads both; this test was under-loading relative to it, and started
-    // failing the moment the toggle went through the reference's names instead of a local body.
-    // Loading it is the honest fix: the dependency is real, not an artifact.
-    {
-        let panels = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/UiPanels.xml"),
-        )
-        .unwrap();
-        let pdoc = benilla_ui::framexml::parse(&panels).unwrap();
-        let _ = benilla_ui::loader::load(&s, &pdoc, &|_| None);
-    }
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/BagFrame.xml"),
-    )
-    .unwrap();
-    let doc = benilla_ui::framexml::parse(&text).unwrap();
-    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-    assert!(
-        report.errors.is_empty(),
-        "loader errors: {:?}",
-        report.errors
-    );
+    load_ui(&s, "StackSplit.xml");
+    load_ui(&s, "MerchantFrame.xml");
+
     assert_eq!(
-        report.frames, 259,
-        "backpack (window + 16 slots × 2 [button + Cooldown child] + 3 money coins \
-         + close = 37) + 4 equipped-bag windows (window + 20 slots × 2 + close = 42 each = 168) \
-         + the KEYRING window (another 42 — the same template, decision 0765) \
-         + the bag-bar toggle (1) + its 4 bar slots (4) + the keyring button (1) \
-         — 0216 slice 2 + the slot Cooldown children \
-         + one $parentItemAnim card per bag-bar button (6 — decision 0887)"
+        bar_frames, 12,
+        "the bag bar is six CheckButtons — MainMenuBarBackpackButton, CharacterBag0..3Slot, \
+         KeyRingButton — each carrying one $parentItemAnim push card (decision 0887): 6 + 6. \
+         Every window this file used to declare (the backpack, four equipped bags, the keyring) \
+         is the reference's ContainerFrame now, and its slot buttons, close buttons and money \
+         rows went with it (decision 1751)"
     );
-    // The re-skinned bag purse reuses BenillaMoney_Set/_Clear (they live in MerchantFrame.xml); load
-    // it too so the shared helper is defined when BenillaBagFrame_Update runs (the same reuse the loot
-    // window makes — at runtime every FrameXML file is loaded before any event fires).
-    let mtext = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/MerchantFrame.xml"),
-    )
-    .unwrap();
-    let mdoc = benilla_ui::framexml::parse(&mtext).unwrap();
-    benilla_ui::loader::load(&s, &mdoc, &|_| None);
-    // The slot OnClick hides the hover tooltip on pickup; load GameTooltip.xml so GameTooltip
-    // exists (the runtime always loads it before the bag frame — ui_script::load_default_ui).
-    let ttext = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/GameTooltip.xml"),
-    )
-    .unwrap();
-    let tdoc = benilla_ui::framexml::parse(&ttext).unwrap();
-    benilla_ui::loader::load(&s, &tdoc, &|_| None);
 
     // The app's feed: a backpack with Tough Jerky ×5 in slot 1.
     let mut slots = std::collections::HashMap::new();
@@ -841,7 +830,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     s.fire_event("BAG_UPDATE", vec![ScriptValue::Int(0)]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // Hidden by default: no jerky on screen.
+    // Nothing open at load: no jerky on screen.
     s.resolve();
     let jerky_visible = |quads: &[benilla_ui::script::ExtractedQuad]| {
         quads.iter().any(|q| {
@@ -849,20 +838,21 @@ fn shipped_bag_frame_drives_end_to_end() {
                     if p.contains("INV_Misc_Food_16"))
         })
     };
-    assert!(!jerky_visible(&s.extract()), "bag window starts hidden");
+    assert!(!jerky_visible(&s.extract()), "no bag window at load");
 
-    // Click the toggle → the window opens, slot 1 paints the jerky in the TOP-LEFT well. The toggle
-    // now seats on the bar's art frame BOTTOMRIGHT +(-6,2), 37×37: art frame BOTTOMRIGHT is the bar's
-    // (full-width, bottom-anchored) corner (1024,0) ⇒ toggle x[981,1018] y[2,39], center (999.5,20.5).
-    // The bag frame is unchanged: 192×240 at BOTTOMRIGHT (0,70) ⇒ x[832,1024] y[70,310]; the real
-    // backpack chain (ContainerFrame.lua l.425-444) seats the top-left button (game slot 1) at
-    // BOTTOMRIGHT frame +(-138,153), a 37×37 icon ⇒ x[849,886] y[223,260].
+    // Click the toggle → the backpack window opens and slot 1 paints the jerky. The toggle seats
+    // on the bar's art frame BOTTOMRIGHT +(-6,2), 37×37: art frame BOTTOMRIGHT is the bar's
+    // (full-width, bottom-anchored) corner (1024,0) ⇒ toggle x[981,1018] y[2,39], center
+    // (999.5,20.5). That arithmetic is THIS file's — the button is `BagFrame.xml`'s and its seat
+    // is `ActionBar.xml`'s — so the click stays at literal coordinates rather than going through
+    // `centre_of`: hitting them is part of what is being tested.
     s.mouse_button(999.0, 20.0, "LeftButton", true);
     s.mouse_button(999.0, 20.0, "LeftButton", false);
     s.resolve();
-    let quads = s.extract();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    let r = quads
+    assert!(bag_open(&s, 0), "the bar's toggle opened the backpack");
+    let quads = s.extract();
+    let icon = quads
         .iter()
         .find(|q| {
             matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
@@ -870,9 +860,16 @@ fn shipped_bag_frame_drives_end_to_end() {
         })
         .and_then(|q| q.rect)
         .expect("slot 1 icon visible after toggle");
-    assert_eq!(
-        (r.left, r.bottom, r.right, r.top),
-        (849.0, 223.0, 886.0, 260.0)
+    // WHERE inside the window that well sits is the reference's arithmetic, not ours
+    // (`ContainerFrame_GenerateFrame` + `updateContainerFrameAnchors`), so it is asked of the
+    // button rather than pinned to numbers this tree no longer owns — and asked by GetID, since
+    // the reference numbers its buttons backwards (`…Item1` is the bag's LAST slot). The property
+    // is what it always was: the fed stack paints in the well that says it is game slot 1.
+    let button = bag_slot_button(&s, 0, 1);
+    let (bx, by) = centre_of(&mut s, &button);
+    assert!(
+        icon.left <= bx && bx <= icon.right && icon.bottom <= by && by <= icon.top,
+        "the jerky icon {icon:?} is not painted on slot 1's button ({button} at {bx},{by})"
     );
     // The stack count renders as text.
     assert!(
@@ -882,10 +879,10 @@ fn shipped_bag_frame_drives_end_to_end() {
         "stack count shows"
     );
 
-    // LEFT-click picks the item up onto the cursor — a local drag, no wire use queued until a place.
-    // The top-left well center is (867,241).
-    s.mouse_button(867.0, 241.0, "LeftButton", true);
-    s.mouse_button(867.0, 241.0, "LeftButton", false);
+    // LEFT-click picks the item up onto the cursor — a local drag, no wire use queued until a
+    // place (ref ContainerFrameItemButton_OnClick's left arm: PickupContainerItem).
+    s.mouse_button(bx, by, "LeftButton", true);
+    s.mouse_button(bx, by, "LeftButton", false);
     assert!(
         s.take_container_uses().is_empty(),
         "left-click is a pickup, not a use"
@@ -899,25 +896,38 @@ fn shipped_bag_frame_drives_end_to_end() {
         "a pickup alone queues no move"
     );
 
-    // RIGHT-click while holding cancels the pickup (client-side; nothing sent).
-    s.mouse_button(867.0, 241.0, "RightButton", true);
-    s.mouse_button(867.0, 241.0, "RightButton", false);
-    assert!(
-        s.cursor_item().is_none(),
-        "right-click cancelled the held cursor"
+    // RIGHT-click while holding. **This assertion inverted with 1751, and the inversion is the
+    // point of recording it.** Our own `BenillaBagSlot_OnClick` had a cursor-cancel arm — a
+    // benilla divergence — so this used to assert that the pickup was cancelled and nothing sent.
+    // The reference's right arm has no cursor test at all: it falls through to
+    // `UseContainerItem(bag, slot)` like any other right-click, and the cursor keeps its payload.
+    // Pinned as what it now IS rather than dropped, so the swap is visible here. Whether the host
+    // should treat a use-while-holding as a place is a fidelity question for the bag arc, not
+    // this file's to answer.
+    s.mouse_button(bx, by, "RightButton", true);
+    s.mouse_button(bx, by, "RightButton", false);
+    assert_eq!(
+        s.take_container_uses(),
+        vec![(0, 1)],
+        "the reference's right arm uses the slot even with a full cursor"
     );
-    assert!(s.take_container_uses().is_empty(), "cancel sends nothing");
+    assert!(
+        s.cursor_item().is_some(),
+        "…and leaves the held item where it was"
+    );
+    s.run("ClearCursor()").unwrap();
 
     // RIGHT-click with an empty cursor uses slot 1 (UseContainerItem → the app's use/equip fork).
-    s.mouse_button(867.0, 241.0, "RightButton", true);
-    s.mouse_button(867.0, 241.0, "RightButton", false);
+    s.mouse_button(bx, by, "RightButton", true);
+    s.mouse_button(bx, by, "RightButton", false);
     assert_eq!(s.take_container_uses(), vec![(0, 1)]);
 
-    // Toggle again → hidden.
+    // Toggle again → shut.
     s.mouse_button(999.0, 20.0, "LeftButton", true);
     s.mouse_button(999.0, 20.0, "LeftButton", false);
     s.resolve();
-    assert!(!jerky_visible(&s.extract()), "toggle closes the window");
+    assert!(!bag_open(&s, 0), "toggle closes the window");
+    assert!(!jerky_visible(&s.extract()), "…and its slots with it");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1439,9 +1449,22 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     // Keys route to the overlay immediately (ref ActionButton.lua:15-45's IsShown fork).
     s.run("ActionButtonDown(1) ActionButtonUp(1)").unwrap();
     assert_eq!(
-        s.take_action_uses(),
+        action_ids(&mut s),
         vec![73],
         "a key pressed mid-slide already drives the bonus page"
+    );
+
+    // …and the same button with the SELF-CAST modifier. `SELFACTIONBUTTON1`-`12` (`ALT-1`…`ALT-=`)
+    // are `ActionButtonUp(id, 1)` and nothing else, so this is the whole of what those twelve
+    // bindings do that the plain twelve do not (1745).
+    s.run("ActionButtonDown(1) ActionButtonUp(1, 1)").unwrap();
+    assert_eq!(
+        s.take_action_uses()
+            .into_iter()
+            .map(|u| (u.action, u.on_self))
+            .collect::<Vec<_>>(),
+        vec![(73, true)],
+        "ActionButtonUp's onSelf reaches UseAction's third argument"
     );
 
     // Half the slide: the replica is half-risen (top = 0.5 * 43 over the bar's bottom edge at
@@ -1536,7 +1559,7 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
     // A key mid-descent still drives the old form's page — ref GetPagedID's lastBonusBar
     // stand-in while the frame is still shown.
     s.run("ActionButtonDown(1) ActionButtonUp(1)").unwrap();
-    assert_eq!(s.take_action_uses(), vec![97]);
+    assert_eq!(action_ids(&mut s), vec![97]);
     s.tick(0.2);
     assert!(
         !s.eval::<bool>("return BonusActionBarFrame:IsShown()")

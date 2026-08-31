@@ -766,8 +766,15 @@ impl RemoteMotion {
             let mut pos = self.wow_pos;
             pos[0] += self.jump_xy_vel[0] * dt;
             pos[1] += self.jump_xy_vel[1] * dt;
-            pos[2] += self.vertical_velocity * dt;
-            let vertical = (self.vertical_velocity - GRAVITY * dt).max(-TERMINAL_VELOCITY);
+            // **The same exact fall step the local mover runs** ([`crate::player::mover::fall_step`],
+            // decision 1740) — one shared machine, which is what the reference has. This used to
+            // move at the START-of-step speed and only then apply gravity (explicit Euler), so a
+            // watched player's jump overshot by `½·g·dt²` every frame and floated; the local mover
+            // had the mirror-image bug in the other direction. The mean velocity is the exact
+            // displacement rate under constant acceleration, so neither drifts now.
+            let (vertical, mean_vy) =
+                crate::player::mover::fall_step(self.vertical_velocity, dt, TERMINAL_VELOCITY);
+            pos[2] += mean_vy * dt;
             let speed = self.jump_xy_vel[0].hypot(self.jump_xy_vel[1]);
             return (pos, self.orientation, vertical, speed);
         }
@@ -817,26 +824,17 @@ impl RemoteMotion {
         let dz = fwd_amt * vp;
 
         let len = (dx * dx + dy * dy + dz * dz).sqrt();
-        // The speed the move-flags imply — the ref's `GetCurrentSpeed 0x7c4c90` (the swim §5's
-        // TU-H): swimming → swim, backward bit → `min(swimBack, swim)`; on land a net-backward
-        // move (S with no forward override) → `min(runBack, run)`; a /walk-toggled mover → walk;
-        // otherwise run. The min is the byte law — a plain back-speed select whenever it's the
-        // slower (always, at vanilla values).
-        let backpedal =
-            self.flags & move_flags::BACKWARD != 0 && self.flags & move_flags::FORWARD == 0;
-        let base = if swimming {
-            if backpedal {
-                speeds.swim_back.min(speeds.swim)
-            } else {
-                speeds.swim
-            }
-        } else if backpedal {
-            speeds.run_back.min(speeds.run)
-        } else if self.flags & move_flags::WALK_MODE != 0 {
-            speeds.walk
-        } else {
-            speeds.run
-        };
+        // The speed this mover's flags imply — the reference's `GetCurrentSpeed 0x7c4c90`, stated
+        // once in [`crate::net::current_speed`] so this side and the local controller cannot drift
+        // apart about a cascade whose whole content is its ORDER. Everything it reads is the
+        // sender's own word, relayed verbatim: the direction bits, the swim bit and the walk bit.
+        //
+        // **The walk arm outranks the backward min, and this block used to have it backwards**
+        // (decision 1752): it tested the backpedal first, so a walking backpedaller extrapolated
+        // at `min(runBack, run)` = 4.5 yd/s. The bytes take the walk arm at `0x7c4d11` *before*
+        // the run arm's `0x7c4d1d`, so the answer is `min(walk, run)` = 2.5 — a walking backpedal
+        // is exactly as slow as a walk, and the observed body now plays Walk instead of Run.
+        let base = crate::net::current_speed(&speeds, self.flags);
         let mut pos = self.wow_pos;
         let speed = if len > 1.0e-4 {
             let step = base * dt / len; // normalize the 3D direction, then advance by base·dt
@@ -928,6 +926,9 @@ mod under_floor {
     /// wire gave it.
     fn half_arrived_world(flags: u32) -> (App, Entity) {
         let mut app = App::new();
+        // `WorldCollision` takes the mover's trace exclusions (the ghost/DOOR set, 1767); the
+        // real one is initialised by the world plugins, which a headless harness does not run.
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,

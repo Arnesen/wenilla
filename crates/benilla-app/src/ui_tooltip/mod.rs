@@ -537,6 +537,8 @@ enum LastHover {
     None,
     Unit(u64),
     Go(u64),
+    /// A hovered **corpse object** — its own plate, keyed on the corpse's guid (1729).
+    Corpse(u64),
 }
 
 /// The snapshot fields the unit tooltip's LINES read (everything except the bar's
@@ -639,10 +641,13 @@ fn drive_mouseover_tooltip(
     // and an IN_USE object all show the gold name plate while showing NO interact cursor — 0466's
     // "no cursor AND no tooltip" coupling was the regression. Transports never reach here — they
     // are excluded from the pick set itself (0466's correct half).
-    let go = hovered_go
-        .target
-        .zip(hovered_go.guid)
-        .filter(|_| unit.is_none() || go_is_nearest(&hovered, &hovered_go));
+    // "Nothing else was picked, or the GameObject is the nearer pick." **A hovered corpse counts
+    // as something else picked** (decision 1723) — it has no tooltip of its own yet, and the
+    // `unit.is_none()` short-circuit would otherwise hand a farther GameObject the gold plate the
+    // moment the ray landed on a body instead of a unit.
+    let go = hovered_go.target.zip(hovered_go.guid).filter(|_| {
+        (unit.is_none() && hovered.corpse.is_none()) || go_is_nearest(&hovered, &hovered_go)
+    });
 
     if let Some((guid, state)) = unit.filter(|_| go.is_none()) {
         // Push first (the engine's builder + the recolor's UnitReaction read the token), then
@@ -658,6 +663,47 @@ fn drive_mouseover_tooltip(
             *last = LastHover::Unit(guid);
             *last_lines = Some(key);
         }
+        return;
+    }
+    // The **corpse plate** — "Corpse of <owner>" (the reference's own builder `0x52aef0`, wow-re
+    // `corpse-click-and-reclaim.md` Q6, §5 cross-checked). Ahead of the GameObject arm because the
+    // corpse is the nearer pick whenever `go` came back empty.
+    //
+    // It is a *name plate and nothing else*: no health bar, no reaction recolour, no level or
+    // creature-type line — a corpse is not a unit, and the publisher deliberately fires **no
+    // event** for it, so it never becomes the Lua `mouseover` unit token either (`UnitName
+    // ("mouseover")` on a body is nil in the reference, and stays nil here). Corner-seated like a
+    // unit's, not cursor-seated like a signpost's.
+    if let Some((entity, guid)) = hovered
+        .corpse
+        .zip(hovered.corpse_guid)
+        .filter(|_| go.is_none())
+    {
+        let Some(store) = stores.get(entity).ok() else {
+            return;
+        };
+        // A bone pile with nothing to take publishes no mouseover at all — no plate, no brighten.
+        if !crate::target::corpse_mouseover_eligible(store) {
+            if !matches!(*last, LastHover::None) {
+                script.world_tooltip_fade();
+                *last = LastHover::None;
+            }
+            return;
+        }
+        if *last == LastHover::Corpse(guid) {
+            return; // already showing; nothing re-seats a corner plate
+        }
+        // The owner's name is the ask-once cache like any other player name — a corpse carries
+        // `CORPSE_FIELD_OWNER`, never a name. Until the answer lands there is no plate to show
+        // (`last` stays `None`, so it appears the moment the name arrives).
+        let Some(owner) = store.0.corpse_owner() else {
+            return;
+        };
+        let Some(name) = names.resolve(owner, &commands).map(str::to_string) else {
+            return;
+        };
+        script.world_tooltip_gameobject(&format!("Corpse of {name}"), &[], None);
+        *last = LastHover::Corpse(guid);
         return;
     }
     if let Some((entity, guid)) = go {

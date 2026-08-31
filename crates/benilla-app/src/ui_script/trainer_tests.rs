@@ -252,7 +252,7 @@ fn shipped_trainer_frame_drives_end_to_end() {
         "Cost:"
     );
     assert!(s
-        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled()")
+        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled() ~= 0")
         .unwrap());
 
     // Train buys the selected service — the row's spell id reaches the app's drain.
@@ -266,7 +266,7 @@ fn shipped_trainer_frame_drives_end_to_end() {
     s.run("SelectTrainerService(6); BenillaTrainerFrame_Update()")
         .unwrap();
     assert!(!s
-        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled()")
+        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled() ~= 0")
         .unwrap());
     s.resolve();
     assert!(
@@ -293,7 +293,7 @@ fn shipped_trainer_frame_drives_end_to_end() {
         "a known prerequisite shows white with its rank: {reqs}"
     );
     assert!(!s
-        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled()")
+        .eval::<bool>("return BenillaTrainerTrainButton:IsEnabled() ~= 0")
         .unwrap());
 
     // The app's client-side close: clear the snapshot + fire TRAINER_CLOSED → the window hides.

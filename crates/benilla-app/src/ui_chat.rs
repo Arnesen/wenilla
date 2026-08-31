@@ -14,6 +14,9 @@ use crate::ui_script::UiInput;
 
 #[cfg(test)]
 mod ace_gate_tests;
+/// The world broadcasts (`SMSG_ZONE_UNDER_ATTACK`/`_DEFENSE_MESSAGE`/`_SERVER_MESSAGE`) — the
+/// AreaTable/ServerMessages resolve and the joined-defense-channel walk they land on.
+mod broadcast;
 mod channels;
 /// The combat log's chat lines (B297) — classification, chat type, and the GlobalString key each
 /// combat packet's sentence is built from.
@@ -32,6 +35,7 @@ mod settings;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use broadcast::Broadcast;
 /// The joined-channel roster + the `ChatChannels.dbc` catalog. Read outside this module by the
 /// world-state readout ([`crate::world_state_ui`]), whose `Type == 1` gate is "has the player
 /// joined a zone-dependent defense channel".
@@ -62,9 +66,15 @@ impl Plugin for UiChatPlugin {
             // `crate::area`'s `AreaTable.dbc` load carries the same ordering for the same reason.
             // `EmotesText.dbc` × `EmotesTextData.dbc` (decision 1274) rides the same ordering for
             // the same reason: the sentence tables are read once, off the open patch chain.
+            // `ServerMessages.dbc` (the five shutdown/restart sentences) rides the same ordering
+            // for the same reason.
             .add_systems(
                 Startup,
-                (channels::load_chat_channels, feed::load_emote_texts)
+                (
+                    channels::load_chat_channels,
+                    feed::load_emote_texts,
+                    broadcast::load_server_messages,
+                )
                     .after(benilla_assets::AssetSet::Open),
             )
             // The slash-command table (decision 0881), built from the reference's own alias strings
@@ -85,6 +95,23 @@ impl Plugin for UiChatPlugin {
                 )
                     .before(feed::feed_chat),
             )
+            // The three combat-log families that are NOT packet-driven (1703): the death reflex,
+            // the aura arrival/departure/stack callbacks, and the pet-loyalty byte. Each is a
+            // descriptor diff, so each runs before the drain that would otherwise show its line a
+            // frame late.
+            .add_systems(
+                Update,
+                (
+                    combat::watch::death_lines,
+                    combat::watch::aura_lines,
+                    combat::watch::pet_loyalty_lines,
+                )
+                    .before(feed::feed_chat),
+            )
+            // The world broadcasts' resolve pass — before the drain that renders what it produces,
+            // so an alarm or a shutdown countdown lands on the frame it decodes like every other
+            // chat source.
+            .add_systems(Update, broadcast::feed_broadcasts.before(feed::feed_chat))
             .add_systems(Update, feed::feed_chat.before(UiInput))
             // A fresh VM gets the joined-channel mirror re-pushed once (decision 1291) — before
             // the feed, so the reload frame's first routed line already renders numbered.

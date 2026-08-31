@@ -35,9 +35,14 @@ fn backdrop_installs_and_extracts_pieces_with_colors() {
         .collect();
     // bg (1) + 8 border pieces.
     assert_eq!(pieces.len(), 9);
-    // First is the bg, tinted the tooltip background color.
+    // First is the bg, tinted the tooltip background color — QUANTIZED. The reference's colour
+    // field is a packed `0xAARRGGBB` byte quad and the setter converts `×255 + 0.5` through
+    // `__ftol` (wow-re `numeric-arg-coercion-law.md` Q4), so `0.09` stores as 23 and reads back
+    // as `23/255`. This assertion used to hold `0.09` exactly, which was our lossless `[f32; 4]`
+    // showing through a store the client cannot make.
     assert_eq!(pieces[0].0, "bg");
-    assert_eq!(pieces[0].1, [0.09, 0.09, 0.19, 1.0]);
+    let q = |x: f32| f32::from((x * 255.0 + 0.5) as u8) / 255.0;
+    assert_eq!(pieces[0].1, [q(0.09), q(0.09), q(0.19), 1.0]);
     // The remaining 8 are the border, white, from the edge file.
     assert!(pieces[1..]
         .iter()
@@ -172,4 +177,61 @@ fn set_backdrop_nil_tears_down() {
         .extract()
         .iter()
         .all(|q| !matches!(q.content, QuadContent::Backdrop { .. })));
+}
+
+/// **The colour setters' argument gating is asymmetric, and getting it backwards is worse than
+/// the bug it replaces** (wow-re `numeric-arg-coercion-law.md` Q4, VERIFIED at `0x777d30` /
+/// `0x7780d0`).
+///
+/// r/g/b go through a bare `lua_tonumber` — a `nil` channel is `0.0` and the call COMPLETES.
+/// benilla typed them `f32` and raised, which killed ShaguTweaks at `helpers.lua:248`, where
+/// `color.r` comes off a table that does not always have one.
+///
+/// Alpha is different: `lua_isnumber`-gated at `0x778227` with `1.0f` staged at `0x778220`, so a
+/// missing **or nil** alpha is OPAQUE. The tempting blanket fix — "treat every nil as 0.0, like
+/// its neighbours" — would have turned every one of those borders transparent, which reads as a
+/// rendering fault rather than an API bug and is the reason this test names both halves.
+#[test]
+fn backdrop_colors_coerce_rgb_but_default_alpha_opaque() {
+    let s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "Plate2")
+        f:SetBackdrop({ bgFile = "bg", edgeFile = "edge", edgeSize = 16 })
+    "#,
+    )
+    .unwrap();
+
+    // A nil channel is 0.0 and the call completes — no raise.
+    s.run("f:SetBackdropBorderColor(nil, 1, 1, 1)").unwrap();
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return f:GetBackdropBorderColor()")
+            .unwrap(),
+        (0.0, 1.0, 1.0, 1.0)
+    );
+
+    // A missing alpha is 1.0, and so is an explicit nil one — NOT 0.0.
+    s.run("f:SetBackdropColor(0.2, 0.4, 0.6)").unwrap();
+    let (_, _, _, a) = s
+        .eval::<(f32, f32, f32, f32)>("return f:GetBackdropColor()")
+        .unwrap();
+    assert_eq!(a, 1.0, "a missing alpha is opaque");
+    s.run("f:SetBackdropColor(0.2, 0.4, 0.6, nil)").unwrap();
+    let (_, _, _, a) = s
+        .eval::<(f32, f32, f32, f32)>("return f:GetBackdropColor()")
+        .unwrap();
+    assert_eq!(
+        a, 1.0,
+        "an explicit nil alpha is opaque too — the isnumber gate"
+    );
+
+    // Out of range clamps; a table coerces to 0 like any non-number.
+    s.run("f:SetBackdropColor(5, -1, {}, 0.5)").unwrap();
+    let (r, g, b, a) = s
+        .eval::<(f32, f32, f32, f32)>("return f:GetBackdropColor()")
+        .unwrap();
+    assert_eq!((r, g, b), (1.0, 0.0, 0.0));
+    // Quantized `×255 + 0.5` through `__ftol`: 0.5 -> 128/255, not 0.5 exactly. The field is a
+    // packed 0xAARRGGBB byte quad and nothing finer survives the store.
+    assert_eq!(a, 128.0 / 255.0);
 }

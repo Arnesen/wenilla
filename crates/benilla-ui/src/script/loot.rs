@@ -13,9 +13,17 @@
 //! `texture, item, quantity, quality` (`LootFrame.lua:81`), `LootSlotIsItem(slot)` /
 //! `LootSlotIsCoin(slot)` (`LootFrame.lua:80`), `GetLootSlotLink(slot)` → the row's item link (what
 //! the row click's ctrl/shift arms read, `LootFrame.lua:149`/`:152` — decision 1059),
-//! `LootSlot(slot)` (the C `LootButton` behaviour, the action a row click performs —
-//! `LootFrame.lua:94`), and `CloseLoot()` (fired from `OnHide`, `LootFrame.lua:143-145`).
-//! `slot` is **1-based**; an out-of-range slot answers `nil`.
+//! and `CloseLoot()` (fired from `OnHide`, `LootFrame.lua:143-145`). `slot` is **1-based**; an
+//! out-of-range slot answers `nil`.
+//!
+//! ## The take is TWO verbs, not one (decision 1744)
+//!
+//! `LootSlot(slot)` looks like "loot row n" and is not: in 1.12 it is the **LOOT_BIND confirmation
+//! continuation** alone. The C dispatcher `0x4c2790(slot, flag)` takes the row only on `flag == 0`,
+//! which no Lua binding reaches — the row click is the C `CLootButton`'s own behaviour — while
+//! `LootSlot 0x4c2e70` passes `flag = 1`, whose arm refuses every slot but the one a bind confirm
+//! is pending for. benilla has no `CLootButton`, so the click arm is `BenillaTakeLootSlot(slot)`
+//! and `LootSlot` keeps the reference's meaning exactly.
 //!
 //! The **coin pile is a synthesized client-side row** (first in the list when the loot carries gold):
 //! `LootSlotIsCoin` is true for it, its `item` text is the formatted money amount, and `LootSlot(1)`
@@ -118,10 +126,18 @@ impl super::UiScript {
         self.model_mut().loot = state;
     }
 
-    /// Drain the 1-based row indices queued by `LootSlot` since the last call. The app maps each to
-    /// either the coin (money) intent or the item's wire loot slot.
+    /// Drain the 1-based row indices queued by `BenillaTakeLootSlot` since the last call — the ROW
+    /// CLICK's take. The app maps each to either the coin (money) intent or the item's wire loot
+    /// slot, and applies the bind-on-pickup deferral (decision 1744).
     pub fn take_loot_picks(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().loot_picks)
+    }
+
+    /// Drain the 1-based row indices queued by `LootSlot` — the LOOT_BIND confirmation
+    /// continuations. Each is honoured only if it names the row the app is actually holding a
+    /// confirm open for (the reference's `[0x847cec]` gate); anything else is dropped.
+    pub fn take_loot_confirms(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().loot_confirms)
     }
 
     /// Whether `CloseLoot` was called since the last drain (and clear the flag). The app maps this to
@@ -255,12 +271,35 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // LootSlot(slot) — queue the 1-based row pick; the app maps it to the coin or the item wire slot.
+    // BenillaTakeLootSlot(slot) — the ROW CLICK's take, queued as a 1-based display row; the app
+    // maps it to the coin or the item's wire slot and applies the bind-on-pickup gate.
+    //
+    // Why this is not `LootSlot`, and why the name is ours (decision 1744): in 1.12 the plain take
+    // is **not a Lua binding at all**. The dispatcher `0x4c2790(slot, flag)` has exactly two
+    // callers — the C `CLootButton::OnClick 0x4c1820` with `flag = 0`, and the `LootSlot` binding
+    // `0x4c2e70` with `flag = 1` — and only the `flag = 0` arm reaches the take. benilla has no
+    // `CLootButton` widget type (our rows are ordinary XML buttons), so the click arm needs a verb,
+    // and giving it the 1.12 NAME would have handed `LootSlot` a second meaning the reference does
+    // not give it. `Benilla`-prefixed like the other seams the reference kept in C.
+    g.set(
+        "BenillaTakeLootSlot",
+        lua.create_function(|lua, slot: u32| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.loot_picks.push(slot);
+            Ok(())
+        })?,
+    )?;
+
+    // LootSlot(slot) — the LOOT_BIND **confirmation continuation**, and nothing else, exactly as
+    // 1.12 has it (`0x4c2e70`: `luaL_checknumber(1)`, `dec eax`, `0x4c2790(slot, flag = 1)`; the
+    // flag-1 arm at `0x4c27c0` starts `cmp edi, [0x847cec]` and returns unless the slot IS the
+    // pending confirm). So an addon calling `LootSlot(n)` on an ordinary row does nothing here,
+    // which is what it does on the real client; the app owns the pending-slot gate.
     g.set(
         "LootSlot",
         lua.create_function(|lua, slot: u32| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.loot_picks.push(slot);
+            model.loot_confirms.push(slot);
             Ok(())
         })?,
     )?;
@@ -539,13 +578,29 @@ mod tests {
     }
 
     #[test]
-    fn loot_slot_queues_picks() {
+    fn take_loot_slot_queues_picks() {
         let mut s = UiScript::new().unwrap();
         s.set_loot(Some(loot()));
-        s.run("LootSlot(1)").unwrap(); // coin
-        s.run("LootSlot(2)").unwrap(); // item
+        s.run("BenillaTakeLootSlot(1)").unwrap(); // coin
+        s.run("BenillaTakeLootSlot(2)").unwrap(); // item
         assert_eq!(s.take_loot_picks(), vec![1, 2]);
         assert!(s.take_loot_picks().is_empty(), "drained");
+    }
+
+    /// `LootSlot` is the confirmation continuation, so it rides its OWN queue — a client that let
+    /// it fall into the pick queue would loot any row an addon named, which the reference refuses
+    /// (decision 1744).
+    #[test]
+    fn loot_slot_queues_confirms_not_picks() {
+        let mut s = UiScript::new().unwrap();
+        s.set_loot(Some(loot()));
+        s.run("LootSlot(2)").unwrap();
+        assert!(
+            s.take_loot_picks().is_empty(),
+            "LootSlot is not the take verb"
+        );
+        assert_eq!(s.take_loot_confirms(), vec![2]);
+        assert!(s.take_loot_confirms().is_empty(), "drained");
     }
 
     #[test]

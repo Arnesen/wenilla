@@ -24,9 +24,6 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{BankState, ScriptValue, UiScript};
 
-use crate::entities::ItemDisplays;
-use crate::items::Items;
-use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
@@ -118,20 +115,20 @@ fn bank_slot_error_text(result: u32) -> Option<String> {
     }
 }
 
-/// Push the purchase-row snapshot + the open/close/purchased-count events (module doc). The
-/// banker's name rides the `BANKFRAME_OPENED` event arg (the merchant feed's title pattern —
-/// ask-once through the [`NameCache`], `BANKFRAME_UPDATE` is not a real event, so a late name
-/// lands via a fresh `BANKFRAME_OPENED` only on re-open; the title shows "Banker" until then).
+/// Push the purchase-row snapshot + the open/close/purchased-count events (module doc).
+///
+/// **`BANKFRAME_OPENED` carries no arguments**, which is a change 1751's swap forced and a
+/// correction either way: the banker's name used to ride it as `arg1` (the merchant feed's title
+/// pattern), and the reference's own `BankFrame_OnEvent` reads no `arg1` at all — it titles the
+/// window with `UnitName("npc")`, off the interaction token [`crate::ui_session`] already points
+/// at the banker. Firing an argument the reference does not fire is a divergence an addon can
+/// see, and it bought nothing once the reference's file was the one reading the event.
 #[allow(clippy::too_many_arguments)]
 fn feed_bank(
     script: Option<NonSendMut<UiScript>>,
     open: Res<BankOpen>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     prices: Option<Res<BankPrices>>,
-    mut items: ResMut<Items>,
-    icons: Option<Res<ItemDisplays>>,
-    commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
     mut errors: ResMut<BankErrors>,
     mut last: Local<crate::ui_script::VmMemo<Option<BankState>>>,
     mut last_banker: Local<crate::ui_script::VmMemo<Option<u64>>>,
@@ -151,38 +148,13 @@ fn feed_bank(
     let purchased = store
         .and_then(|s| s.0.player_bank_bag_slots_purchased())
         .unwrap_or(0);
-    let fresh = open.banker.map(|_| {
-        // The bag buttons' icons: each held bank bag's item → template → icon, the container
-        // feed's own resolution (ask-once; `None` while the answer is in flight or slot empty).
-        let mut bag_textures: [Option<String>; 6] = Default::default();
-        if let Some(store) = store {
-            for (i, tex) in bag_textures.iter_mut().enumerate() {
-                *tex = store
-                    .0
-                    .player_bank_bag_slot(i as u8)
-                    .filter(|g| *g != 0)
-                    .and_then(|guid| {
-                        let entry = items.object(guid)?.object_entry()?;
-                        let display_id = items.template(entry, guid, &commands)?.display_info_id;
-                        icons
-                            .as_deref()
-                            .and_then(|ic| ic.catalog.get(display_id))
-                            .and_then(|d| d.icon.clone())
-                    });
-            }
-        }
-        BankState {
-            num_purchased: u32::from(purchased),
-            next_cost: prices
-                .as_ref()
-                .and_then(|p| p.0.next_slot_price(purchased))
-                .unwrap_or(0),
-            bag_textures,
-        }
+    let fresh = open.banker.map(|_| BankState {
+        num_purchased: u32::from(purchased),
+        next_cost: prices
+            .as_ref()
+            .and_then(|p| p.0.next_slot_price(purchased))
+            .unwrap_or(0),
     });
-    let banker_name = open
-        .banker
-        .and_then(|g| names.resolve(g, &commands).map(str::to_string));
     // A different banker while the window is already open is a real close+open (decision 0096 /
     // [`npc_switched`]) — both sounds, and the OnHide-queued close intent is consumed so the
     // drain doesn't clear the session we just re-opened.
@@ -191,14 +163,13 @@ fn feed_bank(
         return;
     }
     script.set_bank(fresh.clone());
-    let name_arg = || vec![ScriptValue::Str(banker_name.clone().unwrap_or_default())];
     if switched {
         script.fire_event("BANKFRAME_CLOSED", vec![]);
-        script.fire_event("BANKFRAME_OPENED", name_arg());
+        script.fire_event("BANKFRAME_OPENED", vec![]);
         let _ = script.take_bank_close();
     } else {
         match (&*last, &fresh) {
-            (None, Some(_)) => script.fire_event("BANKFRAME_OPENED", name_arg()),
+            (None, Some(_)) => script.fire_event("BANKFRAME_OPENED", vec![]),
             // The purchased count moved while open — the no-packet buy confirmation (decision
             // 0604): the reference event repaints the bag row + purchase frame.
             (Some(_), Some(_)) => script.fire_event("PLAYERBANKBAGSLOTS_CHANGED", vec![]),

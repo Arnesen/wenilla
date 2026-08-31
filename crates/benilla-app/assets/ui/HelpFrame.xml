@@ -659,9 +659,10 @@
          13px of the plate out of the mouse rect — the art bleeds past the drawn frame there.
 
          `parent="UIParent"` is the reference's and is kept verbatim (ItemTextFrame.xml's
-         precedent); it is inert in this engine, which has no cross-file parent attachment and
-         screen-parents a bare toplevel anyway. `movable` is the reference's too and is equally
-         inert: this window declares no drag scripts, so it never actually moves. -->
+         precedent). It is NOT inert — the loader resolves a cross-file `parent=` by name (1734), so
+         this window really hangs under `UIParent` and hides with it. `movable` is the reference's
+         too and IS inert, on both sides: this window declares no drag scripts and neither does the
+         reference's, which never calls `StartMoving` on it. -->
     <Frame name="HelpFrame" toplevel="true" parent="UIParent" movable="true" enableMouse="true" hidden="true">
         <Size><AbsDimension x="640" y="512"/></Size>
         <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>

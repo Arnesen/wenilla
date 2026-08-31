@@ -242,6 +242,11 @@ pub(crate) fn go_animates(type_id: i32) -> bool {
     )
 }
 
+/// `GAMEOBJECT_TYPE_DOOR` — type id `0`, the one type a ghost's mover trace drops
+/// ([`publish_ghost_door_exclusions`]). Also the wire default: vmangos omits zero-valued fields, so
+/// an absent `GAMEOBJECT_TYPE_ID` means DOOR.
+const GO_TYPE_DOOR: i32 = 0;
+
 /// Which types drop their collision when open (decision 0249): **DOOR(0) / BUTTON(1)** only. A door's
 /// static hull can't swing with the mesh, so an open door is made walkable by disabling the collider —
 /// keyed off the server's wire state, which *is* the door's real passability. A **CHEST(3)** keeps its
@@ -850,6 +855,62 @@ fn drive_go_collision(
     }
 }
 
+/// **A ghost walks through closed doors** — publish the door set the local mover's trace must
+/// drop, which is [`benilla_world::collision::MoverTraceExclusions`]' only producer.
+///
+/// The reference builds a per-trace collision mask, and the local mover's mask gains bit `0x8000`
+/// when the body it drives is a player carrying `PLAYER_FLAGS` bit `0x10` (GHOST) — `0x631658`,
+/// off `OBJECT_FIELD_TYPE & TYPEMASK_PLAYER` plus the flag, pinned against the `UnitIsGhost`
+/// registrar pair. The consumer is a single instruction, `0x5f85f6 test ah,ah` inside `0x5f85f0` —
+/// `CGGameObject_C`'s collision-candidacy virtual at primary-vtable slot `+0x50` — which reads the
+/// bit through the sign flag and answers *no candidate* for a GameObject whose
+/// `GAMEOBJECT_TYPE_ID` is `0`, DOOR. Nothing else about a ghost's collision differs (wow-re
+/// `collision/scratch/ghost-door-tracemask.md`, decision 1767).
+///
+/// **Off the MOVER's descriptor, not ours.** The producer tests the object being traced, so a
+/// possessed creature is not a player and never sets the bit; `player_is_ghost` reading a field a
+/// creature has no block for answers false on its own, which is the same guard the byte order
+/// gives.
+///
+/// **DOOR only** — not BUTTON, which shares the state-driven collider lane in
+/// [`drive_go_collision`] but is a different type id, and the predicate is an equality against `0`.
+/// Note that an absent `GAMEOBJECT_TYPE_ID` *is* DOOR (vmangos omits zero-valued fields), which is
+/// why the scan is scoped by [`EntityKind::GameObject`]: read across every `ObjectStore` the same
+/// absence would make a DOOR of every unit in the world.
+fn publish_ghost_door_exclusions(
+    mut exclusions: ResMut<benilla_world::collision::MoverTraceExclusions>,
+    mover: Query<&ObjectStore, With<crate::net::Embodied>>,
+    doors: Query<(Entity, &ObjectStore, &crate::net::NetEntity), With<Collider>>,
+) {
+    let ghost = mover.single().is_ok_and(|s| s.0.player_is_ghost());
+    if !ghost {
+        // The overwhelmingly common frame. Clearing only when non-empty keeps this off the
+        // change-detection wire for the whole of a living session.
+        if !exclusions.0.is_empty() {
+            exclusions.0.clear();
+        }
+        return;
+    }
+    exclusions.0.clear();
+    exclusions.0.extend(
+        doors
+            .iter()
+            .filter(|(_, store, net)| ghost_passable(net.kind, store.0.gameobject_type_id()))
+            .map(|(entity, _, _)| entity),
+    );
+}
+
+/// Is this collider one a **ghost's** mover trace drops — a GameObject of type DOOR?
+///
+/// The kind test is not redundant with the type test, and that is the whole reason this is a named
+/// function. An absent `GAMEOBJECT_TYPE_ID` reads as `0` = DOOR (vmangos omits zero-valued fields,
+/// the law `go_templates` already documents), and a **unit** has no GameObject block at all — so a
+/// scan that asked only about the type id would answer DOOR for every creature and player in the
+/// world and quietly delete them from the mover's trace.
+fn ghost_passable(kind: benilla_protocol::EntityKind, type_id: i32) -> bool {
+    kind == benilla_protocol::EntityKind::GameObject && type_id == GO_TYPE_DOOR
+}
+
 /// Fire the event keyframes an animated GameObject's playing clip crossed this frame — the GO
 /// half of the M2 event-kernel surface (wow-re `go-display-sound-events.md`, the 1086 fold-back
 /// record): the reference registers an event callback per **family-A** GO at create
@@ -932,11 +993,48 @@ pub(crate) fn plugin(app: &mut App) {
                 .chain()
                 .in_set(WorldStage::Present),
         );
+    // Ahead of the mover, not with the GO drive above: the set it publishes is read by
+    // `WorldCollision::cast_mover` inside the player controller, which runs in `Input`.
+    // Publishing in `Present` would hand the mover the previous frame's doors — imperceptible,
+    // but there is no reason to owe it.
+    app.add_systems(
+        Update,
+        publish_ghost_door_exclusions.in_set(WorldStage::Input),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A ghost's mover drops DOOR GameObjects — and nothing else** (decision 1767).
+    ///
+    /// The third case is the one this test exists for. `GAMEOBJECT_TYPE_ID` is absent on a unit,
+    /// and an absent field reads `0`, which *is* DOOR — so the type id alone says "door" for every
+    /// creature and player in the world. Excluding those from the mover's trace would mean walking
+    /// through units while dead, from a change that never mentions them.
+    #[test]
+    fn a_ghosts_trace_drops_doors_and_only_doors() {
+        use benilla_protocol::EntityKind;
+
+        assert!(
+            ghost_passable(EntityKind::GameObject, 0),
+            "a DOOR GameObject is what the reference's `0x5f85f0` refuses to make a candidate"
+        );
+        assert!(
+            !ghost_passable(EntityKind::GameObject, 1),
+            "a BUTTON is not — it shares the state-driven collider lane, not this one; the \
+             reference's predicate is an equality against 0"
+        );
+        assert!(
+            !ghost_passable(EntityKind::Unit, 0),
+            "and a UNIT reading type 0 is the absent field, not a door: units keep colliding"
+        );
+        assert!(
+            !ghost_passable(EntityKind::Player, 0),
+            "same for a player — the absent-field trap is not unit-specific"
+        );
+    }
 
     /// The wire default that let open doors block (decision 0757). `None` must read ACTIVE/open,
     /// never "unknown" — vmangos omits the zero-valued field, so `None` IS the open state for

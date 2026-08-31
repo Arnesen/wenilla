@@ -382,7 +382,7 @@ pub(super) fn chat_edit_live(
     let Some(script) = script else {
         return;
     };
-    if !ui_capture.0 {
+    if !ui_capture.typing {
         return; // box not focused — nothing to live-parse
     }
     let text: String = script
@@ -561,11 +561,14 @@ pub(super) fn parse_type_switch(
 }
 
 /// The open commands through the binding table (0997; 1.12 defaults OPENCHAT = Enter,
-/// OPENCHATSLASH = `/`, REPLY = R): OPENCHAT opens with the sticky type, downgrading an invalid
-/// PARTY/RAID to SAY against the live group state (the ref's `ChatEdit_UpdateHeader`
-/// invalid-type law; the sticky itself keeps its value, so rejoining a group restores it —
-/// GUILD/BG downgrades wait on their arcs' state); OPENCHATSLASH opens pre-slashed; REPLY opens
-/// as a reply to the last teller. The dispatch already gated on nothing owning the keyboard
+/// OPENCHATSLASH = `/`, REPLY = R, REPLY2 = Shift-R): OPENCHAT opens with the sticky type,
+/// downgrading an invalid PARTY/RAID to SAY against the live group state (the ref's
+/// `ChatEdit_UpdateHeader` invalid-type law; the sticky itself keeps its value, so rejoining a
+/// group restores it — GUILD/BG downgrades wait on their arcs' state); OPENCHATSLASH opens
+/// pre-slashed; REPLY opens as a reply to the last teller, and **REPLY2 to the last person YOU
+/// told** — the reference's own split, `ChatEdit_GetLastTellTarget` against
+/// `ChatEdit_GetLastToldTarget` (ChatFrame.lua l.1627/1645), and the reason they are two
+/// commands rather than one. The dispatch already gated on nothing owning the keyboard
 /// (a focused box's Enter is the box's), and Shift-Enter no longer opens chat — `SHIFT-ENTER`
 /// is a different chord than `ENTER`, the exact-modifier law the reference applies.
 pub(super) fn open_chat_keys(
@@ -581,12 +584,22 @@ pub(super) fn open_chat_keys(
     let open_plain = binds.fired(cmd::OPEN_CHAT);
     let open_slash = binds.fired(cmd::OPEN_CHAT_SLASH);
     let open_reply = binds.fired(cmd::REPLY) && !state.last_tell.is_empty();
-    if !(open_plain || open_slash || open_reply) {
+    // REPLY2 rides `last_told`, which the send path has been keeping all along
+    // ([`super::input::send`]) with nothing reading it. Same guard shape as REPLY's: with nobody
+    // told yet the reference falls into its own empty-string else-branch and opens nothing.
+    let open_reply2 = binds.fired(cmd::REPLY2) && state.last_told.is_some();
+    if !(open_plain || open_slash || open_reply || open_reply2) {
         return;
     }
-    if open_reply {
+    if open_reply || open_reply2 {
         state.chat_type = SendType::Whisper;
-        state.tell_target = state.last_tell.front().cloned().unwrap_or_default();
+        // REPLY wins a same-frame tie, which is the order the reference's two bindings can only
+        // be pressed in anyway (they are different chords); stated rather than left to the `if`.
+        state.tell_target = if open_reply {
+            state.last_tell.front().cloned().unwrap_or_default()
+        } else {
+            state.last_told.clone().unwrap_or_default()
+        };
     } else {
         state.chat_type = sticky_on_open(state.sticky, &group);
     }
