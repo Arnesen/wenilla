@@ -584,7 +584,15 @@ fn drive_loading_screen(
     // While the snap is still in flight the residency being published is the OLD location's
     // (fully resident) — hold the bar at zero until the destination's own numbers exist. ---
     if !screen.awaiting_snap {
-        screen.displayed = screen.displayed.max(progress.fraction());
+        // The sliced in-game UI load is part of what the screen waits for (its clear condition
+        // above), so it is part of what the bar shows: while it is pending, residency fills the
+        // first 80 % and the load's own steps the last 20 %; once it is gone, residency alone —
+        // and the monotonic max below keeps that hand-over from ever moving the bar backwards.
+        let fraction = match entry_ui_pending.as_deref() {
+            Some(ui) => 0.8 * progress.fraction() + 0.2 * ui.fraction(),
+            None => progress.fraction(),
+        };
+        screen.displayed = screen.displayed.max(fraction);
     }
     let frac = screen.displayed;
     if let Ok(mut node) = fill.single_mut() {

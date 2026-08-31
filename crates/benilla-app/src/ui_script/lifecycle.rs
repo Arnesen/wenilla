@@ -18,6 +18,7 @@ use super::{
     UiKeyboardCapture,
 };
 use crate::ui_script::addons;
+use crate::ui_script::addons::Addon;
 
 pub(crate) fn setup_script(world: &mut World) {
     install_boot_vm(world);
@@ -142,14 +143,74 @@ fn ui_wanted(world: &World) -> bool {
 /// cover — have committed their presents before this frame's stall begins. The loading screen
 /// folds this resource's existence into its clear condition, so a reveal can never precede the
 /// UI it is supposed to reveal.
+///
+/// **Since the world-entry slicing (2026-08-31) the load is a resumable state machine, not one
+/// burst.** Measured on the page: the whole edge — reference sourcing, ~55 FrameXML/Lua files
+/// through the wasm Lua VM, positions, addons, saved variables — was ONE main-thread task of
+/// 3.0–3.4 s warm, and on a cold WAN cache (every UI sprite the first draw resolves is a
+/// synchronous XHR) **206 s**: Chrome's "page unresponsive" dialog, every Enter World. Slicing
+/// spends the same work over frames — [`ENTRY_LOAD_FRAME_BUDGET`] of it per frame, at least one
+/// step each — so the cover keeps presenting, its bar keeps moving ([`Self::fraction`]) and the
+/// tab stays responsive. The latch's other contracts are unchanged: it exists from
+/// `OnEnter(InWorld)` until the tree is built ([`ingame_ui_pending`]), and the loading screen
+/// clears only after it is gone.
 #[derive(Resource, Default)]
 pub(crate) struct PendingEntryUiLoad {
     covered_frames: u32,
+    stage: EntryStage,
+    /// Steps done / total, for the loading bar. `total` is known after the first step.
+    done: usize,
+    total: usize,
+    started: Option<bevy::platform::time::Instant>,
+    frames: u32,
+    covering: bool,
+    identity: Option<(String, String)>,
+    version_check: bool,
+    /// The builtin manifest's file list, resolved once at the first step.
+    files: Vec<String>,
+}
+
+impl PendingEntryUiLoad {
+    /// 0..1 of the load's steps done — the loading screen folds it into its bar.
+    pub(crate) fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.done as f32 / self.total as f32).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// Where the sliced entry load is — see [`PendingEntryUiLoad`]. The order is
+/// [`load_ingame_ui`]'s, one step per stage transition: what used to be one call is now the
+/// same calls with frame boundaries allowed between them.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum EntryStage {
+    /// Waiting for the cover, or about to take the first step.
+    #[default]
+    Armed,
+    /// The builtin manifest's files after the font registry (index 0 loaded at boot), one per
+    /// step.
+    Builtin { next: usize },
+    /// `UIParent_ManageFramePositions()`.
+    Positions,
+    /// Every third-party addon (one step: the walk is dependency-ordered and fires
+    /// `ADDON_LOADED` per addon — kept atomic; the page has no addon folder, and a native
+    /// player's addon burst is the reference's own behaviour).
+    ThirdParty,
+    /// Saved variables, `VARIABLES_LOADED`, the failure count, the identity record.
+    Finish,
 }
 
 /// Covered+in-world frames before the entry load runs — the same present proxy, and the same
 /// value, as `pipe_warm::WARM_COVER_PRESENT_FRAMES` (0962's argument, restated there).
 const ENTRY_LOAD_COVER_FRAMES: u32 = 3;
+
+/// How much of one frame the entry load may spend before yielding to the next. At least one
+/// step always runs, so a single slow file still makes progress; the budget only decides
+/// whether a *second* step starts. Small on purpose: the frames it yields to are the loading
+/// cover's — cheap to render — and every one of them is a frame the browser can answer.
+const ENTRY_LOAD_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// `OnEnter(InWorld)`: arm the deferred entry load. The load itself runs a few frames later —
 /// see [`PendingEntryUiLoad`].
@@ -205,23 +266,159 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     let covering = world
         .get_resource::<crate::loading_screen::LoadingScreen>()
         .is_some_and(|s| s.covering());
-    if covering {
+    if covering && world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed {
         let mut pending = world.resource_mut::<PendingEntryUiLoad>();
         pending.covered_frames += 1;
         if pending.covered_frames < ENTRY_LOAD_COVER_FRAMES {
             return;
         }
     }
-    world.remove_resource::<PendingEntryUiLoad>();
-    let start = bevy::platform::time::Instant::now();
-    load_ingame_ui_on_world_entry(world);
-    // The standing instrument for this burst: the one number that says whether the cover is
-    // still hiding it, on every entry, in every log.
-    info!(
-        "ui_script: in-game UI up in {:.0} ms (behind the cover: {})",
-        start.elapsed().as_secs_f32() * 1000.0,
-        covering
-    );
+    // One frame's slice: steps until the budget is spent (at least one), then yield. The VM
+    // leaves the world for the slice and comes back at its end, so every other system sees it
+    // between frames exactly as it did around the old single burst.
+    if !ui_wanted(world) {
+        world.remove_resource::<PendingEntryUiLoad>();
+        return;
+    }
+    let Some(mut script) = world.remove_non_send_resource::<UiScript>() else {
+        warn!("ui_script: entering the world with no VM — the in-game UI will not load");
+        world.remove_resource::<PendingEntryUiLoad>();
+        return;
+    };
+    let frame_start = bevy::platform::time::Instant::now();
+    world.resource_mut::<PendingEntryUiLoad>().frames += 1;
+    loop {
+        let stage = world.resource::<PendingEntryUiLoad>().stage;
+        match stage {
+            EntryStage::Armed => {
+                let (identity, version_check) = entry_prepare(world, &mut script);
+                let files = Addon::builtin().toc.files;
+                let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                pending.identity = identity;
+                pending.version_check = version_check;
+                pending.covering = covering;
+                pending.started = Some(frame_start);
+                // sourced (done above) + files after index 0 + positions + addons + finish
+                pending.total = 1 + files.len().saturating_sub(1) + 3;
+                pending.done = 1;
+                pending.files = files;
+                pending.stage = EntryStage::Builtin { next: 1 };
+            }
+            EntryStage::Builtin { next } => {
+                let pending = world.resource::<PendingEntryUiLoad>();
+                if next < pending.files.len() {
+                    let file = &pending.files[next..next + 1];
+                    // Errors are logged by the loader itself and retained for `/errors`; the
+                    // one-shot path discards them too.
+                    let _ = Addon::builtin().load_files(&script, file);
+                    let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                    pending.done += 1;
+                    pending.stage = EntryStage::Builtin { next: next + 1 };
+                } else {
+                    world.resource_mut::<PendingEntryUiLoad>().stage = EntryStage::Positions;
+                    continue; // free transition
+                }
+            }
+            EntryStage::Positions => {
+                let _ = super::manifest::bootstrap_positions(&script);
+                let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                pending.done += 1;
+                pending.stage = EntryStage::ThirdParty;
+            }
+            EntryStage::ThirdParty => {
+                let (identity, version_check) = {
+                    let p = world.resource::<PendingEntryUiLoad>();
+                    (p.identity.clone(), p.version_check)
+                };
+                let _ = addons::load_third_party(&mut script, identity.as_ref(), version_check);
+                let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                pending.done += 1;
+                pending.stage = EntryStage::Finish;
+            }
+            EntryStage::Finish => {
+                let pending = world
+                    .remove_resource::<PendingEntryUiLoad>()
+                    .unwrap_or_default();
+                entry_finish(world, &mut script, pending.identity.clone());
+                world.insert_non_send_resource(script);
+                // The standing instrument for this edge: the one number that says whether the
+                // cover is still hiding it — and now over how many frames it was spread.
+                info!(
+                    "ui_script: in-game UI up in {:.0} ms over {} frame(s) (behind the cover: {})",
+                    pending
+                        .started
+                        .map_or(0.0, |s| s.elapsed().as_secs_f32() * 1000.0),
+                    pending.frames,
+                    pending.covering
+                );
+                return;
+            }
+        }
+        if frame_start.elapsed() >= ENTRY_LOAD_FRAME_BUDGET {
+            break; // resume next frame
+        }
+    }
+    world.insert_non_send_resource(script);
+}
+
+/// The entry load's opening: the identity the addons see, the realm and player the file scopes
+/// read, the instruction bound, and the reference FrameXML sourced off the chain. Shared by the
+/// sliced entry load and the one-shot [`load_ingame_ui_on_world_entry`]; the *why* of each line
+/// lives on the one-shot below.
+fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, String)>, bool) {
+    let identity = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(crate::ui_macro::identity);
+    let realm = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
+        .unwrap_or_default();
+    script.set_realm_name(&realm);
+    if let Some(seat) = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(seat_from_roster)
+    {
+        script.set_unit("player", Some(seat));
+    }
+    let version_check = script
+        .cvar("checkAddonVersion")
+        .map(|v| v != "0")
+        .unwrap_or_else(|| {
+            world
+                .get_resource::<crate::cvars::CvarPersist>()
+                .is_none_or(crate::cvars::CvarPersist::addon_version_check)
+        });
+    script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
+    super::reference_ui::load_sourced(script);
+    (identity, version_check)
+}
+
+/// The entry load's closing — everything [`load_ingame_ui_on_world_entry`] does after the
+/// files: minimap zoom seed, saved variables + `VARIABLES_LOADED`, the failure count, the budget
+/// disarm, the identity record. Same sharing arrangement as [`entry_prepare`].
+fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(String, String)>) {
+    let zoom = world.resource::<crate::minimap::MinimapZoom>();
+    script.set_minimap_zoom(zoom.outdoor, zoom.inside);
+    finish_ui_load(script);
+    let failed = script
+        .diagnostics()
+        .iter()
+        .filter(|d| d.kind == benilla_ui::script::diagnostics::DiagnosticKind::Load)
+        .count();
+    if failed > 0 {
+        if let Some(mut chat) = world.get_resource_mut::<crate::ui_chat::ChatLog>() {
+            chat.push_event(crate::ui_chat::ChatEvent::text_only(
+                crate::ui_chat::ChatEventKind::System,
+                format!(
+                    "{failed} addon load {} — type /errors to see {}.",
+                    if failed == 1 { "failure" } else { "failures" },
+                    if failed == 1 { "it" } else { "them" }
+                ),
+            ));
+        }
+    }
+    script.clear_instruction_budget();
+    world.insert_resource(AddOnIdentity(identity));
 }
 
 /// Materialize the in-game UI for **this** session.

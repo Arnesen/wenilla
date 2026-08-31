@@ -91,7 +91,12 @@ async fn index(State(state): State<DataState>) -> Response {
     match listed {
         Ok(Ok(entries)) => {
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-            Json(names).into_response()
+            // Cacheable, unlike before: the wasm `Chain` now reads this once per session to
+            // answer `contains` from memory (its struct doc has the numbers), and `web/boot.js`
+            // prefetches it at character select so that read is a cache hit. A day, not the
+            // files' year: the list changes when an operator adds a patch archive, and a stale
+            // index would make the client believe those files absent until it expires.
+            ([(header::CACHE_CONTROL, "public, max-age=86400")], Json(names)).into_response()
         }
         Ok(Err(e)) => {
             tracing::error!(error = %e, "chain list failed");
