@@ -65,12 +65,14 @@ pub(super) fn publish_viewer(
     };
 }
 
-/// Tell the world where to stream from, once per frame, before the stream stage reads it.
+/// Tell the world where to stream from, once per frame, before the stream stage reads it — and,
+/// when that answer is not the body, put the body on the settle hold for as long as it is not.
 pub(super) fn publish_view_focus(
     mut focus: ResMut<ViewFocus>,
-    player: Option<Res<Player>>,
+    mut player: Option<ResMut<Player>>,
     roster: Option<Res<crate::char_select::Roster>>,
     cinematic: Option<Res<crate::cinematic::Cinematic>>,
+    mut was_flying: Local<bool>,
 ) {
     let entry = roster
         .as_deref()
@@ -82,6 +84,37 @@ pub(super) fn publish_view_focus(
     // mode. The server does the mirror-image thing on its side: while a cinematic runs it
     // re-anchors object visibility to its own copy of the flying camera (decision 0196).
     let flying = cinematic.as_deref().is_some_and(|c| c.is_playing());
+    // **A detached focus stops keeping the body's own ground resident — so the body goes on the
+    // hold for as long as that lasts.** Free-fly never had to answer for this: `control` skips the
+    // whole controlled branch while `detached`, so nothing simulates the body there. A cinematic
+    // does, and the body stands with gravity on while the tiles under it unload. Measured on the
+    // probe: `.debug play cinematic 41` over a settled body at z=59.4 dropped it to z=-62 within
+    // four seconds, the server yanking it back, and it never sent a movement packet again.
+    //
+    // This is not a new fact — it is the settle hold's own ("the ground under this body is not
+    // there"), reached from the other side: after a teleport the body's world has not arrived
+    // *yet*, and here it is *leaving*. So it takes the same hold, and the release stays exactly
+    // where decision 0737 put it — [`release_post_snap_hold`], on residency about the body's own
+    // tile, which cannot become true again until the shot ends and the focus comes home. Nothing
+    // here ever clears the hold: starting one is the game's business, ending one is the world's.
+    //
+    // `world_stale` rides with it because it is equally true — the resident world is the flying
+    // camera's, not this body's — and because it is what keeps the stall backstop off. Without it
+    // a camera that settles mid-shot goes quiet, the 6 s no-progress budget expires, and gravity
+    // comes back on partway through a 102-second intro: the exact fall this prevents, delayed.
+    // Armed on the RISING EDGE, never re-asserted per frame — the sentence above is a rule, not a
+    // flourish. A shot whose camera happens to stay on the body's own tile makes that tile resident
+    // and the release ends the hold at once, correctly; re-arming every frame would fight it and
+    // leave `settling` oscillating under the loading screen's clear-gate and the zone-channel walk,
+    // both of which read it.
+    if flying && !*was_flying {
+        if let Some(p) = player.as_deref_mut().filter(|p| p.active) {
+            p.settling = true;
+            p.world_stale = true;
+            info!("cinematic: body held — the stream follows the camera off its ground");
+        }
+    }
+    *was_flying = flying;
     // The pacing bit: spawn caps apply only to a live avatar standing in a settled world. Through
     // entry, a teleport and a world swap the loading cover is absorbing the burst, and a cap there
     // would only lengthen the reveal.
@@ -226,6 +259,88 @@ mod tests {
 
     fn settling(app: &mut App) -> bool {
         app.world().resource::<Player>().settling
+    }
+
+    /// **A cinematic puts the body on the settle hold, once.** The live defect this pins: with the
+    /// stream following the flying camera, the tiles under a standing body unload and it falls
+    /// through the world — measured on the probe at `.debug play cinematic 41`, z=59.4 to z=-62 in
+    /// four seconds, with the server yanking it back and no movement packet sent again.
+    ///
+    /// `world_stale` rides along because without it the stall backstop expires the moment the
+    /// camera stops streaming new ground, and gravity comes back partway through the shot.
+    #[test]
+    fn a_flying_cinematic_holds_the_body_and_marks_its_world_stale() {
+        let mut app = App::new();
+        app.insert_resource(ViewFocus::default())
+            .insert_resource(Player {
+                active: true,
+                settling: false,
+                world_stale: false,
+                ..Player::default()
+            })
+            .insert_resource(crate::cinematic::Cinematic::playing_for_test())
+            .add_systems(Update, publish_view_focus);
+        app.update();
+
+        let p = app.world().resource::<Player>();
+        assert!(
+            p.settling,
+            "the body kept gravity while its ground unloaded"
+        );
+        assert!(
+            p.world_stale,
+            "the stall backstop was left free to expire mid-shot"
+        );
+    }
+
+    /// The other half of the same rule: **nothing here ever ends a hold**, and nothing re-arms one.
+    /// The release is the world's (decision 0737), and a shot whose camera stays on the body's own
+    /// tile makes that tile resident — so the release ends the hold correctly, and a per-frame
+    /// re-arm would fight it and leave `settling` flickering under the two systems that read it
+    /// (the loading screen's clear gate and the zone-channel walk).
+    #[test]
+    fn the_hold_is_armed_on_the_edge_and_never_re_armed() {
+        let mut app = App::new();
+        app.insert_resource(ViewFocus::default())
+            .insert_resource(Player {
+                active: true,
+                ..Player::default()
+            })
+            .insert_resource(crate::cinematic::Cinematic::playing_for_test())
+            .add_systems(Update, publish_view_focus);
+        app.update();
+        assert!(app.world().resource::<Player>().settling);
+
+        // The world releases the hold (the camera's tile IS this body's), still mid-cinematic.
+        app.world_mut().resource_mut::<Player>().settling = false;
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        app.update();
+        let p = app.world().resource::<Player>();
+        assert!(
+            !p.settling,
+            "the publish re-armed a hold the world had ended"
+        );
+        assert!(
+            !p.world_stale,
+            "and re-staled a world the streamer had cleared"
+        );
+    }
+
+    /// No cinematic, no hold — the ordinary frame is untouched.
+    #[test]
+    fn an_ordinary_frame_arms_nothing() {
+        let mut app = App::new();
+        app.insert_resource(ViewFocus::default())
+            .insert_resource(Player {
+                active: true,
+                ..Player::default()
+            })
+            .insert_resource(crate::cinematic::Cinematic::default())
+            .add_systems(Update, publish_view_focus);
+        app.update();
+        let p = app.world().resource::<Player>();
+        assert!(!p.settling);
+        assert!(!p.world_stale);
     }
 
     /// B263 (decision 1303): a stream that keeps arriving keeps the hold, however long it takes.

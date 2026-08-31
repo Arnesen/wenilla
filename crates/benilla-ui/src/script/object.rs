@@ -337,6 +337,10 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
             super::button::REG_CHECKBUTTON_METHODS,
             super::button::REG_BUTTON_METHODS,
         ],
+        // The Model pane's own surface. Its absence is what stopped pfUI — and, through pfUI's
+        // embedded copies, pfQuest, pfQuest-turtle and ShaguDPS — on `SetModel` after the whole
+        // rest of their UI had already built (`super::modelframe`'s header).
+        Some(FrameKind::Model) => &[super::modelframe::REG_MODEL_METHODS],
         Some(FrameKind::Minimap) => &[super::minimap::REG_MINIMAP_METHODS],
         Some(FrameKind::Cooldown) => &[super::cooldown::REG_COOLDOWN_METHODS],
         Some(FrameKind::GameTooltip) => &[super::tooltip::REG_TOOLTIP_METHODS],

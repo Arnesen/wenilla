@@ -984,6 +984,29 @@ fn feed_minimap_inside(
     }
 }
 
+/// Push the player's world facing onto the Minimap's engine-owned player-arrow `Model` — the
+/// client's `CMinimap::SetPlayerFacing 0x4eb8e0`, which writes it verbatim into the arrow's
+/// `[+0x39c]`, the field `Model:GetFacing()` reads.
+///
+/// **Every frame, not on an edge**, because the value is continuous: the reference calls it from
+/// the per-frame minimap update with the player's live `GetFacing()`, and an addon polling it in an
+/// OnUpdate (which is what reads it — Questie's `GetPlayerFacing`, pfQuest's `compat/client.lua`)
+/// would otherwise steer off a stale heading. It costs one arena lookup per Minimap widget, which
+/// is what `WidgetArena::minimap_kinds` exists to make true.
+///
+/// **The one transform, and why it is not a fudge.** `player.facing()` is benilla's `face_yaw`, an
+/// unbounded accumulator — a mouse-turn just adds to it — whereas the client's unit orientation is
+/// a normalized field, and the same normalization already happens on the wire (`movement_net`'s
+/// `[0, 2π)` rule, which vmangos's `VerifyMovementInfo` requires). So the value published here is
+/// the wire value, and an addon reading it back sees the same number the server does.
+fn feed_minimap_player_facing(
+    script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
+    player: Res<Player>,
+) {
+    let Some(mut script) = script else { return };
+    script.set_minimap_player_facing(player.facing().rem_euclid(std::f32::consts::TAU));
+}
+
 /// Push the live game clock into the VM when the game minute ticks — `GetGameTime()`'s backing
 /// globals (the zone-text family's shape). The reference's GameTimeFrame re-reads GetGameTime
 /// every OnUpdate and compares the packed minute against its cached `timeOfDay`, so a
@@ -1044,6 +1067,9 @@ impl Plugin for MinimapPlugin {
                     // Before the script tick, so a zoom button pressed this frame routes to the
                     // indoor/outdoor index that matches where the player actually is.
                     feed_minimap_inside.before(crate::ui_script::UiInput),
+                    // Before the script tick, so an addon's OnUpdate steers off this frame's
+                    // heading rather than last frame's.
+                    feed_minimap_player_facing.before(crate::ui_script::UiInput),
                     // Before the script tick, and after the containment verdict it reads: the
                     // `MINIMAP_PING` event and `Minimap:GetPingPosition()`'s value land in the
                     // same tick, on a ping the renderer already drew at the end of last frame.

@@ -342,6 +342,17 @@ impl ViewFocus {
         }
     }
 
+    /// **Is the stream following the body's own ground?** True only for an attached live avatar.
+    ///
+    /// The question anyone asking "is the world under the *player* loaded?" actually means. While
+    /// the eye is detached — free-fly, a cinematic fly-by — residency describes wherever the
+    /// camera went, so a consumer that reads it as a fact about the body is reading someone else's
+    /// tile. `release_post_snap_hold` already learned that the hard way (decision 1336) and tests
+    /// the tile itself; this is the cheap form for a consumer that only needs the yes/no.
+    pub fn follows_body(&self) -> bool {
+        self.attached && self.body.is_some()
+    }
+
     /// A live avatar whose eye has been **detached** (free-fly): the stream follows the camera,
     /// the zone authority still follows the body.
     pub fn detached(wow: [f32; 3], paced: bool) -> Self {

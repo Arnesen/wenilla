@@ -198,6 +198,101 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // ── The four structure queries: GetChildren / GetNumChildren / GetRegions / GetNumRegions ──
+    //
+    // Registered bindings in 1.12 (`GetNumRegions 0x773e60`, `GetRegions 0x773f60`,
+    // `GetNumChildren 0x774080`, `GetChildren 0x774180` — wow-re `ui/ledger.tsv`, classified
+    // ORCHESTRATION: each marshals and delegates, with no fidelity math of its own).
+    //
+    // **Why these four are worth more than their size.** They are how an addon walks a frame it did
+    // not build, which is the whole basis of the "reskin the default UI" genre — and that genre is
+    // the top of the 1.12 popularity list. `pfUI.api.StripTextures` is the canonical shape:
+    //
+    //     for _, v in ipairs({ frame:GetRegions() }) do
+    //       if v.SetTexture then ... v:SetTexture(nil) end
+    //     end
+    //
+    // With `GetRegions` absent that is `attempt to call method 'GetRegions' (a nil value)`, raised
+    // out of a library file every one of pfUI, pfQuest, pfQuest-turtle and ShaguDPS embeds — four
+    // separate top-20 addons dying on one missing verb, plus Questie on `GetChildren`.
+    //
+    // **Two lists, one walk each, in the arena's own order.** `Frame::children` is insertion order,
+    // which our own arena documents as the client's `+0x300` child-list order; `Frame::regions` is
+    // creation order. Neither is re-sorted here — a structure query reports the structure, and the
+    // draw order is `crate::order`'s separate concern.
+    //
+    // **A detached region is not in the list.** `Region:SetParent(nil)` sets `Region::detached`
+    // rather than removing the entry, because the owner's `Vec` is what `WidgetArena::destroy`
+    // frees from — but the client's re-link virtual `0x77fd10` with a null parent genuinely
+    // **unlinks from the old parent's draw layer and region list** (wow-re
+    // `widget-api-batch-benilla.md` Q7, VERIFIED), so a detached region must be invisible to both
+    // region verbs. Our flag is a representation choice; the list these report is the client's.
+    //
+    // **The count and the list come from ONE function** ([`regions_of`] / [`children_of`]), never
+    // two walks with the same filter written twice. `GetNumRegions` disagreeing with
+    // `#{GetRegions()}` is a bug an addon would hit as an off-by-one deep inside a loop it did not
+    // write, and the only way to make it impossible is to have one of them BE the other.
+    //
+    // **Settled by a wow-re §5 quartet** (`ui/scratch/widget-list-bindings.md`), which confirmed two
+    // of these choices and corrected a third:
+    //
+    //  · **The order is link order, oldest first, and no reversal.** `CSimpleFrame` embeds a punned
+    //    `TSList` header whose ctor sets `tail = &header`, `head = (&header)|1`, and BOTH linkers
+    //    append at the TAIL (`0x76a750` for regions, `0x76aa20` for children — one caller each).
+    //    Our insertion-order `Vec` is the same order. (wow-re's own `draw-order-law.md` said
+    //    "tail→head"; that was a direction mislabel and was corrected in the same round.)
+    //  · **Hidden children and regions are returned and counted** — a VERIFIED negative: the
+    //    counting loops never load the visibility word at all.
+    //  · **The TITLE REGION IS NOT RETURNED**, and that one corrected us. Both creation paths
+    //    (`0x773910`, `0x769b79`) dispatch a vtable slot that is a bare `[this+0x9c] = parent` and
+    //    never reach the linker `0x77fd10`, so a title region is not in the list this walks —
+    //    corroborated by `Hide`/`Show` carrying an explicit extra `[frame+0xa8]` case *because* the
+    //    list walk misses it. Ours is in `Frame::regions` (so the arena can free it), so
+    //    [`regions_of`] filters it out.
+    //  · **A Button's label (`+0x338`) and its four state textures ARE in the list** — they link
+    //    through `0x77fd10` like any region, which is what ours do too.
+    //  · **The return shape**: N separate values, never a table; a frame with none returns ZERO
+    //    values (no `lua_newtable` in either body), and `GetNum*` returns one number — `0` when
+    //    empty, never nil.
+    //
+    // The one thing still out of reach is not these bindings': Questie reads
+    // `({Minimap:GetChildren()})[9]` for the player arrow, and the §5 found why that index works —
+    // `CMinimap`'s ctor `0x4edbc0` builds NINE engine-owned `Model` children before the XML
+    // `<Frames>` descent, the ninth (`[Minimap+0x338]`) being the arrow `SetPlayerFacing 0x4eb8e0`
+    // writes. We create none of them, so index 9 is nil here until the minimap grows its engine
+    // children.
+    m.set(
+        "GetChildren",
+        lua.create_function(|lua, this: Table| {
+            let ids = children_of(lua, &this)?;
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                out.push(Value::Table(frame_wrapper(lua, id)?));
+            }
+            Ok(mlua::MultiValue::from_vec(out))
+        })?,
+    )?;
+    m.set(
+        "GetNumChildren",
+        lua.create_function(|lua, this: Table| Ok(children_of(lua, &this)?.len()))?,
+    )?;
+    m.set(
+        "GetRegions",
+        lua.create_function(|lua, this: Table| {
+            let ids = regions_of(lua, &this)?;
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                out.push(Value::Table(crate::script::region::region_wrapper(
+                    lua, id,
+                )?));
+            }
+            Ok(mlua::MultiValue::from_vec(out))
+        })?,
+    )?;
+    m.set(
+        "GetNumRegions",
+        lua.create_function(|lua, this: Table| Ok(regions_of(lua, &this)?.len()))?,
+    )?;
     // SetParent — the runtime reparent, per the byte-verified law (wow-re
     // `ui/scratch/setparent-runtime-strata-level.md`; decision 1323). The binding half
     // (`0x7a1550`): the parent argument is a frame table, a NAME string (`0x76c760`), or an
@@ -762,4 +857,53 @@ fn set_shown(lua: &Lua, this: &Table, shown: bool) -> mlua::Result<()> {
     };
     event::fire_visibility_changes(lua, changed);
     Ok(())
+}
+
+/// This frame's child frames as stable ids, in the arena's insertion order — the one walk
+/// `GetChildren` and `GetNumChildren` share (see their comment on why they must share it).
+fn children_of(lua: &Lua, this: &Table) -> mlua::Result<Vec<u32>> {
+    let h = frame_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let Some(children) = model.arena.frame(h).map(|f| f.children.clone()) else {
+        return Ok(Vec::new());
+    };
+    Ok(children.into_iter().map(|c| model.frame_id(c)).collect())
+}
+
+/// This frame's live regions as stable ids, in creation order — **the title region and detached
+/// ones excluded** — the one walk `GetRegions` and `GetNumRegions` share.
+///
+/// Both exclusions are the client's list, not tidiness, and both are VERIFIED (wow-re
+/// `ui/scratch/widget-list-bindings.md`, §5 quartet):
+///
+/// - **Detached.** `SetParent(nil)` reaches `0x77fd55` → the removal virtual `0x76a7f0`, which
+///   unlinks the node and frees it, and then skips every re-link. We keep the entry only so the
+///   arena can still free the slot; reporting it would hand an addon an object the reference never
+///   would, and `StripTextures`-shaped code would "strip" a region already off the screen.
+/// - **The title region.** Its two creation paths (`0x773910`, `0x769b79`) dispatch a vtable slot
+///   that is a bare `[this+0x9c] = parent` and never reach the linker at all, so it was never in
+///   this list — corroborated by `Hide`/`Show` needing an explicit extra `[frame+0xa8]` case
+///   *because* the walk misses it. Ours is in [`crate::widget::Frame::regions`] so that
+///   `WidgetArena::destroy` still frees it, which makes that a representation detail this walk
+///   must not leak.
+///
+/// A Button's label and its four state textures are deliberately NOT excluded: they link through
+/// `0x77fd10` like any other region in the reference, and ours go through `create_region` like any
+/// other region here.
+fn regions_of(lua: &Lua, this: &Table) -> mlua::Result<Vec<u32>> {
+    let h = frame_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let Some((regions, title)) = model
+        .arena
+        .frame(h)
+        .map(|f| (f.regions.clone(), f.title_region))
+    else {
+        return Ok(Vec::new());
+    };
+    let live: Vec<_> = regions
+        .into_iter()
+        .filter(|r| Some(*r) != title)
+        .filter(|r| model.arena.region(*r).is_some_and(|reg| !reg.detached))
+        .collect();
+    Ok(live.into_iter().map(|r| model.region_id(r)).collect())
 }

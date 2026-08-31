@@ -123,6 +123,11 @@ pub enum KindState {
     /// `<ColorWheelTexture>`/`<ColorValueTexture>` elements carry no `file=`), so this state is the
     /// widget's whole modeled behavior here; see [`crate::script::colorselect`].
     ColorSelect(ColorSelectState),
+    /// The `Model` widget's scene state — the 3D pane an addon or a FrameXML frame parks a model
+    /// in. **The same split as [`KindState::Minimap`] and [`KindState::Cooldown`]**: the engine
+    /// core carries exactly what the Lua API reads and writes, and the pixels are the app
+    /// renderer's job. See [`ModelState`].
+    Model(ModelState),
     /// The `<Minimap>` widget's zoom state (decision 0203). The engine core carries only what the
     /// Lua API reads/writes (`GetZoom`/`SetZoom`/`GetZoomLevels`); the tile/blip render is app-side.
     Minimap(MinimapState),
@@ -289,6 +294,83 @@ impl CooldownState {
     }
 }
 
+/// The `Model` widget's scene state (`0x6eecf0`'s frame type; the `<Model>` element).
+///
+/// **What this is and is not.** The 1.12 `Model` widget is a viewport that draws one M2 in a
+/// little scene of its own — the character pane, the tabard designer, the minimap ping, the pet
+/// bar's autocast shine, and every addon that wants a 3D thing in a frame. The engine core holds
+/// exactly the scene an addon can read back or write; **the render is the app's**, the same
+/// contract [`MinimapState`] and [`CooldownState`] already run under, and the reason both of those
+/// exist as state-only kinds here.
+///
+/// **Every field is a 1.12 binding's storage, not a guess at one.** The names are in the shipped
+/// binary as isolated strings (`SetModel`, `ClearModel`, `GetModel`, `SetSequence`,
+/// `SetSequenceTime`, `SetRotation`, `SetFacing`, `SetModelScale`, `SetCamera`, `SetPosition`,
+/// `SetLight`, `SetFogColor`, `SetUnit`, `RefreshUnit`), and wow-re's ledger already has the
+/// scene half registered — `SetPosition 0x76dc00`, `SetLight 0x76e1e0`, `GetLight 0x76e7d0`,
+/// `GetPosition 0x76ea40`, `SetFogColor 0x76ee60`, `GetFogColor 0x76f080`. (wow-re's
+/// registration scan does *not* list the model/sequence half; the strings say otherwise, and that
+/// gap is reported back rather than worked around.)
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelState {
+    /// The M2/MDX path last given to `SetModel`, or `None` after `ClearModel` / before any set.
+    /// Stored **as written** — the client's own path space is `Interface\...\Foo.mdx`, and the
+    /// app's loader is what maps `.mdx` to the `.m2` that actually ships.
+    pub path: Option<String>,
+    /// `SetUnit(unit)` — the *other* way a pane gets its content, used by the dress-up and
+    /// paper-doll frames. Mutually exclusive with [`Self::path`] in practice: whichever was set
+    /// last is what the pane shows, so each setter clears the other.
+    pub unit: Option<String>,
+    /// `SetSequence(n)` — the animation index the pane plays.
+    pub sequence: i32,
+    /// `SetSequenceTime(sequence, ms)` — the scrub point, as `(sequence, milliseconds)`. The
+    /// cooldown indicator's whole mechanism is this pair driven per frame, which is why it is
+    /// stored rather than folded into [`Self::sequence`].
+    pub sequence_time: Option<(i32, i32)>,
+    /// `SetRotation`/`SetFacing` — the model's yaw in radians. **Two names, one slot**: the
+    /// reference FrameXML drives the tabard and character panes with `SetRotation` (10 sites) and
+    /// nothing in the shipped chain calls `SetFacing`, but both are in the binary and both mean
+    /// the pane's yaw.
+    pub facing: f32,
+    /// `SetModelScale` — the model's own scale within the pane, default 1.
+    pub scale: f32,
+    /// `SetCamera(index)` — which of the model's baked camera setups to view it through.
+    pub camera: i32,
+    /// `SetPosition(x, y, z)` — the model's offset within the pane's scene.
+    pub position: (f32, f32, f32),
+    /// `SetLight(...)` — the scene's light, stored verbatim as the 14-number tuple the binding
+    /// takes (`enabled, omni, dirX, dirY, dirZ, ambIntensity, ambR, ambG, ambB, dirIntensity,
+    /// dirR, dirG, dirB` plus the leading `enabled`). Opaque here on purpose: the engine core has
+    /// no lighting model, and inventing a typed one would be asserting a scene semantics we have
+    /// not verified.
+    pub light: Option<Vec<f32>>,
+    /// `SetFogColor(r, g, b)` — `None` until set; the client also has a `SetFogFar`/`SetFogNear`
+    /// pair we do not model (nothing in the corpus or the shipped chain calls them).
+    pub fog_color: Option<(f32, f32, f32)>,
+}
+
+/// A fresh `Model` pane: no content, sequence 0, unrotated, unit scale, camera 0, at the origin.
+///
+/// `scale` is the one field whose zero value would be wrong — a model at scale 0 is invisible, and
+/// the widget's documented default is 1 — so [`ModelState`] cannot use a derived `Default` for it
+/// and this impl exists to say why.
+impl Default for ModelState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            unit: None,
+            sequence: 0,
+            sequence_time: None,
+            facing: 0.0,
+            scale: 1.0,
+            camera: 0,
+            position: (0.0, 0.0, 0.0),
+            light: None,
+            fog_color: None,
+        }
+    }
+}
+
 /// The Minimap widget's modeled state — the client keeps **two independent zoom indices**, chosen by
 /// whether the player is inside a WMO (wow-re minimap node, `wmo-interior-minimap.md` finding 2 Q7
 /// CORRECTION): the inside flag `0xceaa60` routes the outdoor index `0x86f698` (CVar `minimapZoom`,
@@ -310,6 +392,12 @@ pub struct MinimapState {
     /// Is the player inside a WMO interior (the client's `0xceaa60`)? Selects which index the Lua
     /// zoom API reads and writes. Pushed down by the app, which owns the WMO containment test.
     pub inside: bool,
+    /// The **player-arrow** `Model` — the client's `[Minimap+0x338]`, ninth and last of the nine
+    /// engine children the ctor builds ([`MINIMAP_ENGINE_CHILDREN`]). An explicit slot because that
+    /// is the shape the client keeps: `CMinimap::SetPlayerFacing 0x4eb8e0` reaches the arrow through
+    /// this field, never by counting children; "it is also `GetChildren()[9]`" is a *consequence* of
+    /// the ctor's order, not the definition.
+    pub player_arrow: Option<FrameHandle>,
 }
 
 /// Both minimap zoom CVars register with the default `"3"` — **not** 0 (wow-re, VERIFIED at the
@@ -327,6 +415,9 @@ impl Default for MinimapState {
             zoom: MINIMAP_DEFAULT_ZOOM,
             inside_zoom: MINIMAP_DEFAULT_ZOOM,
             inside: false,
+            // Filled by the arena the moment the widget is inserted — the nine are ctor-time, so a
+            // Minimap is never observably without them (`WidgetArena::create`).
+            player_arrow: None,
         }
     }
 }
@@ -353,6 +444,39 @@ impl MinimapState {
 
 /// The client's minimap zoom-level count (`get_zoom_levels` `0x6da9a0` returns the constant 6).
 pub const MINIMAP_ZOOM_LEVELS: u8 = 6;
+
+/// **Nine `Model` children, built by the `CMinimap` ctor before anything else sees the widget** —
+/// wow-re `ui/scratch/widget-list-bindings.md` §5 / `ui/ui.md`, VERIFIED. The ctor `0x4edbc0`
+/// (TU `Ui\MinimapFrame.cpp`) allocates `CSimpleModel` (`0x76c8e0`) nine times with the Minimap as
+/// parent, in three source-ordered groups whose `__LINE__` arguments give the order directly:
+///
+/// | # | stored at | `__LINE__` | what it is |
+/// |---|---|---|---|
+/// | 1–5 | `[Minimap+0x320 + 4k]` | 1424 | the rim/party arrows (`minimapArrowModel`) |
+/// | 6–8 | `[Minimap+0x314 + 4k]` | 1438 | the three POI direction arrows (`minimapArrowModel`) |
+/// | 9 | `[Minimap+0x338]` | 1450 | **the player arrow** (`minimapPlayerModel`) |
+///
+/// **Why the engine core carries them at all**, when the app draws every one of these arrows itself
+/// from its own art (`benilla-app`'s `minimap::blips`): because they are *structure the Lua API can
+/// see*, and two of the most-installed 1.12 addons read it. `Questie`'s `QuestieArrow.lua`
+/// `GetPlayerFacing()` is `({Minimap:GetChildren()})[9]:GetFacing()`, and pfQuest's
+/// `compat/client.lua` does the same — the ctor runs before the XML `<Frames>` descent
+/// (`0x6ee408` before `0x6ee4ea`) and both linkers append at the tail, so on a stock client the
+/// tuple is these nine then `Minimap.xml`'s six, and index 9 is the arrow. Without them that read
+/// is `nil` and the addon dies calling a method on it.
+///
+/// The count is fixed and unconditional: an unloadable model file only skips the *file* assignment
+/// (`0x4ee286` returns early), never the child.
+pub const MINIMAP_ENGINE_CHILDREN: usize = 9;
+
+/// The engine default for `<Minimap minimapArrowModel=…>` — the string at `0x84c768`, applied by
+/// `0x4ee170` to engine children 1–8. (`Minimap.xml:97` sets the attribute explicitly, in the `.mdl`
+/// spelling; the loader rewrites the extension either way.)
+pub const MINIMAP_DEFAULT_ARROW_MODEL: &str = "Interface\\Minimap\\Rotating-MinimapArrow.mdx";
+
+/// The engine default for `<Minimap minimapPlayerModel=…>` — the string at `0x8453c0`, applied by
+/// `0x4ee260` to engine child 9 **alone**.
+pub const MINIMAP_DEFAULT_PLAYER_MODEL: &str = "Interface\\Minimap\\MinimapArrow.mdx";
 
 /// A `CSimpleScrollFrame`'s runtime state: the frame whose anchors are overridden to track the
 /// scroll offset ([`crate::script::UiScript::resolve`]'s scroll-child override), and the current

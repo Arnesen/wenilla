@@ -117,6 +117,27 @@ impl Cinematic {
     }
 }
 
+#[cfg(test)]
+impl Cinematic {
+    /// A cinematic that answers [`Cinematic::is_playing`] — for the neighbours that only ask that
+    /// one question (the streaming focus's hold, the HUD hide). **Shot-less on purpose:** there is
+    /// no way to build a [`CinematicPath`] without a real `Cameras\*.m2`, and a fixture that
+    /// faked one would let a test assert about a shot that does not exist. Anything that reads a
+    /// shot must be tested against the real corpus instead, and will panic loudly here if it is
+    /// not.
+    pub(crate) fn playing_for_test() -> Self {
+        Self {
+            pending: None,
+            playing: Some(Playing {
+                sequence_id: 0,
+                shots: Vec::new(),
+                index: 0,
+                elapsed: Duration::ZERO,
+            }),
+        }
+    }
+}
+
 /// One of the two letterbox bars — full-width, black, top or bottom.
 ///
 /// **Bevy UI nodes, not FrameXML quads, and that is the whole point.** The HUD is hidden during a
@@ -257,11 +278,13 @@ fn drive_letterbox(
             letterbox_bar(width, screen)
         });
     // On the edges and on a resize, never every frame: the measured crop, so the letterbox is a
-    // number in the log rather than something only an eye can confirm.
+    // number in the log rather than something only an eye can confirm. `info!` on purpose — the
+    // default filter stops at that level, and a number nobody's ordinary run prints is a number
+    // nobody checks (it fires once per cinematic, plus once per resize during one).
     if height != *logged {
         *logged = height;
         if height > 0.0 {
-            debug!("cinematic: letterbox bar {height:.1} px");
+            info!("cinematic: letterbox bar {height:.1} px");
         }
     }
     for (mut node, mut vis) in &mut bars {

@@ -70,6 +70,12 @@ use std::path::{Path, PathBuf};
 use benilla_ui::script::UiScript;
 use benilla_ui::toc::Toc;
 
+/// The read-back — *why is this global nil?* One addon, loaded the way the survey loads it, then
+/// arbitrary Lua evaluated against the VM that is left standing. A debugger, not a column; its
+/// header says what it is worth and where it deliberately stops.
+pub mod probe;
+#[cfg(test)]
+mod probe_tests;
 /// The render column — the one question every column here was blind to: *did this addon put
 /// anything on screen?* Its own module because it is its own concern (and this file is well over
 /// the size budget); its header is the design and the honest bounds.
@@ -290,6 +296,34 @@ pub struct AddonReport {
 /// `root` is an AddOns folder — one subfolder per addon, each with a `<Name>.toc`. Anything else
 /// is skipped in silence, exactly as discovery does, because a stray `Backup/` is the common case.
 pub fn survey(root: &Path) -> Vec<AddonReport> {
+    let (names, installed, registry) = corpus(root);
+
+    // Folder → the method names its source DEFINES, memoised across the whole survey.
+    //
+    // A dependency's definitions have to be read once per *folder*, not once per dependent: the
+    // corpus's library folders are declared by dozens of addons each (83 declare `FuBar`), and
+    // re-scanning `FuBar`'s source 83 times is the survey's runtime for nothing.
+    let mut defined_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    names
+        .iter()
+        .map(|n| survey_one(root, n, &installed, &registry, &mut defined_methods))
+        .collect()
+}
+
+/// **The corpus as every VM must see it** — the folders that carry a manifest, the case-folded
+/// installed set dependency resolution consults, and the AddOn registry each VM is seated with.
+///
+/// Its own function because [`probe`] needs the IDENTICAL environment for a single addon, and a
+/// probe built against a registry of one would answer a different question from the row it exists
+/// to explain (see [`probe`]'s header). The installed set is a property of the FOLDER, never of
+/// the selection.
+fn corpus(
+    root: &Path,
+) -> (
+    Vec<String>,
+    BTreeSet<String>,
+    Vec<benilla_ui::script::AddOnInfo>,
+) {
     let mut names: Vec<String> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -328,16 +362,7 @@ pub fn survey(root: &Path) -> Vec<AddonReport> {
         })
         .collect();
 
-    // Folder → the method names its source DEFINES, memoised across the whole survey.
-    //
-    // A dependency's definitions have to be read once per *folder*, not once per dependent: the
-    // corpus's library folders are declared by dozens of addons each (83 declare `FuBar`), and
-    // re-scanning `FuBar`'s source 83 times is the survey's runtime for nothing.
-    let mut defined_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    names
-        .iter()
-        .map(|n| survey_one(root, n, &installed, &registry, &mut defined_methods))
-        .collect()
+    (names, installed, registry)
 }
 
 /// The method names one addon folder's source **defines** — `function T:N`, `function T.N`,

@@ -122,6 +122,35 @@ pub(crate) struct SoundConfig {
     /// (1109) ride under the entry cover exactly as the real client's does: its amp is applied
     /// once at start, and a playing stream never passes back through the kit starters.
     pub world_hold: bool,
+    /// **The cinematic's music stop** — NOT a CVar, a per-frame live bit fed from
+    /// [`crate::cinematic::Cinematic`] by [`feed_music_suppression`], and the exact runtime
+    /// counterpart of the reference's `[0xb06cc8]` (wow-re `sound/scratch/cinematic-audio-law.md`,
+    /// §5, VERIFIED).
+    ///
+    /// A cinematic asserts precisely what `/console EnableMusic 0` asserts: both reach the same
+    /// setter `0x4603b0` — the CVar handler at `0x4574a4`, the cinematic's own start at `0x48ed83`
+    /// — and on the disable edge that setter runs `0x7a5700`, which is **stop-and-destroy and
+    /// takes no duration**. So the zone track is CUT, never faded, and the per-tick music pump
+    /// bails at its first instruction (`0x460040`: `mov al,[0xb06cc8]; test al,al; jne`) for as
+    /// long as the flag is set.
+    ///
+    /// **Separate from [`Self::music_enabled`] on purpose.** The cinematic writes the runtime
+    /// flag, never the CVar — and neither do we, because benilla persists a CVar *diff* to
+    /// `config.toml`: asserting `EnableMusic` here would save a player's music off for good if
+    /// they quit during a 102-second intro.
+    ///
+    /// **Ambience is deliberately untouched**, and that is verified rather than assumed: ambience
+    /// has the analogous suppress flag (`[0x836424]`, written only from `EnableAmbience`) and the
+    /// cinematic never writes it.
+    ///
+    /// **One thing of the reference's we deliberately do not carry: its restore latch.** It records
+    /// at the start whether music was already off (`[0xb4e278] = (flag == 0)`) and re-enables at
+    /// the stop only if it was the one that disabled it — because there the flag and the player's
+    /// `EnableMusic` CVar are the *same* bit, so restoring blindly would switch a player's music
+    /// back on. Here they are two: this is a separate runtime bit, and a player who set
+    /// `EnableMusic 0` is still silenced by [`Self::category_amp`] whatever this says. The latch
+    /// would guard against nothing, so it is left out rather than transcribed for its own sake.
+    pub music_suppressed: bool,
     /// The **output limiter** — benilla's own `SoundOutputLimiter` CVar (decision 1551), default
     /// **on**. Not a 1.12 CVar: the reference has no such DSP and does not need one, because it
     /// hands its whole audible mix to FMOD 3 and carries its headroom elsewhere (the SFX-bus
@@ -160,6 +189,7 @@ impl Default for SoundConfig {
             ambience_enabled: true,
             reverb: false,
             world_hold: false,
+            music_suppressed: false,
             limiter: true,
         }
     }
@@ -178,6 +208,21 @@ fn feed_world_hold(
     let hold = screen.covering();
     if config.world_hold != hold {
         config.world_hold = hold;
+    }
+}
+
+/// Copy the cinematic's music stop into [`SoundConfig::music_suppressed`], once per frame in
+/// `PreUpdate` beside [`feed_world_hold`] — same shape, same reason: one answer per frame, read by
+/// every trigger system after it.
+fn feed_music_suppression(
+    mut config: ResMut<SoundConfig>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
+) {
+    let playing = cinematic
+        .as_deref()
+        .is_some_and(crate::cinematic::Cinematic::is_playing);
+    if config.music_suppressed != playing {
+        config.music_suppressed = playing;
     }
 }
 
@@ -373,7 +418,7 @@ impl Plugin for SoundPlugin {
         )
         // The cover's audio hold (see [`SoundConfig::world_hold`]): fed in PreUpdate so every
         // trigger system this frame — whatever stage it runs in — reads one answer.
-        .add_systems(PreUpdate, feed_world_hold)
+        .add_systems(PreUpdate, (feed_world_hold, feed_music_suppression))
         .add_systems(
             Update,
             (
@@ -421,12 +466,25 @@ fn update_audio_listener(
     mut listener: ResMut<AudioListener>,
     mut out: NonSendMut<SoundOutput>,
     player: Res<Player>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
     self_av: Query<(&Transform, Option<&CameraPivot>), With<Embodied>>,
     cam: Query<&Transform, (With<WorldCamera>, Without<Embodied>)>,
 ) {
+    // **A cinematic takes the listener to the camera, and it OVERRIDES the CVar** — wow-re
+    // `sound/scratch/cinematic-audio-law.md` (VERIFIED; it also promoted `benilla-pins.md` B14's
+    // `camera+0x50` label from INFERRED to VERIFIED). `0x483112 jne 0x4831f0` takes the camera
+    // branch whenever `camera+0x50 != 0`, ahead of and regardless of `SoundListenerAtCharacter`;
+    // the flag is armed from the cinematic's own start path (`0x48ee55` → `0x50c870` → `0x50c9f2`
+    // → `0x50c740`) and cleared only by `0x50ca50` at the stop.
+    //
+    // The narration itself is 2D, so what this actually moves is every *other* 3D sound during a
+    // fly-by that can travel 1741 yards from the body.
+    let flying = cinematic
+        .as_deref()
+        .is_some_and(crate::cinematic::Cinematic::is_playing);
     // At-character (the default). `player.pos` is the feet; the head offset is the shared
     // model-derived pivot height, and the facing is the aim yaw about world-up (world +Y).
-    if player.active && !player.detached {
+    if player.active && !player.detached && !flying {
         if let Ok((t, pivot)) = self_av.single() {
             listener.pos = player.pos + Vec3::Y * head_height(pivot, t.scale.x);
             listener.rot = Quat::from_rotation_y(player.facing());
@@ -436,7 +494,7 @@ fn update_audio_listener(
             return;
         }
     }
-    // At-camera fallback (the `SoundListenerAtCharacter=0` path).
+    // At-camera (the `SoundListenerAtCharacter=0` path, and the cinematic override above).
     if let Ok(t) = cam.single() {
         listener.pos = t.translation;
         listener.rot = t.rotation;

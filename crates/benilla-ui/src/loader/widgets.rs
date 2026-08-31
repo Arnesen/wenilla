@@ -2,7 +2,9 @@ use mlua::{ObjectLike, Table};
 
 use crate::framexml::{self, Element};
 
-use super::{abs_dim, abs_value, children_named, color_of, tex_coords_of, Loader};
+use super::{
+    abs_dim, abs_value, children_named, children_named_any, color_of, tex_coords_of, Loader,
+};
 
 impl Loader<'_> {
     /// `<StatusBar>` LoadXML extras (RF-28, byte-verified table `0x782ef0`): `minValue`/`maxValue`
@@ -149,7 +151,27 @@ impl Loader<'_> {
         // back to the owner — 14 of them in one window, each a sort arrow sitting in the wrong
         // place. The real client is order-free here because it resolves anchors later; we are not,
         // so we order it ourselves rather than making each author work around it.
-        for bt in children_named(el, "ButtonText") {
+        // **Both spellings of the label** (`ButtonText` | `NormalText`), in document order.
+        //
+        // `<NormalText>` is not a synonym bolted on here — it is the binary's own second name for
+        // this slot, and it does strictly more: `CSimpleButton::LoadXML 0x7788c0` constructs the
+        // label `CSimpleFontString` on the `<NormalText>` leg (`0x778b6c call 0x770d30`), clears
+        // its `ownsFontAttrs` (`0x778b7b` — the ONE site image-wide that clears it), hands it to
+        // the shared adopter `0x778d20`, and runs its `LoadXML 0x770f40` with the whole
+        // font-attribute surface skipped, because the SAME node is fed separately to the button's
+        // persistent Normal-state `CSimpleFont` at `+0x33c` (`0x778ba9`/`0x778baf call 0x783c30`).
+        // One owner per attribute, no double application — which is why this pass reads the
+        // element's geometry and name and the state-font pass below reads its `inherits=`/`font=`,
+        // and neither reads the other's. (wow-re `scratch/fontstring-loadxml-font-attrs.md` §3/§7,
+        // `scratch/resize-bounds-and-button-fontstring.md` §5.3 — all VERIFIED off the bytes.)
+        //
+        // The reference FrameXML writes only `<ButtonText>` (31 sites, 16 of them
+        // `name="$parentText"`) and never `<NormalText>`, so nothing we ship could notice the
+        // second spelling was missing. A third-party template is where it shows: KLHThreatMeter's
+        // `<Button name="KLHTM_SelfHeaderStringTemplate" virtual="true"><NormalText
+        // name="$parentText" …>` left `KLHTM_SelfFrameHeaderNameText` nil, and the addon died in
+        // its `PLAYER_LOGIN` handler on exactly that global.
+        for bt in children_named_any(el, &["ButtonText", "NormalText"]) {
             // Create the label slot even with no text yet (the geometry below must land on a real
             // region; SetText is the slot's lazy constructor), then apply the element's own
             // `<Size>/<Anchors>`/justify to it — the ref anchors ButtonText all over (the quest
@@ -228,12 +250,12 @@ impl Loader<'_> {
         // The per-state label fonts (`<NormalFont inherits=>` etc. — UIPanelButtonTemplate's
         // gold/white/gray label trio) → the 1.12 setter trio; every occurrence applies in
         // document order (same last-wins rule as `apply_size`).
-        for (child, method) in [
-            ("NormalFont", "SetTextFontObject"),
-            ("HighlightFont", "SetHighlightFontObject"),
-            ("DisabledFont", "SetDisabledFontObject"),
+        for (children, method) in [
+            (["NormalFont", "NormalText"], "SetTextFontObject"),
+            (["HighlightFont", "HighlightText"], "SetHighlightFontObject"),
+            (["DisabledFont", "DisabledText"], "SetDisabledFontObject"),
         ] {
-            for f in children_named(el, child) {
+            for f in children_named_any(el, &children) {
                 // These three are `<Font>`-TYPED elements — `CSimpleButton::LoadXML 0x7788c0`
                 // routes them at `0x778bf4` into the SAME `0x783c30` a top-level `<Font>` uses — so
                 // they take `inherits=` and `font=` alike, and `font=` wins: both land in one slot
@@ -356,6 +378,34 @@ impl Loader<'_> {
     /// `justifyH`** are what the frame's lines bake, stack and align at (read at extract,
     /// `crate::script::UiScript::extract`) — that child is how `UIErrorsFrame.xml` centres its
     /// toasts and how a chat frame keeps its lines flush left.
+    /// `<Minimap>`'s LoadXML extras (`CMinimap::LoadXML 0x4ee2b0`): the two model-file attributes,
+    /// which name the nine `Model` children the arena's ctor already built
+    /// (`crate::widget::MINIMAP_ENGINE_CHILDREN`). Both have engine defaults, so an attribute-less
+    /// `<Minimap>` still gets the stock arrows — the reference reads the default string when the
+    /// attribute is absent rather than leaving the children file-less.
+    ///
+    /// Gated on the element's own tag like every other step here, so a plain `<Frame>` wearing a
+    /// Minimap template simply skips it.
+    pub(super) fn apply_minimap(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
+        if !el.tag.eq_ignore_ascii_case("Minimap") {
+            return;
+        }
+        let arrow = el
+            .attr("minimapArrowModel")
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::widget::MINIMAP_DEFAULT_ARROW_MODEL);
+        let player = el
+            .attr("minimapPlayerModel")
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL);
+        if let Err(e) = crate::script::apply_minimap_model_attrs(self.lua, wrapper, arrow, player) {
+            self.warn_once(
+                "minimap:models",
+                format!("{dbg}: <Minimap> model attributes: {e}"),
+            );
+        }
+    }
+
     pub(super) fn apply_messageframe(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
         let scrolling = el.tag.eq_ignore_ascii_case("ScrollingMessageFrame");
         let plain = el.tag.eq_ignore_ascii_case("MessageFrame");

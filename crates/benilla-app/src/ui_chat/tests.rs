@@ -2017,8 +2017,8 @@ fn both_dock_windows_carry_the_same_chrome() {
     );
 }
 
-/// **The two dock windows must come from ONE declaration.** The structural guard that ends the
-/// class (decision 1588).
+/// **All SEVEN chat windows must come from ONE declaration.** The structural guard that ends the
+/// class (decision 1588), widened to the whole set by 1712.
 ///
 /// Three rounds of the same bug: window 2 shipped with no tab (1575), then with no rect and no
 /// border art (1579), then with no `OnUpdate` and no scroll column (1588) — each time because it
@@ -2026,11 +2026,18 @@ fn both_dock_windows_carry_the_same_chrome() {
 /// tests each catch ONE missed part after someone notices it; this catches the mirroring itself,
 /// which is the only check that can fire before a part is missing.
 ///
-/// So: both windows inherit the same virtual template (the reference's own shape —
-/// `FloatingChatFrameTemplate`), and neither declares any content of its own beyond its seat. A
-/// `<Layers>`, `<Frames>` or `<Scripts>` block on either instance is the defect, whatever is in it.
+/// **Windows 3..7 were the fourth round of it**, and the longest-lived: they were not mirrored
+/// partially, they were declared bare — no tab, no background, no border art, no scroll column —
+/// on the argument that nothing reads a hidden, undocked window's furniture. pfUI reads all of it,
+/// for all seven, unguarded (`chat.lua:588`, `chat.lua:321-419`). This test covered exactly the two
+/// windows the argument had already exempted, so it could not fire; it now covers the set the
+/// reference declares.
+///
+/// So: every window inherits the same virtual template (the reference's own shape —
+/// `FloatingChatFrameTemplate`), and none declares any content of its own beyond its seat. A
+/// `<Layers>`, `<Frames>` or `<Scripts>` block on any instance is the defect, whatever is in it.
 #[test]
-fn the_two_dock_windows_are_one_declaration() {
+fn the_seven_chat_windows_are_one_declaration() {
     use benilla_ui::framexml::TopLevel;
     let xml = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/ChatFrame.xml"),
@@ -2046,27 +2053,28 @@ fn the_two_dock_windows_are_one_declaration() {
         let Some(name) = el.attr("name") else {
             continue;
         };
-        if name != "ChatFrame1" && name != "ChatFrame2" {
+        if !(1..=7).any(|i| name == format!("ChatFrame{i}")) {
             continue;
         }
         seen += 1;
         assert_eq!(
             el.attr("inherits"),
-            Some("BenillaDockedChatFrameTemplate"),
-            "{name} must inherit the dock template, not restate it"
+            Some("BenillaChatFrameTemplate"),
+            "{name} must inherit the window template, not restate it"
         );
         for child in &el.children {
             assert!(
                 matches!(child.tag.as_str(), "Size" | "Anchors"),
                 "{name} declares its own <{}> — that is the mirroring this test exists to stop; \
-                 it belongs in BenillaDockedChatFrameTemplate where BOTH windows get it",
+                 it belongs in BenillaChatFrameTemplate where EVERY window gets it",
                 child.tag
             );
         }
     }
     assert_eq!(
-        seen, 2,
-        "both dock windows must be declared in ChatFrame.xml"
+        seen,
+        7, // NUM_CHAT_WINDOWS — ChatFrame.lua:5
+        "all seven chat windows must be declared in ChatFrame.xml"
     );
 }
 

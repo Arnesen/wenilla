@@ -1140,6 +1140,37 @@
             hideOnEscape = 1,
         }
 
+        -- ── ABANDON_QUEST_WITH_ITEMS — DECLARED, never shown ────────────────────────────────────
+        -- `GetAbandonQuestItems()` is always nil here (`quest_log.rs`), so nothing in this client
+        -- reaches `StaticPopup_Show("ABANDON_QUEST_WITH_ITEMS", …)`, and the click handler below
+        -- says so. That was taken as a reason to omit the *entry*, and it is not one: the
+        -- reference's StaticPopup.lua declares this table unconditionally at load
+        -- (StaticPopup.lua:762-775), whatever the client later shows, and an addon reading `_G`
+        -- reads declarations, not behaviour.
+        --
+        -- Questie is the measurement: `QuestieQuest.lua:55` is
+        -- `StaticPopupDialogs["ABANDON_QUEST_WITH_ITEMS"].OnAccept` at file scope, with no guard —
+        -- it wraps BOTH abandon dialogs to clear its own quest cache. Absent, that is
+        -- `attempt to index field 'ABANDON_QUEST_WITH_ITEMS' (a nil value)` and the addon's whole
+        -- quest module never loads. (#3 of the top-20 corpus; the same shape as `ChatFrame3..7`'s
+        -- "declared because addons read them", 1497.)
+        --
+        -- Byte-identical to ABANDON_QUEST above but for `text` — the reference's two entries differ
+        -- in exactly that one field. `%s` twice: the quest name, then the item list.
+        StaticPopupDialogs["ABANDON_QUEST_WITH_ITEMS"] = {
+            text = "Abandon \"%s\", destroying %s?", -- ABANDON_QUEST_CONFIRM_WITH_ITEMS
+            button1 = "Yes",                         -- YES
+            button2 = "No",                          -- NO
+            OnAccept = function()
+                AbandonQuest()
+                PlaySound("igQuestLogAbandonQuest")
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
         function BenillaQuestLogAbandonButton_OnClick()
             if GetQuestLogSelection() == 0 then return end
             -- pin §4, QuestLogFrame.xml:463-472: SetAbandonQuest() pins the click-time selection;

@@ -5,8 +5,9 @@
 //! constant 6, `set_zoom` clamps at 5 and marks the tile grid dirty, and the zoom index feeds the
 //! `zoom_to_scale` tables (`0x6da9b0`). The engine core carries only the index
 //! ([`MinimapState`]); the app renderer maps it to a world radius and draws the tiles
-//! (decision 0203). The model attrs (`minimapPlayerModel=`/`minimapArrowModel=`) are not
-//! modeled yet — deferred with phase 3's blips.
+//! (decision 0203). The two model attrs (`minimapArrowModel=`/`minimapPlayerModel=`) are modeled
+//! only as far as the Lua surface can see them: [`apply_model_attrs`] names the nine engine
+//! children the ctor built, and the app still draws every arrow from its own art.
 //!
 //! **The ping** (decision 1596) is the same split, one rung further out: the two methods here are
 //! pure seam — `PingLocation` parks a click and `GetPingPosition` reads back what the app
@@ -52,6 +53,48 @@ fn with_minimap<T>(
         KindState::Minimap(m) => Ok(f(m)),
         _ => Err(mlua::Error::runtime("not a Minimap")),
     }
+}
+
+/// `CMinimap::LoadXML 0x4ee2b0`'s model half: assign the two `<Minimap>` model attributes to the
+/// nine engine children the ctor already built. `minimapArrowModel` (engine default
+/// [`crate::widget::MINIMAP_DEFAULT_ARROW_MODEL`]) goes to children **1–8** via `0x4ee170`'s two loops
+/// (`0x4ee1b7` over the five at `+0x320`, `0x4ee204` over the three at `+0x314`);
+/// `minimapPlayerModel` (default [`crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL`]) goes to child **9 alone**, via
+/// `0x4ee260`.
+///
+/// The split is what makes the nine *distinguishable* from Lua: without it `GetModel()` is `""` on
+/// all nine and nothing in the tuple says which one is the player arrow.
+///
+/// Runs before the `<Frames>` descent, because `0x4ee2b0` does its own work and only then chains to
+/// `CSimpleFrame::LoadXML 0x76a2f0`, which is what recurses into the children.
+pub(crate) fn apply_model_attrs(
+    lua: &Lua,
+    this: &Table,
+    arrow: &str,
+    player: &str,
+) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let Some(children) = model.arena.frame(h).map(|f| f.children.clone()) else {
+        return Ok(());
+    };
+    for (i, child) in children
+        .into_iter()
+        .take(crate::widget::MINIMAP_ENGINE_CHILDREN)
+        .enumerate()
+    {
+        let path = if i + 1 == crate::widget::MINIMAP_ENGINE_CHILDREN {
+            player
+        } else {
+            arrow
+        };
+        if let Some(frame) = model.arena.frame_mut(child) {
+            if let KindState::Model(state) = &mut frame.kind_state {
+                state.path = Some(path.to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {

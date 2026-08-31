@@ -94,6 +94,7 @@ mod merchant;
 mod messageframe;
 mod minimap;
 mod model;
+mod modelframe;
 mod net_stats;
 mod object;
 mod party;
@@ -192,6 +193,7 @@ pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NA
 pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
+pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
 pub use model::{TextureProbe, TextureSizeProbe};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
@@ -605,6 +607,7 @@ impl UiScript {
         slider::install(&lua)?;
         colorselect::install(&lua)?;
         minimap::install(&lua)?;
+        modelframe::install(&lua)?;
         cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
@@ -758,9 +761,51 @@ impl UiScript {
     /// moved (a widget born after the last transition still gets told, without paying the arena
     /// walk every frame).
     pub fn set_minimap_inside(&mut self, inside: bool) {
-        for (_, frame) in self.model_mut().arena.iter_frames_mut() {
-            if let KindState::Minimap(m) = &mut frame.kind_state {
-                m.inside = inside;
+        self.for_each_minimap(|m| m.inside = inside);
+    }
+
+    /// Run `f` over every live Minimap widget's state. Goes through the arena's Minimap registry
+    /// rather than a full `iter_frames_mut`, for the reason that registry exists: a corpus UI is
+    /// three to four thousand frames and there is normally exactly one Minimap, and one of these
+    /// feeds ([`Self::set_minimap_player_facing`]) runs every frame.
+    fn for_each_minimap(&mut self, mut f: impl FnMut(&mut crate::widget::MinimapState)) {
+        let mut model = self.model_mut();
+        for h in model.arena.minimap_kinds().to_vec() {
+            if let Some(frame) = model.arena.frame_mut(h) {
+                if let KindState::Minimap(m) = &mut frame.kind_state {
+                    f(m);
+                }
+            }
+        }
+    }
+
+    /// Push the player's world facing (radians) onto every Minimap's **player-arrow** `Model` —
+    /// the client's `CMinimap::SetPlayerFacing 0x4eb8e0`, whose whole 34-byte body is
+    /// `[minimap+0x33c] = arg` then, guarded on non-null, `[[minimap+0x338]+0x39c] = arg`: a raw
+    /// dword copy into the same field `Model:SetFacing 0x76dce0` writes, with **no negation, offset
+    /// or unit change**. Its one caller (`0x4eb0a4`–`0x4eb0b1`) feeds it the player's `GetFacing()`
+    /// straight off the FPU stack, so what an addon reads back is the unit's orientation exactly.
+    ///
+    /// This is what makes `({Minimap:GetChildren()})[9]:GetFacing()` — Questie's `GetPlayerFacing`,
+    /// and pfQuest's `compat/client.lua` — return the truth rather than the ctor default `0`, which
+    /// is the difference between a waypoint arrow that points at the waypoint and one aimed
+    /// permanently north. Called every frame by the app, which owns the player.
+    pub fn set_minimap_player_facing(&mut self, facing: f32) {
+        let mut model = self.model_mut();
+        let arrows: Vec<crate::widget::FrameHandle> = model
+            .arena
+            .minimap_kinds()
+            .iter()
+            .filter_map(|&h| match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Minimap(m)) => m.player_arrow,
+                _ => None,
+            })
+            .collect();
+        for h in arrows {
+            if let Some(frame) = model.arena.frame_mut(h) {
+                if let KindState::Model(state) = &mut frame.kind_state {
+                    state.facing = facing;
+                }
             }
         }
     }
@@ -801,12 +846,10 @@ impl UiScript {
     pub fn set_minimap_zoom(&mut self, zoom: u8, inside_zoom: u8) {
         let top = crate::widget::MINIMAP_ZOOM_LEVELS - 1;
         let (zoom, inside_zoom) = (zoom.min(top), inside_zoom.min(top));
-        for (_, frame) in self.model_mut().arena.iter_frames_mut() {
-            if let KindState::Minimap(m) = &mut frame.kind_state {
-                m.zoom = zoom;
-                m.inside_zoom = inside_zoom;
-            }
-        }
+        self.for_each_minimap(|m| {
+            m.zoom = zoom;
+            m.inside_zoom = inside_zoom;
+        });
     }
 
     /// Load and run a Lua chunk (text-only; the sandbox rejects bytecode). Errors propagate to the

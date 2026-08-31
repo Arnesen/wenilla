@@ -802,6 +802,7 @@ impl Loader<'_> {
         self.apply_editbox(el, wrapper, dbg_name);
         self.apply_messageframe(el, wrapper, dbg_name);
         self.apply_simplehtml(el, wrapper, dbg_name);
+        self.apply_minimap(el, wrapper, dbg_name);
         // 6 · <Scripts> handlers (rf24 `0x769ef0`); OnLoad is captured to fire bottom-up below.
         let onload = self.apply_scripts(el, wrapper, dbg_name);
 
@@ -888,6 +889,25 @@ pub(super) fn children_named<'a>(
     el.children
         .iter()
         .filter(move |c| c.tag.eq_ignore_ascii_case(tag))
+}
+
+/// Iterate an element's direct children whose tag matches ANY of `tags` (case-insensitively), in
+/// document order.
+///
+/// **Two spellings, one pass.** A 1.12 `<Button>` answers to two names for its label
+/// (`<ButtonText>` and `<NormalText>`) and two for each of its three state fonts
+/// (`<NormalFont>`/`<NormalText>`, `<HighlightFont>`/`<HighlightText>`,
+/// `<DisabledFont>`/`<DisabledText>` — `CSimpleButton::LoadXML 0x7788c0`'s tag-compare chain,
+/// wow-re `scratch/fontstring-loadxml-font-attrs.md` §7). Walking one spelling and then the other
+/// would apply them in tag order instead of document order, and every one of these slots is
+/// last-wins — so the alternatives have to be a single filtered walk, not two.
+pub(super) fn children_named_any<'a>(
+    el: &'a Element,
+    tags: &'a [&'a str],
+) -> impl Iterator<Item = &'a Element> {
+    el.children
+        .iter()
+        .filter(move |c| tags.iter().any(|t| c.tag.eq_ignore_ascii_case(t)))
 }
 
 /// Does this `text=` value LOOK like a GlobalStrings key? `SCREAMING_SNAKE`, two characters or more —

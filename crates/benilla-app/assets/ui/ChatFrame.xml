@@ -580,6 +580,13 @@
                 local frame = getglobal("ChatFrame" .. i)
                 if i == id then frame:Show() else frame:Hide() end
             end
+            -- `SELECTED_CHAT_FRAME` tracks the SELECTION, which is what makes it different from
+            -- `DEFAULT_CHAT_FRAME` (the print target, seeded once and left alone). The reference
+            -- writes it from the tab's own OnClick before it even reaches FCF_SelectDockFrame
+            -- (`FloatingChatFrame.lua:1232`) and again on a drag (`FloatingChatFrame.xml:158`);
+            -- ours has one selection verb that every one of those paths goes through, so it is
+            -- written here rather than replicated at three call sites.
+            SELECTED_CHAT_FRAME = getglobal("ChatFrame" .. id) or SELECTED_CHAT_FRAME
             if BenillaFCF.flashTab == id then
                 BenillaFCF.flashTab = 0
                 local flash = getglobal("ChatFrame" .. id .. "TabFlash")
@@ -1185,22 +1192,31 @@
         end
     ]]></Script>
 
-    <!-- ── The dock: ChatFrame1 (General) + ChatFrame2 (Combat Log) sharing its rect ─────── -->
+    <!-- ── The seven chat windows: ChatFrame1 (General) + ChatFrame2 (Combat Log) docked, 3..7
+             hidden and undocked ──────────────────────────────────────────────────────────────── -->
     <!--
-        **One declaration, two windows.** The dock's two windows are the SAME widget seated
-        differently, and saying that twice is how three straight rounds of bugs got in: 1575 found
-        the Combat Log with no tab, 1579 found it with no rect and no border art, and 1588 found it
-        with no `OnUpdate` and no scroll column — each time because window 2 was a HAND-MIRRORED
-        partial copy of window 1 and the mirroring missed a part. The reference does not mirror: it
-        declares `FloatingChatFrameTemplate` `virtual="true"` and every `ChatFrameN` inherits it
-        (FloatingChatFrame.xml l.211, l.685-832). So do we, and the class of bug goes with it —
-        a part that exists for one docked window now cannot fail to exist for the other.
+        **One declaration, seven windows.** A chat window is the SAME widget seated differently, and
+        saying it twice is how three straight rounds of bugs got in: 1575 found the Combat Log with
+        no tab, 1579 found it with no rect and no border art, and 1588 found it with no `OnUpdate`
+        and no scroll column — each time because window 2 was a HAND-MIRRORED partial copy of
+        window 1 and the mirroring missed a part. The reference does not mirror: it declares
+        `FloatingChatFrameTemplate` `virtual="true"` and every `ChatFrameN` inherits it
+        (FloatingChatFrame.xml l.211, l.685-832). So do we, and the class of bug goes with it.
+
+        **All seven, not two — and that changed for a measured reason (1712).** ChatFrame3..7 were
+        declared bare: a `ScrollingMessageFrame` and nothing else, on the argument that nothing
+        reads their furniture while they stay hidden and undocked. The top-20 corpus falsifies it.
+        pfUI's `chat.lua:588` is `for i = 1, NUM_CHAT_WINDOWS do _G["ChatFrame"..i.."UpButton"]:Hide()`
+        — the scroll column, the tab, and (in `RefreshChat`) `$parentBackground`, every
+        `CHAT_FRAME_TEXTURES` slice and `$parentResizeBottom`, all seven, none guarded. The
+        reference has them because the template is shared; the visibility of the window it hangs
+        off has nothing to do with whether the global resolves.
 
         Per-instance is only what genuinely differs: the seat (ChatFrame1 is the managed-position
         base — `UIPARENT_MANAGED_FRAME_POSITIONS["ChatFrame1"]`, baseY 85 + the bottom-stack
         offsets, decision 0272 — and ChatFrame2 takes its rect from ChatFrame1's, which is what
         being docked MEANS and why it must never carry a managed row of its own, 1579), the id,
-        and which of the two ships shown.
+        and which ships shown.
 
         The chrome the template carries: displayDuration 120 / maxLines 128 (ref ChatFrameTemplate);
         a background stretched -2/+2 x and +3/-6 y past the frame (ref $parentBackground anchors)
@@ -1217,7 +1233,7 @@
         one script here that is genuinely ChatFrame1's rather than the dock's, so the template
         carries the gate rather than the registration.
     -->
-    <ScrollingMessageFrame name="BenillaDockedChatFrameTemplate" virtual="true"
+    <ScrollingMessageFrame name="BenillaChatFrameTemplate" virtual="true"
                            frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128"
                            movable="true" resizable="true">
         <!-- ref FloatingChatFrame.xml l.222-230, verbatim. The only `<ResizeBounds>` in the whole
@@ -1538,9 +1554,11 @@
                     this:RegisterEvent("UPDATE_CHAT_WINDOWS")
                 end
                 -- `isDocked` — the reference's own flag, and it is LOAD-BEARING now rather than an
-                -- advertisement. Only this template is inherited, and only ChatFrame1/ChatFrame2
-                -- inherit it, so every frame that reaches this line is docked: they share one rect
-                -- (window 2's anchors are window 1's corners) and one tab strip.
+                -- advertisement. **The gate below is the chat-cache's own `DOCKED` byte** (1712):
+                -- the shipped file marks windows 1 and 2 `DOCKED 1` and windows 3..10 `DOCKED 0`,
+                -- so the two that reach the assignment are exactly the two that share one rect
+                -- (window 2's anchors are window 1's corners) and one tab strip. It was
+                -- unconditional while this template had two instances; it now has seven.
                 --
                 -- This file used to withhold the flag on the grounds that it "belongs to a dock
                 -- MODEL (dock/undock, FCF_DockUpdate's re-anchoring) that 0288 §2 holds out", i.e.
@@ -1548,9 +1566,11 @@
                 -- reference's move and resize gates READ it — `chatFrame.isDocked and chatFrame ~=
                 -- DEFAULT_CHAT_FRAME` is the clause that keeps the Combat Log from being resized
                 -- out of the dock it is anchored into — so withholding it now means the gate that
-                -- protects window 2 silently never fires. The flag is a fact about our two windows;
-                -- the verbs remain out.
-                this.isDocked = 1
+                -- protects window 2 silently never fires. The flag is a fact about our two docked
+                -- windows; the verbs remain out.
+                if this:GetID() == 1 or this:GetID() == 2 then
+                    this.isDocked = 1
+                end
             </OnLoad>
             <OnEvent>
                 if event == "EXECUTE_CHAT_LINE" then
@@ -1613,7 +1633,7 @@
         <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
 
-    <ScrollingMessageFrame name="ChatFrame1" inherits="BenillaDockedChatFrameTemplate" id="1">
+    <ScrollingMessageFrame name="ChatFrame1" inherits="BenillaChatFrameTemplate" id="1">
         <Size><AbsDimension x="430" y="120"/></Size>
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT">
@@ -1625,7 +1645,7 @@
     <!-- ChatFrame2 "Combat Log": docked — it takes ChatFrame1's rect from these two anchors and
          nothing else, ships hidden, and its tab (ChatFrame2Tab, below) selects it. Its message
          groups are the chat-cache combat set, registered app-side (`ui_chat::frames`, 1571). -->
-    <ScrollingMessageFrame name="ChatFrame2" inherits="BenillaDockedChatFrameTemplate" hidden="true" id="2">
+    <ScrollingMessageFrame name="ChatFrame2" inherits="BenillaChatFrameTemplate" hidden="true" id="2">
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="ChatFrame1" relativePoint="TOPLEFT"/>
             <Anchor point="BOTTOMRIGHT" relativeTo="ChatFrame1" relativePoint="BOTTOMRIGHT"/>
@@ -1690,87 +1710,53 @@
             `local function print(text) ChatFrame3:AddMessage(text) end`, is dead code replicated
             into four folders — the count that looks like 12 files is 7 real sites.
 
-         No tabs (`ChatFrame3Tab`..`ChatFrame7Tab`) and no dock regions. The reference builds
-         both; here they would be furniture for a dock model we do not have (0288 §2), and
-         nothing reads them while these frames stay hidden and undocked. Outfitter.lua:3099 is
-         the one addon that would touch a tab — `local vTab = getglobal("ChatFrame"..i.."Tab")`
-         then `vTab:GetText()`, unguarded — but only INSIDE `if vChatFrame:IsVisible() or
-         vChatFrame.isDocked`, so a hidden, `isDocked`-less window never reaches it.
+         **They now carry the full template, and that is 1712's correction.** These five used to
+         be declared bare — no tab, no background, no border art, no scroll column — on the
+         argument that the furniture is "for a dock model we do not have (0288 §2), and nothing
+         reads it while these frames stay hidden and undocked". The reading of Outfitter behind it
+         was right (`Outfitter.lua:3099` gates its `vTab:GetText()` behind `IsVisible() or
+         isDocked`) and the conclusion was still wrong, because one addon is not the corpus.
+         pfUI reads every piece of it, for all seven, unguarded:
 
-         `isDocked` is NOT set on these five, and that is the whole point of the flag now: the two
-         dock windows set it in the shared template's `OnLoad` (it is what the reference's move and
-         resize gates read), and ChatFrame3..7 are the frames that genuinely are not docked. The
-         Outfitter hazard the flag used to carry — `if vChatFrame:IsVisible() or vChatFrame.isDocked`
-         then `vTab:GetText()` on a window with no tab — is why it stays off here: these have no
-         tabs, and they are hidden, so neither arm reaches the nil.
+             chat.lua:588   `_G["ChatFrame"..i.."UpButton"]:Hide()`  — and Down/Bottom, and
+                            `_G["ChatFrame"..i.."Tab"].SetAlpha`, at module load
+             chat.lua:322   `local tab = _G["ChatFrame"..i.."Tab"]` → `tab:SetParent(…)`,
+                            `tab:GetRegions()`
+             chat.lua:404   every `CHAT_FRAME_TEXTURES` slice, `texture:SetTexture()`
+             chat.lua:419   `_G["ChatFrame"..i.."ResizeBottom"]:Hide()`
 
-         No background/border art: the ref's own defaults put every one of these at window alpha
-         0 (COLOR's fourth byte), and BenillaFCF only fades the dock's two. A shown ChatFrame5
-         renders its text over the world with no box — which is what the reference gives you. ── -->
-    <ScrollingMessageFrame name="ChatFrame3" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="3">
+         Visibility has nothing to do with whether a global resolves, and pfQuest, pfQuest-turtle
+         and ShaguDPS embed the same library. So all seven inherit the same template, exactly as
+         the reference does (FloatingChatFrame.xml l.822-832 are five one-liners), and the tabs
+         below are declared the same way.
+
+         `isDocked` is still NOT set on these five, and that stays the whole point of the flag: the
+         template's `OnLoad` gates it to the two windows the chat-cache marks `DOCKED 1`, and these
+         are the frames that genuinely are not docked — which is what keeps Outfitter's own gate
+         doing what it does on a stock client.
+
+         They keep the reference's own look: window alpha 0 (the chat-cache `COLOR`'s fourth byte)
+         means a shown ChatFrame5 renders its text over the world with no box, and the template's
+         art is all alpha-0 until `BenillaFCF` fades it — which it does for the dock's two. ── -->
+    <ScrollingMessageFrame name="ChatFrame3" inherits="BenillaChatFrameTemplate" hidden="true" id="3">
         <Size><AbsDimension x="430" y="128"/></Size>
         <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
-        <Scripts>
-            <OnMouseWheel>
-                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
-            </OnMouseWheel>
-            <OnHyperlinkClick>
-                SetItemRef(arg1, arg2, arg3)
-            </OnHyperlinkClick>
-        </Scripts>
-        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
-    <ScrollingMessageFrame name="ChatFrame4" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="4">
+    <ScrollingMessageFrame name="ChatFrame4" inherits="BenillaChatFrameTemplate" hidden="true" id="4">
         <Size><AbsDimension x="430" y="128"/></Size>
         <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
-        <Scripts>
-            <OnMouseWheel>
-                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
-            </OnMouseWheel>
-            <OnHyperlinkClick>
-                SetItemRef(arg1, arg2, arg3)
-            </OnHyperlinkClick>
-        </Scripts>
-        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
-    <ScrollingMessageFrame name="ChatFrame5" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="5">
+    <ScrollingMessageFrame name="ChatFrame5" inherits="BenillaChatFrameTemplate" hidden="true" id="5">
         <Size><AbsDimension x="430" y="128"/></Size>
         <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
-        <Scripts>
-            <OnMouseWheel>
-                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
-            </OnMouseWheel>
-            <OnHyperlinkClick>
-                SetItemRef(arg1, arg2, arg3)
-            </OnHyperlinkClick>
-        </Scripts>
-        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
-    <ScrollingMessageFrame name="ChatFrame6" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="6">
+    <ScrollingMessageFrame name="ChatFrame6" inherits="BenillaChatFrameTemplate" hidden="true" id="6">
         <Size><AbsDimension x="430" y="128"/></Size>
         <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
-        <Scripts>
-            <OnMouseWheel>
-                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
-            </OnMouseWheel>
-            <OnHyperlinkClick>
-                SetItemRef(arg1, arg2, arg3)
-            </OnHyperlinkClick>
-        </Scripts>
-        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
-    <ScrollingMessageFrame name="ChatFrame7" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="7">
+    <ScrollingMessageFrame name="ChatFrame7" inherits="BenillaChatFrameTemplate" hidden="true" id="7">
         <Size><AbsDimension x="430" y="128"/></Size>
         <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
-        <Scripts>
-            <OnMouseWheel>
-                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
-            </OnMouseWheel>
-            <OnHyperlinkClick>
-                SetItemRef(arg1, arg2, arg3)
-            </OnHyperlinkClick>
-        </Scripts>
-        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
     </ScrollingMessageFrame>
 
     <!-- ── The tabs (ref ChatTabTemplate: 64×32, ChatFrameTab 3-slice quarters 16/44/16, label
@@ -1785,11 +1771,8 @@
          line pipeline doesn't exist), so the tab just selected an empty window. ChatFrame2
          itself stays above (the router keeps feeding it) so the tab can return whole with the
          combat-log arc — director's call, 2026-07-11. The FCF loops guard the missing tab. ── -->
-    <Button name="ChatFrame1Tab" frameStrata="LOW" alpha="0" id="1">
+    <Button name="BenillaChatTabTemplate" virtual="true" frameStrata="LOW" alpha="0">
         <Size><AbsDimension x="70" y="32"/></Size>
-        <Anchors>
-            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame1Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
-        </Anchors>
         <Layers>
             <Layer level="BACKGROUND">
                 <Texture name="$parentLeft" file="Interface\ChatFrame\ChatFrameTab">
@@ -1837,9 +1820,21 @@
                  without this the right-click never reaches OnClick at all. -->
             <OnLoad>
                 this:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+                <!-- The tab's LABEL is the window's name. The reference reads it from
+                     `GetChatWindowInfo` (`FCF_SetWindowName`), and the shipped chat-cache holds a
+                     NAME for windows 1 and 2 and leaves it EMPTY for 3..10 — so an undocked
+                     window's tab has no text there either, and `GetText()` on it is nil. Ours
+                     seats the same two from their GlobalStrings, which is where the loader's
+                     ALL-CAPS key rule used to reach for them when the text was authored here. -->
+                local id = this:GetID()
+                if id == 1 then
+                    this:SetText(GENERAL)
+                elseif id == 2 then
+                    this:SetText(COMBAT_LOG)
+                end
             </OnLoad>
             <OnClick>
-                BenillaFCF_TabClick(1, arg1)
+                BenillaFCF_TabClick(this:GetID(), arg1)
             </OnClick>
             <!-- The reference's own move handle (ref FCF_Tab_OnClick's press/release arms, and the
                  tip below, which says "Left-click and drag to move the window" in as many words).
@@ -1862,7 +1857,7 @@
                 GameTooltip:Hide()
             </OnLeave>
         </Scripts>
-        <ButtonText name="$parentText" text="GENERAL">
+        <ButtonText name="$parentText">
             <Anchors>
                 <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
             </Anchors>
@@ -1883,114 +1878,63 @@
         </HighlightTexture>
     </Button>
 
-    <!--
-        ChatFrame2Tab — the "Combat Log" dock tab. **This is the tab that was missing**: every
-        piece of machinery around it already existed and was written to expect it — `BenillaFCF`'s
-        fade, resize and flash loops all run `for i = 1, 2` over
-        `getglobal("ChatFrame"..i.."Tab")`, `selected = 1` is commented "2 = Combat Log", and
-        `FCF_SelectDockFrame` errors on any id that is not 1 or 2 — but the button itself was never
-        authored, and each of those loops has an `if tab then` guard that swallowed its absence
-        without a word. ChatFrame2 was therefore reachable only from Lua: it is `hidden`, as a
-        non-selected dock frame should be, and nothing on screen could select it.
+    <!-- ChatFrame1Tab — "General". Only the seat is per-instance, exactly as the reference's own
+         instance is (FloatingChatFrame.xml l.712-720: an `<Anchors>` block and nothing else). -->
+    <Button name="ChatFrame1Tab" inherits="BenillaChatTabTemplate" id="1">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame1Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
+        </Anchors>
+    </Button>
 
-        Labels are the GlobalString KEYS (`GENERAL`, `COMBAT_LOG`), resolved out of the player's own
-        `GlobalStrings.lua` by the loader's ALL-CAPS key rule — the same shape the combat log's own
-        format strings use (1571), and the reason neither word is quoted in this file.
-
-        Anchored LEFT-to-RIGHT off tab 1; `BenillaFCF_TabResize` sizes both to their measured label
-        widths, so the abutment survives a locale whose words are longer.
-    -->
-    <Button name="ChatFrame2Tab" frameStrata="LOW" alpha="0" id="2">
-        <Size><AbsDimension x="70" y="32"/></Size>
+    <!-- ChatFrame2Tab — "Combat Log". Its seat is the dock's tab strip: abutted to tab 1's right
+         edge, which is our standing-in for `FCF_DockUpdate`'s cumulative `FCF_SetTabPosition` x.
+         `BenillaFCF_TabResize` sizes both to their measured label widths, so the abutment survives
+         a locale whose words are longer. -->
+    <Button name="ChatFrame2Tab" inherits="BenillaChatTabTemplate" id="2">
         <Anchors>
             <Anchor point="LEFT" relativeTo="ChatFrame1Tab" relativePoint="RIGHT"/>
         </Anchors>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentLeft" file="Interface\ChatFrame\ChatFrameTab">
-                    <Size><AbsDimension x="16" y="32"/></Size>
-                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
-                    <TexCoords left="0.0" right="0.25" top="0.0" bottom="1.0"/>
-                </Texture>
-                <Texture name="$parentMiddle" file="Interface\ChatFrame\ChatFrameTab">
-                    <Size><AbsDimension x="38" y="32"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/></Anchors>
-                    <TexCoords left="0.25" right="0.75" top="0.0" bottom="1.0"/>
-                </Texture>
-                <Texture name="$parentRight" file="Interface\ChatFrame\ChatFrameTab">
-                    <Size><AbsDimension x="16" y="32"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddle" relativePoint="RIGHT"/></Anchors>
-                    <TexCoords left="0.75" right="1.0" top="0.0" bottom="1.0"/>
-                </Texture>
-            </Layer>
-        </Layers>
-        <Frames>
-            <Frame name="$parentFlash" hidden="true">
-                <Size><AbsDimension x="5" y="32"/></Size>
-                <Anchors>
-                    <Anchor point="LEFT" relativeTo="$parentLeft"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
-                    <Anchor point="RIGHT" relativeTo="$parentRight"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
-                </Anchors>
-                <Layers>
-                    <Layer level="BACKGROUND">
-                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD" setAllPoints="true"/>
-                    </Layer>
-                </Layers>
-            </Frame>
-            <!-- The window's options menu (decision 1589). A child of the TAB, because
-                 FCF_GetCurrentChatFrameID reads the open menu's parent id — the reference's own
-                 contract, and why the tab carries `id` above. -->
-            <Frame name="$parentDropDown" inherits="UIDropDownMenuTemplate" hidden="true">
-                <Scripts>
-                    <OnLoad>FCFOptionsDropDown_OnLoad()</OnLoad>
-                </Scripts>
-            </Frame>
-        </Frames>
-        <Scripts>
-            <!-- ref FloatingChatFrame.xml l.121: the tab takes the right button too, which is
-                 what opens the options menu. A Button's default set is LeftButtonUp only, so
-                 without this the right-click never reaches OnClick at all. -->
-            <OnLoad>
-                this:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-            </OnLoad>
-            <OnClick>
-                BenillaFCF_TabClick(2, arg1)
-            </OnClick>
-            <!-- The reference's own move handle (ref FCF_Tab_OnClick's press/release arms, and the
-                 tip below, which says "Left-click and drag to move the window" in as many words).
-                 It reaches the same two verbs as the window body does; the registration that arms
-                 it is `BenillaFCF_ApplyLock`'s, so a locked window's tab still only selects. -->
-            <OnDragStart>
-                FCF_StartMove(getglobal("ChatFrame" .. this:GetID()))
-            </OnDragStart>
-            <OnDragStop>
-                FCF_StopMove(getglobal("ChatFrame" .. this:GetID()))
-            </OnDragStop>
-            <!-- ref l.129-134. The tip is how the menu is DISCOVERABLE: nothing on screen says a
-                 chat tab has a right-click menu, which is half of why B246 read as "no chat
-                 options at all". `noNormalText` is the reference's own 6th argument. -->
-            <OnEnter>
-                BenillaTooltip_AddNewbieTipFor(this, CHAT_OPTIONS_LABEL, 1.0, 1.0, 1.0,
-                    NEWBIE_TOOLTIP_CHATOPTIONS, 1)
-            </OnEnter>
-            <OnLeave>
-                GameTooltip:Hide()
-            </OnLeave>
-        </Scripts>
-        <ButtonText name="$parentText" text="COMBAT_LOG">
-            <Anchors>
-                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor>
-            </Anchors>
-        </ButtonText>
-        <NormalFont inherits="GameFontNormalSmall"/>
-        <HighlightTexture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
-            <Size><AbsDimension x="0" y="32"/></Size>
-            <Anchors>
-                <Anchor point="LEFT" relativeTo="$parentLeft"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
-                <Anchor point="RIGHT" relativeTo="$parentRight"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
-            </Anchors>
-        </HighlightTexture>
     </Button>
+
+    <!-- ChatFrame3Tab..ChatFrame7Tab — the five undocked windows' tabs. `hidden`, because that is
+         the reference's `ChatTabTemplate` default and only `FCF_DockFrame`/`FCF_OpenNewWindow`
+         un-hide one; and seated on their own window's background at the reference's own offset —
+         `FCF_SetTabPosition(chatFrame, 0)` is `SetPoint("BOTTOMLEFT", <frame>Background, "TOPLEFT",
+         x+2, 0)` (FloatingChatFrame.lua:1263), which is the same anchor tab 1 carries above.
+
+         They exist because addons read them, not because anything here shows them: pfUI's
+         `chat.lua:595` is `_G["ChatFrame"..i.."Tab"].SetAlpha` for all seven at module load, and
+         `chat.lua:322` hands the same tab to `SetParent`/`GetRegions` (1712). -->
+    <Button name="ChatFrame3Tab" inherits="BenillaChatTabTemplate" hidden="true" id="3">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame3Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
+        </Anchors>
+    </Button>
+
+    <Button name="ChatFrame4Tab" inherits="BenillaChatTabTemplate" hidden="true" id="4">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame4Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
+        </Anchors>
+    </Button>
+
+    <Button name="ChatFrame5Tab" inherits="BenillaChatTabTemplate" hidden="true" id="5">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame5Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
+        </Anchors>
+    </Button>
+
+    <Button name="ChatFrame6Tab" inherits="BenillaChatTabTemplate" hidden="true" id="6">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame6Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
+        </Anchors>
+    </Button>
+
+    <Button name="ChatFrame7Tab" inherits="BenillaChatTabTemplate" hidden="true" id="7">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrame7Background" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
+        </Anchors>
+    </Button>
+
 
     <!-- ── The UIMenu kit (ref UIMenu.xml, names kept for the addon surface): a row button
          with a right-aligned shortcut string, and the tooltip-backdrop menu holding the ref's
@@ -2219,6 +2163,46 @@
         -- die on `attempt to index global 'DEFAULT_CHAT_FRAME'` without it, and many more reach
         -- it on a later path.
         DEFAULT_CHAT_FRAME = ChatFrame1
+        -- ...and `SELECTED_CHAT_FRAME`, which the reference seats on the SAME line of the same
+        -- OnLoad (`FloatingChatFrame.xml:739-740`). The two are not synonyms and the difference
+        -- is why both exist: DEFAULT is where FrameXML PRINTS, SELECTED is which window the
+        -- player last picked, and it moves with the tabs (BenillaFCF_SelectDock, above). Seeded
+        -- here because `BenillaFCF_SelectDock(1)` on the next line is what first writes it —
+        -- pfUI reads it from a chat-tab SetAlpha hook that can fire before any tab is clicked,
+        -- and a nil there stopped it (and, through its embedded copies, pfQuest, pfQuest-turtle
+        -- and ShaguDPS) dead.
+        SELECTED_CHAT_FRAME = ChatFrame1
+
+        -- ── The four per-window fields `ChatFrame_OnLoad` seats on every chat frame ───────────
+        -- `this.tellTimer`, `this.channelList`, `this.zoneChannelList`, `this.messageTypeList`
+        -- (ChatFrame.lua l.1155-1158). Written here in one loop rather than in an OnLoad, because
+        -- ChatFrame3..7 deliberately have no OnLoad at all (see their block above) and the
+        -- reference's semantics are per-FRAME, not per-template — a loop over the seven windows
+        -- is the same set of writes with nothing left uncovered.
+        --
+        -- **The three tables are EMPTY, which is the same honest shape `ChatTypeGroup` above
+        -- carries and for the same reason**: our chat routes host-side (`ui_chat`), so a window
+        -- does not accumulate a message-group subscription list to put in `messageTypeList`, and
+        -- channel membership is the engine's, not a per-window Lua list. The divergence, stated:
+        -- an addon that reads these gets a truthful "this window subscribes to nothing in Lua"
+        -- rather than a nil. That is the `ChatFrame_OnEvent` architecture question again, not
+        -- these fields'.
+        --
+        -- Measured demand: pfUI's `RefreshChat` walks `_G["ChatFrame"..i].messageTypeList` with
+        -- `pairs` and NO nil guard (`modules/chat.lua:325`), counting how many of a window's
+        -- types look like a combat log. A nil there is `bad argument #1 to 'pairs'` — and pfUI is
+        -- embedded in pfQuest, pfQuest-turtle and ShaguDPS, so it is four top-20 addons on one
+        -- unset field. With an empty list the count is 0 and no window is classed as a combat
+        -- log, which is exactly right for a UI that has no combat-log window.
+        for i = 1, NUM_CHAT_WINDOWS do
+            local frame = getglobal("ChatFrame" .. i)
+            if frame then
+                frame.tellTimer = GetTime()
+                frame.channelList = {}
+                frame.zoneChannelList = {}
+                frame.messageTypeList = {}
+            end
+        end
 
         BenillaFCF_SelectDock(1)
         BenillaFCF_LoadWindowLooks()
